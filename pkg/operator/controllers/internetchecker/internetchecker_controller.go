@@ -81,14 +81,14 @@ func (r *InternetChecker) Reconcile(request ctrl.Request) (ctrl.Result, error) {
 			Status:  corev1.ConditionFalse,
 			Message: sb.String(),
 			Reason:  "CheckFailed",
-		}, r.role)
+		})
 	} else {
 		err = controllers.SetCondition(context.TODO(), r.faroscli, &status.Condition{
 			Type:    condition,
 			Status:  corev1.ConditionTrue,
 			Message: "Outgoing connection successful.",
 			Reason:  "CheckDone",
-		}, r.role)
+		})
 	}
 	if err != nil {
 		return reconcile.Result{}, err

@@ -15,7 +15,7 @@ import (
 	"github.com/faroshq/faros/pkg/util/version"
 )
 
-func SetCondition(ctx context.Context, arocli farosclient.OperatorV1alpha1Interface, cond *status.Condition, role string) error {
+func SetCondition(ctx context.Context, arocli farosclient.OperatorV1alpha1Interface, cond *status.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cluster, err := arocli.Clusters().Get(ctx, farosv1alpha1.SingletonClusterName, metav1.GetOptions{})
 		if err != nil {
@@ -24,7 +24,7 @@ func SetCondition(ctx context.Context, arocli farosclient.OperatorV1alpha1Interf
 
 		changed := cluster.Status.Conditions.SetCondition(*cond)
 
-		if setStaticStatus(cluster, role) {
+		if setStaticStatus(cluster) {
 			changed = true
 		}
 
@@ -37,7 +37,7 @@ func SetCondition(ctx context.Context, arocli farosclient.OperatorV1alpha1Interf
 	})
 }
 
-func setStaticStatus(cluster *farosv1alpha1.Cluster, role string) (changed bool) {
+func setStaticStatus(cluster *farosv1alpha1.Cluster) (changed bool) {
 	conditions := make(status.Conditions, 0, len(cluster.Status.Conditions))
 
 	// cleanup any old conditions
