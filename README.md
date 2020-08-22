@@ -3,9 +3,13 @@
 
 ## Quickstarts
 
+```
 export KUBECONFIG=mycluster.kubeconfig
 ./faros deploy
 
+# To check
+kubectl get cluster.operator.faros.sh -o yaml
+```
 ## Contributing
 
 This project welcomes contributions and suggestions.
