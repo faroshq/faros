@@ -1,0 +1,88 @@
+?   	github.com/faroshq/faros/cmd/faros	[no test files]
+?   	github.com/faroshq/faros/hack/licenses	[no test files]
+?   	github.com/faroshq/faros/hack/monitor	[no test files]
+?   	github.com/faroshq/faros/hack/validate-imports	[no test files]
+?   	github.com/faroshq/faros/pkg/operator	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/apis/operator.faros.sh/v1alpha1	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/clientset/versioned	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/clientset/versioned/fake	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/clientset/versioned/scheme	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/clientset/versioned/typed/operator.faros.sh/v1alpha1	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/clientset/versioned/typed/operator.faros.sh/v1alpha1/fake	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/controllers	[no test files]
+=== RUN   TestSetAlertManagerWebhook
+--- PASS: TestSetAlertManagerWebhook (0.00s)
+PASS
+coverage: 44.9% of statements
+ok  	github.com/faroshq/faros/pkg/operator/controllers/alertwebhook	0.013s	coverage: 44.9% of statements
+=== RUN   TestInternetCheckerCheck
+=== RUN   TestInternetCheckerCheck/200_ok
+=== RUN   TestInternetCheckerCheck/400_bad_request
+=== RUN   TestInternetCheckerCheck/unreachable_error
+=== RUN   TestInternetCheckerCheck/timeout
+--- PASS: TestInternetCheckerCheck (0.00s)
+    --- PASS: TestInternetCheckerCheck/200_ok (0.00s)
+    --- PASS: TestInternetCheckerCheck/400_bad_request (0.00s)
+    --- PASS: TestInternetCheckerCheck/unreachable_error (0.00s)
+    --- PASS: TestInternetCheckerCheck/timeout (0.00s)
+PASS
+coverage: 27.3% of statements
+ok  	github.com/faroshq/faros/pkg/operator/controllers/internetchecker	0.010s	coverage: 27.3% of statements
+?   	github.com/faroshq/faros/pkg/operator/deploy	[no test files]
+=== RUN   TestX509CertComparer
+--- PASS: TestX509CertComparer (0.00s)
+PASS
+coverage: 37.5% of statements
+ok  	github.com/faroshq/faros/pkg/util/cmp	0.012s	coverage: 37.5% of statements
+=== RUN   TestCreateOrder
+--- PASS: TestCreateOrder (0.00s)
+=== RUN   TestFindGVR
+=== RUN   TestFindGVR/find_one
+=== RUN   TestFindGVR/find_best_version
+=== RUN   TestFindGVR/find_full_group.resource
+=== RUN   TestFindGVR/no_sub.resources
+=== RUN   TestFindGVR/empty_resources
+=== RUN   TestFindGVR/find_all_kinds
+--- PASS: TestFindGVR (0.00s)
+    --- PASS: TestFindGVR/find_one (0.00s)
+    --- PASS: TestFindGVR/find_best_version (0.00s)
+    --- PASS: TestFindGVR/find_full_group.resource (0.00s)
+    --- PASS: TestFindGVR/no_sub.resources (0.00s)
+    --- PASS: TestFindGVR/empty_resources (0.00s)
+    --- PASS: TestFindGVR/find_all_kinds (0.00s)
+=== RUN   TestEnsure
+=== RUN   TestEnsure/create
+2020-08-22 17:33:29.350	INFO	Create ConfigMap/openshift-azure-logging/config
+=== RUN   TestEnsure/update
+2020-08-22 17:33:29.351	INFO	Update ConfigMap/openshift-azure-logging/config:   map[string]interface{}{
+  	"apiVersion": string("v1"),
+- 	"data":       map[string]interface{}{"audit.conf": string("1")},
++ 	"data":       map[string]interface{}{"audit.conf": string("2")},
+  	"kind":       string("ConfigMap"),
+  	"metadata":   map[string]interface{}{"name": string("config"), "namespace": string("openshift-azure-logging")},
+  }
+
+=== RUN   TestEnsure/no_update_needed
+=== RUN   TestEnsure/no_update_needed_either
+--- PASS: TestEnsure (0.00s)
+    --- PASS: TestEnsure/create (0.00s)
+    --- PASS: TestEnsure/update (0.00s)
+    --- PASS: TestEnsure/no_update_needed (0.00s)
+    --- PASS: TestEnsure/no_update_needed_either (0.00s)
+=== RUN   TestMerge
+=== RUN   TestMerge/changed
+=== RUN   TestMerge/no_change
+--- PASS: TestMerge (0.00s)
+    --- PASS: TestMerge/changed (0.00s)
+    --- PASS: TestMerge/no_change (0.00s)
+=== RUN   TestHashWorkloadConfigs
+--- PASS: TestHashWorkloadConfigs (0.00s)
+PASS
+coverage: 68.1% of statements
+ok  	github.com/faroshq/faros/pkg/util/dynamichelper	0.010s	coverage: 68.1% of statements
+?   	github.com/faroshq/faros/pkg/util/logger	[no test files]
+?   	github.com/faroshq/faros/pkg/util/ready	[no test files]
+?   	github.com/faroshq/faros/pkg/util/scheme	[no test files]
+?   	github.com/faroshq/faros/pkg/util/status	[no test files]
+?   	github.com/faroshq/faros/pkg/util/version	[no test files]
+?   	github.com/faroshq/faros/test/e2e	[no test files]
