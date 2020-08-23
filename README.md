@@ -7,8 +7,14 @@
 export KUBECONFIG=mycluster.kubeconfig
 ./faros deploy
 
-# To check
-kubectl get cluster.operator.faros.sh -o yaml
+# To check default config for Faros
+kubectl get config.faros.sh -o yaml
+
+# Create Network monitor and check status
+kubectl create -f pkg/operator/deploy/staticresources/network_example.yaml
+kubectl get Network.monitor.faros.sh/cluster
+
+
 ```
 ## Contributing
 
@@ -41,7 +47,7 @@ This project welcomes contributions and suggestions.
 
 ## Basic architecture
 
-* Operator exposes basic cluster health as status on the `cluster.operator.faros.sh`
+* Operator exposes basic cluster health as status on the `object.monitor.faros.sh`
 CRD.
 
 * (future) Monitoring hub will read specific CRD and will query all its cluster

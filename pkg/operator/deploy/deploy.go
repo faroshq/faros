@@ -22,8 +22,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	pkgoperator "github.com/faroshq/faros/pkg/operator"
-	farosv1alpha1 "github.com/faroshq/faros/pkg/operator/apis/operator.faros.sh/v1alpha1"
-	farosclient "github.com/faroshq/faros/pkg/operator/clientset/versioned/typed/operator.faros.sh/v1alpha1"
+	farosv1alpha1 "github.com/faroshq/faros/pkg/operator/apis/faros.sh/v1alpha1"
+	farosclient "github.com/faroshq/faros/pkg/operator/clientset/faros.sh/v1alpha1/versioned/typed/faros.sh/v1alpha1"
 	"github.com/faroshq/faros/pkg/util/dynamichelper"
 	"github.com/faroshq/faros/pkg/util/ready"
 )
@@ -39,10 +39,10 @@ type operator struct {
 	dh       dynamichelper.DynamicHelper
 	cli      kubernetes.Interface
 	extcli   extensionsclient.Interface
-	faroscli farosclient.OperatorV1alpha1Interface
+	faroscli farosclient.FarosV1alpha1Interface
 }
 
-func New(log *zap.Logger, cli kubernetes.Interface, extcli extensionsclient.Interface, faroscli farosclient.OperatorV1alpha1Interface) (Operator, error) {
+func New(log *zap.Logger, cli kubernetes.Interface, extcli extensionsclient.Interface, faroscli farosclient.FarosV1alpha1Interface) (Operator, error) {
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -87,21 +87,16 @@ func (o *operator) resources() ([]runtime.Object, error) {
 		results = append(results, obj)
 	}
 
-	// create a secret here for genevalogging, later we will copy it to
-	// the genevalogging namespace.
+	// create a config object to star the operator.
 	return append(results,
-		&farosv1alpha1.Cluster{
+		&farosv1alpha1.Config{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: farosv1alpha1.SingletonClusterName,
+				Name: farosv1alpha1.SingletonObjectName,
 			},
-			Spec: farosv1alpha1.ClusterSpec{
+			Spec: farosv1alpha1.ConfigSpec{
+				// TODO: Move to future config package
 				Name:     "test",
 				Location: "location",
-				InternetChecker: farosv1alpha1.InternetCheckerSpec{
-					URLs: []string{
-						"https://www.google.io/",
-					},
-				},
 			},
 		},
 	), nil
@@ -129,9 +124,6 @@ func (o *operator) CreateOrUpdate(ctx context.Context) error {
 
 	for _, un := range uns {
 		err = o.dh.Ensure(ctx, un)
-		if err != nil {
-			return err
-		}
 
 		switch un.GroupVersionKind().GroupKind().String() {
 		case "CustomResourceDefinition.apiextensions.k8s.io":
@@ -152,7 +144,7 @@ func (o *operator) CreateOrUpdate(ctx context.Context) error {
 				return err
 			}
 
-		case "Cluster.operator.faros.sh":
+		case "Cluster.config.faros.sh":
 			// add an owner reference onto our configuration secret.  This is
 			// can only be done once we've got the cluster UID.  It is needed to
 			// ensure that secret updates trigger updates of the appropriate
@@ -194,7 +186,7 @@ func (o *operator) IsReady(ctx context.Context) (bool, error) {
 	}
 
 	// wait for conditions to appear
-	cluster, err := o.faroscli.Clusters().Get(ctx, farosv1alpha1.SingletonClusterName, metav1.GetOptions{})
+	cluster, err := o.faroscli.Configs().Get(ctx, farosv1alpha1.SingletonObjectName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}

@@ -9,11 +9,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 
-	farosv1alpha1 "github.com/faroshq/faros/pkg/operator/apis/operator.faros.sh/v1alpha1"
+	farosconfigv1alpha1 "github.com/faroshq/faros/pkg/operator/apis/faros.sh/v1alpha1"
+	farosmonitorsv1alpha1 "github.com/faroshq/faros/pkg/operator/apis/monitor.faros.sh/v1alpha1"
 )
 
 func init() {
 	runtime.Must(apiextensionsv1beta1.AddToScheme(scheme.Scheme))
 	runtime.Must(apiextensionsv1.AddToScheme(scheme.Scheme))
-	runtime.Must(farosv1alpha1.AddToScheme(scheme.Scheme))
+	runtime.Must(farosmonitorsv1alpha1.AddToScheme(scheme.Scheme))
+	runtime.Must(farosconfigv1alpha1.AddToScheme(scheme.Scheme))
 }

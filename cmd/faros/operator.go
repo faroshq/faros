@@ -11,10 +11,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	farosclient "github.com/faroshq/faros/pkg/operator/clientset/versioned/typed/operator.faros.sh/v1alpha1"
-	"github.com/faroshq/faros/pkg/operator/controllers"
-	"github.com/faroshq/faros/pkg/operator/controllers/alertwebhook"
-	"github.com/faroshq/faros/pkg/operator/controllers/internetchecker"
+	farosconfigscli "github.com/faroshq/faros/pkg/operator/clientset/faros.sh/v1alpha1/versioned/typed/faros.sh/v1alpha1"
+	farosmonitorscli "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1"
+	"github.com/faroshq/faros/pkg/operator/controllers/config"
+	"github.com/faroshq/faros/pkg/operator/controllers/network"
 	"github.com/faroshq/faros/pkg/util/logger"
 	// +kubebuilder:scaffold:imports
 )
@@ -40,21 +40,28 @@ func operator(ctx context.Context, log *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	faroscli, err := farosclient.NewForConfig(restConfig)
+
+	fmoncli, err := farosmonitorscli.NewForConfig(restConfig)
 	if err != nil {
 		return err
 	}
 
-	if err = (alertwebhook.NewReconciler(
-		rlog.WithValues("controller", controllers.AlertwebhookControllerName),
-		kubernetescli)).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create controller AlertWebhook: %v", err)
+	fcfgcli, err := farosconfigscli.NewForConfig(restConfig)
+	if err != nil {
+		return err
 	}
 
-	if err = (internetchecker.NewReconciler(
-		rlog.WithValues("controller", controllers.InternetCheckerControllerName),
-		kubernetescli, faroscli)).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create controller InternetChecker: %v", err)
+	if err = (config.NewReconciler(
+		rlog.WithValues("controller", config.ControllerName),
+		kubernetescli, fcfgcli)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller Config: %v", err)
+	}
+	// +kubebuilder:scaffold:builder
+
+	if err = (network.NewReconciler(
+		rlog.WithValues("controller", network.ControllerName),
+		kubernetescli, fmoncli)).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create controller Network: %v", err)
 	}
 	// +kubebuilder:scaffold:builder
 

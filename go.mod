@@ -8,6 +8,7 @@ require (
 	github.com/brancz/kube-rbac-proxy v0.5.0 // indirect
 	github.com/coreos/etcd v3.3.15+incompatible // indirect
 	github.com/coreos/prometheus-operator v0.29.0 // indirect
+	github.com/davecgh/go-spew v1.1.1
 	github.com/dimchansky/utfbom v1.1.0 // indirect
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-bindata/go-bindata v3.1.2+incompatible
@@ -32,6 +33,7 @@ require (
 	github.com/prometheus/client_golang v1.7.1 // indirect
 	github.com/rogpeppe/go-internal v1.5.0 // indirect
 	github.com/sirupsen/logrus v1.6.0 // indirect
+	github.com/spf13/pflag v1.0.5
 	github.com/thanos-io/thanos v0.11.0 // indirect
 	github.com/ugorji/go/codec v1.1.7
 	go.etcd.io/bbolt v1.3.5 // indirect
@@ -50,6 +52,8 @@ require (
 	k8s.io/apimachinery v0.19.0-beta.2
 	k8s.io/client-go v0.19.0-beta.2
 	k8s.io/code-generator v0.19.0-beta.2
+	k8s.io/gengo v0.0.0-20200428234225-8167cfdcfc14
+	k8s.io/klog/v2 v2.1.0
 	k8s.io/kube-state-metrics v1.7.2 // indirect
 	k8s.io/kubectl v0.19.0-beta.2 // indirect
 	k8s.io/utils v0.0.0-20200729134348-d5654de09c73 // indirect

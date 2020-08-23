@@ -8,12 +8,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	farosclient "github.com/faroshq/faros/pkg/operator/clientset/versioned/typed/operator.faros.sh/v1alpha1"
+	farosmonitorsclient "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1"
 )
 
 type clientSet struct {
 	Kubernetes  kubernetes.Interface
-	FarosClient farosclient.OperatorV1alpha1Interface
+	FarosClient farosmonitorsclient.MonitorV1alpha1Interface
 }
 
 var (
@@ -34,13 +34,13 @@ func newClientSet(subscriptionID string) (*clientSet, error) {
 
 	cli := kubernetes.NewForConfigOrDie(restconfig)
 
-	faroscli, err := farosclient.NewForConfig(restconfig)
+	faromonitorsscli, err := farosmonitorsclient.NewForConfig(restconfig)
 	if err != nil {
 		return nil, err
 	}
 
 	return &clientSet{
 		Kubernetes:  cli,
-		FarosClient: faroscli,
+		FarosClient: faromonitorsscli,
 	}, nil
 }
