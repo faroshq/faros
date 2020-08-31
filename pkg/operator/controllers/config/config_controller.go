@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +29,6 @@ type Config struct {
 	kubernetescli kubernetes.Interface
 	faroscli      farosclient.FarosV1alpha1Interface
 	log           logr.Logger
-	role          string
 }
 
 func NewReconciler(log logr.Logger, kubernetescli kubernetes.Interface, faroscli farosclient.FarosV1alpha1Interface) *Config {
@@ -53,13 +51,17 @@ type simpleHTTPClient interface {
 
 // Reconcile will keep checking that the cluster can connect to essential services.
 func (c *Config) Reconcile(request ctrl.Request) (ctrl.Result, error) {
-	if request.Name != farosv1alpha1.SingletonObjectName {
+	switch request.Name {
+	case farosv1alpha1.SingletonClusterConfigObjectName, farosv1alpha1.SingletonHubConfigObjectName:
+		return c.reconcileConfig(request)
+	default:
 		return reconcile.Result{}, nil
 	}
+}
 
+func (c *Config) reconcileConfig(request ctrl.Request) (ctrl.Result, error) {
 	_, err := c.faroscli.Configs().Get(context.TODO(), request.Name, metav1.GetOptions{})
 	if err != nil {
-		spew.Dump(err)
 		return reconcile.Result{}, err
 	}
 

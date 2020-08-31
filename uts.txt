@@ -15,6 +15,7 @@
 ?   	github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/scheme	[no test files]
 ?   	github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1	[no test files]
 ?   	github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1/fake	[no test files]
+?   	github.com/faroshq/faros/pkg/operator/controllers/clusters	[no test files]
 ?   	github.com/faroshq/faros/pkg/operator/controllers/config	[no test files]
 === RUN   TestNetwork
 === RUN   TestNetwork/200_ok
@@ -28,13 +29,14 @@
     --- PASS: TestNetwork/timeout (0.00s)
 PASS
 coverage: 16.4% of statements
-ok  	github.com/faroshq/faros/pkg/operator/controllers/network	0.011s	coverage: 16.4% of statements
+ok  	github.com/faroshq/faros/pkg/operator/controllers/network	0.012s	coverage: 16.4% of statements
 ?   	github.com/faroshq/faros/pkg/operator/deploy	[no test files]
+?   	github.com/faroshq/faros/pkg/util/bucket	[no test files]
 === RUN   TestX509CertComparer
 --- PASS: TestX509CertComparer (0.00s)
 PASS
 coverage: 37.5% of statements
-ok  	github.com/faroshq/faros/pkg/util/cmp	0.023s	coverage: 37.5% of statements
+ok  	github.com/faroshq/faros/pkg/util/cmp	0.020s	coverage: 37.5% of statements
 === RUN   TestCreateOrder
 --- PASS: TestCreateOrder (0.00s)
 === RUN   TestFindGVR
@@ -53,15 +55,15 @@ ok  	github.com/faroshq/faros/pkg/util/cmp	0.023s	coverage: 37.5% of statements
     --- PASS: TestFindGVR/find_all_kinds (0.00s)
 === RUN   TestEnsure
 === RUN   TestEnsure/create
-2020-08-23 11:03:31.287	INFO	Create ConfigMap/openshift-azure-logging/config
+2020-08-31 18:24:22.747	INFO	Create ConfigMap/openshift-azure-logging/config
 === RUN   TestEnsure/update
-2020-08-23 11:03:31.287	INFO	Update ConfigMap/openshift-azure-logging/config:   map[string]interface{}{
-  	"apiVersion": string("v1"),
-- 	"data":       map[string]interface{}{"audit.conf": string("1")},
-+ 	"data":       map[string]interface{}{"audit.conf": string("2")},
-  	"kind":       string("ConfigMap"),
-  	"metadata":   map[string]interface{}{"name": string("config"), "namespace": string("openshift-azure-logging")},
-  }
+2020-08-31 18:24:22.748	INFO	Update ConfigMap/openshift-azure-logging/config:   map[string]interface{}{
+  	"apiVersion": string("v1"),
+- 	"data":       map[string]interface{}{"audit.conf": string("1")},
++ 	"data":       map[string]interface{}{"audit.conf": string("2")},
+  	"kind":       string("ConfigMap"),
+  	"metadata":   map[string]interface{}{"name": string("config"), "namespace": string("openshift-azure-logging")},
+  }
 
 === RUN   TestEnsure/no_update_needed
 === RUN   TestEnsure/no_update_needed_either
@@ -80,9 +82,11 @@ ok  	github.com/faroshq/faros/pkg/util/cmp	0.023s	coverage: 37.5% of statements
 --- PASS: TestHashWorkloadConfigs (0.00s)
 PASS
 coverage: 68.1% of statements
-ok  	github.com/faroshq/faros/pkg/util/dynamichelper	0.014s	coverage: 68.1% of statements
+ok  	github.com/faroshq/faros/pkg/util/dynamichelper	0.015s	coverage: 68.1% of statements
+?   	github.com/faroshq/faros/pkg/util/heartbeat	[no test files]
 ?   	github.com/faroshq/faros/pkg/util/logger	[no test files]
 ?   	github.com/faroshq/faros/pkg/util/ready	[no test files]
+?   	github.com/faroshq/faros/pkg/util/recover	[no test files]
 ?   	github.com/faroshq/faros/pkg/util/scheme	[no test files]
 ?   	github.com/faroshq/faros/pkg/util/status	[no test files]
 ?   	github.com/faroshq/faros/pkg/util/version	[no test files]

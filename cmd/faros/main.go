@@ -35,12 +35,15 @@ func main() {
 
 	var err error
 	switch strings.ToLower(flag.Arg(0)) {
-	case "operator":
+	case "operator": // long running
 		checkArgs(1)
 		err = operator(ctx, log)
-	case "deploy":
+	case "hub": // long running
 		checkArgs(1)
-		err = deploy(ctx, log)
+		err = hub(ctx, log)
+	case "deploy": // short running
+		checkArgs(2)
+		err = deploy(ctx, log, strings.ToLower(flag.Arg(1)))
 	default:
 		usage()
 		os.Exit(2)

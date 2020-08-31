@@ -5,7 +5,7 @@ package operator
 
 // build the operator's CRD (based on the apis)
 // for deployment
-//go:generate go run ../../vendor/sigs.k8s.io/controller-tools/cmd/controller-gen "crd:trivialVersions=true" paths="./apis/..." output:crd:dir=deploy/staticresources
+//go:generate go run ../../vendor/sigs.k8s.io/controller-tools/cmd/controller-gen "crd:trivialVersions=true" paths="./apis/..." output:crd:dir=deploy/staticresources/shared
 
 // bindata for the above yaml files
 //go:generate go run ../../vendor/github.com/go-bindata/go-bindata/go-bindata -nometadata -pkg deploy -prefix deploy/staticresources/ -o deploy/bindata.go deploy/staticresources/...

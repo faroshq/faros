@@ -1,0 +1,8 @@
+apiVersion: monitor.faros.sh/v1alpha1
+kind: Network
+metadata:
+  name: cluster
+spec:
+  internetChecker:
+    urls:
+    - https://www.google.com

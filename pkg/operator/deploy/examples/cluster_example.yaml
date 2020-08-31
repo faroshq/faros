@@ -1,0 +1,11 @@
+apiVersion: faros.sh/v1alpha1
+kind: Cluster
+metadata:
+  name: hub
+  namespace: faros-operator
+spec:
+  name: hub
+  location: westeurope
+  kubeConfigSecret:
+    name: hub-kubeconfig
+    namespace: faros-operator

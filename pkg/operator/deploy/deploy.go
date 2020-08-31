@@ -5,6 +5,7 @@ package deploy
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -30,8 +31,13 @@ import (
 
 type Operator interface {
 	CreateOrUpdate(ctx context.Context) error
-	IsReady(ctx context.Context) (bool, error)
+	IsReady(ctx context.Context, name string) (bool, error)
 }
+
+type deploymentType string
+
+var deploymentTypeOperator deploymentType = "operator"
+var deploymentTypeHub deploymentType = "hub"
 
 type operator struct {
 	log *zap.Logger
@@ -40,9 +46,11 @@ type operator struct {
 	cli      kubernetes.Interface
 	extcli   extensionsclient.Interface
 	faroscli farosclient.FarosV1alpha1Interface
+
+	deployment deploymentType
 }
 
-func New(log *zap.Logger, cli kubernetes.Interface, extcli extensionsclient.Interface, faroscli farosclient.FarosV1alpha1Interface) (Operator, error) {
+func New(log *zap.Logger, deployment string, cli kubernetes.Interface, extcli extensionsclient.Interface, faroscli farosclient.FarosV1alpha1Interface) (Operator, error) {
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -59,14 +67,71 @@ func New(log *zap.Logger, cli kubernetes.Interface, extcli extensionsclient.Inte
 		cli:      cli,
 		extcli:   extcli,
 		faroscli: faroscli,
+
+		// TODO: add validation for deployment type
+		deployment: deploymentType(deployment),
 	}, nil
 }
 
 func (o *operator) resources() ([]runtime.Object, error) {
 	// first static resources from Assets
+	results, err := o.assetsByRole()
+	if err != nil {
+		return nil, err
+	}
+
+	// Deploy dummy configurations
+	// TODO: Move to separete deploy {role} example
+	config := &farosv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{},
+		Spec:       farosv1alpha1.ConfigSpec{},
+	}
+
+	switch o.deployment {
+	case deploymentTypeOperator:
+		config.ObjectMeta.Name = farosv1alpha1.SingletonClusterConfigObjectName
+		config.Spec.ClusterConfigSpec = &farosv1alpha1.ClusterConfigSpec{
+			Location: "location",
+			Name:     "test",
+		}
+		results = append(results, config)
+	case deploymentTypeHub:
+		config.ObjectMeta.Name = farosv1alpha1.SingletonHubConfigObjectName
+		config.Spec.HubConfigSpec = &farosv1alpha1.HubConfigSpec{
+			Source: farosv1alpha1.SourceTypeCRD,
+		}
+		results = append(results, config)
+	}
+
+	return results, nil
+}
+
+func (o *operator) assetsByRole() ([]runtime.Object, error) {
+	assets, err := AssetDir(fmt.Sprintf("%s", o.deployment))
+	if err != nil {
+		return nil, err
+	}
+	results, err := serializeAssets(fmt.Sprintf("%s", o.deployment), assets)
+	if err != nil {
+		return nil, err
+	}
+
+	assets, err = AssetDir("shared")
+	if err != nil {
+		return nil, err
+	}
+	resultsShared, err := serializeAssets("shared", assets)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(results, resultsShared...), nil
+}
+
+func serializeAssets(role string, assets []string) ([]runtime.Object, error) {
 	results := []runtime.Object{}
-	for _, assetName := range AssetNames() {
-		b, err := Asset(assetName)
+	for _, assetName := range assets {
+		b, err := Asset(role + "/" + assetName)
 		if err != nil {
 			return nil, err
 		}
@@ -87,19 +152,7 @@ func (o *operator) resources() ([]runtime.Object, error) {
 		results = append(results, obj)
 	}
 
-	// create a config object to star the operator.
-	return append(results,
-		&farosv1alpha1.Config{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: farosv1alpha1.SingletonObjectName,
-			},
-			Spec: farosv1alpha1.ConfigSpec{
-				// TODO: Move to future config package
-				Name:     "test",
-				Location: "location",
-			},
-		},
-	), nil
+	return results, nil
 }
 
 func (o *operator) CreateOrUpdate(ctx context.Context) error {
@@ -179,14 +232,14 @@ func (o *operator) CreateOrUpdate(ctx context.Context) error {
 	return nil
 }
 
-func (o *operator) IsReady(ctx context.Context) (bool, error) {
+func (o *operator) IsReady(ctx context.Context, name string) (bool, error) {
 	ok, err := ready.CheckDeploymentIsReady(ctx, o.cli.AppsV1().Deployments(pkgoperator.Namespace), "faros-operator")()
 	if !ok || err != nil {
 		return ok, err
 	}
 
 	// wait for conditions to appear
-	cluster, err := o.faroscli.Configs().Get(ctx, farosv1alpha1.SingletonObjectName, metav1.GetOptions{})
+	cluster, err := o.faroscli.Configs().Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
