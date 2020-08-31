@@ -14,12 +14,17 @@ import (
 
 type FarosV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	ClustersGetter
 	ConfigsGetter
 }
 
 // FarosV1alpha1Client is used to interact with features provided by the faros.sh group.
 type FarosV1alpha1Client struct {
 	restClient rest.Interface
+}
+
+func (c *FarosV1alpha1Client) Clusters(namespace string) ClusterInterface {
+	return newClusters(c, namespace)
 }
 
 func (c *FarosV1alpha1Client) Configs() ConfigInterface {

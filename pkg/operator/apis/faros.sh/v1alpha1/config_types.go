@@ -10,16 +10,36 @@ import (
 )
 
 const (
-	SingletonObjectName string               = "cluster"
-	Healthy             status.ConditionType = "Healthy"
+	SingletonClusterConfigObjectName string               = "cluster"
+	SingletonHubConfigObjectName     string               = "hub"
+	Healthy                          status.ConditionType = "Healthy"
 )
 
 func AllConditionTypes() []status.ConditionType {
 	return []status.ConditionType{Healthy}
 }
 
-// ConfigSpec defines the desired state of the Config
+// ClusterConfigSpec defines the desired state of the Config
+// Same configuration is being re-used for Hub and Cluster configuration
 type ConfigSpec struct {
+	*ClusterConfigSpec `json:"cluster,omitempty"`
+	*HubConfigSpec     `json:"hub,omitempty"`
+}
+
+type SourceType string
+
+var SourceTypeCRD SourceType = "CRD"
+
+// ConfigSpec defines the desired state of the Config
+// Same configuration is being re-used for Hub and Cluster configuration
+type HubConfigSpec struct {
+	// Source defines source of the cluster to monitor information
+	Source SourceType `json:"source,omitempty"`
+}
+
+// ClusterConfigSpec defines the desired state of the Config
+// Same configuration is being re-used for Hub and Cluster configuration
+type ClusterConfigSpec struct {
 	// Name is the  name of the cluster
 	Name     string `json:"name,omitempty"`
 	Location string `json:"location,omitempty"`

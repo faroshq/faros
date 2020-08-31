@@ -16,7 +16,7 @@ import (
 
 func setCondition(ctx context.Context, faroscli farosclient.FarosV1alpha1Interface, cond *status.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		obj, err := faroscli.Configs().Get(ctx, farosv1alpha1.SingletonObjectName, metav1.GetOptions{})
+		obj, err := faroscli.Configs().Get(ctx, farosv1alpha1.SingletonClusterConfigObjectName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}

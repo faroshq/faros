@@ -16,6 +16,10 @@ type FakeFarosV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeFarosV1alpha1) Clusters(namespace string) v1alpha1.ClusterInterface {
+	return &FakeClusters{c, namespace}
+}
+
 func (c *FakeFarosV1alpha1) Configs() v1alpha1.ConfigInterface {
 	return &FakeConfigs{c}
 }

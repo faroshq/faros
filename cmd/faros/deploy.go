@@ -16,7 +16,7 @@ import (
 	deployer "github.com/faroshq/faros/pkg/operator/deploy"
 )
 
-func deploy(ctx context.Context, log *zap.Logger) error {
+func deploy(ctx context.Context, log *zap.Logger, deployment string) error {
 	restConfig, err := ctrl.GetConfig()
 	if err != nil {
 		return err
@@ -39,7 +39,7 @@ func deploy(ctx context.Context, log *zap.Logger) error {
 
 	log.Info("starting deployer")
 
-	operator, err := deployer.New(log, kubernetescli, extcli, fcfgcli)
+	operator, err := deployer.New(log, deployment, kubernetescli, extcli, fcfgcli)
 	if err != nil {
 		return err
 	}
