@@ -6,12 +6,11 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -37,23 +36,13 @@ type Cluster struct {
 	log           logr.Logger
 }
 
-func NewReconciler(log logr.Logger, kubernetescli kubernetes.Interface, faroscli farosclient.FarosV1alpha1Interface) *Cluster {
+func NewReconciler(log logr.Logger, kubernetescli kubernetes.Interface, faroscli farosclient.FarosV1alpha1Interface) (*Cluster, error) {
 	return &Cluster{
 		kubernetescli: kubernetescli,
 		faroscli:      faroscli,
 		log:           log,
-	}
+	}, nil
 }
-
-type simpleHTTPClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
-
-// This is the permissions that this controller needs to work.
-// "make generate" will run kubebuilder and cause operator/deploy/staticresources/*/role.yaml to be updated
-// from the annotation below.
-// +kubebuilder:rbac:groups=faros.sh,resources=networks,verbs=get;list;watch
-// +kubebuilder:rbac:groups=faros.sh,resources=networks/status,verbs=get;update;patch
 
 // Reconcile will keep checking that the cluster can connect to essential services.
 func (c *Cluster) Reconcile(request ctrl.Request) (ctrl.Result, error) {
@@ -63,6 +52,9 @@ func (c *Cluster) Reconcile(request ctrl.Request) (ctrl.Result, error) {
 func (c *Cluster) reconcileConfig(request ctrl.Request) (ctrl.Result, error) {
 	cluster, err := c.faroscli.Clusters(request.Namespace).Get(context.TODO(), request.Name, metav1.GetOptions{})
 	if err != nil {
+		if errors.IsNotFound(err) {
+			err = nil
+		}
 		return reconcile.Result{}, err
 	}
 	if cluster.Spec.KubeConfigSecret.Name == "" ||
@@ -76,8 +68,6 @@ func (c *Cluster) reconcileConfig(request ctrl.Request) (ctrl.Result, error) {
 	// Cluster object reconcile flow:
 	// 1. Check if kubeconfig secret exists, if so app owner metadata
 	// 2. Check if kubeconfig is valid and we can reach cluster
-	// 3. Create UUID for this cluster and add it to status of the cluster object
-
 	err = c.checkKubeConfigSecret(cluster.Spec.KubeConfigSecret)
 	if err != nil {
 		err = setCondition(context.TODO(), c.faroscli, request, &status.Condition{
@@ -89,23 +79,13 @@ func (c *Cluster) reconcileConfig(request ctrl.Request) (ctrl.Result, error) {
 		return reconcile.Result{Requeue: true}, err
 	}
 
-	if cluster.Status.UUID == "" {
-		clusterCopy := cluster.DeepCopy()
-		clusterCopy.Status.UUID = uuid.New().String()
-
-		cluster, err = c.faroscli.Clusters(request.Namespace).UpdateStatus(context.TODO(), clusterCopy, metav1.UpdateOptions{})
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-
 	// TODO: All these secConditions are asking for refactor together with other
 	// status fields
 	err = setCondition(context.TODO(), c.faroscli, request, &status.Condition{
 		Type:    condition,
 		Status:  corev1.ConditionTrue,
-		Message: "Monitoring",
-		Reason:  "Accepted",
+		Message: "Monitor can access the cluster",
+		Reason:  "Verified",
 	})
 	if err != nil {
 		return reconcile.Result{}, err

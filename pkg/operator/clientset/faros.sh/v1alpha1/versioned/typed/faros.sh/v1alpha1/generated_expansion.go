@@ -8,3 +8,5 @@ package v1alpha1
 type ClusterExpansion interface{}
 
 type ConfigExpansion interface{}
+
+type WorkerExpansion interface{}

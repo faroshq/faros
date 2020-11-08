@@ -6,15 +6,15 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.3.0
   creationTimestamp: null
-  name: clusters.faros.sh
+  name: workers.faros.sh
 spec:
   group: faros.sh
   names:
-    kind: Cluster
-    listKind: ClusterList
-    plural: clusters
-    singular: cluster
-  scope: Namespaced
+    kind: Worker
+    listKind: WorkerList
+    plural: workers
+    singular: worker
+  scope: Cluster
   subresources:
     status: {}
   validation:
@@ -30,27 +30,20 @@ spec:
         metadata:
           type: object
         spec:
-          description: ClusterSpec defines the desired state of the Config
+          description: WorkerSpec defines the desired state of the Config
           properties:
-            kubeConfigSecret:
-              description: SecretReference represents a Secret Reference. It has enough information to retrieve secret in any namespace
-              properties:
-                name:
-                  description: Name is unique within a namespace to reference a secret resource.
-                  type: string
-                namespace:
-                  description: Namespace defines the space within which the secret name must be unique.
-                  type: string
-              type: object
-            location:
-              type: string
-            name:
-              description: Name is the  name of the cluster
+            uuid:
+              description: UID is a type that holds unique ID values, including UUIDs.  Because we don't ONLY use UUIDs, this is an alias to string.  Being a type captures intent and helps make sure that UIDs and names do not get conflated.
               type: string
           type: object
         status:
-          description: ClusterStatus defines the observed state of Faros Operator
+          description: WorkerStatus defines the observed state of Faros Operator
           properties:
+            clusters:
+              items:
+                description: UID is a type that holds unique ID values, including UUIDs.  Because we don't ONLY use UUIDs, this is an alias to string.  Being a type captures intent and helps make sure that UIDs and names do not get conflated.
+                type: string
+              type: array
             conditions:
               description: Conditions is a set of Condition instances.
               items:
@@ -74,11 +67,11 @@ spec:
                 - type
                 type: object
               type: array
-            operatorVersion:
+            lastHeartbeatTime:
+              format: date-time
               type: string
-            workerUID:
-              description: UID is a type that holds unique ID values, including UUIDs.  Because we don't ONLY use UUIDs, this is an alias to string.  Being a type captures intent and helps make sure that UIDs and names do not get conflated.
-              type: string
+          required:
+          - lastHeartbeatTime
           type: object
       type: object
   version: v1alpha1

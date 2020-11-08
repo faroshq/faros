@@ -6,16 +6,16 @@
 package v1alpha1
 
 import (
-	rest "k8s.io/client-go/rest"
-
 	v1alpha1 "github.com/faroshq/faros/pkg/operator/apis/faros.sh/v1alpha1"
 	"github.com/faroshq/faros/pkg/operator/clientset/faros.sh/v1alpha1/versioned/scheme"
+	rest "k8s.io/client-go/rest"
 )
 
 type FarosV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	ClustersGetter
 	ConfigsGetter
+	WorkersGetter
 }
 
 // FarosV1alpha1Client is used to interact with features provided by the faros.sh group.
@@ -29,6 +29,10 @@ func (c *FarosV1alpha1Client) Clusters(namespace string) ClusterInterface {
 
 func (c *FarosV1alpha1Client) Configs() ConfigInterface {
 	return newConfigs(c)
+}
+
+func (c *FarosV1alpha1Client) Workers() WorkerInterface {
+	return newWorkers(c)
 }
 
 // NewForConfig creates a new FarosV1alpha1Client for the given config.

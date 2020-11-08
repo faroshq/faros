@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/go-logr/logr"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +19,19 @@ func Panic(log *zap.Logger) {
 		if log != nil {
 			log.Sugar().Error(e)
 			log.Sugar().Info(string(debug.Stack()))
+
+		} else {
+			fmt.Fprintln(os.Stderr, e)
+			debug.PrintStack()
+		}
+	}
+}
+
+func PanicLogr(log logr.Logger) {
+	if e := recover(); e != nil {
+		if log != nil {
+			log.Error(fmt.Errorf("%w", e), "panic")
+			log.Info(string(debug.Stack()))
 
 		} else {
 			fmt.Fprintln(os.Stderr, e)

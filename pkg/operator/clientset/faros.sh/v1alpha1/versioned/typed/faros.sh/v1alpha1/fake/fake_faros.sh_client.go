@@ -6,10 +6,9 @@
 package fake
 
 import (
+	v1alpha1 "github.com/faroshq/faros/pkg/operator/clientset/faros.sh/v1alpha1/versioned/typed/faros.sh/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
-
-	v1alpha1 "github.com/faroshq/faros/pkg/operator/clientset/faros.sh/v1alpha1/versioned/typed/faros.sh/v1alpha1"
 )
 
 type FakeFarosV1alpha1 struct {
@@ -22,6 +21,10 @@ func (c *FakeFarosV1alpha1) Clusters(namespace string) v1alpha1.ClusterInterface
 
 func (c *FakeFarosV1alpha1) Configs() v1alpha1.ConfigInterface {
 	return &FakeConfigs{c}
+}
+
+func (c *FakeFarosV1alpha1) Workers() v1alpha1.WorkerInterface {
+	return &FakeWorkers{c}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

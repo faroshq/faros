@@ -3,6 +3,9 @@ module github.com/faroshq/faros
 go 1.13
 
 require (
+	github.com/Azure/go-autorest/autorest v0.9.6
+	github.com/coreos/etcd v3.3.10+incompatible
+	github.com/davecgh/go-spew v1.1.1
 	github.com/go-bindata/go-bindata v3.1.2+incompatible
 	github.com/go-logr/logr v0.1.0
 	github.com/go-logr/zapr v0.1.1 // indirect
@@ -13,6 +16,7 @@ require (
 	github.com/onsi/ginkgo v1.14.0
 	github.com/onsi/gomega v1.10.1
 	github.com/prometheus/client_golang v1.7.1 // indirect
+	github.com/sirupsen/logrus v1.4.2
 	github.com/stretchr/testify v1.5.1 // indirect
 	github.com/ugorji/go/codec v1.1.7
 	go.uber.org/zap v1.14.1
@@ -26,6 +30,7 @@ require (
 	k8s.io/apimachinery v0.19.0-beta.2
 	k8s.io/client-go v0.19.0-beta.2
 	k8s.io/code-generator v0.19.0-beta.2
+	k8s.io/klog v1.0.0
 	k8s.io/utils v0.0.0-20200729134348-d5654de09c73 // indirect
 	sigs.k8s.io/controller-runtime v0.6.2
 	sigs.k8s.io/controller-tools v0.3.0

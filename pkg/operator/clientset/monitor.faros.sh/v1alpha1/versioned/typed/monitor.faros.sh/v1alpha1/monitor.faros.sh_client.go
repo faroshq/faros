@@ -6,10 +6,9 @@
 package v1alpha1
 
 import (
-	rest "k8s.io/client-go/rest"
-
 	v1alpha1 "github.com/faroshq/faros/pkg/operator/apis/monitor.faros.sh/v1alpha1"
 	"github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/scheme"
+	rest "k8s.io/client-go/rest"
 )
 
 type MonitorV1alpha1Interface interface {

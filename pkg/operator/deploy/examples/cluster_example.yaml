@@ -4,7 +4,6 @@ metadata:
   name: hub
   namespace: faros-operator
 spec:
-  name: hub
   location: westeurope
   kubeConfigSecret:
     name: hub-kubeconfig

@@ -20,7 +20,12 @@ spec:
         app: faros-hub
     spec:
       containers:
-      - command:
+      - env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        command:
         - faros
         args:
         - hub

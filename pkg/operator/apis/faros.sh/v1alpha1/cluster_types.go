@@ -6,6 +6,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/faroshq/faros/pkg/util/status"
 )
@@ -18,9 +19,9 @@ type ClusterSpec struct {
 	KubeConfigSecret corev1.SecretReference `json:"kubeConfigSecret,omitempty"`
 }
 
-// ConfigStatus defines the observed state of Faros Operator
+// ClusterStatus defines the observed state of Faros Operator
 type ClusterStatus struct {
-	UUID            string            `json:"uuid,omitempty"`
+	WorkerUID       types.UID         `json:"workerUID,omitempty"`
 	OperatorVersion string            `json:"operatorVersion,omitempty"`
 	Conditions      status.Conditions `json:"conditions,omitempty"`
 }

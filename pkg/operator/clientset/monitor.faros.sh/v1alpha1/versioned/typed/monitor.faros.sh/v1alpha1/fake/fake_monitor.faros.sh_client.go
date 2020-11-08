@@ -6,10 +6,9 @@
 package fake
 
 import (
+	v1alpha1 "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
-
-	v1alpha1 "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/typed/monitor.faros.sh/v1alpha1"
 )
 
 type FakeMonitorV1alpha1 struct {

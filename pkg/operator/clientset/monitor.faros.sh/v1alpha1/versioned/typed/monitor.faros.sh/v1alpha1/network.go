@@ -9,13 +9,12 @@ import (
 	"context"
 	"time"
 
+	v1alpha1 "github.com/faroshq/faros/pkg/operator/apis/monitor.faros.sh/v1alpha1"
+	scheme "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/scheme"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	rest "k8s.io/client-go/rest"
-
-	v1alpha1 "github.com/faroshq/faros/pkg/operator/apis/monitor.faros.sh/v1alpha1"
-	scheme "github.com/faroshq/faros/pkg/operator/clientset/monitor.faros.sh/v1alpha1/versioned/scheme"
 )
 
 // NetworksGetter has a method to return a NetworkInterface.

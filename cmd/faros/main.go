@@ -19,8 +19,9 @@ import (
 
 func usage() {
 	fmt.Fprint(flag.CommandLine.Output(), "usage:\n")
-	fmt.Fprintf(flag.CommandLine.Output(), "  %s monitor\n", os.Args[0])
+	fmt.Fprintf(flag.CommandLine.Output(), "  %s hub\n", os.Args[0])
 	fmt.Fprintf(flag.CommandLine.Output(), "  %s operator\n", os.Args[0])
+	fmt.Fprintf(flag.CommandLine.Output(), "  %s deploy [hub, operator]\n", os.Args[0])
 	flag.PrintDefaults()
 }
 
