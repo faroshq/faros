@@ -1,0 +1,92 @@
+package controller
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/InVisionApp/go-health/v2"
+	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/service"
+	"github.com/faroshq/faros/pkg/store"
+	"github.com/faroshq/faros/pkg/util/recover"
+	"github.com/sirupsen/logrus"
+)
+
+var _ Interface = &Controller{}
+
+type Interface interface {
+	Run(context.Context, <-chan struct{}, chan<- struct{})
+}
+
+type Controller struct {
+	log     *logrus.Entry
+	service service.Interface
+}
+
+func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore store.Store, health *health.Health) (*Controller, error) {
+	svc, err := service.New(ctx, log, config, pgStore, health)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Controller{
+		log:     log,
+		service: svc,
+	}, nil
+}
+
+func (c *Controller) Run(ctx context.Context, stop <-chan struct{}, done chan<- struct{}) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wg := &sync.WaitGroup{}
+	fm := []func(context.Context, *sync.WaitGroup){
+		c.runService,
+	}
+
+	if stop != nil {
+		go func() {
+			defer recover.Panic(c.log)
+
+			<-stop
+			c.log.Info("stopping controller")
+			cancel()
+		}()
+	}
+
+	for _, f := range fm {
+		wg.Add(1)
+		go f(ctx, wg)
+	}
+
+	wg.Wait()
+	close(done)
+}
+
+func (c *Controller) runService(ctx context.Context, wg *sync.WaitGroup) {
+	defer recover.Panic(c.log)
+
+	defer wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		err := c.service.Run(ctx)
+		if err != nil {
+			if strings.Contains(err.Error(), "http: Server closed") {
+				return
+			}
+			c.log.Fatalf("controller failed to start: %s", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			c.log.Info("stopped service")
+			return
+		case <-ticker.C:
+		}
+
+	}
+}

@@ -1,0 +1,7 @@
+make --dry-run --always-make --keep-going --print-directory
+make: Entering directory '/go/src/github.com/faroshq/faros'
+go generate ./...
+ 
+go build -ldflags "-X github.com/faroshq/faros/pkg/util/version.GitCommit=51ffa46-dirty" ./cmd/faros
+make: Leaving directory '/go/src/github.com/faroshq/faros'
+ 
