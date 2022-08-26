@@ -1,5 +1,0 @@
-apiVersion: faros.sh/v1alpha1
-kind: Worker
-metadata:
-  name: test
-  namespace: faros-hub

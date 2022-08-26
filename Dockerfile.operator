@@ -1,5 +1,0 @@
-FROM registry.access.redhat.com/ubi8/ubi-minimal
-RUN microdnf update && microdnf clean all
-COPY faros /usr/local/bin/
-ENTRYPOINT ["faros"]
-USER 1000

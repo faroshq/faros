@@ -1,2 +1,3 @@
-/*.kubeconfig
-/wip
+faros
+secrets
+.env

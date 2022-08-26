@@ -1,63 +1,95 @@
 package main
 
-// Copyright (c) Faros.sh.
-// Licensed under the Apache License 2.0.
-
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
-	"strings"
+	"os/signal"
+	"time"
 
-	"go.uber.org/zap"
+	health "github.com/InVisionApp/go-health/v2"
+	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
+	"github.com/faroshq/faros/pkg/util/log"
+	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/faroshq/faros/pkg/util/logger"
-	_ "github.com/faroshq/faros/pkg/util/scheme"
-	"github.com/faroshq/faros/pkg/util/version"
+	sql_store "github.com/faroshq/faros/pkg/store/sql"
 )
 
-func usage() {
-	fmt.Fprint(flag.CommandLine.Output(), "usage:\n")
-	fmt.Fprintf(flag.CommandLine.Output(), "  %s hub\n", os.Args[0])
-	fmt.Fprintf(flag.CommandLine.Output(), "  %s operator\n", os.Args[0])
-	fmt.Fprintf(flag.CommandLine.Output(), "  %s deploy [hub, operator]\n", os.Args[0])
-	flag.PrintDefaults()
-}
-
 func main() {
-	log := logger.GetZapLoggerInstance("", zap.InfoLevel)
-	log.Sugar().Infof("starting, git commit %s", version.GitCommit)
-
-	flag.Usage = usage
-	flag.Parse()
-
 	ctx := context.Background()
 
-	var err error
-	switch strings.ToLower(flag.Arg(0)) {
-	case "operator": // long running
-		checkArgs(1)
-		err = operator(ctx, log)
-	case "hub": // long running
-		checkArgs(1)
-		err = hub(ctx, log)
-	case "deploy": // short running
-		checkArgs(2)
-		err = deploy(ctx, log, strings.ToLower(flag.Arg(1)))
-	default:
-		usage()
-		os.Exit(2)
-	}
-
-	if err != nil {
-		log.Sugar().Error(err)
+	if err := run(ctx); err != nil {
+		fmt.Printf("error starting controller: %v", err)
+		os.Exit(1)
 	}
 }
 
-func checkArgs(required int) {
-	if len(flag.Args()) != required {
-		usage()
-		os.Exit(2)
+func run(ctx context.Context) error {
+	c, err := config.Load(true, true)
+	if err != nil {
+		return err
 	}
+
+	log := log.GetLogger()
+
+	log.Info("starting cluster registry")
+
+	// Create a new health instance
+	h := health.New()
+	defer h.Stop()
+
+	if os.Getenv("PORT") != "" {
+		// Overriding given port
+		c.API.URI = ":" + os.Getenv("PORT")
+	}
+
+	sqlStore, err := sql_store.NewStore(log, c)
+	if err != nil {
+		return err
+	}
+
+	h.AddCheck(&health.Config{
+		Name:     "database",
+		Interval: time.Second * 5,
+		Checker:  sqlStore,
+		Fatal:    true,
+	})
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	ctrl, err := controller.New(ctx, log, c, sqlStore, h)
+	if err != nil {
+		return err
+	}
+
+	go ctrl.Run(ctx, stop, done)
+	select {
+	case <-signals:
+		// shutdown
+	case <-ctx.Done():
+		// ctx termination
+	}
+	// we catch both sigterm (used by systemd) and Interupt (ctr+c) for development. Later is not really needed
+	log.Info("received Sigterm/Int")
+	close(stop)
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	select {
+	case <-shutdownCtx.Done():
+		log.Warn("controller didn't shutdown in time, force exit")
+	case <-done:
+		// OK
+	}
+
+	err = sqlStore.Close()
+	if err != nil {
+		log.Errorf("error while closing SQL store: %s", err)
+	}
+
+	return nil
 }
