@@ -1,0 +1,10 @@
+1. Session revoke on TTL
+2. Caching for database
+3. Dev env for all this suite
+4. Basic tests for auth layer
+5. Basic tests for database layer
+6. Separate repo with fork for UI, authentication, etc.
+7. Public CLI and this as container
+8. Docker compose file for deployment
+9. Docs site
+10. Kubernetes reflector container

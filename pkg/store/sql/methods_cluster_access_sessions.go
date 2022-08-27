@@ -89,3 +89,18 @@ func (s *Store) ListClusterAccessSessions(ctx context.Context, p models.ClusterA
 
 	return result, nil
 }
+
+// ListAllClusterAccessSessions lists all cluster access sessions
+// TODO: Add paggination
+func (s *Store) ListAllClusterAccessSessions(ctx context.Context) ([]models.ClusterAccessSession, error) {
+	p := models.ClusterAccessSession{}
+	result := []models.ClusterAccessSession{}
+	if err := s.db.WithContext(ctx).Where(p).Find(&result).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, store.ErrRecordNotFound
+		}
+		return nil, err
+	}
+
+	return result, nil
+}

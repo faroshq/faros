@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/faroshq/faros/pkg/cli/config"
 	"github.com/faroshq/faros/pkg/cli/util/errors"
@@ -60,7 +61,7 @@ func list(ctx context.Context, opts opts) error {
 
 	if c.Output == printutil.FormatTable {
 		table := printutil.DefaultTable()
-		table.SetHeader([]string{"Name", "Cluster", "Namespace", "Created", "Updated"})
+		table.SetHeader([]string{"Name", "Cluster", "Namespace", "Created", "Updated", "TTL", "Expired"})
 		for _, c := range sessionsList {
 			createdStr := formater.Since(c.CreatedAt).String() + " ago"
 			updatedStr := formater.Since(c.UpdatedAt).String() + " ago"
@@ -71,6 +72,8 @@ func list(ctx context.Context, opts opts) error {
 				c.Namespace,
 				createdStr,
 				updatedStr,
+				c.TTL.String(),
+				strconv.FormatBool(c.Expired),
 			})
 		}
 

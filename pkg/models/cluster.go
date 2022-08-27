@@ -8,10 +8,10 @@ type Cluster struct {
 	UpdatedAt   time.Time `json:"updatedAt" yaml:"updatedAt"`
 	NamespaceID string    `json:"namespaceId" yaml:"namespaceId" gorm:"index,constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 
-	Name   string        `json:"name" yaml:"name"`
-	Config ClusterConfig `json:"config" yaml:"config" gorm:"json"`
+	Name   string        `json:"name,omitempty" yaml:"name,omitempty"`
+	Config ClusterConfig `json:"config,omitempty" yaml:"config,omitempty" gorm:"json"`
 }
 
 type ClusterConfig struct {
-	RawKubeConfig string `json:"rawKubeConfig" yaml:"rawKubeConfig"`
+	RawKubeConfig string `json:"rawKubeConfig,omitempty" yaml:"rawKubeConfig,omitempty"`
 }

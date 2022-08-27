@@ -11,6 +11,7 @@ import (
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/service"
+	"github.com/faroshq/faros/pkg/session"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
@@ -22,8 +23,9 @@ type Interface interface {
 }
 
 type Controller struct {
-	log     *logrus.Entry
-	service service.Interface
+	log      *logrus.Entry
+	service  service.Interface
+	sessions session.Interface
 }
 
 func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore store.Store, health *health.Health) (*Controller, error) {
@@ -32,9 +34,15 @@ func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore 
 		return nil, err
 	}
 
+	sess, err := session.New(log, config, pgStore)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Controller{
-		log:     log,
-		service: svc,
+		log:      log,
+		service:  svc,
+		sessions: sess,
 	}, nil
 }
 
@@ -44,6 +52,7 @@ func (c *Controller) Run(ctx context.Context, stop <-chan struct{}, done chan<- 
 	wg := &sync.WaitGroup{}
 	fm := []func(context.Context, *sync.WaitGroup){
 		c.runService,
+		c.runSessions,
 	}
 
 	if stop != nil {
@@ -85,6 +94,33 @@ func (c *Controller) runService(ctx context.Context, wg *sync.WaitGroup) {
 		select {
 		case <-ctx.Done():
 			c.log.Info("stopped service")
+			return
+		case <-ticker.C:
+		}
+
+	}
+}
+
+func (c *Controller) runSessions(ctx context.Context, wg *sync.WaitGroup) {
+	defer recover.Panic(c.log)
+
+	defer wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		err := c.sessions.Run(ctx)
+		if err != nil {
+			if strings.Contains(err.Error(), "http: Server closed") {
+				return
+			}
+			c.log.Fatalf("sessions failed to start: %s", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			c.log.Info("stopped sessions")
 			return
 		case <-ticker.C:
 		}

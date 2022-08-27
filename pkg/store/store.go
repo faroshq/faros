@@ -26,6 +26,10 @@ type Store interface {
 	CreateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 	UpdateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 
+	// ListAllClusterAccessSessions will list all cluster sessions. Should not be used
+	// in user context in any ways.
+	ListAllClusterAccessSessions(context.Context) ([]models.ClusterAccessSession, error)
+
 	// Status is a healthcheck endpoint
 	Status() (interface{}, error)
 	Close() error

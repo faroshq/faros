@@ -8,5 +8,5 @@ type Namespace struct {
 	UpdatedAt time.Time `json:"updatedAt" yaml:"updatedAt"`
 
 	Name        string `json:"name" yaml:"name" gorm:"primaryKey"`
-	Description string `json:"description" yaml:"description"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
 }

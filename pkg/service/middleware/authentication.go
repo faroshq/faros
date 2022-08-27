@@ -44,6 +44,12 @@ func KubeConfigAuthentication(log *logrus.Entry, auth auth.Authenticator, store 
 				return
 			}
 
+			if request.Expired {
+				log.Error("cluster access session expired")
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+
 			authenticated, err := auth.AuthenticateClusterAccessSession(ctx, request, token)
 			if err != nil {
 				log.WithError(err).Error("failed to authenticate cluster access session in middleware")

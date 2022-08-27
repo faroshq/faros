@@ -1,15 +1,22 @@
 package config
 
+import "time"
+
 const (
 	ConfigFileName = "config.yaml"
 )
 
 type Config struct {
-	API      API      `yaml:"api,omitempty"`
-	Database Database `yaml:"database,omitempty"`
+	API        API        `yaml:"api,omitempty"`
+	Database   Database   `yaml:"database,omitempty"`
+	Controller Controller `yaml:"controller,omitempty"`
 }
 
-type Registry struct {
+type Controller struct {
+	// SessionExpireInterval is the interval at which sessions are checked for expiration
+	SessionExpireInterval time.Duration `envconfig:"FAROS_SESSION_EXPIRE_INTERVAL" default:"30s"`
+	// SessionPurgeTTL is the time after which sessions are purged after expiration
+	SessionPurgeTTL time.Duration `envconfig:"FAROS_SESSION_PURGE_TTL" default:"1h"`
 }
 
 type API struct {

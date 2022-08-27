@@ -34,7 +34,7 @@ func run(ctx context.Context) error {
 
 	log := log.GetLogger()
 
-	log.Info("starting cluster registry")
+	log.Info("starting faros controller")
 
 	// Create a new health instance
 	h := health.New()

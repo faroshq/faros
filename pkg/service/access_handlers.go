@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
@@ -129,6 +130,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 		return
 	}
 
+	spew.Dump(createClusterAccessSessionRequest)
 	// else create new one
 	result, err := s.store.CreateClusterAccessSession(r.Context(), createClusterAccessSessionRequest)
 	if err != nil {
