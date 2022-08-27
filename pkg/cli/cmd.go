@@ -16,10 +16,11 @@ import (
 func RunCLI(ctx context.Context) error {
 	cmd := &cobra.Command{
 		Short: "Faros CLI",
-		Long:  "Faros CLI",
-		Use:   "faros --help",
+		Long: `
+Faros CLI is a command line interface for Faros.sh`,
+		Use: "faros --help",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// must run first to populate global config
+
 			err := config.InitializeConfig(cmd)
 			if err != nil {
 				return err

@@ -11,9 +11,17 @@ import (
 // New returns new list wrapper
 func New() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "list",
-		Long:    "List faros resources",
-		Short:   "List faros resources",
+		Use:   "list",
+		Short: "List faros resources",
+		Long: `
+List faros resources
+
+Example:
+  faros list --help
+  faros list cluster --help
+  faros list namespace --help
+  faros list access --help
+`,
 		Aliases: []string{"ls"},
 	}
 

@@ -7,8 +7,13 @@ import (
 func GetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "clusters",
-		Long:  "Get cluster",
 		Short: "Get cluster",
+		Long: `
+Get individual cluster by name or ID
+
+Example:
+  faros get clusters cluster_name
+`,
 		Aliases: []string{
 			"clusters",
 		},
@@ -21,8 +26,15 @@ func GetCmd() *cobra.Command {
 func ListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "clusters",
-		Long:  "List cluster",
 		Short: "List cluster",
+		Long: `
+List cluster by namespace
+
+Example:
+  faros list clusters
+  faros list clusters -n <namespace_name>
+
+`,
 		Aliases: []string{
 			"cluster",
 		},
@@ -35,8 +47,14 @@ func ListCmd() *cobra.Command {
 func DeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "clusters",
-		Long:  "Delete clusters",
 		Short: "Delete cluster",
+		Long: `
+Delete cluster by name or ID. Cluster deletion will revoke all sessions for the cluster.
+
+Example:
+  faros delete clusters cluster_name cluster_name2
+
+  `,
 		Aliases: []string{
 			"cluster",
 		},
@@ -55,9 +73,13 @@ func CreateCmd() *cobra.Command {
 	cc := &cobra.Command{
 		Use:   "clusters",
 		Short: "Create a cluster",
-		Long: `Create a cluster
+		Long: `
+Create a cluster for Faros to manage.
+
 Usage:
-	faros clusters create cluster_name -f <kubeconfig_location>
+	faros create cluster cluster_name -f <kubeconfig_location>
+	faros create cluster cluster_name -f <kubeconfig_location> -n <namespace>
+
 `,
 		Aliases: []string{
 			"cluster",

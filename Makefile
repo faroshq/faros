@@ -24,6 +24,5 @@ lint:
 	go run -mod vendor ./hack/validate-imports cmd hack pkg
 	staticcheck ./...
 
-
 show-sqlite-database:
 	sqlitebrowser secrets/database.sqlite3

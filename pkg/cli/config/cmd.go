@@ -19,9 +19,15 @@ var Config GlobalConfig
 // New returns the cobra command for "config".
 func New() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "config",
-		Long:  "Configure CLI operations with new credentials",
-		Short: "Configure cli",
+		Use: "config",
+		Long: `
+Configure CLI operations with credentials and other configuration.
+
+Example:
+  faros config --namespace my-namespace --api-endpoint https://console.faros.sh
+`,
+
+		Short: "Configure cli session with credentials, namespaces and other configuration",
 		Aliases: []string{
 			"configure",
 			"configs",
@@ -54,7 +60,7 @@ func printVersion(cmd *cobra.Command) {
 }
 
 func PersistConfiguration(ctx context.Context, args []string) error {
-	fmt.Println("Configuring CLI.")
+	fmt.Println("Configuring CLI...")
 
 	configFile, err := getConfigFile()
 	if err != nil {
@@ -105,6 +111,6 @@ func PersistConfiguration(ctx context.Context, args []string) error {
 		return err
 	}
 
-	fmt.Println("Done")
+	fmt.Printf("Configured CLI. Config file: %s \n", configFile)
 	return nil
 }

@@ -11,9 +11,17 @@ import (
 // New returns new delete wrapper
 func New() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "delete",
-		Long:    "Delete faros resources",
-		Short:   "Delete faros resources",
+		Use:   "delete",
+		Short: "Delete faros resources",
+		Long: `
+Delete faros resources
+
+Example:
+  faros delete --help
+  faros delete cluster --help
+  faros delete namespace --help
+  faros delete access --help
+`,
 		Aliases: []string{"rm", "remove"},
 	}
 

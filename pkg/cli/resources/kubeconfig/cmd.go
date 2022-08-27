@@ -13,8 +13,16 @@ func CreateCmd() *cobra.Command {
 	var opts opts
 	cc := &cobra.Command{
 		Use:   "kubeconfig",
-		Long:  "Generate cluster kubeconfig",
 		Short: "Generate cluster kubeconfig",
+		Long: `
+Generate cluster kubeconfig for cluster access session. Session must exists
+before generating kubeconfig. Once kubeconfig is generated, its token is not
+retrievable.
+
+Example:
+  faros create kubeconfig -c <cluster_name> -s <access_session_name>
+  faros create kubeconfig -c <cluster_name> -s <access_session_name> -n <namespace_name>
+`,
 		Aliases: []string{
 			"kc", "kube-config",
 		},

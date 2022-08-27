@@ -11,9 +11,17 @@ import (
 // New returns new get wrapper
 func New() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "get",
-		Long:    "Get faros resources",
-		Short:   "Get faros resources",
+		Use:   "get",
+		Short: "Get faros resources",
+		Long: `
+Get faros resources
+
+Example:
+  faros get --help
+  faros get cluster --help
+  faros get namespace --help
+  faros get access --help
+`,
 		Aliases: []string{"inspect", "show"},
 	}
 

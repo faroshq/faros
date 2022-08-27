@@ -7,8 +7,14 @@ import (
 func GetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "namespaces",
-		Long:  "Get namespaces",
 		Short: "Get namespaces",
+		Long: `
+Get namespace in Faros.
+
+Example:
+  faros get namespace namespace_name
+
+`,
 		Aliases: []string{
 			"namespace",
 		},
@@ -21,8 +27,14 @@ func GetCmd() *cobra.Command {
 func ListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "namespaces",
-		Long:  "List namespaces",
 		Short: "List namespaces",
+		Long: `
+List namespaces in Faros.
+
+Example:
+  faros list namespaces
+
+`,
 		Aliases: []string{
 			"namespace",
 		},
@@ -35,8 +47,15 @@ func ListCmd() *cobra.Command {
 func DeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "namespaces",
-		Long:  "Delete namespaces",
 		Short: "Delete namespaces",
+		Long: `
+Delete namespaces in Faros. Once namespace is deleted it will delete all clusters,
+access sessions and other resources associated with the namespace.
+
+Example:
+  faros delete namespaces namespace_name namespace_name2
+
+`,
 		Aliases: []string{
 			"namespace",
 		},
@@ -53,6 +72,7 @@ func CreateCmd() *cobra.Command {
 		Long: `Create a namespace
 Usage:
 	faros namespace create namespace_name
+
 `,
 		Aliases: []string{
 			"namespace",
