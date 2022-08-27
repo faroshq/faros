@@ -8,7 +8,7 @@ import (
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
-	httputil "github.com/faroshq/faros/pkg/util/http"
+	"github.com/faroshq/faros/pkg/util/httputil"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )

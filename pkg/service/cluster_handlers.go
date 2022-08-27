@@ -7,7 +7,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/models"
 	errutil "github.com/faroshq/faros/pkg/util/error"
-	httputil "github.com/faroshq/faros/pkg/util/http"
+	"github.com/faroshq/faros/pkg/util/httputil"
 )
 
 func (s *Service) getCluster(w http.ResponseWriter, r *http.Request) {

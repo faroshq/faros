@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/faroshq/faros/pkg/models"
-	httputil "github.com/faroshq/faros/pkg/util/http"
+	"github.com/faroshq/faros/pkg/util/httputil"
 )
 
 const (

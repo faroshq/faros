@@ -11,7 +11,7 @@ import (
 	"github.com/faroshq/faros/pkg/client"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/util/file"
-	httputil "github.com/faroshq/faros/pkg/util/http"
+	"github.com/faroshq/faros/pkg/util/httputil"
 	"github.com/faroshq/faros/pkg/util/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"

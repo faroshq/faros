@@ -13,7 +13,7 @@ import (
 	"github.com/faroshq/faros/pkg/util/log"
 	_ "github.com/go-sql-driver/mysql"
 
-	sql_store "github.com/faroshq/faros/pkg/store/sql"
+	sqlstore "github.com/faroshq/faros/pkg/store/sql"
 )
 
 func main() {
@@ -44,7 +44,7 @@ func run(ctx context.Context) error {
 		c.API.URI = ":" + os.Getenv("PORT")
 	}
 
-	sqlStore, err := sql_store.NewStore(log, c)
+	sqlStore, err := sqlstore.NewStore(log, c)
 	if err != nil {
 		return err
 	}
