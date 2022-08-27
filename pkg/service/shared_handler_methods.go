@@ -4,10 +4,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gorilla/mux"
+
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
-	"github.com/gorilla/mux"
 )
 
 // _getNamespace is shared helper to get namespace from request.

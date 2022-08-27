@@ -9,10 +9,10 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/faroshq/faros/pkg/models"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
+	"github.com/faroshq/faros/pkg/models"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	logutil "github.com/faroshq/faros/pkg/util/log"
 )

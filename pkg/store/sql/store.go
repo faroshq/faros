@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/faroshq/faros/pkg/config"
-	"github.com/faroshq/faros/pkg/store"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/store"
 )
 
 var _ store.Store = &Store{}

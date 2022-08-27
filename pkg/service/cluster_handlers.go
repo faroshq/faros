@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/davecgh/go-spew/spew"
+
 	"github.com/faroshq/faros/pkg/models"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"

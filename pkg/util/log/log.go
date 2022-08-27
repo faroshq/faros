@@ -11,9 +11,10 @@ import (
 	"strings"
 
 	"github.com/coreos/go-systemd/v22/journal"
+	"github.com/sirupsen/logrus"
+
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/util/stringutils"
-	"github.com/sirupsen/logrus"
 )
 
 var (

@@ -1,10 +1,11 @@
 package list
 
 import (
+	"github.com/spf13/cobra"
+
 	"github.com/faroshq/faros/pkg/cli/resources/access"
 	"github.com/faroshq/faros/pkg/cli/resources/clusters"
 	"github.com/faroshq/faros/pkg/cli/resources/namespaces"
-	"github.com/spf13/cobra"
 )
 
 // New returns new list wrapper

@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/faroshq/faros/pkg/models"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
+
+	"github.com/faroshq/faros/pkg/models"
 )
 
 var Config GlobalConfig

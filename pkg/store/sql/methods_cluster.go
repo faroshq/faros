@@ -3,10 +3,11 @@ package sql
 import (
 	"context"
 
-	"github.com/faroshq/faros/pkg/models"
-	"github.com/faroshq/faros/pkg/store"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
+
+	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/store"
 )
 
 // GetUser gets full user based on args user

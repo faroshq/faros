@@ -20,7 +20,7 @@ generate-dev-certs: generate-api-serving-cert
 
 lint:
 	gofmt -s -w cmd hack pkg
-	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/synpse-hq/synpse-core cmd hack pkg
+	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
 	go run -mod vendor ./hack/validate-imports cmd hack pkg
 	# TODO: Enable this at some point
 	#staticcheck ./...

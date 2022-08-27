@@ -5,12 +5,13 @@ import (
 	"strings"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 )
 
 // listClusterAccess list cluster access sessions for specific cluster

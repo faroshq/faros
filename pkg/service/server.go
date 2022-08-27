@@ -14,14 +14,14 @@ import (
 
 	"github.com/InVisionApp/go-health/v2"
 	healthhandlers "github.com/InVisionApp/go-health/v2/handlers"
+	"github.com/gorilla/handlers"
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/recover"
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 )
 
 var _ Interface = &Service{}

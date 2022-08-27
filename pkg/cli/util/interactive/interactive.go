@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
+
 	"github.com/faroshq/faros/pkg/models"
 )
 

@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/InVisionApp/go-health/v2"
+	"github.com/sirupsen/logrus"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/service"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/recover"
-	"github.com/sirupsen/logrus"
 )
 
 var _ Interface = &Controller{}

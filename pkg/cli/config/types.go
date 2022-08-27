@@ -1,8 +1,9 @@
 package config
 
 import (
-	"github.com/faroshq/faros/pkg/client"
 	"github.com/sirupsen/logrus"
+
+	"github.com/faroshq/faros/pkg/client"
 )
 
 type GlobalConfig struct {

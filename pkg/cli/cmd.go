@@ -3,12 +3,13 @@ package cli
 import (
 	"context"
 
+	"github.com/spf13/cobra"
+
 	"github.com/faroshq/faros/pkg/cli/config"
 	"github.com/faroshq/faros/pkg/cli/create"
 	"github.com/faroshq/faros/pkg/cli/delete"
 	"github.com/faroshq/faros/pkg/cli/get"
 	"github.com/faroshq/faros/pkg/cli/list"
-	"github.com/spf13/cobra"
 )
 
 // RunCLI returns user CLI

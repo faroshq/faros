@@ -8,12 +8,12 @@ import (
 	"time"
 
 	health "github.com/InVisionApp/go-health/v2"
-	"github.com/faroshq/faros/pkg/config"
-	"github.com/faroshq/faros/pkg/controller"
-	"github.com/faroshq/faros/pkg/util/log"
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	sqlstore "github.com/faroshq/faros/pkg/store/sql"
+	"github.com/faroshq/faros/pkg/util/log"
 )
 
 func main() {

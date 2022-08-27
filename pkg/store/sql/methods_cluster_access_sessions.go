@@ -4,10 +4,11 @@ import (
 	"context"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/faroshq/faros/pkg/models"
-	"github.com/faroshq/faros/pkg/store"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
+
+	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/store"
 )
 
 // GetClusterAccessSession gets cluster access sessions based on clusterID and NamespaceID

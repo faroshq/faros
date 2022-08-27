@@ -7,12 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faroshq/faros/pkg/config"
-	gormlogs "github.com/faroshq/faros/pkg/util/log/gorm"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"github.com/faroshq/faros/pkg/config"
+	gormlogs "github.com/faroshq/faros/pkg/util/log/gorm"
 )
 
 type SQL struct {
