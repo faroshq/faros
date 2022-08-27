@@ -22,16 +22,16 @@ func (c *Client) GetCluster(ctx context.Context, cluster models.Cluster) (*model
 	return &result, nil
 }
 
-func (c *Client) ListClusters(ctx context.Context, namespaceID string) ([]models.Cluster, error) {
-	if namespaceID == "" {
+func (c *Client) ListClusters(ctx context.Context, cluster models.Cluster) ([]models.Cluster, error) {
+	if cluster.NamespaceID == "" {
 		return nil, fmt.Errorf("namespaceID not provided")
 	}
 
-	var clusters []models.Cluster
-	if err := c.get(ctx, &clusters, namespacesURL, namespaceID, clustersURL); err != nil {
+	var results []models.Cluster
+	if err := c.get(ctx, &results, namespacesURL, cluster.NamespaceID, clustersURL); err != nil {
 		return nil, err
 	}
-	return clusters, nil
+	return results, nil
 }
 
 func (c *Client) CreateCluster(ctx context.Context, cluster models.Cluster) (*models.Cluster, error) {
@@ -64,7 +64,7 @@ func (c *Client) UpdateCluster(ctx context.Context, cluster models.Cluster) (*mo
 	}
 
 	var result models.Cluster
-	if err := c.post(ctx, &cluster, cluster, namespacesURL, cluster.NamespaceID, clustersURL, cluster.Name); err != nil {
+	if err := c.post(ctx, &cluster, cluster, namespacesURL, cluster.NamespaceID, clustersURL, cluster.ID); err != nil {
 		return nil, err
 	}
 	return &result, nil

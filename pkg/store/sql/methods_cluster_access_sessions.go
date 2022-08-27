@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/pkg/errors"
@@ -32,6 +33,7 @@ func (s *Store) GetClusterAccessSession(ctx context.Context, p models.ClusterAcc
 // CreateClusterAccessSession creates cluster access session
 func (s *Store) CreateClusterAccessSession(ctx context.Context, p models.ClusterAccessSession) (*models.ClusterAccessSession, error) {
 	p.ID = models.NewClusterAccessSessionID()
+	spew.Dump(p)
 
 	err := s.db.WithContext(ctx).Create(&p).Error
 	if err != nil {

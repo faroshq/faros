@@ -1,1 +1,0 @@
-{"buildTargets":["clean","generate","image-operator","lint-go","operator","publish-operator","test-go"],"launchTargets":[],"customConfigurationProvider":{"workspaceBrowse":{"browsePath":[],"compilerArgs":[]},"fileIndex":[]}}

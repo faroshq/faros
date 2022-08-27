@@ -59,7 +59,7 @@ func create(ctx context.Context, opts createOps, args []string, update bool) err
 		// TODO: create from args
 	}
 
-	clusters, err := c.APIClient.ListClusters(ctx, cluster.NamespaceID)
+	clusters, err := c.APIClient.ListClusters(ctx, cluster)
 	if err != nil {
 		return errors.ParseCloudError(err)
 	}

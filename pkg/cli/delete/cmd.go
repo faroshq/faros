@@ -1,6 +1,7 @@
 package delete
 
 import (
+	"github.com/faroshq/faros/pkg/cli/resources/access"
 	"github.com/faroshq/faros/pkg/cli/resources/clusters"
 	"github.com/faroshq/faros/pkg/cli/resources/namespaces"
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ func New() *cobra.Command {
 
 	cmd.AddCommand(clusters.DeleteCmd())
 	cmd.AddCommand(namespaces.DeleteCmd())
+	cmd.AddCommand(access.DeleteCmd())
 
 	return cmd
 }

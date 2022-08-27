@@ -1,6 +1,7 @@
 package create
 
 import (
+	"github.com/faroshq/faros/pkg/cli/resources/access"
 	"github.com/faroshq/faros/pkg/cli/resources/clusters"
 	"github.com/faroshq/faros/pkg/cli/resources/namespaces"
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ func New() *cobra.Command {
 
 	cmd.AddCommand(clusters.CreateCmd())
 	cmd.AddCommand(namespaces.CreateCmd())
+	cmd.AddCommand(access.CreateCmd())
 
 	return cmd
 }

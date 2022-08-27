@@ -4,18 +4,19 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/models"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	httputil "github.com/faroshq/faros/pkg/util/http"
 )
 
 func (s *Service) getCluster(w http.ResponseWriter, r *http.Request) {
-	cluster, _, err := s._getClusterAndNamespace(w, r)
+	result, _, err := s._getClusterAndNamespace(w, r)
 	if err != nil {
 		return
 	}
 
-	httputil.Respond(w, cluster)
+	httputil.Respond(w, result)
 }
 
 func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +44,7 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) {
+	spew.Dump("createOrUpdateCluster")
 	namespace, err := s._getNamespace(w, r)
 	if err != nil {
 		return

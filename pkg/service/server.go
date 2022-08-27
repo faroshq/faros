@@ -90,7 +90,8 @@ func New(
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.listClusterAccessSession).Methods(http.MethodGet)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.getClusterAccessSession).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access{access}", s.getClusterAccessSession).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
 
 	// debug!
 	// TODO: put behind auth

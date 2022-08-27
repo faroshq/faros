@@ -18,7 +18,7 @@ func list(ctx context.Context) error {
 		return errors.ParseCloudError(err)
 	}
 
-	clusters, err := c.APIClient.ListClusters(ctx, c.Namespace)
+	clusters, err := c.APIClient.ListClusters(ctx, models.Cluster{NamespaceID: c.Namespace})
 	if err != nil {
 		return errors.ParseCloudError(err)
 	}
@@ -61,5 +61,5 @@ func list(ctx context.Context) error {
 		return nil
 	}
 
-	return printutil.PrintWithFormat(clusters, c.Output)
+	return printutil.PrintWithFormat(clusterList, c.Output)
 }

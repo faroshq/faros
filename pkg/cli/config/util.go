@@ -144,7 +144,7 @@ func EnrichCommonFlags(cmd *cobra.Command) error {
 	cmd.PersistentFlags().StringVar(&c.APIEndpoint, "controller-uri", "https://localhost:8443/api/v1", "API Endpoint URL")
 	cmd.PersistentFlags().MarkHidden("controller-uri")
 
-	cmd.PersistentFlags().StringVar(&c.Namespace, "namespace", "", "Namespace name or ID")
+	cmd.PersistentFlags().StringVarP(&c.Namespace, "namespace", "n", "", "Namespace name or ID")
 	cmd.PersistentFlags().MarkHidden("namespace")
 
 	cmd.PersistentFlags().BoolVar(&c.InsecureSkipTLSVerify, "insecureSkipTLSVerify", false, "skip tls verify")
@@ -189,4 +189,25 @@ func ResolveUserFlags(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func ResolveClusterFlag(ctx context.Context, cluster string) (string, error) {
+	c := &Config
+
+	if strings.HasPrefix(cluster, models.ClusterPrefix) {
+		return cluster, nil
+	} else {
+		clusters, err := c.APIClient.ListClusters(ctx, models.Cluster{
+			NamespaceID: c.Namespace,
+		})
+		if err != nil {
+			return "", err
+		}
+		for _, c := range clusters {
+			if strings.EqualFold(c.Name, cluster) {
+				return c.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("cluster %s not found", cluster)
 }

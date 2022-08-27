@@ -19,6 +19,7 @@ import (
 const (
 	namespacesURL = "namespaces"
 	clustersURL   = "clusters"
+	accessURL     = "access"
 )
 
 type Client struct {

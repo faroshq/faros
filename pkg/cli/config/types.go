@@ -17,3 +17,11 @@ type GlobalConfig struct {
 	InsecureSkipTLSVerify bool
 	Log                   *logrus.Entry
 }
+
+// ResourceIDsConfig is used to inject resource IDs into the config
+// when user providers them as names instead of IDs.
+type ResourceIDsConfig struct {
+	Namespace            string
+	Cluster              string
+	ClusterAccessSession string
+}

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
@@ -36,16 +37,34 @@ func (s *Service) listClusterAccessSession(w http.ResponseWriter, r *http.Reques
 
 // getClusterAccessSession gets individual cluster access session for specific cluster
 func (s *Service) getClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	session, err := s._getClusterAccessSession(w, r)
+	result, err := s._getClusterAccessSession(w, r)
 	if err != nil {
 		return
 	}
 
-	httputil.Respond(w, session)
+	httputil.Respond(w, result)
+}
+
+// getClusterAccessSession gets individual cluster access session for specific cluster
+func (s *Service) deleteClusterAccessSession(w http.ResponseWriter, r *http.Request) {
+	result, err := s._getClusterAccessSession(w, r)
+	if err != nil {
+		return
+	}
+
+	err = s.store.DeleteClusterAccessSession(r.Context(), *result)
+	if err != nil {
+		s.log.WithError(err).Error("failed to unmarshal request")
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
+		return
+	}
+
+	httputil.Respond(w, "")
 }
 
 // createOrUpdateClusterAccessSession created new cluster access session for specific cluster
 func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *http.Request) {
+	spew.Dump("createOrUpdateClusterAccessSession")
 	cluster, namespace, err := s._getClusterAndNamespace(w, r)
 	if err != nil {
 		return
@@ -75,19 +94,29 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 	query := models.ClusterAccessSession{
 		NamespaceID: namespace.ID,
 		ClusterID:   cluster.ID,
-		Name:        createClusterAccessSessionRequest.Name,
 	}
 
-	_, err = s.store.GetClusterAccessSession(r.Context(), query)
-	if err != nil && err != store.ErrRecordNotFound {
-		s.log.WithError(err).Error("failed to get cluster access session")
+	sessions, err := s.store.ListClusterAccessSessions(r.Context(), query)
+	if err != nil {
+		s.log.WithError(err).Error("failed to list cluster access sessions")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
 
-	// if we managed to get the cluster access session, then it already exists - update
-	if err == nil {
-		result, err := s.store.UpdateClusterAccessSession(r.Context(), createClusterAccessSessionRequest)
+	var isUpdate bool
+	var session *models.ClusterAccessSession
+
+	for _, s := range sessions {
+		if s.Name == createClusterAccessSessionRequest.Name {
+			session = &s
+			isUpdate = true
+		}
+	}
+	if isUpdate {
+		// update fields
+		session.TTL = createClusterAccessSessionRequest.TTL
+
+		result, err := s.store.UpdateClusterAccessSession(r.Context(), *session)
 		if err != nil {
 			s.log.WithError(err).Error("failed to update cluster access session")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))

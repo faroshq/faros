@@ -7,6 +7,7 @@ import (
 
 	"github.com/faroshq/faros/pkg/cli/config"
 	"github.com/faroshq/faros/pkg/cli/util/errors"
+	"github.com/faroshq/faros/pkg/models"
 )
 
 func delete(ctx context.Context, args []string) error {
@@ -16,7 +17,9 @@ func delete(ctx context.Context, args []string) error {
 		return fmt.Errorf("cluster name argument missing")
 	}
 
-	clusters, err := c.APIClient.ListClusters(ctx, c.Namespace)
+	clusters, err := c.APIClient.ListClusters(ctx, models.Cluster{
+		NamespaceID: c.Namespace,
+	})
 	if err != nil {
 		return errors.ParseCloudError(err)
 	}
