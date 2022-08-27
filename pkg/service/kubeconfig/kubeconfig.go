@@ -5,13 +5,14 @@ import (
 	"net/http/httputil"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+
 	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/auth"
 	"github.com/faroshq/faros/pkg/util/clientcache"
 	"github.com/faroshq/faros/pkg/util/roundtripper"
-	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 )
 
 type kubeconfig struct {

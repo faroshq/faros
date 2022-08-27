@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 
+	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // Authenticator authenticator is used to authenticate internally stored authentication resources

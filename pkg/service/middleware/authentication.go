@@ -5,11 +5,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/auth"
-	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
 )
 
 // KubeConfigAuthentication validates a Bearer token fields and sets ClusterAccessSession
