@@ -22,5 +22,4 @@ lint:
 	gofmt -s -w cmd hack pkg
 	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
 	go run -mod vendor ./hack/validate-imports cmd hack pkg
-	# TODO: Enable this at some point
-	#staticcheck ./...
+	staticcheck ./...

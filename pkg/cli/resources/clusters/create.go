@@ -55,8 +55,6 @@ func create(ctx context.Context, opts createOps, args []string, update bool) err
 		}
 		// encode to base64
 		cluster.Config.RawKubeConfig = base64.RawStdEncoding.EncodeToString(data)
-	} else {
-		// TODO: create from args
 	}
 
 	clusters, err := c.APIClient.ListClusters(ctx, cluster)

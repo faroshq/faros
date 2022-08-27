@@ -16,19 +16,13 @@ import (
 	gormlogs "github.com/faroshq/faros/pkg/util/log/gorm"
 )
 
-type SQL struct {
-	db *gorm.DB
-}
+type SQL struct{}
 
 // Available DB types
 const (
 	DatabaseTypePostgres = "postgres"
 	DatabaseTypeSqlite3  = sqlite.DriverName
 )
-
-type scanner interface {
-	Scan(...interface{}) error
-}
 
 func connect(ctx context.Context, log *logrus.Entry, c *config.Config) (*gorm.DB, *pgxpool.Pool, error) {
 	for {

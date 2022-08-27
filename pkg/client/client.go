@@ -56,54 +56,6 @@ func (c *Client) delete(ctx context.Context, s ...string) error {
 	return c.performRequest(req, &noop)
 }
 
-func (c *Client) patch(ctx context.Context, in, out interface{}, s ...string) error {
-	var reqBytes []byte
-
-	switch v := in.(type) {
-	case string:
-		reqBytes = []byte(v)
-	default:
-		var err error
-		reqBytes, err = json.Marshal(in)
-		if err != nil {
-			return err
-		}
-	}
-
-	reader := bytes.NewReader(reqBytes)
-
-	req, err := httputil.NewCliRequest(ctx, http.MethodPatch, getURL(c.url, s...), reader)
-	if err != nil {
-		return err
-	}
-
-	return c.performRequest(req, out)
-}
-
-func (c *Client) put(ctx context.Context, in, out interface{}, s ...string) error {
-	var reqBytes []byte
-
-	switch v := in.(type) {
-	case string:
-		reqBytes = []byte(v)
-	default:
-		var err error
-		reqBytes, err = json.Marshal(in)
-		if err != nil {
-			return err
-		}
-	}
-
-	reader := bytes.NewReader(reqBytes)
-
-	req, err := httputil.NewCliRequest(ctx, http.MethodPut, getURL(c.url, s...), reader)
-	if err != nil {
-		return err
-	}
-
-	return c.performRequest(req, out)
-}
-
 func (c *Client) post(ctx context.Context, in, out interface{}, s ...string) error {
 	var reqBytes []byte
 
@@ -128,10 +80,10 @@ func (c *Client) post(ctx context.Context, in, out interface{}, s ...string) err
 	return c.performRequest(req, out)
 }
 
-func (c *Client) performRequest(req *http.Request, out interface{}) error {
+func (c *Client) performRequest(req *httputil.Request, out interface{}) error {
 	req.Header.Add(models.ClientClientRequestID, uuid.New().String())
 
-	resp, err := c.httpClient.Do(&httputil.Request{req})
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}

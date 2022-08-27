@@ -32,6 +32,9 @@ func list(ctx context.Context, opts opts) error {
 		NamespaceID: c.Namespace,
 		ClusterID:   clusterID,
 	})
+	if err != nil {
+		return errors.ParseCloudError(err)
+	}
 
 	var sessionsList []struct {
 		models.ClusterAccessSession

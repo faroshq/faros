@@ -57,13 +57,15 @@ type Request struct {
 	*http.Request
 }
 
-func NewCliRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+func NewCliRequest(ctx context.Context, method, url string, body io.Reader) (*Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
 
-	return req, nil
+	return &Request{
+		Request: req,
+	}, nil
 }
 
 func NewAgentRequest(ctx context.Context, method, url string, body io.Reader) (*Request, error) {

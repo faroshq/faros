@@ -2,8 +2,8 @@ package models
 
 import "time"
 
-var ClientClientRequestID = "registry-client-request-id"
-var ClientRequestID = "registry-request-id"
+var ClientClientRequestID = "faros-client-request-id"
+var ClientRequestID = "faros-request-id"
 
 // CorrelationData represents any data, used for metrics or tracing.
 type CorrelationData struct {

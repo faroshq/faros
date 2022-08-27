@@ -80,11 +80,6 @@ func (w *logResponseWriter) Flush() {
 	flucher.Flush()
 }
 
-func (w *logResponseWriter) CloseNotify() <-chan bool {
-	notify := w.ResponseWriter.(http.CloseNotifier)
-	return notify.CloseNotify()
-}
-
 type logReadCloser struct {
 	io.ReadCloser
 
@@ -150,20 +145,4 @@ func Log(log *logrus.Entry) func(http.Handler) http.Handler {
 			h.ServeHTTP(w, r)
 		})
 	}
-}
-
-func getNamespacFromContext(ctx context.Context) *models.Namespace {
-	data := ctx.Value(ContextKeyNamespace)
-	if data != nil {
-		return data.(*models.Namespace)
-	}
-	return nil
-}
-
-func getClusterFromContext(ctx context.Context) *models.Cluster {
-	data := ctx.Value(ContextKeyCluster)
-	if data != nil {
-		return data.(*models.Cluster)
-	}
-	return nil
 }

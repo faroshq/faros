@@ -7,9 +7,7 @@ import (
 var (
 	stringErrorFailure                      = "failure"
 	stringErrorNamespaceNotFound            = "namespace not found"
-	stringErrorNamespaceAlreadyExists       = "namespace already exists"
 	stringErrorClusterNotFound              = "cluster not found"
-	stringErrorClusterAlreadyExists         = "cluster already exists"
 	stringErrorClusterAccessSessionNotFound = "cluster access session not found"
 )
 

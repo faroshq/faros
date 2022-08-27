@@ -21,12 +21,15 @@ require (
 	github.com/spf13/cobra v1.5.0
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.12.0
+	golang.org/x/tools v0.1.12
 	gopkg.in/yaml.v2 v2.4.0
 	gorm.io/driver/sqlite v1.3.6
 	gorm.io/gorm v1.23.8
+	honnef.co/go/tools v0.0.1-2020.1.4
 )
 
 require (
+	github.com/BurntSushi/toml v0.3.1 // indirect
 	github.com/InVisionApp/go-logger v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
@@ -64,7 +67,6 @@ require (
 	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
 	golang.org/x/text v0.3.7 // indirect
-	golang.org/x/tools v0.1.12 // indirect
 	gopkg.in/ini.v1 v1.66.4 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -6,7 +6,6 @@ package log
 import (
 	"flag"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -19,7 +18,6 @@ import (
 
 var (
 	_, thisfile, _, _ = runtime.Caller(0)
-	pkgpath           = filepath.Dir(thisfile)
 	repopath          = strings.Replace(thisfile, "pkg/util/log/log.go", "", -1)
 
 	loglevel = flag.String("loglevel", "info", "{panic,fatal,error,warning,info,debug,trace}")
