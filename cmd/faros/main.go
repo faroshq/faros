@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,7 +19,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-
+	flag.Parse()
 	if err := run(ctx); err != nil {
 		fmt.Printf("error starting controller: %v", err)
 		os.Exit(1)

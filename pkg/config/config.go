@@ -13,7 +13,7 @@ type Registry struct {
 }
 
 type API struct {
-	URI            string   `envconfig:"FAROS_API_URI" default:":8443"`
+	URI            string   `envconfig:"FAROS_API_URI" default:"localhost:8443"`
 	AllowedOrigins []string `envconfig:"FAROS_API_ALLOWED_ORIGIN" default:""`
 	TLSKeyPath     string   `envconfig:"FAROS_API_TLS_KEY" default:""`
 	TLSCertPath    string   `envconfig:"FAROS_API_TLS_CERT" default:""`

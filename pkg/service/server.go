@@ -19,7 +19,10 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/service/kubeconfig"
+	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
+	"github.com/faroshq/faros/pkg/util/auth"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
@@ -32,6 +35,7 @@ type Interface interface {
 
 type Service struct {
 	log      *logrus.Entry
+	auth     auth.Authenticator
 	server   *http.Server
 	listener net.Listener
 	router   *mux.Router
@@ -54,6 +58,12 @@ func New(
 		config: config,
 		store:  store,
 	}
+
+	authenticator, err := auth.NewAuthenticator(logger, config, store)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create authenticator: %w", err)
+	}
+	s.auth = authenticator
 
 	// setup serving certs
 	key, err := x509.ParsePKCS1PrivateKey(config.API.TLSKey)
@@ -92,6 +102,10 @@ func New(
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access{access}", s.getClusterAccessSession).Methods(http.MethodGet)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
+	// This is post. All methods dealing with security should be POST
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
+
+	s.setupProxy()
 
 	// debug!
 	// TODO: put behind auth
@@ -181,8 +195,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) setupRouter() *mux.Router {
 	r := mux.NewRouter()
-	r.Use(Panic(s.log))
-	r.Use(Log(s.log))
+	r.Use(middleware.Panic(s.log))
+	r.Use(middleware.Log(s.log))
 
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -190,4 +204,8 @@ func (s *Service) setupRouter() *mux.Router {
 	})
 
 	return r
+}
+
+func (s *Service) setupProxy() {
+	kubeconfig.New(s.log, s.store, s.router, s.auth)
 }

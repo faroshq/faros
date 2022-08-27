@@ -5,6 +5,7 @@ import (
 
 	"github.com/faroshq/faros/pkg/cli/resources/access"
 	"github.com/faroshq/faros/pkg/cli/resources/clusters"
+	"github.com/faroshq/faros/pkg/cli/resources/kubeconfig"
 	"github.com/faroshq/faros/pkg/cli/resources/namespaces"
 )
 
@@ -20,6 +21,7 @@ func New() *cobra.Command {
 	cmd.AddCommand(clusters.CreateCmd())
 	cmd.AddCommand(namespaces.CreateCmd())
 	cmd.AddCommand(access.CreateCmd())
+	cmd.AddCommand(kubeconfig.CreateCmd())
 
 	return cmd
 }

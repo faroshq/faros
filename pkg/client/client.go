@@ -20,6 +20,7 @@ const (
 	namespacesURL = "namespaces"
 	clustersURL   = "clusters"
 	accessURL     = "access"
+	kubeconfigURL = "kubeconfig"
 )
 
 type Client struct {

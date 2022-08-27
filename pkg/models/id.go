@@ -8,7 +8,7 @@ import (
 
 const (
 	ClusterPrefix              = "cls"
-	NamespacePrefix            = "wrk"
+	NamespacePrefix            = "nms"
 	ClusterAccessSessionPrefix = "cas"
 )
 

@@ -1,10 +1,12 @@
 package service
 
 import (
+	"context"
+	"encoding/base64"
+	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"
+	"github.com/faroshq/faros/pkg/util/kubeconfig"
 )
 
 // listClusterAccess list cluster access sessions for specific cluster
@@ -65,7 +68,6 @@ func (s *Service) deleteClusterAccessSession(w http.ResponseWriter, r *http.Requ
 
 // createOrUpdateClusterAccessSession created new cluster access session for specific cluster
 func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	spew.Dump("createOrUpdateClusterAccessSession")
 	cluster, namespace, err := s._getClusterAndNamespace(w, r)
 	if err != nil {
 		return
@@ -136,4 +138,54 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 	}
 
 	httputil.Respond(w, result)
+}
+
+// createOrUpdateClusterAccessSessionKubeconfig creates or updates kubeconfig for specific cluster access session
+// Update might happen if user lost kubeconfig and wants to generate new one
+func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWriter, r *http.Request) {
+	session, err := s._getClusterAccessSession(w, r)
+	if err != nil {
+		return
+	}
+
+	token := uuid.New().String()
+	hashedToken, err := s.auth.HashPassword(token)
+	if err != nil {
+		s.log.WithError(err).Error("failed to hash token")
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
+		return
+	}
+
+	session.EncryptedToken = base64.RawStdEncoding.EncodeToString(hashedToken)
+	session.Token = token
+
+	// update existing session with new details
+	_, err = s.store.UpdateClusterAccessSession(r.Context(), *session)
+	if err != nil {
+		s.log.WithError(err).Error("failed to create cluster access session")
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
+		return
+	}
+
+	// at this point we can generate kubeconfig and return tu user
+	kubeconfig, err := s._generateKubeConfig(r.Context(), session)
+	if err != nil {
+		s.log.WithError(err).Error("failed to generate kubeconfig")
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
+		return
+	}
+
+	kc := models.KubeConfig{
+		KubeConfig: base64.RawStdEncoding.EncodeToString(kubeconfig),
+	}
+
+	httputil.Respond(w, kc)
+}
+
+func (s *Service) _generateKubeConfig(ctx context.Context, session *models.ClusterAccessSession) ([]byte, error) {
+	path := fmt.Sprintf("/namespaces/%s/clusters/%s/access/%s/proxy",
+		session.NamespaceID, session.ClusterID, session.ID)
+	server := "https://" + s.config.API.URI + path
+
+	return kubeconfig.MakeKubeconfig(server, session.Token)
 }

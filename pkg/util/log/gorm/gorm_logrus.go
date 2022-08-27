@@ -21,7 +21,7 @@ type logger struct {
 func New(log *logrus.Entry) *logger {
 	return &logger{
 		log:                   log,
-		SkipErrRecordNotFound: true,
+		SkipErrRecordNotFound: false,
 	}
 }
 

@@ -212,3 +212,25 @@ func ResolveClusterFlag(ctx context.Context, cluster string) (string, error) {
 	}
 	return "", fmt.Errorf("cluster %s not found", cluster)
 }
+
+func ResolveClusterAccessFlag(ctx context.Context, clusterID, session string) (string, error) {
+	c := &Config
+
+	if strings.HasPrefix(session, models.ClusterAccessSessionPrefix) {
+		return session, nil
+	} else {
+		sessions, err := c.APIClient.ListClusterAccessSessions(ctx, models.ClusterAccessSession{
+			NamespaceID: c.Namespace,
+			ClusterID:   clusterID,
+		})
+		if err != nil {
+			return "", err
+		}
+		for _, c := range sessions {
+			if strings.EqualFold(c.Name, session) {
+				return c.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("cluster access session %s not found", session)
+}

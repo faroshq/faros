@@ -3,7 +3,6 @@ package sql
 import (
 	"context"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
 
@@ -34,7 +33,6 @@ func (s *Store) GetClusterAccessSession(ctx context.Context, p models.ClusterAcc
 // CreateClusterAccessSession creates cluster access session
 func (s *Store) CreateClusterAccessSession(ctx context.Context, p models.ClusterAccessSession) (*models.ClusterAccessSession, error) {
 	p.ID = models.NewClusterAccessSessionID()
-	spew.Dump(p)
 
 	err := s.db.WithContext(ctx).Create(&p).Error
 	if err != nil {
@@ -53,7 +51,7 @@ func (s *Store) UpdateClusterAccessSession(ctx context.Context, p models.Cluster
 	}
 
 	query := models.ClusterAccessSession{ID: p.ID, ClusterID: p.ClusterID, NamespaceID: p.NamespaceID}
-	err := s.db.WithContext(ctx).Model(&models.Cluster{}).Where(&query).Save(&p).Error
+	err := s.db.WithContext(ctx).Model(&models.ClusterAccessSession{}).Where(&query).Save(&p).Error
 	if err != nil {
 		return nil, err
 	}
@@ -82,11 +80,12 @@ func (s *Store) ListClusterAccessSessions(ctx context.Context, p models.ClusterA
 	}
 
 	result := []models.ClusterAccessSession{}
-	if err := s.db.WithContext(ctx).Where(&p).Find(&result).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where(p).Find(&result).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, store.ErrRecordNotFound
 		}
 		return nil, err
 	}
+
 	return result, nil
 }

@@ -92,3 +92,21 @@ func (c *Client) DeleteClusterAccessSession(ctx context.Context, access models.C
 	}
 	return nil
 }
+
+func (c *Client) CreateClusterAccessSessionKubeConfig(ctx context.Context, access models.ClusterAccessSession) (*models.KubeConfig, error) {
+	if access.NamespaceID == "" {
+		return nil, fmt.Errorf("NamespaceID not selected")
+	}
+	if access.ID == "" {
+		return nil, fmt.Errorf("accessID not provided")
+	}
+	if access.ClusterID == "" {
+		return nil, fmt.Errorf("clusterID not provided")
+	}
+
+	var result models.KubeConfig
+	if err := c.post(ctx, nil, &result, namespacesURL, access.NamespaceID, clustersURL, access.ClusterID, accessURL, access.ID, kubeconfigURL); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
