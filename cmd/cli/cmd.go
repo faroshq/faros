@@ -9,7 +9,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	// errors are being printed by CLI  handelers
+	// errors are being printed by CLI handlers
 	err := run(ctx)
 	if err != nil {
 		os.Exit(1)

@@ -1,6 +1,13 @@
 SHELL = /bin/bash
 OUTPUT_BIN_CLI ?= release/cli
 TAG_NAME ?= $(shell git describe --tags --abbrev=0)
+GIT_REVISION = $(shell git rev-parse --short HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
+JOBDATE		?= $(shell date -u +%Y-%m-%dT%H%M%SZ)
+
+LDFLAGS		+= -s -w
+LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.version=$(TAG_NAME)
+LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.commit=$(GIT_REVISION)
+LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.buildTime=$(JOBDATE)
 
 run:
 	FAROS_DATABASE_SQLITE_URI=secrets/database.sqlite3

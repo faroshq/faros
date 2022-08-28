@@ -29,7 +29,7 @@ func MakeKubeconfig(server, token string) ([]byte, error) {
 		},
 		Contexts: []clientcmdv1.NamedContext{
 			{
-				Name: "context",
+				Name: "cluster",
 				Context: clientcmdv1.Context{
 					Cluster:   "cluster",
 					Namespace: "default",
@@ -37,6 +37,6 @@ func MakeKubeconfig(server, token string) ([]byte, error) {
 				},
 			},
 		},
-		CurrentContext: "context",
+		CurrentContext: "cluster",
 	}, "", "    ")
 }

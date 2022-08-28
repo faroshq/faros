@@ -14,6 +14,7 @@ type GlobalConfig struct {
 	Output                    string `yaml:"output,omitempty"`
 	WorkDir                   string `yaml:"work-dir,omitempty"`
 	DefaultKubeConfigLocation string `yaml:"default-kubeconfig,omitempty"`
+	KubeConfigMode            string `yaml:"kubeconfig-mint-mode,omitempty"`
 	APIEndpoint               string `yaml:"api-endpoint,omitempty"`
 	Namespace                 string `yaml:"namespace,omitempty"`
 	InsecureSkipTLSVerify     bool   `yaml:"insecure-skip-tls-verify,omitempty"`
