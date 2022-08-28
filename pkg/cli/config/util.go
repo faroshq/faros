@@ -8,21 +8,25 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
 	"github.com/faroshq/faros/pkg/client"
 	"github.com/faroshq/faros/pkg/models"
-	"github.com/faroshq/faros/pkg/util/file"
 	"github.com/faroshq/faros/pkg/util/httputil"
 	"github.com/faroshq/faros/pkg/util/log"
 )
 
-var defaultConfigFilename = "config"
-var defaultConfigFileType = "yaml"
-var defaultConfigFileDir = ".faros"
-var envPrefix = "FAROS"
+var (
+	defaultConfigFilename    = "config"
+	defaultConfigFileType    = "yaml"
+	defaultConfigFileDir     = ".faros"
+	defaultKubeConfigFileDir = ".kube"
+	defaultKubeConfigFile    = "config"
+	envPrefix                = "FAROS"
+)
 
 func InitializeAPIClient() error {
 	apiEndpointURL, err := url.Parse(Config.APIEndpoint)
@@ -49,16 +53,6 @@ func InitializeConfig(cmd *cobra.Command) error {
 		return err
 	}
 
-	// TODO: remove this once we move from config to config.yaml
-	oldConfig := strings.Trim(configFile, "."+defaultConfigFileType)
-	if exist, _ := file.Exist(oldConfig); exist {
-		fmt.Printf("Migrating CLI config file\n")
-		err := file.MoveFile(oldConfig, configFile)
-		if err != nil {
-			fmt.Printf("failed to migrate CLI configuration format: %s", err)
-		}
-	}
-
 	v.SetConfigFile(configFile)
 
 	err = os.MkdirAll(filepath.Dir(configFile), os.ModePerm)
@@ -75,7 +69,7 @@ func InitializeConfig(cmd *cobra.Command) error {
 		// It's okay if there isn't a config file
 		if os.IsNotExist(err) {
 			fmt.Printf(`
-Faros cluster registry CLI configuration not found. Please run:
+Faros.sh CLI configuration not found. Please run:
 'faros configure --namespace <namespace_name/namespace_id>'
 `)
 			return nil
@@ -87,7 +81,7 @@ Faros cluster registry CLI configuration not found. Please run:
 
 	// When we bind flags to environment variables expect that the
 	// environment variables are prefixed, e.g. a flag like --number
-	// binds to an environment variable STING_NUMBER. This helps
+	// binds to an environment variable STRING_NUMBER. This helps
 	// avoid conflicts.
 	v.SetEnvPrefix(envPrefix)
 
@@ -101,7 +95,6 @@ Faros cluster registry CLI configuration not found. Please run:
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -129,31 +122,6 @@ func bindFlags(cmd *cobra.Command, v *viper.Viper) {
 	})
 }
 
-func EnrichCommonFlags(cmd *cobra.Command) error {
-	c := &Config
-
-	homedir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	cmd.SilenceUsage = true
-	cmd.PersistentFlags().StringVarP(&c.LogLevel, "loglevel", "l", "info", "Valid values are [debug, info, warning, error]")
-	cmd.PersistentFlags().StringVarP(&c.Output, "output", "o", "table", "Valid values are [table, json, yaml]")
-	cmd.PersistentFlags().StringVarP(&c.WorkDir, "work-dir", "w", filepath.Join(homedir, defaultConfigFileDir), "Working directory for CLI")
-
-	cmd.PersistentFlags().StringVar(&c.APIEndpoint, "controller-uri", "https://localhost:8443/api/v1", "API Endpoint URL")
-	cmd.PersistentFlags().MarkHidden("controller-uri")
-
-	cmd.PersistentFlags().StringVarP(&c.Namespace, "namespace", "n", "", "Namespace name or ID")
-	cmd.PersistentFlags().MarkHidden("namespace")
-
-	cmd.PersistentFlags().BoolVar(&c.InsecureSkipTLSVerify, "insecureSkipTLSVerify", false, "skip tls verify")
-	cmd.PersistentFlags().MarkHidden("insecureSkipTLSVerify")
-
-	return nil
-}
-
 func getConfigFile() (string, error) {
 	configDir, err := getConfigDir()
 	if err != nil {
@@ -161,6 +129,26 @@ func getConfigFile() (string, error) {
 	}
 
 	return filepath.Join(configDir, defaultConfigFilename+"."+defaultConfigFileType), nil
+}
+
+func getConfig() (*GlobalConfig, error) {
+	configFile, err := getConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, err
+	}
+
+	config := GlobalConfig{}
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 func getConfigDir() (string, error) {
@@ -172,24 +160,40 @@ func getConfigDir() (string, error) {
 	return filepath.Join(homeDir, defaultConfigFileDir), nil
 }
 
-func ResolveUserFlags(ctx context.Context) error {
+func TranslateUserConfig(ctx context.Context) error {
 	c := &Config
 
-	if strings.HasPrefix(c.Namespace, models.NamespacePrefix) {
+	// nothing to resolve if we dont have a namespace
+	if c.APIClient == nil {
 		return nil
-	} else {
-		namespaces, err := c.APIClient.ListNamespaces(ctx)
-		if err != nil {
-			return err
-		}
-		for _, namespace := range namespaces {
-			if strings.EqualFold(namespace.Name, c.Namespace) {
-				c.Namespace = namespace.ID
-			}
-		}
+	}
+
+	var err error
+	c.Namespace, err = ResolveNamespaceFlag(ctx, c.Namespace)
+	if err != nil {
+		return err
 	}
 
 	return nil
+}
+
+func ResolveNamespaceFlag(ctx context.Context, namespace string) (string, error) {
+	c := &Config
+
+	if strings.HasPrefix(namespace, models.NamespacePrefix) {
+		return namespace, nil
+	} else {
+		namespaces, err := c.APIClient.ListNamespaces(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, namespace := range namespaces {
+			if strings.EqualFold(namespace.Name, c.Namespace) {
+				return namespace.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("namespace %s not found", namespace)
 }
 
 func ResolveClusterFlag(ctx context.Context, cluster string) (string, error) {

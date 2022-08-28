@@ -6,23 +6,18 @@ import (
 	"github.com/faroshq/faros/pkg/client"
 )
 
+// GlobalConfig is the global configuration for CLI
+// IMPORTANT: Flags names in AppendGlobalFlags must match yaml keys in config.yaml!!!
+// Otherwise viper looses those values
 type GlobalConfig struct {
-	LogLevel string
-	Output   string
-	WorkDir  string
+	LogLevel                  string `yaml:"loglevel,omitempty"`
+	Output                    string `yaml:"output,omitempty"`
+	WorkDir                   string `yaml:"work-dir,omitempty"`
+	DefaultKubeConfigLocation string `yaml:"default-kubeconfig,omitempty"`
+	APIEndpoint               string `yaml:"api-endpoint,omitempty"`
+	Namespace                 string `yaml:"namespace,omitempty"`
+	InsecureSkipTLSVerify     bool   `yaml:"insecure-skip-tls-verify,omitempty"`
 
-	APIEndpoint string
-	Namespace   string
-
-	APIClient             *client.Client
-	InsecureSkipTLSVerify bool
-	Log                   *logrus.Entry
-}
-
-// ResourceIDsConfig is used to inject resource IDs into the config
-// when user providers them as names instead of IDs.
-type ResourceIDsConfig struct {
-	Namespace            string
-	Cluster              string
-	ClusterAccessSession string
+	APIClient *client.Client `yaml:"-"`
+	Log       *logrus.Entry  `yaml:"-"`
 }
