@@ -20,7 +20,6 @@ func RunCLI(ctx context.Context) error {
 Faros CLI is a command line interface for Faros.sh`,
 		Use: "faros --help",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-
 			err := config.InitializeConfig(cmd)
 			if err != nil {
 				return err
@@ -35,12 +34,17 @@ Faros CLI is a command line interface for Faros.sh`,
 			if err != nil {
 				return err
 			}
+
 			// resolve namespace to namespaceID
-			return config.ResolveUserFlags(cmd.Context())
+			if cmd.CalledAs() != "configure" {
+				return config.TranslateUserConfig(cmd.Context())
+			}
+
+			return nil
 		},
 	}
 
-	err := config.EnrichCommonFlags(cmd)
+	err := config.AppendGlobalFlags(cmd)
 	if err != nil {
 		return err
 	}

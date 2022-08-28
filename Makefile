@@ -42,6 +42,6 @@ build-cli-all:
 	cd release && go-selfupdate cli/ $(TAG_NAME)
 	./hack/fixup-windows-cli.sh
 
-build-cli:
-	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_CLI}/cli ./cmd/cli
-	CGO_ENABLED=0 GOOS=windows go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_CLI}/cli.exe ./cmd/cli
+cli:
+	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
+

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/config"
 )
 
@@ -16,7 +15,6 @@ type multi struct {
 var _ AEAD = (*multi)(nil)
 
 func NewMulti(ctx context.Context, config *config.Config) (AEAD, error) {
-	spew.Dump(config.Controller.EncryptionKeys)
 	latestKeyB64 := config.Controller.EncryptionKeys[len(config.Controller.EncryptionKeys)-1]
 	latestKey, err := base64.StdEncoding.DecodeString(latestKeyB64)
 	if err != nil {
