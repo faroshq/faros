@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -129,26 +128,6 @@ func getConfigFile() (string, error) {
 	}
 
 	return filepath.Join(configDir, defaultConfigFilename+"."+defaultConfigFileType), nil
-}
-
-func getConfig() (*GlobalConfig, error) {
-	configFile, err := getConfigFile()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return nil, err
-	}
-
-	config := GlobalConfig{}
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return nil, err
-	}
-
-	return &config, nil
 }
 
 func getConfigDir() (string, error) {

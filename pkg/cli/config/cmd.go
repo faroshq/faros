@@ -46,6 +46,7 @@ func AppendGlobalFlags(cmd *cobra.Command) error {
 	cmd.PersistentFlags().StringVarP(&c.Output, "output", "o", "table", "Valid values are [table, json, yaml]")
 	cmd.PersistentFlags().StringVarP(&c.WorkDir, "work-dir", "w", filepath.Join(homedir, defaultConfigFileDir), "Working directory for CLI")
 	cmd.PersistentFlags().StringVar(&c.DefaultKubeConfigLocation, "default-kubeconfig", filepath.Join(homedir, defaultKubeConfigFileDir, defaultKubeConfigFile), "Default kubeconfig file location")
+	cmd.PersistentFlags().StringVar(&c.KubeConfigMode, "kubeconfig-mint-mode", "new", "Valid values are [merge, new]")
 
 	cmd.PersistentFlags().StringVar(&c.APIEndpoint, "api-endpoint", "https://localhost:8443/api/v1", "API Endpoint URL")
 	cmd.PersistentFlags().StringVarP(&c.Namespace, "namespace", "n", "", "Namespace name or ID")
@@ -99,6 +100,7 @@ func PersistConfiguration(ctx context.Context, args []string) error {
 	config.DefaultKubeConfigLocation = Config.DefaultKubeConfigLocation
 	config.Output = Config.Output
 	config.LogLevel = Config.LogLevel
+	config.KubeConfigMode = Config.KubeConfigMode
 
 	data, err = yaml.Marshal(config)
 	if err != nil {
