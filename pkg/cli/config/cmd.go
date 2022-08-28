@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/faroshq/faros/pkg/util/version"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 )
@@ -71,7 +72,7 @@ func NewVersion() *cobra.Command {
 }
 
 func printVersion(cmd *cobra.Command) {
-	fmt.Printf("CLI version: %s\n", "0.0.1")
+	fmt.Printf("CLI version: %s\n", version.GetVersion().Version)
 	os.Exit(0)
 }
 
