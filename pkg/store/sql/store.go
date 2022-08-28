@@ -12,14 +12,17 @@ import (
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/store"
+	"github.com/faroshq/faros/pkg/util/encryption"
 )
 
 var _ store.Store = &Store{}
 
 type Store struct {
-	log     *logrus.Entry
-	db      *gorm.DB
-	pgxPool *pgxpool.Pool // used for pubsub if we need one
+	log               *logrus.Entry
+	encryption        encryption.AEAD
+	encryptionEnabled bool
+	db                *gorm.DB
+	pgxPool           *pgxpool.Pool // used for pubsub if we need one
 }
 
 func NewStore(log *logrus.Entry, c *config.Config) (*Store, error) {
@@ -45,6 +48,15 @@ func NewStore(log *logrus.Entry, c *config.Config) (*Store, error) {
 		log:     log,
 		db:      db,
 		pgxPool: pgxPool,
+	}
+
+	// set encryption if enabled
+	if c.Controller.EncryptionKeys != nil && len(c.Controller.EncryptionKeys) > 0 {
+		s.encryption, err = encryption.NewMulti(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		s.encryptionEnabled = true
 	}
 
 	err = s.migrate(ctx, c)

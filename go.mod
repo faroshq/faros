@@ -5,9 +5,12 @@ go 1.18
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.5
 	github.com/InVisionApp/go-health/v2 v2.1.2
+	github.com/codahale/etm v0.0.0-20141003032925-c00c9e6fb4c9
 	github.com/coreos/go-systemd/v22 v22.3.2
+	github.com/davecgh/go-spew v1.1.1
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-sql-driver/mysql v1.6.0
+	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
@@ -33,7 +36,6 @@ require (
 require (
 	github.com/BurntSushi/toml v0.3.1 // indirect
 	github.com/InVisionApp/go-logger v1.0.1 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/felixge/httpsnoop v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
 	github.com/go-logr/logr v1.2.3 // indirect

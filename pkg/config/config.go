@@ -17,6 +17,9 @@ type Controller struct {
 	SessionExpireInterval time.Duration `envconfig:"FAROS_SESSION_EXPIRE_INTERVAL" default:"30s"`
 	// SessionPurgeTTL is the time after which sessions are purged after expiration
 	SessionPurgeTTL time.Duration `envconfig:"FAROS_SESSION_PURGE_TTL" default:"1h"`
+	// EncryptionKeys is the keys used for encrypting and decrypting secret fields
+	// in the database. If one key fails to decrypt, second is used. Last key is used to seal the secrets
+	EncryptionKeys []string `envconfig:"FAROS_ENCRYPTION_KEYS" default:"tDPRu/wtFeSRnnfU4rNXWKhvjq+H+pL+s6mU5+hH9XZmAxAIy8tUKN6fO4lbmBiSY6zSq0x/Zwf+a3X3DnbNCg=="`
 }
 
 type API struct {

@@ -35,10 +35,6 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for idx := range result {
-		result[idx].Config.RawKubeConfig = "redacted"
-	}
-
 	httputil.Respond(w, result)
 }
 

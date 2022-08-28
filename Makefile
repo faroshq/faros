@@ -9,14 +9,18 @@ run:
 build-cli:
 	go build -o faros ./cmd/cli
 
+generate:
+	go generate ./...
+
 generate-api-serving-cert:
 	mkdir -p ./secrets
 	go run ./hack/genkey localhost
 	mv localhost.* secrets
 
-
 generate-dev-certs: generate-api-serving-cert
 
+generate-encryption-key:
+	go run ./hack/encryption
 
 lint:
 	gofmt -s -w cmd hack pkg
@@ -26,3 +30,4 @@ lint:
 
 show-sqlite-database:
 	sqlitebrowser secrets/database.sqlite3
+

@@ -1,6 +1,14 @@
-# Faros Kubernetes cluster manager
+# Faros Kubernetes Proxy
 
-Enables easy access of remote Kubernetes clusters anywhere in the world.
+Faros - Global Kubernetes API Proxy enabling you to give short-lived (TTL) kubeconfigs
+to any k8s clusters. It will proxy requests to the k8s clusters and return the response,
+without exposing original credentials.
+
+Kubeconfig --> Faros Proxy ---> Cluster
+
+Where Faros proxy will give you short-lived kubeconfig to clusters and
+replace the credentials while proxying. This way you can access multiple cluster
+using single API, and have granular control over access to each cluster.
 
 # Development
 
