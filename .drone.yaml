@@ -48,7 +48,7 @@ name: "upload-installation-scripts"
 
 trigger:
   branch:
-  - master
+  - main
   event:
   - push
 
