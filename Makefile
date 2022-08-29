@@ -32,6 +32,7 @@ lint:
 	gofmt -s -w cmd hack pkg
 	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
 	go run -mod vendor ./hack/validate-imports cmd hack pkg
+	go install honnef.co/go/tools/cmd/staticcheck@latest
 	staticcheck ./...
 
 show-sqlite-database:
