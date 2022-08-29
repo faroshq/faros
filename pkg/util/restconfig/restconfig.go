@@ -15,16 +15,16 @@ func DialContext(restConfig *rest.Config) func(ctx context.Context, network, add
 			return nil, fmt.Errorf("unimplemented network %q", network)
 		}
 
-		d := &dialer{}
+		d := &d{}
 		return d.DialContext(ctx, network, address)
 	}
 }
 
-type dialer struct{}
+type d struct{}
 
-func (d *dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (d *d) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+		Timeout:   time.Minute,
+		KeepAlive: time.Minute,
 	}).DialContext(ctx, network, address)
 }

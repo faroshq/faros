@@ -4,3 +4,4 @@ secrets
 .vscode
 release
 dev
+profile.cov

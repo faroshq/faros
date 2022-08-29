@@ -152,7 +152,7 @@ func (s *Service) Run(ctx context.Context) error {
 		defer cancel()
 		err := s.server.Shutdown(ctx)
 		if err != nil {
-			s.log.Error("api shutdown error: %s", err)
+			s.log.Errorf("api shutdown error: %s", err)
 		}
 		s.log.Info("Stopped API Service")
 	}()

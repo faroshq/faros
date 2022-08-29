@@ -16,7 +16,7 @@ func TestOpen(t *testing.T) {
 	type test struct {
 		name       string
 		mocks      func(firstOpener *mock_encryption.MockAEAD, secondOpener *mock_encryption.MockAEAD)
-		wantResult []byte
+		wantResult string
 		wantErr    string
 	}
 
@@ -26,21 +26,21 @@ func TestOpen(t *testing.T) {
 			mocks: func(firstOpener *mock_encryption.MockAEAD, secondOpener *mock_encryption.MockAEAD) {
 				firstOpener.EXPECT().Open(mockInput).Return("result from the first opener", nil)
 			},
-			wantResult: []byte("result from the first opener"),
+			wantResult: "result from the first opener",
 		},
 		{
 			name: "first opener errors, but second succeeds",
 			mocks: func(firstOpener *mock_encryption.MockAEAD, secondOpener *mock_encryption.MockAEAD) {
-				firstOpener.EXPECT().Open(mockInput).Return(nil, errors.New("fake error from the first opener"))
+				firstOpener.EXPECT().Open(mockInput).Return("", errors.New("fake error from the first opener"))
 				secondOpener.EXPECT().Open(mockInput).Return("result from the second opener", nil)
 			},
-			wantResult: []byte("result from the second opener"),
+			wantResult: "result from the second opener",
 		},
 		{
 			name: "all openers error",
 			mocks: func(firstOpener *mock_encryption.MockAEAD, secondOpener *mock_encryption.MockAEAD) {
-				firstOpener.EXPECT().Open(mockInput).Return(nil, errors.New("fake error from the first opener"))
-				secondOpener.EXPECT().Open(mockInput).Return(nil, errors.New("fake error from the second opener"))
+				firstOpener.EXPECT().Open(mockInput).Return("", errors.New("fake error from the first opener"))
+				secondOpener.EXPECT().Open(mockInput).Return("", errors.New("fake error from the second opener"))
 			},
 			wantErr: "fake error from the second opener",
 		},
@@ -67,7 +67,7 @@ func TestOpen(t *testing.T) {
 				t.Error(err)
 			}
 			if b != "" && !reflect.DeepEqual(tt.wantResult, b) ||
-				b == "" && tt.wantResult != nil {
+				b == "" && tt.wantResult != "" {
 				t.Error(b)
 			}
 		})
