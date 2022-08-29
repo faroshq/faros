@@ -52,3 +52,8 @@ build-cli-all:
 cli:
 	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
 
+test:
+	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov
+
+test-e2e:
+	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v

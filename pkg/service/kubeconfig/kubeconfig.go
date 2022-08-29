@@ -16,10 +16,8 @@ import (
 )
 
 type kubeconfig struct {
-	log *logrus.Entry
-
-	store store.Store
-
+	log         *logrus.Entry
+	store       store.Store
 	clientCache clientcache.ClientCache
 }
 
@@ -30,9 +28,8 @@ func New(
 	auth auth.Authenticator,
 ) *kubeconfig {
 	k := &kubeconfig{
-		log:   logger,
-		store: store,
-
+		log:         logger,
+		store:       store,
 		clientCache: clientcache.New(time.Hour),
 	}
 

@@ -7,9 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/faroshq/faros/pkg/util/version"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
+
+	"github.com/faroshq/faros/pkg/util/version"
 )
 
 var Config GlobalConfig

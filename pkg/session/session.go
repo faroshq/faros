@@ -4,11 +4,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/recover"
-	"github.com/sirupsen/logrus"
 )
 
 // SessionManager is slim runnable manager to maintain session TTLs.

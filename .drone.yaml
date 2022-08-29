@@ -1,0 +1,102 @@
+kind: pipeline
+type: docker
+name: default
+
+volumes:
+  - name: certs
+    temp: {}
+  - name: dockersocket
+    host:
+      path: /var/run/docker.sock
+
+steps:
+  # fails, doesn't show what's up
+  # - name: generate
+  #   image: quay.io/synpse/golang:1.18
+  #   commands:
+  #   - make generate git-status
+  # Fetching tags, needed for the build
+  - name: fetch-tags
+    image: quay.io/synpse/golang:1.18
+    pull: always
+    commands:
+      - git fetch --tags
+  - name: lint
+    image: quay.io/synpse/golang:1.18
+    commands:
+      - make lint
+  - name: test-unit
+    pull: always
+    image: quay.io/synpse/golang:1.18
+    volumes:
+    - name: dockersocket
+      path: /var/run/docker.sock
+    commands:
+      - make test
+
+  - name: build
+    image: quay.io/synpse/golang:1.18
+    pull: always
+    commands:
+      - make cli
+
+---
+# Copy installation scripts to GCS
+kind: pipeline
+type: docker
+name: "upload-installation-scripts"
+
+trigger:
+  branch:
+  - master
+  event:
+  - push
+
+steps:
+  - name: upload-install-script
+    image: plugins/gcs
+    settings:
+      source: installers
+      target: downloads.faros.sh
+      token:
+        from_secret: google-service-account-json
+
+---
+# Build agent and CLI binaries on tag
+kind: pipeline
+type: docker
+name: "compile-and-upload-cli-binaries"
+
+trigger:
+  ref:
+  - refs/tags/*
+
+steps:
+  # Fetching tags, needed for the build
+  - name: fetch-tags
+    image: quay.io/synpse/golang:1.18
+    commands:
+      - git fetch --tags
+  - name: sync-down-binaries
+    image: gcr.io/cloud-builders/gsutil
+    commands:
+    - mkdir -p release/public
+    - gsutil -m rsync -d -r gs://downloads.faros.sh/cli/autoupdate release/public
+  - name: build-binaries
+    image: quay.io/synpse/golang:ci
+    commands:
+      - TAG_NAME=${DRONE_TAG} make build-cli-all
+  - name: upload-cli-binaries
+    image: plugins/gcs
+    settings:
+      source: release/cli
+      target: downloads.faros.sh/cli
+      token:
+        from_secret: google-service-account-json
+  - name: upload-cli-metadata
+    image: plugins/gcs
+    settings:
+      source: release/public
+      target: downloads.faros.sh/cli/autoupdate
+      token:
+        from_secret: google-service-account-json

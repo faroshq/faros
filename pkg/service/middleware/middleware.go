@@ -7,7 +7,6 @@ const (
 	ContextKeyOriginalPath
 	ContextKeyBody
 	ContextKeyCorrelationData
-
 	ContextKeyClusterAccessSession
 	ContextKeyCluster
 )

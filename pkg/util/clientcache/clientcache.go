@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// ClientCache is a cache for *http.Clients.  It allows us to reuse clients and
-// connections across multiple incoming calls, saving us TCP, TLS and proxy
-// initialisations.
 type ClientCache interface {
 	Get(interface{}) *http.Client
 	Put(interface{}, *http.Client)

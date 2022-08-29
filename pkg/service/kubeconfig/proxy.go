@@ -200,8 +200,7 @@ func (k *kubeconfig) error(r *http.Request, statusCode int, err error) {
 }
 
 // cancelBody is a workaround for the fact that http timeouts are incompatible
-// with hijacked connections (https://github.com/golang/go/issues/31391):
-// net/http.cancelTimerBody does not implement Writer.
+// with hijacked connections. See: https://github.com/golang/go/issues/31391:
 type cancelBody struct {
 	io.ReadWriteCloser
 	t *time.Timer

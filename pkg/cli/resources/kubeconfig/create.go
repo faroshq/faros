@@ -55,7 +55,7 @@ func create(ctx context.Context, args []string, opts opts) error {
 	}
 
 	clusterKubeconfigName := fmt.Sprintf("%s-%s", opts.cluster, opts.accesssession)
-	path := filepath.Join(c.WorkDir, fmt.Sprintf("%s.kubeconfig", clusterKubeconfigName, opts.accesssession))
+	path := filepath.Join(c.WorkDir, fmt.Sprintf("%s.kubeconfig", clusterKubeconfigName))
 	if strings.EqualFold(c.KubeConfigMode, "new") {
 		err = os.WriteFile(path, raw, 0644)
 		if err != nil {
