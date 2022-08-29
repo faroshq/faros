@@ -3,8 +3,6 @@ type: docker
 name: default
 
 volumes:
-  - name: certs
-    temp: {}
   - name: dockersocket
     host:
       path: /var/run/docker.sock
