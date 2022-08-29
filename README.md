@@ -1,4 +1,4 @@
-# Faros Kubernetes Proxy
+# Faros.sh Kubernetes Proxy
 
 Faros - Global Kubernetes API Proxy enabling you to give short-lived (TTL) kubeconfigs
 to any k8s clusters. It will proxy requests to the k8s clusters and return the response,
