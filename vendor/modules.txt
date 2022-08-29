@@ -16,9 +16,6 @@ github.com/InVisionApp/go-logger
 # github.com/codahale/etm v0.0.0-20141003032925-c00c9e6fb4c9
 ## explicit
 github.com/codahale/etm
-# github.com/coreos/go-systemd/v22 v22.3.2
-## explicit; go 1.12
-github.com/coreos/go-systemd/v22/journal
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
