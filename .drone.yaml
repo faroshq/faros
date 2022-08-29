@@ -10,12 +10,6 @@ volumes:
       path: /var/run/docker.sock
 
 steps:
-  # fails, doesn't show what's up
-  # - name: generate
-  #   image: quay.io/synpse/golang:1.18
-  #   commands:
-  #   - make generate git-status
-  # Fetching tags, needed for the build
   - name: fetch-tags
     image: quay.io/synpse/golang:1.18
     pull: always
