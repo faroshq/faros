@@ -5,11 +5,11 @@ import (
 )
 
 type ClusterAccessSession struct {
-	ID          string    `json:"id" yaml:"id" gorm:"primaryKey"`
+	ID          string    `json:"id" yaml:"id" gorm:"primaryKey,uniqueIndex"`
 	CreatedAt   time.Time `json:"createdAt" yaml:"createdAt" grom:"index"`
 	UpdatedAt   time.Time `json:"updatedAt" yaml:"updatedAt"`
-	NamespaceID string    `json:"namespaceId" yaml:"namespaceId" gorm:"index,constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
-	ClusterID   string    `json:"clusterId" yaml:"clusterId" gorm:"index,constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	NamespaceID string    `json:"namespaceId" yaml:"namespaceId" gorm:"index"`
+	ClusterID   string    `json:"clusterId" yaml:"clusterId" gorm:"index"`
 
 	Name string        `json:"name,omitempty" yaml:"name,omitempty"`
 	TTL  time.Duration `json:"ttl,omitempty" yaml:"ttl,omitempty"`

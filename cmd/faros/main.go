@@ -27,7 +27,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	c, err := config.Load(true, true)
+	c, err := config.Load()
 	if err != nil {
 		return err
 	}
@@ -39,11 +39,6 @@ func run(ctx context.Context) error {
 	// Create a new health instance
 	h := health.New()
 	defer h.Stop()
-
-	if os.Getenv("PORT") != "" {
-		// Overriding given port
-		c.API.URI = ":" + os.Getenv("PORT")
-	}
 
 	sqlStore, err := sqlstore.NewStore(log, c)
 	if err != nil {

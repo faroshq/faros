@@ -3,7 +3,6 @@ package service
 import (
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
 )
 
@@ -15,7 +14,7 @@ const (
 
 func read(r *http.Request, req interface{}) error {
 	// Protecting the API from too big uploads
-	body, err := ioutil.ReadAll(io.LimitReader(r.Body, 10*MEGABYTE))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*MEGABYTE))
 	if err != nil {
 		return err
 	}

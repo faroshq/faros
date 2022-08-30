@@ -6,7 +6,7 @@ type Cluster struct {
 	ID          string    `json:"id" yaml:"id" gorm:"primaryKey"`
 	CreatedAt   time.Time `json:"createdAt" yaml:"createdAt" grom:"index"`
 	UpdatedAt   time.Time `json:"updatedAt" yaml:"updatedAt"`
-	NamespaceID string    `json:"namespaceId" yaml:"namespaceId" gorm:"index,constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	NamespaceID string    `json:"namespaceId" yaml:"namespaceId" gorm:"index"`
 
 	Name   string        `json:"name,omitempty" yaml:"name,omitempty"`
 	Config ClusterConfig `json:"config,omitempty" yaml:"config,omitempty" gorm:"json"`

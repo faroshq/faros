@@ -1,20 +1,23 @@
 SHELL = /bin/bash
 OUTPUT_BIN_CLI ?= release/cli
 OUTPUT_BIN_FAROS ?= release/faros
+FAROS_REPO ?= quay.io/faroshq/faros
+FAROS_CLI_REPO ?= quay.io/faroshq/faros-cli
 TAG_NAME ?= $(shell git describe --tags --abbrev=0)
 GIT_REVISION = $(shell git rev-parse --short HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
 JOBDATE		?= $(shell date -u +%Y-%m-%dT%H%M%SZ)
 
 LDFLAGS		+= -s -w
+LDFLAGS     += -extldflags=-static
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.version=$(TAG_NAME)
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.commit=$(GIT_REVISION)
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.buildTime=$(JOBDATE)
 
 run:
-	FAROS_DATABASE_SQLITE_URI=secrets/database.sqlite3
-	FAROS_API_TLS_KEY=secrets/localhost.key \
-	FAROS_API_TLS_CERT=secrets/localhost.crt \
 	go run  ./cmd/faros --loglevel=trace
+
+run-compose:
+	docker-compose -f docker-compose-dev.yaml up --build faros
 
 generate:
 	go generate ./...
@@ -29,6 +32,7 @@ generate-dev-certs: generate-api-serving-cert
 generate-encryption-key:
 	go run ./hack/encryption
 
+.PHONY: list
 lint:
 	gofmt -s -w cmd hack pkg
 	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
@@ -53,18 +57,26 @@ build-cli-all:
 
 .PHONY: cli
 cli:
-	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
+	go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
 
 .PHONY: faros
 faros:
-	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_FAROS}/faros ./cmd/faros
+	CGO_ENABLED=1  go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_FAROS}/faros ./cmd/faros
 
-image-faros: faros
-	docker build -t ${CONTROLLER_REPO}:${TAG_NAME} -f dockerfiles/controller/Dockerfile \
+.PHONY: image-faros
+image-faros:
+	docker build -t ${FAROS_REPO}:${TAG_NAME} -f dockerfiles/faros/Dockerfile \
 	--build-arg version=${TAG_NAME} .
 
+.PHONY: image-cli
+image-cli:
+	docker build -t ${FAROS_CLI_REPO}:${TAG_NAME} -f dockerfiles/cli/Dockerfile \
+	--build-arg version=${TAG_NAME} .
+
+.PHONY: test
 test:
 	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov
 
+.PHONY: test-e2e
 test-e2e:
 	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v

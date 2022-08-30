@@ -32,6 +32,7 @@ type Store interface {
 
 	// Status is a healthcheck endpoint
 	Status() (interface{}, error)
+	RawDB() interface{}
 	Close() error
 }
 

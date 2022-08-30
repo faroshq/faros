@@ -36,5 +36,20 @@ type API struct {
 
 type Database struct {
 	SqliteURI string `envconfig:"FAROS_DATABASE_SQLITE_URI" default:"file::memory:?cache=shared"`
-	Type      string `envconfig:"FAROS_DATABASE_TYPE" default:"sqlite" `
+	// Name of the database
+	Name string `envconfig:"FAROS_DATABASE_NAME" default:"faros"`
+	// Type is the type of database to use.
+	Type string `envconfig:"FAROS_DATABASE_TYPE" default:"sqlite" `
+	// Host is the host of the database
+	Host string `envconfig:"FAROS_DATABASE_HOST" default:"localhost"`
+	// Port is the port of the database
+	Port int `envconfig:"FAROS_DATABASE_PORT" default:"5432"`
+	// Password is the password of the database
+	Password string `envconfig:"FAROS_DATABASE_PASSWORD" default:""`
+	// Username is the username of the database
+	Username string `envconfig:"FAROS_DATABASE_USERNAME" default:""`
+	// MaxConnIdleTime is the maximum amount of time a database connection can be idle
+	MaxConnIdleTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_IDLE_TIME" default:"30s"`
+	//MaxConnLifeTime is the maximum amount of time a database connection can be used
+	MaxConnLifeTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_LIFE_TIME" default:"1h"`
 }

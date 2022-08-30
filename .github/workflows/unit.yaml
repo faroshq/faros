@@ -10,6 +10,22 @@ jobs:
   unit:
     runs-on: [ubuntu-latest]
     timeout-minutes: 8
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: pguser
+          POSTGRES_PASSWORD: pgpass
+          POSTGRES_DB: faros
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Set up Go 1.x
         uses: actions/setup-go@v2
@@ -20,7 +36,7 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Lint
-        id: coverage
+        id: lint
         shell: bash
         run: |
           make lint
@@ -31,7 +47,7 @@ jobs:
         env:
           ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
         run: |
-          export CI_DISABLE_TEST=true
+          export CI_ONLY=true
           make test
           COVERAGE=$(go tool cover -func profile.cov | grep total: | awk '{print $3}')
           echo "\n\nCoverage will be $COVERAGE"

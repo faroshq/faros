@@ -2,14 +2,13 @@ package file
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 )
 
 func WriteFileAtomic(filename string, data []byte, perm os.FileMode) error {
 	dir, file := path.Split(filename)
-	tempFile, err := ioutil.TempFile(dir, fmt.Sprintf(".%s", file))
+	tempFile, err := os.CreateTemp(dir, fmt.Sprintf(".%s", file))
 	if err != nil {
 		return err
 	}

@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 
 	"github.com/faroshq/faros/pkg/cli/config"
 	"github.com/faroshq/faros/pkg/cli/util/errors"
@@ -38,7 +39,7 @@ func create(ctx context.Context, opts createOps, args []string, update bool) err
 			if err != nil {
 				return fmt.Errorf("url [%s] not found", opts.kubeConfigLocation)
 			}
-			data, err = ioutil.ReadAll(resp.Body)
+			data, err = io.ReadAll(resp.Body)
 			if err != nil {
 				return fmt.Errorf("url [%s] failed to read", opts.kubeConfigLocation)
 			}
@@ -48,7 +49,7 @@ func create(ctx context.Context, opts createOps, args []string, update bool) err
 				return fmt.Errorf("file [%s] not found", opts.kubeConfigLocation)
 			}
 			var err error
-			data, err = ioutil.ReadFile(opts.kubeConfigLocation)
+			data, err = os.ReadFile(opts.kubeConfigLocation)
 			if err != nil {
 				return err
 			}

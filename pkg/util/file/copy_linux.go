@@ -2,14 +2,13 @@ package file
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"syscall"
 )
 
 func CopyDirectory(scrDir, dest string) error {
-	entries, err := ioutil.ReadDir(scrDir)
+	entries, err := os.ReadDir(scrDir)
 	if err != nil {
 		return err
 	}
@@ -48,10 +47,13 @@ func CopyDirectory(scrDir, dest string) error {
 		if err := os.Lchown(destPath, int(stat.Uid), int(stat.Gid)); err != nil {
 			return err
 		}
-
-		isSymlink := entry.Mode()&os.ModeSymlink != 0
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		isSymlink := info.Mode()&os.ModeSymlink != 0
 		if !isSymlink {
-			if err := os.Chmod(destPath, entry.Mode()); err != nil {
+			if err := os.Chmod(destPath, info.Mode()); err != nil {
 				return err
 			}
 		}

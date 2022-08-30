@@ -29,7 +29,7 @@ func NewStore(log *logrus.Entry, c *config.Config) (*Store, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	log = log.WithField("database", sqlite.DriverName)
+	log = log.WithField("database", c.Database.Type)
 	db, pgxPool, err := connect(ctx, log, c)
 	if err != nil {
 		return nil, err
@@ -93,4 +93,8 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return db.Close()
+}
+
+func (s *Store) RawDB() interface{} {
+	return s.db
 }
