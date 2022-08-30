@@ -19,6 +19,12 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v2
 
+      - name: Lint
+        id: coverage
+        shell: bash
+        run: |
+          make lint
+
       - name: Unit tests
         id: coverage
         shell: bash

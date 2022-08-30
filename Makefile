@@ -1,5 +1,6 @@
 SHELL = /bin/bash
 OUTPUT_BIN_CLI ?= release/cli
+OUTPUT_BIN_FAROS ?= release/faros
 TAG_NAME ?= $(shell git describe --tags --abbrev=0)
 GIT_REVISION = $(shell git rev-parse --short HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
 JOBDATE		?= $(shell date -u +%Y-%m-%dT%H%M%SZ)
@@ -50,8 +51,17 @@ build-cli-all:
 	cd release && go-selfupdate cli/ $(TAG_NAME)
 	./hack/fixup-windows-cli.sh
 
+.PHONY: cli
 cli:
 	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
+
+.PHONY: faros
+faros:
+	CGO_ENABLED=0 go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_FAROS}/faros ./cmd/faros
+
+image-faros: faros
+	docker build -t ${CONTROLLER_REPO}:${TAG_NAME} -f dockerfiles/controller/Dockerfile \
+	--build-arg version=${TAG_NAME} .
 
 test:
 	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov
