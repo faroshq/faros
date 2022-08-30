@@ -17,7 +17,8 @@ jobs:
           go-version: ^1.18
         id: go
       - name: Check out code
-        uses: actions/checkout@ve
+        uses: actions/checkout@v3
+        with:
           fetch-depth: 0
       - name: ⚙️ Run Golang code generate
         shell: bash
