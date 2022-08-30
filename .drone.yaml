@@ -7,31 +7,6 @@ volumes:
     host:
       path: /var/run/docker.sock
 
-steps:
-  - name: fetch-tags
-    image: quay.io/synpse/golang:1.18
-    pull: always
-    commands:
-      - git fetch --tags
-  - name: lint
-    image: quay.io/synpse/golang:1.18
-    commands:
-      - make lint
-  - name: test-unit
-    pull: always
-    image: quay.io/synpse/golang:1.18
-    volumes:
-    - name: dockersocket
-      path: /var/run/docker.sock
-    commands:
-      - make test
-
-  - name: build
-    image: quay.io/synpse/golang:1.18
-    pull: always
-    commands:
-      - make cli
-
 ---
 # Copy installation scripts to GCS
 kind: pipeline
