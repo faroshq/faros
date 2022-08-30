@@ -17,10 +17,13 @@ COPY . .
 
 RUN make faros
 
+RUN make generate-api-serving-cert
+
 FROM alpine
 RUN apk --update add ca-certificates
 
 COPY --from=builder /app/release/faros/faros /bin
+COPY --from=builder /app/secrets /faros-secrets
 
 # Create a group and user
 ENV USER_ID=1000
@@ -32,7 +35,13 @@ RUN addgroup -g $USER_ID $GROUP_NAME && \
     adduser --shell /sbin/nologin --disabled-password \
     --no-create-home --uid $USER_ID --ingroup $GROUP_NAME $USER_NAME
 
-RUN chown -R $USER_NAME:$GROUP_NAME /bin/faros
+ENV FAROS_API_TLS_KEY=/faros-secrets/localhost.key
+ENV FAROS_API_TLS_CERT=/faros-secrets/localhost.crt
+ENV FAROS_DATABASE_SQLITE_URI=/faros/database.sqlite3
+
+RUN mkdir -p /faros/
+
+RUN chown -R $USER_NAME:$GROUP_NAME /faros-secrets/* /bin/faros /faros/
 
 USER $USER_ID
 

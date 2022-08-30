@@ -34,7 +34,7 @@ func generateKeyAndCertificate(commonName string, parentKey *rsa.PrivateKey, par
 	}
 
 	now := time.Now().UTC()
-	notAfter := now.AddDate(1, 0, 0)
+	notAfter := now.AddDate(10, 0, 0)
 
 	if parentCert != nil && parentCert.NotAfter.Before(notAfter) {
 		notAfter = parentCert.NotAfter
