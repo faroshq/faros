@@ -4,40 +4,38 @@ volumes:
   faros-pgadmin:
 
 services:
-  faros:
-    container_name: faros
-    network_mode: bridge
-    logging:
-      options:
-        max-size: 10m
-    build:
-      context: ./
-      dockerfile: dockerfiles/faros/Dockerfile
-    restart: always
-    volumes:
-    - ./secrets:/faros
-    links:
-      - postgres:postgres
-    depends_on:
-      - postgres
-    ports:
-      - "8443:8443"
-    environment:
-      - FAROS_API_URI=localhost:8443
-      - FAROS_API_TLS_KEY=/faros/localhost.key
-      - FAROS_API_TLS_CERT=/faros/localhost.crt
-      - FAROS_DATABASE_TYPE=postgres
-      - FAROS_DATABASE_HOST=synpse-postgres
-      - FAROS_DATABASE_PASSWORD=pgpass
-      - FAROS_DATABASE_USERNAME=pguser
-      - ADMIN_EMAIL=admin@faros.sh
-      - ADMIN_PASSWORD=farosfaros
-      - FAROS_SESSION_EXPIRE_INTERVAL=5s
-      - FAROS_SESSION_PURGE_TTL=5m
-      #
-      - FAROS_ENCRYPTION_KEYS=${FAROS_ENCRYPTION_KEYS}
+#faros:
+#    container_name: faros
+#    network_mode: bridge
+#    logging:
+#      options:
+#        max-size: 10m
+#    build:
+#      context: ./
+#      dockerfile: dockerfiles/faros/Dockerfile
+#    restart: always
+#    volumes:
+#    - ./secrets:/faros
+#    links:
+#      - postgres:postgres
+#    depends_on:
+#      - postgres
+#    ports:
+#      - "8443:8443"
+#    environment:
+#      - FAROS_API_URI=localhost:8443
+#      - FAROS_API_TLS_KEY=/faros/localhost.key
+#      - FAROS_API_TLS_CERT=/faros/localhost.crt
+#      - FAROS_DATABASE_TYPE=postgres
+#      - FAROS_DATABASE_HOST=faros-postgres
+#      - FAROS_DATABASE_PASSWORD=pgpass
+#      - FAROS_DATABASE_USERNAME=pguser
+#      - FAROS_SESSION_EXPIRE_INTERVAL=5s
+#      - FAROS_SESSION_PURGE_TTL=5m
+#      #
+#     - FAROS_ENCRYPTION_KEYS=${FAROS_ENCRYPTION_KEYS}
   postgres:
-    image: postgres:13
+    image: library/postgres
     network_mode: bridge
     container_name: faros-postgres
     restart: always

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/sirupsen/logrus"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -37,9 +38,29 @@ func connect(ctx context.Context, log *logrus.Entry, c *config.Config) (*gorm.DB
 				pgxPool   *pgxpool.Pool
 			)
 
-			// TODO: This is the place to add support for other dialectors
-			dialector = sqlite.Open(c.Database.SqliteURI)
+			switch c.Database.Type {
+			case DatabaseTypePostgres:
+				dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=disable", c.Database.Host, c.Database.Username, c.Database.Password, c.Database.Name, c.Database.Port)
+				dialector = postgres.Open(dsn)
 
+				connConfig, err := pgxpool.ParseConfig(dsn)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to parse postgres config: %w", err)
+				}
+				connConfig.MaxConnIdleTime = c.Database.MaxConnIdleTime
+				connConfig.MaxConnLifetime = c.Database.MaxConnLifeTime
+				connConfig.MaxConns = 15
+
+				pgxPool, err = pgxpool.ConnectConfig(ctx, connConfig)
+				if err != nil {
+					time.Sleep(1 * time.Second)
+					log.WithError(err).Warn("sql store connector can't reach DB, waiting")
+					continue
+				}
+
+			default:
+				dialector = sqlite.Open(c.Database.SqliteURI)
+			}
 			glogs := gormlogs.New(log)
 			db, err := gorm.Open(dialector, &gorm.Config{
 				Logger: glogs,

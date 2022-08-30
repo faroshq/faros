@@ -11,7 +11,7 @@ import (
 // Loading order:
 // 1. Load .env file
 // 2. Load envconfig from ENV variables and defaults
-func Load(isController, parseConfigFile bool) (*Config, error) {
+func Load() (*Config, error) {
 	c := &Config{}
 	// 1. Load .env file
 	godotenv.Load()

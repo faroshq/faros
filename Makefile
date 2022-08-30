@@ -13,9 +13,6 @@ LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.commit=$(GIT_REVISION)
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.buildTime=$(JOBDATE)
 
 run:
-	FAROS_DATABASE_SQLITE_URI=secrets/database.sqlite3
-	FAROS_API_TLS_KEY=secrets/localhost.key \
-	FAROS_API_TLS_CERT=secrets/localhost.crt \
 	go run  ./cmd/faros --loglevel=trace
 
 run-compose:
