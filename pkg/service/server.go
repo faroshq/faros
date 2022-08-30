@@ -143,7 +143,10 @@ func New(
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	s.log.Info("Starting API Service")
+	s.log.WithFields(logrus.Fields{
+		"uri": s.config.API.URI,
+		"tls": s.config.API.TLSCertPath,
+	}).Info("Starting API Service")
 	go func() {
 		defer recover.Panic(s.log)
 

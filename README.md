@@ -17,6 +17,13 @@ CLI:
 curl https://downloads.faros.sh/install-cli.sh | bash
 ```
 
+# Run
+
+Semi-production:
+```bash
+docker run -v $(pwd)/secrets:/faros -p 8443:8443 ghcr.io/faroshq/faros:latest
+```
+
 # Development
 
 Run:
