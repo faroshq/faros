@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -98,7 +98,7 @@ func (c *Client) handleResponse(resp *httputil.Response, out interface{}) error 
 	case http.StatusOK, http.StatusCreated:
 		switch o := out.(type) {
 		case *string:
-			bytes, err := ioutil.ReadAll(resp.Body)
+			bytes, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return err
 			}
@@ -107,7 +107,7 @@ func (c *Client) handleResponse(resp *httputil.Response, out interface{}) error 
 		}
 		return json.NewDecoder(resp.Body).Decode(&out)
 	default:
-		bytes, _ := ioutil.ReadAll(resp.Body)
+		bytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf(string(bytes))
 	}
 }

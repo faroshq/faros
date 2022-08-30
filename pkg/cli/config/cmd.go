@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -85,7 +84,7 @@ func PersistConfiguration(ctx context.Context, args []string) error {
 		return err
 	}
 
-	data, err := ioutil.ReadFile(configFile)
+	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return err
 	}
@@ -109,7 +108,7 @@ func PersistConfiguration(ctx context.Context, args []string) error {
 		return err
 	}
 
-	err = ioutil.WriteFile(configFile, data, os.ModePerm)
+	err = os.WriteFile(configFile, data, os.ModePerm)
 	if err != nil {
 		return err
 	}

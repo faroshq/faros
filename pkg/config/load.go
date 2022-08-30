@@ -1,7 +1,7 @@
 package config
 
 import (
-	"io/ioutil"
+	"os"
 
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
@@ -25,11 +25,11 @@ func Load() (*Config, error) {
 	// Load certs if provided
 	if c.API.TLSKeyPath != "" && c.API.TLSCertPath != "" {
 		c.API.TLSEnabled = true
-		c.API.TLSKey, err = ioutil.ReadFile(c.API.TLSKeyPath)
+		c.API.TLSKey, err = os.ReadFile(c.API.TLSKeyPath)
 		if err != nil {
 			return c, err
 		}
-		c.API.TLSCert, err = ioutil.ReadFile(c.API.TLSCertPath)
+		c.API.TLSCert, err = os.ReadFile(c.API.TLSCertPath)
 		if err != nil {
 			return c, err
 		}

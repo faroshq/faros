@@ -7,7 +7,6 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 
 	utiltls "github.com/faroshq/faros/pkg/util/tls"
@@ -25,7 +24,7 @@ func run(name string) error {
 	var signingCert *x509.Certificate
 
 	if *keyFile != "" {
-		b, err := ioutil.ReadFile(*keyFile)
+		b, err := os.ReadFile(*keyFile)
 		if err != nil {
 			return err
 		}
@@ -37,7 +36,7 @@ func run(name string) error {
 	}
 
 	if *certFile != "" {
-		b, err := ioutil.ReadFile(*certFile)
+		b, err := os.ReadFile(*certFile)
 		if err != nil {
 			return err
 		}
@@ -54,13 +53,13 @@ func run(name string) error {
 	}
 
 	// key in der format
-	err = ioutil.WriteFile(name+".key", x509.MarshalPKCS1PrivateKey(key), 0600)
+	err = os.WriteFile(name+".key", x509.MarshalPKCS1PrivateKey(key), 0600)
 	if err != nil {
 		return err
 	}
 
 	// cert in der format
-	err = ioutil.WriteFile(name+".crt", cert[0].Raw, 0666)
+	err = os.WriteFile(name+".crt", cert[0].Raw, 0666)
 	if err != nil {
 		return err
 	}
@@ -82,7 +81,7 @@ func run(name string) error {
 	}
 
 	// key and cert in PKCS#8 PEM format for Azure Key Vault.
-	return ioutil.WriteFile(name+".pem", buf.Bytes(), 0600)
+	return os.WriteFile(name+".pem", buf.Bytes(), 0600)
 }
 
 func usage() {

@@ -2,7 +2,7 @@ package responsewriter
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
 	"net/http"
 )
 
@@ -43,6 +43,6 @@ func (w *responseWriter) Response() *http.Response {
 		ProtoMinor: w.r.ProtoMinor,
 		StatusCode: w.statusCode,
 		Header:     w.h,
-		Body:       ioutil.NopCloser(&w.Buffer),
+		Body:       io.NopCloser(&w.Buffer),
 	}
 }
