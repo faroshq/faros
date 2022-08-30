@@ -1,0 +1,69 @@
+version: "3.7"
+volumes:
+  faros-psql-user-data:
+  faros-pgadmin:
+
+services:
+  faros:
+    container_name: faros
+    network_mode: bridge
+    logging:
+      options:
+        max-size: 10m
+    build:
+      context: ./
+      dockerfile: dockerfiles/faros/Dockerfile
+    restart: always
+    volumes:
+    - ./secrets:/faros
+    links:
+      - postgres:postgres
+    depends_on:
+      - postgres
+    ports:
+      - "8443:8443"
+    environment:
+      - FAROS_API_URI=localhost:8443
+      - FAROS_API_TLS_KEY=/faros/localhost.key
+      - FAROS_API_TLS_CERT=/faros/localhost.crt
+      - FAROS_DATABASE_TYPE=postgres
+      - FAROS_DATABASE_HOST=synpse-postgres
+      - FAROS_DATABASE_PASSWORD=pgpass
+      - FAROS_DATABASE_USERNAME=pguser
+      - ADMIN_EMAIL=admin@faros.sh
+      - ADMIN_PASSWORD=farosfaros
+      - FAROS_SESSION_EXPIRE_INTERVAL=5s
+      - FAROS_SESSION_PURGE_TTL=5m
+      #
+      - FAROS_ENCRYPTION_KEYS=${FAROS_ENCRYPTION_KEYS}
+  postgres:
+    image: postgres:13
+    network_mode: bridge
+    container_name: faros-postgres
+    restart: always
+    volumes:
+      - "faros-psql-user-data:/var/lib/postgresql/data"
+    ports:
+      - "15432:5432"
+    environment:
+      - POSTGRES_USER=pguser
+      - POSTGRES_PASSWORD=pgpass
+      - POSTGRES_DB=faros
+      - PGDATA=/var/lib/postgresql/data/pgdata
+  pgadmin:
+    image: dpage/pgadmin4
+    network_mode: bridge
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@faros.sh
+      PGADMIN_DEFAULT_PASSWORD: admin
+    links:
+     - postgres:postgres
+    volumes:
+     - faros-pgadmin:/root/.pgadmin
+    ports:
+     - "${PGADMIN_PORT:-15050}:80"
+    restart: unless-stopped
+
+networks:
+  postgres:
+    driver: bridge
