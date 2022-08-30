@@ -32,6 +32,7 @@ generate-dev-certs: generate-api-serving-cert
 generate-encryption-key:
 	go run ./hack/encryption
 
+.PHONY: list
 lint:
 	gofmt -s -w cmd hack pkg
 	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
@@ -62,17 +63,20 @@ cli:
 faros:
 	CGO_ENABLED=1  go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_FAROS}/faros ./cmd/faros
 
+.PHONY: image-faros
 image-faros:
 	docker build -t ${FAROS_REPO}:${TAG_NAME} -f dockerfiles/faros/Dockerfile \
 	--build-arg version=${TAG_NAME} .
 
+.PHONY: image-cli
 image-cli:
 	docker build -t ${FAROS_CLI_REPO}:${TAG_NAME} -f dockerfiles/cli/Dockerfile \
 	--build-arg version=${TAG_NAME} .
 
-
+.PHONY: test
 test:
 	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov
 
+.PHONY: test-e2e
 test-e2e:
 	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v
