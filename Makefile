@@ -2,6 +2,7 @@ SHELL = /bin/bash
 OUTPUT_BIN_CLI ?= release/cli
 OUTPUT_BIN_FAROS ?= release/faros
 FAROS_REPO ?= quay.io/faroshq/faros
+FAROS_CLI_REPO ?= quay.io/faroshq/faros-cli
 TAG_NAME ?= $(shell git describe --tags --abbrev=0)
 GIT_REVISION = $(shell git rev-parse --short HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
 JOBDATE		?= $(shell date -u +%Y-%m-%dT%H%M%SZ)
@@ -64,6 +65,11 @@ faros:
 image-faros:
 	docker build -t ${FAROS_REPO}:${TAG_NAME} -f dockerfiles/faros/Dockerfile \
 	--build-arg version=${TAG_NAME} .
+
+image-cli:
+	docker build -t ${FAROS_CLI_REPO}:${TAG_NAME} -f dockerfiles/cli/Dockerfile \
+	--build-arg version=${TAG_NAME} .
+
 
 test:
 	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov

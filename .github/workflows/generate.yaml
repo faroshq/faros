@@ -24,3 +24,9 @@ jobs:
           set -xe
           make generate
           [[ -z "$(git status -s)" ]]
+      - name: Build binaries
+        id: build
+        shell: bash
+        run: |
+          make image-faros
+          make image-cli
