@@ -1,4 +1,4 @@
-name: Maintenance
+name: maintenance
 on:
   push:
   pull_request_target:

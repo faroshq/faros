@@ -1,4 +1,4 @@
-name: generate
+name: generate & build test
 
 on:
   push:
