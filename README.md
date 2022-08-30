@@ -10,6 +10,13 @@ Where Faros proxy will give you short-lived kubeconfig to clusters and
 replace the credentials while proxying. This way you can access multiple cluster
 using single API, and have granular control over access to each cluster.
 
+# Installation
+
+CLI:
+```bash
+curl https://downloads.faros.sh/install-cli.sh | bash
+```
+
 # Development
 
 Run:

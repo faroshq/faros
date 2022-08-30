@@ -57,6 +57,8 @@ setup_verify_arch() {
         *)
             fatal "Unsupported architecture $ARCH"
     esac
+
+     info "ARCH = $ARCH"
 }
 
 setup_verify_os() {
@@ -75,7 +77,7 @@ setup_verify_os() {
         *) echo "OS ${OS} is not supported by this installation script"; exit 1;;
     esac
 
-    BINARY="synpse"
+    BINARY="faros"
 
     # add .exe if on windows
     if [ "$OS" = "windows" ]; then
@@ -147,7 +149,7 @@ setup_binary() {
        $SUDO chown root:root ${TMP_BIN}
     fi
     $SUDO mv -f ${TMP_BIN} ${BIN_DIR}/faros
-    $SUDO cp ${BIN_DIR}/faros ${BIN_DIR}/kubectl faros
+    $SUDO cp ${BIN_DIR}/faros ${BIN_DIR}/kubectl-faros
 }
 
 # --- download and verify ---
