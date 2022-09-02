@@ -6,6 +6,15 @@ github.com/AlecAivazis/survey/v2/terminal
 # github.com/BurntSushi/toml v0.3.1
 ## explicit
 github.com/BurntSushi/toml
+# github.com/GehirnInc/crypt v0.0.0-20200316065508-bb7000b8a962
+## explicit
+github.com/GehirnInc/crypt
+github.com/GehirnInc/crypt/apr1_crypt
+github.com/GehirnInc/crypt/common
+github.com/GehirnInc/crypt/internal
+github.com/GehirnInc/crypt/md5_crypt
+github.com/GehirnInc/crypt/sha256_crypt
+github.com/GehirnInc/crypt/sha512_crypt
 # github.com/InVisionApp/go-health/v2 v2.1.2
 ## explicit; go 1.13
 github.com/InVisionApp/go-health/v2
@@ -217,6 +226,9 @@ github.com/stretchr/testify/require
 # github.com/subosito/gotenv v1.3.0
 ## explicit; go 1.18
 github.com/subosito/gotenv
+# github.com/tg123/go-htpasswd v1.2.0
+## explicit; go 1.12
+github.com/tg123/go-htpasswd
 # golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
 ## explicit; go 1.17
 golang.org/x/crypto/bcrypt
