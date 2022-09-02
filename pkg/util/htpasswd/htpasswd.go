@@ -5,7 +5,6 @@ package htpasswd
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 )
@@ -49,7 +48,7 @@ func (hp HashedPasswords) Bytes() (passwordBytes []byte) {
 
 // WriteToFile put them to a file will be overwritten or created
 func (hp HashedPasswords) WriteToFile(file string) error {
-	return ioutil.WriteFile(file, hp.Bytes(), 0644)
+	return os.WriteFile(file, hp.Bytes(), 0644)
 }
 
 // SetPassword set a password for a user with a hashing algo
@@ -77,7 +76,7 @@ func (hp HashedPasswords) SetPassword(name, password string, hashAlgorithm HashA
 
 // ParseHtpasswdFile load a htpasswd file
 func ParseHtpasswdFile(file string) (passwords HashedPasswords, err error) {
-	htpasswdBytes, err := ioutil.ReadFile(file)
+	htpasswdBytes, err := os.ReadFile(file)
 	if err != nil {
 		return
 	}

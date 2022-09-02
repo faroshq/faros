@@ -1,7 +1,6 @@
 package htpasswd
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -24,13 +23,13 @@ func getHashedPasswords() HashedPasswords {
 }
 
 func tFile(name string) string {
-	f, err := ioutil.TempFile(os.TempDir(), "foomo-htpasswd-test-"+name)
+	f, err := os.CreateTemp("/tmp", "foomo-htpasswd-test-"+name)
 	poe(err)
 	return f.Name()
 }
 
 func fileContentsAre(t *testing.T, file string, contents string) {
-	fileBytes, err := ioutil.ReadFile(file)
+	fileBytes, err := os.ReadFile(file)
 	poe(err)
 	if contents != string(fileBytes) {
 		t.Fatal("unexpected file contents", "should have been", contents, "was \""+string(fileBytes)+"\"")
