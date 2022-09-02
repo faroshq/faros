@@ -13,6 +13,7 @@ import (
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/util/htpasswd"
 	servicetest "github.com/faroshq/faros/test/util/service"
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -76,8 +77,8 @@ func TestBasicAuth(t *testing.T) {
 				httpRequest.SetBasicAuth("test@faros.sh", "farosfaros")
 				return httpRequest
 			},
-			expectBody: "",
-			expectCode: http.StatusForbidden,
+			expectBody: "[]\n",
+			expectCode: http.StatusOK,
 		},
 		{
 			name: "403 - Forbidden - bad password",
@@ -117,7 +118,7 @@ func TestBasicAuth(t *testing.T) {
 			// test checkers
 			// TODO: move to cmd github.com/google/go-cmp/cmp
 			if !reflect.DeepEqual(tt.expectBody, w.Body.String()) {
-				t.Errorf("%s != %s", tt.expectBody, w.Body.String())
+				t.Errorf(cmp.Diff(tt.expectBody, w.Body.String()))
 			}
 			if tt.expectCode != w.Result().StatusCode {
 				t.Errorf("expected code: %d, got: %d", tt.expectCode, w.Code)
