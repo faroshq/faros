@@ -23,10 +23,13 @@ type Controller struct {
 }
 
 type API struct {
-	URI            string   `envconfig:"FAROS_API_URI" default:"0.0.0.0:8443"`
-	AllowedOrigins []string `envconfig:"FAROS_API_ALLOWED_ORIGIN" default:""`
-	TLSKeyPath     string   `envconfig:"FAROS_API_TLS_KEY" default:""`
-	TLSCertPath    string   `envconfig:"FAROS_API_TLS_CERT" default:""`
+	URI                     string   `envconfig:"FAROS_API_URI" default:"0.0.0.0:8443"`
+	AllowedOrigins          []string `envconfig:"FAROS_API_ALLOWED_ORIGIN" default:""`
+	TLSKeyPath              string   `envconfig:"FAROS_API_TLS_KEY" default:"/faros-secrets/localhost.key"`
+	TLSCertPath             string   `envconfig:"FAROS_API_TLS_CERT" default:"/faros-secrets/localhost.crt"`
+	AuthenticationProviders []string `envconfig:"FAROS_API_AUTHENTICATION_PROVIDERS" default:"basicauth"`
+
+	BasicAuthAuthenticationProviderFile string `envconfig:"FAROS_API_BASICAUTH_AUTHENTICATION_PROVIDER_FILE" default:"/faros-secrets/htpasswd"`
 
 	// loaded config after parsing
 	TLSEnabled bool

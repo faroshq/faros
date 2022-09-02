@@ -5,12 +5,14 @@ import (
 	"strings"
 
 	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/service/middleware"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"
 )
 
 func (s *Service) getNamespace(w http.ResponseWriter, r *http.Request) {
-	result, err := s._getNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	result, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return
 	}
@@ -79,7 +81,8 @@ func (s *Service) createOrUpdateNamespace(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) deleteNamespace(w http.ResponseWriter, r *http.Request) {
-	result, err := s._getNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	result, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return
 	}

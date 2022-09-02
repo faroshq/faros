@@ -7,10 +7,15 @@ import (
 )
 
 const (
+	UserPrefix                 = "usr"
 	ClusterPrefix              = "cls"
 	NamespacePrefix            = "nms"
 	ClusterAccessSessionPrefix = "cas"
 )
+
+func NewUserID() string {
+	return fmt.Sprintf("%s_%s", UserPrefix, uuid.New().String())
+}
 
 func NewClusterID() string {
 	return fmt.Sprintf("%s_%s", ClusterPrefix, uuid.New().String())

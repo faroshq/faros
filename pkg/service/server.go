@@ -19,10 +19,10 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/service/authentication/basicauth"
 	"github.com/faroshq/faros/pkg/service/kubeconfig"
 	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
-	"github.com/faroshq/faros/pkg/util/auth"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
@@ -35,7 +35,6 @@ type Interface interface {
 
 type Service struct {
 	log      *logrus.Entry
-	auth     auth.Authenticator
 	server   *http.Server
 	listener net.Listener
 	router   *mux.Router
@@ -59,12 +58,6 @@ func New(
 		store:  store,
 	}
 
-	authenticator, err := auth.NewAuthenticator(logger, config, store)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create authenticator: %w", err)
-	}
-	s.auth = authenticator
-
 	// setup serving certs
 	key, err := x509.ParsePKCS1PrivateKey(config.API.TLSKey)
 	if err != nil {
@@ -78,11 +71,20 @@ func New(
 	}
 	s.servingCerts = certs
 
-	s.router = s.setupRouter()
+	// setup router middleware
+	s.router, err = s.setupRouter()
+	if err != nil {
+		return nil, err
+	}
+	err = s.setupProxy()
+	if err != nil {
+		return nil, err
+	}
 
 	// setup health
 	s.router.HandleFunc("/healthz", healthhandlers.NewJSONHandlerFunc(health, nil))
 
+	// setup all the user routes
 	apiRouter := s.router.PathPrefix("/api/v1").Subrouter()
 
 	apiRouter.HandleFunc("/namespaces", s.createOrUpdateNamespace).Methods(http.MethodPost)
@@ -104,8 +106,6 @@ func New(
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
 	// This is post. All methods dealing with security should be POST
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
-
-	s.setupProxy()
 
 	// debug!
 	// TODO: put behind auth
@@ -196,19 +196,26 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
-func (s *Service) setupRouter() *mux.Router {
+func (s *Service) setupRouter() (*mux.Router, error) {
 	r := mux.NewRouter()
-	r.Use(middleware.Panic(s.log))
-	r.Use(middleware.Log(s.log))
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	if err != nil {
+		s.log.Errorf("failed to create basic auth middleware: %s", err)
+		return nil, err
+	}
+
+	r.Use(middleware.Panic(s.log))            //must be first as its saves from server going under
+	r.Use(middleware.Log(s.log))              // must be second as it sets request logger into context
+	r.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
 
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 	})
 
-	return r
+	return r, nil
 }
 
-func (s *Service) setupProxy() {
-	kubeconfig.New(s.log, s.store, s.router, s.auth)
+func (s *Service) setupProxy() error {
+	return kubeconfig.New(s.log, s.config, s.store, s.router)
 }

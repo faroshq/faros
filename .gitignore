@@ -3,5 +3,5 @@ secrets
 .env
 .vscode
 release
-dev
+/dev
 profile.cov

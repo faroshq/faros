@@ -34,7 +34,7 @@ func NewPostgresTestingStore(t *testing.T) (store.Store, error) {
 	var store store.Store
 	var err error
 
-	cfg, err := config.Load()
+	cfg, err := config.Load(false)
 	if err != nil {
 		return nil, err
 	}

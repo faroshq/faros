@@ -7,13 +7,13 @@ import (
 	"github.com/faroshq/faros/pkg/models"
 )
 
-func (c *Client) GetNamespace(ctx context.Context, namespaceID string) (*models.Namespace, error) {
-	if namespaceID == "" {
+func (c *Client) GetNamespace(ctx context.Context, namespace models.Namespace) (*models.Namespace, error) {
+	if namespace.ID == "" {
 		return nil, fmt.Errorf("namespaceID not provided")
 	}
 
 	var result models.Namespace
-	if err := c.get(ctx, &result, namespacesURL, namespaceID); err != nil {
+	if err := c.get(ctx, &result, namespacesURL, namespace.ID); err != nil {
 		return nil, err
 	}
 	return &result, nil

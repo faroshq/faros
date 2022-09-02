@@ -35,6 +35,11 @@ Faros CLI is a command line interface for Faros.sh`,
 				return err
 			}
 
+			err = config.EnsureConfigExists(cmd)
+			if err != nil {
+				return err
+			}
+
 			// resolve namespace to namespaceID
 			if cmd.CalledAs() != "configure" {
 				return config.TranslateUserConfig(cmd.Context())

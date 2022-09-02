@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.5
+	github.com/GehirnInc/crypt v0.0.0-20200316065508-bb7000b8a962
 	github.com/InVisionApp/go-health/v2 v2.1.2
 	github.com/codahale/etm v0.0.0-20141003032925-c00c9e6fb4c9
 	github.com/ghodss/yaml v1.0.0
@@ -23,6 +24,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.12.0
 	github.com/stretchr/testify v1.8.0
+	github.com/tg123/go-htpasswd v1.2.0
 	golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
 	golang.org/x/tools v0.1.12
 	gopkg.in/yaml.v2 v2.4.0
