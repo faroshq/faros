@@ -2,6 +2,7 @@ package basicauth
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/faroshq/faros/pkg/service/authentication"
 	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
+	bcryptutil "github.com/faroshq/faros/pkg/util/bcrypt"
 	"github.com/faroshq/faros/pkg/util/file"
 	"github.com/faroshq/faros/pkg/util/htpasswd"
 	"github.com/faroshq/faros/pkg/validators"
@@ -108,10 +110,16 @@ func (b *BasicAuth) Authenticate() func(http.Handler) http.Handler {
 				ProviderName: models.AuthenticationProviderBasicAuth,
 			})
 			if err != nil && err == store.ErrRecordNotFound {
+				hash, err := bcryptutil.HashPassword(password)
+				if err != nil {
+					log.WithError(err).Error("failed to create user")
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
 				user, err = b.store.CreateUser(ctx, models.User{
 					Email:        username,
 					ProviderName: models.AuthenticationProviderBasicAuth,
-					PasswordHash: password,
+					PasswordHash: base64.StdEncoding.EncodeToString(hash),
 				})
 				if err != nil {
 					log.WithError(err).Error("failed to create user")
