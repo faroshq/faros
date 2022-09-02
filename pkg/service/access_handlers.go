@@ -11,7 +11,9 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
+	bcryptutil "github.com/faroshq/faros/pkg/util/bcrypt"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"
 	"github.com/faroshq/faros/pkg/util/kubeconfig"
@@ -19,7 +21,8 @@ import (
 
 // listClusterAccess list cluster access sessions for specific cluster
 func (s *Service) listClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	cluster, namespace, err := s._getClusterAndNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	cluster, namespace, err := s._getClusterAndNamespace(w, r, log)
 	if err != nil {
 		return
 	}
@@ -31,7 +34,7 @@ func (s *Service) listClusterAccessSession(w http.ResponseWriter, r *http.Reques
 
 	results, err := s.store.ListClusterAccessSessions(r.Context(), query)
 	if err != nil && err != store.ErrRecordNotFound {
-		s.log.WithError(err).Error("failed to list cluster access sessions")
+		log.WithError(err).Error("failed to list cluster access sessions")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, "failed to list cluster access requests"))
 		return
 	}
@@ -41,7 +44,8 @@ func (s *Service) listClusterAccessSession(w http.ResponseWriter, r *http.Reques
 
 // getClusterAccessSession gets individual cluster access session for specific cluster
 func (s *Service) getClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	result, err := s._getClusterAccessSession(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	result, err := s._getClusterAccessSession(w, r, log)
 	if err != nil {
 		return
 	}
@@ -51,14 +55,15 @@ func (s *Service) getClusterAccessSession(w http.ResponseWriter, r *http.Request
 
 // getClusterAccessSession gets individual cluster access session for specific cluster
 func (s *Service) deleteClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	result, err := s._getClusterAccessSession(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	result, err := s._getClusterAccessSession(w, r, log)
 	if err != nil {
 		return
 	}
 
 	err = s.store.DeleteClusterAccessSession(r.Context(), *result)
 	if err != nil {
-		s.log.WithError(err).Error("failed to unmarshal request")
+		log.WithError(err).Error("failed to unmarshal request")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
 		return
 	}
@@ -68,21 +73,22 @@ func (s *Service) deleteClusterAccessSession(w http.ResponseWriter, r *http.Requ
 
 // createOrUpdateClusterAccessSession created new cluster access session for specific cluster
 func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *http.Request) {
-	cluster, namespace, err := s._getClusterAndNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	cluster, namespace, err := s._getClusterAndNamespace(w, r, log)
 	if err != nil {
 		return
 	}
 
 	var createClusterAccessSessionRequest models.ClusterAccessSession
 	if err := read(r, &createClusterAccessSessionRequest); err != nil {
-		s.log.WithError(err).Error("failed to unmarshal request")
+		log.WithError(err).Error("failed to unmarshal request")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
 		return
 	}
 
 	// check if path matches payload
 	if strings.EqualFold(mux.Vars(r)["access"], createClusterAccessSessionRequest.Name) {
-		s.log.WithError(err).Error("somebody is trying some funky things with payloads")
+		log.WithError(err).Error("somebody is trying some funky things with payloads")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
 		return
 	}
@@ -101,7 +107,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 
 	sessions, err := s.store.ListClusterAccessSessions(r.Context(), query)
 	if err != nil {
-		s.log.WithError(err).Error("failed to list cluster access sessions")
+		log.WithError(err).Error("failed to list cluster access sessions")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -121,7 +127,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 
 		result, err := s.store.UpdateClusterAccessSession(r.Context(), *session)
 		if err != nil {
-			s.log.WithError(err).Error("failed to update cluster access session")
+			log.WithError(err).Error("failed to update cluster access session")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 			return
 		}
@@ -132,7 +138,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 	// else create new one
 	result, err := s.store.CreateClusterAccessSession(r.Context(), createClusterAccessSessionRequest)
 	if err != nil {
-		s.log.WithError(err).Error("failed to create cluster access session")
+		log.WithError(err).Error("failed to create cluster access session")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -143,15 +149,16 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 // createOrUpdateClusterAccessSessionKubeconfig creates or updates kubeconfig for specific cluster access session
 // Update might happen if user lost kubeconfig and wants to generate new one
 func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWriter, r *http.Request) {
-	session, err := s._getClusterAccessSession(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	session, err := s._getClusterAccessSession(w, r, log)
 	if err != nil {
 		return
 	}
 
 	token := uuid.New().String()
-	hashedToken, err := s.auth.HashPassword(token)
+	hashedToken, err := bcryptutil.HashPassword(token)
 	if err != nil {
-		s.log.WithError(err).Error("failed to hash token")
+		log.WithError(err).Error("failed to hash token")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -162,7 +169,7 @@ func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWr
 	// update existing session with new details
 	_, err = s.store.UpdateClusterAccessSession(r.Context(), *session)
 	if err != nil {
-		s.log.WithError(err).Error("failed to create cluster access session")
+		log.WithError(err).Error("failed to create cluster access session")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -170,7 +177,7 @@ func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWr
 	// at this point we can generate kubeconfig and return tu user
 	kubeconfig, err := s._generateKubeConfig(r.Context(), session)
 	if err != nil {
-		s.log.WithError(err).Error("failed to generate kubeconfig")
+		log.WithError(err).Error("failed to generate kubeconfig")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}

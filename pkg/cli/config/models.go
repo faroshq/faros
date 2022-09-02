@@ -18,6 +18,8 @@ type GlobalConfig struct {
 	APIEndpoint               string `yaml:"api-endpoint,omitempty"`
 	Namespace                 string `yaml:"namespace,omitempty"`
 	InsecureSkipTLSVerify     bool   `yaml:"insecure-skip-tls-verify,omitempty"`
+	Username                  string `yaml:"username,omitempty"`
+	Password                  string `yaml:"password,omitempty"`
 
 	APIClient *client.Client `yaml:"-"`
 	Log       *logrus.Entry  `yaml:"-"`

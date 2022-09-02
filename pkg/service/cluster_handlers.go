@@ -5,12 +5,14 @@ import (
 	"strings"
 
 	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/service/middleware"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/httputil"
 )
 
 func (s *Service) getCluster(w http.ResponseWriter, r *http.Request) {
-	result, _, err := s._getClusterAndNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	result, _, err := s._getClusterAndNamespace(w, r, log)
 	if err != nil {
 		return
 	}
@@ -19,7 +21,8 @@ func (s *Service) getCluster(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
-	namespace, err := s._getNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	namespace, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return
 	}
@@ -30,7 +33,7 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.store.ListClusters(r.Context(), clusterQuery)
 	if err != nil {
-		s.log.WithError(err).Error("failed to list clusters")
+		log.WithError(err).Error("failed to list clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -39,14 +42,15 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) {
-	namespace, err := s._getNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	namespace, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return
 	}
 
 	var createClusterRequest models.Cluster
 	if err := read(r, &createClusterRequest); err != nil {
-		s.log.WithError(err).Error("failed to unmarshal request")
+		log.WithError(err).Error("failed to unmarshal request")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
 		return
 	}
@@ -59,7 +63,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 
 	clusters, err := s.store.ListClusters(r.Context(), query)
 	if err != nil {
-		s.log.WithError(err).Error("failed to list clusters")
+		log.WithError(err).Error("failed to list clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -79,7 +83,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 
 		result, err := s.store.UpdateCluster(r.Context(), cluster)
 		if err != nil {
-			s.log.WithError(err).Error("failed to update cluster")
+			log.WithError(err).Error("failed to update cluster")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 			return
 		}
@@ -92,7 +96,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 	// create
 	result, err := s.store.CreateCluster(r.Context(), createClusterRequest)
 	if err != nil {
-		s.log.WithError(err).Error("failed to create cluster")
+		log.WithError(err).Error("failed to create cluster")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}
@@ -104,13 +108,14 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) deleteCluster(w http.ResponseWriter, r *http.Request) {
-	cluster, _, err := s._getClusterAndNamespace(w, r)
+	log := middleware.GetLoggerFromRequest(r)
+	cluster, _, err := s._getClusterAndNamespace(w, r, log)
 	if err != nil {
 		return
 	}
 
 	if err := s.store.DeleteCluster(r.Context(), *cluster); err != nil {
-		s.log.WithError(err).Error("failed to delete cluster")
+		log.WithError(err).Error("failed to delete cluster")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return
 	}

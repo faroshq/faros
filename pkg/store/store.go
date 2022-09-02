@@ -26,6 +26,12 @@ type Store interface {
 	CreateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 	UpdateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 
+	GetUser(context.Context, models.User) (*models.User, error)
+	ListUsers(context.Context, models.User) ([]models.User, error)
+	DeleteUser(context.Context, models.User) error
+	CreateUser(context.Context, models.User) (*models.User, error)
+	UpdateUser(context.Context, models.User) (*models.User, error)
+
 	// ListAllClusterAccessSessions will list all cluster sessions. Should not be used
 	// in user context in any ways.
 	ListAllClusterAccessSessions(context.Context) ([]models.ClusterAccessSession, error)

@@ -12,6 +12,7 @@ func (s *Store) migrate(_ context.Context, c *config.Config) error {
 		&models.Cluster{},
 		&models.Namespace{},
 		&models.ClusterAccessSession{},
+		&models.User{},
 	)
 	if err != nil {
 		return err

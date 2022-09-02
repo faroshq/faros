@@ -22,7 +22,7 @@ func New() *cobra.Command {
 Configure CLI operations with credentials and other configuration.
 
 Example:
-  faros configure --namespace my-namespace --api-endpoint https://api.faros.sh
+  faros configure --namespace my-namespace --api-endpoint https://api.faros.sh --username username@email.com --password password_value
 `,
 
 		Short: "Configure cli session with credentials, namespaces and other configuration",
@@ -48,9 +48,10 @@ func AppendGlobalFlags(cmd *cobra.Command) error {
 	cmd.PersistentFlags().StringVarP(&c.WorkDir, "work-dir", "w", filepath.Join(homedir, defaultConfigFileDir), "Working directory for CLI")
 	cmd.PersistentFlags().StringVar(&c.DefaultKubeConfigLocation, "default-kubeconfig", filepath.Join(homedir, defaultKubeConfigFileDir, defaultKubeConfigFile), "Default kubeconfig file location")
 	cmd.PersistentFlags().StringVar(&c.KubeConfigMode, "kubeconfig-mint-mode", "new", "Valid values are [merge, new]")
-
 	cmd.PersistentFlags().StringVar(&c.APIEndpoint, "api-endpoint", "https://localhost:8443/api/v1", "API Endpoint URL")
 	cmd.PersistentFlags().StringVarP(&c.Namespace, "namespace", "n", "", "Namespace name or ID")
+	cmd.PersistentFlags().StringVarP(&c.Username, "username", "u", "", "Username to be used to authenticate to API")
+	cmd.PersistentFlags().StringVarP(&c.Password, "password", "p", "", "Password to be used to authenticate to API")
 
 	cmd.PersistentFlags().BoolVar(&c.InsecureSkipTLSVerify, "insecure-skip-tls-verify", false, "Skip tls verify")
 
@@ -102,6 +103,8 @@ func PersistConfiguration(ctx context.Context, args []string) error {
 	config.Output = Config.Output
 	config.LogLevel = Config.LogLevel
 	config.KubeConfigMode = Config.KubeConfigMode
+	config.Username = Config.Username
+	config.Password = Config.Password
 
 	data, err = yaml.Marshal(config)
 	if err != nil {

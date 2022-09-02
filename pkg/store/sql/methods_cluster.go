@@ -10,7 +10,7 @@ import (
 	"github.com/faroshq/faros/pkg/store"
 )
 
-// GetUser gets full user based on args user
+// GetCluster gets cluster based on args cluster
 // Search: ID or Name and Namespace must be provided
 func (s *Store) GetCluster(ctx context.Context, p models.Cluster) (*models.Cluster, error) {
 	switch {
@@ -40,7 +40,7 @@ func (s *Store) GetCluster(ctx context.Context, p models.Cluster) (*models.Clust
 	return &result, nil
 }
 
-// CreateUser creates user and assigns unique ID
+// CreateCluster creates cluster object
 func (s *Store) CreateCluster(ctx context.Context, p models.Cluster) (*models.Cluster, error) {
 	p.ID = models.NewClusterID()
 
@@ -59,7 +59,7 @@ func (s *Store) CreateCluster(ctx context.Context, p models.Cluster) (*models.Cl
 	return s.GetCluster(ctx, models.Cluster{ID: p.ID})
 }
 
-// UpdateUser updates user based on user ID
+// UpdateCluster updates user based on cluster ID
 func (s *Store) UpdateCluster(ctx context.Context, p models.Cluster) (*models.Cluster, error) {
 	switch {
 	case p.ID != "":
@@ -85,7 +85,7 @@ func (s *Store) UpdateCluster(ctx context.Context, p models.Cluster) (*models.Cl
 	return s.GetCluster(ctx, models.Cluster{ID: p.ID, Name: p.Name, NamespaceID: p.NamespaceID})
 }
 
-// DeleteUser deletes user based on user ID
+// DeleteCluster deletes cluster based on cluster ID
 func (s *Store) DeleteCluster(ctx context.Context, p models.Cluster) error {
 	switch {
 	case p.ID != "":
@@ -97,6 +97,7 @@ func (s *Store) DeleteCluster(ctx context.Context, p models.Cluster) error {
 	return s.db.WithContext(ctx).Delete(&p).Error
 }
 
+// ListClusters lists clusters based on namespace ID or other args
 func (s *Store) ListClusters(ctx context.Context, p models.Cluster) ([]models.Cluster, error) {
 	switch {
 	case p.NamespaceID != "":

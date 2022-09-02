@@ -110,3 +110,12 @@ func Log(log *logrus.Entry) func(http.Handler) http.Handler {
 		})
 	}
 }
+
+func GetLoggerFromRequest(r *http.Request) *logrus.Entry {
+	logger, ok := r.Context().Value(ContextKeyLog).(*logrus.Entry)
+	if !ok {
+		logger = logutil.GetLogger()
+		logger.Warn("failed to get logger from request, returning default logger")
+	}
+	return logger
+}

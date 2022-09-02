@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/store"
@@ -14,14 +15,14 @@ import (
 // _getNamespace is shared helper to get namespace from request.
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
-func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request) (*models.Namespace, error) {
+func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request, log *logrus.Entry) (*models.Namespace, error) {
 	namespaceQuery := models.Namespace{}
 	namespaceArg := mux.Vars(r)["namespace"]
 	if strings.HasPrefix(namespaceArg, models.NamespacePrefix) {
 		namespaceQuery.ID = namespaceArg
 	} else {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
-		s.log.WithError(errorIDFormatInvalid).Error("ID format namespace is invalid")
+		log.WithError(errorIDFormatInvalid).Error("ID format namespace is invalid")
 		return nil, errorIDFormatInvalid
 	}
 
@@ -31,7 +32,7 @@ func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request) (*models
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorNamespaceNotFound))
 			return nil, err
 		}
-		s.log.WithError(err).Error("failed to get namespace")
+		log.WithError(err).Error("failed to get namespace")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return nil, err
 	}
@@ -41,7 +42,7 @@ func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request) (*models
 // _getCluster is shared helper to get cluster from request.
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
-func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, namespace *models.Namespace) (*models.Cluster, error) {
+func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, log *logrus.Entry, namespace *models.Namespace) (*models.Cluster, error) {
 	clusterQuery := models.Cluster{
 		NamespaceID: namespace.ID,
 	}
@@ -50,7 +51,7 @@ func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, namespace 
 		clusterQuery.ID = clusterArg
 	} else {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
-		s.log.WithError(errorIDFormatInvalid).Error("ID format cluster is invalid")
+		log.WithError(errorIDFormatInvalid).Error("ID format cluster is invalid")
 		return nil, errorIDFormatInvalid
 	}
 
@@ -60,7 +61,7 @@ func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, namespace 
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterNotFound))
 			return nil, err
 		}
-		s.log.WithError(err).Error("failed to get clusters")
+		log.WithError(err).Error("failed to get clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 	}
 	cluster.Config.RawKubeConfig = "redacted"
@@ -70,12 +71,12 @@ func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, namespace 
 // _getClusterAccessSession is shared helper to get cluster access session from request.
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
-func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Request) (*models.ClusterAccessSession, error) {
-	namespace, err := s._getNamespace(w, r)
+func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Request, log *logrus.Entry) (*models.ClusterAccessSession, error) {
+	namespace, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return nil, err
 	}
-	cluster, err := s._getCluster(w, r, namespace)
+	cluster, err := s._getCluster(w, r, log, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +90,7 @@ func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Reques
 		query.ID = clusterAccessSessionArg
 	} else {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
-		s.log.WithError(errorIDFormatInvalid).Error("ID format cluster access session is invalid")
+		log.WithError(errorIDFormatInvalid).Error("ID format cluster access session is invalid")
 		return nil, errorIDFormatInvalid
 	}
 
@@ -99,7 +100,7 @@ func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Reques
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
 			return nil, err
 		}
-		s.log.WithError(err).Error("failed to get cluster access session")
+		log.WithError(err).Error("failed to get cluster access session")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 	}
 	return session, nil
@@ -108,12 +109,12 @@ func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Reques
 // _getClusterAndNamespace is shared helper to get cluster and namespace from request.
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
-func (s *Service) _getClusterAndNamespace(w http.ResponseWriter, r *http.Request) (*models.Cluster, *models.Namespace, error) {
-	namespace, err := s._getNamespace(w, r)
+func (s *Service) _getClusterAndNamespace(w http.ResponseWriter, r *http.Request, log *logrus.Entry) (*models.Cluster, *models.Namespace, error) {
+	namespace, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return nil, nil, err
 	}
-	cluster, err := s._getCluster(w, r, namespace)
+	cluster, err := s._getCluster(w, r, log, namespace)
 	if err != nil {
 		return nil, nil, err
 	}

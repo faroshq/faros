@@ -39,11 +39,16 @@ func InitializeAPIClient() error {
 		httpClient = httputil.DefaultInsecureClient
 	}
 
-	Config.APIClient = client.NewClient(apiEndpointURL, httpClient)
+	Config.APIClient = client.NewClient(apiEndpointURL, &client.Config{
+		Username: Config.Username,
+		Password: Config.Password,
+	}, httpClient)
 
 	return nil
 }
 
+// InitializeConfig will make sure config file exists and is enriched from
+// flags with the help of Viper
 func InitializeConfig(cmd *cobra.Command) error {
 	v := viper.New()
 
@@ -69,7 +74,7 @@ func InitializeConfig(cmd *cobra.Command) error {
 		if os.IsNotExist(err) {
 			fmt.Printf(`
 Faros.sh CLI configuration not found. Please run:
-'faros configure --namespace <namespace_name/namespace_id>'
+'faros configure --namespace <namespace_name/namespace_id> --username <username@email.com> --password <password>'
 `)
 			return nil
 		}
@@ -97,6 +102,42 @@ Faros.sh CLI configuration not found. Please run:
 	return nil
 }
 
+// EnsureConfigExists will make sure config, used in config file exits in the
+// faros. In example if user changed namespace and namespace does not exists.
+// Should be executed after config is loaded and we have API client available
+func EnsureConfigExists(cmd *cobra.Command) error {
+	c := &Config
+	ctx := cmd.Context()
+	// ensure namespace exists
+	namespaces, err := c.APIClient.ListNamespaces(ctx)
+	if err != nil {
+		return err
+	}
+	var create bool
+	if len(namespaces) == 0 {
+		create = true
+	}
+
+	for _, namespace := range namespaces {
+		if strings.EqualFold(namespace.Name, c.Namespace) {
+			_, err := c.APIClient.GetNamespace(ctx, models.Namespace{ID: namespace.ID})
+			if err != nil { // TODO: parse error for better api performance
+				create = true
+			}
+		}
+	}
+	if create {
+		_, err := c.APIClient.CreateNamespace(ctx, models.Namespace{
+			Name: c.Namespace,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InitializeLogger will create logger for cmd
 func InitializeLogger(cmd *cobra.Command) error {
 	Config.Log = log.GetLogger()
 	return nil

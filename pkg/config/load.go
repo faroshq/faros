@@ -11,7 +11,7 @@ import (
 // Loading order:
 // 1. Load .env file
 // 2. Load envconfig from ENV variables and defaults
-func Load() (*Config, error) {
+func Load(loadCertificates bool) (*Config, error) {
 	c := &Config{}
 	// 1. Load .env file
 	godotenv.Load()
@@ -23,7 +23,7 @@ func Load() (*Config, error) {
 	}
 
 	// Load certs if provided
-	if c.API.TLSKeyPath != "" && c.API.TLSCertPath != "" {
+	if loadCertificates && c.API.TLSKeyPath != "" && c.API.TLSCertPath != "" {
 		c.API.TLSEnabled = true
 		c.API.TLSKey, err = os.ReadFile(c.API.TLSKeyPath)
 		if err != nil {
