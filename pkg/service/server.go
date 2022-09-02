@@ -76,6 +76,7 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+
 	err = s.setupProxy()
 	if err != nil {
 		return nil, err
@@ -106,6 +107,14 @@ func New(
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
 	// This is post. All methods dealing with security should be POST
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
+
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	if err != nil {
+		s.log.Errorf("failed to create basic auth middleware: %s", err)
+		return nil, err
+	}
+
+	apiRouter.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
 
 	// debug!
 	// TODO: put behind auth
@@ -198,15 +207,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) setupRouter() (*mux.Router, error) {
 	r := mux.NewRouter()
-	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
-	if err != nil {
-		s.log.Errorf("failed to create basic auth middleware: %s", err)
-		return nil, err
-	}
 
-	r.Use(middleware.Panic(s.log))            //must be first as its saves from server going under
-	r.Use(middleware.Log(s.log))              // must be second as it sets request logger into context
-	r.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
+	r.Use(middleware.Panic(s.log)) //must be first as its saves from server going under
+	r.Use(middleware.Log(s.log))   // must be second as it sets request logger into context
 
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
