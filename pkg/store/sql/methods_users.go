@@ -16,6 +16,8 @@ func (s *Store) GetUser(ctx context.Context, p models.User) (*models.User, error
 	switch {
 	case p.ID != "":
 		// OK, getting by ID
+	case p.Email != "" && p.ProviderName == models.AuthenticationProviderBasicAuth:
+		// Ok getting my email for basic auth
 	default:
 		return nil, store.ErrFailToQuery
 	}

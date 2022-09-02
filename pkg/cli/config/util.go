@@ -39,7 +39,10 @@ func InitializeAPIClient() error {
 		httpClient = httputil.DefaultInsecureClient
 	}
 
-	Config.APIClient = client.NewClient(apiEndpointURL, httpClient)
+	Config.APIClient = client.NewClient(apiEndpointURL, &client.Config{
+		Username: Config.Username,
+		Password: Config.Password,
+	}, httpClient)
 
 	return nil
 }
@@ -71,7 +74,7 @@ func InitializeConfig(cmd *cobra.Command) error {
 		if os.IsNotExist(err) {
 			fmt.Printf(`
 Faros.sh CLI configuration not found. Please run:
-'faros configure --namespace <namespace_name/namespace_id>'
+'faros configure --namespace <namespace_name/namespace_id> --username <username@email.com> --password <password>'
 `)
 			return nil
 		}

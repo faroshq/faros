@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentication"
@@ -86,7 +85,6 @@ func (b *BasicAuth) Authenticate() func(http.Handler) http.Handler {
 			}
 
 			// validate email
-			spew.Dump(username)
 			// TODO: this is weak validator!
 			err := validators.ValidateEmail(username)
 			if err != nil {
