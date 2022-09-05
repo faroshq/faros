@@ -78,9 +78,6 @@ func New(
 	}
 
 	err = s.setupProxy()
-	if err != nil {
-		return nil, err
-	}
 
 	// setup health
 	s.router.HandleFunc("/healthz", healthhandlers.NewJSONHandlerFunc(health, nil))

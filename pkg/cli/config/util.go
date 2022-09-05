@@ -27,7 +27,7 @@ var (
 	envPrefix                = "FAROS"
 )
 
-func InitializeAPIClient() error {
+func InitializeAPIClient(_ *cobra.Command) error {
 	apiEndpointURL, err := url.Parse(Config.APIEndpoint)
 	if err != nil {
 		return fmt.Errorf("failed to parse API endpoint URL '%s', error: %w", Config.APIEndpoint, err)
@@ -102,10 +102,11 @@ Faros.sh CLI configuration not found. Please run:
 	return nil
 }
 
-// EnsureConfigExists will make sure config, used in config file exits in the
+// EnsureObjectExists will make sure config object (namespace) exists in
 // faros. In example if user changed namespace and namespace does not exists.
 // Should be executed after config is loaded and we have API client available
-func EnsureConfigExists(cmd *cobra.Command) error {
+// TODO: refactor and tide up these functions
+func EnsureObjectExists(cmd *cobra.Command) error {
 	c := &Config
 	ctx := cmd.Context()
 	// ensure namespace exists
@@ -180,8 +181,13 @@ func getConfigDir() (string, error) {
 	return filepath.Join(homeDir, defaultConfigFileDir), nil
 }
 
-func TranslateUserConfig(ctx context.Context) error {
+// TranslateUserConfig will translate user named configuration to ID based config
+func TranslateUserConfig(cmd *cobra.Command) error {
+	if cmd.CalledAs() != "configure" {
+		return nil
+	}
 	c := &Config
+	ctx := cmd.Context()
 
 	// nothing to resolve if we dont have a namespace
 	if c.APIClient == nil {
