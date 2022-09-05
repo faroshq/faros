@@ -71,57 +71,25 @@ func New(
 	}
 	s.servingCerts = certs
 
-	// setup router middleware
+	// setup router and base middleware
 	s.router, err = s.setupRouter()
 	if err != nil {
 		return nil, err
 	}
 
-	err = s.setupProxy()
-
-	// setup health
-	s.router.HandleFunc("/healthz", healthhandlers.NewJSONHandlerFunc(health, nil))
-
-	// setup all the user routes
-	apiRouter := s.router.PathPrefix("/api/v1").Subrouter()
-
-	apiRouter.HandleFunc("/namespaces", s.createOrUpdateNamespace).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces", s.listNamespaces).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}", s.getNamespace).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}", s.createOrUpdateNamespace).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}", s.deleteNamespace).Methods(http.MethodDelete)
-
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.listClusters).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.createOrUpdateCluster).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.createOrUpdateCluster).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.getCluster).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.deleteCluster).Methods(http.MethodDelete)
-
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.listClusterAccessSession).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access{access}", s.getClusterAccessSession).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
-	// This is post. All methods dealing with security should be POST
-	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
-
-	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	// setup proxy and proxy authentication
+	err = s.setupProxyRoutes()
 	if err != nil {
-		s.log.Errorf("failed to create basic auth middleware: %s", err)
 		return nil, err
 	}
 
-	apiRouter.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
+	err = s.setupAPIRoutes()
+	if err != nil {
+		return nil, err
+	}
 
-	// debug!
-	// TODO: put behind auth
-	debugRouter := apiRouter.PathPrefix("/debug/").Subrouter()
-	debugRouter.HandleFunc("/pprof/cmdline", pprof.Cmdline)
-	debugRouter.HandleFunc("/pprof/profile", pprof.Profile)
-	debugRouter.HandleFunc("/pprof/symbol", pprof.Symbol)
-	debugRouter.HandleFunc("/pprof/trace", pprof.Trace)
-	debugRouter.PathPrefix("/pprof/").Handler(http.StripPrefix("/api", http.HandlerFunc(pprof.Index)))
-
+	// setup health under root router
+	s.router.HandleFunc("/healthz", healthhandlers.NewJSONHandlerFunc(health, nil))
 	s.router.PathPrefix("/api").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeInternalServerError, "404, whatever you are looking for does not exist"))
 	})
@@ -205,7 +173,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Service) setupRouter() (*mux.Router, error) {
 	r := mux.NewRouter()
 
-	r.Use(middleware.Panic(s.log)) //must be first as its saves from server going under
+	r.Use(middleware.Panic(s.log)) // must be first as its saves from server going under
 	r.Use(middleware.Log(s.log))   // must be second as it sets request logger into context
 
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +184,64 @@ func (s *Service) setupRouter() (*mux.Router, error) {
 	return r, nil
 }
 
-func (s *Service) setupProxy() error {
+// setupProxyRoutes configure proxy routes
+func (s *Service) setupProxyRoutes() error {
 	return kubeconfig.New(s.log, s.config, s.store, s.router)
+}
+
+// setupAPIRoutes will configure API server routes
+func (s *Service) setupAPIRoutes() error {
+	// setup all the user routes
+	apiRouter := s.router.PathPrefix("/api/v1").Subrouter()
+
+	apiRouter.HandleFunc("/namespaces", s.createOrUpdateNamespace).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces", s.listNamespaces).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}", s.getNamespace).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}", s.createOrUpdateNamespace).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}", s.deleteNamespace).Methods(http.MethodDelete)
+
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.listClusters).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.createOrUpdateCluster).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.createOrUpdateCluster).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.getCluster).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.deleteCluster).Methods(http.MethodDelete)
+
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.listClusterAccessSession).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.createOrUpdateClusterAccessSession).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access{access}", s.getClusterAccessSession).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}", s.deleteClusterAccessSession).Methods(http.MethodDelete)
+	// This is post. All methods dealing with security should be POST
+	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
+
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	if err != nil {
+		s.log.Errorf("failed to create basic auth middleware: %s", err)
+		return err
+	}
+	// set basic authentication on api router
+	apiRouter.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
+	return nil
+}
+
+// setupAPIRoutes will configure API server routes
+func (s *Service) setupDebugRoutes() error {
+	// setup all the user routes
+	debugRouter := s.router.PathPrefix("/debug").Subrouter()
+
+	debugRouter.HandleFunc("/pprof/cmdline", pprof.Cmdline)
+	debugRouter.HandleFunc("/pprof/profile", pprof.Profile)
+	debugRouter.HandleFunc("/pprof/symbol", pprof.Symbol)
+	debugRouter.HandleFunc("/pprof/trace", pprof.Trace)
+	debugRouter.PathPrefix("/pprof/").Handler(http.StripPrefix("/api", http.HandlerFunc(pprof.Index)))
+
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	if err != nil {
+		s.log.Errorf("failed to create basic auth middleware: %s", err)
+		return err
+	}
+	// set basic authentication on debug router
+	debugRouter.Use(basicAuthMiddleware.Authenticate()) // basic auth middleware
+
+	return nil
 }
