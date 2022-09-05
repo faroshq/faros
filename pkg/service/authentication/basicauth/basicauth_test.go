@@ -10,11 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/util/htpasswd"
 	servicetest "github.com/faroshq/faros/test/util/service"
-	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestBasicAuth(t *testing.T) {

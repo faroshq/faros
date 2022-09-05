@@ -7,14 +7,15 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentication"
 	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/store"
-	"github.com/gorilla/mux"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 var _ authentication.Authentication = &KubeCtlAuth{}
