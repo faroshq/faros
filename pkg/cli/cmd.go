@@ -17,32 +17,21 @@ func RunCLI(ctx context.Context) error {
 	cmd := &cobra.Command{
 		Short: "Faros CLI",
 		Long: `
-Faros CLI is a command line interface for Faros.sh`,
+Faros CLI is a command line interface for raros.sh`,
 		Use: "faros --help",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			err := config.InitializeConfig(cmd)
-			if err != nil {
-				return err
+			fMap := []func(*cobra.Command) error{
+				config.InitializeConfig, // must be first
+				config.InitializeLogger, // must be after config
+				config.InitializeAPIClient,
+				config.EnsureObjectExists,  // must be before client
+				config.TranslateUserConfig, // must ve after translate
 			}
-
-			err = config.InitializeLogger(cmd)
-			if err != nil {
-				return err
-			}
-
-			err = config.InitializeAPIClient()
-			if err != nil {
-				return err
-			}
-
-			err = config.EnsureConfigExists(cmd)
-			if err != nil {
-				return err
-			}
-
-			// resolve namespace to namespaceID
-			if cmd.CalledAs() != "configure" {
-				return config.TranslateUserConfig(cmd.Context())
+			for _, f := range fMap {
+				err := f(cmd)
+				if err != nil {
+					return err
+				}
 			}
 
 			return nil

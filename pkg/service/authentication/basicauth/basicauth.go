@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentication"
@@ -17,8 +20,6 @@ import (
 	"github.com/faroshq/faros/pkg/util/file"
 	"github.com/faroshq/faros/pkg/util/htpasswd"
 	"github.com/faroshq/faros/pkg/validators"
-	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 var _ authentication.Authentication = &BasicAuth{}
