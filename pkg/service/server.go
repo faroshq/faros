@@ -88,6 +88,11 @@ func New(
 		return nil, err
 	}
 
+	err = s.setupDebugRouter()
+	if err != nil {
+		return nil, err
+	}
+
 	// setup health under root router
 	s.router.HandleFunc("/healthz", healthhandlers.NewJSONHandlerFunc(health, nil))
 	s.router.PathPrefix("/api").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +229,8 @@ func (s *Service) setupAPIRoutes() error {
 	return nil
 }
 
-// setupAPIRoutes will configure API server routes
-func (s *Service) setupDebugRoutes() error {
+// setupDebugRouter will configure API server routes
+func (s *Service) setupDebugRouter() error {
 	// setup all the user routes
 	debugRouter := s.router.PathPrefix("/debug").Subrouter()
 
