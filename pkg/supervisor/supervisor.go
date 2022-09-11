@@ -1,4 +1,4 @@
-package controller
+package supervisor
 
 import (
 	"context"
@@ -16,19 +16,19 @@ import (
 	"github.com/faroshq/faros/pkg/util/recover"
 )
 
-var _ Interface = &Controller{}
+var _ Interface = &Supervisor{}
 
 type Interface interface {
 	Run(context.Context, <-chan struct{}, chan<- struct{})
 }
 
-type Controller struct {
+type Supervisor struct {
 	log      *logrus.Entry
 	service  service.Interface
 	sessions session.Interface
 }
 
-func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore store.Store, health *health.Health) (*Controller, error) {
+func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore store.Store, health *health.Health) (*Supervisor, error) {
 	svc, err := service.New(ctx, log, config, pgStore, health)
 	if err != nil {
 		return nil, err
@@ -39,14 +39,14 @@ func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore 
 		return nil, err
 	}
 
-	return &Controller{
+	return &Supervisor{
 		log:      log,
 		service:  svc,
 		sessions: sess,
 	}, nil
 }
 
-func (c *Controller) Run(ctx context.Context, stop <-chan struct{}, done chan<- struct{}) {
+func (c *Supervisor) Run(ctx context.Context, stop <-chan struct{}, done chan<- struct{}) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wg := &sync.WaitGroup{}
@@ -74,7 +74,7 @@ func (c *Controller) Run(ctx context.Context, stop <-chan struct{}, done chan<- 
 	close(done)
 }
 
-func (c *Controller) runService(ctx context.Context, wg *sync.WaitGroup) {
+func (c *Supervisor) runService(ctx context.Context, wg *sync.WaitGroup) {
 	defer recover.Panic(c.log)
 
 	defer wg.Done()
@@ -101,7 +101,7 @@ func (c *Controller) runService(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (c *Controller) runSessions(ctx context.Context, wg *sync.WaitGroup) {
+func (c *Supervisor) runSessions(ctx context.Context, wg *sync.WaitGroup) {
 	defer recover.Panic(c.log)
 
 	defer wg.Done()

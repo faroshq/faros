@@ -12,8 +12,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/faroshq/faros/pkg/config"
-	"github.com/faroshq/faros/pkg/controller"
 	sqlstore "github.com/faroshq/faros/pkg/store/sql"
+	"github.com/faroshq/faros/pkg/supervisor"
 	"github.com/faroshq/faros/pkg/util/log"
 )
 
@@ -57,12 +57,12 @@ func run(ctx context.Context) error {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 
-	ctrl, err := controller.New(ctx, log, c, sqlStore, h)
+	sp, err := supervisor.New(ctx, log, c, sqlStore, h)
 	if err != nil {
 		return err
 	}
 
-	go ctrl.Run(ctx, stop, done)
+	go sp.Run(ctx, stop, done)
 	select {
 	case <-signals:
 		// shutdown
