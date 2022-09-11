@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,8 +19,12 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/kubernetes/scheme"
+	kclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/faroshq/faros/pkg/util/htpasswd"
+	"github.com/faroshq/faros/pkg/util/httputil"
 	logutil "github.com/faroshq/faros/pkg/util/log"
 	"github.com/faroshq/faros/test/util/database"
 	serviceutil "github.com/faroshq/faros/test/util/service"
@@ -34,6 +39,7 @@ var (
 	Password = "farosfaros"
 
 	APIClient *client.Client
+	KClient   *kclient.Client
 )
 
 var _ = BeforeSuite(func() {
@@ -72,6 +78,19 @@ var _ = BeforeSuite(func() {
 
 	err = setupStack(ctx, log, config, store)
 	require.NoError(t, err)
+
+	err = startEnvTest(t)
+	require.NoError(t, err)
+
+	// setup client:
+	apiEndpointURL, err := url.Parse("https://0.0.0.0:8443/api/v1")
+	require.NoError(t, err)
+
+	httpClient := httputil.DefaultInsecureClient
+	APIClient = client.NewClient(apiEndpointURL, &client.Config{
+		Username: Username,
+		Password: Password,
+	}, httpClient)
 })
 
 func setupStack(ctx context.Context, log *logrus.Entry, config *config.Config, store store.Store) error {
@@ -105,3 +124,24 @@ var _ = AfterSuite(func() {
 	contextCancel()
 	time.Sleep(time.Second * 5) // Hack to let controller stop fully
 })
+
+func startEnvTest(t *testing.T) error {
+	testEnv := &envtest.Environment{
+		ErrorIfCRDPathMissing: false,
+		CRDInstallOptions: envtest.CRDInstallOptions{
+			CleanUpAfterUse: true,
+		},
+	}
+	cfg, err := testEnv.Start()
+	if err != nil {
+		return err
+	}
+
+	k8sClient, err := kclient.New(cfg, kclient.Options{Scheme: scheme.Scheme})
+	if err != nil {
+		return err
+	}
+	KClient = &k8sClient
+	return nil
+
+}

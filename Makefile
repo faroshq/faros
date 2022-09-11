@@ -79,4 +79,5 @@ test:
 
 .PHONY: test-e2e
 test-e2e:
-	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v
+	bash -c "trap './hack/envtest/setup.sh -r' EXIT; source ./hack/envtest/setup.sh -c && \
+	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v"
