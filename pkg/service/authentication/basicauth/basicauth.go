@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentication"
 	"github.com/faroshq/faros/pkg/service/middleware"
@@ -25,18 +26,18 @@ import (
 var _ authentication.Authentication = &BasicAuth{}
 
 type BasicAuth struct {
-	log    *logrus.Entry
-	config *config.Config
-	store  store.Store
+	log        *logrus.Entry
+	config     *config.Config
+	controller controller.Controller
 
 	htpasswd htpasswd.HashedPasswords
 }
 
-func New(log *logrus.Entry, config *config.Config, store store.Store) (*BasicAuth, error) {
+func New(log *logrus.Entry, config *config.Config, controller controller.Controller) (*BasicAuth, error) {
 	b := &BasicAuth{
-		log:    log,
-		config: config,
-		store:  store,
+		log:        log,
+		config:     config,
+		controller: controller,
 	}
 	// if not enabled just return shallow provider. Authenticate method
 	// will just proxy further in the chain
@@ -106,7 +107,7 @@ func (b *BasicAuth) Authenticate() func(http.Handler) http.Handler {
 
 			// if we here, we been authenticated with basic auth
 			var user *models.User
-			user, err = b.store.GetUser(ctx, models.User{
+			user, err = b.controller.GetUser(ctx, models.User{
 				Email:        username,
 				ProviderName: models.AuthenticationProviderBasicAuth,
 			})
@@ -117,7 +118,7 @@ func (b *BasicAuth) Authenticate() func(http.Handler) http.Handler {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
-				user, err = b.store.CreateUser(ctx, models.User{
+				user, err = b.controller.CreateUser(ctx, models.User{
 					Email:        username,
 					ProviderName: models.AuthenticationProviderBasicAuth,
 					PasswordHash: base64.StdEncoding.EncodeToString(hash),
@@ -166,7 +167,7 @@ func (b *BasicAuth) Enabled() bool {
 // syncDatabase will sync users from file, and remove ones deleted.
 func (b *BasicAuth) syncDatabase() error {
 	ctx, _ := context.WithDeadline(context.Background(), time.Now().Add(time.Second*5))
-	users, err := b.store.ListUsers(ctx, models.User{
+	users, err := b.controller.ListUsers(ctx, models.User{
 		ProviderName: models.AuthenticationProviderBasicAuth,
 	})
 	if err != nil {
@@ -176,7 +177,7 @@ func (b *BasicAuth) syncDatabase() error {
 	for _, user := range users {
 		if _, ok := b.htpasswd[user.Email]; !ok {
 			b.log.Infof("removing user %s", user.Email)
-			if err := b.store.DeleteUser(ctx, user); err != nil {
+			if err := b.controller.DeleteUser(ctx, user); err != nil {
 				return err
 			}
 		}

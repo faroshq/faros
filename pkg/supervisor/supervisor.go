@@ -10,8 +10,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/service"
-	"github.com/faroshq/faros/pkg/session"
 	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
@@ -23,26 +23,26 @@ type Interface interface {
 }
 
 type Supervisor struct {
-	log      *logrus.Entry
-	service  service.Interface
-	sessions session.Interface
+	log        *logrus.Entry
+	service    service.Interface
+	controller controller.Controller
 }
 
-func New(ctx context.Context, log *logrus.Entry, config *config.Config, pgStore store.Store, health *health.Health) (*Supervisor, error) {
-	svc, err := service.New(ctx, log, config, pgStore, health)
+func New(ctx context.Context, log *logrus.Entry, config *config.Config, sqlStore store.Store, health *health.Health) (*Supervisor, error) {
+	ctrl, err := controller.New(log, config, sqlStore)
 	if err != nil {
 		return nil, err
 	}
 
-	sess, err := session.New(log, config, pgStore)
+	svc, err := service.New(ctx, log, config, ctrl, health)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Supervisor{
-		log:      log,
-		service:  svc,
-		sessions: sess,
+		log:        log.WithField("component", "supervisor"),
+		service:    svc,
+		controller: ctrl,
 	}, nil
 }
 
@@ -52,7 +52,7 @@ func (c *Supervisor) Run(ctx context.Context, stop <-chan struct{}, done chan<- 
 	wg := &sync.WaitGroup{}
 	fm := []func(context.Context, *sync.WaitGroup){
 		c.runService,
-		c.runSessions,
+		c.runController,
 	}
 
 	if stop != nil {
@@ -101,7 +101,7 @@ func (c *Supervisor) runService(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (c *Supervisor) runSessions(ctx context.Context, wg *sync.WaitGroup) {
+func (c *Supervisor) runController(ctx context.Context, wg *sync.WaitGroup) {
 	defer recover.Panic(c.log)
 
 	defer wg.Done()
@@ -110,17 +110,14 @@ func (c *Supervisor) runSessions(ctx context.Context, wg *sync.WaitGroup) {
 	defer ticker.Stop()
 
 	for {
-		err := c.sessions.Run(ctx)
+		err := c.controller.Run(ctx)
 		if err != nil {
-			if strings.Contains(err.Error(), "http: Server closed") {
-				return
-			}
-			c.log.Fatalf("sessions failed to start: %s", err)
+			c.log.Fatalf("controller failed to start: %s", err)
 		}
 
 		select {
 		case <-ctx.Done():
-			c.log.Info("stopped sessions")
+			c.log.Info("stopped controller")
 			return
 		case <-ticker.C:
 		}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/InVisionApp/go-health/v2"
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/service"
 	"github.com/faroshq/faros/pkg/util/log"
 	"github.com/stretchr/testify/require"
@@ -34,7 +35,10 @@ func GetTestServer(ctx context.Context, config *config.Config, t *testing.T) *se
 
 	// service will require TLS certificates to be present.
 
-	service, err := service.New(ctx, log, config, store, h)
+	ctrl, err := controller.New(log, config, store)
+	require.NoError(t, err)
+
+	service, err := service.New(ctx, log, config, ctrl, h)
 	require.NoError(t, err)
 
 	go func() {

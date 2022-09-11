@@ -73,7 +73,8 @@ pkg/models - api structured, data models
 pkg/service - API/Proxy service
 pkg/session - session TTL manager
 pkg/store - storage interface and implementation
-pkg/controller - utility to run multiple services
+pkg/supervisor - utility to run multiple services
+pkg/controller - controller responsible for managing clusters and their sessions, kubeconfigs
 ```
 
 ## Bootstrap for development

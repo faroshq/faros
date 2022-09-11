@@ -27,12 +27,7 @@ func (s *Service) listClusterAccessSession(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	query := models.ClusterAccessSession{
-		ClusterID:   cluster.ID,
-		NamespaceID: namespace.ID,
-	}
-
-	results, err := s.store.ListClusterAccessSessions(r.Context(), query)
+	results, err := s.controller.ListClusterAccessSessions(r.Context(), namespace.ID, cluster.ID)
 	if err != nil && err != store.ErrRecordNotFound {
 		log.WithError(err).Error("failed to list cluster access sessions")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, "failed to list cluster access requests"))
@@ -61,7 +56,7 @@ func (s *Service) deleteClusterAccessSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err = s.store.DeleteClusterAccessSession(r.Context(), *result)
+	err = s.controller.DeleteClusterAccessSessions(r.Context(), result.ID)
 	if err != nil {
 		log.WithError(err).Error("failed to unmarshal request")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
@@ -100,12 +95,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 		createClusterAccessSessionRequest.Name = uuid.New().String()
 	}
 
-	query := models.ClusterAccessSession{
-		NamespaceID: namespace.ID,
-		ClusterID:   cluster.ID,
-	}
-
-	sessions, err := s.store.ListClusterAccessSessions(r.Context(), query)
+	sessions, err := s.controller.ListClusterAccessSessions(r.Context(), namespace.ID, cluster.ID)
 	if err != nil {
 		log.WithError(err).Error("failed to list cluster access sessions")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -125,7 +115,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 		// update fields
 		session.TTL = createClusterAccessSessionRequest.TTL
 
-		result, err := s.store.UpdateClusterAccessSession(r.Context(), *session)
+		result, err := s.controller.UpdateClusterAccessSession(r.Context(), *session)
 		if err != nil {
 			log.WithError(err).Error("failed to update cluster access session")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -136,7 +126,7 @@ func (s *Service) createOrUpdateClusterAccessSession(w http.ResponseWriter, r *h
 	}
 
 	// else create new one
-	result, err := s.store.CreateClusterAccessSession(r.Context(), createClusterAccessSessionRequest)
+	result, err := s.controller.CreateClusterAccessSession(r.Context(), createClusterAccessSessionRequest)
 	if err != nil {
 		log.WithError(err).Error("failed to create cluster access session")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -167,7 +157,7 @@ func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWr
 	session.Token = token
 
 	// update existing session with new details
-	_, err = s.store.UpdateClusterAccessSession(r.Context(), *session)
+	_, err = s.controller.UpdateClusterAccessSession(r.Context(), *session)
 	if err != nil {
 		log.WithError(err).Error("failed to create cluster access session")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))

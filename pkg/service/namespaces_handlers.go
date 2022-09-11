@@ -20,7 +20,7 @@ func (s *Service) getNamespace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listNamespaces(w http.ResponseWriter, r *http.Request) {
-	result, err := s.store.ListNamespaces(r.Context())
+	result, err := s.controller.ListNamespaces(r.Context())
 	if err != nil {
 		s.log.WithError(err).Errorf("failed to list namespaces")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -38,7 +38,7 @@ func (s *Service) createOrUpdateNamespace(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	namespaces, err := s.store.ListNamespaces(r.Context())
+	namespaces, err := s.controller.ListNamespaces(r.Context())
 	if err != nil {
 		s.log.WithError(err).Error("failed to list namespaces")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusBadRequest, errutil.CloudErrorCodeInvalidParameter, stringErrorFailure))
@@ -59,7 +59,7 @@ func (s *Service) createOrUpdateNamespace(w http.ResponseWriter, r *http.Request
 		// Update fields
 		namespace.Description = createNamespaceRequest.Description
 
-		result, err := s.store.UpdateNamespace(r.Context(), namespace)
+		result, err := s.controller.UpdateNamespace(r.Context(), namespace)
 		if err != nil {
 			s.log.WithError(err).Error("failed to update namespace")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -70,7 +70,7 @@ func (s *Service) createOrUpdateNamespace(w http.ResponseWriter, r *http.Request
 	}
 
 	// create
-	result, err := s.store.CreateNamespace(r.Context(), createNamespaceRequest)
+	result, err := s.controller.CreateNamespace(r.Context(), createNamespaceRequest)
 	if err != nil {
 		s.log.WithError(err).Error("failed to create namespace")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -82,12 +82,12 @@ func (s *Service) createOrUpdateNamespace(w http.ResponseWriter, r *http.Request
 
 func (s *Service) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	log := middleware.GetLoggerFromRequest(r)
-	result, err := s._getNamespace(w, r, log)
+	namespace, err := s._getNamespace(w, r, log)
 	if err != nil {
 		return
 	}
 
-	clusters, err := s.store.ListClusters(r.Context(), models.Cluster{NamespaceID: result.ID})
+	clusters, err := s.controller.ListClusters(r.Context(), namespace.ID)
 	if err != nil {
 		s.log.WithError(err).Error("failed to list clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -95,14 +95,14 @@ func (s *Service) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, cluster := range clusters {
-		if err := s.store.DeleteCluster(r.Context(), cluster); err != nil {
+		if err := s.controller.DeleteCluster(r.Context(), cluster.ID); err != nil {
 			s.log.WithError(err).Error("failed to delete cluster")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 			return
 		}
 	}
 
-	if err := s.store.DeleteNamespace(r.Context(), *result); err != nil {
+	if err := s.controller.DeleteNamespace(r.Context(), namespace.ID); err != nil {
 		s.log.WithError(err).Error("failed to delete namespace")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return

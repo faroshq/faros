@@ -9,15 +9,15 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/service/authentication/kubectl"
-	"github.com/faroshq/faros/pkg/store"
 	"github.com/faroshq/faros/pkg/util/clientcache"
 	"github.com/faroshq/faros/pkg/util/roundtripper"
 )
 
 type kubeconfig struct {
 	log         *logrus.Entry
-	store       store.Store
+	controller  controller.Controller
 	config      *config.Config
 	clientCache clientcache.ClientCache
 }
@@ -25,18 +25,18 @@ type kubeconfig struct {
 func New(
 	logger *logrus.Entry,
 	config *config.Config,
-	store store.Store,
+	controller controller.Controller,
 	router *mux.Router,
 ) error {
 	k := &kubeconfig{
 		log:         logger,
-		store:       store,
 		config:      config,
 		clientCache: clientcache.New(time.Hour),
+		controller:  controller,
 	}
 
 	// kubeconfig authentication
-	kubeconfigAuth, err := kubectl.New(k.log, k.config, k.store)
+	kubeconfigAuth, err := kubectl.New(k.log, k.config, k.controller)
 	if err != nil {
 		return err
 	}

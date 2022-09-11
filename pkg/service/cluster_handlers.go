@@ -27,11 +27,7 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clusterQuery := models.Cluster{
-		NamespaceID: namespace.ID,
-	}
-
-	result, err := s.store.ListClusters(r.Context(), clusterQuery)
+	result, err := s.controller.ListClusters(r.Context(), namespace.ID)
 	if err != nil {
 		log.WithError(err).Error("failed to list clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -57,11 +53,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 
 	createClusterRequest.NamespaceID = namespace.ID
 
-	query := models.Cluster{
-		NamespaceID: namespace.ID,
-	}
-
-	clusters, err := s.store.ListClusters(r.Context(), query)
+	clusters, err := s.controller.ListClusters(r.Context(), namespace.ID)
 	if err != nil {
 		log.WithError(err).Error("failed to list clusters")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -81,7 +73,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 		// Update fields
 		cluster.Config.RawKubeConfig = createClusterRequest.Config.RawKubeConfig
 
-		result, err := s.store.UpdateCluster(r.Context(), cluster)
+		result, err := s.controller.UpdateCluster(r.Context(), cluster)
 		if err != nil {
 			log.WithError(err).Error("failed to update cluster")
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -94,7 +86,7 @@ func (s *Service) createOrUpdateCluster(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// create
-	result, err := s.store.CreateCluster(r.Context(), createClusterRequest)
+	result, err := s.controller.CreateCluster(r.Context(), createClusterRequest)
 	if err != nil {
 		log.WithError(err).Error("failed to create cluster")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
@@ -114,7 +106,7 @@ func (s *Service) deleteCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.DeleteCluster(r.Context(), *cluster); err != nil {
+	if err := s.controller.DeleteCluster(r.Context(), cluster.ID); err != nil {
 		log.WithError(err).Error("failed to delete cluster")
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
 		return

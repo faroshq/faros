@@ -45,7 +45,7 @@ func NewStore(log *logrus.Entry, c *config.Config) (*Store, error) {
 	}
 
 	s := &Store{
-		log:     log,
+		log:     log.WithField("component", "store"),
 		db:      db,
 		pgxPool: pgxPool,
 	}

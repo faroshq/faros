@@ -20,6 +20,11 @@ type Controller struct {
 	// EncryptionKeys is the keys used for encrypting and decrypting secret fields
 	// in the database. If one key fails to decrypt, second is used. Last key is used to seal the secrets
 	EncryptionKeys []string `envconfig:"FAROS_ENCRYPTION_KEYS" default:"tDPRu/wtFeSRnnfU4rNXWKhvjq+H+pL+s6mU5+hH9XZmAxAIy8tUKN6fO4lbmBiSY6zSq0x/Zwf+a3X3DnbNCg=="`
+
+	// CloudRefreshInterval is the interval at which cloud resources are refreshed
+	CloudRefreshInterval time.Duration `envconfig:"FAROS_CLOUD_REFRESH_INTERVAL" default:"30s"`
+	// AzureCredentials is the credentials used to authenticate with Azure
+	AzureCredentials AzureCredentials `yaml:"azure_credentials,omitempty"`
 }
 
 type API struct {
@@ -55,4 +60,12 @@ type Database struct {
 	MaxConnIdleTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_IDLE_TIME" default:"30s"`
 	//MaxConnLifeTime is the maximum amount of time a database connection can be used
 	MaxConnLifeTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_LIFE_TIME" default:"1h"`
+}
+
+// AzureCredentials contains the credentials for Azure
+type AzureCredentials struct {
+	SubscriptionID string `envconfig:"AZURE_SUBSCRIPTION_ID" default:""`
+	TenantID       string `envconfig:"AZURE_TENANT_ID" default:""`
+	ClientID       string `envconfig:"AZURE_CLIENT_ID" default:""`
+	ClientSecret   string `envconfig:"AZURE_CLIENT_SECRET" default:""`
 }

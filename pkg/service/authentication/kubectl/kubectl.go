@@ -12,26 +12,26 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentication"
 	"github.com/faroshq/faros/pkg/service/middleware"
-	"github.com/faroshq/faros/pkg/store"
 )
 
 var _ authentication.Authentication = &KubeCtlAuth{}
 
 type KubeCtlAuth struct {
-	log    *logrus.Entry
-	config *config.Config
-	store  store.Store
+	log        *logrus.Entry
+	config     *config.Config
+	controller controller.Controller
 }
 
-func New(log *logrus.Entry, config *config.Config, store store.Store) (*KubeCtlAuth, error) {
+func New(log *logrus.Entry, config *config.Config, controller controller.Controller) (*KubeCtlAuth, error) {
 
 	b := &KubeCtlAuth{
-		log:    log,
-		config: config,
-		store:  store,
+		log:        log,
+		config:     config,
+		controller: controller,
 	}
 
 	return b, nil
@@ -56,7 +56,7 @@ func (k *KubeCtlAuth) Authenticate() func(http.Handler) http.Handler {
 
 			token := strings.TrimPrefix(authorization, "Bearer ")
 
-			request, err := k.store.GetClusterAccessSession(ctx, models.ClusterAccessSession{
+			request, err := k.controller.GetClusterAccessSession(ctx, models.ClusterAccessSession{
 				NamespaceID: namespaceID,
 				ClusterID:   clusterID,
 				ID:          accessID,
@@ -86,10 +86,7 @@ func (k *KubeCtlAuth) Authenticate() func(http.Handler) http.Handler {
 			}
 
 			// if authenticated we will need cluster to proxy the result
-			cluster, err := k.store.GetCluster(ctx, models.Cluster{
-				NamespaceID: namespaceID,
-				ID:          clusterID,
-			})
+			cluster, err := k.controller.GetCluster(ctx, namespaceID, clusterID)
 			if err != nil {
 				log.WithError(err).Error("failed to get cluster in middleware")
 				w.WriteHeader(http.StatusForbidden)

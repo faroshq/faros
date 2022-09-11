@@ -19,10 +19,10 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controller"
 	"github.com/faroshq/faros/pkg/service/authentication/basicauth"
 	"github.com/faroshq/faros/pkg/service/kubeconfig"
 	"github.com/faroshq/faros/pkg/service/middleware"
-	"github.com/faroshq/faros/pkg/store"
 	errutil "github.com/faroshq/faros/pkg/util/error"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
@@ -38,8 +38,9 @@ type Service struct {
 	server   *http.Server
 	listener net.Listener
 	router   *mux.Router
-	store    store.Store
 	config   *config.Config
+
+	controller controller.Controller
 
 	servingKey   *rsa.PrivateKey
 	servingCerts []*x509.Certificate
@@ -49,13 +50,13 @@ func New(
 	ctx context.Context,
 	logger *logrus.Entry,
 	config *config.Config,
-	store store.Store,
+	controller controller.Controller,
 	health *health.Health,
 ) (*Service, error) {
 	s := &Service{
-		log:    logger,
-		config: config,
-		store:  store,
+		log:        logger.WithField("component", "api"),
+		config:     config,
+		controller: controller,
 	}
 
 	// setup serving certs
@@ -191,7 +192,7 @@ func (s *Service) setupRouter() (*mux.Router, error) {
 
 // setupProxyRoutes configure proxy routes
 func (s *Service) setupProxyRoutes() error {
-	return kubeconfig.New(s.log, s.config, s.store, s.router)
+	return kubeconfig.New(s.log, s.config, s.controller, s.router)
 }
 
 // setupAPIRoutes will configure API server routes
@@ -219,7 +220,7 @@ func (s *Service) setupAPIRoutes() error {
 	// This is post. All methods dealing with security should be POST
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}/access/{access}/kubeconfig", s.createOrUpdateClusterAccessSessionKubeconfig).Methods(http.MethodPost)
 
-	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.controller)
 	if err != nil {
 		s.log.Errorf("failed to create basic auth middleware: %s", err)
 		return err
@@ -240,7 +241,7 @@ func (s *Service) setupDebugRouter() error {
 	debugRouter.HandleFunc("/pprof/trace", pprof.Trace)
 	debugRouter.PathPrefix("/pprof/").Handler(http.StripPrefix("/api", http.HandlerFunc(pprof.Index)))
 
-	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.store)
+	basicAuthMiddleware, err := basicauth.New(s.log, s.config, s.controller)
 	if err != nil {
 		s.log.Errorf("failed to create basic auth middleware: %s", err)
 		return err

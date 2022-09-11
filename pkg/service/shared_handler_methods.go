@@ -16,17 +16,14 @@ import (
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
 func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request, log *logrus.Entry) (*models.Namespace, error) {
-	namespaceQuery := models.Namespace{}
-	namespaceArg := mux.Vars(r)["namespace"]
-	if strings.HasPrefix(namespaceArg, models.NamespacePrefix) {
-		namespaceQuery.ID = namespaceArg
-	} else {
+	namespaceID := mux.Vars(r)["namespace"]
+	if !strings.HasPrefix(namespaceID, models.NamespacePrefix) {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
 		log.WithError(errorIDFormatInvalid).Error("ID format namespace is invalid")
 		return nil, errorIDFormatInvalid
 	}
 
-	namespace, err := s.store.GetNamespace(r.Context(), namespaceQuery)
+	namespace, err := s.controller.GetNamespace(r.Context(), namespaceID)
 	if err != nil {
 		if err == store.ErrRecordNotFound {
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorNamespaceNotFound))
@@ -43,19 +40,14 @@ func (s *Service) _getNamespace(w http.ResponseWriter, r *http.Request, log *log
 // If failed, we should stop processing. Errors will be written to response and
 // logged by helper
 func (s *Service) _getCluster(w http.ResponseWriter, r *http.Request, log *logrus.Entry, namespace *models.Namespace) (*models.Cluster, error) {
-	clusterQuery := models.Cluster{
-		NamespaceID: namespace.ID,
-	}
-	clusterArg := mux.Vars(r)["cluster"]
-	if strings.HasPrefix(clusterArg, models.ClusterPrefix) {
-		clusterQuery.ID = clusterArg
-	} else {
+	clusterID := mux.Vars(r)["cluster"]
+	if !strings.HasPrefix(clusterID, models.ClusterPrefix) {
 		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
 		log.WithError(errorIDFormatInvalid).Error("ID format cluster is invalid")
 		return nil, errorIDFormatInvalid
 	}
 
-	cluster, err := s.store.GetCluster(r.Context(), clusterQuery)
+	cluster, err := s.controller.GetCluster(r.Context(), namespace.ID, clusterID)
 	if err != nil {
 		if err == store.ErrRecordNotFound {
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterNotFound))
@@ -94,7 +86,7 @@ func (s *Service) _getClusterAccessSession(w http.ResponseWriter, r *http.Reques
 		return nil, errorIDFormatInvalid
 	}
 
-	session, err := s.store.GetClusterAccessSession(r.Context(), query)
+	session, err := s.controller.GetClusterAccessSession(r.Context(), query)
 	if err != nil {
 		if err == store.ErrRecordNotFound {
 			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterAccessSessionNotFound))
