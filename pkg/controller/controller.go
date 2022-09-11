@@ -50,7 +50,7 @@ type controller struct {
 }
 
 func New(log *logrus.Entry, config *config.Config, store store.Store) (*controller, error) {
-	sess, err := session.New(log, config, store)
+	sessions, err := session.New(log, config, store)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func New(log *logrus.Entry, config *config.Config, store store.Store) (*controll
 		config: config,
 		store:  store,
 
-		sessions: sess,
+		sessions: sessions,
 	}, nil
 }
 

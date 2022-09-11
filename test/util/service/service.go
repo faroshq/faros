@@ -28,7 +28,7 @@ func GetTestServer(ctx context.Context, config *config.Config, t *testing.T) *se
 	h := health.New()
 	defer h.Stop()
 
-	key, cert, err := getTestCertificates()
+	key, cert, err := GetTestCertificates()
 	require.NoError(t, err)
 	config.API.TLSKey = key
 	config.API.TLSCert = cert
@@ -49,7 +49,7 @@ func GetTestServer(ctx context.Context, config *config.Config, t *testing.T) *se
 	return service
 }
 
-func getTestCertificates() (keyByte []byte, certByte []byte, err error) {
+func GetTestCertificates() (keyByte []byte, certByte []byte, err error) {
 	var signingKey *rsa.PrivateKey
 	var signingCert *x509.Certificate
 

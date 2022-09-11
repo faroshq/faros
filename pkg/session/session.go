@@ -28,7 +28,7 @@ type sessionManager struct {
 
 func New(log *logrus.Entry, config *config.Config, store store.Store) (*sessionManager, error) {
 	return &sessionManager{
-		log:    log,
+		log:    log.WithField("component", "session"),
 		config: config,
 		store:  store,
 	}, nil
