@@ -12,7 +12,7 @@ func TestClientCache(t *testing.T) {
 	cli1 := &http.Client{}
 	cli2 := &http.Client{}
 
-	c := New(1)
+	c := NewClientCache(1)
 	c.(*clientCache).now = func() time.Time { return now }
 
 	// t = 0: put(1), get(1)

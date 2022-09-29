@@ -14,7 +14,7 @@ type multi struct {
 
 var _ AEAD = (*multi)(nil)
 
-func NewMulti(ctx context.Context, config *config.Config) (AEAD, error) {
+func NewMulti(ctx context.Context, config *config.ServerConfig) (AEAD, error) {
 	latestKeyB64 := config.Controller.EncryptionKeys[len(config.Controller.EncryptionKeys)-1]
 	latestKey, err := base64.StdEncoding.DecodeString(latestKeyB64)
 	if err != nil {

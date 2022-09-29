@@ -24,7 +24,7 @@ func TestBasicAuth(t *testing.T) {
 	// init shared server for test as we might be clashing ports.
 	// We could fix this by using freeport and bind to random ports :)
 	// But who has time for this :)
-	config := &config.Config{}
+	config := &config.ServerConfig{}
 	config.API.AuthenticationProviders = []string{"basicauth"}
 
 	// create test htpasswd file in temp store

@@ -16,22 +16,26 @@ import (
 )
 
 type kubeconfig struct {
-	log         *logrus.Entry
-	controller  controller.Controller
-	config      *config.Config
+	log        *logrus.Entry
+	controller controller.Controller
+	config     *config.ServerConfig
+	// clientCache is a cache for direct client connections
 	clientCache clientcache.ClientCache
+	// dialer is a cache for reverse tunnel connections
+	dialerCache clientcache.DialerCache
 }
 
 func New(
 	logger *logrus.Entry,
-	config *config.Config,
+	config *config.ServerConfig,
 	controller controller.Controller,
 	router *mux.Router,
 ) error {
 	k := &kubeconfig{
 		log:         logger,
 		config:      config,
-		clientCache: clientcache.New(time.Hour),
+		clientCache: clientcache.NewClientCache(time.Hour),
+		dialerCache: clientcache.NewDialerCache(time.Hour),
 		controller:  controller,
 	}
 
@@ -52,6 +56,11 @@ func New(
 	// Important: if you are changing this path, make sure proxy splitters are up to date,
 	// as things will go bananas otherwise.
 	proxyRouter.PathPrefix("/namespaces/{namespace}/clusters/{cluster}/access/{access}/proxy").Handler(proxy)
+
+	// Important: if you are changing these, make sure you update helper functions in
+	// helper.go as it is used for agents to create url
+	proxyRouter.PathPrefix("/namespaces/{namespace}/clusters/{cluster}/access/{access}/connect").Handler(k.Tunnel(proxyRouter))
+	proxyRouter.PathPrefix("/namespaces/{namespace}/clusters/{cluster}/access/{access}/proxy-tunnel").Handler(k.ProxyRev(proxyRouter))
 
 	return nil
 }

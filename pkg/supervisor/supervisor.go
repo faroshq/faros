@@ -28,7 +28,7 @@ type Supervisor struct {
 	controller controller.Controller
 }
 
-func New(ctx context.Context, log *logrus.Entry, config *config.Config, sqlStore store.Store, health *health.Health) (*Supervisor, error) {
+func New(ctx context.Context, log *logrus.Entry, config *config.ServerConfig, sqlStore store.Store, health *health.Health) (*Supervisor, error) {
 	ctrl, err := controller.New(log, config, sqlStore)
 	if err != nil {
 		return nil, err

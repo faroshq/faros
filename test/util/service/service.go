@@ -19,7 +19,7 @@ import (
 
 // GetTestServer will return test server. It will accept config as it drives server
 // functionality required in tests
-func GetTestServer(ctx context.Context, config *config.Config, t *testing.T) *service.Service {
+func GetTestServer(ctx context.Context, config *config.ServerConfig, t *testing.T) *service.Service {
 	log := log.GetLogger()
 
 	store, err := databasetest.NewSQLLiteTestingStore(t)

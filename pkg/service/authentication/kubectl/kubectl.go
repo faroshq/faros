@@ -22,11 +22,11 @@ var _ authentication.Authentication = &KubeCtlAuth{}
 
 type KubeCtlAuth struct {
 	log        *logrus.Entry
-	config     *config.Config
+	config     *config.ServerConfig
 	controller controller.Controller
 }
 
-func New(log *logrus.Entry, config *config.Config, controller controller.Controller) (*KubeCtlAuth, error) {
+func New(log *logrus.Entry, config *config.ServerConfig, controller controller.Controller) (*KubeCtlAuth, error) {
 
 	b := &KubeCtlAuth{
 		log:        log,

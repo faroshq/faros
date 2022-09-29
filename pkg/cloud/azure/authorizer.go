@@ -19,7 +19,7 @@ type authorizersList map[string]autorest.Authorizer
 // newAuthorizers will return list of authorizers based on subscriptions IDs.
 // If no subscription ID is configured, it will attempt to list all subscriptions
 // Currently we don't support cross tenant access
-func newAuthorizers(ctx context.Context, log *logrus.Entry, c *config.Config) (authorizersList, error) {
+func newAuthorizers(ctx context.Context, log *logrus.Entry, c *config.ServerConfig) (authorizersList, error) {
 	if c.Controller.AzureCredentials.ClientID == "" {
 		return nil, fmt.Errorf("no azure client id configured")
 	}

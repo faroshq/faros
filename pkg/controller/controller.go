@@ -43,13 +43,13 @@ type Controller interface {
 
 type controller struct {
 	log    *logrus.Entry
-	config *config.Config
+	config *config.ServerConfig
 	store  store.Store
 
 	sessions session.Interface
 }
 
-func New(log *logrus.Entry, config *config.Config, store store.Store) (*controller, error) {
+func New(log *logrus.Entry, config *config.ServerConfig, store store.Store) (*controller, error) {
 	sessions, err := session.New(log, config, store)
 	if err != nil {
 		return nil, err

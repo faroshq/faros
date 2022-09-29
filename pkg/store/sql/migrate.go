@@ -7,7 +7,7 @@ import (
 	"github.com/faroshq/faros/pkg/models"
 )
 
-func (s *Store) migrate(_ context.Context, c *config.Config) error {
+func (s *Store) migrate(_ context.Context, c *config.ServerConfig) error {
 	err := s.db.AutoMigrate(
 		&models.Cluster{},
 		&models.Namespace{},

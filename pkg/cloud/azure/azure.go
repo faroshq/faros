@@ -28,7 +28,7 @@ type clients struct {
 
 type azureProvider struct {
 	log    *logrus.Entry
-	config *config.Config
+	config *config.ServerConfig
 
 	clientList []clients
 
@@ -36,7 +36,7 @@ type azureProvider struct {
 	clusterListLock  sync.RWMutex
 }
 
-func New(ctx context.Context, log *logrus.Entry, config *config.Config) (cloud.Cloud, error) {
+func New(ctx context.Context, log *logrus.Entry, config *config.ServerConfig) (cloud.Cloud, error) {
 	authorizersList, err := newAuthorizers(ctx, log, config)
 	if err != nil {
 		return nil, err

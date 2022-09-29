@@ -27,13 +27,13 @@ var _ authentication.Authentication = &BasicAuth{}
 
 type BasicAuth struct {
 	log        *logrus.Entry
-	config     *config.Config
+	config     *config.ServerConfig
 	controller controller.Controller
 
 	htpasswd htpasswd.HashedPasswords
 }
 
-func New(log *logrus.Entry, config *config.Config, controller controller.Controller) (*BasicAuth, error) {
+func New(log *logrus.Entry, config *config.ServerConfig, controller controller.Controller) (*BasicAuth, error) {
 	b := &BasicAuth{
 		log:        log,
 		config:     config,

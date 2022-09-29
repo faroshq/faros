@@ -23,8 +23,8 @@ type v struct {
 	cli     *http.Client
 }
 
-// New returns a new ClientCache
-func New(ttl time.Duration) ClientCache {
+// NewClientCache returns a new ClientCache
+func NewClientCache(ttl time.Duration) ClientCache {
 	return &clientCache{
 		now: time.Now,
 		ttl: ttl,

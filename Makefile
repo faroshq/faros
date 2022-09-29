@@ -13,8 +13,12 @@ LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.version=$(TAG_NAME)
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.commit=$(GIT_REVISION)
 LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.buildTime=$(JOBDATE)
 
-run:
+run-server:
 	go run  ./cmd/faros --loglevel=trace
+
+run-agent:
+	go run  ./cmd/agent --loglevel=trace
+
 
 run-compose:
 	docker-compose -f docker-compose-dev.yaml up --build faros

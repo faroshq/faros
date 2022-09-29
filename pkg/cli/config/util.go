@@ -135,6 +135,7 @@ func EnsureObjectExists(cmd *cobra.Command) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -183,12 +184,11 @@ func getConfigDir() (string, error) {
 
 // TranslateUserConfig will translate user named configuration to ID based config
 func TranslateUserConfig(cmd *cobra.Command) error {
-	if cmd.CalledAs() != "configure" {
+	if cmd.CalledAs() == "configure" {
 		return nil
 	}
 	c := &Config
 	ctx := cmd.Context()
-
 	// nothing to resolve if we dont have a namespace
 	if c.APIClient == nil {
 		return nil

@@ -1,5 +1,8 @@
 package kubeconfig
 
+// Based on https://github.com/golang/build/tree/master/revdial/v2
+// Based on https://github.com/kcp-dev/kcp/tree/main/pkg/tunneler
+
 import (
 	"context"
 	"crypto/tls"

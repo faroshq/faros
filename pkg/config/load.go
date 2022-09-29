@@ -11,8 +11,8 @@ import (
 // Loading order:
 // 1. Load .env file
 // 2. Load envconfig from ENV variables and defaults
-func Load(loadCertificates bool) (*Config, error) {
-	c := &Config{}
+func LoadServer(loadCertificates bool) (*ServerConfig, error) {
+	c := &ServerConfig{}
 	// 1. Load .env file
 	godotenv.Load()
 
@@ -33,6 +33,24 @@ func Load(loadCertificates bool) (*Config, error) {
 		if err != nil {
 			return c, err
 		}
+	}
+
+	return c, err
+}
+
+// Load loads the configuration from the environment and flags
+// Loading order:
+// 1. Load .env file
+// 2. Load envconfig from ENV variables and defaults
+func LoadAgent() (*AgentConfig, error) {
+	c := &AgentConfig{}
+	// 1. Load .env file
+	godotenv.Load()
+
+	// 2. Load ENV and defaults
+	err := envconfig.Process("", c)
+	if err != nil {
+		return c, err
 	}
 
 	return c, err

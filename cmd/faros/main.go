@@ -27,7 +27,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	c, err := config.Load(true)
+	c, err := config.LoadServer(true)
 	if err != nil {
 		return err
 	}

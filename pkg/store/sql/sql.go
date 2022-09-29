@@ -25,7 +25,7 @@ const (
 	DatabaseTypeSqlite3  = sqlite.DriverName
 )
 
-func connect(ctx context.Context, log *logrus.Entry, c *config.Config) (*gorm.DB, *pgxpool.Pool, error) {
+func connect(ctx context.Context, log *logrus.Entry, c *config.ServerConfig) (*gorm.DB, *pgxpool.Pool, error) {
 	for {
 		select {
 		case <-ctx.Done():

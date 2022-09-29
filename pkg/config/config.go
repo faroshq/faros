@@ -6,10 +6,23 @@ const (
 	ConfigFileName = "config.yaml"
 )
 
-type Config struct {
+type ServerConfig struct {
 	API        API        `yaml:"api,omitempty"`
 	Database   Database   `yaml:"database,omitempty"`
 	Controller Controller `yaml:"controller,omitempty"`
+}
+
+type AgentConfig struct {
+	// ServerURI is the URI of the server to connect to
+	ServerURI string `envconfig:"FAROS_SERVER_URI" yaml:"serverURI,omitempty"`
+	// AccessKey is the access key used to authenticate with the server
+	AccessKey string `envconfig:"FAROS_ACCESS_KEY" yaml:"accessKey,omitempty"`
+	// ClusterID is the ID of the cluster this agent is running on
+	ClusterID string `envconfig:"FAROS_CLUSTER_ID" yaml:"clusterID,omitempty"`
+	// AccessID is the ID of the access object
+	AccessID string `envconfig:"FAROS_ACCESS_ID" yaml:"accessID,omitempty"`
+	// NamespaceID is the ID of the namespace this agent is running in
+	NamespaceID string `envconfig:"FAROS_NAMESPACE_ID" yaml:"namespaceID,omitempty"`
 }
 
 type Controller struct {
@@ -20,7 +33,6 @@ type Controller struct {
 	// EncryptionKeys is the keys used for encrypting and decrypting secret fields
 	// in the database. If one key fails to decrypt, second is used. Last key is used to seal the secrets
 	EncryptionKeys []string `envconfig:"FAROS_ENCRYPTION_KEYS" default:"tDPRu/wtFeSRnnfU4rNXWKhvjq+H+pL+s6mU5+hH9XZmAxAIy8tUKN6fO4lbmBiSY6zSq0x/Zwf+a3X3DnbNCg=="`
-
 	// CloudRefreshInterval is the interval at which cloud resources are refreshed
 	CloudRefreshInterval time.Duration `envconfig:"FAROS_CLOUD_REFRESH_INTERVAL" default:"30s"`
 	// AzureCredentials is the credentials used to authenticate with Azure

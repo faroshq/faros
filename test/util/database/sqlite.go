@@ -25,7 +25,7 @@ func NewSQLLiteTestingStore(t *testing.T) (store.Store, error) {
 	var store store.Store
 	var err error
 
-	cfg, err := config.Load(false)
+	cfg, err := config.LoadServer(false)
 	if err != nil {
 		return nil, err
 	}

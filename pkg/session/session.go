@@ -22,11 +22,11 @@ type Interface interface {
 
 type sessionManager struct {
 	log    *logrus.Entry
-	config *config.Config
+	config *config.ServerConfig
 	store  store.Store
 }
 
-func New(log *logrus.Entry, config *config.Config, store store.Store) (*sessionManager, error) {
+func New(log *logrus.Entry, config *config.ServerConfig, store store.Store) (*sessionManager, error) {
 	return &sessionManager{
 		log:    log.WithField("component", "session"),
 		config: config,

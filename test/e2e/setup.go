@@ -53,7 +53,7 @@ var _ = BeforeSuite(func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	contextCancel = cancel
 
-	config, err := config.Load(false)
+	config, err := config.LoadServer(false)
 	require.NoError(t, err)
 
 	// configure certs
@@ -93,7 +93,7 @@ var _ = BeforeSuite(func() {
 	}, httpClient)
 })
 
-func setupStack(ctx context.Context, log *logrus.Entry, config *config.Config, store store.Store) error {
+func setupStack(ctx context.Context, log *logrus.Entry, config *config.ServerConfig, store store.Store) error {
 	h := health.New()
 	h.AddCheck(&health.Config{
 		Name:     "database",

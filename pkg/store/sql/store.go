@@ -25,7 +25,7 @@ type Store struct {
 	pgxPool           *pgxpool.Pool // used for pubsub if we need one
 }
 
-func NewStore(log *logrus.Entry, c *config.Config) (*Store, error) {
+func NewStore(log *logrus.Entry, c *config.ServerConfig) (*Store, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 

@@ -38,7 +38,7 @@ type Service struct {
 	server   *http.Server
 	listener net.Listener
 	router   *mux.Router
-	config   *config.Config
+	config   *config.ServerConfig
 
 	controller controller.Controller
 
@@ -49,7 +49,7 @@ type Service struct {
 func New(
 	ctx context.Context,
 	logger *logrus.Entry,
-	config *config.Config,
+	config *config.ServerConfig,
 	controller controller.Controller,
 	health *health.Health,
 ) (*Service, error) {
