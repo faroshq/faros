@@ -7,10 +7,10 @@ import (
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/util/azureclients/mgmt/subscription"
-	"github.com/sirupsen/logrus"
 )
 
 // authorizersList is list of authorizers based on subscriptions IDs

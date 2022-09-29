@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+
 	"github.com/faroshq/faros/pkg/agent"
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/util/log"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 func main() {

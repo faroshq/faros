@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/aojea/rwconn"
+
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/middleware"
 	"github.com/faroshq/faros/pkg/util/dialer"
-
-	"github.com/aojea/rwconn"
 )
 
 func (k *kubeconfig) Tunnel(apiHandler http.Handler) http.HandlerFunc {

@@ -8,13 +8,13 @@ import (
 
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
+	"github.com/sirupsen/logrus"
 
 	"github.com/faroshq/faros/pkg/cloud"
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/util/azureclients/mgmt/containerservice"
 	"github.com/faroshq/faros/pkg/util/recover"
-	"github.com/sirupsen/logrus"
 )
 
 var _ cloud.Cloud = (*azureProvider)(nil)
