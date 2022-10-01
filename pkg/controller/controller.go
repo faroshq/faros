@@ -14,6 +14,10 @@ import (
 // This is so we can manipulate storage object between cloud providers and user provided data
 // and still have consistent data model available for API.
 
+// This interface is very much similar to the one in pkg/store/store.go . This might
+// be overkill for now, but should work as an abstraction layer for data manipulation if
+// required in the future.
+
 type Controller interface {
 	GetCluster(ctx context.Context, namespaceID, clusterID string) (*models.Cluster, error)
 	CreateCluster(ctx context.Context, model models.Cluster) (*models.Cluster, error)
@@ -26,6 +30,11 @@ type Controller interface {
 	DeleteClusterAccessSessions(ctx context.Context, sessionID string) error
 	UpdateClusterAccessSession(ctx context.Context, session models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 	CreateClusterAccessSession(ctx context.Context, createClusterAccessSessionRequest models.ClusterAccessSession) (*models.ClusterAccessSession, error)
+
+	GetClusterRegistrationToken(ctx context.Context, query models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
+	ListRegistrationToken(ctx context.Context, namespaceID string) ([]models.ClusterRegistrationToken, error)
+	DeleteRegistrationToken(ctx context.Context, tokenID string) error
+	CreateRegistrationToken(ctx context.Context, createClusterRegistrationTokenRequest models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
 
 	ListNamespaces(ctx context.Context) ([]models.Namespace, error)
 	GetNamespace(ctx context.Context, namespaceID string) (*models.Namespace, error)
@@ -40,6 +49,8 @@ type Controller interface {
 
 	Run(ctx context.Context) error
 }
+
+var _ Controller = &controller{}
 
 type controller struct {
 	log    *logrus.Entry

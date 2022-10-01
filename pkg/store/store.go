@@ -26,6 +26,11 @@ type Store interface {
 	CreateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 	UpdateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
 
+	ListRegistrationTokens(context.Context, models.ClusterRegistrationToken) ([]models.ClusterRegistrationToken, error)
+	DeleteRegistrationToken(context.Context, models.ClusterRegistrationToken) error
+	GetClusterRegistrationToken(context.Context, models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
+	CreateRegistrationToken(context.Context, models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
+
 	GetUser(context.Context, models.User) (*models.User, error)
 	ListUsers(context.Context, models.User) ([]models.User, error)
 	DeleteUser(context.Context, models.User) error

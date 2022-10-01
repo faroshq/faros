@@ -113,3 +113,36 @@ func (s *Service) _getClusterAndNamespace(w http.ResponseWriter, r *http.Request
 
 	return cluster, namespace, nil
 }
+
+// _getClusterRegistrationToken is shared helper to get cluster registration from request.
+// If failed, we should stop processing. Errors will be written to response and
+// logged by helper
+func (s *Service) _getClusterRegistrationToken(w http.ResponseWriter, r *http.Request, log *logrus.Entry) (*models.ClusterRegistrationToken, error) {
+	namespace, err := s._getNamespace(w, r, log)
+	if err != nil {
+		return nil, err
+	}
+
+	query := models.ClusterRegistrationToken{
+		NamespaceID: namespace.ID,
+	}
+	clusterRegistrationTokenArg := mux.Vars(r)["token"]
+	if strings.HasPrefix(clusterRegistrationTokenArg, models.ClusterRegistrationTokenPrefix) {
+		query.ID = clusterRegistrationTokenArg
+	} else {
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterRegistrationTokenNotFound))
+		log.WithError(errorIDFormatInvalid).Error("ID format cluster registration token in invalid")
+		return nil, errorIDFormatInvalid
+	}
+
+	session, err := s.controller.GetClusterRegistrationToken(r.Context(), query)
+	if err != nil {
+		if err == store.ErrRecordNotFound {
+			errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusNotFound, errutil.CloudErrorCodeNotFound, stringErrorClusterRegistrationTokenNotFound))
+			return nil, err
+		}
+		log.WithError(err).Error("failed to get cluster registration token")
+		errutil.WriteCloudError(w, errutil.NewCloudError(http.StatusInternalServerError, errutil.CloudErrorCodeInternalServerError, stringErrorFailure))
+	}
+	return session, nil
+}

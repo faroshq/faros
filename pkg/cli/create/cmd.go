@@ -7,6 +7,7 @@ import (
 	"github.com/faroshq/faros/pkg/cli/resources/clusters"
 	"github.com/faroshq/faros/pkg/cli/resources/kubeconfig"
 	"github.com/faroshq/faros/pkg/cli/resources/namespaces"
+	"github.com/faroshq/faros/pkg/cli/resources/registrationtokens"
 )
 
 // New returns new get wrapper
@@ -31,6 +32,7 @@ Example:
 	cmd.AddCommand(namespaces.CreateCmd())
 	cmd.AddCommand(access.CreateCmd())
 	cmd.AddCommand(kubeconfig.CreateCmd())
+	cmd.AddCommand(registrationtokens.CreateCmd())
 
 	return cmd
 }

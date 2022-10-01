@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	namespacesURL = "namespaces"
-	clustersURL   = "clusters"
-	accessURL     = "access"
-	kubeconfigURL = "kubeconfig"
+	namespacesURL                = "namespaces"
+	clustersURL                  = "clusters"
+	clustersRegistrationTokenURL = "cluster-registration-token"
+	accessURL                    = "access"
+	kubeconfigURL                = "kubeconfig"
 )
 
 type Config struct {

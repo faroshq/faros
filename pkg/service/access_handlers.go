@@ -145,6 +145,8 @@ func (s *Service) createOrUpdateClusterAccessSessionKubeconfig(w http.ResponseWr
 		return
 	}
 
+	// TODO: Maybe it would be good to move this to controller layer and make api server
+	// without this logic
 	token := uuid.New().String()
 	hashedToken, err := bcryptutil.HashPassword(token)
 	if err != nil {

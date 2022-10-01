@@ -13,6 +13,7 @@ func (s *Store) migrate(_ context.Context, c *config.ServerConfig) error {
 		&models.Namespace{},
 		&models.ClusterAccessSession{},
 		&models.User{},
+		&models.ClusterRegistrationToken{},
 	)
 	if err != nil {
 		return err
@@ -24,6 +25,10 @@ func (s *Store) migrate(_ context.Context, c *config.ServerConfig) error {
 		}
 
 		if err := createFK(s.db, models.ClusterAccessSession{}, models.Namespace{}, "namespace_id", "id", "CASCADE", "CASCADE"); err != nil {
+			s.log.Warnf("failed to add DB FK: %s", err)
+		}
+
+		if err := createFK(s.db, models.ClusterRegistrationToken{}, models.Namespace{}, "namespace_id", "id", "CASCADE", "CASCADE"); err != nil {
 			s.log.Warnf("failed to add DB FK: %s", err)
 		}
 

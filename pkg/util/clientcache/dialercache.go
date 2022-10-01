@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/faroshq/faros/pkg/util/dialer"
 )
 
@@ -27,6 +28,7 @@ type dd struct {
 
 // New returns a new ClientCache
 func NewDialerCache(ttl time.Duration) DialerCache {
+
 	return &dialerCache{
 		now: time.Now,
 		ttl: ttl,
@@ -36,6 +38,14 @@ func NewDialerCache(ttl time.Duration) DialerCache {
 
 // call holding c.mu
 func (d *dialerCache) expire() {
+
+	go func() {
+		for {
+			spew.Dump(d.m)
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
 	now := d.now()
 	for k, v := range d.m {
 		if now.After(v.expires) {

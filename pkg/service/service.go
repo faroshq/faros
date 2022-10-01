@@ -206,6 +206,10 @@ func (s *Service) setupAPIRoutes() error {
 	apiRouter.HandleFunc("/namespaces/{namespace}", s.createOrUpdateNamespace).Methods(http.MethodPost)
 	apiRouter.HandleFunc("/namespaces/{namespace}", s.deleteNamespace).Methods(http.MethodDelete)
 
+	apiRouter.HandleFunc("/namespaces/{namespace}/cluster-registration-token", s.listClusterRegistrationTokens).Methods(http.MethodGet)
+	apiRouter.HandleFunc("/namespaces/{namespace}/cluster-registration-token", s.createClusterRegistrationToken).Methods(http.MethodPost)
+	apiRouter.HandleFunc("/namespaces/{namespace}/cluster-registration-token/{token}", s.deleteClusterRegistrationToken).Methods(http.MethodDelete)
+
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.listClusters).Methods(http.MethodGet)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters", s.createOrUpdateCluster).Methods(http.MethodPost)
 	apiRouter.HandleFunc("/namespaces/{namespace}/clusters/{cluster}", s.createOrUpdateCluster).Methods(http.MethodPost)
