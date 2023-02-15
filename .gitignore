@@ -5,3 +5,4 @@ secrets
 release
 /dev
 profile.cov
+*.kubeconfig

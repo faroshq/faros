@@ -8,40 +8,15 @@ import (
 )
 
 type Store interface {
-	GetCluster(context.Context, models.Cluster) (*models.Cluster, error)
-	ListClusters(context.Context, models.Cluster) ([]models.Cluster, error)
-	DeleteCluster(context.Context, models.Cluster) error
-	CreateCluster(context.Context, models.Cluster) (*models.Cluster, error)
-	UpdateCluster(context.Context, models.Cluster) (*models.Cluster, error)
-
-	GetNamespace(context.Context, models.Namespace) (*models.Namespace, error)
-	ListNamespaces(context.Context) ([]models.Namespace, error)
-	DeleteNamespace(context.Context, models.Namespace) error
-	CreateNamespace(context.Context, models.Namespace) (*models.Namespace, error)
-	UpdateNamespace(context.Context, models.Namespace) (*models.Namespace, error)
-
-	GetClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-	ListClusterAccessSessions(context.Context, models.ClusterAccessSession) ([]models.ClusterAccessSession, error)
-	DeleteClusterAccessSession(context.Context, models.ClusterAccessSession) error
-	CreateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-	UpdateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-
-	ListRegistrationTokens(context.Context, models.ClusterRegistrationToken) ([]models.ClusterRegistrationToken, error)
-	DeleteRegistrationToken(context.Context, models.ClusterRegistrationToken) error
-	GetClusterRegistrationToken(context.Context, models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
-	CreateRegistrationToken(context.Context, models.ClusterRegistrationToken) (*models.ClusterRegistrationToken, error)
-
 	GetUser(context.Context, models.User) (*models.User, error)
 	ListUsers(context.Context, models.User) ([]models.User, error)
 	DeleteUser(context.Context, models.User) error
 	CreateUser(context.Context, models.User) (*models.User, error)
 	UpdateUser(context.Context, models.User) (*models.User, error)
 
-	// ListAllClusterAccessSessions will list all cluster sessions. Should not be used
-	// in user context in any ways.
-	ListAllClusterAccessSessions(context.Context) ([]models.ClusterAccessSession, error)
+	SubscribeChanges(ctx context.Context, callback func(event *models.Event) error) error
 
-	// Status is a healthcheck endpoint
+	// Status is a health check endpoint
 	Status() (interface{}, error)
 	RawDB() interface{}
 	Close() error

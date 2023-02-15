@@ -100,7 +100,7 @@ func TestGenerateKeyAndCertificate(t *testing.T) {
 					t.Error(certs[0].NotAfter)
 				}
 			} else {
-				if certs[0].NotBefore.AddDate(10, 0, 0) != certs[0].NotAfter {
+				if certs[0].NotBefore.AddDate(1, 0, 0) != certs[0].NotAfter {
 					t.Error(certs[0].NotBefore, certs[0].NotAfter)
 				}
 			}

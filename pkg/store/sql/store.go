@@ -1,4 +1,4 @@
-package sql
+package storesql
 
 import (
 	"context"
@@ -6,36 +6,34 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	klog "k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/store"
-	"github.com/faroshq/faros/pkg/util/encryption"
 )
 
 var _ store.Store = &Store{}
 
 type Store struct {
-	log               *logrus.Entry
-	encryption        encryption.AEAD
-	encryptionEnabled bool
-	db                *gorm.DB
-	pgxPool           *pgxpool.Pool // used for pubsub if we need one
+	db      *gorm.DB
+	pgxPool *pgxpool.Pool // used for pubsub if we need one
 }
 
-func NewStore(log *logrus.Entry, c *config.ServerConfig) (*Store, error) {
+func NewStore(ctx context.Context, c *config.Database) (*Store, error) {
+	logger := klog.FromContext(ctx)
+	logger = logger.WithValues("database", c.Type)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	log = log.WithField("database", c.Database.Type)
-	db, pgxPool, err := connect(ctx, log, c)
+	db, pgxPool, err := connect(ctx, c)
 	if err != nil {
 		return nil, err
 	}
 
-	log.WithField("dialector", db.Dialector.Name()).Info("Initializing database store")
+	logger.WithValues("dialector", db.Dialector.Name()).Info("Initializing database store")
 
 	if db.Dialector.Name() == sqlite.DriverName {
 		err = db.Exec("PRAGMA foreign_keys = ON").Error
@@ -45,18 +43,8 @@ func NewStore(log *logrus.Entry, c *config.ServerConfig) (*Store, error) {
 	}
 
 	s := &Store{
-		log:     log.WithField("component", "store"),
 		db:      db,
 		pgxPool: pgxPool,
-	}
-
-	// set encryption if enabled
-	if c.Controller.EncryptionKeys != nil && len(c.Controller.EncryptionKeys) > 0 {
-		s.encryption, err = encryption.NewMulti(ctx, c)
-		if err != nil {
-			return nil, err
-		}
-		s.encryptionEnabled = true
 	}
 
 	err = s.migrate(ctx, c)

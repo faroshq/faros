@@ -1,61 +1,58 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"k8s.io/client-go/rest"
+)
 
 const (
 	ConfigFileName = "config.yaml"
 )
 
-type ServerConfig struct {
-	API        API        `yaml:"api,omitempty"`
-	Database   Database   `yaml:"database,omitempty"`
-	Controller Controller `yaml:"controller,omitempty"`
-}
+type APIConfig struct {
+	// Addr is the address to bind the controller to.
+	Addr string `envconfig:"FAROS_API_ADDR" required:"true" default:":8443"`
+	// ControllerExternalURL is the URL that the controller is externally reachable at.
+	ControllerExternalURL string `envconfig:"FAROS_API_EXTERNAL_URL" required:"true" default:"https://faros.dev.faros.sh"`
 
-type AgentConfig struct {
-	// ServerURI is the URI of the server to connect to
-	ServerURI string `envconfig:"FAROS_SERVER_URI" yaml:"serverURI,omitempty"`
-	// AccessKey is the access key used to authenticate with the server
-	AccessKey string `envconfig:"FAROS_ACCESS_KEY" yaml:"accessKey,omitempty"`
-	// ClusterID is the ID of the cluster this agent is running on
-	ClusterID string `envconfig:"FAROS_CLUSTER_ID" yaml:"clusterID,omitempty"`
-	// AccessID is the ID of the access object
-	AccessID string `envconfig:"FAROS_ACCESS_ID" yaml:"accessID,omitempty"`
-	// NamespaceID is the ID of the namespace this agent is running in
-	NamespaceID string `envconfig:"FAROS_NAMESPACE_ID" yaml:"namespaceID,omitempty"`
-}
+	// Important: HostingClusterKubeConfigPath is used to dynamically read secrets for trust. For now single secrets we
+	// require in API server context is OIDC CA bundle from Dex. If removed this dependency, this can be
+	// removed.
+	// HostingClusterKubeConfig is the path to the kubeconfig file for the hosting cluster.
+	HostingClusterKubeConfigPath string `envconfig:"FAROS_API_HOSTING_CLUSTER_KUBECONFIG" required:"true" default:"cluster.kubeconfig"`
+	// HostingClusterNamespace is the namespace in the hosting cluster where the controller will run.
+	HostingClusterNamespace string `envconfig:"FAROS_API_HOSTING_CLUSTER_NAMESPACE" required:"true" default:"kcp"`
+	// HostingClusterRestConfig is the rest config for the hosting cluster.
+	// Loaded from HostingClusterKubeConfig.
+	HostingClusterRestConfig *rest.Config `envconfig:"-"`
 
-type Controller struct {
-	// SessionExpireInterval is the interval at which sessions are checked for expiration
-	SessionExpireInterval time.Duration `envconfig:"FAROS_SESSION_EXPIRE_INTERVAL" default:"30s"`
-	// SessionPurgeTTL is the time after which sessions are purged after expiration
-	SessionPurgeTTL time.Duration `envconfig:"FAROS_SESSION_PURGE_TTL" default:"1h"`
-	// EncryptionKeys is the keys used for encrypting and decrypting secret fields
-	// in the database. If one key fails to decrypt, second is used. Last key is used to seal the secrets
-	EncryptionKeys []string `envconfig:"FAROS_ENCRYPTION_KEYS" default:"tDPRu/wtFeSRnnfU4rNXWKhvjq+H+pL+s6mU5+hH9XZmAxAIy8tUKN6fO4lbmBiSY6zSq0x/Zwf+a3X3DnbNCg=="`
-	// CloudRefreshInterval is the interval at which cloud resources are refreshed
-	CloudRefreshInterval time.Duration `envconfig:"FAROS_CLOUD_REFRESH_INTERVAL" default:"30s"`
-	// AzureCredentials is the credentials used to authenticate with Azure
-	AzureCredentials AzureCredentials `yaml:"azure_credentials,omitempty"`
-}
+	// KCPClusterKubeConfigPath is the path to the kubeconfig file for the kcp cluster
+	KCPClusterKubeConfigPath string `envconfig:"FAROS_API_KCP_CLUSTER_KUBECONFIG" required:"true" default:"kcp.kubeconfig"`
+	// KCPClusterRestConfig is the rest config for the KCP cluster.
+	// Used to manage users, workspaces, etc
+	KCPClusterRestConfig *rest.Config `envconfig:"-"`
 
-type API struct {
-	URI                     string   `envconfig:"FAROS_API_URI" default:"0.0.0.0:8443"`
-	AllowedOrigins          []string `envconfig:"FAROS_API_ALLOWED_ORIGIN" default:""`
-	TLSKeyPath              string   `envconfig:"FAROS_API_TLS_KEY" default:"/faros-secrets/localhost.key"`
-	TLSCertPath             string   `envconfig:"FAROS_API_TLS_CERT" default:"/faros-secrets/localhost.crt"`
-	AuthenticationProviders []string `envconfig:"FAROS_API_AUTHENTICATION_PROVIDERS" default:"basicauth"`
+	// In prod we use auto-certs so this is not an issue.
+	// TODO: Add support for auto-certs
+	TLSKeyFile  string `envconfig:"FAROS_TLS_KEY_FILE" default:""`
+	TLSCertFile string `envconfig:"FAROS_TLS_CERT_FILE" default:""`
 
-	BasicAuthAuthenticationProviderFile string `envconfig:"FAROS_API_BASICAUTH_AUTHENTICATION_PROVIDER_FILE" default:"/faros-secrets/htpasswd"`
+	// OIDC provider configuration
+	OIDCIssuerURL      string `envconfig:"FAROS_OIDC_ISSUER_URL" yaml:"oidcIssuerURL,omitempty" default:"https://dex.dev.faros.sh"`
+	OIDCClientID       string `envconfig:"FAROS_OIDC_CLIENT_ID" yaml:"oidcClientID,omitempty" default:"faros"`
+	OIDCClientSecret   string `envconfig:"FAROS_OIDC_CLIENT_SECRET" yaml:"oidcClientSecret,omitempty" default:"faros"`
+	OIDCCASecretName   string `envconfig:"FAROS_OIDC_CA_SECRET_NAME" yaml:"oidcCASecretName,omitempty" default:"dex-pki-ca"`
+	OIDCUsernameClaim  string `envconfig:"FAROS_OIDC_USERNAME_CLAIM" yaml:"oidcFarosUsernameClaim,omitempty" default:"email"`
+	OIDCUserPrefix     string `envconfig:"FAROS_OIDC_USER_PREFIX" yaml:"oidcUserPrefix,omitempty" default:"faros-sso-"`
+	OIDCGroupsPrefix   string `envconfig:"FAROS_OIDC_GROUPS_PREFIX" yaml:"oidcGroupsPrefix,omitempty" default:"faros-sso-"`
+	OIDCAuthSessionKey string `envconfig:"FAROS_OIDC_AUTH_SESSION_KEY" yaml:"oidcAuthSessionKey,omitempty" default:""`
 
-	// loaded config after parsing
-	TLSEnabled bool
-	TLSKey     []byte `yaml:"-"`
-	TLSCert    []byte `yaml:"-"`
+	Database Database `yaml:"database,omitempty"`
 }
 
 type Database struct {
-	SqliteURI string `envconfig:"FAROS_DATABASE_SQLITE_URI" default:"file::memory:?cache=shared"`
+	SqliteURI string `envconfig:"FAROS_DATABASE_SQLITE_URI" default:"dev/database.sqlite3"`
 	// Name of the database
 	Name string `envconfig:"FAROS_DATABASE_NAME" default:"faros"`
 	// Type is the type of database to use.
@@ -72,12 +69,4 @@ type Database struct {
 	MaxConnIdleTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_IDLE_TIME" default:"30s"`
 	//MaxConnLifeTime is the maximum amount of time a database connection can be used
 	MaxConnLifeTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_LIFE_TIME" default:"1h"`
-}
-
-// AzureCredentials contains the credentials for Azure
-type AzureCredentials struct {
-	SubscriptionID string `envconfig:"AZURE_SUBSCRIPTION_ID" default:""`
-	TenantID       string `envconfig:"AZURE_TENANT_ID" default:""`
-	ClientID       string `envconfig:"AZURE_CLIENT_ID" default:""`
-	ClientSecret   string `envconfig:"AZURE_CLIENT_SECRET" default:""`
 }

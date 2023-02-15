@@ -1,8 +1,9 @@
-package sql
+package storesql
 
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
 
@@ -16,8 +17,8 @@ func (s *Store) GetUser(ctx context.Context, p models.User) (*models.User, error
 	switch {
 	case p.ID != "":
 		// OK, getting by ID
-	case p.Email != "" && p.ProviderName == models.AuthenticationProviderBasicAuth:
-		// Ok getting my email for basic auth
+	case p.Email != "":
+		// OK, getting by Email
 	default:
 		return nil, store.ErrFailToQuery
 	}
@@ -35,12 +36,15 @@ func (s *Store) GetUser(ctx context.Context, p models.User) (*models.User, error
 
 // CreateUser creates user and assigns unique ID
 func (s *Store) CreateUser(ctx context.Context, p models.User) (*models.User, error) {
-	p.ID = models.NewUserID()
+	p.ID = uuid.New().String()
 
 	err := s.db.WithContext(ctx).Create(&p).Error
 	if err != nil {
 		return nil, err
 	}
+
+	s.notifyUpdatedUser(ctx, p.ID, models.EventCreated)
+
 	return s.GetUser(ctx, models.User{ID: p.ID})
 }
 
@@ -54,10 +58,12 @@ func (s *Store) UpdateUser(ctx context.Context, p models.User) (*models.User, er
 	}
 
 	query := models.User{ID: p.ID}
-	err := s.db.WithContext(ctx).Model(&models.Cluster{}).Where(&query).Save(&p).Error
+	err := s.db.WithContext(ctx).Model(&models.User{}).Where(&query).Save(&p).Error
 	if err != nil {
 		return nil, err
 	}
+
+	s.notifyUpdatedUser(ctx, p.ID, models.EventUpdated)
 
 	return s.GetUser(ctx, models.User{ID: p.ID})
 }
@@ -83,9 +89,7 @@ func (s *Store) ListUsers(ctx context.Context, p models.User) ([]models.User, er
 		return nil, err
 	}
 
-	for idx := range results {
-		results[idx].PasswordHash = "redacted"
-	}
+	s.notifyUpdatedUser(ctx, p.ID, models.EventDeleted)
 
 	return results, nil
 }
