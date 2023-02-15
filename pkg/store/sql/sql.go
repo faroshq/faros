@@ -9,6 +9,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
 	klog "k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/config"

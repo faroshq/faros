@@ -7,10 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
+	klog "k8s.io/klog/v2"
+
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/models"
-	"gorm.io/gorm"
-	klog "k8s.io/klog/v2"
 )
 
 func (s *Store) migrate(ctx context.Context, c *config.Database) error {
@@ -36,11 +38,12 @@ func (s *Store) migrate(ctx context.Context, c *config.Database) error {
 	}
 
 	if c.Type == DatabaseTypePostgres {
-		// TODO
+		fmt.Println("Creating foreign keys")
 	}
 	return nil
 }
 
+//lint:ignore U1000 used later
 func createFK(db *gorm.DB, src, dst interface{}, fk, pk string, onDelete, onUpdate string) error {
 	srcTableName := db.NamingStrategy.TableName(reflect.TypeOf(src).Name())
 	dstTableName := db.NamingStrategy.TableName(reflect.TypeOf(dst).Name())

@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v4/pgxpool"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
 	klog "k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/config"

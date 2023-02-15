@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/handlers"
 	"go.uber.org/zap"
+
 	"k8s.io/klog/v2"
 )
 
@@ -58,11 +59,6 @@ func (w *logResponseWriter) WriteHeader(statusCode int) {
 func (w *logResponseWriter) Flush() {
 	flucher := w.ResponseWriter.(http.Flusher)
 	flucher.Flush()
-}
-
-func (w *logResponseWriter) CloseNotify() <-chan bool {
-	notify := w.ResponseWriter.(http.CloseNotifier)
-	return notify.CloseNotify()
 }
 
 type logReadCloser struct {

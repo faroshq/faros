@@ -15,17 +15,19 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc"
-	"github.com/faroshq/faros/pkg/config"
-	"github.com/faroshq/faros/pkg/models"
-	"github.com/faroshq/faros/pkg/store"
 	"github.com/golang-jwt/jwt/request"
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/models"
+	"github.com/faroshq/faros/pkg/store"
 	utiltls "github.com/faroshq/faros/pkg/util/tls"
 )
 
@@ -119,7 +121,9 @@ func (a *AuthenticatorImpl) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 	// Getting the session, it's not an issue if we error here
 	session, err := a.oAuthSessions.Get(r, "sess")
 	if err != nil {
-		// print error
+		klog.Error(err)
+		http.Error(w, fmt.Sprintf("failed to get session: %q", r.Form), http.StatusBadRequest)
+		return
 	}
 
 	session.Values["state"] = state

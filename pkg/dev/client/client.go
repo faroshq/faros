@@ -5,10 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/aojea/h2rev2"
@@ -28,7 +28,7 @@ type Client struct {
 }
 
 func New(upstreamURL, downstreamURL, clientCertFile, clientCertKeyFile, clientID string) (*Client, error) {
-	certFile, err := ioutil.ReadFile(clientCertFile)
+	certFile, err := os.ReadFile(clientCertFile)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func New(upstreamURL, downstreamURL, clientCertFile, clientCertKeyFile, clientID
 	pool := x509.NewCertPool()
 	pool.AddCert(clientCert)
 
-	keyFile, err := ioutil.ReadFile(clientCertKeyFile)
+	keyFile, err := os.ReadFile(clientCertKeyFile)
 	if err != nil {
 		return nil, err
 	}

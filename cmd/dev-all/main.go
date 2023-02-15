@@ -6,10 +6,11 @@ import (
 	"os"
 	"strings"
 
+	"k8s.io/klog/v2"
+
 	"github.com/faroshq/faros/pkg/config"
 	devproxyclient "github.com/faroshq/faros/pkg/dev/client"
 	"github.com/faroshq/faros/pkg/server"
-	"k8s.io/klog/v2"
 )
 
 func main() {

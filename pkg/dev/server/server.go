@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/faroshq/faros/pkg/util/revdial"
 	"github.com/pkg/errors"
+
 	"k8s.io/klog"
+
+	"github.com/faroshq/faros/pkg/util/revdial"
 )
 
 var _ Interface = &Service{}

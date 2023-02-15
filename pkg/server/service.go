@@ -8,29 +8,25 @@ import (
 
 	health "github.com/InVisionApp/go-health/v2"
 	healthhandlers "github.com/InVisionApp/go-health/v2/handlers"
-	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
-	"github.com/faroshq/faros/pkg/server/auth"
-	"github.com/faroshq/faros/pkg/store"
-	"github.com/faroshq/faros/pkg/util/recover"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-
 	kcpclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 	"go.uber.org/zap"
+
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/klog"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/server/auth"
+	"github.com/faroshq/faros/pkg/store"
 	storesql "github.com/faroshq/faros/pkg/store/sql"
+	"github.com/faroshq/faros/pkg/util/recover"
 )
 
 var (
-	scheme       = runtime.NewScheme()
-	codecs       = serializer.NewCodecFactory(scheme)
-	limit  int64 = 1024 * 1024 * 10
+	scheme = runtime.NewScheme()
 )
 
 func init() {
@@ -58,8 +54,7 @@ type Service struct {
 	health        *health.Health
 	store         store.Store
 
-	kcpClient   kcpclient.ClusterInterface
-	farosClient farosclient.Interface
+	kcpClient kcpclient.ClusterInterface
 }
 
 func New(ctx context.Context, config *config.APIConfig) (*Service, error) {

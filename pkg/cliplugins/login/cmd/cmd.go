@@ -1,9 +1,11 @@
 package cmd
 
 import (
-	"github.com/faroshq/faros/pkg/cliplugins/login/plugin"
 	"github.com/spf13/cobra"
+
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+
+	"github.com/faroshq/faros/pkg/cliplugins/login/plugin"
 )
 
 // New provides a cobra command for login

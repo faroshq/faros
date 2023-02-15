@@ -6,17 +6,17 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/faroshq/faros/pkg/models"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
+
 	klog "k8s.io/klog/v2"
+
+	"github.com/faroshq/faros/pkg/models"
 )
 
 const (
-	channelWorkspaceUpdates  = "workspace_updates"
-	channelUserUpdates       = "user_updates"
-	channelMembershipUpdates = "membership_updates"
+	channelUserUpdates = "user_updates"
 )
 
 // SubscribeChanges subscribes to changes in the database
@@ -89,16 +89,8 @@ func (s *Store) subscribeChangesSQLite(ctx context.Context, callback func(event 
 	}
 }
 
-func (s *Store) notifyUpdatedMembership(ctx context.Context, membershipID string, event models.EventType) {
-	s._notify(ctx, membershipID, channelMembershipUpdates, event)
-}
-
 func (s *Store) notifyUpdatedUser(ctx context.Context, userID string, event models.EventType) {
 	s._notify(ctx, userID, channelUserUpdates, event)
-}
-
-func (s *Store) notifyUpdatedWorkspace(ctx context.Context, workspaceID string, event models.EventType) {
-	s._notify(ctx, workspaceID, channelWorkspaceUpdates, event)
 }
 
 func (s *Store) _notify(ctx context.Context, id, channel string, event models.EventType) {
@@ -114,12 +106,8 @@ func (s *Store) _notifySQLlite(ctx context.Context, id, channel string, event mo
 
 	var resource models.EventResource
 	switch channel {
-	case channelMembershipUpdates:
-		resource = models.EventResourceMembership
 	case channelUserUpdates:
 		resource = models.EventResourceUser
-	case channelWorkspaceUpdates:
-		resource = models.EventResourceWorkspace
 	}
 
 	e := &models.Event{
@@ -144,12 +132,8 @@ func (s *Store) _notifyPostgres(ctx context.Context, id, channel string, event m
 
 	var resource models.EventResource
 	switch channel {
-	case channelMembershipUpdates:
-		resource = models.EventResourceMembership
 	case channelUserUpdates:
 		resource = models.EventResourceUser
-	case channelWorkspaceUpdates:
-		resource = models.EventResourceWorkspace
 	}
 
 	bts, err := json.Marshal(&models.Event{

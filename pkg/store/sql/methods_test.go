@@ -7,10 +7,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/models"
 	databasetest "github.com/faroshq/faros/test/util/database"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // TestCascade tests if records deletes cascades

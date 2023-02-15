@@ -11,15 +11,17 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/faroshq/faros/pkg/models"
 	"github.com/kcp-dev/kcp/pkg/cliplugins/base"
 	"github.com/skratchdot/open-golang/open"
 	"github.com/spf13/cobra"
+
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog"
+
+	"github.com/faroshq/faros/pkg/models"
 )
 
 var kubeConfigAuthKey = "faros"

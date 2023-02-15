@@ -7,6 +7,7 @@ import (
 	kcpclienthelper "github.com/kcp-dev/apimachinery/pkg/client"
 	kcpclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned"
 	"github.com/kcp-dev/logicalcluster/v3"
+
 	"k8s.io/client-go/rest"
 )
 

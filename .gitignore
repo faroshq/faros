@@ -6,3 +6,4 @@ release
 /dev
 profile.cov
 *.kubeconfig
+/hack/tools/*

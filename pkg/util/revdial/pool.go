@@ -28,11 +28,6 @@ type controlMsg struct {
 	Err      string `json:"err,omitempty"`
 }
 
-// ReversePool contains a pool of Dialers to create reverse connections
-// It exposes an http.Handler to handle the clients.
-// 	pool := h2rev2.NewReversePool()
-// 	mux := http.NewServeMux()
-//	mux.Handle("", pool)
 type ReversePool struct {
 	mu   sync.Mutex
 	pool map[string]*Dialer
@@ -96,7 +91,7 @@ func (rp *ReversePool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case error:
 				err = t
 			default:
-				err = errors.New("Unknown error")
+				err = errors.New("unknown error")
 			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -121,6 +116,7 @@ func (rp *ReversePool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if d == nil || isClosedChan(d.Done()) {
 			conn := newConn(r.Body, flushWriter{w})
 			rp.DeleteDialer(identity)
+			//lint:ignore SA4006 we want to create a new dialer
 			d = rp.CreateDialer(identity, conn)
 			// start control loop
 			<-conn.Done()

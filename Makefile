@@ -20,6 +20,11 @@ CONTROLLER_GEN_BIN := controller-gen
 CONTROLLER_GEN := $(TOOLS_DIR)/$(CONTROLLER_GEN_BIN)-$(CONTROLLER_GEN_VER)
 export CONTROLLER_GEN # so hack scripts can use it
 
+OPENSHIFT_GOIMPORTS_VER := c72f1dc2e3aacfa00aece3391d938c9bc734e791
+OPENSHIFT_GOIMPORTS_BIN := openshift-goimports
+OPENSHIFT_GOIMPORTS := $(TOOLS_DIR)/$(OPENSHIFT_GOIMPORTS_BIN)-$(OPENSHIFT_GOIMPORTS_VER)
+export OPENSHIFT_GOIMPORTS # so hack scripts can use it
+
 #APIEXPORT_PREFIX ?= v$(shell date +'%Y%m%d')
 APIEXPORT_PREFIX = today
 
@@ -32,6 +37,13 @@ $(KUSTOMIZE): ## Download kustomize locally if necessary.
 	curl -s $(KUSTOMIZE_INSTALL_SCRIPT) | bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN)
 	touch $(KUSTOMIZE) # we download an "old" file, so make will re-download to refresh it unless we make it newer than the owning dir
 
+$(OPENSHIFT_GOIMPORTS):
+	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/openshift-eng/openshift-goimports $(OPENSHIFT_GOIMPORTS_BIN) $(OPENSHIFT_GOIMPORTS_VER)
+
+.PHONY: imports
+imports: $(OPENSHIFT_GOIMPORTS)
+	$(OPENSHIFT_GOIMPORTS) -m github.com/faroshq/faros
+
 manifests:  ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crds/bases | true
 	make generate
@@ -41,7 +53,7 @@ apiresourceschemas: $(KUSTOMIZE) ## Convert CRDs from config/crds to APIResource
 	$(KUSTOMIZE) build config/crds | kubectl kcp crd snapshot -f - --prefix $(APIEXPORT_PREFIX) > config/kcp/$(APIEXPORT_PREFIX).apiresourceschemas.yaml
 	make generate
 
-tools:$(CONTROLLER_GEN) $(CODE_GENERATOR)
+tools:$(CONTROLLER_GEN) $(CODE_GENERATOR) $(OPENSHIFT_GOIMPORTS)
 .PHONY: tools
 
 $(CONTROLLER_GEN):
@@ -51,6 +63,7 @@ codegen: $(CONTROLLER_GEN) $(CODE_GENERATOR) generate ## Run the codegenerators
 	echo $(CODE_GENERATOR)
 	go mod download
 	./hack/update-codegen.sh
+	make lint
 .PHONY: codegen
 
 generate:
@@ -58,9 +71,8 @@ generate:
 
 lint:
 	gofmt -s -w cmd hack pkg
-	go run golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
-	go run ./hack/validate-imports cmd hack pkg
 	staticcheck ./...
+	make imports
 
 setup-kind:
 	./hack/dev/setup-kind.sh

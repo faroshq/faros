@@ -5,9 +5,10 @@ import (
 	"flag"
 	"strings"
 
+	"k8s.io/klog/v2"
+
 	devproxyclient "github.com/faroshq/faros/pkg/dev/client"
 	devproxyserver "github.com/faroshq/faros/pkg/dev/server"
-	"k8s.io/klog/v2"
 )
 
 var (
