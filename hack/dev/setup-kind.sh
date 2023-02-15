@@ -16,7 +16,7 @@ CLUSTER_NAME=kcp
 if ! kind get clusters | grep -w -q "${CLUSTER_NAME}"; then
 kind create cluster --name kcp \
      --kubeconfig ./cluster.kubeconfig \
-     --config ./hack/kind/config.yaml
+     --config ./hack/dev/kind/config.yaml
 else
     echo "Cluster already exists"
 fi
@@ -69,7 +69,7 @@ mkdir -p ./dev
 [ ! -d "./dev/kcp-chart" ] && git clone https://github.com/mjudeikis/helm-charts.git -b local.dev ./dev/kcp-chart
 
 helm upgrade -i kcp ./dev/kcp-chart/charts/kcp \
-     --values ./hack/kcp/values.yaml \
+     --values ./hack/dev/kcp/values.yaml \
      --set kcp.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
      --set kcpFrontProxy.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
      --namespace kcp \
@@ -88,7 +88,7 @@ fi
 echo "Install Faros"
 
 helm upgrade -i faros ./charts/faros-dev \
-     --values ./hack/faros/values.yaml \
+     --values ./hack/dev/faros/values.yaml \
      --namespace kcp
 
 

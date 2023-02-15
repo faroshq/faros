@@ -63,10 +63,10 @@ lint:
 	staticcheck ./...
 
 setup-kind:
-	./hack/setup-kind.sh
+	./hack/dev/setup-kind.sh
 
 delete-kind:
-	./hack/delete-kind.sh
+	./hack/dev/delete-kind.sh
 	rm -rf dev/database.sqlite3
 
 images:
