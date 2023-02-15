@@ -21,7 +21,7 @@ import (
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/server/auth"
 	"github.com/faroshq/faros/pkg/store"
-	storesql "github.com/faroshq/faros/pkg/store/sql"
+	k8sstore "github.com/faroshq/faros/pkg/store/k8s"
 	"github.com/faroshq/faros/pkg/util/recover"
 )
 
@@ -47,7 +47,7 @@ const (
 )
 
 type Service struct {
-	config        *config.APIConfig
+	config        config.APIConfig
 	authenticator auth.Authenticator
 	server        *http.Server
 	router        *mux.Router
@@ -57,18 +57,21 @@ type Service struct {
 	kcpClient kcpclient.ClusterInterface
 }
 
-func New(ctx context.Context, config *config.APIConfig) (*Service, error) {
-	store, err := storesql.NewStore(ctx, &config.Database)
+func New(ctx context.Context, config *config.Config) (*Service, error) {
+	apiConfig := config.APIConfig
+	kcpConfig := config.FarosKCPConfig
+
+	store, err := k8sstore.New(ctx, *config)
 	if err != nil {
 		return nil, err
 	}
-	kcpClient, err := kcpclient.NewForConfig(config.KCPClusterRestConfig)
+	kcpClient, err := kcpclient.NewForConfig(kcpConfig.KCPClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}
 
 	authenticator, err := auth.NewAuthenticator(
-		config,
+		*config,
 		store,
 		path.Join(pathAPIVersion, pathOIDCCallback),
 	)
@@ -77,7 +80,7 @@ func New(ctx context.Context, config *config.APIConfig) (*Service, error) {
 	}
 
 	s := &Service{
-		config:        config,
+		config:        apiConfig,
 		health:        health.New(),
 		store:         store,
 		kcpClient:     kcpClient,
@@ -92,7 +95,7 @@ func New(ctx context.Context, config *config.APIConfig) (*Service, error) {
 	apiRouter.HandleFunc(pathOIDCCallback, s.oidcCallback) // /faros.sh/api/v1alpha1/oidc/callback
 
 	s.server = &http.Server{
-		Addr: config.Addr,
+		Addr: apiConfig.Addr,
 		Handler: handlers.CORS(
 			handlers.AllowCredentials(),
 			handlers.AllowedHeaders([]string{"Content-Type"}),
@@ -109,12 +112,7 @@ func (s *Service) Run(ctx context.Context) error {
 		defer recover.Panic()
 		<-ctx.Done()
 
-		err := s.store.Close()
-		if err != nil {
-			klog.Errorf("Error closing store: %v", err)
-		}
-
-		err = s.health.Stop()
+		err := s.health.Stop()
 		if err != nil {
 			klog.Error(err)
 		}

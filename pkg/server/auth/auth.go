@@ -16,10 +16,10 @@ import (
 
 	"github.com/coreos/go-oidc"
 	"github.com/golang-jwt/jwt/request"
-	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -37,16 +37,16 @@ type Authenticator interface {
 	// OIDCCallback will handle OIDC callback
 	OIDCCallback(w http.ResponseWriter, r *http.Request)
 	// Authenticate will authenticate the request if user already exists
-	Authenticate(r *http.Request) (authenticated bool, user *models.User, err error)
+	Authenticate(r *http.Request) (authenticated bool, user *tenancyv1alpha1.User, err error)
 	// ParseJWTToken will parse the JWT token and return the user
-	ParseJWTToken(ctx context.Context, token string) (user *models.User, err error)
+	ParseJWTToken(ctx context.Context, token string) (user *tenancyv1alpha1.User, err error)
 }
 
 // Static check
 var _ Authenticator = &AuthenticatorImpl{}
 
 type AuthenticatorImpl struct {
-	config *config.APIConfig
+	config config.Config
 
 	oAuthSessions *sessions.CookieStore
 	store         store.Store
@@ -56,16 +56,16 @@ type AuthenticatorImpl struct {
 	client        *http.Client
 }
 
-func NewAuthenticator(cfg *config.APIConfig, store store.Store, callbackURLPrefix string) (*AuthenticatorImpl, error) {
+func NewAuthenticator(cfg config.Config, store store.Store, callbackURLPrefix string) (*AuthenticatorImpl, error) {
 	var client *http.Client
 	var err error
 
-	hostingCoreClient, err := kubernetes.NewForConfig(cfg.HostingClusterRestConfig)
+	hostingCoreClient, err := kubernetes.NewForConfig(cfg.FarosKCPConfig.HostingClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	secret, err := hostingCoreClient.CoreV1().Secrets(cfg.HostingClusterNamespace).Get(context.Background(), cfg.OIDCCASecretName, metav1.GetOptions{})
+	secret, err := hostingCoreClient.CoreV1().Secrets(cfg.FarosKCPConfig.HostingClusterNamespace).Get(context.Background(), cfg.APIConfig.OIDCCASecretName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -83,17 +83,17 @@ func NewAuthenticator(cfg *config.APIConfig, store store.Store, callbackURLPrefi
 		return nil, err
 	}
 
-	redirectURL := cfg.ControllerExternalURL + callbackURLPrefix
+	redirectURL := cfg.APIConfig.ControllerExternalURL + callbackURLPrefix
 
 	ctx := oidc.ClientContext(context.Background(), client)
 
-	provider, err := oidc.NewProvider(ctx, cfg.OIDCIssuerURL)
+	provider, err := oidc.NewProvider(ctx, cfg.APIConfig.OIDCIssuerURL)
 	if err != nil {
 		return nil, err
 	}
 	// Create an ID token parser, but only trust ID tokens issued to "example-app"
 	verifier := provider.Verifier(&oidc.Config{
-		ClientID: cfg.OIDCClientID,
+		ClientID: cfg.APIConfig.OIDCClientID,
 	})
 
 	da := &AuthenticatorImpl{
@@ -103,7 +103,7 @@ func NewAuthenticator(cfg *config.APIConfig, store store.Store, callbackURLPrefi
 		provider:      provider,
 		client:        client,
 		redirectURL:   redirectURL,
-		oAuthSessions: sessions.NewCookieStore([]byte(cfg.OIDCAuthSessionKey)),
+		oAuthSessions: sessions.NewCookieStore([]byte(cfg.APIConfig.OIDCAuthSessionKey)),
 	}
 	return da, nil
 }
@@ -232,7 +232,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		IDToken:       *idToken,
 		RawIDToken:    rawIDToken,
 		Email:         claims.Email,
-		ServerBaseURL: fmt.Sprintf("%s/clusters", a.config.ControllerExternalURL),
+		ServerBaseURL: fmt.Sprintf("%s/clusters", a.config.APIConfig.ControllerExternalURL),
 	}
 
 	data, err := json.Marshal(response)
@@ -248,7 +248,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 }
 
-func (a *AuthenticatorImpl) Authenticate(r *http.Request) (authenticated bool, user *models.User, err error) {
+func (a *AuthenticatorImpl) Authenticate(r *http.Request) (authenticated bool, user *tenancyv1alpha1.User, err error) {
 	// Trying to authenticate via URL query (websocket for SSH/logs, SSE)
 	if urlQueryToken := r.URL.Query().Get("_t"); urlQueryToken != "" {
 		user, err = a.ParseJWTToken(r.Context(), urlQueryToken)
@@ -285,7 +285,7 @@ func (a *AuthenticatorImpl) Authenticate(r *http.Request) (authenticated bool, u
 }
 
 // ParseJWTToken validates token's validity and returns models.User that the token belongs to
-func (a *AuthenticatorImpl) ParseJWTToken(ctx context.Context, token string) (user *models.User, err error) {
+func (a *AuthenticatorImpl) ParseJWTToken(ctx context.Context, token string) (user *tenancyv1alpha1.User, err error) {
 	idToken, err := a.verifier.Verify(ctx, token)
 	if err != nil {
 		return nil, err
@@ -343,8 +343,8 @@ func httpClientForRootCAs(crt, key []byte) (*http.Client, error) {
 
 func (a *AuthenticatorImpl) oauth2Config(scopes []string) *oauth2.Config {
 	return &oauth2.Config{
-		ClientID:     a.config.OIDCClientID,
-		ClientSecret: a.config.OIDCClientSecret,
+		ClientID:     a.config.APIConfig.OIDCClientID,
+		ClientSecret: a.config.APIConfig.OIDCClientSecret,
 		Endpoint:     a.provider.Endpoint(),
 		Scopes:       scopes,
 		RedirectURL:  a.redirectURL,
@@ -352,9 +352,9 @@ func (a *AuthenticatorImpl) oauth2Config(scopes []string) *oauth2.Config {
 }
 
 // registerOrUpdateUser will register or update user in the system when user is authenticated
-func (a *AuthenticatorImpl) registerOrUpdateUser(ctx context.Context, email string) (*models.User, error) {
+func (a *AuthenticatorImpl) registerOrUpdateUser(ctx context.Context, email string) (*tenancyv1alpha1.User, error) {
 	current, err := a.getUser(ctx, email)
-	if err != nil && err != store.ErrRecordNotFound {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 
@@ -363,23 +363,20 @@ func (a *AuthenticatorImpl) registerOrUpdateUser(ctx context.Context, email stri
 		return current, nil
 	} else {
 		// create the user
-		return a.store.CreateUser(ctx, models.User{
-			Email: email,
-			User: tenancyv1alpha1.User{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: uuid.New().String(),
-				},
-				Spec: tenancyv1alpha1.UserSpec{
-					Email: email,
-				},
+		return a.store.CreateUser(ctx, tenancyv1alpha1.User{
+			ObjectMeta: metav1.ObjectMeta{},
+			Spec: tenancyv1alpha1.UserSpec{
+				Email: email,
 			},
 		})
 	}
 }
 
-func (a *AuthenticatorImpl) getUser(ctx context.Context, email string) (*models.User, error) {
-	user, err := a.store.GetUser(ctx, models.User{
-		Email: email,
+func (a *AuthenticatorImpl) getUser(ctx context.Context, email string) (*tenancyv1alpha1.User, error) {
+	user, err := a.store.GetUser(ctx, tenancyv1alpha1.User{
+		Spec: tenancyv1alpha1.UserSpec{
+			Email: email,
+		},
 	})
 	if err != nil {
 		return nil, err

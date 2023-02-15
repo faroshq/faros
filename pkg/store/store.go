@@ -2,25 +2,14 @@ package store
 
 import (
 	"context"
-	"errors"
 
-	"github.com/faroshq/faros/pkg/models"
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 )
 
 type Store interface {
-	GetUser(context.Context, models.User) (*models.User, error)
-	ListUsers(context.Context, models.User) ([]models.User, error)
-	DeleteUser(context.Context, models.User) error
-	CreateUser(context.Context, models.User) (*models.User, error)
-	UpdateUser(context.Context, models.User) (*models.User, error)
-
-	SubscribeChanges(ctx context.Context, callback func(event *models.Event) error) error
-
-	// Status is a health check endpoint
-	Status() (interface{}, error)
-	RawDB() interface{}
-	Close() error
+	GetUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
+	ListUsers(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.UserList, error)
+	DeleteUser(context.Context, tenancyv1alpha1.User) error
+	CreateUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
+	UpdateUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
 }
-
-var ErrFailToQuery = errors.New("malformed request. failed to query")
-var ErrRecordNotFound = errors.New("object not found")

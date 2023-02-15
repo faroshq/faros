@@ -9,6 +9,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/config"
+	"github.com/faroshq/faros/pkg/controllers"
 	devproxyclient "github.com/faroshq/faros/pkg/dev/client"
 	"github.com/faroshq/faros/pkg/server"
 )
@@ -45,7 +46,7 @@ func run(ctx context.Context) error {
 		}
 	}
 
-	ca, err := config.LoadAPI()
+	cfg, err := config.LoadAPI()
 	if err != nil {
 		return err
 	}
@@ -57,12 +58,18 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	server, err := server.New(ctx, ca)
+	server, err := server.New(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	controller, err := controllers.New(cfg)
 	if err != nil {
 		return err
 	}
 
 	go server.Run(ctx)
+	go controller.Run(ctx)
 	go clientAPI.Run(ctx)
 
 	<-ctx.Done()

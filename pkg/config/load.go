@@ -17,8 +17,8 @@ import (
 // Loading order:
 // 1. Load .env file
 // 2. Load envconfig from ENV variables and defaults
-func LoadAPI() (*APIConfig, error) {
-	c := &APIConfig{}
+func LoadAPI() (*Config, error) {
+	c := &Config{}
 	godotenv.Load()
 
 	err := envconfig.Process("", c)
@@ -26,22 +26,22 @@ func LoadAPI() (*APIConfig, error) {
 		return c, err
 	}
 
-	if c.OIDCAuthSessionKey == "" {
+	if c.APIConfig.OIDCAuthSessionKey == "" {
 		fmt.Println("FAROS_OIDC_AUTH_SESSION_KEY not supplied, generating random one")
-		c.OIDCAuthSessionKey = uuid.Must(uuid.NewUUID()).String()
+		c.APIConfig.OIDCAuthSessionKey = uuid.Must(uuid.NewUUID()).String()
 	}
 
-	hostingKubeConfig, err := loadKubeConfig(c.HostingClusterKubeConfigPath)
+	hostingKubeConfig, err := loadKubeConfig(c.FarosKCPConfig.HostingClusterKubeConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load hosting cluster kubeconfig: %w", err)
 	}
 
-	c.HostingClusterRestConfig, err = hostingKubeConfig.ClientConfig()
+	c.FarosKCPConfig.HostingClusterRestConfig, err = hostingKubeConfig.ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load hosting cluster rest config: %w", err)
 	}
 
-	kcpKubeConfig, err := loadKubeConfig(c.KCPClusterKubeConfigPath)
+	kcpKubeConfig, err := loadKubeConfig(c.FarosKCPConfig.KCPClusterKubeConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kcp cluster kubeconfig: %w", err)
 	}
@@ -63,7 +63,7 @@ func LoadAPI() (*APIConfig, error) {
 		return nil, err
 	}
 
-	c.KCPClusterRestConfig = rest
+	c.FarosKCPConfig.KCPClusterRestConfig = rest
 
 	return c, err
 }

@@ -1,0 +1,6 @@
+resources:
+  - today.apiresourceschemas.yaml
+  - apiexport-tenancy.yaml
+
+configurations:
+  - kustomizeconfig.yaml
