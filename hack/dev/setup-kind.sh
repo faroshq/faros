@@ -51,7 +51,7 @@ echo "Install dex"
 [ ! -d "./dev/dex-chart" ] && git clone https://github.com/faroshq/dex-helm-charts -b master ./dev/dex-chart
 
 while ! helm upgrade -i dex ./dev/dex-chart/charts/dex \
-     --values ./hack/dex/values.yaml \
+     --values ./hack/dev/dex/values.yaml \
      --create-namespace \
      --namespace kcp \
      --wait \
@@ -72,11 +72,13 @@ helm upgrade -i kcp ./dev/kcp-chart/charts/kcp \
      --values ./hack/dev/kcp/values.yaml \
      --set kcp.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
      --set kcpFrontProxy.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
+     --set kcp.hostAliases.values[1].ip=$(kubectl get svc kcp-internal -n kcp -o json  | jq -r .spec.clusterIP) \
+     --set kcpFrontProxy.hostAliases.values[1].ip=$(kubectl get svc kcp-internal -n kcp -o json  | jq -r .spec.clusterIP) \
      --namespace kcp \
      --create-namespace
 
 echo "Generate KCP admin kubeconfig"
-./hack/generate-admin-kubeconfig.sh
+./hack/dev/generate-admin-kubeconfig.sh
 
 echo "Check /etc/hosts for kcp.dev.faros.sh"
 if ! grep -q kcp.dev.faros.sh /etc/hosts; then

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-hostname=$(cat ./hack/kcp/values.yaml | grep externalHostname | cut -d" " -f2- | tr -d '"')
+hostname=$(cat ./hack/dev/kcp/values.yaml | grep externalHostname | cut -d" " -f2- | tr -d '"')
 
 cat << EOF > kcp.kubeconfig
 apiVersion: v1

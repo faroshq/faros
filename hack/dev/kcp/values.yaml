@@ -9,6 +9,9 @@ kcp:
     - hostnames:
       - dex.dev.faros.sh
       ip: 127.0.0.1
+    - hostnames:
+      - kcp.dev.faros.sh
+      ip: 127.0.0.1
 kcpFrontProxy:
   openshiftRoute:
     enabled: false
@@ -26,6 +29,9 @@ kcpFrontProxy:
     - hostnames:
       - dex.dev.faros.sh
       ip: 127.0.0.1
+    - hostnames:
+      - kcp.dev.faros.sh
+      ip: 127.0.0.1
 oidc:
   enabled: true
   issuerUrl: https://dex.dev.faros.sh
@@ -35,3 +41,8 @@ oidc:
   usernamePrefix: faros-sso-
   groupsPrefix: faros-sso-
   caSecretName: dex-pki-ca
+certificates:
+  dnsNames:
+  - kcp
+  - localhost
+  - kcp.dev.faros.sh

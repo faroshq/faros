@@ -22,7 +22,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/config"
@@ -119,16 +118,11 @@ func (a *AuthenticatorImpl) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 	state := base64.URLEncoding.EncodeToString(b)
 
 	// Getting the session, it's not an issue if we error here
-	session, err := a.oAuthSessions.Get(r, "sess")
-	if err != nil {
-		klog.Error(err)
-		http.Error(w, fmt.Sprintf("failed to get session: %q", r.Form), http.StatusBadRequest)
-		return
-	}
+	session, _ := a.oAuthSessions.Get(r, "sess")
 
 	session.Values["state"] = state
 	session.Values["redirect_uri"] = localRedirect
-	err = a.oAuthSessions.Save(r, w, session)
+	err := a.oAuthSessions.Save(r, w, session)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed persist state: %q", r.Form), http.StatusBadRequest)
 		return
