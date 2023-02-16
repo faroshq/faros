@@ -11,13 +11,17 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	kcpclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
+	"github.com/kcp-dev/logicalcluster/v3"
 	"go.uber.org/zap"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/klog"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
+	farosclusterclient "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/server/auth"
 	"github.com/faroshq/faros/pkg/store"
@@ -26,7 +30,9 @@ import (
 )
 
 var (
-	scheme = runtime.NewScheme()
+	scheme       = runtime.NewScheme()
+	codecs       = serializer.NewCodecFactory(scheme)
+	limit  int64 = 1024 * 1024 * 10
 )
 
 func init() {
@@ -40,10 +46,12 @@ type Interface interface {
 }
 
 const (
-	pathAPIVersion   = "/faros.sh/api/v1alpha1"
-	pathOIDC         = "/oidc"
-	pathOIDCLogin    = "/oidc/login"
-	pathOIDCCallback = "/oidc/callback"
+	pathAPIVersion    = "/faros.sh/api/v1alpha1"
+	pathOrganizations = "/organizations"
+	pathWorkspaces    = "/workspaces"
+	pathOIDC          = "/oidc"
+	pathOIDCLogin     = "/oidc/login"
+	pathOIDCCallback  = "/oidc/callback"
 )
 
 type Service struct {
@@ -54,7 +62,8 @@ type Service struct {
 	health        *health.Health
 	store         store.Store
 
-	kcpClient kcpclient.ClusterInterface
+	kcpClient   kcpclient.ClusterInterface
+	farosClient farosclient.Interface
 }
 
 func New(ctx context.Context, config *config.Config) (*Service, error) {
@@ -65,7 +74,14 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	kcpClient, err := kcpclient.NewForConfig(kcpConfig.KCPClusterRestConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	// farosClient is used to manage tenants workspace objects only
+	farosClient, err := farosclusterclient.NewForConfig(kcpConfig.KCPClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +100,7 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 		health:        health.New(),
 		store:         store,
 		kcpClient:     kcpClient,
+		farosClient:   farosClient.Cluster(logicalcluster.NewPath(config.FarosKCPConfig.ControllersTenantWorkspace)),
 		authenticator: authenticator,
 	}
 
@@ -93,6 +110,16 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 	apiRouter := s.router.PathPrefix(pathAPIVersion).Subrouter()
 	apiRouter.HandleFunc(pathOIDCLogin, s.oidcLogin)       // /faros.sh/api/v1alpha1/oidc/login
 	apiRouter.HandleFunc(pathOIDCCallback, s.oidcCallback) // /faros.sh/api/v1alpha1/oidc/callback
+
+	apiRouter.HandleFunc(path.Join(pathOrganizations), s.listOrganizations).Methods(http.MethodGet)                       // /faros.sh/api/v1alpha1/organizations
+	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.getOrganization).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/organizations/{organization}
+	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.deleteOrganization).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}
+	apiRouter.HandleFunc(pathOrganizations, s.createOrganization).Methods(http.MethodPost)
+
+	//apiRouter.HandleFunc(pathWorkspaces, s.listWorkspaces).Methods(http.MethodGet)                               // /faros.sh/api/v1alpha1/workspaces
+	//apiRouter.HandleFunc(path.Join(pathWorkspaces, "{workspace}"), s.getWorkspace).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/workspaces/{workspace}
+	//apiRouter.HandleFunc(path.Join(pathWorkspaces, "{workspace}"), s.deleteWorkspace).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/workspaces/{workspace}
+	//apiRouter.HandleFunc(pathWorkspaces, s.createWorkspace).Methods(http.MethodPost)
 
 	s.server = &http.Server{
 		Addr: apiConfig.Addr,

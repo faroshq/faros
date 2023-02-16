@@ -44,8 +44,16 @@ func (c *TenancyV1alpha1ClusterClient) Cluster(clusterPath logicalcluster.Path) 
 	return &TenancyV1alpha1Client{Fake: c.Fake, ClusterPath: clusterPath}
 }
 
+func (c *TenancyV1alpha1ClusterClient) Organizations() kcptenancyv1alpha1.OrganizationClusterInterface {
+	return &organizationsClusterClient{Fake: c.Fake}
+}
+
 func (c *TenancyV1alpha1ClusterClient) Users() kcptenancyv1alpha1.UserClusterInterface {
 	return &usersClusterClient{Fake: c.Fake}
+}
+
+func (c *TenancyV1alpha1ClusterClient) Workspaces() kcptenancyv1alpha1.WorkspaceClusterInterface {
+	return &workspacesClusterClient{Fake: c.Fake}
 }
 
 var _ tenancyv1alpha1.TenancyV1alpha1Interface = (*TenancyV1alpha1Client)(nil)
@@ -60,6 +68,14 @@ func (c *TenancyV1alpha1Client) RESTClient() rest.Interface {
 	return ret
 }
 
+func (c *TenancyV1alpha1Client) Organizations() tenancyv1alpha1.OrganizationInterface {
+	return &organizationsClient{Fake: c.Fake, ClusterPath: c.ClusterPath}
+}
+
 func (c *TenancyV1alpha1Client) Users() tenancyv1alpha1.UserInterface {
 	return &usersClient{Fake: c.Fake, ClusterPath: c.ClusterPath}
+}
+
+func (c *TenancyV1alpha1Client) Workspaces() tenancyv1alpha1.WorkspaceInterface {
+	return &workspacesClient{Fake: c.Fake, ClusterPath: c.ClusterPath}
 }

@@ -3,11 +3,11 @@ package bootstrap
 import (
 	"context"
 
+	"github.com/kcp-dev/logicalcluster/v3"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-
-	"github.com/kcp-dev/logicalcluster/v3"
 
 	"github.com/faroshq/faros/pkg/bootstrap/templates/root"
 	"github.com/faroshq/faros/pkg/bootstrap/templates/servicetenants"

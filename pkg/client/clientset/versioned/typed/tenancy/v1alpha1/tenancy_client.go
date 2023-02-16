@@ -29,7 +29,9 @@ import (
 
 type TenancyV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	OrganizationsGetter
 	UsersGetter
+	WorkspacesGetter
 }
 
 // TenancyV1alpha1Client is used to interact with features provided by the tenancy.faros.sh group.
@@ -37,8 +39,16 @@ type TenancyV1alpha1Client struct {
 	restClient rest.Interface
 }
 
+func (c *TenancyV1alpha1Client) Organizations() OrganizationInterface {
+	return newOrganizations(c)
+}
+
 func (c *TenancyV1alpha1Client) Users() UserInterface {
 	return newUsers(c)
+}
+
+func (c *TenancyV1alpha1Client) Workspaces() WorkspaceInterface {
+	return newWorkspaces(c)
 }
 
 // NewForConfig creates a new TenancyV1alpha1Client for the given config.

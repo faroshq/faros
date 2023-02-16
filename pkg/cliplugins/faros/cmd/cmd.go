@@ -9,11 +9,18 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	logincmd "github.com/faroshq/faros/pkg/cliplugins/login/cmd"
+	organizationcmd "github.com/faroshq/faros/pkg/cliplugins/organization/cmd"
 )
 
 // New returns a cobra.Command for faros actions.
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	loginCmd, err := logincmd.New(genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	organizationCmd, err := organizationcmd.New(genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -25,6 +32,7 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	}
 
 	cmd.AddCommand(loginCmd)
+	cmd.AddCommand(organizationCmd)
 
 	return cmd, nil
 }

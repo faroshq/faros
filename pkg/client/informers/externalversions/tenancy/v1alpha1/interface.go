@@ -26,8 +26,12 @@ import (
 )
 
 type ClusterInterface interface {
+	// Organizations returns a OrganizationClusterInformer
+	Organizations() OrganizationClusterInformer
 	// Users returns a UserClusterInformer
 	Users() UserClusterInformer
+	// Workspaces returns a WorkspaceClusterInformer
+	Workspaces() WorkspaceClusterInformer
 }
 
 type version struct {
@@ -40,14 +44,28 @@ func New(f internalinterfaces.SharedInformerFactory, tweakListOptions internalin
 	return &version{factory: f, tweakListOptions: tweakListOptions}
 }
 
+// Organizations returns a OrganizationClusterInformer
+func (v *version) Organizations() OrganizationClusterInformer {
+	return &organizationClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 // Users returns a UserClusterInformer
 func (v *version) Users() UserClusterInformer {
 	return &userClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
+// Workspaces returns a WorkspaceClusterInformer
+func (v *version) Workspaces() WorkspaceClusterInformer {
+	return &workspaceClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 type Interface interface {
+	// Organizations returns a OrganizationInformer
+	Organizations() OrganizationInformer
 	// Users returns a UserInformer
 	Users() UserInformer
+	// Workspaces returns a WorkspaceInformer
+	Workspaces() WorkspaceInformer
 }
 
 type scopedVersion struct {
@@ -61,7 +79,17 @@ func NewScoped(f internalinterfaces.SharedScopedInformerFactory, namespace strin
 	return &scopedVersion{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
+// Organizations returns a OrganizationInformer
+func (v *scopedVersion) Organizations() OrganizationInformer {
+	return &organizationScopedInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 // Users returns a UserInformer
 func (v *scopedVersion) Users() UserInformer {
 	return &userScopedInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// Workspaces returns a WorkspaceInformer
+func (v *scopedVersion) Workspaces() WorkspaceInformer {
+	return &workspaceScopedInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

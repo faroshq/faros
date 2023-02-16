@@ -7,7 +7,9 @@ import (
 	"time"
 
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
+	kcpclientset "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 	"golang.org/x/sync/errgroup"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -19,14 +21,11 @@ import (
 	"github.com/faroshq/faros/pkg/config"
 	utilhttp "github.com/faroshq/faros/pkg/util/http"
 	utilkubernetes "github.com/faroshq/faros/pkg/util/kubernetes"
-	kcpclientset "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 )
 
 var (
 	scheme = runtime.NewScheme()
 )
-
-const resyncPeriod = 10 * time.Hour
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))

@@ -18,4 +18,8 @@ limitations under the License.
 
 package v1alpha1
 
+type OrganizationExpansion interface{}
+
 type UserExpansion interface{}
+
+type WorkspaceExpansion interface{}

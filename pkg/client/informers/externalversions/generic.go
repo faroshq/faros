@@ -87,8 +87,12 @@ func (f *genericInformer) Lister() cache.GenericLister {
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericClusterInformer, error) {
 	switch resource {
 	// Group=tenancy.faros.sh, Version=V1alpha1
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("organizations"):
+		return &genericClusterInformer{resource: resource.GroupResource(), informer: f.Tenancy().V1alpha1().Organizations().Informer()}, nil
 	case tenancyv1alpha1.SchemeGroupVersion.WithResource("users"):
 		return &genericClusterInformer{resource: resource.GroupResource(), informer: f.Tenancy().V1alpha1().Users().Informer()}, nil
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("workspaces"):
+		return &genericClusterInformer{resource: resource.GroupResource(), informer: f.Tenancy().V1alpha1().Workspaces().Informer()}, nil
 	}
 
 	return nil, fmt.Errorf("no informer found for %v", resource)
@@ -99,8 +103,14 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 func (f *sharedScopedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
 	// Group=tenancy.faros.sh, Version=V1alpha1
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("organizations"):
+		informer := f.Tenancy().V1alpha1().Organizations().Informer()
+		return &genericInformer{lister: cache.NewGenericLister(informer.GetIndexer(), resource.GroupResource()), informer: informer}, nil
 	case tenancyv1alpha1.SchemeGroupVersion.WithResource("users"):
 		informer := f.Tenancy().V1alpha1().Users().Informer()
+		return &genericInformer{lister: cache.NewGenericLister(informer.GetIndexer(), resource.GroupResource()), informer: informer}, nil
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("workspaces"):
+		informer := f.Tenancy().V1alpha1().Workspaces().Informer()
 		return &genericInformer{lister: cache.NewGenericLister(informer.GetIndexer(), resource.GroupResource()), informer: informer}, nil
 	}
 
