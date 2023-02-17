@@ -72,6 +72,6 @@ func (o *DeleteOptions) Run(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println("Organization deleted successfully")
+	fmt.Printf("Organization %s deleted successfully \n", o.Name)
 	return nil
 }

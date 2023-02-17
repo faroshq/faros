@@ -3,41 +3,43 @@ package plugin
 import (
 	"context"
 	"fmt"
-	"net/url"
 
 	"github.com/spf13/cobra"
-
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-// DeleteOptions contains options for configuring faros
-type DeleteOptions struct {
+// UseOptions contains options for configuring faros
+type UseOptions struct {
 	*base.Options
+	Name string
 
-	Name             string
-	OrganizationName string
+	// for testing
+	modifyConfig func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error
 }
 
-// NewGetOptions returns a new GetOptions.
-func NewDeleteOptions(streams genericclioptions.IOStreams) *DeleteOptions {
-	return &DeleteOptions{
+// NewUseOptions returns a new GetOptions.
+func NewUseOptions(streams genericclioptions.IOStreams) *UseOptions {
+	return &UseOptions{
 		Options: base.NewOptions(streams),
+		modifyConfig: func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error {
+			return clientcmd.ModifyConfig(configAccess, *newConfig, true)
+		},
 	}
 }
 
 // BindFlags binds fields GenerateOptions as command line flags to cmd's flagset.
-func (o *DeleteOptions) BindFlags(cmd *cobra.Command) {
+func (o *UseOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
-
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first.")
 }
 
 // Complete ensures all dynamically populated fields are initialized.
-func (o *DeleteOptions) Complete(args []string) error {
+func (o *UseOptions) Complete(args []string) error {
 	if err := o.Options.Complete(); err != nil {
 		return err
 	}
@@ -46,22 +48,11 @@ func (o *DeleteOptions) Complete(args []string) error {
 		o.Name = args[0]
 	}
 
-	raw, err := o.ClientConfig.RawConfig()
-	if err != nil {
-		panic(err)
-	}
-
-	if o.OrganizationName == "" {
-		if ns, ok := raw.Contexts[kubeConfigContextKeyOrg]; ok {
-			o.OrganizationName = ns.Namespace
-		}
-	}
-
 	return nil
 }
 
 // Validate validates the SyncOptions are complete and usable.
-func (o *DeleteOptions) Validate() error {
+func (o *UseOptions) Validate() error {
 	var errs []error
 
 	if err := o.Options.Validate(); err != nil {
@@ -71,8 +62,8 @@ func (o *DeleteOptions) Validate() error {
 	return utilerrors.NewAggregate(errs)
 }
 
-// Run gets workspaces from tenant workspace api
-func (o *DeleteOptions) Run(ctx context.Context) error {
+// Run gets workspace from tenant workspace api
+func (o *UseOptions) Run(ctx context.Context) error {
 	farosClient, err := o.GetFarosClient()
 	if err != nil {
 		return err
@@ -85,34 +76,33 @@ func (o *DeleteOptions) Run(ctx context.Context) error {
 		return err
 	}
 
-	if o.OrganizationName == "" {
+	if o.Name == "" {
 		if len(organizations.Items) == 0 {
 			return fmt.Errorf("no organizations found")
 		}
-		o.OrganizationName = organizations.Items[0].Name
+		o.Name = organizations.Items[0].Name
 	} else {
 		found := false
 		for _, organization := range organizations.Items {
-			if organization.Name == o.OrganizationName {
+			if organization.Name == o.Name {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return fmt.Errorf("organization %s not found", o.OrganizationName)
+			return fmt.Errorf("organization %s not found", o.Name)
 		}
 	}
 
-	path, err := url.JoinPath(fmt.Sprintf(o.TenantWorkspacesAPIfmt, o.OrganizationName), o.Name)
+	// Get raw config and add new cluster and context to it
+	rawConfig, err := o.ClientConfig.RawConfig()
 	if err != nil {
 		return err
 	}
 
-	err = farosClient.RESTClient().Delete().AbsPath(path).Do(ctx).Error()
-	if err != nil {
-		return err
-	}
+	rawConfig.Contexts[kubeConfigContextKeyOrg] = clientcmdapi.NewContext()
+	rawConfig.Contexts[kubeConfigContextKeyOrg].Namespace = o.Name
 
-	fmt.Printf("Workspace %s/%s deleted successfully \n", o.OrganizationName, o.Name)
-	return nil
+	fmt.Printf("Using organization: %s \n ", o.Name)
+	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &rawConfig)
 }

@@ -146,6 +146,6 @@ func (o *UseOptions) Run(ctx context.Context) error {
 		rawConfig.CurrentContext = kubeConfigAuthKey
 	}
 
-	fmt.Println("Using workspace", o.Name)
+	fmt.Printf("Using workspace: %s/%s \n ", o.OrganizationName, o.Name)
 	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &rawConfig)
 }

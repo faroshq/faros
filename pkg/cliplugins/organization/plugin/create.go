@@ -15,7 +15,11 @@ import (
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 )
 
-var kubeConfigAuthKey = "faros"
+var (
+	// kubeConfigContextKeyOrg is used to overload context object to store organization
+	// in Namespace place
+	kubeConfigContextKeyOrg = "faros-org"
+)
 
 // GetOptions contains options for configuring faros workspaces
 type CreateOptions struct {
@@ -97,6 +101,8 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("Organization %s created successfully \n", o.Name)
 
 	return nil
 }

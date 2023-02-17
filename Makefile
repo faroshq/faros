@@ -24,6 +24,11 @@ OPENSHIFT_GOIMPORTS_VER := c72f1dc2e3aacfa00aece3391d938c9bc734e791
 OPENSHIFT_GOIMPORTS_BIN := openshift-goimports
 OPENSHIFT_GOIMPORTS := $(TOOLS_DIR)/$(OPENSHIFT_GOIMPORTS_BIN)-$(OPENSHIFT_GOIMPORTS_VER)
 export OPENSHIFT_GOIMPORTS # so hack scripts can use it
+LDFLAGS := \
+	-extldflags '-static'
+
+ARCH := $(shell go env GOARCH)
+OS := $(shell go env GOOS)
 
 #APIEXPORT_PREFIX ?= v$(shell date +'%Y%m%d')
 APIEXPORT_PREFIX = today
@@ -39,6 +44,12 @@ $(KUSTOMIZE): ## Download kustomize locally if necessary.
 
 $(OPENSHIFT_GOIMPORTS):
 	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/openshift-eng/openshift-goimports $(OPENSHIFT_GOIMPORTS_BIN) $(OPENSHIFT_GOIMPORTS_VER)
+
+build: WHAT ?= ./cmd/...
+build:
+	GOOS=$(OS) GOARCH=$(ARCH) CGO_ENABLED=0 go build $(BUILDFLAGS) -ldflags="$(LDFLAGS)" -o bin $(WHAT)
+.PHONY: build
+
 
 .PHONY: imports
 imports: $(OPENSHIFT_GOIMPORTS)

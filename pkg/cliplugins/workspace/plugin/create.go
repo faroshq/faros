@@ -15,6 +15,10 @@ import (
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 )
 
+var (
+	kubeConfigContextKeyOrg = "faros-org"
+)
+
 // GetOptions contains options for configuring faros workspaces
 type CreateOptions struct {
 	*base.Options
@@ -47,6 +51,17 @@ func (o *CreateOptions) Complete(args []string) error {
 
 	if o.Name == "" && len(args) > 0 {
 		o.Name = args[0]
+	}
+
+	raw, err := o.ClientConfig.RawConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	if o.OrganizationName == "" {
+		if ns, ok := raw.Contexts[kubeConfigContextKeyOrg]; ok {
+			o.OrganizationName = ns.Namespace
+		}
 	}
 
 	return nil
@@ -121,6 +136,8 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	fmt.Printf("Workspace %s/%s created successfully \n", o.OrganizationName, o.Name)
 
 	return nil
 }

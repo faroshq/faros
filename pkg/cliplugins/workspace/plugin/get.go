@@ -34,7 +34,7 @@ func NewGetOptions(streams genericclioptions.IOStreams) *GetOptions {
 func (o *GetOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
 
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first.")
+	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first")
 }
 
 // Complete ensures all dynamically populated fields are initialized.
@@ -45,6 +45,17 @@ func (o *GetOptions) Complete(args []string) error {
 
 	if o.Name == "" && len(args) > 0 {
 		o.Name = args[0]
+	}
+
+	raw, err := o.ClientConfig.RawConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	if o.OrganizationName == "" {
+		if ns, ok := raw.Contexts[kubeConfigContextKeyOrg]; ok {
+			o.OrganizationName = ns.Namespace
+		}
 	}
 
 	return nil

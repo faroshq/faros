@@ -12,6 +12,7 @@ import (
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 
 	getOptions := plugin.NewGetOptions(streams)
+
 	cmd := &cobra.Command{
 		Use:              "organizations",
 		Aliases:          []string{"organization", "orgs", "org"},
@@ -84,6 +85,24 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 		},
 	}
 
+	useOptions := plugin.NewUseOptions(streams)
+	useCmd := &cobra.Command{
+		Use:          "use",
+		Short:        "Use a organization",
+		SilenceUsage: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			if err := useOptions.Complete(args); err != nil {
+				return err
+			}
+
+			if err := useOptions.Validate(); err != nil {
+				return err
+			}
+
+			return useOptions.Run(c.Context())
+		},
+	}
+
 	getOptions.BindFlags(getCmd)
 	cmd.AddCommand(getCmd)
 
@@ -92,6 +111,9 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 
 	deleteOptions.BindFlags(deleteCmd)
 	cmd.AddCommand(deleteCmd)
+
+	useOptions.BindFlags(useCmd)
+	cmd.AddCommand(useCmd)
 
 	return cmd, nil
 }

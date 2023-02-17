@@ -12,6 +12,7 @@ import (
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 
 	getOptions := plugin.NewGetOptions(streams)
+
 	cmd := &cobra.Command{
 		Use:              "workspaces",
 		Aliases:          []string{"workspace", "ws"},
@@ -103,6 +104,7 @@ func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	}
 
 	getOptions.BindFlags(getCmd)
+	getOptions.BindFlags(cmd)
 	cmd.AddCommand(getCmd)
 
 	createOptions.BindFlags(createCmd)
