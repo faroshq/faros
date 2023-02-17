@@ -50,7 +50,6 @@ func (s *Service) getOrganization(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// check if user is a member of the organization
-	spew.Dump(organization)
 
 	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r, http.StatusOK, organization)
 }

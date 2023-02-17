@@ -1,4 +1,4 @@
-package organizations
+package workspaces
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 
 	"github.com/kcp-dev/kcp/pkg/apis/core"
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
+	"github.com/kcp-dev/logicalcluster/v3"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/klog/v2"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	"github.com/faroshq/faros/pkg/models"
 )
 
 type reconcileStatus int
@@ -24,10 +26,10 @@ const (
 )
 
 type reconciler interface {
-	reconcile(ctx context.Context, organization *tenancyv1alpha1.Organization) (reconcileStatus, error)
+	reconcile(ctx context.Context, workspace *tenancyv1alpha1.Workspace) (reconcileStatus, error)
 }
 
-func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha1.Organization) (bool, error) {
+func (c *Controller) reconcile(ctx context.Context, workspace *tenancyv1alpha1.Workspace) (bool, error) {
 	var reconcilers []reconciler
 	createReconcilers := []reconciler{
 		&finalizerAddReconciler{ // must be first
@@ -36,16 +38,16 @@ func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha
 			},
 		},
 		&kcpWorkspaceReconciler{ // must be second
-			createOrganizationWorkspace: func(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
-				return c.createOrganizationWorkspace(ctx, organization)
+			createWorkspace: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+				return c.createWorkspace(ctx, workspace)
 			},
 		},
 	}
 
 	deleteReconcilers := []reconciler{
 		&kcpWorkspaceDeleteReconciler{
-			deleteOrganizationWorkspace: func(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
-				return c.deleteOrganizationWorkspace(ctx, organization)
+			deleteWorkspace: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+				return c.deleteWorkspace(ctx, workspace)
 			},
 		},
 		&finalizerRemoveReconciler{
@@ -55,7 +57,7 @@ func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha
 		},
 	}
 
-	if !organization.DeletionTimestamp.IsZero() { //delete
+	if !workspace.DeletionTimestamp.IsZero() { //delete
 		reconcilers = deleteReconcilers
 	} else { //create or update
 		reconcilers = createReconcilers
@@ -67,7 +69,7 @@ func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha
 	for _, r := range reconcilers {
 		var err error
 		var status reconcileStatus
-		status, err = r.reconcile(ctx, organization)
+		status, err = r.reconcile(ctx, workspace)
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -80,26 +82,30 @@ func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha
 	return requeue, utilerrors.NewAggregate(errs)
 }
 
-func (c *Controller) createOrganizationWorkspace(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
+func (c *Controller) createWorkspace(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
 	logger := klog.FromContext(ctx)
+
+	name := workspace.Labels[models.LabelWorkspace]
 
 	ws := &kcptenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: organization.Name,
+			Name: name,
 		},
 		Spec: kcptenancyv1alpha1.WorkspaceSpec{
 			Type: kcptenancyv1alpha1.WorkspaceTypeReference{
-				Name: "organization",
+				Name: "faros",
 				Path: "root",
 			},
 		},
 	}
 
-	_, err := c.kcpClientSet.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
+	orgCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name)
+
+	_, err := c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		logger.Info("creating workspace", "workspace-name", organization.Name)
-		_, err = c.kcpClientSet.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Create(ctx, ws, metav1.CreateOptions{})
+		logger.Info("creating workspace", "workspace-name", workspace.Name)
+		_, err = c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Create(ctx, ws, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create Workspace: %s", err)
 		}
@@ -112,12 +118,8 @@ func (c *Controller) createOrganizationWorkspace(ctx context.Context, organizati
 	return nil
 }
 
-func (c *Controller) deleteOrganizationWorkspace(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
-	ws := &kcptenancyv1alpha1.Workspace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: organization.Name,
-		},
-	}
+func (c *Controller) deleteWorkspace(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+	orgCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name)
 
-	return c.kcpClientSet.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Delete(ctx, ws.Name, metav1.DeleteOptions{})
+	return c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Delete(ctx, workspace.Labels[models.LabelWorkspace], metav1.DeleteOptions{})
 }

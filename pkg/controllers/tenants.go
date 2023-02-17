@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	farosclientset "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
-	farosinformers "github.com/faroshq/faros/pkg/client/informers/externalversions"
-	"github.com/faroshq/faros/pkg/controllers/tenancy/organizations"
 	"github.com/kcp-dev/client-go/kubernetes"
+
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
+
+	farosclientset "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
+	farosinformers "github.com/faroshq/faros/pkg/client/informers/externalversions"
+	"github.com/faroshq/faros/pkg/controllers/tenancy/organizations"
+	"github.com/faroshq/faros/pkg/controllers/tenancy/workspaces"
 )
 
 var (
@@ -77,10 +80,22 @@ func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 		return err
 	}
 
+	ctrlWorkspaces, err := workspaces.NewController(
+		c.config,
+		c.kcpClientSet,
+		coreClientSet,
+		farosClientSet, // client to manage plugins
+		informer.Tenancy().V1alpha1().Workspaces(),
+	)
+	if err != nil {
+		return err
+	}
+
 	informer.Start(ctx.Done())
 	informer.WaitForCacheSync(ctx.Done())
 
 	go ctrlOrganizations.Start(ctx, 2)
+	go ctrlWorkspaces.Start(ctx, 2)
 
 	<-ctx.Done()
 	return nil

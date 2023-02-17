@@ -1,4 +1,4 @@
-package organizations
+package workspaces
 
 import (
 	"context"
@@ -33,11 +33,11 @@ import (
 )
 
 const (
-	controllerName = "faros-organizations"
-	finalizerName  = "organizations.tenancy.faros.sh/finalizer"
+	controllerName = "faros-workspaces"
+	finalizerName  = "workspaces.tenancy.faros.sh/finalizer"
 )
 
-// Controller watches Faros Organizations and makes sure they represented by KCP organization workspaces
+// Controller watches Faros Workspaces and makes sure they represented by KCP workspaces
 // Controller runs inside controllers workspace virtual workspace for tenancy.
 // For now tenancy objects are located only in single workspace, but in the future we
 // can scale them to multiple workspaces per shard if needed.
@@ -46,11 +46,11 @@ type Controller struct {
 
 	queue workqueue.RateLimitingInterface
 
-	kcpClientSet         kcpclientset.ClusterInterface
-	coreClientSet        kubernetes.ClusterInterface
-	farosClientSet       farosclientset.ClusterInterface
-	organizationsIndexer cache.Indexer
-	organizationsLister  tenancylisters.OrganizationClusterLister
+	kcpClientSet      kcpclientset.ClusterInterface
+	coreClientSet     kubernetes.ClusterInterface
+	farosClientSet    farosclientset.ClusterInterface
+	workspacesIndexer cache.Indexer
+	workspacesLister  tenancylisters.WorkspaceClusterLister
 
 	bootstraper bootstrap.Bootstraper
 }
@@ -60,7 +60,7 @@ func NewController(
 	kcpClientSet kcpclientset.ClusterInterface,
 	coreClientSet kubernetes.ClusterInterface,
 	farosClientSet farosclientset.ClusterInterface,
-	organizationsInformer tenancyinformers.OrganizationClusterInformer,
+	workspacesInformer tenancyinformers.WorkspaceClusterInformer,
 ) (*Controller, error) {
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), controllerName)
 
@@ -70,17 +70,17 @@ func NewController(
 	}
 
 	c := &Controller{
-		config:               config,
-		queue:                queue,
-		bootstraper:          bootstraper,
-		kcpClientSet:         kcpClientSet,
-		coreClientSet:        coreClientSet,
-		farosClientSet:       farosClientSet,
-		organizationsIndexer: organizationsInformer.Informer().GetIndexer(),
-		organizationsLister:  organizationsInformer.Lister(),
+		config:            config,
+		queue:             queue,
+		bootstraper:       bootstraper,
+		kcpClientSet:      kcpClientSet,
+		coreClientSet:     coreClientSet,
+		farosClientSet:    farosClientSet,
+		workspacesIndexer: workspacesInformer.Informer().GetIndexer(),
+		workspacesLister:  workspacesInformer.Lister(),
 	}
 
-	organizationsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	workspacesInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { c.enqueue(obj) },
 		UpdateFunc: func(oldObj, obj interface{}) { c.enqueueUpdate(oldObj, obj) },
 		DeleteFunc: func(obj interface{}) { c.enqueue(obj) },
@@ -108,11 +108,11 @@ func (c *Controller) enqueueUpdate(objOld, objNew interface{}) {
 
 func toQueueElementType(oldObj, obj interface{}) (oldMeta, newMeta metav1.Object, oldStatus, newStatus interface{}) {
 	switch typedObj := obj.(type) {
-	case *tenancyv1alpha1.Organization:
+	case *tenancyv1alpha1.Workspace:
 		newMeta = typedObj
 		newStatus = typedObj.Status
 		if oldObj != nil {
-			typedOldObj := oldObj.(*tenancyv1alpha1.Organization)
+			typedOldObj := oldObj.(*tenancyv1alpha1.Workspace)
 			oldStatus = typedOldObj.Status
 			oldMeta = typedOldObj
 		}
@@ -128,7 +128,7 @@ func (c *Controller) enqueue(obj interface{}) {
 	}
 
 	logger := logging.WithQueueKey(logging.WithReconciler(klog.Background(), controllerName), key)
-	logger.V(2).Info("queueing Organization")
+	logger.V(2).Info("queueing Workspace")
 	c.queue.Add(key)
 }
 
@@ -190,7 +190,7 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 		return false, nil
 	}
 
-	obj, err := c.organizationsLister.Cluster(cluster).Get(name)
+	obj, err := c.workspacesLister.Cluster(cluster).Get(name)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return false, nil // object deleted before we handled it
@@ -220,7 +220,7 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 	return requeue, utilerrors.NewAggregate(errs)
 }
 
-func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha1.Organization) error {
+func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha1.Workspace) error {
 	specOrObjectMetaChanged := !equality.Semantic.DeepEqual(old.Spec, obj.Spec) || !equality.Semantic.DeepEqual(old.ObjectMeta, obj.ObjectMeta)
 	statusChanged := !equality.Semantic.DeepEqual(old.Status, obj.Status)
 
@@ -232,13 +232,13 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 		return nil
 	}
 
-	clusterOrganizationForPatch := func(organization *tenancyv1alpha1.Organization) tenancyv1alpha1.Organization {
-		var ret tenancyv1alpha1.Organization
+	clusterworkspaceForPatch := func(workspace *tenancyv1alpha1.Workspace) tenancyv1alpha1.Workspace {
+		var ret tenancyv1alpha1.Workspace
 		if specOrObjectMetaChanged {
-			ret.ObjectMeta = organization.ObjectMeta
-			ret.Spec = organization.Spec
+			ret.ObjectMeta = workspace.ObjectMeta
+			ret.Spec = workspace.Spec
 		} else {
-			ret.Status = organization.Status
+			ret.Status = workspace.Status
 		}
 		return ret
 	}
@@ -246,7 +246,7 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 	clusterName := logicalcluster.From(old)
 	name := old.Name
 
-	oldForPatch := clusterOrganizationForPatch(old)
+	oldForPatch := clusterworkspaceForPatch(old)
 	// to ensure they appear in the patch as preconditions
 	oldForPatch.UID = ""
 	oldForPatch.ResourceVersion = ""
@@ -256,19 +256,19 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 		return fmt.Errorf("failed to Marshal old data for Workspace %s|%s: %w", clusterName, name, err)
 	}
 
-	newForPatch := clusterOrganizationForPatch(obj)
+	newForPatch := clusterworkspaceForPatch(obj)
 	// to ensure they appear in the patch as preconditions
 	newForPatch.UID = old.UID
 	newForPatch.ResourceVersion = old.ResourceVersion
 
 	newData, err := json.Marshal(newForPatch)
 	if err != nil {
-		return fmt.Errorf("failed to Marshal new data for Organization %s|%s: %w", clusterName, name, err)
+		return fmt.Errorf("failed to Marshal new data for Workspaces %s|%s: %w", clusterName, name, err)
 	}
 
 	patchBytes, err := jsonpatch.CreateMergePatch(oldData, newData)
 	if err != nil {
-		return fmt.Errorf("failed to create patch for Organization %s|%s: %w", clusterName, name, err)
+		return fmt.Errorf("failed to create patch for Workspaces %s|%s: %w", clusterName, name, err)
 	}
 
 	var subresources []string
@@ -276,6 +276,6 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 		subresources = []string{"status"}
 	}
 
-	_, err = c.farosClientSet.Cluster(clusterName.Path()).TenancyV1alpha1().Organizations().Patch(ctx, obj.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{}, subresources...)
+	_, err = c.farosClientSet.Cluster(clusterName.Path()).TenancyV1alpha1().Workspaces().Patch(ctx, obj.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{}, subresources...)
 	return err
 }

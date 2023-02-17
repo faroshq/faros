@@ -6,13 +6,13 @@ import (
 	"os"
 
 	apisv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/apis/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func kcpAPIsGroupPresent(restConfig *rest.Config) bool {
@@ -73,11 +73,13 @@ func restConfigForAPIExport(ctx context.Context, cfg *rest.Config, apiExportName
 		apiExport = exports.Items[0]
 	}
 
+	//lint:ignore SA1019 Ignore the deprecation warnings
 	if len(apiExport.Status.VirtualWorkspaces) < 1 {
 		return nil, fmt.Errorf("APIExport %q status.virtualWorkspaces is empty", apiExportName)
 	}
 
 	cfg = rest.CopyConfig(cfg)
+	//lint:ignore SA1019 Ignore the deprecation warnings
 	cfg.Host = apiExport.Status.VirtualWorkspaces[0].URL
 
 	return cfg, nil

@@ -4,6 +4,7 @@ import (
 	conditionsv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/third_party/conditions/apis/conditions/v1alpha1"
 	"github.com/kcp-dev/kcp/pkg/apis/third_party/conditions/util/conditions"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -26,10 +27,10 @@ type Workspace struct {
 
 // WorkspaceSpec defines the desired state of workspace
 type WorkspaceSpec struct {
-	// Name string is the name of the workspace
-	Name string `json:"name,omitempty"`
 	// Description is a user readable description of the workspace
 	Description string `json:"description,omitempty"`
+	// OrganizationRef is the reference to the organization that owns the workspace
+	OrganizationRef corev1.ObjectReference `json:"organizationRef,omitempty"`
 }
 
 // WorkspaceStatus defines the observed state of Workspace

@@ -3,8 +3,9 @@ package organizations
 import (
 	"context"
 
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 )
 
 type finalizerAddReconciler struct {

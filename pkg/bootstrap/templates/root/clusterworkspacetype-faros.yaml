@@ -16,5 +16,5 @@ spec:
       path: root
   limitAllowedParents:
     types:
-    - name: root
+    - name: organization
       path: root

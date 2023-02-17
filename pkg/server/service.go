@@ -45,13 +45,14 @@ type Interface interface {
 	Run(ctx context.Context) error
 }
 
-const (
-	pathAPIVersion    = "/faros.sh/api/v1alpha1"
-	pathOrganizations = "/organizations"
-	pathWorkspaces    = "/workspaces"
-	pathOIDC          = "/oidc"
-	pathOIDCLogin     = "/oidc/login"
-	pathOIDCCallback  = "/oidc/callback"
+var (
+	pathAPIVersion             = "/faros.sh/api/v1alpha1"
+	pathOrganizations          = "/organizations"
+	pathWorkspaces             = "/workspaces"
+	pathOIDC                   = "/oidc"
+	pathOIDCLogin              = "/oidc/login"
+	pathOIDCCallback           = "/oidc/callback"
+	pathOrganizationWorkspaces = path.Join(pathOrganizations, "{organization}", pathWorkspaces)
 )
 
 type Service struct {
@@ -116,10 +117,10 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.deleteOrganization).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}
 	apiRouter.HandleFunc(pathOrganizations, s.createOrganization).Methods(http.MethodPost)
 
-	//apiRouter.HandleFunc(pathWorkspaces, s.listWorkspaces).Methods(http.MethodGet)                               // /faros.sh/api/v1alpha1/workspaces
+	apiRouter.HandleFunc(pathOrganizationWorkspaces, s.listWorkspaces).Methods(http.MethodGet) // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces
 	//apiRouter.HandleFunc(path.Join(pathWorkspaces, "{workspace}"), s.getWorkspace).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/workspaces/{workspace}
-	//apiRouter.HandleFunc(path.Join(pathWorkspaces, "{workspace}"), s.deleteWorkspace).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/workspaces/{workspace}
-	//apiRouter.HandleFunc(pathWorkspaces, s.createWorkspace).Methods(http.MethodPost)
+	apiRouter.HandleFunc(path.Join(pathOrganizationWorkspaces, "{workspace}"), s.deleteWorkspace).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces/{workspace}
+	apiRouter.HandleFunc(pathOrganizationWorkspaces, s.createWorkspace).Methods(http.MethodPost)                             // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces
 
 	s.server = &http.Server{
 		Addr: apiConfig.Addr,
