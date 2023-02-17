@@ -115,7 +115,7 @@ func (c *Controller) createWorkspace(ctx context.Context, workspace *tenancyv1al
 
 	orgCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name)
 
-	_, err := c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
+	created, err := c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
 		logger.Info("creating workspace", "workspace-name", workspace.Name)
@@ -129,6 +129,7 @@ func (c *Controller) createWorkspace(ctx context.Context, workspace *tenancyv1al
 		return fmt.Errorf("failed to get the Workspace %s", err)
 	}
 
+	workspace.Status.WorkspaceURL = created.Spec.URL
 	return nil
 }
 

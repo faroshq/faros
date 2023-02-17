@@ -18,6 +18,67 @@ import (
 	"github.com/faroshq/faros/pkg/models"
 )
 
+func (s *Service) getWorkspace(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	authenticated, user, err := s.authenticate(w, r)
+	if err != nil || !authenticated {
+		return
+	}
+
+	vars := mux.Vars(r)
+	organizationName := vars["organization"]
+	if organizationName == "" {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	workspaceName := vars["workspace"]
+	if workspaceName == "" {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	organizationRef, err := s.store.GetOrganization(ctx, tenancyv1alpha1.Organization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: organizationName,
+		},
+	})
+	if err != nil {
+		klog.Error(err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	organization, err := s.farosClient.TenancyV1alpha1().Organizations().Get(ctx, organizationRef.Name, metav1.GetOptions{})
+	if err != nil {
+		klog.Error(err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	workspace, err := s.store.GetWorkspace(ctx, tenancyv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: getWorkspaceName(*organization, tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: workspaceName,
+				},
+			}),
+		},
+	})
+	if err != nil {
+		klog.Error(err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r, http.StatusOK, workspace)
+}
+
 func (s *Service) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	authenticated, user, err := s.authenticate(w, r)

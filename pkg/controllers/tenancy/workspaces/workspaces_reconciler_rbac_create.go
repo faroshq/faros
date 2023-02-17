@@ -35,7 +35,7 @@ func (r *workspaceRBACReconciler) reconcile(ctx context.Context, workspace *tena
 
 	clusterRoleBinding := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "workspace-cluster-admins",
+			Name: "faros-cluster-admins",
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: rbacv1.GroupName,

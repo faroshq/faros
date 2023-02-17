@@ -117,8 +117,8 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.deleteOrganization).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}
 	apiRouter.HandleFunc(pathOrganizations, s.createOrganization).Methods(http.MethodPost)
 
-	apiRouter.HandleFunc(pathOrganizationWorkspaces, s.listWorkspaces).Methods(http.MethodGet) // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces
-	//apiRouter.HandleFunc(path.Join(pathWorkspaces, "{workspace}"), s.getWorkspace).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/workspaces/{workspace}
+	apiRouter.HandleFunc(pathOrganizationWorkspaces, s.listWorkspaces).Methods(http.MethodGet)                               // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces
+	apiRouter.HandleFunc(path.Join(pathOrganizationWorkspaces, "{workspace}"), s.getWorkspace).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces/{workspace}
 	apiRouter.HandleFunc(path.Join(pathOrganizationWorkspaces, "{workspace}"), s.deleteWorkspace).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces/{workspace}
 	apiRouter.HandleFunc(pathOrganizationWorkspaces, s.createWorkspace).Methods(http.MethodPost)                             // /faros.sh/api/v1alpha1/organizations/{organization}/workspaces
 
