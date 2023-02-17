@@ -2,12 +2,14 @@ package base
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/kcp-dev/kcp/pkg/cliplugins/base"
 	"github.com/spf13/cobra"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
+	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	utilprint "github.com/faroshq/faros/pkg/util/print"
 )
 
@@ -57,7 +59,36 @@ func (o *Options) Complete() error {
 	}
 }
 
+var kubeConfigAuthKey = "faros"
+
 // Validate validates the configured options.
 func (o *Options) Validate() error {
 	return nil
+}
+
+func (o *Options) GetFarosClient() (*farosclient.Clientset, error) {
+	config, err := o.ClientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := o.ClientConfig.RawConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	cluster := raw.Clusters[kubeConfigAuthKey]
+
+	u, err := url.Parse(cluster.Server)
+	if err != nil {
+		return nil, err
+	}
+	config.Host = u.Host
+
+	farosClient, err := farosclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return farosClient, nil
 }

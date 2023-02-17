@@ -10,18 +10,27 @@ import (
 
 // New provides a cobra command for workload operations.
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
+
+	getOptions := plugin.NewGetOptions(streams)
 	cmd := &cobra.Command{
 		Use:              "workspaces",
 		Aliases:          []string{"workspace", "ws"},
 		Short:            "Manages workspaces",
 		SilenceUsage:     true,
 		TraverseChildren: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return cmd.Help()
+		RunE: func(c *cobra.Command, args []string) error {
+			if err := getOptions.Complete(args); err != nil {
+				return err
+			}
+
+			if err := getOptions.Validate(); err != nil {
+				return err
+			}
+
+			return getOptions.Run(c.Context())
 		},
 	}
 
-	getOptions := plugin.NewGetOptions(streams)
 	getCmd := &cobra.Command{
 		Use:          "get",
 		Short:        "Get an workspaces",

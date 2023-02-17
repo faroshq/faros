@@ -10,7 +10,6 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -67,20 +66,11 @@ func (o *UseOptions) Validate() error {
 	return utilerrors.NewAggregate(errs)
 }
 
+var kubeConfigAuthKey = "faros"
+
 // Run gets workspace from tenant workspace api
 func (o *UseOptions) Run(ctx context.Context) error {
-	config, err := o.ClientConfig.ClientConfig()
-	if err != nil {
-		return err
-	}
-
-	u, err := url.Parse(config.Host)
-	if err != nil {
-		return err
-	}
-	config.Host = u.Host
-
-	farosClient, err := farosclient.NewForConfig(config)
+	farosClient, err := o.GetFarosClient()
 	if err != nil {
 		return err
 	}

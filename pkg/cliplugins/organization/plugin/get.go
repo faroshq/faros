@@ -10,7 +10,6 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 	utilprint "github.com/faroshq/faros/pkg/util/print"
 )
@@ -59,24 +58,7 @@ func (o *GetOptions) Validate() error {
 
 // Run gets workspaces from tenant workspace api
 func (o *GetOptions) Run(ctx context.Context) error {
-	config, err := o.ClientConfig.ClientConfig()
-	if err != nil {
-		return err
-	}
-
-	rawConfig, err := o.ClientConfig.RawConfig()
-	if err != nil {
-		return err
-	}
-
-	u, err := url.Parse(rawConfig.Clusters[kubeConfigAuthKey].Server)
-	if err != nil {
-		return err
-	}
-	config.Host = u.Host
-	config.BearerToken = rawConfig.AuthInfos[kubeConfigAuthKey].Token
-
-	farosclient, err := farosclient.NewForConfig(config)
+	farosClient, err := o.GetFarosClient()
 	if err != nil {
 		return err
 	}
@@ -89,7 +71,7 @@ func (o *GetOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = farosclient.RESTClient().Get().AbsPath(path).Do(ctx).Into(organizations)
+	err = farosClient.RESTClient().Get().AbsPath(path).Do(ctx).Into(organizations)
 	if err != nil {
 		return err
 	}

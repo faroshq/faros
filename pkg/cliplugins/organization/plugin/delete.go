@@ -10,7 +10,6 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
-	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 )
 
@@ -59,26 +58,16 @@ func (o *DeleteOptions) Validate() error {
 
 // Run gets workspaces from tenant workspace api
 func (o *DeleteOptions) Run(ctx context.Context) error {
-	config, err := o.ClientConfig.ClientConfig()
+	farosClient, err := o.GetFarosClient()
 	if err != nil {
 		return err
 	}
 
-	u, err := url.Parse(config.Host)
-	if err != nil {
-		return err
-	}
-	config.Host = u.Host
-
-	farosclient, err := farosclient.NewForConfig(config)
-	if err != nil {
-		return err
-	}
 	path, err := url.JoinPath(o.TenantOrganizationsAPI, o.Name)
 	if err != nil {
 		return err
 	}
-	err = farosclient.RESTClient().Delete().AbsPath(path).Do(ctx).Error()
+	err = farosClient.RESTClient().Delete().AbsPath(path).Do(ctx).Error()
 	if err != nil {
 		return err
 	}
