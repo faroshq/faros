@@ -27,6 +27,8 @@ var (
 	scheme = runtime.NewScheme()
 )
 
+const resyncPeriod = 10 * time.Hour
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kcptenancyv1alpha1.AddToScheme(scheme))
@@ -110,15 +112,9 @@ func (c *controllerManager) Run(ctx context.Context) error {
 
 	eg := errgroup.Group{}
 
-	//eg.Go(func() error {
-	//	return c.runEdge(ctx, plugins)
-	//})
-	//eg.Go(func() error {
-	//	return c.runSystemTenants(ctx)
-	//})
-	//eg.Go(func() error {
-	//		return c.runSystemPlugins(ctx, plugins)
-	//	})
+	eg.Go(func() error {
+		return c.runTenancyControllers(ctx)
+	})
 
 	return eg.Wait()
 }
