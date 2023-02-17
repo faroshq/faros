@@ -204,7 +204,7 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 	ctx = klog.NewContext(ctx, logger)
 
 	var errs []error
-	requeue, err := c.reconcile(ctx, obj)
+	requeue, err := c.reconcile(ctx, cluster, obj)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -232,7 +232,7 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 		return nil
 	}
 
-	clusterworkspaceForPatch := func(workspace *tenancyv1alpha1.Workspace) tenancyv1alpha1.Workspace {
+	clusterWorkspaceForPatch := func(workspace *tenancyv1alpha1.Workspace) tenancyv1alpha1.Workspace {
 		var ret tenancyv1alpha1.Workspace
 		if specOrObjectMetaChanged {
 			ret.ObjectMeta = workspace.ObjectMeta
@@ -246,7 +246,7 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 	clusterName := logicalcluster.From(old)
 	name := old.Name
 
-	oldForPatch := clusterworkspaceForPatch(old)
+	oldForPatch := clusterWorkspaceForPatch(old)
 	// to ensure they appear in the patch as preconditions
 	oldForPatch.UID = ""
 	oldForPatch.ResourceVersion = ""
@@ -256,7 +256,7 @@ func (c *Controller) patchIfNeeded(ctx context.Context, old, obj *tenancyv1alpha
 		return fmt.Errorf("failed to Marshal old data for Workspace %s|%s: %w", clusterName, name, err)
 	}
 
-	newForPatch := clusterworkspaceForPatch(obj)
+	newForPatch := clusterWorkspaceForPatch(obj)
 	// to ensure they appear in the patch as preconditions
 	newForPatch.UID = old.UID
 	newForPatch.ResourceVersion = old.ResourceVersion

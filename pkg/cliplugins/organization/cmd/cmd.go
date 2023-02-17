@@ -12,6 +12,7 @@ import (
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	cmd := &cobra.Command{
 		Use:              "organizations",
+		Aliases:          []string{"organization", "orgs", "org"},
 		Short:            "Manages organizations",
 		SilenceUsage:     true,
 		TraverseChildren: true,

@@ -73,7 +73,7 @@ func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 		c.config,
 		c.kcpClientSet,
 		coreClientSet,
-		farosClientSet, // client to manage plugins
+		farosClientSet,
 		informer.Tenancy().V1alpha1().Organizations(),
 	)
 	if err != nil {
@@ -84,7 +84,7 @@ func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 		c.config,
 		c.kcpClientSet,
 		coreClientSet,
-		farosClientSet, // client to manage plugins
+		farosClientSet,
 		informer.Tenancy().V1alpha1().Workspaces(),
 	)
 	if err != nil {

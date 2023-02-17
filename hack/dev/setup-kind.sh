@@ -63,6 +63,9 @@ do
   sleep 5
 done
 
+echo "Waiting for the ingress controller to become ready..."
+kubectl --context "${KUBECTL_CONTEXT}" -n kcp wait --for=condition=Ready pod -l  app.kubernetes.io/name=dex --timeout=5m
+
 echo "Install KCP"
 
 mkdir -p ./dev

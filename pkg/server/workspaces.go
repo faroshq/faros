@@ -20,7 +20,7 @@ import (
 
 func (s *Service) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -43,7 +43,10 @@ func (s *Service) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: check member permissions
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	request := &tenancyv1alpha1.Workspace{}
 	limitedReader := &io.LimitedReader{R: r.Body, N: limit}
@@ -81,7 +84,6 @@ func (s *Service) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			Description: request.Spec.Description,
 			OrganizationRef: corev1.ObjectReference{
 				Name:       organization.Name,
-				Namespace:  organization.Namespace,
 				Kind:       organization.Kind,
 				APIVersion: organization.APIVersion,
 			},
@@ -103,7 +105,7 @@ func (s *Service) createWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -111,6 +113,23 @@ func (s *Service) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	organizationName := mux.Vars(r)["organization"]
 	if organizationName == "" {
 		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	// get organization and check if user is a member and can list memberships
+	organization, err := s.store.GetOrganization(ctx, tenancyv1alpha1.Organization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: organizationName,
+		},
+	})
+	if err != nil {
+		klog.Error(err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -131,7 +150,7 @@ func (s *Service) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -160,7 +179,10 @@ func (s *Service) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: check if user is a member of the organization
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	if err := s.store.DeleteWorkspace(ctx, tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{

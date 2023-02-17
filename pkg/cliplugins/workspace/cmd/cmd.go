@@ -12,6 +12,7 @@ import (
 func New(streams genericclioptions.IOStreams) (*cobra.Command, error) {
 	cmd := &cobra.Command{
 		Use:              "workspaces",
+		Aliases:          []string{"workspace", "ws"},
 		Short:            "Manages workspaces",
 		SilenceUsage:     true,
 		TraverseChildren: true,

@@ -4,7 +4,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/gorilla/mux"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +18,7 @@ import (
 
 func (s *Service) getOrganization(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -49,19 +48,21 @@ func (s *Service) getOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// check if user is a member of the organization
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r, http.StatusOK, organization)
 }
 
 func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
 
-	// TODO: List via user membership
 	organizations, err := s.store.ListOrganizations(ctx, tenancyv1alpha1.Organization{})
 	if err != nil {
 		klog.Error(err)
@@ -69,12 +70,21 @@ func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r, http.StatusOK, organizations)
+	results := &tenancyv1alpha1.OrganizationList{
+		Items: []tenancyv1alpha1.Organization{},
+	}
+	for _, organization := range organizations.Items {
+		if organization.IsOwner(user) {
+			results.Items = append(results.Items, organization)
+		}
+	}
+
+	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r, http.StatusOK, results)
 }
 
 func (s *Service) createOrganization(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -109,6 +119,14 @@ func (s *Service) createOrganization(w http.ResponseWriter, r *http.Request) {
 		},
 		Spec: tenancyv1alpha1.OrganizationSpec{
 			Description: request.Spec.Description,
+			OwnersRef: []tenancyv1alpha1.ObjectReference{
+				{
+					Kind:       user.Kind,
+					APIVersion: user.APIVersion,
+					Name:       user.Name,
+					Email:      user.Spec.Email,
+				},
+			},
 		},
 	}
 
@@ -124,7 +142,7 @@ func (s *Service) createOrganization(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) deleteOrganization(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	authenticated, _, err := s.authenticate(w, r)
+	authenticated, user, err := s.authenticate(w, r)
 	if err != nil || !authenticated {
 		return
 	}
@@ -147,8 +165,10 @@ func (s *Service) deleteOrganization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// check if user is a member of the organization
-	spew.Dump(organization)
+	if !organization.IsOwner(user) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	if err := s.store.DeleteOrganization(ctx, *organization); err != nil {
 		klog.Error(err)

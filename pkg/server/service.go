@@ -50,8 +50,8 @@ var (
 	pathOrganizations          = "/organizations"
 	pathWorkspaces             = "/workspaces"
 	pathOIDC                   = "/oidc"
-	pathOIDCLogin              = "/oidc/login"
-	pathOIDCCallback           = "/oidc/callback"
+	pathOIDCLogin              = path.Join(pathOIDC, "/login")
+	pathOIDCCallback           = path.Join(pathOIDC, "/callback")
 	pathOrganizationWorkspaces = path.Join(pathOrganizations, "{organization}", pathWorkspaces)
 )
 

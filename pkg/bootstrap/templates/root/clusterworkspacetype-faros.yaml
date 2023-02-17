@@ -7,13 +7,6 @@ spec:
     with:
     - name: universal
       path: root
-  defaultChildWorkspaceType:
-    name: universal
-    path: root
-  limitAllowedChildren:
-    types:
-    - name: universal
-      path: root
   limitAllowedParents:
     types:
     - name: organization
