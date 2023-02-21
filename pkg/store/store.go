@@ -2,45 +2,26 @@ package store
 
 import (
 	"context"
-	"errors"
 
-	"github.com/faroshq/faros/pkg/models"
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 )
 
 type Store interface {
-	GetCluster(context.Context, models.Cluster) (*models.Cluster, error)
-	ListClusters(context.Context, models.Cluster) ([]models.Cluster, error)
-	DeleteCluster(context.Context, models.Cluster) error
-	CreateCluster(context.Context, models.Cluster) (*models.Cluster, error)
-	UpdateCluster(context.Context, models.Cluster) (*models.Cluster, error)
+	GetUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
+	ListUsers(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.UserList, error)
+	DeleteUser(context.Context, tenancyv1alpha1.User) error
+	CreateUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
+	UpdateUser(context.Context, tenancyv1alpha1.User) (*tenancyv1alpha1.User, error)
 
-	GetNamespace(context.Context, models.Namespace) (*models.Namespace, error)
-	ListNamespaces(context.Context) ([]models.Namespace, error)
-	DeleteNamespace(context.Context, models.Namespace) error
-	CreateNamespace(context.Context, models.Namespace) (*models.Namespace, error)
-	UpdateNamespace(context.Context, models.Namespace) (*models.Namespace, error)
+	GetWorkspace(context.Context, tenancyv1alpha1.Workspace) (*tenancyv1alpha1.Workspace, error)
+	ListWorkspaces(context.Context, string, tenancyv1alpha1.Workspace) (*tenancyv1alpha1.WorkspaceList, error)
+	DeleteWorkspace(context.Context, tenancyv1alpha1.Workspace) error
+	CreateWorkspace(context.Context, tenancyv1alpha1.Workspace) (*tenancyv1alpha1.Workspace, error)
+	UpdateWorkspace(context.Context, tenancyv1alpha1.Workspace) (*tenancyv1alpha1.Workspace, error)
 
-	GetClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-	ListClusterAccessSessions(context.Context, models.ClusterAccessSession) ([]models.ClusterAccessSession, error)
-	DeleteClusterAccessSession(context.Context, models.ClusterAccessSession) error
-	CreateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-	UpdateClusterAccessSession(context.Context, models.ClusterAccessSession) (*models.ClusterAccessSession, error)
-
-	GetUser(context.Context, models.User) (*models.User, error)
-	ListUsers(context.Context, models.User) ([]models.User, error)
-	DeleteUser(context.Context, models.User) error
-	CreateUser(context.Context, models.User) (*models.User, error)
-	UpdateUser(context.Context, models.User) (*models.User, error)
-
-	// ListAllClusterAccessSessions will list all cluster sessions. Should not be used
-	// in user context in any ways.
-	ListAllClusterAccessSessions(context.Context) ([]models.ClusterAccessSession, error)
-
-	// Status is a healthcheck endpoint
-	Status() (interface{}, error)
-	RawDB() interface{}
-	Close() error
+	GetOrganization(context.Context, tenancyv1alpha1.Organization) (*tenancyv1alpha1.Organization, error)
+	ListOrganizations(context.Context, tenancyv1alpha1.Organization) (*tenancyv1alpha1.OrganizationList, error)
+	DeleteOrganization(context.Context, tenancyv1alpha1.Organization) error
+	CreateOrganization(context.Context, tenancyv1alpha1.Organization) (*tenancyv1alpha1.Organization, error)
+	UpdateOrganization(context.Context, tenancyv1alpha1.Organization) (*tenancyv1alpha1.Organization, error)
 }
-
-var ErrFailToQuery = errors.New("malformed request. failed to query")
-var ErrRecordNotFound = errors.New("object not found")

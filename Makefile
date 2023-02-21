@@ -1,82 +1,95 @@
-SHELL = /bin/bash
-OUTPUT_BIN_CLI ?= release/cli
-OUTPUT_BIN_FAROS ?= release/faros
-FAROS_REPO ?= quay.io/faroshq/faros
-FAROS_CLI_REPO ?= quay.io/faroshq/faros-cli
+REPO ?= quay.io/faroshq/
 TAG_NAME ?= $(shell git describe --tags --abbrev=0)
-GIT_REVISION = $(shell git rev-parse --short HEAD)$(shell [[ $$(git status --porcelain) = "" ]] || echo -dirty)
-JOBDATE		?= $(shell date -u +%Y-%m-%dT%H%M%SZ)
+LOCALBIN ?= $(shell pwd)/bin
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+GO_INSTALL = ./hack/go-install.sh
+KUSTOMIZE ?= $(LOCALBIN)/kustomize
+TOOLS_DIR=hack/tools
+TOOLS_GOBIN_DIR := $(abspath $(TOOLS_DIR))
+KO_DOCKER_REPO ?= ${REPO}
 
-LDFLAGS		+= -s -w
-LDFLAGS     += -extldflags=-static
-LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.version=$(TAG_NAME)
-LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.commit=$(GIT_REVISION)
-LDFLAGS		+= -X github.com/faroshq/faros/pkg/util/version.buildTime=$(JOBDATE)
+CODE_GENERATOR_VER := v2.0.0-alpha.1
+CODE_GENERATOR_BIN := code-generator
+CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
+export CODE_GENERATOR # so hack scripts can use it
 
-run:
-	go run  ./cmd/faros --loglevel=trace
+KUSTOMIZE_VERSION ?= v3.8.7
 
-run-compose:
-	docker-compose -f docker-compose-dev.yaml up --build faros
+CONTROLLER_GEN_VER := v0.10.0
+CONTROLLER_GEN_BIN := controller-gen
+CONTROLLER_GEN := $(TOOLS_DIR)/$(CONTROLLER_GEN_BIN)-$(CONTROLLER_GEN_VER)
+export CONTROLLER_GEN # so hack scripts can use it
+
+OPENSHIFT_GOIMPORTS_VER := c72f1dc2e3aacfa00aece3391d938c9bc734e791
+OPENSHIFT_GOIMPORTS_BIN := openshift-goimports
+OPENSHIFT_GOIMPORTS := $(TOOLS_DIR)/$(OPENSHIFT_GOIMPORTS_BIN)-$(OPENSHIFT_GOIMPORTS_VER)
+export OPENSHIFT_GOIMPORTS # so hack scripts can use it
+LDFLAGS := \
+	-extldflags '-static'
+
+ARCH := $(shell go env GOARCH)
+OS := $(shell go env GOOS)
+
+#APIEXPORT_PREFIX ?= v$(shell date +'%Y%m%d')
+APIEXPORT_PREFIX = today
+
+$(CODE_GENERATOR):
+	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/kcp-dev/code-generator/v2 $(CODE_GENERATOR_BIN) $(CODE_GENERATOR_VER)
+
+KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
+$(KUSTOMIZE): ## Download kustomize locally if necessary.
+	mkdir -p $(LOCALBIN)
+	curl -s $(KUSTOMIZE_INSTALL_SCRIPT) | bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN)
+	touch $(KUSTOMIZE) # we download an "old" file, so make will re-download to refresh it unless we make it newer than the owning dir
+
+$(OPENSHIFT_GOIMPORTS):
+	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/openshift-eng/openshift-goimports $(OPENSHIFT_GOIMPORTS_BIN) $(OPENSHIFT_GOIMPORTS_VER)
+
+build: WHAT ?= ./cmd/...
+build:
+	GOOS=$(OS) GOARCH=$(ARCH) CGO_ENABLED=0 go build $(BUILDFLAGS) -ldflags="$(LDFLAGS)" -o bin $(WHAT)
+.PHONY: build
+
+
+.PHONY: imports
+imports: $(OPENSHIFT_GOIMPORTS)
+	$(OPENSHIFT_GOIMPORTS) -m github.com/faroshq/faros
+
+manifests:  ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crds/bases | true
+	make generate
+
+.PHONY: apiresourceschemas
+apiresourceschemas: $(KUSTOMIZE) ## Convert CRDs from config/crds to APIResourceSchemas. Specify APIEXPORT_PREFIX as needed.
+	$(KUSTOMIZE) build config/crds | kubectl kcp crd snapshot -f - --prefix $(APIEXPORT_PREFIX) > config/kcp/$(APIEXPORT_PREFIX).apiresourceschemas.yaml
+	make generate
+
+tools:$(CONTROLLER_GEN) $(CODE_GENERATOR) $(OPENSHIFT_GOIMPORTS)
+.PHONY: tools
+
+$(CONTROLLER_GEN):
+	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) sigs.k8s.io/controller-tools/cmd/controller-gen $(CONTROLLER_GEN_BIN) $(CONTROLLER_GEN_VER)
+
+codegen: $(CONTROLLER_GEN) $(CODE_GENERATOR) generate ## Run the codegenerators
+	echo $(CODE_GENERATOR)
+	go mod download
+	./hack/update-codegen.sh
+	make lint
+.PHONY: codegen
 
 generate:
 	go generate ./...
 
-generate-api-serving-cert:
-	mkdir -p ./secrets
-	go run ./hack/genkey localhost
-	mv localhost.* secrets
-
-generate-dev-certs: generate-api-serving-cert
-
-generate-encryption-key:
-	go run ./hack/encryption
-
-.PHONY: list
 lint:
 	gofmt -s -w cmd hack pkg
-	go run -mod vendor ./vendor/golang.org/x/tools/cmd/goimports -w -local=github.com/faroshq/faros cmd hack pkg
-	go run -mod vendor ./hack/validate-imports cmd hack pkg
-	go install honnef.co/go/tools/cmd/staticcheck@latest
 	staticcheck ./...
+	make imports
 
-show-sqlite-database:
-	sqlitebrowser secrets/database.sqlite3
+setup-kind:
+	./hack/dev/setup-kind.sh
 
-# Cross-platform CLI resease
-build-cli-all:
-	GO111MODULE=off go get github.com/mitchellh/gox
-	@echo "++ Building faros CLI binaries"
-	cd cmd/cli && gox -verbose -output="../../${OUTPUT_BIN_CLI}/{{.OS}}-{{.Arch}}" \
-	-ldflags "$(LDFLAGS)" -osarch="linux/amd64 linux/386 darwin/amd64 darwin/arm64 windows/amd64 linux/arm"
-	cd cmd/cli && env GOARCH=arm64 GOOS=linux go build -ldflags="$(LDFLAGS)" -o ${OUTPUT_BIN_CLI}/linux-aarch64
-	@echo "++ Building synpse CLI OTA metadata"
-	GO111MODULE=off go get github.com/sanbornm/go-selfupdate/cmd/go-selfupdate
-	cd release && go-selfupdate cli/ $(TAG_NAME)
-	./hack/fixup-windows-cli.sh
+delete-kind:
+	./hack/dev/delete-kind.sh
 
-.PHONY: cli
-cli:
-	go build -mod vendor -ldflags "$(LDFLAGS)" -o faros ./cmd/cli
-
-.PHONY: faros
-faros:
-	CGO_ENABLED=1  go build -mod vendor -ldflags "$(LDFLAGS)" -o ${OUTPUT_BIN_FAROS}/faros ./cmd/faros
-
-.PHONY: image-faros
-image-faros:
-	docker build -t ${FAROS_REPO}:${TAG_NAME} -f dockerfiles/faros/Dockerfile \
-	--build-arg version=${TAG_NAME} .
-
-.PHONY: image-cli
-image-cli:
-	docker build -t ${FAROS_CLI_REPO}:${TAG_NAME} -f dockerfiles/cli/Dockerfile \
-	--build-arg version=${TAG_NAME} .
-
-.PHONY: test
-test:
-	go test -mod=vendor -v -failfast `go list ./... | egrep -v /test/` -coverprofile=profile.cov
-
-.PHONY: test-e2e
-test-e2e:
-	go test -count=1 ./test/e2e --tags e2e -test.timeout 5m --test.v
+images:
+	KO_DOCKER_REPO=${KO_DOCKER_REPO} ko build --sbom=none -B --platform=linux/amd64 -t latest ./cmd/*

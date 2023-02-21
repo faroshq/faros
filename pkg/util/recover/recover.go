@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	"github.com/sirupsen/logrus"
+	"k8s.io/klog"
 )
 
 // Panic recovers a panic
-func Panic(log *logrus.Entry) {
+func Panic() {
 	if e := recover(); e != nil {
-		log.Error(fmt.Sprint("%w", e))
-		log.Info(string(debug.Stack()))
-
+		klog.Error(fmt.Sprint("%w", e))
+		klog.Error(string(debug.Stack()))
 	}
 }

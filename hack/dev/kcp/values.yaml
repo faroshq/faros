@@ -1,0 +1,48 @@
+externalHostname: "kcp.dev.faros.sh"
+kcp:
+  volumeClassName: "standard"
+  tokenAuth:
+    enabled: true
+  hostAliases:
+    enabled: true
+    values:
+    - hostnames:
+      - dex.dev.faros.sh
+      ip: 127.0.0.1
+    - hostnames:
+      - kcp.dev.faros.sh
+      ip: 127.0.0.1
+kcpFrontProxy:
+  openshiftRoute:
+    enabled: false
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: "nginx"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  certificate:
+    issuerSpec:
+      selfSigned: {}
+  hostAliases:
+    enabled: true
+    values:
+    - hostnames:
+      - dex.dev.faros.sh
+      ip: 127.0.0.1
+    - hostnames:
+      - kcp.dev.faros.sh
+      ip: 127.0.0.1
+oidc:
+  enabled: true
+  issuerUrl: https://dex.dev.faros.sh
+  clientId: faros
+  groupClaim: groups
+  usernameClaim: email
+  usernamePrefix: faros-sso-
+  groupsPrefix: faros-sso-
+  caSecretName: dex-pki-ca
+certificates:
+  dnsNames:
+  - kcp
+  - localhost
+  - kcp.dev.faros.sh

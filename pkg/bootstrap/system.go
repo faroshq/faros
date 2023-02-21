@@ -1,0 +1,62 @@
+package bootstrap
+
+import (
+	"context"
+
+	"github.com/kcp-dev/logicalcluster/v3"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+
+	"github.com/faroshq/faros/pkg/bootstrap/templates/root"
+	"github.com/faroshq/faros/pkg/bootstrap/templates/servicetenants"
+	bootstraputils "github.com/faroshq/faros/pkg/util/bootstrap"
+)
+
+func (b *bootstrap) bootstrapServiceTenantAssets(ctx context.Context, source, target string) error {
+	targetRest, err := b.clientFactory.GetWorkspaceRestConfig(ctx, target)
+	if err != nil {
+		return err
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(targetRest)
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(targetRest)
+	if err != nil {
+		return err
+	}
+
+	clusterPath := logicalcluster.NewPath(source)
+
+	export, err := b.kcpClient.Cluster(clusterPath).ApisV1alpha1().APIExports().Get(ctx, "tenancy.faros.sh", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	return servicetenants.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption(
+		"IDENTITY", export.Status.IdentityHash,
+	))
+}
+
+func (b *bootstrap) bootstrapRootTenantAssets(ctx context.Context) error {
+	rest, err := b.clientFactory.GetWorkspaceRestConfig(ctx, "root")
+	if err != nil {
+		return err
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(rest)
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(rest)
+	if err != nil {
+		return err
+	}
+
+	return root.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption())
+}
