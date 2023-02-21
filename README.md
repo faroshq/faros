@@ -9,8 +9,7 @@ KCP allows users to create organizations and workspaces inside organizations.
 
 1. Make getting org and workspace based on user bindings
 2. Add basic quotas for orgs and workspaces
-3. Add an ability to add other members/groups to orgs and workspaces
-4. Move to APIExportEndpointSlice.status.endpoints
-5. Make kubeconfig "double" so API works even when cluster context is set
-6. Add Certificate to kubeconfig
-7. Add refresh for kubeconfig token
+3. Move to APIExportEndpointSlice.status.endpoints
+4. Add Certificate to kubeconfig
+5. Add refresh for kubeconfig token
+6. Make orgs `rootless` LogicalClusters. It will require running shard-api in the same cluster as shard itself, and doing some loadbalancing. Replicate front-proxy.
