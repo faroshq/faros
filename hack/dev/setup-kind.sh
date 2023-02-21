@@ -50,10 +50,15 @@ echo "Install dex"
 
 [ ! -d "./dev/dex-chart" ] && git clone https://github.com/faroshq/dex-helm-charts -b master ./dev/dex-chart
 
+kubectl get secret dex-pki-ca -n dex -o yaml \
+| sed s/"namespace: dex"/"namespace: kcp"/\
+| kubectl apply -n kcp -f - | true
+
 while ! helm upgrade -i dex ./dev/dex-chart/charts/dex \
      --values ./hack/dev/dex/values.yaml \
      --create-namespace \
-     --namespace kcp \
+     --namespace dex \
+     --create-namespace \
      --wait \
      --set config.connectors[0].config.clientSecret=$GITHUB_CLIENT_SECRET \
      --set config.connectors[0].config.clientID=$GITHUB_CLIENT_ID
@@ -73,8 +78,8 @@ mkdir -p ./dev
 
 helm upgrade -i kcp ./dev/kcp-chart/charts/kcp \
      --values ./hack/dev/kcp/values.yaml \
-     --set kcp.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
-     --set kcpFrontProxy.hostAliases.values[0].ip=$(kubectl get svc dex -n kcp -o json  | jq -r .spec.clusterIP) \
+     --set kcp.hostAliases.values[0].ip=$(kubectl get svc dex -n dex -o json  | jq -r .spec.clusterIP) \
+     --set kcpFrontProxy.hostAliases.values[0].ip=$(kubectl get svc dex -n dex -o json  | jq -r .spec.clusterIP) \
      --set kcp.hostAliases.values[1].ip=$(kubectl get svc kcp-internal -n kcp -o json  | jq -r .spec.clusterIP) \
      --set kcpFrontProxy.hostAliases.values[1].ip=$(kubectl get svc kcp-internal -n kcp -o json  | jq -r .spec.clusterIP) \
      --namespace kcp \

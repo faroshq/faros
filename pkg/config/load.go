@@ -17,7 +17,7 @@ import (
 // Loading order:
 // 1. Load .env file
 // 2. Load envconfig from ENV variables and defaults
-func LoadAPI() (*Config, error) {
+func Load() (*Config, error) {
 	c := &Config{}
 	godotenv.Load()
 
