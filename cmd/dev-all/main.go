@@ -46,7 +46,7 @@ func run(ctx context.Context) error {
 		}
 	}
 
-	cfg, err := config.LoadAPI()
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
