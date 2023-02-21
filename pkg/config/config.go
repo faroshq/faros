@@ -1,8 +1,6 @@
 package config
 
 import (
-	"time"
-
 	"k8s.io/client-go/rest"
 )
 
@@ -13,8 +11,6 @@ const (
 type Config struct {
 	// APIConfig is the configuration for the API server.
 	APIConfig APIConfig `yaml:"api"`
-	// DatastoreConfig is the configuration for the datastore.
-	DatastoreConfig DatastoreConfig `yaml:"datastore"`
 	// FarosKCPConfig is the configuration for the Faros KCP integration.
 	FarosKCPConfig FarosKCPConfig `yaml:"farosKCP"`
 }
@@ -65,24 +61,4 @@ type FarosKCPConfig struct {
 
 	// ControllersWorkspace is name of workspace controllers are operating in
 	ControllersWorkspace string `envconfig:"FAROS_CONTROLLER_WORKSPACE" yaml:"controllersWorkspace,omitempty" default:"root:faros:service:controllers"`
-}
-
-type DatastoreConfig struct {
-	SqliteURI string `envconfig:"FAROS_DATABASE_SQLITE_URI" default:"dev/database.sqlite3"`
-	// Name of the database
-	Name string `envconfig:"FAROS_DATABASE_NAME" default:"faros"`
-	// Type is the type of database to use.
-	Type string `envconfig:"FAROS_DATABASE_TYPE" default:"sqlite" `
-	// Host is the host of the database
-	Host string `envconfig:"FAROS_DATABASE_HOST" default:"localhost"`
-	// Port is the port of the database
-	Port int `envconfig:"FAROS_DATABASE_PORT" default:"5432"`
-	// Password is the password of the database
-	Password string `envconfig:"FAROS_DATABASE_PASSWORD" default:""`
-	// Username is the username of the database
-	Username string `envconfig:"FAROS_DATABASE_USERNAME" default:""`
-	// MaxConnIdleTime is the maximum amount of time a database connection can be idle
-	MaxConnIdleTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_IDLE_TIME" default:"30s"`
-	//MaxConnLifeTime is the maximum amount of time a database connection can be used
-	MaxConnLifeTime time.Duration `envconfig:"FAROS_DATABASE_MAX_CONN_LIFE_TIME" default:"1h"`
 }
