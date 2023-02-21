@@ -59,33 +59,35 @@ type AuthenticatorImpl struct {
 func NewAuthenticator(cfg config.Config, store store.Store, callbackURLPrefix string) (*AuthenticatorImpl, error) {
 	var client *http.Client
 	var err error
+	ctx := context.Background()
 
-	hostingCoreClient, err := kubernetes.NewForConfig(cfg.FarosKCPConfig.HostingClusterRestConfig)
+	hostingCoreClient, err := kubernetes.NewForConfig(cfg.FarosKCPConfig.KCPClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	secret, err := hostingCoreClient.CoreV1().Secrets(cfg.FarosKCPConfig.HostingClusterNamespace).Get(context.Background(), cfg.APIConfig.OIDCCASecretName, metav1.GetOptions{})
-	if err != nil {
+	secret, err := hostingCoreClient.CoreV1().Secrets(cfg.APIConfig.OIDCCASecretNamespace).Get(ctx, cfg.APIConfig.OIDCCASecretName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 
-	crt, ok := secret.Data["tls.crt"]
-	if !ok {
-		return nil, errors.New("oidc tls.crt not found in secret")
-	}
-	key, ok := secret.Data["tls.key"]
-	if !ok {
-		return nil, errors.New("oidc tls.key not found in secret")
-	}
-	client, err = httpClientForRootCAs(crt, key)
-	if err != nil {
-		return nil, err
+	if secret != nil {
+		crt, ok := secret.Data["tls.crt"]
+		if !ok {
+			return nil, errors.New("oidc tls.crt not found in secret")
+		}
+		key, ok := secret.Data["tls.key"]
+		if !ok {
+			return nil, errors.New("oidc tls.key not found in secret")
+		}
+		client, err = httpClientForRootCAs(crt, key)
+		if err != nil {
+			return nil, err
+		}
+		ctx = oidc.ClientContext(ctx, client)
 	}
 
 	redirectURL := cfg.APIConfig.ControllerExternalURL + callbackURLPrefix
-
-	ctx := oidc.ClientContext(context.Background(), client)
 
 	provider, err := oidc.NewProvider(ctx, cfg.APIConfig.OIDCIssuerURL)
 	if err != nil {
