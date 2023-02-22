@@ -26,4 +26,5 @@ jobs:
           auth_token: ${{ secrets.auth_token }}
         run: |
           echo "${{ github.token }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
+          export GOFLAGS="-ldflags=-X=github.com/faroshq/faros/pkg/util/version.version=${{ github.sha }}
           ko build -B --platform=all -t latest -t ${{ github.sha }} ./cmd/*

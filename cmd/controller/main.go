@@ -9,6 +9,7 @@ import (
 
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/controllers"
+	"github.com/faroshq/faros/pkg/util/version"
 )
 
 func main() {
@@ -27,6 +28,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	klog.Info("Version: ", version.GetVersion().Version)
 
 	cfg, err := config.Load()
 	if err != nil {
