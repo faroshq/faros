@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kcp-dev/kcp/pkg/cliplugins/base"
 	"github.com/skratchdot/open-golang/open"
 	"github.com/spf13/cobra"
 
+	"github.com/faroshq/faros/pkg/cliplugins/base"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/tools/clientcmd"
@@ -111,7 +111,7 @@ func (o *LoginSetupOptions) Run(ctx context.Context) error {
 		}
 	}()
 
-	url := fmt.Sprintf("https://faros.dev.faros.sh/faros.sh/api/v1alpha1/oidc/login?redirect_uri=http://localhost:%d", l.Addr().(*net.TCPAddr).Port)
+	url := fmt.Sprintf("%s/faros.sh/api/v1alpha1/oidc/login?redirect_uri=http://localhost:%d", o.APIEndpoint, l.Addr().(*net.TCPAddr).Port)
 
 	if err := open.Run(url); err != nil {
 		return fmt.Errorf("trying to open web browser, error: %s", err)

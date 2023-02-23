@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/kcp-dev/client-go/kubernetes"
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
 	kcpclientset "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 	"golang.org/x/sync/errgroup"
@@ -46,6 +47,7 @@ type controllerManager struct {
 	clientFactory utilkubernetes.ClientFactory
 	bootstraper   bootstrap.Bootstraper
 	kcpClientSet  kcpclientset.ClusterInterface
+	coreClientSet kubernetes.ClusterInterface
 }
 
 func New(c *config.Config) (Controllers, error) {
@@ -54,18 +56,30 @@ func New(c *config.Config) (Controllers, error) {
 		return nil, err
 	}
 
-	cf, err := utilkubernetes.NewClientFactory(c.FarosKCPConfig.KCPClusterRestConfig)
+	farosCfg := &c.FarosKCPConfig
+	cf, err := utilkubernetes.NewClientFactory(farosCfg.KCPClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	kcpClientSet, err := kcpclientset.NewForConfig(c.FarosKCPConfig.KCPClusterRestConfig)
+	rootRest, err := cf.GetRootRestConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := kcpclientset.NewForConfig(rootRest)
+	if err != nil {
+		return nil, err
+	}
+
+	coreClientSet, err := kubernetes.NewForConfig(rootRest)
 	if err != nil {
 		return nil, err
 	}
 
 	return &controllerManager{
-		kcpClientSet:  kcpClientSet,
+		kcpClientSet:  client,
+		coreClientSet: coreClientSet,
 		config:        c,
 		clientFactory: cf,
 		bootstraper:   b,
@@ -102,6 +116,7 @@ func (c *controllerManager) WaitForAPIReady(ctx context.Context) error {
 }
 
 func (c *controllerManager) Run(ctx context.Context) error {
+	klog.V(2).Info("starting controllers")
 	// bootstrap will set missing ctrlRestConfig and deploy kcp wide resources
 	ctxT, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()

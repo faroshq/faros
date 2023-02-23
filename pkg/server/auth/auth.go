@@ -61,7 +61,7 @@ func NewAuthenticator(cfg config.Config, store store.Store, callbackURLPrefix st
 	var err error
 	ctx := context.Background()
 
-	hostingCoreClient, err := kubernetes.NewForConfig(cfg.FarosKCPConfig.KCPClusterRestConfig)
+	hostingCoreClient, err := kubernetes.NewForConfig(cfg.FarosKCPConfig.HostingClusterRestConfig)
 	if err != nil {
 		return nil, err
 	}

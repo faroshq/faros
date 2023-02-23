@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kcp-dev/client-go/kubernetes"
-
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
@@ -25,16 +23,6 @@ var (
 // managing workspaces and tenants
 func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 	restConfig, err := c.clientFactory.GetWorkspaceRestConfig(ctx, c.config.FarosKCPConfig.ControllersWorkspace)
-	if err != nil {
-		return err
-	}
-
-	rootRestConfig, err := c.clientFactory.GetRootRestConfig()
-	if err != nil {
-		return err
-	}
-
-	coreClientSet, err := kubernetes.NewForConfig(rootRestConfig)
 	if err != nil {
 		return err
 	}
@@ -72,7 +60,7 @@ func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 	ctrlOrganizations, err := organizations.NewController(
 		c.config,
 		c.kcpClientSet,
-		coreClientSet,
+		c.coreClientSet,
 		farosClientSet,
 		informer.Tenancy().V1alpha1().Organizations(),
 	)
@@ -83,7 +71,7 @@ func (c *controllerManager) runTenancyControllers(ctx context.Context) error {
 	ctrlWorkspaces, err := workspaces.NewController(
 		c.config,
 		c.kcpClientSet,
-		coreClientSet,
+		c.coreClientSet,
 		farosClientSet,
 		informer.Tenancy().V1alpha1().Workspaces(),
 	)

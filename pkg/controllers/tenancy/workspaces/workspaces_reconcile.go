@@ -156,7 +156,7 @@ func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, org *
 	case apierrors.IsNotFound(err):
 		_, err := c.coreClientSet.RbacV1().ClusterRoleBindings().Cluster(workspaceCluster).Create(ctx, crb, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create the ClusterRoleBindings %s", err)
+			return fmt.Errorf("failed to create the ClusterRoleBindings in workspace %s: %s", workspaceCluster.String(), err)
 		}
 	case err == nil:
 		currentClusterRoleBinding.RoleRef = crb.RoleRef
