@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/spf13/cobra"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -100,8 +99,6 @@ func (o *UseOptions) Run(ctx context.Context) error {
 			return fmt.Errorf("organization %s not found", o.OrganizationName)
 		}
 	}
-
-	spew.Dump(organizations)
 
 	// Get raw config and add new cluster and context to it
 	rawConfig, err := o.ClientConfig.RawConfig()
