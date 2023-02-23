@@ -4,15 +4,15 @@ Faros allows to self-provision [KCP](https://github.com/kcp-dev/kcp) workspaces 
 
 ## How it works
 
-1. Download faros plugin from [releases](https://github.com/faroshq/faros/releases) and install it.
+1. Download faros `kubectl-faros` plugin from [releases](https://github.com/faroshq/faros/releases) and install it.
 
 ```bash
 https://github.com/faroshq/faros/releases/latest
 
-tar -xvf faros-v*.tar.gz
-mv faros /usr/local/bin/faros
-chmod +x /usr/local/bin/faros
-rm faros-v*.tar.gz
+tar -xvf kubectl-faros-v*.tar.gz
+mv kubectl-faros /usr/local/bin/kubectl-faros
+chmod +x /usr/local/bin/kubectl-faros
+rm kubectl-faros-v*.tar.gz
 ```
 
 2. Login to Faros
