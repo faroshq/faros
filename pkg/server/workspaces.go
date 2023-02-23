@@ -38,18 +38,11 @@ func (s *Service) getWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	organizationRef, err := s.store.GetOrganization(ctx, tenancyv1alpha1.Organization{
+	organization, err := s.store.GetOrganization(ctx, tenancyv1alpha1.Organization{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: organizationName,
 		},
 	})
-	if err != nil {
-		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	organization, err := s.farosClient.TenancyV1alpha1().Organizations().Get(ctx, organizationRef.Name, metav1.GetOptions{})
 	if err != nil {
 		klog.Error(err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)

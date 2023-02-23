@@ -15,9 +15,7 @@ import (
 func main() {
 
 	klog.InitFlags(flag.CommandLine)
-
 	flag.Parse()
-
 	ctx := klog.NewContext(context.Background(), klog.NewKlogr())
 
 	err := run(ctx)
@@ -40,6 +38,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	klog.Info("Starting controller")
 	go controller.Run(ctx)
 
 	<-ctx.Done()

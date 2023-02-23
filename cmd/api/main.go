@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/klog/v2"
@@ -15,9 +16,7 @@ import (
 func main() {
 
 	klog.InitFlags(flag.CommandLine)
-
 	flag.Parse()
-
 	ctx := klog.NewContext(context.Background(), klog.NewKlogr())
 
 	err := run(ctx)
@@ -32,12 +31,12 @@ func run(ctx context.Context) error {
 
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 
 	server, err := server.New(ctx, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create server: %w", err)
 	}
 
 	go server.Run(ctx)

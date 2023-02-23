@@ -41,28 +41,16 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.FarosKCPConfig.HostingClusterRestConfig = rest
-
-	kcpKubeConfig, err := loadKubeConfig(c.FarosKCPConfig.KCPClusterKubeConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kcp cluster kubeconfig: %w", err)
-	}
-	c.FarosKCPConfig.KCPClusterRestConfig = kcpKubeConfig
+	c.FarosKCPConfig.KCPClusterRestConfig = rest
 
 	return c, err
 }
 
-// loadKubeConfig loads a kubeconfig from disk. This method is
-// intended to be common between fixture for servers whose lifecycle
-// is test-managed and fixture for servers whose lifecycle is managed
-// separately from a test run.
+// loadKubeConfig loads a kubeconfig from disk or from the environment
 func loadKubeConfig(kubeconfigPath string) (*rest.Config, error) {
-	exists, err := utilfile.Exist(kubeconfigPath)
-	if err != nil {
-		return nil, err
-	}
+	exists, _ := utilfile.Exist(kubeconfigPath)
 	if !exists {
-		config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		config, err := clientcmd.BuildConfigFromFlags("", "")
 		if err != nil {
 			return nil, err
 		}

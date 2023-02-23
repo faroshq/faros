@@ -18,12 +18,12 @@ type Options struct {
 	*base.Options
 	// Output specifies output format
 	Output string
-
 	// TenantOrganizationsAPI is the API path for organizations
 	TenantOrganizationsAPI string
-
 	// TenantWorkspacesAPIfmt is the API path for workspaces
 	TenantWorkspacesAPIfmt string
+	// APIEndpoint is the endpoint of the API server
+	APIEndpoint string
 }
 
 // NewOptions provides an instance of Options with default values.
@@ -37,6 +37,7 @@ func NewOptions(streams genericclioptions.IOStreams) *Options {
 func (o *Options) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
 	cmd.Flags().StringVarP(&o.Output, "output", "o", o.Output, "output format [table,json,yaml]")
+	cmd.Flags().StringVarP(&o.APIEndpoint, "endpoint", "e", "https://api.faros.sh", "Faros API endpoint")
 }
 
 // Complete initializes ClientConfig based on Kubeconfig and KubectlOverrides.
