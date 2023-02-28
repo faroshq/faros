@@ -9,6 +9,7 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
+	"github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	utilprint "github.com/faroshq/faros/pkg/util/print"
 )
@@ -60,8 +61,6 @@ func (o *Options) Complete() error {
 	}
 }
 
-var kubeConfigAuthKey = "faros"
-
 // Validate validates the configured options.
 func (o *Options) Validate() error {
 	return nil
@@ -78,7 +77,7 @@ func (o *Options) GetFarosClient() (*farosclient.Clientset, error) {
 		return nil, err
 	}
 
-	cluster := raw.Clusters[kubeConfigAuthKey]
+	cluster := raw.Clusters[v1alpha1.KubeConfigAuthKey]
 
 	u, err := url.Parse(cluster.Server)
 	if err != nil {

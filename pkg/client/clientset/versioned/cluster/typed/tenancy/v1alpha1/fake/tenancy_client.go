@@ -22,13 +22,12 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"github.com/kcp-dev/logicalcluster/v3"
-
 	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
-	"k8s.io/client-go/rest"
+	"github.com/kcp-dev/logicalcluster/v3"
 
 	kcptenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
+	"k8s.io/client-go/rest"
 )
 
 var _ kcptenancyv1alpha1.TenancyV1alpha1ClusterInterface = (*TenancyV1alpha1ClusterClient)(nil)
@@ -42,6 +41,10 @@ func (c *TenancyV1alpha1ClusterClient) Cluster(clusterPath logicalcluster.Path) 
 		panic("A specific cluster must be provided when scoping, not the wildcard.")
 	}
 	return &TenancyV1alpha1Client{Fake: c.Fake, ClusterPath: clusterPath}
+}
+
+func (c *TenancyV1alpha1ClusterClient) Metadatas() kcptenancyv1alpha1.MetadataClusterInterface {
+	return &metadatasClusterClient{Fake: c.Fake}
 }
 
 func (c *TenancyV1alpha1ClusterClient) Organizations() kcptenancyv1alpha1.OrganizationClusterInterface {
@@ -66,6 +69,10 @@ type TenancyV1alpha1Client struct {
 func (c *TenancyV1alpha1Client) RESTClient() rest.Interface {
 	var ret *rest.RESTClient
 	return ret
+}
+
+func (c *TenancyV1alpha1Client) Metadatas() tenancyv1alpha1.MetadataInterface {
+	return &metadatasClient{Fake: c.Fake, ClusterPath: c.ClusterPath}
 }
 
 func (c *TenancyV1alpha1Client) Organizations() tenancyv1alpha1.OrganizationInterface {

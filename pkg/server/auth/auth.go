@@ -135,6 +135,7 @@ func (a *AuthenticatorImpl) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if r.FormValue("offline_access") != "yes" {
 		authCodeURL = a.oauth2Config(scopes).AuthCodeURL(state)
 	} else {
+		scopes = append(scopes, "offline_access")
 		authCodeURL = a.oauth2Config(scopes).AuthCodeURL(state, oauth2.AccessTypeOffline)
 	}
 
@@ -202,13 +203,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rawIDToken, ok := token.Extra("id_token").(string)
-	if !ok {
-		http.Error(w, "no id_token in token response", http.StatusInternalServerError)
-		return
-	}
-
-	idToken, err := a.verifier.Verify(r.Context(), rawIDToken)
+	idToken, err := a.verifier.Verify(r.Context(), token.AccessToken)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to verify ID token: %v", err), http.StatusInternalServerError)
 		return
@@ -216,8 +211,12 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 	// TODO: extend
 	var claims struct {
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
+		Email         string   `json:"email"`
+		EmailVerified bool     `json:"email_verified"`
+		Groups        []string `json:"groups"`
+		Name          string   `json:"name"`
+		IAT           int      `json:"iat"`
+		EXP           int      `json:"exp"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, fmt.Sprintf("failed to parse claim: %v", err), http.StatusInternalServerError)
@@ -232,9 +231,11 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 	response := models.LoginResponse{
 		IDToken:       *idToken,
-		RawIDToken:    rawIDToken,
+		AccessToken:   token.AccessToken,
+		RefreshToken:  token.RefreshToken,
 		Email:         claims.Email,
 		ServerBaseURL: fmt.Sprintf("%s/clusters", a.config.APIConfig.ControllerExternalURL),
+		ExpiresAt:     claims.EXP,
 	}
 
 	data, err := json.Marshal(response)

@@ -32,39 +32,39 @@ import (
 	tenancyv1alpha1client "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 
-// OrganizationsClusterGetter has a method to return a OrganizationClusterInterface.
+// MetadatasClusterGetter has a method to return a MetadataClusterInterface.
 // A group's cluster client should implement this interface.
-type OrganizationsClusterGetter interface {
-	Organizations() OrganizationClusterInterface
+type MetadatasClusterGetter interface {
+	Metadatas() MetadataClusterInterface
 }
 
-// OrganizationClusterInterface can operate on Organizations across all clusters,
-// or scope down to one cluster and return a tenancyv1alpha1client.OrganizationInterface.
-type OrganizationClusterInterface interface {
-	Cluster(logicalcluster.Path) tenancyv1alpha1client.OrganizationInterface
-	List(ctx context.Context, opts metav1.ListOptions) (*tenancyv1alpha1.OrganizationList, error)
+// MetadataClusterInterface can operate on Metadatas across all clusters,
+// or scope down to one cluster and return a tenancyv1alpha1client.MetadataInterface.
+type MetadataClusterInterface interface {
+	Cluster(logicalcluster.Path) tenancyv1alpha1client.MetadataInterface
+	List(ctx context.Context, opts metav1.ListOptions) (*tenancyv1alpha1.MetadataList, error)
 	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
 }
 
-type organizationsClusterInterface struct {
+type metadatasClusterInterface struct {
 	clientCache kcpclient.Cache[*tenancyv1alpha1client.TenancyV1alpha1Client]
 }
 
 // Cluster scopes the client down to a particular cluster.
-func (c *organizationsClusterInterface) Cluster(clusterPath logicalcluster.Path) tenancyv1alpha1client.OrganizationInterface {
+func (c *metadatasClusterInterface) Cluster(clusterPath logicalcluster.Path) tenancyv1alpha1client.MetadataInterface {
 	if clusterPath == logicalcluster.Wildcard {
 		panic("A specific cluster must be provided when scoping, not the wildcard.")
 	}
 
-	return c.clientCache.ClusterOrDie(clusterPath).Organizations()
+	return c.clientCache.ClusterOrDie(clusterPath).Metadatas()
 }
 
-// List returns the entire collection of all Organizations across all clusters.
-func (c *organizationsClusterInterface) List(ctx context.Context, opts metav1.ListOptions) (*tenancyv1alpha1.OrganizationList, error) {
-	return c.clientCache.ClusterOrDie(logicalcluster.Wildcard).Organizations().List(ctx, opts)
+// List returns the entire collection of all Metadatas across all clusters.
+func (c *metadatasClusterInterface) List(ctx context.Context, opts metav1.ListOptions) (*tenancyv1alpha1.MetadataList, error) {
+	return c.clientCache.ClusterOrDie(logicalcluster.Wildcard).Metadatas().List(ctx, opts)
 }
 
-// Watch begins to watch all Organizations across all clusters.
-func (c *organizationsClusterInterface) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
-	return c.clientCache.ClusterOrDie(logicalcluster.Wildcard).Organizations().Watch(ctx, opts)
+// Watch begins to watch all Metadatas across all clusters.
+func (c *metadatasClusterInterface) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	return c.clientCache.ClusterOrDie(logicalcluster.Wildcard).Metadatas().Watch(ctx, opts)
 }

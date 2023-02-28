@@ -41,139 +41,139 @@ import (
 	tenancyv1alpha1listers "github.com/faroshq/faros/pkg/client/listers/tenancy/v1alpha1"
 )
 
-// WorkspaceClusterInformer provides access to a shared informer and lister for
-// Workspaces.
-type WorkspaceClusterInformer interface {
-	Cluster(logicalcluster.Name) WorkspaceInformer
+// MetadataClusterInformer provides access to a shared informer and lister for
+// Metadatas.
+type MetadataClusterInformer interface {
+	Cluster(logicalcluster.Name) MetadataInformer
 	Informer() kcpcache.ScopeableSharedIndexInformer
-	Lister() tenancyv1alpha1listers.WorkspaceClusterLister
+	Lister() tenancyv1alpha1listers.MetadataClusterLister
 }
 
-type workspaceClusterInformer struct {
+type metadataClusterInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
 }
 
-// NewWorkspaceClusterInformer constructs a new informer for Workspace type.
+// NewMetadataClusterInformer constructs a new informer for Metadata type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewWorkspaceClusterInformer(client clientset.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers) kcpcache.ScopeableSharedIndexInformer {
-	return NewFilteredWorkspaceClusterInformer(client, resyncPeriod, indexers, nil)
+func NewMetadataClusterInformer(client clientset.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers) kcpcache.ScopeableSharedIndexInformer {
+	return NewFilteredMetadataClusterInformer(client, resyncPeriod, indexers, nil)
 }
 
-// NewFilteredWorkspaceClusterInformer constructs a new informer for Workspace type.
+// NewFilteredMetadataClusterInformer constructs a new informer for Metadata type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewFilteredWorkspaceClusterInformer(client clientset.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
+func NewFilteredMetadataClusterInformer(client clientset.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.TenancyV1alpha1().Workspaces().List(context.TODO(), options)
+				return client.TenancyV1alpha1().Metadatas().List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.TenancyV1alpha1().Workspaces().Watch(context.TODO(), options)
+				return client.TenancyV1alpha1().Metadatas().Watch(context.TODO(), options)
 			},
 		},
-		&tenancyv1alpha1.Workspace{},
+		&tenancyv1alpha1.Metadata{},
 		resyncPeriod,
 		indexers,
 	)
 }
 
-func (f *workspaceClusterInformer) defaultInformer(client clientset.ClusterInterface, resyncPeriod time.Duration) kcpcache.ScopeableSharedIndexInformer {
-	return NewFilteredWorkspaceClusterInformer(client, resyncPeriod, cache.Indexers{
+func (f *metadataClusterInformer) defaultInformer(client clientset.ClusterInterface, resyncPeriod time.Duration) kcpcache.ScopeableSharedIndexInformer {
+	return NewFilteredMetadataClusterInformer(client, resyncPeriod, cache.Indexers{
 		kcpcache.ClusterIndexName: kcpcache.ClusterIndexFunc,
 	},
 		f.tweakListOptions,
 	)
 }
 
-func (f *workspaceClusterInformer) Informer() kcpcache.ScopeableSharedIndexInformer {
-	return f.factory.InformerFor(&tenancyv1alpha1.Workspace{}, f.defaultInformer)
+func (f *metadataClusterInformer) Informer() kcpcache.ScopeableSharedIndexInformer {
+	return f.factory.InformerFor(&tenancyv1alpha1.Metadata{}, f.defaultInformer)
 }
 
-func (f *workspaceClusterInformer) Lister() tenancyv1alpha1listers.WorkspaceClusterLister {
-	return tenancyv1alpha1listers.NewWorkspaceClusterLister(f.Informer().GetIndexer())
+func (f *metadataClusterInformer) Lister() tenancyv1alpha1listers.MetadataClusterLister {
+	return tenancyv1alpha1listers.NewMetadataClusterLister(f.Informer().GetIndexer())
 }
 
-// WorkspaceInformer provides access to a shared informer and lister for
-// Workspaces.
-type WorkspaceInformer interface {
+// MetadataInformer provides access to a shared informer and lister for
+// Metadatas.
+type MetadataInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() tenancyv1alpha1listers.WorkspaceLister
+	Lister() tenancyv1alpha1listers.MetadataLister
 }
 
-func (f *workspaceClusterInformer) Cluster(clusterName logicalcluster.Name) WorkspaceInformer {
-	return &workspaceInformer{
+func (f *metadataClusterInformer) Cluster(clusterName logicalcluster.Name) MetadataInformer {
+	return &metadataInformer{
 		informer: f.Informer().Cluster(clusterName),
 		lister:   f.Lister().Cluster(clusterName),
 	}
 }
 
-type workspaceInformer struct {
+type metadataInformer struct {
 	informer cache.SharedIndexInformer
-	lister   tenancyv1alpha1listers.WorkspaceLister
+	lister   tenancyv1alpha1listers.MetadataLister
 }
 
-func (f *workspaceInformer) Informer() cache.SharedIndexInformer {
+func (f *metadataInformer) Informer() cache.SharedIndexInformer {
 	return f.informer
 }
 
-func (f *workspaceInformer) Lister() tenancyv1alpha1listers.WorkspaceLister {
+func (f *metadataInformer) Lister() tenancyv1alpha1listers.MetadataLister {
 	return f.lister
 }
 
-type workspaceScopedInformer struct {
+type metadataScopedInformer struct {
 	factory          internalinterfaces.SharedScopedInformerFactory
 	tweakListOptions internalinterfaces.TweakListOptionsFunc
 }
 
-func (f *workspaceScopedInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&tenancyv1alpha1.Workspace{}, f.defaultInformer)
+func (f *metadataScopedInformer) Informer() cache.SharedIndexInformer {
+	return f.factory.InformerFor(&tenancyv1alpha1.Metadata{}, f.defaultInformer)
 }
 
-func (f *workspaceScopedInformer) Lister() tenancyv1alpha1listers.WorkspaceLister {
-	return tenancyv1alpha1listers.NewWorkspaceLister(f.Informer().GetIndexer())
+func (f *metadataScopedInformer) Lister() tenancyv1alpha1listers.MetadataLister {
+	return tenancyv1alpha1listers.NewMetadataLister(f.Informer().GetIndexer())
 }
 
-// NewWorkspaceInformer constructs a new informer for Workspace type.
+// NewMetadataInformer constructs a new informer for Metadata type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewWorkspaceInformer(client scopedclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredWorkspaceInformer(client, resyncPeriod, indexers, nil)
+func NewMetadataInformer(client scopedclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
+	return NewFilteredMetadataInformer(client, resyncPeriod, indexers, nil)
 }
 
-// NewFilteredWorkspaceInformer constructs a new informer for Workspace type.
+// NewFilteredMetadataInformer constructs a new informer for Metadata type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
-func NewFilteredWorkspaceInformer(client scopedclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
+func NewFilteredMetadataInformer(client scopedclientset.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.TenancyV1alpha1().Workspaces().List(context.TODO(), options)
+				return client.TenancyV1alpha1().Metadatas().List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.TenancyV1alpha1().Workspaces().Watch(context.TODO(), options)
+				return client.TenancyV1alpha1().Metadatas().Watch(context.TODO(), options)
 			},
 		},
-		&tenancyv1alpha1.Workspace{},
+		&tenancyv1alpha1.Metadata{},
 		resyncPeriod,
 		indexers,
 	)
 }
 
-func (f *workspaceScopedInformer) defaultInformer(client scopedclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredWorkspaceInformer(client, resyncPeriod, cache.Indexers{}, f.tweakListOptions)
+func (f *metadataScopedInformer) defaultInformer(client scopedclientset.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
+	return NewFilteredMetadataInformer(client, resyncPeriod, cache.Indexers{}, f.tweakListOptions)
 }

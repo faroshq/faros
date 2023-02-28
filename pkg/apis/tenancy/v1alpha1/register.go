@@ -19,6 +19,9 @@ const WorkspaceKind = "Workspace"
 // OrganizationKind is the kind for a Organization
 const OrganizationKind = "Organization"
 
+// MetadataKind is the kind for a Metadata
+const MetadataKind = "Metadata"
+
 // SchemeGroupVersion is group version used to register these objects
 var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: "v1alpha1"}
 
@@ -46,6 +49,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&WorkspaceList{},
 		&Organization{},
 		&OrganizationList{},
+		&Metadata{},
+		&MetadataList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

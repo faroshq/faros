@@ -26,6 +26,8 @@ import (
 )
 
 type ClusterInterface interface {
+	// Metadatas returns a MetadataClusterInformer
+	Metadatas() MetadataClusterInformer
 	// Organizations returns a OrganizationClusterInformer
 	Organizations() OrganizationClusterInformer
 	// Users returns a UserClusterInformer
@@ -44,6 +46,11 @@ func New(f internalinterfaces.SharedInformerFactory, tweakListOptions internalin
 	return &version{factory: f, tweakListOptions: tweakListOptions}
 }
 
+// Metadatas returns a MetadataClusterInformer
+func (v *version) Metadatas() MetadataClusterInformer {
+	return &metadataClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
 // Organizations returns a OrganizationClusterInformer
 func (v *version) Organizations() OrganizationClusterInformer {
 	return &organizationClusterInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
@@ -60,6 +67,8 @@ func (v *version) Workspaces() WorkspaceClusterInformer {
 }
 
 type Interface interface {
+	// Metadatas returns a MetadataInformer
+	Metadatas() MetadataInformer
 	// Organizations returns a OrganizationInformer
 	Organizations() OrganizationInformer
 	// Users returns a UserInformer
@@ -77,6 +86,11 @@ type scopedVersion struct {
 // New returns a new ClusterInterface.
 func NewScoped(f internalinterfaces.SharedScopedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
 	return &scopedVersion{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+}
+
+// Metadatas returns a MetadataInformer
+func (v *scopedVersion) Metadatas() MetadataInformer {
+	return &metadataScopedInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // Organizations returns a OrganizationInformer

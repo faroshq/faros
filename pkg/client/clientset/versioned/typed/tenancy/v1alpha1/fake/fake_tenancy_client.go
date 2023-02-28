@@ -19,14 +19,17 @@ limitations under the License.
 package fake
 
 import (
+	v1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
-
-	v1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 
 type FakeTenancyV1alpha1 struct {
 	*testing.Fake
+}
+
+func (c *FakeTenancyV1alpha1) Metadatas() v1alpha1.MetadataInterface {
+	return &FakeMetadatas{c}
 }
 
 func (c *FakeTenancyV1alpha1) Organizations() v1alpha1.OrganizationInterface {
