@@ -78,19 +78,22 @@ func (o *Options) Complete() error {
 		if err != nil {
 			panic(err)
 		}
-		unknownObj := raw.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey]
-		obj, ok := unknownObj.(*runtime.Unknown)
-		if !ok {
-			return fmt.Errorf("failed to convert object to runtime.Unknown")
-		}
+		if raw.Clusters[tenancyv1alpha1.KubeConfigAuthKey] != nil &&
+			raw.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey] != nil {
+			unknownObj := raw.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey]
+			obj, ok := unknownObj.(*runtime.Unknown)
+			if !ok {
+				return fmt.Errorf("failed to convert object to runtime.Unknown")
+			}
 
-		metadata := &tenancyv1alpha1.Metadata{}
-		err = json.Unmarshal(obj.Raw, metadata)
-		if err != nil {
-			return err
-		}
+			metadata := &tenancyv1alpha1.Metadata{}
+			err = json.Unmarshal(obj.Raw, metadata)
+			if err != nil {
+				return err
+			}
 
-		o.OrganizationName = metadata.Spec.CurrentOrganization
+			o.OrganizationName = metadata.Spec.CurrentOrganization
+		}
 	}
 
 	switch o.Output {
