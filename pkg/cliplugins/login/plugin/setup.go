@@ -14,11 +14,10 @@ import (
 	"github.com/skratchdot/open-golang/open"
 	"github.com/spf13/cobra"
 
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog"
 
@@ -33,18 +32,12 @@ type LoginSetupOptions struct {
 
 	// ConfigFile of CLI config
 	ConfigFile string
-
-	// for testing
-	modifyConfig func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error
 }
 
 // NewGenerateOptions returns a new GenerateOptions.
 func NewLoginSetupOptions(streams genericclioptions.IOStreams) *LoginSetupOptions {
 	return &LoginSetupOptions{
 		Options: base.NewOptions(streams),
-		modifyConfig: func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error {
-			return clientcmd.ModifyConfig(configAccess, *newConfig, true)
-		},
 	}
 }
 
@@ -156,7 +149,7 @@ func (o *LoginSetupOptions) configureKubeConfig(ctx context.Context, response mo
 		Server: response.ServerBaseURL,
 		Extensions: map[string]runtime.Object{
 			v1alpha1.MetadataKey: &v1alpha1.Metadata{
-				TypeMeta: v1.TypeMeta{
+				TypeMeta: metav1.TypeMeta{
 					Kind: v1alpha1.MetadataKind,
 				},
 				Spec: v1alpha1.MetadataSpec{
@@ -170,6 +163,7 @@ func (o *LoginSetupOptions) configureKubeConfig(ctx context.Context, response mo
 	if response.CertificateAuthorityData != "" {
 		config.Clusters[v1alpha1.KubeConfigAuthKey].CertificateAuthorityData = ca
 	} else {
+		fmt.Sprintln("Skipping TLS verification")
 		config.Clusters[v1alpha1.KubeConfigAuthKey].InsecureSkipTLSVerify = true
 	}
 	config.Contexts[v1alpha1.KubeConfigAuthKey] = &clientcmdapi.Context{
@@ -180,5 +174,5 @@ func (o *LoginSetupOptions) configureKubeConfig(ctx context.Context, response mo
 
 	fmt.Print("Saving configuration...\n")
 
-	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &config)
+	return o.ModifyConfig(o.ClientConfig.ConfigAccess(), &config)
 }

@@ -151,6 +151,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 	var localRedirect string
 	oauth2Config := a.oauth2Config(nil)
+	var isRefresh bool
 	switch r.Method {
 	case http.MethodGet:
 		// Authorization redirect callback from OAuth2 auth flow.
@@ -182,6 +183,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	case http.MethodPost:
+		isRefresh = true
 		// Form request from frontend to refresh a token.
 		refresh := r.FormValue("refresh_token")
 		if refresh == "" {
@@ -190,7 +192,6 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		}
 		t := &oauth2.Token{
 			RefreshToken: refresh,
-			Expiry:       time.Now().Add(-time.Hour),
 		}
 		var err error
 		token, err = oauth2Config.TokenSource(ctx, t).Token()
@@ -209,7 +210,6 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// TODO: extend
 	var claims struct {
 		Email         string   `json:"email"`
 		EmailVerified bool     `json:"email_verified"`
@@ -244,10 +244,15 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	base64.StdEncoding.EncodeToString(data)
-
-	localRedirect = localRedirect + "?data=" + base64.StdEncoding.EncodeToString(data)
-	http.Redirect(w, r, localRedirect, http.StatusSeeOther)
+	if isRefresh {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+		return
+	} else {
+		base64.StdEncoding.EncodeToString(data)
+		localRedirect = localRedirect + "?data=" + base64.StdEncoding.EncodeToString(data)
+		http.Redirect(w, r, localRedirect, http.StatusSeeOther)
+	}
 
 }
 
