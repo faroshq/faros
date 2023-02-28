@@ -2,16 +2,19 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // UseOptions contains options for configuring faros
@@ -100,8 +103,24 @@ func (o *UseOptions) Run(ctx context.Context) error {
 		return err
 	}
 
-	rawConfig.Contexts[kubeConfigContextKeyOrg] = clientcmdapi.NewContext()
-	rawConfig.Contexts[kubeConfigContextKeyOrg].Namespace = o.Name
+	if _, ok := rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey]; !ok {
+		rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey] = clientcmdapi.NewCluster()
+	}
+
+	unknownObj := rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey]
+	obj, ok := unknownObj.(*runtime.Unknown)
+	if !ok {
+		return fmt.Errorf("failed to convert object to runtime.Unknown")
+	}
+
+	metadata := &tenancyv1alpha1.Metadata{}
+	err = json.Unmarshal(obj.Raw, metadata)
+	if err != nil {
+		return err
+	}
+
+	metadata.Spec.CurrentOrganization = o.Name
+	rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey] = metadata
 
 	fmt.Printf("Using organization: %s \n ", o.Name)
 	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &rawConfig)

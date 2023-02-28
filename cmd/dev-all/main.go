@@ -36,6 +36,8 @@ func run(ctx context.Context) error {
 		"FAROS_OIDC_CLIENT_SECRET=ZXhhbXBsZS1hcHAtc2VjcmV0", //dev value hardcoded
 		"FAROS_TLS_KEY_FILE=dev/server.pem",                 // go run ./hack/genkey -client localhost && 	mv localhost.* dev
 		"FAROS_TLS_CERT_FILE=dev/server.pem",
+		"FAROS_OIDC_ISSUER_URL=https://dex.dev.faros.sh",
+		"FAROS_API_EXTERNAL_URL=https://faros.dev.faros.sh",
 	}
 
 	for _, v := range devVars {

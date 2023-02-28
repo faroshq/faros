@@ -14,17 +14,17 @@ import (
 	"github.com/skratchdot/open-golang/open"
 	"github.com/spf13/cobra"
 
-	"github.com/faroshq/faros/pkg/cliplugins/base"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog"
 
+	"github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	"github.com/faroshq/faros/pkg/cliplugins/base"
 	"github.com/faroshq/faros/pkg/models"
 )
-
-var kubeConfigAuthKey = "faros"
 
 // LoginSetupOptions contains options for login via faros API
 type LoginSetupOptions struct {
@@ -32,18 +32,12 @@ type LoginSetupOptions struct {
 
 	// ConfigFile of CLI config
 	ConfigFile string
-
-	// for testing
-	modifyConfig func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error
 }
 
 // NewGenerateOptions returns a new GenerateOptions.
 func NewLoginSetupOptions(streams genericclioptions.IOStreams) *LoginSetupOptions {
 	return &LoginSetupOptions{
 		Options: base.NewOptions(streams),
-		modifyConfig: func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error {
-			return clientcmd.ModifyConfig(configAccess, *newConfig, true)
-		},
 	}
 }
 
@@ -111,7 +105,7 @@ func (o *LoginSetupOptions) Run(ctx context.Context) error {
 		}
 	}()
 
-	url := fmt.Sprintf("%s/faros.sh/api/v1alpha1/oidc/login?redirect_uri=http://localhost:%d", o.APIEndpoint, l.Addr().(*net.TCPAddr).Port)
+	url := fmt.Sprintf("%s/faros.sh/api/v1alpha1/oidc/login?offline_access=yes&redirect_uri=http://localhost:%d", o.APIEndpoint, l.Addr().(*net.TCPAddr).Port)
 
 	if err := open.Run(url); err != nil {
 		return fmt.Errorf("trying to open web browser, error: %s", err)
@@ -137,12 +131,13 @@ func (o *LoginSetupOptions) configureKubeConfig(ctx context.Context, response mo
 	}
 
 	// setup user
-	user, exists := config.AuthInfos[kubeConfigAuthKey]
+	user, exists := config.AuthInfos[v1alpha1.KubeConfigAuthKey]
 	if !exists {
 		user = clientcmdapi.NewAuthInfo()
 	}
-	user.Token = response.RawIDToken
-	config.AuthInfos[kubeConfigAuthKey] = user
+	user.Token = response.AccessToken
+
+	config.AuthInfos[v1alpha1.KubeConfigAuthKey] = user
 
 	ca, err := base64.StdEncoding.DecodeString(response.CertificateAuthorityData)
 	if err != nil {
@@ -150,21 +145,34 @@ func (o *LoginSetupOptions) configureKubeConfig(ctx context.Context, response mo
 	}
 
 	// setup cluster
-	config.Clusters[kubeConfigAuthKey] = &clientcmdapi.Cluster{
+	config.Clusters[v1alpha1.KubeConfigAuthKey] = &clientcmdapi.Cluster{
 		Server: response.ServerBaseURL,
+		Extensions: map[string]runtime.Object{
+			v1alpha1.MetadataKey: &v1alpha1.Metadata{
+				TypeMeta: metav1.TypeMeta{
+					Kind: v1alpha1.MetadataKind,
+				},
+				Spec: v1alpha1.MetadataSpec{
+					AccessToken:  response.AccessToken,
+					RefreshToken: response.RefreshToken,
+					ExpiresAt:    response.ExpiresAt,
+				},
+			},
+		},
 	}
 	if response.CertificateAuthorityData != "" {
-		config.Clusters[kubeConfigAuthKey].CertificateAuthorityData = ca
+		config.Clusters[v1alpha1.KubeConfigAuthKey].CertificateAuthorityData = ca
 	} else {
-		config.Clusters[kubeConfigAuthKey].InsecureSkipTLSVerify = true
+		fmt.Sprintln("Skipping TLS verification")
+		config.Clusters[v1alpha1.KubeConfigAuthKey].InsecureSkipTLSVerify = true
 	}
-	config.Contexts[kubeConfigAuthKey] = &clientcmdapi.Context{
-		Cluster:  kubeConfigAuthKey,
-		AuthInfo: kubeConfigAuthKey,
+	config.Contexts[v1alpha1.KubeConfigAuthKey] = &clientcmdapi.Context{
+		Cluster:  v1alpha1.KubeConfigAuthKey,
+		AuthInfo: v1alpha1.KubeConfigAuthKey,
 	}
-	config.CurrentContext = kubeConfigAuthKey
+	config.CurrentContext = v1alpha1.KubeConfigAuthKey
 
 	fmt.Print("Saving configuration...\n")
 
-	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &config)
+	return o.ModifyConfig(o.ClientConfig.ConfigAccess(), &config)
 }

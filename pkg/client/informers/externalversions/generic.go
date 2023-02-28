@@ -24,11 +24,11 @@ package informers
 import (
 	"fmt"
 
-	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
-	"github.com/kcp-dev/logicalcluster/v3"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
+
+	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
+	"github.com/kcp-dev/logicalcluster/v3"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 )
@@ -87,6 +87,8 @@ func (f *genericInformer) Lister() cache.GenericLister {
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericClusterInformer, error) {
 	switch resource {
 	// Group=tenancy.faros.sh, Version=V1alpha1
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("metadatas"):
+		return &genericClusterInformer{resource: resource.GroupResource(), informer: f.Tenancy().V1alpha1().Metadatas().Informer()}, nil
 	case tenancyv1alpha1.SchemeGroupVersion.WithResource("organizations"):
 		return &genericClusterInformer{resource: resource.GroupResource(), informer: f.Tenancy().V1alpha1().Organizations().Informer()}, nil
 	case tenancyv1alpha1.SchemeGroupVersion.WithResource("users"):
@@ -103,6 +105,9 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 func (f *sharedScopedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
 	// Group=tenancy.faros.sh, Version=V1alpha1
+	case tenancyv1alpha1.SchemeGroupVersion.WithResource("metadatas"):
+		informer := f.Tenancy().V1alpha1().Metadatas().Informer()
+		return &genericInformer{lister: cache.NewGenericLister(informer.GetIndexer(), resource.GroupResource()), informer: informer}, nil
 	case tenancyv1alpha1.SchemeGroupVersion.WithResource("organizations"):
 		informer := f.Tenancy().V1alpha1().Organizations().Informer()
 		return &genericInformer{lister: cache.NewGenericLister(informer.GetIndexer(), resource.GroupResource()), informer: informer}, nil

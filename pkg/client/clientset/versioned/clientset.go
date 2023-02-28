@@ -22,11 +22,10 @@ import (
 	"fmt"
 	"net/http"
 
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"
-
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 
 type Interface interface {

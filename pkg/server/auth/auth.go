@@ -135,6 +135,7 @@ func (a *AuthenticatorImpl) OIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if r.FormValue("offline_access") != "yes" {
 		authCodeURL = a.oauth2Config(scopes).AuthCodeURL(state)
 	} else {
+		scopes = append(scopes, "offline_access")
 		authCodeURL = a.oauth2Config(scopes).AuthCodeURL(state, oauth2.AccessTypeOffline)
 	}
 
@@ -150,6 +151,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 	var localRedirect string
 	oauth2Config := a.oauth2Config(nil)
+	var isRefresh bool
 	switch r.Method {
 	case http.MethodGet:
 		// Authorization redirect callback from OAuth2 auth flow.
@@ -181,6 +183,7 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	case http.MethodPost:
+		isRefresh = true
 		// Form request from frontend to refresh a token.
 		refresh := r.FormValue("refresh_token")
 		if refresh == "" {
@@ -189,7 +192,6 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		}
 		t := &oauth2.Token{
 			RefreshToken: refresh,
-			Expiry:       time.Now().Add(-time.Hour),
 		}
 		var err error
 		token, err = oauth2Config.TokenSource(ctx, t).Token()
@@ -202,22 +204,19 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rawIDToken, ok := token.Extra("id_token").(string)
-	if !ok {
-		http.Error(w, "no id_token in token response", http.StatusInternalServerError)
-		return
-	}
-
-	idToken, err := a.verifier.Verify(r.Context(), rawIDToken)
+	idToken, err := a.verifier.Verify(r.Context(), token.AccessToken)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to verify ID token: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// TODO: extend
 	var claims struct {
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
+		Email         string   `json:"email"`
+		EmailVerified bool     `json:"email_verified"`
+		Groups        []string `json:"groups"`
+		Name          string   `json:"name"`
+		IAT           int      `json:"iat"`
+		EXP           int      `json:"exp"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, fmt.Sprintf("failed to parse claim: %v", err), http.StatusInternalServerError)
@@ -232,9 +231,11 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 
 	response := models.LoginResponse{
 		IDToken:       *idToken,
-		RawIDToken:    rawIDToken,
+		AccessToken:   token.AccessToken,
+		RefreshToken:  token.RefreshToken,
 		Email:         claims.Email,
 		ServerBaseURL: fmt.Sprintf("%s/clusters", a.config.APIConfig.ControllerExternalURL),
+		ExpiresAt:     claims.EXP,
 	}
 
 	data, err := json.Marshal(response)
@@ -243,10 +244,15 @@ func (a *AuthenticatorImpl) OIDCCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	base64.StdEncoding.EncodeToString(data)
-
-	localRedirect = localRedirect + "?data=" + base64.StdEncoding.EncodeToString(data)
-	http.Redirect(w, r, localRedirect, http.StatusSeeOther)
+	if isRefresh {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+		return
+	} else {
+		base64.StdEncoding.EncodeToString(data)
+		localRedirect = localRedirect + "?data=" + base64.StdEncoding.EncodeToString(data)
+		http.Redirect(w, r, localRedirect, http.StatusSeeOther)
+	}
 
 }
 

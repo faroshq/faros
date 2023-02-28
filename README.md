@@ -67,3 +67,4 @@ kubectl api-resources
 3. Add Certificate to kubeconfig
 4. Add refresh for kubeconfig token
 5. Make orgs `rootless` LogicalClusters. It will require running shard-api in the same cluster as shard itself, and doing some loadbalancing. Replicate front-proxy.
+6. Write faros auth plugin for kubectl

@@ -34,6 +34,7 @@ import (
 
 type TenancyV1alpha1ClusterInterface interface {
 	TenancyV1alpha1ClusterScoper
+	MetadatasClusterGetter
 	OrganizationsClusterGetter
 	UsersClusterGetter
 	WorkspacesClusterGetter
@@ -52,6 +53,10 @@ func (c *TenancyV1alpha1ClusterClient) Cluster(clusterPath logicalcluster.Path) 
 		panic("A specific cluster must be provided when scoping, not the wildcard.")
 	}
 	return c.clientCache.ClusterOrDie(clusterPath)
+}
+
+func (c *TenancyV1alpha1ClusterClient) Metadatas() MetadataClusterInterface {
+	return &metadatasClusterInterface{clientCache: c.clientCache}
 }
 
 func (c *TenancyV1alpha1ClusterClient) Organizations() OrganizationClusterInterface {

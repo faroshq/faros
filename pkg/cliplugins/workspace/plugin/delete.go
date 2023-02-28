@@ -18,8 +18,7 @@ import (
 type DeleteOptions struct {
 	*base.Options
 
-	Name             string
-	OrganizationName string
+	Name string
 }
 
 // NewGetOptions returns a new GetOptions.
@@ -32,8 +31,6 @@ func NewDeleteOptions(streams genericclioptions.IOStreams) *DeleteOptions {
 // BindFlags binds fields GenerateOptions as command line flags to cmd's flagset.
 func (o *DeleteOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
-
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first.")
 }
 
 // Complete ensures all dynamically populated fields are initialized.

@@ -6,20 +6,20 @@ import (
 	"net/url"
 
 	"github.com/spf13/cobra"
+
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // UseOptions contains options for configuring faros
 type UseOptions struct {
 	*base.Options
-	Name             string
-	OrganizationName string
+	Name string
 
 	// for testing
 	modifyConfig func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error
@@ -39,7 +39,6 @@ func NewUseOptions(streams genericclioptions.IOStreams) *UseOptions {
 func (o *UseOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
 
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first")
 }
 
 // Complete ensures all dynamically populated fields are initialized.
@@ -65,8 +64,6 @@ func (o *UseOptions) Validate() error {
 
 	return utilerrors.NewAggregate(errs)
 }
-
-var kubeConfigAuthKey = "faros"
 
 // Run gets workspace from tenant workspace api
 func (o *UseOptions) Run(ctx context.Context) error {
@@ -112,7 +109,7 @@ func (o *UseOptions) Run(ctx context.Context) error {
 	}
 
 	workspace := &tenancyv1alpha1.Workspace{}
-	if o.Name != kubeConfigAuthKey {
+	if o.Name != tenancyv1alpha1.KubeConfigAuthKey {
 		err = farosClient.RESTClient().Get().AbsPath(path).Do(ctx).Into(workspace)
 		if err != nil {
 			return err
@@ -122,7 +119,7 @@ func (o *UseOptions) Run(ctx context.Context) error {
 			Server: workspace.Status.WorkspaceURL,
 		}
 
-		farosCluster, ok := rawConfig.Clusters[kubeConfigAuthKey]
+		farosCluster, ok := rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey]
 		if !ok {
 			rawConfig.Clusters[workspace.Name].InsecureSkipTLSVerify = true
 		} else {
@@ -136,16 +133,17 @@ func (o *UseOptions) Run(ctx context.Context) error {
 
 		rawConfig.Contexts[workspace.Name] = &clientcmdapi.Context{
 			Cluster:  workspace.Name,
-			AuthInfo: kubeConfigAuthKey,
+			AuthInfo: tenancyv1alpha1.KubeConfigAuthKey,
 		}
 
 		rawConfig.CurrentContext = workspace.Name
 
 	} else {
 		// if user requests "faros" context, just set it as current context
-		rawConfig.CurrentContext = kubeConfigAuthKey
+		rawConfig.CurrentContext = tenancyv1alpha1.KubeConfigAuthKey
 	}
 
 	fmt.Printf("Using workspace: %s/%s \n ", o.OrganizationName, o.Name)
+
 	return o.modifyConfig(o.ClientConfig.ConfigAccess(), &rawConfig)
 }
