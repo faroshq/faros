@@ -107,18 +107,14 @@ func (o *UseOptions) Run(ctx context.Context) error {
 		rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey] = clientcmdapi.NewCluster()
 	}
 
-	//if rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey] == nil {
-	//	rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey] = &tenancyv1alpha1.Metadata{}
-	//}
-
-	obj := rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey]
-	objj, ok := obj.(*runtime.Unknown)
+	unknownObj := rawConfig.Clusters[tenancyv1alpha1.KubeConfigAuthKey].Extensions[tenancyv1alpha1.MetadataKey]
+	obj, ok := unknownObj.(*runtime.Unknown)
 	if !ok {
 		return fmt.Errorf("failed to convert object to runtime.Unknown")
 	}
 
 	metadata := &tenancyv1alpha1.Metadata{}
-	err = json.Unmarshal(objj.Raw, metadata)
+	err = json.Unmarshal(obj.Raw, metadata)
 	if err != nil {
 		return err
 	}

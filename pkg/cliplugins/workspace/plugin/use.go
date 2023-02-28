@@ -19,8 +19,7 @@ import (
 // UseOptions contains options for configuring faros
 type UseOptions struct {
 	*base.Options
-	Name             string
-	OrganizationName string
+	Name string
 
 	// for testing
 	modifyConfig func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error
@@ -40,7 +39,6 @@ func NewUseOptions(streams genericclioptions.IOStreams) *UseOptions {
 func (o *UseOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
 
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first")
 }
 
 // Complete ensures all dynamically populated fields are initialized.
@@ -66,8 +64,6 @@ func (o *UseOptions) Validate() error {
 
 	return utilerrors.NewAggregate(errs)
 }
-
-var kubeConfigAuthKey = "faros"
 
 // Run gets workspace from tenant workspace api
 func (o *UseOptions) Run(ctx context.Context) error {

@@ -19,8 +19,6 @@ import (
 type GetOptions struct {
 	*base.Options
 	Name string
-
-	OrganizationName string
 }
 
 // NewGetOptions returns a new GetOptions.
@@ -33,8 +31,6 @@ func NewGetOptions(streams genericclioptions.IOStreams) *GetOptions {
 // BindFlags binds fields GenerateOptions as command line flags to cmd's flagset.
 func (o *GetOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
-
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first")
 }
 
 // Complete ensures all dynamically populated fields are initialized.

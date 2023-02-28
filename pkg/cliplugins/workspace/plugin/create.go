@@ -22,9 +22,8 @@ var (
 // GetOptions contains options for configuring faros workspaces
 type CreateOptions struct {
 	*base.Options
-	Name             string
-	Description      string
-	OrganizationName string
+	Name        string
+	Description string
 }
 
 // NewCreateOptions returns a new NewCreateOptions.
@@ -39,8 +38,6 @@ func (o *CreateOptions) BindFlags(cmd *cobra.Command) {
 	o.Options.BindFlags(cmd)
 
 	cmd.Flags().StringVarP(&o.Description, "description", "d", o.Description, "Description of the workspace")
-	cmd.Flags().StringVarP(&o.OrganizationName, "organization", "", o.OrganizationName, "Name of the organization to which the workspace belongs to first")
-
 }
 
 // Complete ensures all dynamically populated fields are initialized.
