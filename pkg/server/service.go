@@ -112,7 +112,7 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 	apiRouter.HandleFunc(pathOIDCLogin, s.oidcLogin)       // /faros.sh/api/v1alpha1/oidc/login
 	apiRouter.HandleFunc(pathOIDCCallback, s.oidcCallback) // /faros.sh/api/v1alpha1/oidc/callback
 
-	apiRouter.HandleFunc(path.Join(pathOrganizations), s.listOrganizations).Methods(http.MethodGet)                       // /faros.sh/api/v1alpha1/organizations
+	apiRouter.HandleFunc(path.Join(pathOrganizations), s.listOrganizations)                                               // /faros.sh/api/v1alpha1/organizations
 	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.getOrganization).Methods(http.MethodGet)       // /faros.sh/api/v1alpha1/organizations/{organization}
 	apiRouter.HandleFunc(path.Join(pathOrganizations, "{organization}"), s.deleteOrganization).Methods(http.MethodDelete) // /faros.sh/api/v1alpha1/organizations/{organization}
 	apiRouter.HandleFunc(pathOrganizations, s.createOrganization).Methods(http.MethodPost)
@@ -127,7 +127,8 @@ func New(ctx context.Context, config *config.Config) (*Service, error) {
 		Handler: handlers.CORS(
 			handlers.AllowCredentials(),
 			handlers.AllowedHeaders([]string{"Content-Type"}),
-			handlers.AllowedMethods([]string{"GET", "POST", "PUT", "PATCH", "DELETE"}),
+			handlers.AllowedMethods([]string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions}),
+			handlers.AllowedOrigins(apiConfig.AllowedCORSOrigins),
 		)(s),
 	}
 
@@ -169,7 +170,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func setupRouter() *mux.Router {
 	r := mux.NewRouter()
 	r.Use(Panic())
-	r.Use(Gzip())
+	//r.Use(Gzip())
 	r.Use(Log())
 
 	r.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

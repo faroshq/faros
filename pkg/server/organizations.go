@@ -62,6 +62,10 @@ func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !authenticated {
 		return
 	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
 	organizations, err := s.store.ListOrganizations(ctx, tenancyv1alpha1.Organization{})
 	if err != nil {

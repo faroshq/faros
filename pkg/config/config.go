@@ -21,6 +21,9 @@ type APIConfig struct {
 	// ControllerExternalURL is the URL that the controller is externally reachable at.
 	ControllerExternalURL string `envconfig:"FAROS_API_EXTERNAL_URL" required:"true" default:"https://api.faros.sh"`
 
+	// AllowedCORSOrigins is a list of allowed CORS origins.
+	AllowedCORSOrigins []string `envconfig:"FAROS_API_ALLOWED_CORS_ORIGINS" yaml:"allowedCORSOrigins,omitempty" default:"*"`
+
 	// In prod we use auto-certs so this is not an issue.
 	// TODO: Add support for auto-certs
 	TLSKeyFile  string `envconfig:"FAROS_TLS_KEY_FILE" default:""`

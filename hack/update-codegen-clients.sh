@@ -50,3 +50,11 @@ popd
 
 
 go install "${CODEGEN_PKG}"/cmd/openapi-gen
+
+"$GOPATH"/bin/openapi-gen --input-dirs github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1 \
+--input-dirs github.com/kcp-dev/kcp/pkg/apis/third_party/conditions/apis/conditions/v1alpha1 \
+--input-dirs k8s.io/apimachinery/pkg/apis/meta/v1,k8s.io/apimachinery/pkg/runtime,k8s.io/apimachinery/pkg/version \
+--output-package github.com/faroshq/faros/pkg/openapi -O zz_generated.openapi \
+--go-header-file ./hack/../hack/boilerplate/boilerplate.generatego.txt \
+--output-base "${SCRIPT_ROOT}" \
+--trim-path-prefix github.com/faroshq/faros

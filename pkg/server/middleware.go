@@ -138,7 +138,7 @@ func shouldLog(w http.ResponseWriter) bool {
 
 		// currently we dont support non-synpse based agent logging.
 		// this should filter all noise
-		agent := w.Header().Get("Synpse-User-Agent")
+		agent := w.Header().Get("Faros-User-Agent")
 		return agent != ""
 
 	}

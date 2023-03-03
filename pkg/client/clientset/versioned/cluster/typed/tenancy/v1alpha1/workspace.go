@@ -23,12 +23,14 @@ package v1alpha1
 
 import (
 	"context"
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+
 	kcpclient "github.com/kcp-dev/apimachinery/v2/pkg/client"
 	"github.com/kcp-dev/logicalcluster/v3"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	tenancyv1alpha1client "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 

@@ -22,21 +22,19 @@ limitations under the License.
 package v1alpha1
 
 import (
-	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
+	"context"
+
 	"github.com/kcp-dev/logicalcluster/v3"
 
-	"context"
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"k8s.io/apimachinery/pkg/watch"
-
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/testing"
 
-	"k8s.io/apimachinery/pkg/types"
-
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	tenancyv1alpha1client "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 
