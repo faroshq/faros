@@ -39,7 +39,25 @@ func enrichSwaggerObject(swo *spec.Swagger) {
 			Version: "1.0.0",
 		},
 	}
-	swo.Tags = []spec.Tag{{TagProps: spec.TagProps{
-		Name:        "faros",
-		Description: "Managing faros"}}}
+	swo.Tags = []spec.Tag{
+		{
+			TagProps: spec.TagProps{
+				Name:        "faros",
+				Description: "Managing faros",
+			},
+		},
+	}
+	swo.SecurityDefinitions = spec.SecurityDefinitions{
+		"OAuth2": &spec.SecurityScheme{
+			SecuritySchemeProps: spec.SecuritySchemeProps{
+				Type: "oauth2",
+				Flow: "accessCode",
+			},
+		},
+	}
+	swo.Security = []map[string][]string{
+		{
+			"OAuth2": {},
+		},
+	}
 }

@@ -15,25 +15,30 @@ func (o OIDCResource) RegisterTo(container *restful.Container) {
 	ws := new(restful.WebService)
 	ws.
 		Path(pathOIDC).
-		Consumes("*/*").
-		Produces("*/*").
+		Consumes("application/json").
+		Consumes("application/json").
 		ApiVersion(apiVersion)
 
 	ws.Consumes(restful.MIME_JSON)
 	ws.Produces(restful.MIME_JSON)
 
-	ws.Route(ws.GET(oidcLogin).To(o.login).
-		Doc("Login into Faros").Do(return301, returns401, returns500))
+	ws.Route(
+		withAllSupportedStatuses(
+			ws.GET(oidcLogin).To(o.login).
+				Doc("Login into Faros")))
 
-	ws.Route(ws.GET(oidcCallback).To(o.callback).
-		Doc("Callback from OIDC provider for login flow").
-		Operation("get-callback").
-		Do(returns200LoginResult, returns401, returns500))
+	ws.Route(
+		returns200LoginResult(
+			withAllSupportedStatuses(
+				ws.GET(oidcCallback).To(o.callback).
+					Doc("Callback from OIDC provider for login flow").
+					Operation("get-callback"))))
 
-	ws.Route(ws.POST(oidcCallback).To(o.callback).
-		Doc("Callback from OIDC provider for token refresh").
-		Operation("post-callback").
-		Do(return301, returns401, returns500))
+	ws.Route(
+		withAllSupportedStatuses(
+			ws.POST(oidcCallback).To(o.callback).
+				Doc("Callback from OIDC provider for token refresh").
+				Operation("post-callback")))
 
 	container.Add(ws)
 }

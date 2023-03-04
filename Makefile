@@ -98,16 +98,3 @@ images:
 
 swagger:
 	go run ./cmd/swagger/
-
-codegen-typescript:
-	rm -rf ts/api/*
-	docker create -v /local --name src openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} || true
-	docker cp $$(pwd)/swagger.json src:/local/api-swagger.json
-	docker run --rm --volumes-from src -e JAVA_OPTS="-Xmx1024M -DloggerPath=conf/log4j.properties" openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} generate \
-		-i /local/api-swagger.json \
-		-g typescript-fetch \
-		-o /local/lib/ \
-		-p sourceFolder=faros-api,supportsES6=true,typescriptThreePlus=true,useSingleRequestParameter=true \
-		--reserved-words-mappings=protected=protected,package=package,configuration=configuration,enum=enum,continue=continue,default=default
-	docker cp src:/local/lib/ $$(pwd)/ts/api/client
-	docker rm src

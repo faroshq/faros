@@ -32,6 +32,12 @@
        "$ref": "#/definitions/models.LoginResponse"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -39,7 +45,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -56,6 +68,12 @@
     "summary": "Callback from OIDC provider for token refresh",
     "operationId": "post-callback",
     "responses": {
+     "200": {
+      "description": "OK",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "301": {
       "description": "Moved Permanently",
       "schema": {
@@ -69,7 +87,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -88,6 +112,12 @@
     "summary": "Login into Faros",
     "operationId": "login",
     "responses": {
+     "200": {
+      "description": "OK",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "301": {
       "description": "Moved Permanently",
       "schema": {
@@ -101,7 +131,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -112,7 +148,7 @@
   "/faros.sh/api/v1alpha1/organizations": {
    "get": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -126,6 +162,12 @@
        "$ref": "#/definitions/v1alpha1.OrganizationList"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -133,7 +175,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -142,7 +190,7 @@
    },
    "post": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -166,6 +214,12 @@
        "$ref": "#/definitions/v1alpha1.Organization"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -173,7 +227,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -184,7 +244,7 @@
   "/faros.sh/api/v1alpha1/organizations/{organization}": {
    "get": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -207,6 +267,12 @@
        "$ref": "#/definitions/v1alpha1.Organization"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -214,7 +280,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -223,7 +295,7 @@
    },
    "delete": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -246,6 +318,12 @@
        "$ref": "#/definitions/v1.Status"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -253,7 +331,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -264,7 +348,7 @@
   "/faros.sh/api/v1alpha1/organizations/{organization}/workspaces": {
    "get": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -287,6 +371,12 @@
        "$ref": "#/definitions/v1alpha1.WorkspaceList"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -294,7 +384,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -303,7 +399,7 @@
    },
    "post": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -334,6 +430,12 @@
        "$ref": "#/definitions/v1alpha1.Organization"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -341,7 +443,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -352,7 +460,7 @@
   "/faros.sh/api/v1alpha1/organizations/{organization}/workspaces/{workspace}": {
    "get": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -382,6 +490,12 @@
        "$ref": "#/definitions/v1alpha1.Workspace"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -389,7 +503,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -398,7 +518,7 @@
    },
    "delete": {
     "consumes": [
-     "*/*"
+     "application/json"
     ],
     "produces": [
      "application/json"
@@ -428,6 +548,12 @@
        "$ref": "#/definitions/v1.Status"
       }
      },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
      "401": {
       "description": "Unauthorized",
       "schema": {
@@ -435,7 +561,13 @@
       }
      },
      "500": {
-      "description": "Bummer, something went wrong",
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
       "schema": {
        "$ref": "#/definitions/v1.Status"
       }
@@ -1041,6 +1173,18 @@
    }
   }
  },
+ "securityDefinitions": {
+  "OAuth2": {
+   "type": "oauth2",
+   "flow": "accessCode",
+   "authorizationUrl": ""
+  }
+ },
+ "security": [
+  {
+   "OAuth2": []
+  }
+ ],
  "tags": [
   {
    "description": "Managing faros",
