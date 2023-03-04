@@ -11,7 +11,7 @@ import (
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/controllers"
 	devproxyclient "github.com/faroshq/faros/pkg/dev/client"
-	"github.com/faroshq/faros/pkg/server"
+	"github.com/faroshq/faros/pkg/service"
 )
 
 func main() {
@@ -60,7 +60,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	server, err := server.New(ctx, cfg)
+	server, err := service.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
