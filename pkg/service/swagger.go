@@ -11,7 +11,7 @@ type SwaggerResource struct{}
 func (s *SwaggerResource) RegisterTo(container *restful.Container) {
 	config := restfulspec.Config{
 		WebServices:                   container.RegisteredWebServices(), // you control what services are visible
-		APIPath:                       "/apidocs.json",
+		APIPath:                       "/swagger.json",
 		PostBuildSwaggerObjectHandler: enrichSwaggerObject,
 	}
 	container.Add(restfulspec.NewOpenAPIService(config))

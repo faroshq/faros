@@ -26,10 +26,14 @@ func (o OIDCResource) RegisterTo(container *restful.Container) {
 		Doc("Login into Faros").Do(return301, returns401, returns500))
 
 	ws.Route(ws.GET(oidcCallback).To(o.callback).
-		Doc("Callback from OIDC provider for login flow").Do(returns200LoginResult, returns401, returns500))
+		Doc("Callback from OIDC provider for login flow").
+		Operation("get-callback").
+		Do(returns200LoginResult, returns401, returns500))
 
 	ws.Route(ws.POST(oidcCallback).To(o.callback).
-		Doc("Callback from OIDC provider for token refresh").Do(return301, returns401, returns500))
+		Doc("Callback from OIDC provider for token refresh").
+		Operation("post-callback").
+		Do(return301, returns401, returns500))
 
 	container.Add(ws)
 }

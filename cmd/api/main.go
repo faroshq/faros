@@ -9,7 +9,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/config"
-	"github.com/faroshq/faros/pkg/server"
+	"github.com/faroshq/faros/pkg/service"
 	"github.com/faroshq/faros/pkg/util/version"
 )
 
@@ -34,7 +34,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	server, err := server.New(ctx, cfg)
+	server, err := service.New(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}

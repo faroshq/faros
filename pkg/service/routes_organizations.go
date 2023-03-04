@@ -46,24 +46,40 @@ func (o OrganizationResource) RegisterTo(container *restful.Container) {
 		Doc("Create organization").Do(returns200Organization, returns401, returns500))
 
 	ws.Route(ws.GET(organizationArg).To(o.getOrganization).
-		Doc("Get organization").Do(returns200Organization, returns401, returns500))
+		Doc("Get organization").
+		Operation("getOrganization").
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(returns200Organization, returns401, returns500))
 
 	ws.Route(ws.DELETE(organizationArg).To(o.deleteOrganization).
-		Doc("Delete organization").Do(return200, returns401, returns500))
+		Doc("Delete organization").
+		Operation("deleteOrganization").
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(return200, returns401, returns500))
 
 	// TODO: Split this into a separate resource
 	// https://github.com/emicklei/go-restful/issues/320
 	ws.Route(ws.GET(path.Join(organizationArg, pathWorkspaces)).To(o.listWorkspaces).
-		Doc("List workspaces").Do(returns200WorkspaceList, returns401, returns500))
+		Doc("List workspaces").
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(returns200WorkspaceList, returns401, returns500))
 
 	ws.Route(ws.POST(path.Join(organizationArg, pathWorkspaces)).To(o.createWorkspace).
-		Doc("Create workspace").Do(returns200Organization, returns401, returns500))
+		Doc("Create workspace").
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(returns200Organization, returns401, returns500))
 
 	ws.Route(ws.GET(path.Join(organizationArg, pathWorkspaces, workspaceArg)).To(o.getWorkspace).
-		Doc("Get workspace").Do(returns200Workspace, returns401, returns500))
+		Doc("Get workspace").
+		Param(ws.PathParameter("workspace", "Name of an workspace")).
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(returns200Workspace, returns401, returns500))
 
 	ws.Route(ws.DELETE(path.Join(organizationArg, pathWorkspaces, workspaceArg)).To(o.deleteWorkspace).
-		Doc("Delete workspace").Do(return200, returns401, returns500))
+		Doc("Delete workspace").
+		Param(ws.PathParameter("workspace", "Name of an workspace")).
+		Param(ws.PathParameter("organization", "Name of an organization")).
+		Do(return200, returns401, returns500))
 
 	container.Add(ws)
 }

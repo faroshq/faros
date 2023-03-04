@@ -8,6 +8,8 @@ TOOLS_DIR=hack/tools
 TOOLS_GOBIN_DIR := $(abspath $(TOOLS_DIR))
 KO_DOCKER_REPO ?= ${REPO}
 
+OPENAPIGEN_VERSION=v6.4.0
+
 CODE_GENERATOR_VER := v2.0.0-alpha.1
 CODE_GENERATOR_BIN := code-generator
 CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
@@ -93,3 +95,19 @@ delete-kind:
 
 images:
 	KO_DOCKER_REPO=${KO_DOCKER_REPO} ko build --sbom=none -B --platform=linux/amd64 -t latest ./cmd/*
+
+swagger:
+	go run ./cmd/swagger/
+
+codegen-typescript:
+	rm -r js/api/client > /dev/null 2>&1 || true
+	docker create -v /local --name src openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} || true
+	docker cp $$(pwd)/swagger.json src:/local/api-swagger.json
+	docker run --rm --volumes-from src -e JAVA_OPTS="-Xmx1024M -DloggerPath=conf/log4j.properties" openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} generate \
+		-i /local/api-swagger.json \
+		-g typescript-fetch \
+		-o /local/lib/ \
+		-p sourceFolder=faros-api,supportsES6=true,typescriptThreePlus=true,useSingleRequestParameter=true \
+		--reserved-words-mappings=protected=protected,package=package,configuration=configuration,enum=enum,continue=continue,default=default
+	docker cp src:/local/lib/ $$(pwd)/ts/api/client
+	docker rm src
