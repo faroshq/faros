@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -43,7 +44,9 @@ func (o OrganizationResource) RegisterTo(container *restful.Container) {
 		Doc("List organizations").Do(returns200OrganizationList, returns401, returns500))
 
 	ws.Route(ws.POST("/").To(o.createOrganization).
-		Doc("Create organization").Do(returns200Organization, returns401, returns500))
+		Doc("Create organization").
+		Reads(tenancyv1alpha1.Organization{}).
+		Do(returns200Organization, returns401, returns500))
 
 	ws.Route(ws.GET(organizationArg).To(o.getOrganization).
 		Doc("Get organization").
@@ -66,6 +69,7 @@ func (o OrganizationResource) RegisterTo(container *restful.Container) {
 
 	ws.Route(ws.POST(path.Join(organizationArg, pathWorkspaces)).To(o.createWorkspace).
 		Doc("Create workspace").
+		Reads(tenancyv1alpha1.Workspace{}).
 		Param(ws.PathParameter("organization", "Name of an organization")).
 		Do(returns200Organization, returns401, returns500))
 
@@ -132,7 +136,7 @@ func (o OrganizationResource) createOrganization(r *restful.Request, w *restful.
 
 	_, err = o.store.GetOrganization(ctx, *current)
 	if err == nil {
-		http.Error(w, "Organization already exists", http.StatusConflict)
+		responsewriters.ErrorNegotiated(fmt.Errorf("organization already exists"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 

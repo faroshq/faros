@@ -16,6 +16,7 @@
 import * as runtime from '../runtime';
 import type {
   ModelsLoginResponse,
+  V1Status,
   V1alpha1Organization,
   V1alpha1OrganizationList,
   V1alpha1Workspace,
@@ -24,6 +25,8 @@ import type {
 import {
     ModelsLoginResponseFromJSON,
     ModelsLoginResponseToJSON,
+    V1StatusFromJSON,
+    V1StatusToJSON,
     V1alpha1OrganizationFromJSON,
     V1alpha1OrganizationToJSON,
     V1alpha1OrganizationListFromJSON,
@@ -34,8 +37,13 @@ import {
     V1alpha1WorkspaceListToJSON,
 } from '../models';
 
+export interface CreateOrganizationRequest {
+    body: V1alpha1Organization;
+}
+
 export interface CreateWorkspaceRequest {
     organization: string;
+    body: V1alpha1Workspace;
 }
 
 export interface DeleteOrganizationRequest {
@@ -68,16 +76,23 @@ export class DefaultApi extends runtime.BaseAPI {
     /**
      * Create organization
      */
-    async createOrganizationRaw(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<V1alpha1Organization>> {
+    async createOrganizationRaw(requestParameters: CreateOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<V1alpha1Organization>> {
+        if (requestParameters.body === null || requestParameters.body === undefined) {
+            throw new runtime.RequiredError('body','Required parameter requestParameters.body was null or undefined when calling createOrganization.');
+        }
+
         const queryParameters: any = {};
 
         const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
 
         const response = await this.request({
             path: `/faros.sh/api/v1alpha1/organizations`,
             method: 'POST',
             headers: headerParameters,
             query: queryParameters,
+            body: V1alpha1OrganizationToJSON(requestParameters.body),
         }, initOverrides);
 
         return new runtime.JSONApiResponse(response, (jsonValue) => V1alpha1OrganizationFromJSON(jsonValue));
@@ -86,8 +101,8 @@ export class DefaultApi extends runtime.BaseAPI {
     /**
      * Create organization
      */
-    async createOrganization(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<V1alpha1Organization> {
-        const response = await this.createOrganizationRaw(initOverrides);
+    async createOrganization(requestParameters: CreateOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<V1alpha1Organization> {
+        const response = await this.createOrganizationRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -99,15 +114,22 @@ export class DefaultApi extends runtime.BaseAPI {
             throw new runtime.RequiredError('organization','Required parameter requestParameters.organization was null or undefined when calling createWorkspace.');
         }
 
+        if (requestParameters.body === null || requestParameters.body === undefined) {
+            throw new runtime.RequiredError('body','Required parameter requestParameters.body was null or undefined when calling createWorkspace.');
+        }
+
         const queryParameters: any = {};
 
         const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
 
         const response = await this.request({
             path: `/faros.sh/api/v1alpha1/organizations/{organization}/workspaces`.replace(`{${"organization"}}`, encodeURIComponent(String(requestParameters.organization))),
             method: 'POST',
             headers: headerParameters,
             query: queryParameters,
+            body: V1alpha1WorkspaceToJSON(requestParameters.body),
         }, initOverrides);
 
         return new runtime.JSONApiResponse(response, (jsonValue) => V1alpha1OrganizationFromJSON(jsonValue));
@@ -124,7 +146,7 @@ export class DefaultApi extends runtime.BaseAPI {
     /**
      * Delete organization
      */
-    async deleteOrganizationRaw(requestParameters: DeleteOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+    async deleteOrganizationRaw(requestParameters: DeleteOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<V1Status>> {
         if (requestParameters.organization === null || requestParameters.organization === undefined) {
             throw new runtime.RequiredError('organization','Required parameter requestParameters.organization was null or undefined when calling deleteOrganization.');
         }
@@ -140,20 +162,21 @@ export class DefaultApi extends runtime.BaseAPI {
             query: queryParameters,
         }, initOverrides);
 
-        return new runtime.VoidApiResponse(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => V1StatusFromJSON(jsonValue));
     }
 
     /**
      * Delete organization
      */
-    async deleteOrganization(requestParameters: DeleteOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
-        await this.deleteOrganizationRaw(requestParameters, initOverrides);
+    async deleteOrganization(requestParameters: DeleteOrganizationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<V1Status> {
+        const response = await this.deleteOrganizationRaw(requestParameters, initOverrides);
+        return await response.value();
     }
 
     /**
      * Delete workspace
      */
-    async deleteWorkspaceRaw(requestParameters: DeleteWorkspaceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+    async deleteWorkspaceRaw(requestParameters: DeleteWorkspaceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<V1Status>> {
         if (requestParameters.workspace === null || requestParameters.workspace === undefined) {
             throw new runtime.RequiredError('workspace','Required parameter requestParameters.workspace was null or undefined when calling deleteWorkspace.');
         }
@@ -173,14 +196,15 @@ export class DefaultApi extends runtime.BaseAPI {
             query: queryParameters,
         }, initOverrides);
 
-        return new runtime.VoidApiResponse(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => V1StatusFromJSON(jsonValue));
     }
 
     /**
      * Delete workspace
      */
-    async deleteWorkspace(requestParameters: DeleteWorkspaceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
-        await this.deleteWorkspaceRaw(requestParameters, initOverrides);
+    async deleteWorkspace(requestParameters: DeleteWorkspaceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<V1Status> {
+        const response = await this.deleteWorkspaceRaw(requestParameters, initOverrides);
+        return await response.value();
     }
 
     /**

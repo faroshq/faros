@@ -100,7 +100,7 @@ swagger:
 	go run ./cmd/swagger/
 
 codegen-typescript:
-	rm -r js/api/client > /dev/null 2>&1 || true
+	rm -rf ts/api/*
 	docker create -v /local --name src openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} || true
 	docker cp $$(pwd)/swagger.json src:/local/api-swagger.json
 	docker run --rm --volumes-from src -e JAVA_OPTS="-Xmx1024M -DloggerPath=conf/log4j.properties" openapitools/openapi-generator-cli:${OPENAPIGEN_VERSION} generate \

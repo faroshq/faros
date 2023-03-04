@@ -1,3 +1,4 @@
+.openapi-generator-ignore
 apis/DefaultApi.ts
 apis/index.ts
 index.ts
@@ -9,6 +10,9 @@ models/V1ManagedFieldsEntry.ts
 models/V1ObjectMeta.ts
 models/V1ObjectReference.ts
 models/V1OwnerReference.ts
+models/V1Status.ts
+models/V1StatusCause.ts
+models/V1StatusDetails.ts
 models/V1TypeMeta.ts
 models/V1alpha1Condition.ts
 models/V1alpha1ObjectReference.ts
