@@ -15,6 +15,7 @@ var (
 	pathOIDC     = path.Join(pathAPIVersion, "/oidc")
 	oidcLogin    = "/login"
 	oidcCallback = "/callback"
+	oidcRegister = "/register"
 )
 
 var (

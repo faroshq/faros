@@ -145,6 +145,50 @@
     }
    }
   },
+  "/faros.sh/api/v1alpha1/oidc/register": {
+   "post": {
+    "consumes": [
+     "application/json"
+    ],
+    "produces": [
+     "application/json"
+    ],
+    "summary": "Register into Faros",
+    "operationId": "register",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "schema": {
+       "$ref": "#/definitions/v1alpha1.User"
+      }
+     },
+     "301": {
+      "description": "Moved Permanently",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "401": {
+      "description": "Unauthorized",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "500": {
+      "description": "Internal server error",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     },
+     "502": {
+      "description": "Bad gateway",
+      "schema": {
+       "$ref": "#/definitions/v1.Status"
+      }
+     }
+    }
+   }
+  },
   "/faros.sh/api/v1alpha1/organizations": {
    "get": {
     "consumes": [
@@ -1101,6 +1145,50 @@
     },
     "workspaceURL": {
      "type": "string"
+    }
+   }
+  },
+  "v1alpha1.User": {
+   "properties": {
+    "apiVersion": {
+     "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+     "type": "string"
+    },
+    "kind": {
+     "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/definitions/v1.ObjectMeta"
+    },
+    "spec": {
+     "$ref": "#/definitions/v1alpha1.UserSpec"
+    },
+    "status": {
+     "$ref": "#/definitions/v1alpha1.UserStatus"
+    }
+   }
+  },
+  "v1alpha1.UserSpec": {
+   "properties": {
+    "displayName": {
+     "type": "string"
+    },
+    "email": {
+     "type": "string"
+    },
+    "provider": {
+     "type": "string"
+    }
+   }
+  },
+  "v1alpha1.UserStatus": {
+   "properties": {
+    "conditions": {
+     "type": "array",
+     "items": {
+      "$ref": "#/definitions/v1alpha1.Condition"
+     }
     }
    }
   },

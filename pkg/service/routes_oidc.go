@@ -1,6 +1,8 @@
 package service
 
 import (
+	"net/http"
+
 	"github.com/emicklei/go-restful/v3"
 	"github.com/faroshq/faros/pkg/service/authentications"
 	"github.com/faroshq/faros/pkg/store"
@@ -25,7 +27,16 @@ func (o OIDCResource) RegisterTo(container *restful.Container) {
 	ws.Route(
 		withAllSupportedStatuses(
 			ws.GET(oidcLogin).To(o.login).
-				Doc("Login into Faros")))
+				Doc("Login into Faros").
+				Operation("login")))
+
+	ws.Route(
+		returns200User(
+			withAllSupportedStatuses(
+				ws.POST(oidcRegister).To(o.register).
+					AllowedMethodsWithoutContentType([]string{http.MethodPost}).
+					Doc("Register into Faros").
+					Operation("register"))))
 
 	ws.Route(
 		returns200LoginResult(
@@ -49,4 +60,8 @@ func (o OIDCResource) login(r *restful.Request, w *restful.Response) {
 
 func (o OIDCResource) callback(r *restful.Request, w *restful.Response) {
 	o.authentications.OIDCCallback(r, w)
+}
+
+func (o OIDCResource) register(r *restful.Request, w *restful.Response) {
+	o.authentications.RegisterOrUpdate(r, w)
 }

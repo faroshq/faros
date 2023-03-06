@@ -29,6 +29,10 @@ func returns200LoginResult(b *restful.RouteBuilder) *restful.RouteBuilder {
 	return b.Returns(http.StatusOK, "OK", models.LoginResponse{})
 }
 
+func returns200User(b *restful.RouteBuilder) *restful.RouteBuilder {
+	return b.Returns(http.StatusOK, "OK", tenancyv1alpha1.User{})
+}
+
 // withAllSupportedStatuses is a shorthand to add all standard and auth results to the route but not validation.
 func withAllSupportedStatuses(rb *restful.RouteBuilder) *restful.RouteBuilder {
 	return returns500(returns502(returns401(returns200(returns301(rb)))))

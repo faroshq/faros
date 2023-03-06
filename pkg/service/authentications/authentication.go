@@ -11,4 +11,6 @@ type Authenticator interface {
 	OIDCLogin(r *restful.Request, w *restful.Response)
 	// OIDCCallback will handle OIDC callback
 	OIDCCallback(r *restful.Request, w *restful.Response)
+	// RegisterOrUpdate will register or update user in the system
+	RegisterOrUpdate(req *restful.Request, w *restful.Response) (*tenancyv1alpha1.User, error)
 }

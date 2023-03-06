@@ -12,7 +12,12 @@ func (a *authenticator) Authenticate(req *restful.Request) (authenticated bool, 
 	ctx := req.Request.Context()
 	// Trying to authenticate via URL query (websocket for SSH/logs, SSE)
 	if urlQueryToken := req.Request.URL.Query().Get("_t"); urlQueryToken != "" {
-		user, err = a.parseJWTToken(ctx, urlQueryToken)
+		claim, err := a.parseJWTToken(ctx, urlQueryToken)
+		if err != nil {
+			return false, nil, err
+		}
+
+		user, err = a.getUser(ctx, claim.Email)
 		if err != nil {
 			return false, nil, err
 		}
@@ -36,7 +41,12 @@ func (a *authenticator) Authenticate(req *restful.Request) (authenticated bool, 
 		return false, nil, err
 	}
 
-	user, err = a.parseJWTToken(ctx, token)
+	claim, err := a.parseJWTToken(ctx, token)
+	if err != nil {
+		return false, nil, err
+	}
+
+	user, err = a.getUser(ctx, claim.Email)
 	if err != nil {
 		return false, nil, err
 	}
