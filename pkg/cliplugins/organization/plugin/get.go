@@ -12,6 +12,7 @@ import (
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
 	utilprint "github.com/faroshq/faros/pkg/util/print"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 // GetOptions contains options for configuring faros
@@ -71,7 +72,7 @@ func (o *GetOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = farosClient.RESTClient().Get().AbsPath(path).Do(ctx).Into(organizations)
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Get()).AbsPath(path).Do(ctx).Into(organizations)
 	if err != nil {
 		return err
 	}

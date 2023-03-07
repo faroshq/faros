@@ -181,6 +181,9 @@ func (o *Options) RefreshToken() error {
 		client = &http.Client{}
 	}
 
+	originalTransport := client.Transport
+	client.Transport = utilhttp.NewJSONContentTypeRoundTripper(originalTransport)
+
 	response, err := client.Post(fmt.Sprintf("https://%s/faros.sh/api/v1alpha1/oidc/callback?refresh_token=%s", u.Host, metadata.Spec.RefreshToken), "application/json", nil)
 	if err != nil {
 		return err

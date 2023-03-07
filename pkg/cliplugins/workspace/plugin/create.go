@@ -13,6 +13,7 @@ import (
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 var (
@@ -88,7 +89,7 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 
 	// Check organization exists
 	organizations := tenancyv1alpha1.OrganizationList{}
-	err = farosClient.RESTClient().Get().AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Get()).AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
 	if err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 		return fmt.Errorf("error creating patch: %v", err)
 	}
 
-	err = farosClient.RESTClient().Post().Body(patch).AbsPath(fmt.Sprintf(o.TenantWorkspacesAPIfmt, o.OrganizationName)).Do(ctx).Into(&workspace)
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Post()).Body(patch).AbsPath(fmt.Sprintf(o.TenantWorkspacesAPIfmt, o.OrganizationName)).Do(ctx).Into(&workspace)
 	if err != nil {
 		return err
 	}

@@ -11,6 +11,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 // DeleteOptions contains options for configuring faros
@@ -67,7 +68,7 @@ func (o *DeleteOptions) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = farosClient.RESTClient().Delete().AbsPath(path).Do(ctx).Error()
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Delete()).AbsPath(path).Do(ctx).Error()
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import (
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 // UseOptions contains options for configuring faros
@@ -74,7 +75,7 @@ func (o *UseOptions) Run(ctx context.Context) error {
 
 	// Check organization exists
 	organizations := tenancyv1alpha1.OrganizationList{}
-	err = farosClient.RESTClient().Get().AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Get()).AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
 	if err != nil {
 		return err
 	}
