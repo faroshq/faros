@@ -1,7 +1,6 @@
 package service
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 
@@ -32,7 +31,7 @@ func (o OrganizationResource) listOrganizations(r *restful.Request, w *restful.R
 	organizations, err := o.store.ListOrganizations(ctx, tenancyv1alpha1.Organization{})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w.ResponseWriter, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organizations"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -56,11 +55,13 @@ func (o OrganizationResource) createOrganization(r *restful.Request, w *restful.
 	limitedReader := &io.LimitedReader{R: r.Request.Body, N: limit}
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
-		responsewriters.ErrorNegotiated(err, codecs, schema.GroupVersion{}, w, r.Request)
+		klog.Error(err)
+		responsewriters.ErrorNegotiated(errBadRequest("exceded request size limit"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 	if err := runtime.DecodeInto(codecs.UniversalDecoder(), body, request); err != nil {
-		responsewriters.ErrorNegotiated(err, codecs, schema.GroupVersion{}, w, r.Request)
+		klog.Error(err)
+		responsewriters.ErrorNegotiated(errBadRequest("failed reading body"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -72,7 +73,7 @@ func (o OrganizationResource) createOrganization(r *restful.Request, w *restful.
 
 	_, err = o.store.GetOrganization(ctx, *current)
 	if err == nil {
-		responsewriters.ErrorNegotiated(fmt.Errorf("organization already exists"), codecs, schema.GroupVersion{}, w, r.Request)
+		responsewriters.ErrorNegotiated(errConflict("organization already exists"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -96,7 +97,7 @@ func (o OrganizationResource) createOrganization(r *restful.Request, w *restful.
 	organizationCreated, err := o.store.CreateOrganization(ctx, *organization)
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to create organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -109,7 +110,7 @@ func (o OrganizationResource) getOrganization(r *restful.Request, w *restful.Res
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -120,23 +121,16 @@ func (o OrganizationResource) getOrganization(r *restful.Request, w *restful.Res
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
-	organization, err := o.farosClient.TenancyV1alpha1().Organizations().Get(ctx, organizationRef.Name, metav1.GetOptions{})
-	if err != nil {
-		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	if !organizationRef.IsOwner(user) {
+		responsewriters.ErrorNegotiated(errForbidden(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
-	if !organization.IsOwner(user) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-
-	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, organization)
+	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, organizationRef)
 }
 
 func (o OrganizationResource) deleteOrganization(r *restful.Request, w *restful.Response) {
@@ -145,7 +139,7 @@ func (o OrganizationResource) deleteOrganization(r *restful.Request, w *restful.
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -156,18 +150,18 @@ func (o OrganizationResource) deleteOrganization(r *restful.Request, w *restful.
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	if !organization.IsOwner(user) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		responsewriters.ErrorNegotiated(errForbidden(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	if err := o.store.DeleteOrganization(ctx, *organization); err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 

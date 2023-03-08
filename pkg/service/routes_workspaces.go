@@ -23,7 +23,7 @@ func (o OrganizationResource) listWorkspaces(r *restful.Request, w *restful.Resp
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -35,7 +35,7 @@ func (o OrganizationResource) listWorkspaces(r *restful.Request, w *restful.Resp
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -47,7 +47,7 @@ func (o OrganizationResource) listWorkspaces(r *restful.Request, w *restful.Resp
 	workspaces, err := o.store.ListWorkspaces(ctx, organizationName, tenancyv1alpha1.Workspace{})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get workspaces"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -65,7 +65,7 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -77,12 +77,12 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	if !organization.IsOwner(user) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		responsewriters.ErrorNegotiated(errForbidden(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -90,11 +90,13 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 	limitedReader := &io.LimitedReader{R: r.Request.Body, N: limit}
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
-		responsewriters.ErrorNegotiated(err, codecs, schema.GroupVersion{}, w, r.Request)
+		klog.Error(err)
+		responsewriters.ErrorNegotiated(errBadRequest("exceded request size limit"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 	if err := runtime.DecodeInto(codecs.UniversalDecoder(), body, request); err != nil {
-		responsewriters.ErrorNegotiated(err, codecs, schema.GroupVersion{}, w, r.Request)
+		klog.Error(err)
+		responsewriters.ErrorNegotiated(errBadRequest("failed reading body"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -106,7 +108,7 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 
 	_, err = o.store.GetWorkspace(ctx, *current)
 	if err == nil {
-		http.Error(w, "Workspace already exists", http.StatusConflict)
+		responsewriters.ErrorNegotiated(errConflict("workspace already exists"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -131,7 +133,7 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 	created, err := o.store.CreateWorkspace(ctx, *workspace)
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to create workspace"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -151,13 +153,13 @@ func (o OrganizationResource) getWorkspace(r *restful.Request, w *restful.Respon
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	workspaceName := r.PathParameter("workspace")
 	if workspaceName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -168,12 +170,12 @@ func (o OrganizationResource) getWorkspace(r *restful.Request, w *restful.Respon
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	if !organization.IsOwner(user) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		responsewriters.ErrorNegotiated(errForbidden(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -188,7 +190,7 @@ func (o OrganizationResource) getWorkspace(r *restful.Request, w *restful.Respon
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get workspace"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -201,13 +203,13 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 
 	organizationName := r.PathParameter("organization")
 	if organizationName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	workspaceName := r.PathParameter("workspace")
 	if workspaceName == "" {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		responsewriters.ErrorNegotiated(errBadRequest(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -218,12 +220,12 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 	})
 	if err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
 	if !organization.IsOwner(user) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		responsewriters.ErrorNegotiated(errForbidden(""), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
@@ -237,7 +239,7 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 		},
 	}); err != nil {
 		klog.Error(err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
