@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	kcpapis "github.com/kcp-dev/kcp/pkg/apis/apis/v1alpha1"
 	"github.com/kcp-dev/kcp/pkg/apis/core"
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
 	"github.com/kcp-dev/logicalcluster/v3"
@@ -54,6 +55,11 @@ func (c *Controller) reconcile(ctx context.Context, cluster logicalcluster.Name,
 			},
 			createOrUpdateClusterRoleBinding: func(ctx context.Context, org *tenancyv1alpha1.Organization, ws *tenancyv1alpha1.Workspace, crb *rbacv1.ClusterRoleBinding) error {
 				return c.createOrUpdateClusterRoleBinding(ctx, org, ws, crb)
+			},
+		},
+		&apiBindingComputeReconciler{
+			createComputeAPIBinding: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+				return c.createComputeAPIBinding(ctx, workspace)
 			},
 		},
 	}
@@ -168,6 +174,64 @@ func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, org *
 		}
 	default:
 		return fmt.Errorf("failed to create the ClusterRoleBindings %s", err)
+	}
+
+	return nil
+}
+
+func (c *Controller) createComputeAPIBinding(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+	workspaceCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name + ":" + workspace.Labels[models.LabelWorkspace])
+
+	exportCluster := logicalcluster.NewPath(c.config.FarosKCPConfig.ControllersWorkspace)
+	exportName := "compute.faros.sh"
+
+	export, err := c.kcpClientSet.Cluster(exportCluster).ApisV1alpha1().APIExports().Get(ctx, exportName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get the APIExport %s", err)
+	}
+
+	apiBinding := &kcpapis.APIBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: exportName,
+		},
+		Spec: kcpapis.APIBindingSpec{
+			Reference: kcpapis.BindingReference{
+				Export: &kcpapis.ExportBindingReference{
+					Name: exportName,
+					Path: c.config.FarosKCPConfig.ControllersWorkspace,
+				},
+			},
+			PermissionClaims: []kcpapis.AcceptablePermissionClaim{
+				{
+					State: kcpapis.ClaimAccepted,
+					PermissionClaim: kcpapis.PermissionClaim{
+						GroupResource: kcpapis.GroupResource{
+							Group:    "workload.kcp.io",
+							Resource: "synctargets",
+						},
+						IdentityHash: export.Spec.PermissionClaims[0].IdentityHash,
+						All:          true,
+					},
+				},
+			},
+		},
+	}
+
+	current, err := c.kcpClientSet.Cluster(workspaceCluster).ApisV1alpha1().APIBindings().Get(ctx, apiBinding.Name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		_, err := c.kcpClientSet.Cluster(workspaceCluster).ApisV1alpha1().APIBindings().Create(ctx, apiBinding, metav1.CreateOptions{})
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create the APIBinding in workspace %s: %s", workspaceCluster.String(), err)
+		}
+	case err == nil:
+		current.Spec = apiBinding.Spec
+		_, err := c.kcpClientSet.Cluster(workspaceCluster).ApisV1alpha1().APIBindings().Update(ctx, current, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update the APIBinding %s", err)
+		}
+	default:
+		return fmt.Errorf("failed to create the APIBinding %s", err)
 	}
 
 	return nil

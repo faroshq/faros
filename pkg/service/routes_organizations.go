@@ -161,9 +161,10 @@ func (o OrganizationResource) deleteOrganization(r *restful.Request, w *restful.
 
 	if err := o.store.DeleteOrganization(ctx, *organization); err != nil {
 		klog.Error(err)
-		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to delete organization"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	// TODO: Deletion is not marked in this object we return.  We should return it as deleting or status object.
+	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, organization)
 }

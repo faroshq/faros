@@ -20,6 +20,8 @@ kcpFrontProxy:
     annotations:
       kubernetes.io/ingress.class: "nginx"
       nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+      nginx.ingress.kubernetes.io/enable-cors: "true"
   certificate:
     issuerSpec:
       selfSigned: {}

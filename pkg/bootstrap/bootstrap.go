@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kcp-dev/kcp/pkg/apis/core"
 	kcpclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 
 	"github.com/faroshq/faros/pkg/config"
@@ -19,6 +20,7 @@ var fs embed.FS
 type Bootstraper interface {
 	CreateWorkspace(ctx context.Context, name string) error
 	BootstrapServiceTenantAssets(ctx context.Context) error
+	BootstrapServiceComputeAssets(ctx context.Context) error
 	DeployKustomizeAssetsCRD(ctx context.Context) error
 	DeployKustomizeAssetsKCP(ctx context.Context) error
 }
@@ -111,4 +113,10 @@ func (b *bootstrap) BootstrapServiceTenantAssets(ctx context.Context) error {
 		return err
 	}
 	return b.bootstrapRootTenantAssets(ctx)
+}
+
+func (b *bootstrap) BootstrapServiceComputeAssets(ctx context.Context) error {
+	source := core.RootCluster.Path().String()
+	target := b.config.ControllersWorkspace
+	return b.bootstrapServiceComputeAssets(ctx, source, target)
 }

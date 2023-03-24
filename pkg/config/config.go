@@ -4,10 +4,6 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const (
-	ConfigFileName = "config.yaml"
-)
-
 type Config struct {
 	// APIConfig is the configuration for the API server.
 	APIConfig APIConfig `yaml:"api"`

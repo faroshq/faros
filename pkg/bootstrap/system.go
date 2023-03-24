@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/faroshq/faros/pkg/bootstrap/templates/root"
+	"github.com/faroshq/faros/pkg/bootstrap/templates/servicecompute"
 	"github.com/faroshq/faros/pkg/bootstrap/templates/servicetenants"
 	bootstraputils "github.com/faroshq/faros/pkg/util/bootstrap"
 )
@@ -59,4 +60,32 @@ func (b *bootstrap) bootstrapRootTenantAssets(ctx context.Context) error {
 	}
 
 	return root.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption())
+}
+
+func (b *bootstrap) bootstrapServiceComputeAssets(ctx context.Context, source, target string) error {
+	targetRest, err := b.clientFactory.GetWorkspaceRestConfig(ctx, target)
+	if err != nil {
+		return err
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(targetRest)
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(targetRest)
+	if err != nil {
+		return err
+	}
+
+	clusterPath := logicalcluster.NewPath(source)
+
+	export, err := b.kcpClient.Cluster(clusterPath).ApisV1alpha1().APIExports().Get(ctx, "workload.kcp.io", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	return servicecompute.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption(
+		"IDENTITY", export.Status.IdentityHash,
+	))
 }

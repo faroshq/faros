@@ -229,7 +229,7 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 		return
 	}
 
-	if err := o.store.DeleteWorkspace(ctx, tenancyv1alpha1.Workspace{
+	workspace, err := o.store.GetWorkspace(ctx, tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: getWorkspaceName(*organization, tenancyv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{
@@ -237,11 +237,20 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 				},
 			}),
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		klog.Error(err)
-		responsewriters.ErrorNegotiated(errInternalServerError("failed to get organization"), codecs, schema.GroupVersion{}, w, r.Request)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to get workspace"), codecs, schema.GroupVersion{}, w, r.Request)
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	err = o.store.DeleteWorkspace(ctx, *workspace)
+	if err != nil {
+		klog.Error(err)
+		responsewriters.ErrorNegotiated(errInternalServerError("failed to delete workspace"), codecs, schema.GroupVersion{}, w, r.Request)
+		return
+	}
+
+	// TODO: Deletion is not marked in this object we return.  We should return it as deleting or status object.
+	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, workspace)
 }

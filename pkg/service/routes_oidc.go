@@ -18,7 +18,6 @@ func (o OIDCResource) RegisterTo(container *restful.Container) {
 	ws.
 		Path(pathOIDC).
 		Consumes("application/json").
-		Consumes("application/json").
 		ApiVersion(apiVersion)
 
 	ws.Consumes(restful.MIME_JSON)

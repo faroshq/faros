@@ -1,0 +1,10 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIExport
+metadata:
+  name: compute.faros.sh
+spec:
+  permissionClaims:
+  - group: "workload.kcp.io"
+    resource: "synctargets"
+    identityHash: IDENTITY
+    all: true

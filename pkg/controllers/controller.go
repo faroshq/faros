@@ -158,5 +158,10 @@ func (c *controllerManager) bootstrap(ctx context.Context) error {
 		return err
 	}
 
+	// create proxy-apiexport in controllers workspace for sync targets to use
+	if err := c.bootstraper.BootstrapServiceComputeAssets(ctx); err != nil {
+		return err
+	}
+
 	return nil
 }
