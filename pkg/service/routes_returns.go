@@ -4,9 +4,11 @@ import (
 	"net/http"
 
 	"github.com/emicklei/go-restful/v3"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/models"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func returns200OrganizationList(b *restful.RouteBuilder) *restful.RouteBuilder {

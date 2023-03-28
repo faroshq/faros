@@ -9,6 +9,7 @@ import (
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
 	"github.com/kcp-dev/logicalcluster/v3"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	"github.com/faroshq/faros/pkg/apis/workload"
 	farosclientset "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	"github.com/faroshq/faros/pkg/models"
 )
@@ -60,6 +62,11 @@ func (c *Controller) reconcile(ctx context.Context, cluster logicalcluster.Name,
 		&apiBindingComputeReconciler{
 			createComputeAPIBinding: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
 				return c.createComputeAPIBinding(ctx, workspace)
+			},
+		},
+		&farosConfigComputeReconciler{
+			createFarosConfigMap: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+				return c.createFarosConfigMap(ctx, workspace)
 			},
 		},
 	}
@@ -183,7 +190,7 @@ func (c *Controller) createComputeAPIBinding(ctx context.Context, workspace *ten
 	workspaceCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name + ":" + workspace.Labels[models.LabelWorkspace])
 
 	exportCluster := logicalcluster.NewPath(c.config.FarosKCPConfig.ControllersWorkspace)
-	exportName := "compute.faros.sh"
+	exportName := "workload.faros.sh"
 
 	export, err := c.kcpClientSet.Cluster(exportCluster).ApisV1alpha1().APIExports().Get(ctx, exportName, metav1.GetOptions{})
 	if err != nil {
@@ -232,6 +239,40 @@ func (c *Controller) createComputeAPIBinding(ctx context.Context, workspace *ten
 		}
 	default:
 		return fmt.Errorf("failed to create the APIBinding %s", err)
+	}
+
+	return nil
+}
+
+func (c *Controller) createFarosConfigMap(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+	workspaceCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name + ":" + workspace.Labels[models.LabelWorkspace])
+
+	// TODO: Add CA from the workspace cluster (frontproxy-ca)
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      workload.FarosConfigMapName,
+			Namespace: workload.FarosConfigMapNamespace,
+		},
+		Data: map[string]string{
+			workload.FarosConfigMapServerKey: workspace.Status.WorkspaceURL,
+		},
+	}
+
+	current, err := c.coreClientSet.CoreV1().Cluster(workspaceCluster).ConfigMaps(configMap.Namespace).Get(ctx, configMap.Name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		_, err := c.coreClientSet.CoreV1().Cluster(workspaceCluster).ConfigMaps(configMap.Namespace).Create(ctx, configMap, metav1.CreateOptions{})
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create the faros-config ConfigMap in workspace %s: %s", workspaceCluster.String(), err)
+		}
+	case err == nil:
+		current.Data = configMap.Data
+		_, err := c.coreClientSet.CoreV1().Cluster(workspaceCluster).ConfigMaps(configMap.Namespace).Update(ctx, configMap, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update the faros-config ConfigMap %s", err)
+		}
+	default:
+		return fmt.Errorf("failed to create the faros-config ConfigMap %s", err)
 	}
 
 	return nil

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIExport
 metadata:
-  name: compute.faros.sh
+  name: workload.faros.sh
 spec:
   permissionClaims:
   - group: "workload.kcp.io"

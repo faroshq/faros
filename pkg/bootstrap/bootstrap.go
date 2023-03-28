@@ -20,7 +20,7 @@ var fs embed.FS
 type Bootstraper interface {
 	CreateWorkspace(ctx context.Context, name string) error
 	BootstrapServiceTenantAssets(ctx context.Context) error
-	BootstrapServiceComputeAssets(ctx context.Context) error
+	BootstrapServiceWorkloadAssets(ctx context.Context) error
 	DeployKustomizeAssetsCRD(ctx context.Context) error
 	DeployKustomizeAssetsKCP(ctx context.Context) error
 }
@@ -115,8 +115,8 @@ func (b *bootstrap) BootstrapServiceTenantAssets(ctx context.Context) error {
 	return b.bootstrapRootTenantAssets(ctx)
 }
 
-func (b *bootstrap) BootstrapServiceComputeAssets(ctx context.Context) error {
+func (b *bootstrap) BootstrapServiceWorkloadAssets(ctx context.Context) error {
 	source := core.RootCluster.Path().String()
 	target := b.config.ControllersWorkspace
-	return b.bootstrapServiceComputeAssets(ctx, source, target)
+	return b.bootstrapServiceWorkloadAssets(ctx, source, target)
 }

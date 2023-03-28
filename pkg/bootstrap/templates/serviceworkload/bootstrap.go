@@ -1,4 +1,4 @@
-package servicecompute
+package serviceworkload
 
 import (
 	"context"

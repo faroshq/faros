@@ -10,8 +10,8 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/faroshq/faros/pkg/bootstrap/templates/root"
-	"github.com/faroshq/faros/pkg/bootstrap/templates/servicecompute"
 	"github.com/faroshq/faros/pkg/bootstrap/templates/servicetenants"
+	"github.com/faroshq/faros/pkg/bootstrap/templates/serviceworkload"
 	bootstraputils "github.com/faroshq/faros/pkg/util/bootstrap"
 )
 
@@ -62,7 +62,7 @@ func (b *bootstrap) bootstrapRootTenantAssets(ctx context.Context) error {
 	return root.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption())
 }
 
-func (b *bootstrap) bootstrapServiceComputeAssets(ctx context.Context, source, target string) error {
+func (b *bootstrap) bootstrapServiceWorkloadAssets(ctx context.Context, source, target string) error {
 	targetRest, err := b.clientFactory.GetWorkspaceRestConfig(ctx, target)
 	if err != nil {
 		return err
@@ -85,7 +85,7 @@ func (b *bootstrap) bootstrapServiceComputeAssets(ctx context.Context, source, t
 		return err
 	}
 
-	return servicecompute.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption(
+	return serviceworkload.Bootstrap(ctx, discoveryClient, dynamicClient, bootstraputils.ReplaceOption(
 		"IDENTITY", export.Status.IdentityHash,
 	))
 }

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/emicklei/go-restful/v3"
+
 	"github.com/faroshq/faros/pkg/service/authentications"
 	"github.com/faroshq/faros/pkg/store"
 )

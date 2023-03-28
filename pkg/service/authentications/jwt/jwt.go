@@ -15,12 +15,12 @@ import (
 	"github.com/emicklei/go-restful/v3"
 	"github.com/golang-jwt/jwt/request"
 	"github.com/gorilla/sessions"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 
-	"github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/config"
 	"github.com/faroshq/faros/pkg/service/authentications"
@@ -166,7 +166,7 @@ func httpClientForRootCAs(crt, key []byte) (*http.Client, error) {
 
 // RegisterOrUpdate registers or updates user in the store. This method is used by
 // components to register user if they didn't used faros api to login.
-func (a *authenticator) RegisterOrUpdate(req *restful.Request, w *restful.Response) (*v1alpha1.User, error) {
+func (a *authenticator) RegisterOrUpdate(req *restful.Request, w *restful.Response) (*tenancyv1alpha1.User, error) {
 	ctx := req.Request.Context()
 	if req.Request.Header.Get("Authorization") == "" {
 		return nil, fmt.Errorf("invalid authorization header")

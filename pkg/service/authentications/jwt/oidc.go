@@ -10,12 +10,14 @@ import (
 
 	"github.com/coreos/go-oidc"
 	"github.com/emicklei/go-restful/v3"
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	"github.com/faroshq/faros/pkg/models"
 	"golang.org/x/oauth2"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
+
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
+	"github.com/faroshq/faros/pkg/models"
 )
 
 func (a *authenticator) OIDCLogin(r *restful.Request, w *restful.Response) {

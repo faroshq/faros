@@ -21,11 +21,12 @@ import (
 	"log"
 	"os"
 
-	generated "github.com/faroshq/faros/pkg/openapi"
 	builderv2 "k8s.io/kube-openapi/pkg/builder"
 	"k8s.io/kube-openapi/pkg/common"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	"k8s.io/kube-openapi/test/integration/testutil"
+
+	generated "github.com/faroshq/faros/pkg/openapi"
 )
 
 // TODO: Change this to output the generated swagger to stdout.
@@ -43,6 +44,7 @@ func main() {
 	config := createOpenAPIBuilderConfig()
 	config.GetDefinitions = generated.GetOpenAPIDefinitions
 	// Build the Paths using a simple WebService for the final spec
+	//lint:ignore SA1019 Deprecated. Migration needs to be done at some point
 	swagger, serr := builderv2.BuildOpenAPISpec(testutil.CreateWebServices(true), config)
 	if serr != nil {
 		log.Fatalf("ERROR: %s", serr.Error())
@@ -74,7 +76,7 @@ func createOpenAPIBuilderConfig() *common.Config {
 			},
 		},
 		ResponseDefinitions: map[string]spec.Response{
-			"NotFound": spec.Response{
+			"NotFound": {
 				ResponseProps: spec.ResponseProps{
 					Description: "Entity not found.",
 				},

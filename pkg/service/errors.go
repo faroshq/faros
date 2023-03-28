@@ -18,10 +18,6 @@ func errBadRequest(message string) error {
 	return apierrors.NewBadRequest(message)
 }
 
-func errNotFound(message string) error {
-	return apierrors.NewNotFound(schema.GroupResource{}, message)
-}
-
 func errForbidden(message string) error {
 	return apierrors.NewForbidden(schema.GroupResource{}, message, nil)
 }
