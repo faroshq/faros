@@ -12,6 +12,7 @@ import (
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 // DeleteOptions contains options for configuring faros
@@ -77,7 +78,7 @@ func (o *DeleteOptions) Run(ctx context.Context) error {
 
 	// Check organization exists
 	organizations := tenancyv1alpha1.OrganizationList{}
-	err = farosClient.RESTClient().Get().AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Get()).AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organizations)
 	if err != nil {
 		return err
 	}
@@ -105,7 +106,7 @@ func (o *DeleteOptions) Run(ctx context.Context) error {
 		return err
 	}
 
-	err = farosClient.RESTClient().Delete().AbsPath(path).Do(ctx).Error()
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Delete()).AbsPath(path).Do(ctx).Error()
 	if err != nil {
 		return err
 	}

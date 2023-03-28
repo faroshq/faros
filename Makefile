@@ -8,6 +8,8 @@ TOOLS_DIR=hack/tools
 TOOLS_GOBIN_DIR := $(abspath $(TOOLS_DIR))
 KO_DOCKER_REPO ?= ${REPO}
 
+OPENAPIGEN_VERSION=v6.4.0
+
 CODE_GENERATOR_VER := v2.0.0-alpha.1
 CODE_GENERATOR_BIN := code-generator
 CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
@@ -93,3 +95,6 @@ delete-kind:
 
 images:
 	KO_DOCKER_REPO=${KO_DOCKER_REPO} ko build --sbom=none -B --platform=linux/amd64 -t latest ./cmd/*
+
+swagger:
+	go run ./cmd/swagger/

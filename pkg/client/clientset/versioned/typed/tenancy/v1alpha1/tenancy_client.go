@@ -21,9 +21,10 @@ package v1alpha1
 import (
 	"net/http"
 
+	rest "k8s.io/client-go/rest"
+
 	v1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/client/clientset/versioned/scheme"
-	rest "k8s.io/client-go/rest"
 )
 
 type TenancyV1alpha1Interface interface {

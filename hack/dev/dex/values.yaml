@@ -9,6 +9,7 @@ config:
     https: 0.0.0.0:5554
     tlsCert: /etc/dex/tls/tls.crt
     tlsKey: /etc/dex/tls/tls.key
+    allowedOrigins: ['*']
   connectors:
   - type: github
     id: github
@@ -27,6 +28,16 @@ config:
     - https://faros.dev.faros.sh/faros.sh/api/v1alpha1/oidc/callback
     - https://dex.dev.faros.sh/callback
     - https://api.faros.sh/faros.sh/api/v1alpha1/oidc/callback
+    - http://localhost:8080/auth/signinwin/main
+    - http://localhost:8081/auth/signinwin/main
+    - http://localhost:18080/auth/signinwin/
+    - http://localhost:8080/silent-renew
+    - http://localhost:3001/silent-renew.html
+    - http://localhost:3001/callback
+    - http://localhost:5002/oidc-callback
+    - http://localhost:5002/oidc-popup-callback
+    - http://localhost:5002/silent-renew-oidc.html
+    - http://localhost:8080/oidc-callback
     name: 'Faros App'
     secret: ZXhhbXBsZS1hcHAtc2VjcmV0
 

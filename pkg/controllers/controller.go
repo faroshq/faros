@@ -131,6 +131,10 @@ func (c *controllerManager) Run(ctx context.Context) error {
 		return c.runTenancyControllers(ctx)
 	})
 
+	eg.Go(func() error {
+		return c.runWorkloadsControllers(ctx)
+	})
+
 	return eg.Wait()
 }
 
@@ -155,6 +159,11 @@ func (c *controllerManager) bootstrap(ctx context.Context) error {
 
 	// create assets for controller tenant workspace being able to access use apis
 	if err := c.bootstraper.BootstrapServiceTenantAssets(ctx); err != nil {
+		return err
+	}
+
+	// create proxy-apiexport in controllers workspace for sync targets to use
+	if err := c.bootstraper.BootstrapServiceWorkloadAssets(ctx); err != nil {
 		return err
 	}
 

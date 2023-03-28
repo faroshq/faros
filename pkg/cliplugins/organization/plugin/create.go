@@ -13,6 +13,7 @@ import (
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/cliplugins/base"
+	"github.com/faroshq/faros/pkg/util/rest"
 )
 
 // GetOptions contains options for configuring faros workspaces
@@ -91,7 +92,8 @@ func (o *CreateOptions) Run(ctx context.Context) error {
 		return fmt.Errorf("error creating patch: %v", err)
 	}
 
-	err = farosClient.RESTClient().Post().Body(patch).AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organization)
+	// HACK: we need to force json content type for the patch
+	err = rest.ContentTypeJSON(farosClient.RESTClient().Post()).Body(patch).AbsPath(o.TenantOrganizationsAPI).Do(ctx).Into(&organization)
 	if err != nil {
 		return err
 	}

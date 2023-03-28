@@ -4,15 +4,13 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const (
-	ConfigFileName = "config.yaml"
-)
-
 type Config struct {
 	// APIConfig is the configuration for the API server.
 	APIConfig APIConfig `yaml:"api"`
 	// FarosKCPConfig is the configuration for the Faros KCP integration.
 	FarosKCPConfig FarosKCPConfig `yaml:"farosKCP"`
+	// SyncerConfig is the configuration for the syncer.
+	SyncerConfig SyncerConfig `yaml:"syncer"`
 }
 
 type APIConfig struct {
@@ -20,6 +18,9 @@ type APIConfig struct {
 	Addr string `envconfig:"FAROS_API_ADDR" required:"true" default:":8443"`
 	// ControllerExternalURL is the URL that the controller is externally reachable at.
 	ControllerExternalURL string `envconfig:"FAROS_API_EXTERNAL_URL" required:"true" default:"https://api.faros.sh"`
+
+	// AllowedCORSOrigins is a list of allowed CORS origins.
+	AllowedCORSOrigins []string `envconfig:"FAROS_API_ALLOWED_CORS_ORIGINS" yaml:"allowedCORSOrigins,omitempty" default:"*"`
 
 	// In prod we use auto-certs so this is not an issue.
 	// TODO: Add support for auto-certs
@@ -62,6 +63,26 @@ type FarosKCPConfig struct {
 
 	// ControllersWorkspace is name of workspace controllers are operating in
 	ControllersWorkspace string `envconfig:"FAROS_CONTROLLER_WORKSPACE" yaml:"controllersWorkspace,omitempty" default:"root:faros:service:controllers"`
+}
+
+type SyncerConfig struct {
+	// Image is the image to use for the syncer.
+	Image string `envconfig:"FAROS_SYNCER_IMAGE" required:"true" default:"ghcr.io/kcp-dev/kcp/syncer:v0.11.0"`
+	// Replicas is the number of syncer replicas to run.
+	Replicas int `envconfig:"FAROS_SYNCER_REPLICAS" default:"1"`
+	// "Resources to synchronize with kcp, each resource should be in the format of resourcename.<gvr_of_the_resource>,"
+	//	"e.g. to sync routes to physical cluster the resource name should be given as --resource routes.route.openshift.io")
+	ResourceToSync []string `envconfig:"FAROS_SYNCER_RESOURCE_TO_SYNC" default:""`
+	// QPS is the qps the syncer uses when talking to an apiserver.
+	QPS float32 `envconfig:"FAROS_SYNCER_QPS" default:"20"`
+	// Burst is the burst the syncer uses when talking to an apiserver.
+	Burst int `envconfig:"FAROS_SYNCER_BURST" default:"30"`
+	// FeatureGatesString is the set of features gates.
+	FeatureGatesString string `envconfig:"FAROS_SYNCER_FEATURE_GATES" default:""`
+	// APIImportPollInterval is the time interval to push apiimport.
+	APIImportPollIntervalString string `envconfig:"FAROS_SYNCER_API_IMPORT_POLL_INTERVAL" default:"1m"`
+	// DownstreamNamespaceCleanDelayString is the delay after which the syncer will delete a namespace in the downstream cluster.
+	DownstreamNamespaceCleanDelayString string `envconfig:"FAROS_SYNCER_DOWNSTREAM_NAMESPACE_CLEAN_DELAY" default:"30s"`
 }
 
 func (c *APIConfig) AutoCertEnabled() bool {

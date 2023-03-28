@@ -22,12 +22,13 @@ limitations under the License.
 package v1alpha1
 
 import (
-	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
 	"github.com/kcp-dev/logicalcluster/v3"
+
+	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
+	"k8s.io/client-go/rest"
 
 	kcptenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
-	"k8s.io/client-go/rest"
 )
 
 var _ kcptenancyv1alpha1.TenancyV1alpha1ClusterInterface = (*TenancyV1alpha1ClusterClient)(nil)
