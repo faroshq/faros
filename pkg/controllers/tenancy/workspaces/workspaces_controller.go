@@ -192,7 +192,7 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 
 	obj, err := c.workspacesLister.Cluster(cluster).Get(name)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if errors.IsNotFound(err) || errors.IsForbidden(err) {
 			return false, nil // object deleted before we handled it
 		}
 		return false, err

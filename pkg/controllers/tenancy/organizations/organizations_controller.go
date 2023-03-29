@@ -192,7 +192,7 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 
 	obj, err := c.organizationsLister.Cluster(cluster).Get(name)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if errors.IsNotFound(err) || errors.IsForbidden(err) { // KCP  returns 401 on not found
 			return false, nil // object deleted before we handled it
 		}
 		return false, err
