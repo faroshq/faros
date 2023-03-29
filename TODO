@@ -1,0 +1,19 @@
+
+# Roadmap/TODO
+
+1. Add basic quotas for orgs and workspaces
+2. Move to APIExportEndpointSlice.status.endpoints
+3. Add Certificate to kubeconfig
+4. Add refresh for kubeconfig token
+5. Make orgs `rootless` LogicalClusters. It will require running shard-api in the same cluster as shard itself, and doing some loadbalancing. Replicate front-proxy.
+6. Write faros auth plugin for kubectl
+7. Make sure that workspaces reconcilers are handling race conditions with KCP better:
+```
+I0329 07:20:18.257423       1 workspaces_reconcile.go:134] "creating workspace" reconciler="faros-workspaces" key="2l6wi6np4fnwxs95|mj-test-first" workspace-name="mj-test-first"
+E0329 07:20:18.313905       1 workspaces_controller.go:173] "faros-workspaces" controller failed to sync "2l6wi6np4fnwxs95|mj-test-first", err: failed to create the ClusterRoleBindings clusterrolebindings.rbac.authorization.k8s.io "faros-cluster-admins" is forbidden: User "admin" cannot get resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope: access denied
+I0329 07:20:18.320079       1 workspaces_controller.go:166] "processing key" reconciler="faros-workspaces" key="2l6wi6np4fnwxs95|mj-test-first"
+E0329 07:20:18.394141       1 workspaces_controller.go:173] "faros-workspaces" controller failed to sync "2l6wi6np4fnwxs95|mj-test-first", err: failed to create the ClusterRoleBindings clusterrolebindings.rbac.authorization.k8s.io "faros-cluster-admins" is forbidden: User "admin" cannot get resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope: access denied
+I0329 07:20:18.406313       1 workspaces_controller.go:166] "processing key" reconciler="faros-workspaces" key="2l6wi6np4fnwxs95|mj-test-first"
+I0329 07:20:18.816853       1 workspaces_controller.go:131] "queueing Workspace" reconciler="faros-workspaces" key="2l6wi6np4fnwxs95|mj-test-first"
+I0329 07:20:18.818464       1 workspaces_controller.go:166] "processing key" reconciler="faros-workspaces" key="2l6wi6np4fnwxs95|mj-test-first"
+```
