@@ -3,6 +3,7 @@ package synctargets
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	kcpworkloadv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/workload/v1alpha1"
 	"github.com/kcp-dev/logicalcluster/v3"
@@ -34,8 +35,13 @@ func (c *Controller) renderSyncerTemplate(ctx context.Context,
 		return fmt.Errorf("faros configmap %s/%s does not contain key %s", workload.FarosConfigMapNamespace, workload.FarosConfigMapName, workload.FarosConfigMapServerKey)
 	}
 
+	u, err := url.Parse(server)
+	if err != nil {
+		return err
+	}
+
 	templateInputs := synctarget.TemplateInput{
-		ServerURL: server,
+		ServerURL: u.Host,
 		Token:     token,
 		//CAData: nil, // TODO: Add CAData
 		KCPNamespace:   workload.FarosConfigMapNamespace,
