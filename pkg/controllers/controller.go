@@ -6,9 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kcp-dev/client-go/kubernetes"
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
-	kcpclientset "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 	"golang.org/x/sync/errgroup"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,10 +16,8 @@ import (
 	"k8s.io/klog"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	"github.com/faroshq/faros/pkg/bootstrap"
 	"github.com/faroshq/faros/pkg/config"
 	utilhttp "github.com/faroshq/faros/pkg/util/http"
-	utilkubernetes "github.com/faroshq/faros/pkg/util/kubernetes"
 )
 
 var (
@@ -43,46 +39,16 @@ type Controllers interface {
 }
 
 type controllerManager struct {
-	config        *config.Config
-	clientFactory utilkubernetes.ClientFactory
-	bootstraper   bootstrap.Bootstraper
-	kcpClientSet  kcpclientset.ClusterInterface
-	coreClientSet kubernetes.ClusterInterface
+	config *config.Config
 }
 
 func New(c *config.Config) (Controllers, error) {
-	b, err := bootstrap.New(&c.FarosKCPConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	farosCfg := &c.FarosKCPConfig
-	cf, err := utilkubernetes.NewClientFactory(farosCfg.KCPClusterRestConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	rootRest, err := cf.GetRootRestConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	client, err := kcpclientset.NewForConfig(rootRest)
-	if err != nil {
-		return nil, err
-	}
-
-	coreClientSet, err := kubernetes.NewForConfig(rootRest)
-	if err != nil {
-		return nil, err
+	if c.FarosKCPConfig.ControllersRestConfig == nil {
+		return nil, fmt.Errorf("controllers rest config is nil")
 	}
 
 	return &controllerManager{
-		kcpClientSet:  client,
-		coreClientSet: coreClientSet,
-		config:        c,
-		clientFactory: cf,
-		bootstraper:   b,
+		config: c,
 	}, nil
 }
 
@@ -117,13 +83,6 @@ func (c *controllerManager) WaitForAPIReady(ctx context.Context) error {
 
 func (c *controllerManager) Run(ctx context.Context) error {
 	klog.V(2).Info("starting controllers")
-	// bootstrap will set missing ctrlRestConfig and deploy kcp wide resources
-	ctxT, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	err := c.bootstrap(ctxT)
-	if err != nil {
-		return fmt.Errorf("bootstrap failed: %w", err)
-	}
 
 	eg := errgroup.Group{}
 
@@ -136,36 +95,4 @@ func (c *controllerManager) Run(ctx context.Context) error {
 	})
 
 	return eg.Wait()
-}
-
-func (c *controllerManager) bootstrap(ctx context.Context) error {
-	// create controllers workspace
-	for _, w := range []string{
-		c.config.FarosKCPConfig.ControllersTenantWorkspace,
-		c.config.FarosKCPConfig.ControllersWorkspace,
-	} {
-		if err := c.bootstraper.CreateWorkspace(ctx, w); err != nil {
-			return err
-		}
-	}
-	// create assets for controller workspace being able to access all "workspaces"
-	// and implement their requests
-	if err := c.bootstraper.DeployKustomizeAssetsCRD(ctx); err != nil {
-		return err
-	}
-	if err := c.bootstraper.DeployKustomizeAssetsKCP(ctx); err != nil {
-		return err
-	}
-
-	// create assets for controller tenant workspace being able to access use apis
-	if err := c.bootstraper.BootstrapServiceTenantAssets(ctx); err != nil {
-		return err
-	}
-
-	// create proxy-apiexport in controllers workspace for sync targets to use
-	if err := c.bootstraper.BootstrapServiceWorkloadAssets(ctx); err != nil {
-		return err
-	}
-
-	return nil
 }

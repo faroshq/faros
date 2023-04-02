@@ -23,7 +23,6 @@ package v1alpha1
 
 import (
 	conditionsv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/third_party/conditions/apis/conditions/v1alpha1"
-
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 

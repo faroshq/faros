@@ -19,15 +19,14 @@ limitations under the License.
 package fake
 
 import (
+	clientset "github.com/faroshq/faros/pkg/client/clientset/versioned"
+	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
+	faketenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/testing"
-
-	clientset "github.com/faroshq/faros/pkg/client/clientset/versioned"
-	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
-	faketenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.

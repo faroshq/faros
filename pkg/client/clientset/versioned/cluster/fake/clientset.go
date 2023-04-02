@@ -22,18 +22,19 @@ limitations under the License.
 package fake
 
 import (
-	"github.com/kcp-dev/logicalcluster/v3"
-
 	kcpfakediscovery "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/discovery/fake"
 	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
+	"github.com/kcp-dev/logicalcluster/v3"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
 
 	client "github.com/faroshq/faros/pkg/client/clientset/versioned"
+	clientscheme "github.com/faroshq/faros/pkg/client/clientset/versioned/scheme"
+
 	kcpclient "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
 	kcptenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 	faketenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster/typed/tenancy/v1alpha1/fake"
-	clientscheme "github.com/faroshq/faros/pkg/client/clientset/versioned/scheme"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/typed/tenancy/v1alpha1"
 )
 

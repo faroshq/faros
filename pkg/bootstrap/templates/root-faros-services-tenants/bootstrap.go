@@ -1,4 +1,4 @@
-package serviceworkload
+package rootfarosservicestenants
 
 import (
 	"context"

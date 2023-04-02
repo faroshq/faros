@@ -41,6 +41,9 @@ type WorkspaceStatus struct {
 
 	// WorkspaceURL is the URL of the workspace
 	WorkspaceURL string `json:"workspaceURL,omitempty"`
+
+	// Cluster is the cluster where the workspace is deployed
+	Cluster string `json:"cluster,omitempty"`
 }
 
 func (in *Workspace) SetConditions(c conditionsv1alpha1.Conditions) {

@@ -41,7 +41,7 @@ func (c *Controller) renderSyncerTemplate(ctx context.Context,
 	}
 
 	templateInputs := synctarget.TemplateInput{
-		ServerURL: u.Host,
+		ServerURL: u.Scheme + "://" + u.Host,
 		Token:     token,
 		//CAData: nil, // TODO: Add CAData
 		KCPNamespace:   workload.FarosConfigMapNamespace,

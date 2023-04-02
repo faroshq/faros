@@ -9,5 +9,10 @@ spec:
       path: root
   limitAllowedParents:
     types:
-    - name: organization
+    - name: universal
       path: root
+  defaultAPIBindings:
+  - export: tenancy.faros.sh
+    path: root:faros:controllers
+  - export: workload.faros.sh
+    path: root:faros:controllers

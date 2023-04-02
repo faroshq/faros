@@ -144,18 +144,25 @@ func createResourceFromFS(ctx context.Context, client dynamic.Interface, mapper 
 
 	upserted, err := client.Resource(m.Resource).Namespace(u.GetNamespace()).Create(ctx, u, metav1.CreateOptions{})
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
 			existing, err := client.Resource(m.Resource).Namespace(u.GetNamespace()).Get(ctx, u.GetName(), metav1.GetOptions{})
 			if err != nil {
 				return err
 			}
 
-			u.SetResourceVersion(existing.GetResourceVersion())
-			if _, err = client.Resource(m.Resource).Namespace(u.GetNamespace()).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
-				return fmt.Errorf("could not update %s %s: %w", gvk.Kind, tenancyhelper.QualifiedObjectName(existing), err)
-			} else {
-				klog.Infof("Updated %s %s", gvk, tenancyhelper.QualifiedObjectName(existing))
+			switch existing.GetKind() {
+			case "APIResourceSchema":
+				// APIResourceSchema is a special case, its not updatable for now so skip
+				klog.Infof("Skipping %s %s", gvk, tenancyhelper.QualifiedObjectName(existing))
 				return nil
+			default:
+				u.SetResourceVersion(existing.GetResourceVersion())
+				if _, err = client.Resource(m.Resource).Namespace(u.GetNamespace()).Update(ctx, u, metav1.UpdateOptions{}); err != nil {
+					return fmt.Errorf("could not update %s %s: %w", gvk.Kind, tenancyhelper.QualifiedObjectName(existing), err)
+				} else {
+					klog.Infof("Updated %s %s", gvk, tenancyhelper.QualifiedObjectName(existing))
+					return nil
+				}
 			}
 		}
 		return err

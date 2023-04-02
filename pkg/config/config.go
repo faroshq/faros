@@ -22,6 +22,9 @@ type APIConfig struct {
 	// AllowedCORSOrigins is a list of allowed CORS origins.
 	AllowedCORSOrigins []string `envconfig:"FAROS_API_ALLOWED_CORS_ORIGINS" yaml:"allowedCORSOrigins,omitempty" default:"*"`
 
+	// SkipTLSVerify disables TLS verification for all components. Used in dev
+	SkipTLSVerify bool `envconfig:"FAROS_SKIP_TLS_VERIFY" yaml:"skipTLSVerify,omitempty" default:"false"`
+
 	// In prod we use auto-certs so this is not an issue.
 	// TODO: Add support for auto-certs
 	TLSKeyFile  string `envconfig:"FAROS_TLS_KEY_FILE" default:""`
@@ -40,9 +43,12 @@ type APIConfig struct {
 }
 
 type FarosKCPConfig struct {
-	// Important: HostingClusterKubeConfigPath is used to dynamically read secrets for trust. For now single secrets we
-	// require in API server context is OIDC CA bundle from Dex. If removed this dependency, this can be
-	// removed.
+	// Important: HostingClusterKubeConfigPath is used to move controllers (and in the future API)
+	// kubeconfigs into hosting cluster for those components to run. Secrets are created part of
+	// bootstrap process. Later on components dynamically load this kubeconfig and use it to
+	// to start process. If this is not acceptable, bootstrap process can be split from runtime
+	// and runtime part changed.
+
 	// HostingClusterKubeConfig is the path to the kubeconfig file for the hosting cluster.
 	HostingClusterKubeConfigPath string `envconfig:"FAROS_HOSTING_CLUSTER_KUBECONFIG" default:"cluster.kubeconfig"`
 	// HostingClusterNamespace is the namespace in the hosting cluster where the controller will run.
@@ -59,10 +65,27 @@ type FarosKCPConfig struct {
 
 	// ControllersTenantWorkspace is name of workspace for global tenant management. Used in service management
 	// Must match one in Controllers config
-	ControllersTenantWorkspace string `envconfig:"FAROS_TENANT_WORKSPACE" yaml:"controllersTenantWorkspace,omitempty" default:"root:faros:service:tenants"`
-
+	ControllersTenantWorkspace string `envconfig:"FAROS_TENANT_WORKSPACE" yaml:"controllersTenantWorkspace,omitempty" default:"root:faros:tenants"`
+	// ControllerKubeConfigSecretName is name of the secret for controller kubeconfig
+	ControllerFarosConfigSecretName string `envconfig:"FAROS_CONTROLLER_FAROS_CONFIG_SECRET_NAME" yaml:"controllerFarosConfigSecretName,omitempty" default:"faros-controllers-config"`
+	// ControllerClusterNameSecretKey is key of the secret for controller cluster name
+	ControllerClusterNameSecretKey string `envconfig:"FAROS_CONTROLLER_CLUSTER_NAME_SECRET_KEY" yaml:"controllerClusterNameSecretKey,omitempty" default:"cluster-name"`
+	// ControllerKubeConfigSecretKey is key of the secret for controller kubeconfig
+	ControllerKubeConfigSecretKey string `envconfig:"FAROS_CONTROLLER_KUBECONFIG_SECRET_KEY" yaml:"controllerKubeConfigSecretKey,omitempty" default:"kubeconfig"`
+	// ControllersOrganizationWorkspace is name of workspace for all organizations to be present in
+	ControllersOrganizationWorkspace string `envconfig:"FAROS_ORGANIZATIONS_WORKSPACE" yaml:"controllersOrganizationWorkspace,omitempty" default:"root:faros-orgs"`
+	// ControllersKubeConfigPath is path to kubeconfig for controllers
+	ControllersKubeConfigPath string `envconfig:"FAROS_CONTROLLERS_KUBECONFIG" default:"controllers.kubeconfig"`
+	// ControllersRestConfig is the rest config for the controllers cluster
+	ControllersRestConfig *rest.Config `envconfig:"-"`
 	// ControllersWorkspace is name of workspace controllers are operating in
-	ControllersWorkspace string `envconfig:"FAROS_CONTROLLER_WORKSPACE" yaml:"controllersWorkspace,omitempty" default:"root:faros:service:controllers"`
+	ControllersWorkspace string `envconfig:"FAROS_CONTROLLER_WORKSPACE" yaml:"controllersWorkspace,omitempty" default:"root:faros:controllers"`
+	// ControllersClusterName is name of the cluster controllers are running in. Resolved from configMap in the kcp namespace which is created by bootstrap process
+	// Should be mounted from configMap
+	ControllersClusterName string `envconfig:"FAROS_CONTROLLERS_CLUSTER_NAME" yaml:"controllersClusterName,omitempty" default:""`
+
+	// SkipTLSVerify disables TLS verification for all components. Used in dev
+	SkipTLSVerify bool `envconfig:"FAROS_SKIP_TLS_VERIFY" yaml:"skipTLSVerify,omitempty" default:"false"`
 }
 
 type SyncerConfig struct {

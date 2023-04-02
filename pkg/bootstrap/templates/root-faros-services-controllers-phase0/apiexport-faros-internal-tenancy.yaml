@@ -1,0 +1,17 @@
+# Internal tenancy export is bound to faros-orgs and tenants
+# workspaces so we can manage the tenancy resources from the
+# controllers workspace.
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIExport
+metadata:
+  name: internal.tenancy.faros.sh
+spec:
+  latestResourceSchemas:
+  - today.users.tenancy.faros.sh
+  - today.organizations.tenancy.faros.sh
+  - today.workspaces.tenancy.faros.sh
+  permissionClaims:
+  - group: "tenancy.kcp.io"
+    resource: "workspaces"
+    identityHash: ROOT_TENANCY_IDENTITY
+    all: true

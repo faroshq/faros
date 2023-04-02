@@ -25,7 +25,6 @@ import (
 	"k8s.io/klog/v2"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	"github.com/faroshq/faros/pkg/bootstrap"
 	farosclientset "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
 	tenancyinformers "github.com/faroshq/faros/pkg/client/informers/externalversions/tenancy/v1alpha1"
 	tenancylisters "github.com/faroshq/faros/pkg/client/listers/tenancy/v1alpha1"
@@ -52,7 +51,7 @@ type Controller struct {
 	workspacesIndexer cache.Indexer
 	workspacesLister  tenancylisters.WorkspaceClusterLister
 
-	bootstraper bootstrap.Bootstraper
+	organizationsCluster logicalcluster.Path
 }
 
 func NewController(
@@ -64,20 +63,15 @@ func NewController(
 ) (*Controller, error) {
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), controllerName)
 
-	bootstraper, err := bootstrap.New(&config.FarosKCPConfig)
-	if err != nil {
-		return nil, err
-	}
-
 	c := &Controller{
-		config:            config,
-		queue:             queue,
-		bootstraper:       bootstraper,
-		kcpClientSet:      kcpClientSet,
-		coreClientSet:     coreClientSet,
-		farosClientSet:    farosClientSet,
-		workspacesIndexer: workspacesInformer.Informer().GetIndexer(),
-		workspacesLister:  workspacesInformer.Lister(),
+		config:               config,
+		queue:                queue,
+		kcpClientSet:         kcpClientSet,
+		coreClientSet:        coreClientSet,
+		farosClientSet:       farosClientSet,
+		workspacesIndexer:    workspacesInformer.Informer().GetIndexer(),
+		workspacesLister:     workspacesInformer.Lister(),
+		organizationsCluster: logicalcluster.Name(config.FarosKCPConfig.ControllersClusterName).Path(),
 	}
 
 	workspacesInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -192,10 +186,10 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 
 	obj, err := c.workspacesLister.Cluster(cluster).Get(name)
 	if err != nil {
-		if errors.IsNotFound(err) || errors.IsForbidden(err) {
+		if errors.IsNotFound(err) {
 			return false, nil // object deleted before we handled it
 		}
-		return false, err
+		return false, fmt.Errorf("error getting Workspace %q from store: %w", key, err)
 	}
 
 	old := obj

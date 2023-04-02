@@ -65,6 +65,7 @@ manifests:  ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefi
 apiresourceschemas: $(KUSTOMIZE) ## Convert CRDs from config/crds to APIResourceSchemas. Specify APIEXPORT_PREFIX as needed.
 	$(KUSTOMIZE) build config/crds | kubectl kcp crd snapshot -f - --prefix $(APIEXPORT_PREFIX) > config/kcp/$(APIEXPORT_PREFIX).apiresourceschemas.yaml
 	make generate
+	cp config/kcp/$(APIEXPORT_PREFIX).apiresourceschemas.yaml pkg/bootstrap/templates/root-faros-services-controllers-phase0/
 
 tools:$(CONTROLLER_GEN) $(CODE_GENERATOR) $(OPENSHIFT_GOIMPORTS)
 .PHONY: tools
