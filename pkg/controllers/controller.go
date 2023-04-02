@@ -90,9 +90,9 @@ func (c *controllerManager) Run(ctx context.Context) error {
 		return c.runTenancyControllers(ctx)
 	})
 
-	//eg.Go(func() error {
-	//	return c.runWorkloadsControllers(ctx)
-	//})
+	eg.Go(func() error {
+		return c.runWorkloadsControllers(ctx)
+	})
 
 	return eg.Wait()
 }

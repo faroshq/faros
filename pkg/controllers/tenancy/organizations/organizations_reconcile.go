@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	kcptenancyv1alpha1 "github.com/kcp-dev/kcp/pkg/apis/tenancy/v1alpha1"
+	"github.com/kcp-dev/logicalcluster/v3"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +46,9 @@ func (c *Controller) reconcile(ctx context.Context, organization *tenancyv1alpha
 		&kcpWorkspaceDeleteReconciler{
 			deleteOrganizationWorkspace: func(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
 				return c.deleteOrganizationWorkspace(ctx, organization)
+			},
+			deleteWorkspaces: func(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
+				return c.deleteWorkspaces(ctx, organization)
 			},
 		},
 		&finalizerRemoveReconciler{
@@ -119,4 +123,27 @@ func (c *Controller) deleteOrganizationWorkspace(ctx context.Context, organizati
 	}
 
 	return c.kcpClientSet.Cluster(c.organizationsCluster).TenancyV1alpha1().Workspaces().Delete(ctx, ws.Name, metav1.DeleteOptions{})
+}
+
+func (c *Controller) deleteWorkspaces(ctx context.Context, organization *tenancyv1alpha1.Organization) error {
+	organizationWorkspace, err := c.kcpClientSet.Cluster(c.organizationsCluster).TenancyV1alpha1().Workspaces().Get(ctx, organization.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get organization workspace: %s", err)
+	}
+
+	cluster := logicalcluster.From(organizationWorkspace)
+
+	wsList, err := c.kcpClientSet.Cluster(cluster.Path()).TenancyV1alpha1().Workspaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list workspaces: %s", err)
+	}
+
+	for _, ws := range wsList.Items {
+		err := c.kcpClientSet.Cluster(cluster.Path()).TenancyV1alpha1().Workspaces().Delete(ctx, ws.Name, metav1.DeleteOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to delete workspace %s: %s", ws.Name, err)
+		}
+	}
+
+	return nil
 }

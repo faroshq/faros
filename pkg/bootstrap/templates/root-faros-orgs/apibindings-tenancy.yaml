@@ -4,7 +4,7 @@ metadata:
   name: internal.tenancy.faros.sh
 spec:
   permissionClaims:
-  - group: "internal.tenancy.kcp.io"
+  - group: "tenancy.kcp.io"
     resource: "workspaces"
     identityHash: ROOT_TENANCY_IDENTITY
     all: true
