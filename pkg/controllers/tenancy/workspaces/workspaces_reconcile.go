@@ -55,20 +55,20 @@ func (c *Controller) reconcile(ctx context.Context, cluster logicalcluster.Name,
 			getUserWithPrefixName: func(email string) string {
 				return c.getUserWithPrefixName(email)
 			},
-			createOrUpdateClusterRoleBinding: func(ctx context.Context, org *tenancyv1alpha1.Organization, ws *tenancyv1alpha1.Workspace, crb *rbacv1.ClusterRoleBinding) error {
-				return c.createOrUpdateClusterRoleBinding(ctx, org, ws, crb)
+			createOrUpdateClusterRoleBinding: func(ctx context.Context, ws *tenancyv1alpha1.Workspace, crb *rbacv1.ClusterRoleBinding) error {
+				return c.createOrUpdateClusterRoleBinding(ctx, ws, crb)
 			},
 		},
-		&apiBindingComputeReconciler{
-			createComputeAPIBinding: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
-				return c.createComputeAPIBinding(ctx, workspace)
-			},
-		},
-		&farosConfigComputeReconciler{
-			createFarosConfigMap: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
-				return c.createFarosConfigMap(ctx, workspace)
-			},
-		},
+		//&apiBindingComputeReconciler{
+		//	createComputeAPIBinding: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+		//		return c.createComputeAPIBinding(ctx, workspace)
+		//	},
+		//},
+		//&farosConfigComputeReconciler{
+		//	createFarosConfigMap: func(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
+		//		return c.createFarosConfigMap(ctx, workspace)
+		//	},
+		//},
 	}
 
 	deleteReconcilers := []reconciler{
@@ -126,13 +126,17 @@ func (c *Controller) createWorkspace(ctx context.Context, workspace *tenancyv1al
 		},
 	}
 
-	orgCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name)
+	organizationWorkspace, err := c.kcpClientSet.Cluster(c.organizationsCluster).TenancyV1alpha1().Workspaces().Get(ctx, workspace.Spec.OrganizationRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get Organization Workspace: %s", err)
+	}
 
-	created, err := c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
+	cluster := logicalcluster.NewPath(organizationWorkspace.Spec.Cluster)
+	created, err := c.kcpClientSet.Cluster(cluster).TenancyV1alpha1().Workspaces().Get(ctx, ws.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
 		logger.Info("creating workspace", "workspace-name", workspace.Name)
-		_, err = c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Create(ctx, ws, metav1.CreateOptions{})
+		_, err = c.kcpClientSet.Cluster(cluster).TenancyV1alpha1().Workspaces().Create(ctx, ws, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create Workspace: %s", err)
 		}
@@ -143,13 +147,19 @@ func (c *Controller) createWorkspace(ctx context.Context, workspace *tenancyv1al
 	}
 
 	workspace.Status.WorkspaceURL = created.Spec.URL
+	workspace.Status.Cluster = created.Spec.Cluster
 	return nil
 }
 
 func (c *Controller) deleteWorkspace(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
-	orgCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name)
+	organizationWorkspace, err := c.kcpClientSet.Cluster(c.organizationsCluster).TenancyV1alpha1().Workspaces().Get(ctx, workspace.Spec.OrganizationRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get Organization Workspace: %s", err)
+	}
 
-	return c.kcpClientSet.Cluster(orgCluster).TenancyV1alpha1().Workspaces().Delete(ctx, workspace.Labels[models.LabelWorkspace], metav1.DeleteOptions{})
+	cluster := logicalcluster.From(organizationWorkspace).Path()
+
+	return c.kcpClientSet.Cluster(cluster).TenancyV1alpha1().Workspaces().Delete(ctx, workspace.Labels[models.LabelWorkspace], metav1.DeleteOptions{})
 }
 
 func (c *Controller) getUserWithPrefixName(email string) string {
@@ -160,14 +170,13 @@ func (c *Controller) getOrganization(ctx context.Context, farosClient farosclien
 	return farosClient.TenancyV1alpha1().Organizations().Get(ctx, workspace.Spec.OrganizationRef.Name, metav1.GetOptions{})
 }
 
-func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, org *tenancyv1alpha1.Organization, workspace *tenancyv1alpha1.Workspace, crb *rbacv1.ClusterRoleBinding) error {
-	name := workspace.Labels[models.LabelWorkspace]
-	workspaceCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name + ":" + name)
+func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, workspace *tenancyv1alpha1.Workspace, crb *rbacv1.ClusterRoleBinding) error {
+	workspaceCluster := logicalcluster.NewPath(workspace.Status.Cluster)
 
-	currentClusterRoleBinding, err := c.coreClientSet.RbacV1().ClusterRoleBindings().Cluster(workspaceCluster).Get(ctx, crb.Name, metav1.GetOptions{})
+	currentClusterRoleBinding, err := c.coreClientSet.Cluster(workspaceCluster).RbacV1().ClusterRoleBindings().Get(ctx, crb.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		_, err := c.coreClientSet.RbacV1().ClusterRoleBindings().Cluster(workspaceCluster).Create(ctx, crb, metav1.CreateOptions{})
+		_, err := c.coreClientSet.Cluster(workspaceCluster).RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create the ClusterRoleBindings in workspace %s: %s", workspaceCluster.String(), err)
 		}
@@ -175,7 +184,7 @@ func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, org *
 		currentClusterRoleBinding.RoleRef = crb.RoleRef
 		currentClusterRoleBinding.Subjects = crb.Subjects
 		currentClusterRoleBinding.ResourceVersion = ""
-		_, err := c.coreClientSet.RbacV1().ClusterRoleBindings().Cluster(workspaceCluster).Update(ctx, currentClusterRoleBinding, metav1.UpdateOptions{})
+		_, err := c.coreClientSet.Cluster(workspaceCluster).RbacV1().ClusterRoleBindings().Update(ctx, currentClusterRoleBinding, metav1.UpdateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to update the ClusterRoleBindings %s", err)
 		}
@@ -187,7 +196,7 @@ func (c *Controller) createOrUpdateClusterRoleBinding(ctx context.Context, org *
 }
 
 func (c *Controller) createComputeAPIBinding(ctx context.Context, workspace *tenancyv1alpha1.Workspace) error {
-	workspaceCluster := logicalcluster.NewPath(core.RootCluster.Path().String() + ":" + workspace.Spec.OrganizationRef.Name + ":" + workspace.Labels[models.LabelWorkspace])
+	workspaceCluster := logicalcluster.NewPath(workspace.Status.Cluster)
 
 	exportCluster := logicalcluster.NewPath(c.config.FarosKCPConfig.ControllersWorkspace)
 	exportName := "workload.faros.sh"

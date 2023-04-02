@@ -28,11 +28,12 @@ import (
 	kcpclient "github.com/kcp-dev/apimachinery/v2/pkg/client"
 	"github.com/kcp-dev/logicalcluster/v3"
 
+	client "github.com/faroshq/faros/pkg/client/clientset/versioned"
+
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 
-	client "github.com/faroshq/faros/pkg/client/clientset/versioned"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 )
 

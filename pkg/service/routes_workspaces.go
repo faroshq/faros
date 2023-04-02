@@ -14,6 +14,7 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/klog/v2"
 
+	"github.com/faroshq/faros/pkg/apis/tenancy"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	"github.com/faroshq/faros/pkg/models"
 )
@@ -104,7 +105,7 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 
 	current := &tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getWorkspaceName(*organization, *request),
+			Name: tenancy.GetWorkspaceName(*organization, *request),
 		},
 	}
 
@@ -116,7 +117,7 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 
 	workspace := &tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getWorkspaceName(*organization, *request),
+			Name: tenancy.GetWorkspaceName(*organization, *request),
 			Labels: map[string]string{
 				models.LabelOrganization: organization.Name,
 				models.LabelWorkspace:    request.Name,
@@ -143,10 +144,6 @@ func (o OrganizationResource) createWorkspace(r *restful.Request, w *restful.Res
 	created.ManagedFields = nil
 
 	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, created)
-}
-
-func getWorkspaceName(org tenancyv1alpha1.Organization, workspace tenancyv1alpha1.Workspace) string {
-	return org.Name + "-" + workspace.Name
 }
 
 func (o OrganizationResource) getWorkspace(r *restful.Request, w *restful.Response) {
@@ -183,7 +180,7 @@ func (o OrganizationResource) getWorkspace(r *restful.Request, w *restful.Respon
 
 	workspace, err := o.store.GetWorkspace(ctx, tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getWorkspaceName(*organization, tenancyv1alpha1.Workspace{
+			Name: tenancy.GetWorkspaceName(*organization, tenancyv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: workspaceName,
 				},
@@ -233,7 +230,7 @@ func (o OrganizationResource) deleteWorkspace(r *restful.Request, w *restful.Res
 
 	workspace, err := o.store.GetWorkspace(ctx, tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: getWorkspaceName(*organization, tenancyv1alpha1.Workspace{
+			Name: tenancy.GetWorkspaceName(*organization, tenancyv1alpha1.Workspace{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: workspaceName,
 				},

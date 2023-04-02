@@ -1,0 +1,19 @@
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: faros-organization
+spec:
+  extend:
+    with:
+    - name: universal
+      path: root
+  limitAllowedParents:
+    types:
+    - name: organization
+      path: root
+  defaultChildWorkspaceType:
+    name: faros
+    path: root
+  defaultAPIBindings:
+  - export: internal.tenancy.faros.sh
+    path: root:faros:controllers

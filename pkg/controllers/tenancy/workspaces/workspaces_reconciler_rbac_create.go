@@ -15,11 +15,10 @@ import (
 type workspaceRBACReconciler struct {
 	getOrganization                  func(context.Context, *tenancyv1alpha1.Workspace) (*tenancyv1alpha1.Organization, error)
 	getUserWithPrefixName            func(string) string
-	createOrUpdateClusterRoleBinding func(context.Context, *tenancyv1alpha1.Organization, *tenancyv1alpha1.Workspace, *rbacv1.ClusterRoleBinding) error
+	createOrUpdateClusterRoleBinding func(context.Context, *tenancyv1alpha1.Workspace, *rbacv1.ClusterRoleBinding) error
 }
 
 func (r *workspaceRBACReconciler) reconcile(ctx context.Context, workspace *tenancyv1alpha1.Workspace) (reconcileStatus, error) {
-
 	organization, err := r.getOrganization(ctx, workspace)
 	if err != nil {
 		return reconcileStatusStopAndRequeue, err
@@ -46,7 +45,7 @@ func (r *workspaceRBACReconciler) reconcile(ctx context.Context, workspace *tena
 		Subjects: subjects,
 	}
 
-	err = r.createOrUpdateClusterRoleBinding(ctx, organization, workspace, clusterRoleBinding)
+	err = r.createOrUpdateClusterRoleBinding(ctx, workspace, clusterRoleBinding)
 	if err != nil {
 		return reconcileStatusStopAndRequeue, err
 	}

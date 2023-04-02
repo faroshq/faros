@@ -1,5 +1,0 @@
-nameReference:
-- kind: APIResourceSchema
-  fieldSpecs:
-  - kind: APIExport
-    path: spec/latestResourceSchemas

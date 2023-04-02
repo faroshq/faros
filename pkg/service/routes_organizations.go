@@ -6,6 +6,7 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -13,8 +14,10 @@ import (
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 	"k8s.io/klog/v2"
 
+	"github.com/faroshq/faros/pkg/apis/tenancy"
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 	farosclient "github.com/faroshq/faros/pkg/client/clientset/versioned"
+	"github.com/faroshq/faros/pkg/models"
 	"github.com/faroshq/faros/pkg/service/authentications"
 	"github.com/faroshq/faros/pkg/store"
 )
@@ -104,6 +107,35 @@ func (o OrganizationResource) createOrganization(r *restful.Request, w *restful.
 	}
 
 	responsewriters.WriteObjectNegotiated(codecs, negotiation.DefaultEndpointRestrictions, tenancyv1alpha1.SchemeGroupVersion, w, r.Request, http.StatusOK, organizationCreated)
+
+	// create compute workspace as placeholder
+	computeName := "compute"
+	computeWorkspace := &tenancyv1alpha1.Workspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				models.LabelOrganization: organizationCreated.Name,
+				models.LabelWorkspace:    computeName,
+			},
+			Name: tenancy.GetWorkspaceName(*organization, tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: computeName,
+				},
+			}),
+		},
+		Spec: tenancyv1alpha1.WorkspaceSpec{
+			Description: "Compute Workspace",
+			OrganizationRef: corev1.ObjectReference{
+				Kind:       organizationCreated.Kind,
+				Name:       organizationCreated.Name,
+				APIVersion: organizationCreated.APIVersion,
+			},
+		},
+	}
+	_, err = o.store.CreateWorkspace(ctx, *computeWorkspace)
+	if err != nil {
+		klog.Error(err)
+		// not return anything, just log. It a best effort
+	}
 }
 
 func (o OrganizationResource) getOrganization(r *restful.Request, w *restful.Response) {

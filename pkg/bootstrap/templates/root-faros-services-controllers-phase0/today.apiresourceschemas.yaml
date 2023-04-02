@@ -287,6 +287,9 @@ spec:
         status:
           description: WorkspaceStatus defines the observed state of Workspace
           properties:
+            cluster:
+              description: Cluster is the cluster where the workspace is deployed
+              type: string
             conditions:
               description: Current processing state of the Agent.
               items:

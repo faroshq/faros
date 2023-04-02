@@ -6,5 +6,5 @@ spec:
   permissionClaims:
   - group: "workload.kcp.io"
     resource: "synctargets"
-    identityHash: IDENTITY
+    identityHash: ROOT_WORKLOAD_IDENTITY
     all: true

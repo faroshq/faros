@@ -1,6 +1,9 @@
 externalHostname: "kcp.dev.faros.sh"
 kcp:
+#  image: quay.io/faroshq/kcp
+#  tag: latest
   volumeClassName: "standard"
+  v: "8"
   tokenAuth:
     enabled: true
   hostAliases:
@@ -13,6 +16,7 @@ kcp:
       - kcp.dev.faros.sh
       ip: 127.0.0.1
 kcpFrontProxy:
+  v: "8"
   openshiftRoute:
     enabled: false
   ingress:

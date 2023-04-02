@@ -1,0 +1,12 @@
+# Tenancy APIExport for end-user workspaces, and should not be used by
+# internal workspaces.
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIExport
+metadata:
+  name: tenancy.faros.sh
+spec:
+  permissionClaims:
+  - group: "rbac.authorization.k8s.io"
+    resource: "clusterrolebindings"
+    identityHash: ROOT_TENANCY_IDENTITY
+    all: true

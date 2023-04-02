@@ -24,11 +24,11 @@ package informers
 import (
 	"fmt"
 
-	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
-	"github.com/kcp-dev/logicalcluster/v3"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
+
+	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
+	"github.com/kcp-dev/logicalcluster/v3"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
 )

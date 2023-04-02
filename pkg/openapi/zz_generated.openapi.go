@@ -750,6 +750,13 @@ func schema_pkg_apis_tenancy_v1alpha1_WorkspaceStatus(ref common.ReferenceCallba
 							Format:      "",
 						},
 					},
+					"cluster": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cluster is the cluster where the workspace is deployed",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},

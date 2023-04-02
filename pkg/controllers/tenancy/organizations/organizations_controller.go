@@ -8,7 +8,6 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
-	"github.com/kcp-dev/client-go/kubernetes"
 	kcpclientset "github.com/kcp-dev/kcp/pkg/client/clientset/versioned/cluster"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/logicalcluster/v3"
@@ -25,7 +24,6 @@ import (
 	"k8s.io/klog/v2"
 
 	tenancyv1alpha1 "github.com/faroshq/faros/pkg/apis/tenancy/v1alpha1"
-	"github.com/faroshq/faros/pkg/bootstrap"
 	farosclientset "github.com/faroshq/faros/pkg/client/clientset/versioned/cluster"
 	tenancyinformers "github.com/faroshq/faros/pkg/client/informers/externalversions/tenancy/v1alpha1"
 	tenancylisters "github.com/faroshq/faros/pkg/client/listers/tenancy/v1alpha1"
@@ -47,37 +45,29 @@ type Controller struct {
 	queue workqueue.RateLimitingInterface
 
 	kcpClientSet         kcpclientset.ClusterInterface
-	coreClientSet        kubernetes.ClusterInterface
 	farosClientSet       farosclientset.ClusterInterface
 	organizationsIndexer cache.Indexer
 	organizationsLister  tenancylisters.OrganizationClusterLister
 
-	bootstraper bootstrap.Bootstraper
+	organizationsCluster logicalcluster.Path
 }
 
 func NewController(
 	config *config.Config,
 	kcpClientSet kcpclientset.ClusterInterface,
-	coreClientSet kubernetes.ClusterInterface,
 	farosClientSet farosclientset.ClusterInterface,
 	organizationsInformer tenancyinformers.OrganizationClusterInformer,
 ) (*Controller, error) {
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), controllerName)
 
-	bootstraper, err := bootstrap.New(&config.FarosKCPConfig)
-	if err != nil {
-		return nil, err
-	}
-
 	c := &Controller{
 		config:               config,
 		queue:                queue,
-		bootstraper:          bootstraper,
 		kcpClientSet:         kcpClientSet,
-		coreClientSet:        coreClientSet,
 		farosClientSet:       farosClientSet,
 		organizationsIndexer: organizationsInformer.Informer().GetIndexer(),
 		organizationsLister:  organizationsInformer.Lister(),
+		organizationsCluster: logicalcluster.Name(config.FarosKCPConfig.ControllersClusterName).Path(),
 	}
 
 	organizationsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -192,10 +182,10 @@ func (c *Controller) process(ctx context.Context, key string) (bool, error) {
 
 	obj, err := c.organizationsLister.Cluster(cluster).Get(name)
 	if err != nil {
-		if errors.IsNotFound(err) || errors.IsForbidden(err) { // KCP  returns 401 on not found
+		if errors.IsNotFound(err) {
 			return false, nil // object deleted before we handled it
 		}
-		return false, err
+		return false, fmt.Errorf("error getting Organization %q: %w", key, err)
 	}
 
 	old := obj

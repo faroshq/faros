@@ -1,0 +1,15 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIBinding
+metadata:
+  name: internal.tenancy.faros.sh
+spec:
+  permissionClaims:
+  - group: "internal.tenancy.kcp.io"
+    resource: "workspaces"
+    identityHash: ROOT_TENANCY_IDENTITY
+    all: true
+    state: Accepted
+  reference:
+    export:
+      name: internal.tenancy.faros.sh
+      path: root:faros:controllers

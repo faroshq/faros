@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -9,6 +10,7 @@ import (
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 
 	utilfile "github.com/faroshq/faros/pkg/util/file"
 )
@@ -31,23 +33,31 @@ func Load() (*Config, error) {
 		c.APIConfig.OIDCAuthSessionKey = uuid.Must(uuid.NewUUID()).String()
 	}
 
-	rest, err := loadKubeConfig(c.FarosKCPConfig.HostingClusterKubeConfigPath)
+	rest, err := loadKubeConfig(c.FarosKCPConfig.HostingClusterKubeConfigPath, false)
 	if err != nil {
 		return nil, err
 	}
 	c.FarosKCPConfig.HostingClusterRestConfig = rest
 
-	rest, err = loadKubeConfig(c.FarosKCPConfig.KCPClusterKubeConfigPath)
+	rest, err = loadKubeConfig(c.FarosKCPConfig.KCPClusterKubeConfigPath, true)
 	if err != nil {
 		return nil, err
 	}
 	c.FarosKCPConfig.KCPClusterRestConfig = rest
 
+	// best effort
+	rest, err = loadKubeConfig(c.FarosKCPConfig.ControllersKubeConfigPath, false)
+	if err != nil {
+		klog.Infof("Failed to load controllers kubeconfig: %v", err)
+		err = nil
+	}
+	c.FarosKCPConfig.ControllersRestConfig = rest
+
 	return c, err
 }
 
 // loadKubeConfig loads a kubeconfig from disk or from the environment
-func loadKubeConfig(kubeconfigPath string) (*rest.Config, error) {
+func loadKubeConfig(kubeconfigPath string, dropPath bool) (*rest.Config, error) {
 	exists, _ := utilfile.Exist(kubeconfigPath)
 	if !exists {
 		config, err := clientcmd.BuildConfigFromFlags("", "")
@@ -61,7 +71,19 @@ func loadKubeConfig(kubeconfigPath string) (*rest.Config, error) {
 			return nil, fmt.Errorf("failed to load admin kubeconfig: %w", err)
 		}
 
-		return clientcmd.NewNonInteractiveClientConfig(*rawConfig, rawConfig.CurrentContext, nil, nil).ClientConfig()
+		rest, err := clientcmd.NewNonInteractiveClientConfig(*rawConfig, rawConfig.CurrentContext, nil, nil).ClientConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client config: %w", err)
+		}
+		if dropPath {
+			u, err := url.Parse(rest.Host)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse host: %w", err)
+			}
+			u.Path = ""
+			rest.Host = u.String()
+		}
+		return rest, nil
 	}
 
 }
