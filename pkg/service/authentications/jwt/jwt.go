@@ -55,6 +55,7 @@ func New(ctx context.Context, cfg *config.Config, store store.Store, callbackURL
 	}
 
 	if secret != nil {
+		klog.Infof("Using custom CA for OIDC issuer %s", cfg.APIConfig.OIDCIssuerURL)
 		crt, ok := secret.Data["tls.crt"]
 		if !ok {
 			return nil, errors.New("oidc tls.crt not found in secret")
@@ -68,6 +69,8 @@ func New(ctx context.Context, cfg *config.Config, store store.Store, callbackURL
 			return nil, err
 		}
 		ctx = oidc.ClientContext(ctx, client)
+	} else {
+		klog.Infof("Using system CA for OIDC issuer %s", cfg.APIConfig.OIDCIssuerURL)
 	}
 
 	redirectURL := cfg.APIConfig.ControllerExternalURL + callbackURLPrefix

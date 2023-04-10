@@ -153,7 +153,7 @@ func (b *bootstrap) bootstrapControllersWorkspacePhase2(ctx context.Context) err
 			return err
 		}
 	default:
-		return fmt.Errorf("failed to get the faros config secret  %s", kubeConfigSecret.Name)
+		return fmt.Errorf("failed to get the faros config secret  %s: %s", kubeConfigSecret.Name, err)
 	}
 	return nil
 }
