@@ -54,7 +54,7 @@ func New(ctx context.Context, cfg *config.Config, store store.Store, callbackURL
 		return nil, err
 	}
 
-	if secret != nil {
+	if secret != nil && len(secret.Data) > 0 {
 		klog.Infof("Using custom CA for OIDC issuer %s", cfg.APIConfig.OIDCIssuerURL)
 		crt, ok := secret.Data["tls.crt"]
 		if !ok {
