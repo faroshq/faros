@@ -187,6 +187,9 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		}
 		handlers = append(handlers, searchMiddleware)
 	}
+	handlers = append(handlers, &projectEinoAssistantSafeToolErrorMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+	})
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:             "app-studio-project-assistant",
 		Description:      "Runs App Studio project assistant turns.",

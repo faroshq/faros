@@ -18,8 +18,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cloudwego/eino/adk"
+	einotool "github.com/cloudwego/eino/components/tool"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/store"
@@ -74,6 +80,113 @@ func TestProjectAssistantTurnPolicyCanUseDatabricksMCP(t *testing.T) {
 	req.History[0].Content = "render a table of todos in app.js"
 	if projectAssistantTurnPolicyCanUseMCP(policy, req) {
 		t.Fatal("expected generic UI table request to skip MCP discovery")
+	}
+}
+
+func TestProjectEinoAssistantToolRedactsFailedResult(t *testing.T) {
+	const secret = "sk-super-secret"
+	var failedEvent projectToolCallStreamEvent
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{
+			Name: "failing_local_tool",
+			Risk: projectAssistantToolRiskRead,
+		},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			return "", errors.New(
+				"Authorization: Bearer " + secret + " " +
+					strings.Repeat("x", projectToolInfoLimit),
+			)
+		},
+	}
+	tool := projectEinoAssistantTool{
+		tool: localTool,
+		req: projectAssistantRunRequest{
+			StreamCallbacks: projectAssistantStreamCallbacks{
+				OnToolCall: func(event projectToolCallStreamEvent) {
+					failedEvent = event
+				},
+			},
+		},
+		runState: newProjectEinoAssistantRunState(),
+	}
+
+	result, err := tool.invokeAllowedTool(
+		context.Background(),
+		"call-failing-local-tool",
+		localTool.Spec(),
+		map[string]any{},
+	)
+	if err != nil {
+		t.Fatalf("invokeAllowedTool returned error: %v", err)
+	}
+	if strings.Contains(result, secret) || !strings.Contains(result, "[REDACTED]") {
+		t.Fatalf("model-visible result = %q, want secret redacted", result)
+	}
+	if result != truncateProjectToolInfo(result) {
+		t.Fatalf("model-visible result length = %d, want bounded by truncateProjectToolInfo", len(result))
+	}
+	if failedEvent.Status != "failed" {
+		t.Fatalf("tool event status = %q, want failed", failedEvent.Status)
+	}
+	if strings.Contains(failedEvent.Error, secret) || !strings.Contains(failedEvent.Error, "[REDACTED]") {
+		t.Fatalf("tool event error = %q, want secret redacted", failedEvent.Error)
+	}
+	if failedEvent.Error != truncateProjectToolInfo(failedEvent.Error) {
+		t.Fatalf("tool event error length = %d, want bounded by truncateProjectToolInfo", len(failedEvent.Error))
+	}
+}
+
+func TestProjectEinoAssistantToolPropagatesControlFlowErrors(t *testing.T) {
+	interruptErr := einotool.StatefulInterrupt(
+		context.Background(),
+		"approval required",
+		map[string]string{"status": "waiting"},
+	)
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "context canceled", err: context.Canceled},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded},
+		{name: "stream canceled", err: adk.ErrStreamCanceled},
+		{name: "forbidden", err: apierrors.NewForbidden(
+			k8sschema.GroupResource{Group: "ai.kedge.faros.sh", Resource: "projects"},
+			"demo",
+			errors.New("denied"),
+		)},
+		{name: "unauthorized", err: apierrors.NewUnauthorized("denied")},
+		{name: "stateful interrupt", err: interruptErr},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			localTool := projectAssistantToolFunc{
+				spec: projectAssistantToolSpec{
+					Name: "control_flow_tool",
+					Risk: projectAssistantToolRiskRead,
+				},
+				call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+					return "", tt.err
+				},
+			}
+			tool := projectEinoAssistantTool{
+				tool:     localTool,
+				runState: newProjectEinoAssistantRunState(),
+			}
+
+			result, gotErr := tool.invokeAllowedTool(
+				context.Background(),
+				"call-control-flow",
+				localTool.Spec(),
+				map[string]any{},
+			)
+			if gotErr != tt.err {
+				t.Fatalf("error = %v, want original error %v", gotErr, tt.err)
+			}
+			if result != "" {
+				t.Fatalf("result = %q, want empty result for propagated error", result)
+			}
+		})
 	}
 }
 

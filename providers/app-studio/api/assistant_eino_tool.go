@@ -322,6 +322,9 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		Arguments:            args,
 	})
 	if err != nil {
+		if projectEinoAssistantPropagateToolError(err) {
+			return "", err
+		}
 		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
 	}
 	if t.server != nil {
@@ -564,14 +567,15 @@ func (t projectEinoAssistantTool) finishFailedToolCall(callID, name, rawArgs, re
 	if reason == "" {
 		reason = "tool call failed"
 	}
+	safeReason := projectEinoAssistantSafeErrorText(errors.New(reason))
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
 		Name:      name,
 		Status:    "failed",
 		Arguments: summarizeProjectToolArgumentsMap(name, args),
-		Error:     truncateProjectToolInfo(reason),
+		Error:     safeReason,
 	})
-	result := "Tool call failed: " + reason
+	result := truncateProjectToolInfo("Tool call failed: " + safeReason)
 	t.recordToolMessage(callID, name, result)
 	return result
 }

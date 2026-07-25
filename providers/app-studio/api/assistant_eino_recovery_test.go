@@ -25,9 +25,236 @@ import (
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
+	einotool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"google.golang.org/genai"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		secret  string
+	}{
+		{
+			name:    "authorization bearer",
+			message: "request failed: Authorization: Bearer bearer-super-secret",
+			secret:  "bearer-super-secret",
+		},
+		{
+			name:    "authorization basic",
+			message: "request failed: Authorization: Basic dXNlcjpwYXNzd29yZA==",
+			secret:  "dXNlcjpwYXNzd29yZA==",
+		},
+		{
+			name:    "standalone bearer",
+			message: "request failed with Bearer standalone-super-secret",
+			secret:  "standalone-super-secret",
+		},
+		{
+			name:    "api key",
+			message: "request failed: api_key=api-key-super-secret",
+			secret:  "api-key-super-secret",
+		},
+		{
+			name:    "access token",
+			message: `request failed: access_token: "access-token-super-secret"`,
+			secret:  "access-token-super-secret",
+		},
+		{
+			name:    "token",
+			message: "request failed: token=token-super-secret",
+			secret:  "token-super-secret",
+		},
+		{
+			name:    "secret",
+			message: "request failed: secret: secret-super-secret",
+			secret:  "secret-super-secret",
+		},
+		{
+			name:    "password",
+			message: "request failed: password='password-super-secret'",
+			secret:  "password-super-secret",
+		},
+		{
+			name:    "cookie",
+			message: "request failed: Cookie: session=cookie-super-secret; theme=dark",
+			secret:  "cookie-super-secret",
+		},
+		{
+			name:    "set cookie",
+			message: "request failed: Set-Cookie: session=set-cookie-super-secret; Secure",
+			secret:  "set-cookie-super-secret",
+		},
+		{
+			name:    "url userinfo",
+			message: "request failed: https://demo:url-userinfo-super-secret@example.com/private",
+			secret:  "url-userinfo-super-secret",
+		},
+		{
+			name:    "openai key",
+			message: "request failed for sk-openai-super-secret",
+			secret:  "sk-openai-super-secret",
+		},
+		{
+			name:    "escaped json token",
+			message: `request failed: {\"token\":\"escaped-token-super-secret\"}`,
+			secret:  "escaped-token-super-secret",
+		},
+		{
+			name:    "escaped json api key",
+			message: `request failed: {\"api_key\":\"escaped-api-key-super-secret\"}`,
+			secret:  "escaped-api-key-super-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := errors.New(tt.message + " " + strings.Repeat("x", projectToolInfoLimit))
+			got := projectEinoAssistantSafeErrorText(err)
+			if strings.Contains(got, tt.secret) {
+				t.Fatalf("safe error = %q, still contains secret %q", got, tt.secret)
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Fatalf("safe error = %q, want redaction marker", got)
+			}
+			if got != truncateProjectToolInfo(got) {
+				t.Fatalf("safe error length = %d, want bounded by truncateProjectToolInfo", len(got))
+			}
+		})
+	}
+}
+
+func TestProjectEinoAssistantSafeToolErrorMiddleware(t *testing.T) {
+	middleware := &projectEinoAssistantSafeToolErrorMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+	}
+
+	t.Run("invokable", func(t *testing.T) {
+		endpoint, err := middleware.WrapInvokableToolCall(
+			context.Background(),
+			func(context.Context, string, ...einotool.Option) (string, error) {
+				return "", errors.New(
+					"backend failed: token=invokable-super-secret " +
+						strings.Repeat("x", projectToolInfoLimit),
+				)
+			},
+			&adk.ToolContext{Name: "invokable"},
+		)
+		if err != nil {
+			t.Fatalf("wrap invokable tool: %v", err)
+		}
+		result, err := endpoint(context.Background(), "{}")
+		if err != nil {
+			t.Fatalf("invoke wrapped tool: %v", err)
+		}
+		if strings.Contains(result, "invokable-super-secret") ||
+			!strings.Contains(result, "token=[REDACTED]") ||
+			!strings.HasPrefix(result, "Tool call failed: ") {
+			t.Fatalf("result = %q, want sanitized tool failure", result)
+		}
+		if result != truncateProjectToolInfo(result) {
+			t.Fatalf("result length = %d, want bounded by truncateProjectToolInfo", len(result))
+		}
+	})
+
+	t.Run("enhanced invokable", func(t *testing.T) {
+		endpoint, err := middleware.WrapEnhancedInvokableToolCall(
+			context.Background(),
+			func(context.Context, *schema.ToolArgument, ...einotool.Option) (*schema.ToolResult, error) {
+				return nil, errors.New(
+					"backend failed: secret=enhanced-super-secret " +
+						strings.Repeat("x", projectToolInfoLimit),
+				)
+			},
+			&adk.ToolContext{Name: "enhanced"},
+		)
+		if err != nil {
+			t.Fatalf("wrap enhanced invokable tool: %v", err)
+		}
+		result, err := endpoint(context.Background(), &schema.ToolArgument{Text: "{}"})
+		if err != nil {
+			t.Fatalf("invoke wrapped enhanced tool: %v", err)
+		}
+		if result == nil || len(result.Parts) != 1 || result.Parts[0].Type != schema.ToolPartTypeText {
+			t.Fatalf("result = %#v, want one sanitized text part", result)
+		}
+		text := result.Parts[0].Text
+		if strings.Contains(text, "enhanced-super-secret") ||
+			!strings.Contains(text, "secret=[REDACTED]") ||
+			!strings.HasPrefix(text, "Tool call failed: ") {
+			t.Fatalf("result text = %q, want sanitized tool failure", text)
+		}
+		if text != truncateProjectToolInfo(text) {
+			t.Fatalf("result text length = %d, want bounded by truncateProjectToolInfo", len(text))
+		}
+	})
+}
+
+func TestProjectEinoAssistantSafeToolErrorMiddlewarePropagatesControlFlow(t *testing.T) {
+	interruptErr := einotool.StatefulInterrupt(
+		context.Background(),
+		"approval required",
+		map[string]string{"status": "waiting"},
+	)
+	if _, ok := compose.IsInterruptRerunError(interruptErr); !ok {
+		t.Fatalf("stateful interrupt = %v, want real Eino interrupt/rerun error", interruptErr)
+	}
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "context canceled", err: context.Canceled},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded},
+		{name: "stream canceled", err: adk.ErrStreamCanceled},
+		{name: "forbidden", err: apierrors.NewForbidden(
+			k8sschema.GroupResource{Group: "ai.kedge.faros.sh", Resource: "projects"},
+			"demo",
+			errors.New("denied"),
+		)},
+		{name: "unauthorized", err: apierrors.NewUnauthorized("denied")},
+		{name: "stateful interrupt", err: interruptErr},
+	}
+
+	middleware := &projectEinoAssistantSafeToolErrorMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invokable, err := middleware.WrapInvokableToolCall(
+				context.Background(),
+				func(context.Context, string, ...einotool.Option) (string, error) {
+					return "", tt.err
+				},
+				&adk.ToolContext{Name: "invokable"},
+			)
+			if err != nil {
+				t.Fatalf("wrap invokable tool: %v", err)
+			}
+			if _, gotErr := invokable(context.Background(), "{}"); gotErr != tt.err {
+				t.Fatalf("invokable error = %v, want original error %v", gotErr, tt.err)
+			}
+
+			enhanced, err := middleware.WrapEnhancedInvokableToolCall(
+				context.Background(),
+				func(context.Context, *schema.ToolArgument, ...einotool.Option) (*schema.ToolResult, error) {
+					return nil, tt.err
+				},
+				&adk.ToolContext{Name: "enhanced"},
+			)
+			if err != nil {
+				t.Fatalf("wrap enhanced invokable tool: %v", err)
+			}
+			if _, gotErr := enhanced(context.Background(), &schema.ToolArgument{Text: "{}"}); gotErr != tt.err {
+				t.Fatalf("enhanced error = %v, want original error %v", gotErr, tt.err)
+			}
+		})
+	}
+}
 
 func TestProjectEinoAssistantShouldRetryModelError(t *testing.T) {
 	tests := []struct {
