@@ -188,10 +188,11 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		handlers = append(handlers, searchMiddleware)
 	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:        "app-studio-project-assistant",
-		Description: "Runs App Studio project assistant turns.",
-		Model:       chatModel,
-		Handlers:    handlers,
+		Name:             "app-studio-project-assistant",
+		Description:      "Runs App Studio project assistant turns.",
+		Model:            chatModel,
+		ModelRetryConfig: projectEinoAssistantModelRetryConfig(),
+		Handlers:         handlers,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools:               staticTools,
@@ -456,6 +457,9 @@ func (e projectEinoAssistantEngine) collectProjectAssistantTurnEvents(
 			continue
 		}
 		if event.Err != nil {
+			if projectEinoAssistantWillRetry(event.Err) {
+				continue
+			}
 			if projectEinoAssistantMaxIterationsExceeded(event.Err) {
 				outcome.result = projectAssistantRunResult{Content: e.projectAssistantToolLoopFinalAnswer(eventCtx, req, runState)}
 				outcome.receivedOutput = true
@@ -482,6 +486,9 @@ func (e projectEinoAssistantEngine) collectProjectAssistantTurnEvents(
 		}
 		msg, err := projectEinoAssistantMessageOutput(eventCtx, messageOutput, req.StreamCallbacks)
 		if err != nil {
+			if projectEinoAssistantWillRetry(err) {
+				continue
+			}
 			return err
 		}
 		role := messageOutput.Role
@@ -535,13 +542,13 @@ func projectEinoAssistantMessageOutput(
 			continue
 		}
 		chunks = append(chunks, msg)
-		if output.Role == schema.Assistant && streamCallbacks.OnChunk != nil && msg.Content != "" {
-			streamCallbacks.OnChunk(msg.Content)
-		}
 	}
 	msg, err := schema.ConcatMessages(chunks)
 	if err != nil {
 		return nil, err
+	}
+	if output.Role == schema.Assistant && streamCallbacks.OnChunk != nil && msg.Content != "" {
+		streamCallbacks.OnChunk(msg.Content)
 	}
 	return msg, nil
 }

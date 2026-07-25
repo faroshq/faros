@@ -18,10 +18,78 @@ package api
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
+	"syscall"
 
+	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/patchtoolcalls"
+	"google.golang.org/genai"
 )
+
+func projectEinoAssistantShouldRetryModelError(err error) bool {
+	if err == nil ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var openAIError *openaimodel.APIError
+	if errors.As(err, &openAIError) {
+		return projectEinoAssistantRetryableHTTPStatus(openAIError.HTTPStatusCode)
+	}
+	var geminiError genai.APIError
+	if errors.As(err, &geminiError) {
+		return projectEinoAssistantRetryableHTTPStatus(geminiError.Code)
+	}
+	var geminiErrorPointer *genai.APIError
+	if errors.As(err, &geminiErrorPointer) {
+		return projectEinoAssistantRetryableHTTPStatus(geminiErrorPointer.Code)
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) &&
+		(networkError.Timeout() || networkError.Temporary())
+}
+
+func projectEinoAssistantRetryableHTTPStatus(status int) bool {
+	return status == 408 ||
+		status == 409 ||
+		status == 425 ||
+		status == 429 ||
+		(status >= 500 && status <= 599)
+}
+
+func projectEinoAssistantModelRetryConfig() *adk.ModelRetryConfig {
+	return &adk.ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(
+			ctx context.Context,
+			retryCtx *adk.RetryContext,
+		) *adk.RetryDecision {
+			if retryCtx == nil || ctx.Err() != nil ||
+				retryCtx.OutputMessage != nil ||
+				!projectEinoAssistantShouldRetryModelError(retryCtx.Err) {
+				return &adk.RetryDecision{}
+			}
+			return &adk.RetryDecision{
+				Retry:        true,
+				RejectReason: "transient model provider failure",
+			}
+		},
+	}
+}
+
+func projectEinoAssistantWillRetry(err error) bool {
+	var retryError *adk.WillRetryError
+	return errors.As(err, &retryError)
+}
 
 func projectEinoAssistantPatchToolCallsMiddleware(
 	ctx context.Context,

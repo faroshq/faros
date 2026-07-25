@@ -23,12 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -83,12 +85,12 @@ func TestProjectEinoAssistantMessageOutputPublishesAssistantStreamChunks(t *test
 	if msg == nil || msg.Content != "Hello world" {
 		t.Fatalf("message = %#v, want concatenated assistant content", msg)
 	}
-	if strings.Join(chunks, "") != "Hello world" || len(chunks) != 2 {
-		t.Fatalf("chunks = %#v, want two public assistant chunks", chunks)
+	if len(chunks) != 1 || chunks[0] != "Hello world" {
+		t.Fatalf("chunks = %#v, want one accepted assistant response", chunks)
 	}
 }
 
-func TestProjectEinoAssistantMessageOutputPublishesAssistantStreamChunksBeforeEOF(t *testing.T) {
+func TestProjectEinoAssistantMessageOutputPublishesAcceptedStreamAfterEOF(t *testing.T) {
 	stream, writer := schema.Pipe[*schema.Message](0)
 	output := &adk.TypedMessageVariant[*schema.Message]{
 		IsStreaming:   true,
@@ -115,17 +117,17 @@ func TestProjectEinoAssistantMessageOutputPublishesAssistantStreamChunksBeforeEO
 	}
 	select {
 	case got := <-chunks:
-		if got != "Hello " {
-			t.Fatalf("first streamed chunk = %q, want %q", got, "Hello ")
-		}
+		t.Fatalf("assistant chunk %q was published before stream EOF", got)
 	case <-time.After(250 * time.Millisecond):
-		writer.Close()
-		<-result
-		t.Fatal("first assistant chunk was not published before stream EOF")
 	}
 
 	if closed := writer.Send(schema.AssistantMessage("world", nil), nil); closed {
 		t.Fatal("stream closed before second chunk was sent")
+	}
+	select {
+	case got := <-chunks:
+		t.Fatalf("assistant chunk %q was published before stream EOF", got)
+	case <-time.After(250 * time.Millisecond):
 	}
 	writer.Close()
 	got := <-result
@@ -137,11 +139,39 @@ func TestProjectEinoAssistantMessageOutputPublishesAssistantStreamChunksBeforeEO
 	}
 	select {
 	case chunk := <-chunks:
-		if chunk != "world" {
-			t.Fatalf("second streamed chunk = %q, want %q", chunk, "world")
+		if chunk != "Hello world" {
+			t.Fatalf("accepted assistant chunk = %q, want %q", chunk, "Hello world")
 		}
 	default:
-		t.Fatal("second assistant chunk was not published")
+		t.Fatal("accepted assistant response was not published after EOF")
+	}
+	select {
+	case chunk := <-chunks:
+		t.Fatalf("unexpected extra assistant chunk %q", chunk)
+	default:
+	}
+}
+
+func TestProjectEinoAssistantMessageOutputDoesNotPublishFailedStream(t *testing.T) {
+	stream, writer := schema.Pipe[*schema.Message](2)
+	_ = writer.Send(schema.AssistantMessage("rejected response", nil), nil)
+	_ = writer.Send(nil, io.ErrUnexpectedEOF)
+	writer.Close()
+	output := &adk.TypedMessageVariant[*schema.Message]{
+		IsStreaming:   true,
+		MessageStream: stream,
+		Role:          schema.Assistant,
+	}
+	var chunks []string
+
+	_, err := projectEinoAssistantMessageOutput(context.Background(), output, projectAssistantStreamCallbacks{
+		OnChunk: func(chunk string) { chunks = append(chunks, chunk) },
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("message output error = %v, want unexpected EOF", err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("chunks = %#v, want no output from failed stream", chunks)
 	}
 }
 
@@ -174,6 +204,129 @@ func TestProjectEinoAssistantMessageOutputStreamsToolCallContent(t *testing.T) {
 	}
 	if strings.Join(chunks, "") != "I will inspect the project." {
 		t.Fatalf("chunks = %#v, want assistant content streamed even when a tool call follows", chunks)
+	}
+}
+
+func TestEinoAssistantRetriesTransientModelFailure(t *testing.T) {
+	chatModel := &retryingEinoChatModel{
+		streamErrors: []error{io.ErrUnexpectedEOF},
+		content:      "accepted response",
+	}
+	engine := newRetryingProjectEinoAssistantEngine(chatModel)
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileDiscussion)
+	var chunks []string
+	req.StreamCallbacks.OnChunk = func(chunk string) {
+		chunks = append(chunks, chunk)
+	}
+
+	result, err := engine.StreamProjectAssistant(context.Background(), req)
+	if err != nil {
+		t.Fatalf("StreamProjectAssistant returned error: %T: %v", err, err)
+	}
+	if chatModel.calls != 2 {
+		t.Fatalf("model calls = %d, want 2", chatModel.calls)
+	}
+	if result.Content != "accepted response" {
+		t.Fatalf("content = %q, want accepted response", result.Content)
+	}
+	if len(chunks) != 1 || chunks[0] != "accepted response" {
+		t.Fatalf("chunks = %#v, want accepted response only", chunks)
+	}
+}
+
+func TestEinoAssistantExhaustsTransientModelRetries(t *testing.T) {
+	chatModel := &retryingEinoChatModel{
+		streamErrors: []error{
+			io.ErrUnexpectedEOF,
+			io.ErrUnexpectedEOF,
+			io.ErrUnexpectedEOF,
+		},
+		content: "unreachable",
+	}
+	engine := newRetryingProjectEinoAssistantEngine(chatModel)
+
+	_, err := engine.StreamProjectAssistant(
+		context.Background(),
+		projectEinoRunRequestForProfileTest(projectAssistantTurnProfileDiscussion),
+	)
+	if !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %T: %v, want wrapped ErrExceedMaxRetries", err, err)
+	}
+	if chatModel.calls != 3 {
+		t.Fatalf("model calls = %d, want 3", chatModel.calls)
+	}
+}
+
+func TestEinoAssistantDoesNotRetryPermanentModelFailure(t *testing.T) {
+	apiError := &openaimodel.APIError{HTTPStatusCode: http.StatusUnauthorized}
+	chatModel := &retryingEinoChatModel{
+		streamErrors: []error{apiError},
+		content:      "unreachable",
+	}
+	engine := newRetryingProjectEinoAssistantEngine(chatModel)
+
+	_, err := engine.StreamProjectAssistant(
+		context.Background(),
+		projectEinoRunRequestForProfileTest(projectAssistantTurnProfileDiscussion),
+	)
+	var gotAPIError *openaimodel.APIError
+	if !errors.As(err, &gotAPIError) || gotAPIError.HTTPStatusCode != http.StatusUnauthorized {
+		t.Fatalf("StreamProjectAssistant error = %v, want OpenAI 401", err)
+	}
+	if chatModel.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", chatModel.calls)
+	}
+}
+
+func TestCollectProjectAssistantTurnEventsIgnoresWillRetryError(t *testing.T) {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Err: &adk.WillRetryError{ErrStr: "transient failure"},
+	})
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Output: &adk.TypedAgentOutput[*schema.Message]{
+			MessageOutput: &adk.TypedMessageVariant[*schema.Message]{
+				Message: schema.AssistantMessage("accepted response", nil),
+				Role:    schema.Assistant,
+			},
+		},
+	})
+	generator.Close()
+
+	loop := adk.NewTurnLoop[projectAssistantTurnItem, *schema.Message](
+		adk.TurnLoopConfig[projectAssistantTurnItem, *schema.Message]{
+			GenInput: func(
+				context.Context,
+				*adk.TurnLoop[projectAssistantTurnItem, *schema.Message],
+				[]projectAssistantTurnItem,
+			) (*adk.GenInputResult[projectAssistantTurnItem, *schema.Message], error) {
+				return nil, nil
+			},
+			PrepareAgent: func(
+				context.Context,
+				*adk.TurnLoop[projectAssistantTurnItem, *schema.Message],
+				[]projectAssistantTurnItem,
+			) (adk.TypedAgent[*schema.Message], error) {
+				return nil, nil
+			},
+		},
+	)
+	outcome := &projectEinoAssistantTurnOutcome{}
+	engine := projectEinoAssistantEngine{}
+
+	err := engine.collectProjectAssistantTurnEvents(
+		context.Background(),
+		&adk.TurnContext[projectAssistantTurnItem, *schema.Message]{Loop: loop},
+		iter,
+		projectAssistantRunRequest{},
+		newProjectEinoAssistantRunState(),
+		outcome,
+	)
+	if err != nil {
+		t.Fatalf("collectProjectAssistantTurnEvents returned error: %v", err)
+	}
+	if !outcome.receivedOutput || outcome.result.Content != "accepted response" {
+		t.Fatalf("outcome = %#v, want accepted response after retry signal", outcome)
 	}
 }
 
@@ -1703,6 +1856,43 @@ func TestNewServerDefaultsToEinoAssistantEngine(t *testing.T) {
 type scriptedEinoChatModel struct {
 	inputs    [][]*schema.Message
 	toolNames [][]string
+}
+
+type retryingEinoChatModel struct {
+	calls        int
+	streamErrors []error
+	content      string
+}
+
+func newRetryingProjectEinoAssistantEngine(chatModel einomodel.BaseChatModel) projectEinoAssistantEngine {
+	return projectEinoAssistantEngine{
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return chatModel, nil
+		},
+		newTools: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return nil, nil
+		},
+	}
+}
+
+func (m *retryingEinoChatModel) Generate(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return schema.AssistantMessage(m.content, nil), nil
+}
+
+func (m *retryingEinoChatModel) Stream(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.calls++
+	if m.calls <= len(m.streamErrors) {
+		return nil, m.streamErrors[m.calls-1]
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage(m.content, nil),
+	}), nil
 }
 
 type capturingEinoChatModel struct {
