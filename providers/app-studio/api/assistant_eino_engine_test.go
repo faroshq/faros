@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +47,19 @@ func TestEinoAssistantEngineRequiresProject(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "project is required") {
 		t.Fatalf("StreamProjectAssistant error = %v, want missing project error", err)
+	}
+}
+
+func TestProjectEinoAssistantMaxIterationsExceededUsesSentinel(t *testing.T) {
+	if !projectEinoAssistantMaxIterationsExceeded(
+		fmt.Errorf("wrapped: %w", adk.ErrExceedMaxIterations),
+	) {
+		t.Fatal("wrapped Eino max-iteration sentinel was not recognized")
+	}
+	if projectEinoAssistantMaxIterationsExceeded(
+		errors.New("exceeds max iterations"),
+	) {
+		t.Fatal("lookalike string must not be recognized")
 	}
 }
 

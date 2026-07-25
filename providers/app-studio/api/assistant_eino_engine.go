@@ -160,6 +160,11 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		return nil, err
 	}
 	var handlers []adk.ChatModelAgentMiddleware
+	patchToolCallsMiddleware, err := projectEinoAssistantPatchToolCallsMiddleware(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create eino patch tool calls middleware: %w", err)
+	}
+	handlers = append(handlers, patchToolCallsMiddleware)
 	summaryMiddleware, err := summarization.New(ctx, &summarization.Config{
 		Model: chatModel,
 		Trigger: &summarization.TriggerCondition{
@@ -790,10 +795,7 @@ func projectEinoAssistantProjectRepositoryRef(req projectAssistantRunRequest) st
 }
 
 func projectEinoAssistantMaxIterationsExceeded(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "exceeds max iterations")
+	return errors.Is(err, adk.ErrExceedMaxIterations)
 }
 
 func projectEinoAssistantToolLoopFinalInstruction(reason string) string {
