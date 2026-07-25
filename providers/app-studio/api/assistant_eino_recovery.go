@@ -39,7 +39,9 @@ var projectEinoAssistantSecretPatterns = []struct {
 	replacement string
 }{
 	{
-		pattern:     regexp.MustCompile(`(?i)(\bauthorization[ \t]*:[ \t]*(?:bearer|basic)[ \t]+)[^ \t\r\n,;]+`),
+		pattern: regexp.MustCompile(
+			`(?i)(\\?["']?\bauthorization\b\\?["']?[ \t]*:[ \t]*\\?["']?(?:bearer|basic)[ \t]+)[^ \t\r\n,;\\"'}]+`,
+		),
 		replacement: `${1}[REDACTED]`,
 	},
 	{
@@ -47,7 +49,19 @@ var projectEinoAssistantSecretPatterns = []struct {
 		replacement: `${1}[REDACTED]`,
 	},
 	{
-		pattern:     regexp.MustCompile(`(?i)(\b(?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]+`),
+		pattern: regexp.MustCompile(
+			`(?i)(\\"(?:set-cookie|cookie)\\"[ \t]*:[ \t]*)\\"[^\r\n]*?\\"([ \t]*[,}])`,
+		),
+		replacement: `${1}\"[REDACTED]\"${2}`,
+	},
+	{
+		pattern: regexp.MustCompile(
+			`(?i)(["']\b(?:set-cookie|cookie)\b["'][ \t]*:[ \t]*)(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')`,
+		),
+		replacement: `${1}"[REDACTED]"`,
+	},
+	{
+		pattern:     regexp.MustCompile(`(?i)(\b(?:set-cookie|cookie)\b[ \t]*:[ \t]*)[^\r\n]+`),
 		replacement: `${1}[REDACTED]`,
 	},
 	{

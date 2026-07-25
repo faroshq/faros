@@ -35,9 +35,10 @@ import (
 
 func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
 	tests := []struct {
-		name    string
-		message string
-		secret  string
+		name        string
+		message     string
+		secret      string
+		wantContext string
 	}{
 		{
 			name:    "authorization bearer",
@@ -109,6 +110,52 @@ func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
 			message: `request failed: {\"api_key\":\"escaped-api-key-super-secret\"}`,
 			secret:  "escaped-api-key-super-secret",
 		},
+		{
+			name:    "json authorization basic",
+			message: `request failed: {"Authorization":"Basic dXNlcjpwYXNzd29yZA=="}`,
+			secret:  "dXNlcjpwYXNzd29yZA==",
+		},
+		{
+			name:    "escaped json authorization basic",
+			message: `request failed: {\"Authorization\":\"Basic ZXNjYXBlZC1zZWNyZXQ=\"}`,
+			secret:  "ZXNjYXBlZC1zZWNyZXQ=",
+		},
+		{
+			name:        "json cookie",
+			message:     `request failed: {"Cookie":"session=json-cookie-super-secret; theme=dark","status":500}`,
+			secret:      "json-cookie-super-secret",
+			wantContext: `"status":500`,
+		},
+		{
+			name:        "escaped json cookie",
+			message:     `request failed: {\"Cookie\":\"session=escaped-json-cookie-super-secret; theme=dark\",\"status\":500}`,
+			secret:      "escaped-json-cookie-super-secret",
+			wantContext: `\"status\":500`,
+		},
+		{
+			name:        "json set cookie",
+			message:     `request failed: {"Set-Cookie":"session=json-set-cookie-super-secret; Secure","status":500}`,
+			secret:      "json-set-cookie-super-secret",
+			wantContext: `"status":500`,
+		},
+		{
+			name:        "escaped json set cookie",
+			message:     `request failed: {\"Set-Cookie\":\"session=escaped-json-set-cookie-super-secret; Secure\",\"status\":500}`,
+			secret:      "escaped-json-set-cookie-super-secret",
+			wantContext: `\"status\":500`,
+		},
+		{
+			name:        "json cookie with escaped component",
+			message:     `request failed: {"Cookie":"flavor=\"chocolate\"; session=quoted-cookie-super-secret","status":500}`,
+			secret:      "quoted-cookie-super-secret",
+			wantContext: `"status":500`,
+		},
+		{
+			name:        "escaped json cookie with escaped component",
+			message:     `request failed: {\"Cookie\":\"flavor=\\\"chocolate\\\"; session=escaped-quoted-cookie-super-secret\",\"status\":500}`,
+			secret:      "escaped-quoted-cookie-super-secret",
+			wantContext: `\"status\":500`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -120,6 +167,9 @@ func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
 			}
 			if !strings.Contains(got, "[REDACTED]") {
 				t.Fatalf("safe error = %q, want redaction marker", got)
+			}
+			if tt.wantContext != "" && !strings.Contains(got, tt.wantContext) {
+				t.Fatalf("safe error = %q, want unrelated context %q preserved", got, tt.wantContext)
 			}
 			if got != truncateProjectToolInfo(got) {
 				t.Fatalf("safe error length = %d, want bounded by truncateProjectToolInfo", len(got))
