@@ -119,6 +119,13 @@ type projectAssistantToolCallRequest struct {
 	Arguments            map[string]any
 }
 
+func refreshProjectToolSnapshot(current, updated *aiv1alpha1.Project) {
+	if current == nil || updated == nil || current == updated {
+		return
+	}
+	updated.DeepCopyInto(current)
+}
+
 type projectAssistantTool interface {
 	Spec() projectAssistantToolSpec
 	Call(context.Context, projectAssistantToolCallRequest) (string, error)

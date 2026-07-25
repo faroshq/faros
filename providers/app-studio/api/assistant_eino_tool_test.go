@@ -18,17 +18,22 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/adk"
 	einotool "github.com/cloudwego/eino/components/tool"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/store"
+	"github.com/faroshq/provider-app-studio/tenant"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
@@ -287,5 +292,142 @@ func TestEinoToolSchedulesDevelopmentSyncAfterMutatingTool(t *testing.T) {
 	}
 	if gotName != projectToolWriteFile || gotProjectName != "demo" {
 		t.Fatalf("scheduled sync = (%q, %q), want (%q, demo)", gotName, gotProjectName, projectToolWriteFile)
+	}
+}
+
+func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *testing.T) {
+	var projectYAML string
+	templateJSON, err := json.Marshal(applicationTemplateObject().Object)
+	if err != nil {
+		t.Fatalf("marshal template: %v", err)
+	}
+	graphQLServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode GraphQL request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "TemplateYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"infrastructure_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"TemplateYaml": string(templateJSON)}},
+			}})
+		case strings.Contains(req.Query, "ApplicationYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"infrastructure_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{
+					"ApplicationYaml": `{"apiVersion":"infrastructure.kedge.faros.sh/v1alpha1","kind":"Application","metadata":{"name":"demo-dev"},"status":{"phase":"Ready"}}`,
+				}},
+			}})
+		case strings.Contains(req.Query, "ProjectYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": projectYAML}},
+			}})
+		case strings.Contains(req.Query, "applyStatusYaml"):
+			_, _ = w.Write([]byte(`{"data":{"applyStatusYaml":"ok"}}`))
+		case strings.Contains(req.Query, "applyYaml"):
+			appliedYAML, _ := req.Variables["yaml"].(string)
+			if strings.Contains(appliedYAML, "kind: Project\n") {
+				projectYAML = appliedYAML
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"applyYaml": appliedYAML}})
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", req.Query)
+		}
+	}))
+	t.Cleanup(graphQLServer.Close)
+
+	workspaces := workspace.NewFileStore(t.TempDir())
+	server := NewWithWorkspace(
+		tenant.NewGraphQLClient(graphQLServer.URL, false),
+		nil,
+		workspaces,
+		"",
+		false,
+	)
+	type scheduledSync struct {
+		name    string
+		project *aiv1alpha1.Project
+	}
+	var scheduled []scheduledSync
+	server.developmentSyncAfterMutation = func(_ identity, p *aiv1alpha1.Project, name string) {
+		scheduled = append(scheduled, scheduledSync{name: name, project: p.DeepCopy()})
+	}
+
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec:       aiv1alpha1.ProjectSpec{DisplayName: "Demo"},
+	}
+	id := identity{
+		clusterID:     "cluster-ws-1",
+		token:         "caller-token",
+		orgUUID:       "org-a",
+		workspaceUUID: "ws-1",
+	}
+	req := projectAssistantRunRequest{
+		Identity:       id,
+		Project:        project,
+		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+	}
+	runState := newProjectEinoAssistantRunState()
+	registry := server.projectAssistantToolRegistry()
+	invoke := func(name string, arguments map[string]any) {
+		t.Helper()
+		localTool, ok := registry.Get(name)
+		if !ok {
+			t.Fatalf("%s missing from registry", name)
+		}
+		tool := projectEinoAssistantTool{
+			server:   server,
+			tool:     localTool,
+			req:      req,
+			runState: runState,
+		}
+		if _, err := tool.invokeAllowedTool(context.Background(), "call-"+name, localTool.Spec(), arguments); err != nil {
+			t.Fatalf("%s returned error: %v", name, err)
+		}
+	}
+
+	invoke(projectToolSelectTemplate, map[string]any{"template": "application"})
+	invoke(projectToolWriteFile, map[string]any{"path": "web/src/App.tsx", "content": "export default function App() {}\n"})
+
+	if len(scheduled) != 2 {
+		t.Fatalf("scheduled syncs = %d, want 2", len(scheduled))
+	}
+	for _, sync := range scheduled {
+		if sync.project.Spec.Template == nil || sync.project.Spec.Template.Name != "application" {
+			t.Fatalf("%s sync project template = %#v, want application", sync.name, sync.project.Spec.Template)
+		}
+	}
+}
+
+func TestRefreshProjectToolSnapshotKeepsSelfAliasedProject(t *testing.T) {
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "demo",
+			Labels: map[string]string{"app": "demo"},
+		},
+		Spec: aiv1alpha1.ProjectSpec{
+			DisplayName: "Demo",
+			Template:    &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: projectDevelopmentEnvironmentName,
+				Mode: aiv1alpha1.ProjectEnvironmentModeLive,
+			}},
+		},
+	}
+
+	refreshProjectToolSnapshot(project, project)
+
+	if project.Spec.Template == nil || project.Spec.Template.Name != "application" {
+		t.Fatalf("template = %#v, want application", project.Spec.Template)
+	}
+	if len(project.Spec.Environments) != 1 || project.Spec.Environments[0].Name != projectDevelopmentEnvironmentName {
+		t.Fatalf("environments = %#v, want development", project.Spec.Environments)
+	}
+	if project.Labels["app"] != "demo" {
+		t.Fatalf("labels = %#v, want app=demo", project.Labels)
 	}
 }
