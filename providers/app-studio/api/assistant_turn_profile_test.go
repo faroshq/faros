@@ -300,7 +300,6 @@ func TestProjectAssistantModePromptsPutBuilderGuidanceOnlyOnWriteProfiles(t *tes
 				projectToolWriteFile,
 				projectToolApplyPatch,
 				projectToolCommitProjectFiles,
-				"tool_search",
 				"Do not give the user manual copy/paste file replacement instructions",
 			} {
 				if !strings.Contains(prompt, want) {

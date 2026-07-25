@@ -219,7 +219,7 @@ func TestEinoAssistantEngineDoesNotUseToolSearchForSmallReadToolSet(t *testing.T
 	}
 }
 
-func TestEinoAssistantToolSearchUsesBundlesForProductToolbox(t *testing.T) {
+func TestEinoAssistantToolSearchKeepsAppStudioToolsStatic(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	runState := newProjectEinoAssistantRunState()
 	runState.SetToolDiscovery(projectEinoAssistantToolDiscovery{IncludeCommitBridge: true})
@@ -237,9 +237,6 @@ func TestEinoAssistantToolSearchUsesBundlesForProductToolbox(t *testing.T) {
 	staticNames := einoToolNamesForTest(t, staticTools)
 	dynamicNames := einoToolNamesForTest(t, dynamicTools)
 
-	if !stringSliceEqual(staticNames, []string{projectToolAskFollowUp, projectToolRequestProjectPlanApproval}) {
-		t.Fatalf("static tools = %#v, want only collaboration tools", staticNames)
-	}
 	for _, want := range []string{
 		projectToolPlanProjectChanges,
 		projectToolCheckProjectReadiness,
@@ -251,10 +248,46 @@ func TestEinoAssistantToolSearchUsesBundlesForProductToolbox(t *testing.T) {
 		projectToolApplyPatch,
 		projectToolMkdir,
 		projectToolCommitProjectFiles,
+		projectToolGetRuntimeStatus,
+		projectToolGetPreviewURL,
+		projectToolAskFollowUp,
+		projectToolRequestProjectPlanApproval,
 	} {
-		if !stringSliceContains(dynamicNames, want) {
-			t.Fatalf("dynamic tools = %#v, want %s", dynamicNames, want)
+		if !stringSliceContains(staticNames, want) {
+			t.Fatalf("static tools = %#v, want %s", staticNames, want)
 		}
+	}
+	if len(dynamicNames) != 0 {
+		t.Fatalf("dynamic tools = %#v, want no provider tools", dynamicNames)
+	}
+}
+
+func TestEinoAssistantToolSearchDefersOnlySearchableMCPTools(t *testing.T) {
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileImplementation)
+	state := newProjectEinoAssistantRunState()
+	local, ok := server.projectAssistantToolRegistry().Get(projectToolWriteFile)
+	if !ok {
+		t.Fatal("write_file tool missing")
+	}
+	mcpTool := &recordingProjectAssistantTool{spec: projectAssistantToolSpec{
+		Name:        "provider__searchable_tool",
+		Description: "A provider tool.",
+		Parameters:  json.RawMessage(`{"type":"object"}`),
+	}}
+
+	staticTools, dynamicTools, err := projectEinoAssistantToolSearchSets(context.Background(), []einotool.BaseTool{
+		newProjectEinoAssistantTool(local, req, state),
+		newProjectEinoAssistantSearchableMCPTool(server, mcpTool, req, state),
+	})
+	if err != nil {
+		t.Fatalf("projectEinoAssistantToolSearchSets returned error: %v", err)
+	}
+	if got := einoToolNamesForTest(t, staticTools); !stringSliceEqual(got, []string{projectToolWriteFile}) {
+		t.Fatalf("static tools = %#v, want only local write_file", got)
+	}
+	if got := einoToolNamesForTest(t, dynamicTools); !stringSliceEqual(got, []string{"provider__searchable_tool"}) {
+		t.Fatalf("dynamic tools = %#v, want only searchable provider tool", got)
 	}
 }
 
@@ -994,7 +1027,7 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 	}
 }
 
-func TestEinoAssistantEngineRequestsPermissionForDynamicWriteTool(t *testing.T) {
+func TestEinoAssistantEngineRequestsPermissionForDirectWriteTool(t *testing.T) {
 	messages := store.NewMemoryStore()
 	workspaces := workspace.NewFileStore(t.TempDir())
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
@@ -1015,6 +1048,7 @@ func TestEinoAssistantEngineRequestsPermissionForDynamicWriteTool(t *testing.T) 
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	writeCompletions := 0
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
@@ -1022,27 +1056,29 @@ func TestEinoAssistantEngineRequestsPermissionForDynamicWriteTool(t *testing.T) 
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
 		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
+		StreamCallbacks: projectAssistantStreamCallbacks{OnToolCall: func(event projectToolCallStreamEvent) {
+			if event.Name == projectToolWriteFile && event.Status == "succeeded" {
+				writeCompletions++
+			}
+		}},
 	}
 
 	_, err := engine.StreamProjectAssistant(context.Background(), req)
 	var permissionErr *projectAssistantPermissionRequiredError
 	if !errors.As(err, &permissionErr) {
-		t.Fatalf("StreamProjectAssistant error = %v, want dynamic write permission required", err)
+		t.Fatalf("StreamProjectAssistant error = %v, want direct write permission required", err)
 	}
 	if permissionErr.ToolName != projectToolWriteFile {
 		t.Fatalf("permission tool = %q, want write_file", permissionErr.ToolName)
 	}
-	if len(chatModel.toolNames) < 2 {
-		t.Fatalf("model tool names = %#v, want search and selected write tool calls", chatModel.toolNames)
+	if len(chatModel.toolNames) != 1 {
+		t.Fatalf("model tool names = %#v, want one direct write call", chatModel.toolNames)
 	}
-	if stringSliceContains(chatModel.toolNames[0], projectToolWriteFile) {
-		t.Fatalf("initial tools = %#v, want write_file deferred behind tool_search", chatModel.toolNames[0])
+	if !stringSliceContains(chatModel.toolNames[0], projectToolWriteFile) {
+		t.Fatalf("initial tools = %#v, want direct write_file", chatModel.toolNames[0])
 	}
-	if !stringSliceContains(chatModel.toolNames[0], "tool_search") {
-		t.Fatalf("initial tools = %#v, want tool_search", chatModel.toolNames[0])
-	}
-	if !stringSliceContains(chatModel.toolNames[1], projectToolWriteFile) {
-		t.Fatalf("selected tools = %#v, want write_file loaded by tool_search", chatModel.toolNames[1])
+	if stringSliceContains(chatModel.toolNames[0], "tool_search") {
+		t.Fatalf("initial tools = %#v, want no tool_search without provider tools", chatModel.toolNames[0])
 	}
 	run, err := messages.GetAssistantRun(context.Background(), req.MessageScope, permissionErr.RunID)
 	if err != nil {
@@ -1077,6 +1113,12 @@ func TestEinoAssistantEngineRequestsPermissionForDynamicWriteTool(t *testing.T) 
 	}
 	if read.Content != "dynamic write\n" {
 		t.Fatalf("content = %q, want approved dynamic write", read.Content)
+	}
+	if writeCompletions != 1 {
+		t.Fatalf("write completions = %d, want approved write to resume once", writeCompletions)
+	}
+	if len(chatModel.inputs) != 2 {
+		t.Fatalf("model calls = %d, want initial write request and one post-approval response", len(chatModel.inputs))
 	}
 }
 
@@ -1815,15 +1857,6 @@ func (m *dynamicWritePermissionEinoChatModel) Generate(ctx context.Context, inpu
 	m.inputs = append(m.inputs, cloneEinoMessagesForTest(input))
 	switch len(m.inputs) {
 	case 1:
-		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID:   "call-search-write",
-			Type: "function",
-			Function: schema.FunctionCall{
-				Name:      "tool_search",
-				Arguments: `{"query":"select:write_file"}`,
-			},
-		}}), nil
-	case 2:
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID:   "call-write",
 			Type: "function",

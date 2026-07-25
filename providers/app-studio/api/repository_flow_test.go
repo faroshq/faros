@@ -166,6 +166,7 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 		"mkdir",
 		"select_project_template",
 		"hydrate_workspace",
+		"get_project_checkpoints",
 		"check_project_build",
 		"get_build_logs",
 		"rebuild_project",
@@ -304,14 +305,17 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	if !strings.Contains(joined, "Available tools in this workspace") || !strings.Contains(joined, "commit_project_files") {
-		t.Fatalf("first model input missing discovered tool prompt:\n%s", joined)
+	if strings.Contains(joined, "Available tools in this workspace") {
+		t.Fatalf("prompt duplicates the Eino tool catalog: %q", joined)
 	}
-	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
-		t.Fatalf("model tools = %#v, want commit_project_files deferred behind tool_search", model.Inputs[0].Tools)
+	if strings.Contains(joined, projectToolReadProjectFile+":") {
+		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
-	if !projectChatToolsInclude(model.Inputs[0].Tools, "tool_search") {
-		t.Fatalf("model tools = %#v, want tool_search for deferred commit bridge", model.Inputs[0].Tools)
+	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
+		t.Fatalf("model tools = %#v, want direct commit_project_files", model.Inputs[0].Tools)
+	}
+	if projectChatToolsInclude(model.Inputs[0].Tools, "tool_search") {
+		t.Fatalf("model tools = %#v, want no tool_search without provider tools", model.Inputs[0].Tools)
 	}
 }
 
@@ -376,10 +380,11 @@ func TestGenerateProjectAssistantStreamDiscoversDatabricksToolsForDataTableQuest
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	for _, want := range []string{projectToolDatabricksListTables, projectToolDatabricksDescribeTable} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("model input missing %s:\n%s", want, joined)
-		}
+	if strings.Contains(joined, "Available tools in this workspace") {
+		t.Fatalf("prompt duplicates the Eino tool catalog: %q", joined)
+	}
+	if strings.Contains(joined, projectToolReadProjectFile+":") {
+		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
 	for _, want := range []string{
 		"existing imported kedge Table resources only",
@@ -461,8 +466,11 @@ func TestGenerateProjectAssistantStreamFiltersDatabricksToolsOnUnrelatedImplemen
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	if !strings.Contains(joined, projectToolCommitProjectFiles) {
-		t.Fatalf("model input missing commit bridge guidance:\n%s", joined)
+	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
+		t.Fatalf("model tools = %#v, want direct commit bridge", model.Inputs[0].Tools)
+	}
+	if projectChatToolsInclude(model.Inputs[0].Tools, "tool_search") {
+		t.Fatalf("model tools = %#v, want no tool_search without provider tools", model.Inputs[0].Tools)
 	}
 	if strings.Contains(joined, projectToolDatabricksListTables) ||
 		strings.Contains(joined, projectToolDatabricksDescribeTable) ||
@@ -655,13 +663,13 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 		joined += msg.Content + "\n"
 	}
 	for _, want := range []string{projectToolGetRuntimeStatus, projectToolGetPreviewURL} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("model input missing %s:\n%s", want, joined)
+		if !projectChatToolsInclude(model.Inputs[0].Tools, want) {
+			t.Fatalf("model tools = %#v, want %s", model.Inputs[0].Tools, want)
 		}
 	}
 	for _, unwanted := range []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles} {
-		if strings.Contains(joined, unwanted) {
-			t.Fatalf("model input unexpectedly mentions %s:\n%s", unwanted, joined)
+		if projectChatToolsInclude(model.Inputs[0].Tools, unwanted) {
+			t.Fatalf("model tools = %#v, should not include %s", model.Inputs[0].Tools, unwanted)
 		}
 	}
 }
@@ -693,9 +701,6 @@ func TestProjectSystemPromptRequiresWorkspaceInspectBeforeEdit(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Do not narrate tool calls") {
 		t.Fatalf("prompt missing tool-call narration guidance:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "tool_search") || !strings.Contains(prompt, "select:") {
-		t.Fatalf("prompt missing deferred tool_search guidance:\n%s", prompt)
 	}
 	if !strings.Contains(strings.ToLower(prompt), "before") || !strings.Contains(strings.ToLower(prompt), "inspect") {
 		t.Fatalf("prompt does not require inspect-before-edit guidance:\n%s", prompt)

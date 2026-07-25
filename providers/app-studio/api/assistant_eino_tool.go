@@ -33,7 +33,10 @@ import (
 	"github.com/faroshq/provider-app-studio/store"
 )
 
-const projectEinoToolParametersExtraKey = "parametersJSON"
+const (
+	projectEinoToolParametersExtraKey = "parametersJSON"
+	projectEinoToolSearchableExtraKey = "appStudioSearchableMCP"
+)
 
 type projectEinoAssistantToolDiscovery struct {
 	IncludeCommitBridge bool
@@ -42,10 +45,11 @@ type projectEinoAssistantToolDiscovery struct {
 }
 
 type projectEinoAssistantTool struct {
-	server   *Server
-	tool     projectAssistantTool
-	req      projectAssistantRunRequest
-	runState *projectEinoAssistantRunState
+	server        *Server
+	tool          projectAssistantTool
+	req           projectAssistantRunRequest
+	runState      *projectEinoAssistantRunState
+	searchableMCP bool
 }
 
 func newProjectEinoAssistantToolsFactory(server *Server) projectEinoAssistantToolsFactory {
@@ -55,16 +59,19 @@ func newProjectEinoAssistantToolsFactory(server *Server) projectEinoAssistantToo
 		}
 		registry := server.projectAssistantToolRegistry()
 		discovery := projectEinoAssistantEnsureToolDiscovery(ctx, server, req, runState)
-		candidateTools := append(registry.Tools(discovery.IncludeCommitBridge), discovery.MCPTools...)
-		tools := projectAssistantToolsForTurnPolicy(candidateTools, req.TurnPolicy)
-		out := make([]einotool.BaseTool, 0, len(tools))
+		localTools := projectAssistantToolsForTurnPolicy(registry.Tools(discovery.IncludeCommitBridge), req.TurnPolicy)
+		mcpTools := projectAssistantToolsForTurnPolicy(discovery.MCPTools, req.TurnPolicy)
+		out := make([]einotool.BaseTool, 0, len(localTools)+len(mcpTools))
 		graphTools, err := newProjectAssistantGraphWorkflowTools(ctx, projectAssistantWorkflowRunContextForRequest(server, req, runState), req.TurnPolicy)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, graphTools...)
-		for _, tool := range tools {
+		for _, tool := range localTools {
 			out = append(out, newProjectEinoAssistantServerTool(server, tool, req, runState))
+		}
+		for _, tool := range mcpTools {
+			out = append(out, newProjectEinoAssistantSearchableMCPTool(server, tool, req, runState))
 		}
 		return out, nil
 	}
@@ -212,6 +219,16 @@ func newProjectEinoAssistantServerTool(server *Server, tool projectAssistantTool
 	}
 }
 
+func newProjectEinoAssistantSearchableMCPTool(server *Server, tool projectAssistantTool, req projectAssistantRunRequest, runState *projectEinoAssistantRunState) einotool.BaseTool {
+	return projectEinoAssistantTool{
+		server:        server,
+		tool:          tool,
+		req:           req,
+		runState:      runState,
+		searchableMCP: true,
+	}
+}
+
 func (t projectEinoAssistantTool) Info(context.Context) (*schema.ToolInfo, error) {
 	if t.tool == nil {
 		return nil, errors.New("project assistant tool is not configured")
@@ -232,6 +249,9 @@ func (t projectEinoAssistantTool) Info(context.Context) (*schema.ToolInfo, error
 			return nil, fmt.Errorf("decode tool %q JSON schema: %w", spec.Name, err)
 		}
 		info.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(&params)
+	}
+	if t.searchableMCP {
+		info.Extra[projectEinoToolSearchableExtraKey] = true
 	}
 	return info, nil
 }

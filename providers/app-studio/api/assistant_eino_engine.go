@@ -38,10 +38,6 @@ const (
 	projectEinoAssistantSummaryContextTokens   = 24000
 	projectEinoAssistantSummaryInstruction     = "Summarize this App Studio project session for the next builder turn. Preserve user requirements, accepted plans, files touched or inspected, unresolved questions, repository/runtime state, and any constraints. Keep it concise and operational."
 	projectEinoAssistantNoOutputFallback       = "I couldn't produce a response for that turn. Please try again or rephrase the request, and I can continue from the current project context."
-
-	// Bundle search is for App Studio's full product toolbox. Smaller injected
-	// tool sets stay direct so focused permission/resume flows keep their shape.
-	projectEinoAssistantBundleSearchMinTools = 4
 )
 
 type projectEinoAssistantEngine struct {
@@ -270,8 +266,6 @@ func projectEinoAssistantMessageRole(msg *schema.Message) string {
 }
 
 func projectEinoAssistantToolSearchSets(ctx context.Context, tools []einotool.BaseTool) ([]einotool.BaseTool, []einotool.BaseTool, error) {
-	infos := make([]*schema.ToolInfo, 0, len(tools))
-	searchCandidateCount := 0
 	staticTools := make([]einotool.BaseTool, 0, len(tools))
 	dynamicTools := make([]einotool.BaseTool, 0, len(tools))
 	for _, tool := range tools {
@@ -282,20 +276,7 @@ func projectEinoAssistantToolSearchSets(ctx context.Context, tools []einotool.Ba
 		if err != nil {
 			return nil, nil, err
 		}
-		infos = append(infos, info)
-		if projectEinoAssistantToolCanUseSearch(info) {
-			searchCandidateCount++
-		}
-	}
-	useBundleSearch := searchCandidateCount >= projectEinoAssistantBundleSearchMinTools
-	infoIndex := 0
-	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		info := infos[infoIndex]
-		infoIndex++
-		if projectEinoAssistantToolUsesSearch(info, useBundleSearch) {
+		if projectEinoAssistantToolUsesSearch(info) {
 			dynamicTools = append(dynamicTools, tool)
 			continue
 		}
@@ -304,19 +285,12 @@ func projectEinoAssistantToolSearchSets(ctx context.Context, tools []einotool.Ba
 	return staticTools, dynamicTools, nil
 }
 
-func projectEinoAssistantToolCanUseSearch(info *schema.ToolInfo) bool {
+func projectEinoAssistantToolUsesSearch(info *schema.ToolInfo) bool {
 	if info == nil || info.Extra == nil {
 		return false
 	}
-	bundle, _ := info.Extra["bundle"].(string)
-	return projectAssistantToolBundle(bundle) != projectAssistantToolBundleCollaboration
-}
-
-func projectEinoAssistantToolUsesSearch(info *schema.ToolInfo, useBundleSearch bool) bool {
-	if info == nil || info.Extra == nil {
-		return false
-	}
-	return useBundleSearch && projectEinoAssistantToolCanUseSearch(info)
+	searchable, _ := info.Extra[projectEinoToolSearchableExtraKey].(bool)
+	return searchable
 }
 
 type projectEinoAssistantTurnOutcome struct {

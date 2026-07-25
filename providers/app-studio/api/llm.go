@@ -1684,7 +1684,6 @@ func appendProjectAssistantModePrompt(b *strings.Builder, profile projectAssista
 
 func appendProjectAssistantBuilderPrompt(b *strings.Builder, repoRef string) {
 	b.WriteString("Use check_project_readiness before mutating or verifying existing work so repository, memory, workspace context, and recommended checks come from the App Studio graph workflow. ")
-	b.WriteString("When a named App Studio tool is deferred, load it first with tool_search using select:<tool_name>, then call the loaded tool. ")
 	b.WriteString("Use prepare_project_deployment before discussing deployment handoff so build artifact readiness, blockers, and runtime handoff constraints come from the App Studio graph workflow. ")
 	b.WriteString("To take a project to production, use promote_project (see the build/promote guidance above). Use get_runtime_status and get_preview_url as App Studio runtime graph workflows for the development sandbox. ")
 	b.WriteString("For supporting infrastructure, use infrastructure__list_templates before naming any available template, infrastructure__describe_template before recommending values, and infrastructure__provision only after the user explicitly asks to create supporting infrastructure and the permission flow approves the call. ")
@@ -1717,31 +1716,21 @@ func appendProjectAssistantTemplateFitPrompt(b *strings.Builder) {
 }
 
 func projectMCPToolsPrompt(tools []chatTool) string {
-	if len(tools) == 0 {
-		return "No tools were discovered for this workspace."
-	}
-	var b strings.Builder
-	b.WriteString("Available tools in this workspace:\n")
 	hasDatabricksTools := false
 	for _, tool := range tools {
-		desc := strings.TrimSpace(tool.Function.Description)
-		if desc == "" {
-			desc = "(no description)"
-		}
-		b.WriteString("- " + tool.Function.Name + ": " + desc + "\n")
 		switch strings.TrimSpace(tool.Function.Name) {
 		case projectToolDatabricksListTables, projectToolDatabricksDescribeTable:
 			hasDatabricksTools = true
 		}
 	}
-	if hasDatabricksTools {
-		b.WriteString("Databricks guidance: use existing imported kedge Table resources only. ")
-		b.WriteString("Refer to them by tableRef when designing app data models, inspecting cached table metadata, or asking the user which imported table to use through provider-databricks. ")
-		b.WriteString("Do not call provider backend URLs from generated code. ")
-		b.WriteString("Do not generate application code that queries Databricks tableRefs yet; no App Studio runtime data-access bridge is available in this workspace. ")
-		b.WriteString("Do not create or import Databricks tables from App Studio, and do not embed Databricks credentials or raw warehouse auth config in generated code.\n")
+	if !hasDatabricksTools {
+		return ""
 	}
-	return b.String()
+	return "Databricks guidance: use existing imported kedge Table resources only. " +
+		"Refer to them by tableRef when designing app data models, inspecting cached table metadata, or asking the user which imported table to use through provider-databricks. " +
+		"Do not call provider backend URLs from generated code. " +
+		"Do not generate application code that queries Databricks tableRefs yet; no App Studio runtime data-access bridge is available in this workspace. " +
+		"Do not create or import Databricks tables from App Studio, and do not embed Databricks credentials or raw warehouse auth config in generated code.\n"
 }
 
 func projectMCPToolsFailurePrompt(err error) string {
