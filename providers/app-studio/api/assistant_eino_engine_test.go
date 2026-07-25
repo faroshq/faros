@@ -278,6 +278,27 @@ func TestEinoAssistantDoesNotRetryPermanentModelFailure(t *testing.T) {
 	}
 }
 
+func TestEinoAssistantDoesNotRetryPartialStreamFailure(t *testing.T) {
+	chatModel := &partialStreamFailureEinoChatModel{}
+	engine := newRetryingProjectEinoAssistantEngine(chatModel)
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileDiscussion)
+	var chunks []string
+	req.StreamCallbacks.OnChunk = func(chunk string) {
+		chunks = append(chunks, chunk)
+	}
+
+	_, err := engine.StreamProjectAssistant(context.Background(), req)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("StreamProjectAssistant error = %T: %v, want unexpected EOF", err, err)
+	}
+	if chatModel.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", chatModel.calls)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("chunks = %#v, want no output from rejected partial stream", chunks)
+	}
+}
+
 func TestCollectProjectAssistantTurnEventsIgnoresWillRetryError(t *testing.T) {
 	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
 	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
@@ -293,6 +314,47 @@ func TestCollectProjectAssistantTurnEventsIgnoresWillRetryError(t *testing.T) {
 	})
 	generator.Close()
 
+	outcome := collectProjectAssistantTurnEventsForTest(t, iter)
+	if !outcome.receivedOutput || outcome.result.Content != "accepted response" {
+		t.Fatalf("outcome = %#v, want accepted response after retry signal", outcome)
+	}
+}
+
+func TestCollectProjectAssistantTurnEventsIgnoresMessageStreamWillRetryError(t *testing.T) {
+	rejectedStream, writer := schema.Pipe[*schema.Message](1)
+	_ = writer.Send(nil, &adk.WillRetryError{ErrStr: "transient stream failure"})
+	writer.Close()
+	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Output: &adk.TypedAgentOutput[*schema.Message]{
+			MessageOutput: &adk.TypedMessageVariant[*schema.Message]{
+				IsStreaming:   true,
+				MessageStream: rejectedStream,
+				Role:          schema.Assistant,
+			},
+		},
+	})
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Output: &adk.TypedAgentOutput[*schema.Message]{
+			MessageOutput: &adk.TypedMessageVariant[*schema.Message]{
+				Message: schema.AssistantMessage("accepted response", nil),
+				Role:    schema.Assistant,
+			},
+		},
+	})
+	generator.Close()
+
+	outcome := collectProjectAssistantTurnEventsForTest(t, iter)
+	if !outcome.receivedOutput || outcome.result.Content != "accepted response" {
+		t.Fatalf("outcome = %#v, want accepted response after stream retry signal", outcome)
+	}
+}
+
+func collectProjectAssistantTurnEventsForTest(
+	t *testing.T,
+	iter *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]],
+) *projectEinoAssistantTurnOutcome {
+	t.Helper()
 	loop := adk.NewTurnLoop[projectAssistantTurnItem, *schema.Message](
 		adk.TurnLoopConfig[projectAssistantTurnItem, *schema.Message]{
 			GenInput: func(
@@ -325,9 +387,7 @@ func TestCollectProjectAssistantTurnEventsIgnoresWillRetryError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectProjectAssistantTurnEvents returned error: %v", err)
 	}
-	if !outcome.receivedOutput || outcome.result.Content != "accepted response" {
-		t.Fatalf("outcome = %#v, want accepted response after retry signal", outcome)
-	}
+	return outcome
 }
 
 func TestEinoAssistantEngineDoesNotUseToolSearchForSmallReadToolSet(t *testing.T) {
@@ -1864,6 +1924,10 @@ type retryingEinoChatModel struct {
 	content      string
 }
 
+type partialStreamFailureEinoChatModel struct {
+	calls int
+}
+
 func newRetryingProjectEinoAssistantEngine(chatModel einomodel.BaseChatModel) projectEinoAssistantEngine {
 	return projectEinoAssistantEngine{
 		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
@@ -1893,6 +1957,25 @@ func (m *retryingEinoChatModel) Stream(ctx context.Context, _ []*schema.Message,
 	return schema.StreamReaderFromArray([]*schema.Message{
 		schema.AssistantMessage(m.content, nil),
 	}), nil
+}
+
+func (m *partialStreamFailureEinoChatModel) Generate(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, io.ErrUnexpectedEOF
+}
+
+func (m *partialStreamFailureEinoChatModel) Stream(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.calls++
+	stream, writer := schema.Pipe[*schema.Message](2)
+	_ = writer.Send(schema.AssistantMessage("rejected partial response", nil), nil)
+	_ = writer.Send(nil, io.ErrUnexpectedEOF)
+	writer.Close()
+	return stream, nil
 }
 
 type capturingEinoChatModel struct {
