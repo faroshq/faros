@@ -81,6 +81,11 @@ Preserve assertions that Databricks guidance and discovery-failure guidance
 remain present. Remove builder-prompt expectations requiring `tool_search` or
 `select:<tool_name>`.
 
+Update `TestProjectAssistantToolRegistryListsLocalToolsInOrder` to include the
+already-registered `projectToolGetProjectCheckpoints` between
+`projectToolHydrateWorkspace` and `projectToolCheckProjectBuild`. This is the
+single pre-existing baseline failure and does not change production behavior.
+
 - [ ] **Step 2: Run focused tests and verify RED**
 
 Run:
