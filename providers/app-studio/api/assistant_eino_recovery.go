@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strings"
 	"syscall"
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
@@ -32,6 +33,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"google.golang.org/genai"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+)
+
+var projectEinoAssistantSerializedCookiePattern = regexp.MustCompile(
+	`(?i)\\?["']\b(?:set-cookie|cookie)\b\\?["'][ \t]*:[ \t]*\\?["']`,
 )
 
 var projectEinoAssistantSecretPatterns = []struct {
@@ -47,18 +52,6 @@ var projectEinoAssistantSecretPatterns = []struct {
 	{
 		pattern:     regexp.MustCompile(`(?i)(\bbearer[ \t]+)[^ \t\r\n,;]+`),
 		replacement: `${1}[REDACTED]`,
-	},
-	{
-		pattern: regexp.MustCompile(
-			`(?i)(\\"(?:set-cookie|cookie)\\"[ \t]*:[ \t]*)\\"[^\r\n]*?\\"([ \t]*[,}])`,
-		),
-		replacement: `${1}\"[REDACTED]\"${2}`,
-	},
-	{
-		pattern: regexp.MustCompile(
-			`(?i)(["']\b(?:set-cookie|cookie)\b["'][ \t]*:[ \t]*)(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')`,
-		),
-		replacement: `${1}"[REDACTED]"`,
 	},
 	{
 		pattern:     regexp.MustCompile(`(?i)(\b(?:set-cookie|cookie)\b[ \t]*:[ \t]*)[^\r\n]+`),
@@ -206,11 +199,124 @@ func projectEinoAssistantSafeErrorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	value := err.Error()
+	value := projectEinoAssistantRedactSerializedCookieValues(err.Error())
 	for _, pattern := range projectEinoAssistantSecretPatterns {
 		value = pattern.pattern.ReplaceAllString(value, pattern.replacement)
 	}
 	return truncateProjectToolInfo(value)
+}
+
+func projectEinoAssistantRedactSerializedCookieValues(value string) string {
+	var out strings.Builder
+	lastWrite := 0
+	searchStart := 0
+	for searchStart < len(value) {
+		match := projectEinoAssistantSerializedCookiePattern.FindStringIndex(value[searchStart:])
+		if match == nil {
+			break
+		}
+		contentStart := searchStart + match[1]
+		openingQuote := contentStart - 1
+		openingEscapeCount := projectEinoAssistantBackslashCountBefore(value, openingQuote)
+
+		closingQuote := -1
+		closingEscapeStart := -1
+		for i := contentStart; i < len(value); i++ {
+			if value[i] != value[openingQuote] {
+				continue
+			}
+			escapeCount := projectEinoAssistantBackslashCountBefore(value, i)
+			if !projectEinoAssistantSerializedQuoteCloses(openingEscapeCount, escapeCount) {
+				continue
+			}
+			if !projectEinoAssistantSerializedValueHasSafeSuffix(value, i, openingEscapeCount) {
+				continue
+			}
+			closingQuote = i
+			closingEscapeStart = i - escapeCount
+			break
+		}
+
+		out.WriteString(value[lastWrite:contentStart])
+		out.WriteString("[REDACTED]")
+		if closingQuote >= 0 {
+			lastWrite = closingEscapeStart
+			searchStart = closingQuote + 1
+			continue
+		}
+
+		lineEnd := len(value)
+		if relativeEnd := strings.IndexAny(value[contentStart:], "\r\n"); relativeEnd >= 0 {
+			lineEnd = contentStart + relativeEnd
+		}
+		lastWrite = lineEnd
+		searchStart = lineEnd
+	}
+	if lastWrite == 0 {
+		return value
+	}
+	out.WriteString(value[lastWrite:])
+	return out.String()
+}
+
+func projectEinoAssistantBackslashCountBefore(value string, index int) int {
+	count := 0
+	for i := index - 1; i >= 0 && value[i] == '\\'; i-- {
+		count++
+	}
+	return count
+}
+
+func projectEinoAssistantSerializedQuoteCloses(openingEscapeCount, candidateEscapeCount int) bool {
+	modulus := 2 * (openingEscapeCount + 1)
+	return candidateEscapeCount%modulus == openingEscapeCount
+}
+
+func projectEinoAssistantSerializedValueHasSafeSuffix(value string, closingQuote, escapeDepth int) bool {
+	index := projectEinoAssistantSkipHorizontalSpace(value, closingQuote+1)
+	if index >= len(value) {
+		return false
+	}
+	if value[index] == '}' {
+		return true
+	}
+	if value[index] != ',' {
+		return false
+	}
+
+	index = projectEinoAssistantSkipHorizontalSpace(value, index+1)
+	keyQuote := index + escapeDepth
+	if keyQuote >= len(value) {
+		return false
+	}
+	for i := index; i < keyQuote; i++ {
+		if value[i] != '\\' {
+			return false
+		}
+	}
+	quote := value[keyQuote]
+	if quote != '"' && quote != '\'' {
+		return false
+	}
+	for i := keyQuote + 1; i < len(value); i++ {
+		if value[i] != quote {
+			continue
+		}
+		escapeCount := projectEinoAssistantBackslashCountBefore(value, i)
+		if !projectEinoAssistantSerializedQuoteCloses(escapeDepth, escapeCount) {
+			continue
+		}
+		index = projectEinoAssistantSkipHorizontalSpace(value, i+1)
+		return index < len(value) && value[index] == ':'
+	}
+	return false
+}
+
+func projectEinoAssistantSkipHorizontalSpace(value string, index int) int {
+	for index < len(value) && (value[index] == ' ' || value[index] == '\t') {
+		index++
+	}
+	return index
 }
 
 func projectEinoAssistantPatchToolCallsMiddleware(

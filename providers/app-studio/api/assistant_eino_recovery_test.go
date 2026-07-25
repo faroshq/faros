@@ -156,6 +156,23 @@ func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
 			secret:      "escaped-quoted-cookie-super-secret",
 			wantContext: `\"status\":500`,
 		},
+		{
+			name:        "json cookie with escaped component before comma",
+			message:     `request failed: {"Cookie":"flavor=\"chocolate\", session=ordinary-tail-super-secret","status":500}`,
+			secret:      "ordinary-tail-super-secret",
+			wantContext: `"status":500`,
+		},
+		{
+			name:        "escaped json cookie with escaped component before comma",
+			message:     `request failed: {\"Cookie\":\"flavor=\\\"chocolate\\\", session=tail-super-secret\",\"status\":500}`,
+			secret:      "tail-super-secret",
+			wantContext: `\"status\":500`,
+		},
+		{
+			name:    "malformed json cookie without true close",
+			message: `request failed: {"Cookie":"flavor="chocolate", session=malformed-tail-super-secret`,
+			secret:  "malformed-tail-super-secret",
+		},
 	}
 
 	for _, tt := range tests {
@@ -175,6 +192,27 @@ func TestProjectEinoAssistantSafeErrorText(t *testing.T) {
 				t.Fatalf("safe error length = %d, want bounded by truncateProjectToolInfo", len(got))
 			}
 		})
+	}
+}
+
+func TestProjectEinoAssistantSafeErrorTextRedactsMultipleSerializedCookies(t *testing.T) {
+	err := errors.New(
+		`request failed: {"Cookie":"session=first-cookie-super-secret","status":500}` +
+			` and {\"Set-Cookie\":\"session=second-cookie-super-secret\",\"status\":200}`,
+	)
+	got := projectEinoAssistantSafeErrorText(err)
+	for _, secret := range []string{"first-cookie-super-secret", "second-cookie-super-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("safe error = %q, still contains secret %q", got, secret)
+		}
+	}
+	if strings.Count(got, "[REDACTED]") != 2 {
+		t.Fatalf("safe error = %q, want two redaction markers", got)
+	}
+	for _, context := range []string{`"status":500`, `\"status\":200`} {
+		if !strings.Contains(got, context) {
+			t.Fatalf("safe error = %q, want unrelated context %q preserved", got, context)
+		}
 	}
 }
 
