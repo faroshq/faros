@@ -60,6 +60,28 @@ type projectEinoAssistantToolsFactory func(
 	*projectEinoAssistantRunState,
 ) ([]einotool.BaseTool, error)
 
+type projectEinoAssistantInstructionAppendMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+}
+
+func projectEinoAssistantInstructionMiddleware() adk.ChatModelAgentMiddleware {
+	return &projectEinoAssistantInstructionAppendMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+	}
+}
+
+func (m *projectEinoAssistantInstructionAppendMiddleware) BeforeAgent(
+	ctx context.Context,
+	runCtx *adk.ChatModelAgentContext,
+) (context.Context, *adk.ChatModelAgentContext, error) {
+	if runCtx == nil {
+		return ctx, runCtx, nil
+	}
+	next := *runCtx
+	next.Instruction += "\n\n" + projectEinoAssistantDeepInstruction
+	return ctx, &next, nil
+}
+
 // NewEinoAssistantEngine returns the Eino-backed assistant engine. The App
 // Studio assistant uses Eino's ChatModelAgent as the only chat/tool execution
 // loop; App Studio adapters stay at model, tool, storage, and event boundaries.
@@ -173,6 +195,7 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 	if err != nil {
 		return nil, fmt.Errorf("create eino patch tool calls middleware: %w", err)
 	}
+	handlers = append(handlers, projectEinoAssistantInstructionMiddleware())
 	handlers = append(handlers, patchToolCallsMiddleware)
 	reductionMiddleware, err := projectEinoAssistantReductionMiddleware(ctx)
 	if err != nil {
@@ -216,7 +239,7 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		Name:                   "app-studio-project-assistant",
 		Description:            "Runs App Studio project assistant turns.",
 		ChatModel:              chatModel,
-		Instruction:            projectEinoAssistantDeepInstruction,
+		Instruction:            "",
 		ToolsConfig:            toolsConfig,
 		MaxIteration:           maxAssistantToolTurns,
 		WithoutWriteTodos:      !projectEinoAssistantTurnUsesDeepTodos(req.TurnPolicy),

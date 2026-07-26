@@ -53,6 +53,23 @@ func TestEinoAssistantEngineRequiresProject(t *testing.T) {
 	}
 }
 
+func TestProjectEinoAssistantInstructionMiddlewareRetainsBaseAndAppendsDelta(t *testing.T) {
+	middleware := projectEinoAssistantInstructionMiddleware()
+	runCtx := &adk.ChatModelAgentContext{Instruction: "Eino DeepAgent base instruction."}
+
+	_, got, err := middleware.BeforeAgent(context.Background(), runCtx)
+	if err != nil {
+		t.Fatalf("BeforeAgent returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("BeforeAgent returned nil run context")
+	}
+	want := "Eino DeepAgent base instruction.\n\n" + projectEinoAssistantDeepInstruction
+	if got.Instruction != want {
+		t.Fatalf("instruction = %q, want %q", got.Instruction, want)
+	}
+}
+
 func TestProjectEinoAssistantMaxIterationsExceededUsesSentinel(t *testing.T) {
 	if !projectEinoAssistantMaxIterationsExceeded(
 		fmt.Errorf("wrapped: %w", adk.ErrExceedMaxIterations),
