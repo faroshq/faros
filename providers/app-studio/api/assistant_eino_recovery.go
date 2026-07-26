@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -154,6 +155,7 @@ func projectEinoAssistantModelRetryConfig(
 				AdditionalOptions: []einomodel.Option{
 					einomodel.WithToolChoice(schema.ToolChoiceForced),
 				},
+				Backoff: -time.Nanosecond,
 			}
 		},
 	}

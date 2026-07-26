@@ -390,6 +390,7 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 		wantRetry    bool
 		wantReason   any
 		wantReminder bool
+		wantBackoff  time.Duration
 		canceled     bool
 	}{
 		{
@@ -402,6 +403,7 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			wantRetry:    true,
 			wantReason:   "incomplete phase progress: approval",
 			wantReminder: true,
+			wantBackoff:  -time.Nanosecond,
 		},
 		{
 			name: "tool call output is accepted",
@@ -453,6 +455,8 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			},
 			wantRetry:  true,
 			wantReason: "transient model provider failure",
+			// Zero preserves Eino's configured/default transient-error delay.
+			wantBackoff: 0,
 		},
 		{
 			name: "permanent provider error is accepted",
@@ -491,6 +495,9 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			if decision.RejectReason != tt.wantReason {
 				t.Fatalf("RejectReason = %#v, want %#v", decision.RejectReason, tt.wantReason)
 			}
+			if decision.Backoff != tt.wantBackoff {
+				t.Fatalf("Backoff = %s, want %s", decision.Backoff, tt.wantBackoff)
+			}
 			if !tt.wantReminder {
 				if decision.ModifiedInputMessages != nil || decision.PersistModifiedInputMessages || len(decision.AdditionalOptions) != 0 {
 					t.Fatalf("non-semantic decision = %#v, want no modified input or options", decision)
@@ -512,9 +519,6 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			}
 			if decision.PersistModifiedInputMessages {
 				t.Fatalf("PersistModifiedInputMessages = true, want false")
-			}
-			if decision.Backoff != 0*time.Second {
-				t.Fatalf("Backoff = %s, want zero", decision.Backoff)
 			}
 			options := einomodel.GetCommonOptions(nil, decision.AdditionalOptions...)
 			if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
