@@ -295,9 +295,12 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	}
 }
 
-func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalEdits(t *testing.T) {
+func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutationTools(t *testing.T) {
 	tools := projectEinoAssistantPhaseFactoryToolInfos(t)
 	inventoryNames := projectEinoAssistantPhaseToolNames(tools)
+	if !projectEinoAssistantPhaseToolNamesContain(inventoryNames, projectToolSelectTemplate) {
+		t.Fatalf("factory inventory = %#v, want %s represented in the real inventory", inventoryNames, projectToolSelectTemplate)
+	}
 	if !projectEinoAssistantPhaseToolNamesContain(inventoryNames, projectToolHydrateWorkspace) {
 		t.Fatalf("factory inventory = %#v, want %s represented in the real inventory", inventoryNames, projectToolHydrateWorkspace)
 	}
@@ -309,11 +312,13 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalEdits(t
 	}{
 		{
 			phase: projectEinoAssistantPhaseMutate,
-			want:  []string{projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir},
+			want: []string{
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir, projectToolSelectTemplate,
+			},
 		},
 		{
 			phase: projectEinoAssistantPhaseRepair,
-			want:  []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir},
+			want:  []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir, projectToolSelectTemplate},
 		},
 	} {
 		t.Run(string(tt.phase), func(t *testing.T) {
@@ -329,6 +334,12 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalEdits(t
 			}
 			for _, tool := range filtered {
 				risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(tool)
+				if ok && bundle == projectAssistantToolBundleInfrastructure {
+					t.Fatalf("%s exposed infrastructure tool %q from real factory inventory", tt.phase, tool.Name)
+				}
+				if ok && bundle == projectAssistantToolBundleWorkflow && tool.Name != projectToolSelectTemplate {
+					t.Fatalf("%s exposed non-bootstrap workflow tool %q from real factory inventory", tt.phase, tool.Name)
+				}
 				if !ok || risk != projectAssistantToolRiskWrite || bundle != projectAssistantToolBundleEdit {
 					continue
 				}
@@ -368,6 +379,33 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 			name:  "mutate rejects hydrate workspace",
 			phase: projectEinoAssistantPhaseMutate,
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolHydrateWorkspace, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		},
+		{
+			name:  "mutate allows canonical template bootstrap",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			want:  true,
+		},
+		{
+			name:  "mutate rejects namespaced template bootstrap",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+		},
+		{
+			name:  "mutate rejects template bootstrap with infrastructure bundle",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleInfrastructure),
+		},
+		{
+			name:  "repair allows canonical template bootstrap",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			want:  true,
+		},
+		{
+			name:  "repair rejects case template bootstrap lookalike",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo("SELECT_PROJECT_TEMPLATE", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
 		},
 		{
 			name:  "repair rejects namespaced mkdir",

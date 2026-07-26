@@ -427,6 +427,7 @@ func projectEinoAssistantPhaseAllowsTool(
 	if !ok {
 		return false
 	}
+	templateBootstrap := projectEinoAssistantPhaseTemplateBootstrapTool(tool.Name, risk, bundle)
 
 	switch phase {
 	case projectEinoAssistantPhaseApproval:
@@ -439,6 +440,7 @@ func projectEinoAssistantPhaseAllowsTool(
 	case projectEinoAssistantPhaseMutate:
 		return (projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
 			bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			templateBootstrap ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseVerify:
 		return tool.Name == projectToolVerifyDevelopmentRuntime &&
@@ -448,6 +450,7 @@ func projectEinoAssistantPhaseAllowsTool(
 		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
 			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
 				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			templateBootstrap ||
 			(bundle == projectAssistantToolBundleRuntime &&
 				(risk == projectAssistantToolRiskRead || risk == projectAssistantToolRiskRuntime)) ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
@@ -460,6 +463,18 @@ func projectEinoAssistantPhaseAllowsTool(
 	default:
 		return false
 	}
+}
+
+// Template selection is the one workflow/write exception because binding the
+// initial development template is the first mutation for a template-less app.
+func projectEinoAssistantPhaseTemplateBootstrapTool(
+	name string,
+	risk projectAssistantToolRisk,
+	bundle projectAssistantToolBundle,
+) bool {
+	return name == projectToolSelectTemplate &&
+		risk == projectAssistantToolRiskWrite &&
+		bundle == projectAssistantToolBundleWorkflow
 }
 
 func projectEinoAssistantPhaseCanonicalEditTool(name string) bool {

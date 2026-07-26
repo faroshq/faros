@@ -5,9 +5,9 @@
 `projectEinoAssistantPhaseAllowsTool` now makes the mutation lifecycle directional while retaining the existing tool metadata as the source of truth for ordinary tools.
 
 - Approval retains read, input, and plan tools plus discovery through `tool_search`.
-- Mutate allows only canonical `write_file`, `apply_patch`, and `mkdir` edits, `ask_follow_up`, and eligible `write_todos`.
+- Mutate allows canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection, `ask_follow_up`, and eligible `write_todos`.
 - Verify allows `verify_development_runtime` only.
-- Repair allows targeted workspace reads, canonical `write_file`, `apply_patch`, and `mkdir` edits, runtime tools, `ask_follow_up`, and eligible `write_todos`.
+- Repair allows targeted workspace reads, canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection, runtime tools, `ask_follow_up`, and eligible `write_todos`.
 - Commit allows `commit_project_files` only; report allows no tools.
 
 ## Test-first evidence
@@ -33,6 +33,14 @@ Review found that write-risk fallback metadata classified `hydrate_workspace` as
 Verifier and commit exposure now also requires an exact raw canonical name with the expected risk and bundle metadata. The hidden-tool wrapper preserves the raw tool name for that phase authorization check; existing argument, target-path, and operation authorization remains in the permission layer.
 
 The same focused and full API commands passed after this review fix.
+
+## Local E2E follow-up
+
+A local `neat-todo` run reached mutation without a bound development template. The prompt correctly makes template binding the first implementation step, but the narrowed phase hid `select_project_template`, forcing the assistant to hand the action back to the user.
+
+Mutate and repair now carry one documented workflow/write exception for the exact raw canonical `select_project_template` tool with its actual factory metadata. Real factory-inventory tests prove it is visible in both phases while `hydrate_workspace` remains hidden; namespaced/case lookalikes and wrong bundle metadata are rejected. Permission middleware continues to own automatic approval or user interruption for the operation.
+
+The focused phase suite and full API suite passed after the E2E follow-up.
 
 ## Scope and review
 
