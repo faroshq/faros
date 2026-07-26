@@ -579,9 +579,10 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 		result: `{"path":"src/App.tsx"}`,
 	}
 	tests := []struct {
-		name string
-		req  projectAssistantRunRequest
-		want bool
+		name      string
+		req       projectAssistantRunRequest
+		wantTodos bool
+		wantCalls int
 	}{
 		{
 			name: "multi-step implementation plan",
@@ -593,7 +594,8 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 					"implement the requested change",
 				}},
 			},
-			want: true,
+			wantTodos: true,
+			wantCalls: 2,
 		},
 		{
 			name: "one-step implementation plan",
@@ -604,6 +606,7 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 					"update the application title",
 				}},
 			},
+			wantCalls: 2,
 		},
 		{
 			name: "discussion turn",
@@ -611,6 +614,7 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 				Project:     projectWithRepository("demo-repo", "demo", "github"),
 				TurnProfile: projectAssistantTurnProfileDiscussion,
 			},
+			wantCalls: 1,
 		},
 	}
 
@@ -629,11 +633,11 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 			if _, err := engine.StreamProjectAssistant(context.Background(), tt.req); err != nil {
 				t.Fatalf("StreamProjectAssistant returned error: %v", err)
 			}
-			if len(chatModel.toolNames) != 1 {
-				t.Fatalf("model calls = %d, want one", len(chatModel.toolNames))
+			if len(chatModel.toolNames) != tt.wantCalls {
+				t.Fatalf("model calls = %d, want %d", len(chatModel.toolNames), tt.wantCalls)
 			}
-			if got := stringSliceContains(chatModel.toolNames[0], projectEinoAssistantWriteTodosTool); got != tt.want {
-				t.Fatalf("visible tools = %#v, write_todos present = %t, want %t", chatModel.toolNames[0], got, tt.want)
+			if got := stringSliceContains(chatModel.toolNames[0], projectEinoAssistantWriteTodosTool); got != tt.wantTodos {
+				t.Fatalf("visible tools = %#v, write_todos present = %t, want %t", chatModel.toolNames[0], got, tt.wantTodos)
 			}
 		})
 	}
@@ -658,8 +662,8 @@ func TestEinoAssistantEngineDeepPhaseRejectsHiddenWriteTodos(t *testing.T) {
 	if chatModel.todosWritten {
 		t.Fatal("hidden write_todos call updated the session outside a multi-step approved plan")
 	}
-	if len(chatModel.inputs) != 2 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-todos", "Tool call denied") {
-		t.Fatalf("model inputs = %#v, want denied hidden write_todos result", chatModel.inputs)
+	if len(chatModel.inputs) != 3 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-todos", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
+		t.Fatalf("model inputs = %#v, want denied hidden write_todos result and one phase-progress retry", chatModel.inputs)
 	}
 }
 
@@ -694,8 +698,8 @@ func TestEinoAssistantEngineDeepPhaseRejectsHiddenRepeatedPlanWithoutWideningGra
 	if _, err := engine.StreamProjectAssistant(context.Background(), req); err != nil {
 		t.Fatalf("StreamProjectAssistant returned error: %v", err)
 	}
-	if len(chatModel.inputs) != 2 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-plan", "Tool call denied") {
-		t.Fatalf("model inputs = %#v, want denied hidden repeated plan result", chatModel.inputs)
+	if len(chatModel.inputs) != 3 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-plan", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
+		t.Fatalf("model inputs = %#v, want denied hidden repeated plan result and one phase-progress retry", chatModel.inputs)
 	}
 	if runState == nil {
 		t.Fatal("assistant run state was not captured")
@@ -741,8 +745,8 @@ func TestEinoAssistantEngineDeepPhaseHidesApprovalAfterApproval(t *testing.T) {
 	}, checkpoint); err != nil {
 		t.Fatalf("ResumeProjectAssistant returned error: %v", err)
 	}
-	if len(chatModel.toolNames) != 2 {
-		t.Fatalf("model calls = %d, want plan and post-approval calls", len(chatModel.toolNames))
+	if len(chatModel.toolNames) != 3 {
+		t.Fatalf("model calls = %d, want plan, post-approval retry, and accepted bounded response", len(chatModel.toolNames))
 	}
 	if !stringSliceContains(chatModel.toolNames[0], projectToolRequestProjectPlanApproval) {
 		t.Fatalf("initial tools = %#v, want plan approval", chatModel.toolNames[0])
@@ -784,13 +788,15 @@ func TestEinoAssistantEngineDeepPhasePreservesTerminalPhaseAcrossReductionAfterS
 		name            string
 		initialCreation bool
 		wantTools       []string
+		wantCalls       int
 	}{
-		{name: "commit", wantTools: []string{projectToolCommitProjectFiles}},
-		{name: "initial creation report", initialCreation: true},
+		{name: "commit", wantTools: []string{projectToolCommitProjectFiles}, wantCalls: 4},
+		{name: "initial creation report", initialCreation: true, wantCalls: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
+			messages := store.NewMemoryStore()
+			server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 			chatModel := &writeVerifyThenReportEinoChatModel{writeContent: largeSource}
 			var runState *projectEinoAssistantRunState
 			engine := projectEinoAssistantEngine{
@@ -822,14 +828,36 @@ func TestEinoAssistantEngineDeepPhasePreservesTerminalPhaseAcrossReductionAfterS
 				}
 			}
 
-			if _, err := engine.StreamProjectAssistant(context.Background(), req); err != nil {
-				t.Fatalf("StreamProjectAssistant returned error: %v", err)
+			_, err := engine.StreamProjectAssistant(context.Background(), req)
+			if tt.initialCreation {
+				if err != nil {
+					t.Fatalf("StreamProjectAssistant returned error: %v", err)
+				}
+			} else {
+				var permissionErr *projectAssistantPermissionRequiredError
+				if !errors.As(err, &permissionErr) || permissionErr.ToolName != projectToolCommitProjectFiles {
+					t.Fatalf("StreamProjectAssistant error = %v, want commit permission request", err)
+				}
+				run, getErr := messages.GetAssistantRun(context.Background(), req.MessageScope, permissionErr.RunID)
+				if getErr != nil {
+					t.Fatalf("GetAssistantRun returned error: %v", getErr)
+				}
+				var checkpoint projectAssistantCheckpointState
+				if unmarshalErr := json.Unmarshal(run.Checkpoint, &checkpoint); unmarshalErr != nil {
+					t.Fatalf("decode checkpoint returned error: %v", unmarshalErr)
+				}
+				if _, resumeErr := engine.ResumeProjectAssistant(context.Background(), req, projectAssistantResumeRequest{
+					RequestID: permissionErr.RequestID,
+					Decision:  string(projectAssistantPermissionAllow),
+				}, checkpoint); resumeErr != nil {
+					t.Fatalf("ResumeProjectAssistant returned error: %v", resumeErr)
+				}
 			}
-			if len(chatModel.toolNames) != 3 {
-				t.Fatalf("model calls = %d, want write, verify, and terminal-phase report", len(chatModel.toolNames))
+			if len(chatModel.toolNames) != tt.wantCalls {
+				t.Fatalf("model calls = %d, want write, verify, required commit when applicable, and terminal-phase report", len(chatModel.toolNames))
 			}
-			if len(chatModel.inputs) != 3 {
-				t.Fatalf("model inputs = %d, want write, verify, and post-reduction calls", len(chatModel.inputs))
+			if len(chatModel.inputs) != tt.wantCalls {
+				t.Fatalf("model inputs = %d, want write, verify, required commit when applicable, and terminal-phase report", len(chatModel.inputs))
 			}
 			if einoMessagesContainToolArguments(chatModel.inputs[2], largeSource) {
 				t.Fatal("post-verification model input retained the large workspace mutation payload")
@@ -1707,8 +1735,8 @@ func TestEinoAssistantEngineRequestsPermissionForDirectWriteTool(t *testing.T) {
 	if writeCompletions != 1 {
 		t.Fatalf("write completions = %d, want approved write to resume once", writeCompletions)
 	}
-	if len(chatModel.inputs) != 2 {
-		t.Fatalf("model calls = %d, want initial write request and one post-approval response", len(chatModel.inputs))
+	if len(chatModel.inputs) != 3 {
+		t.Fatalf("model calls = %d, want initial write request, one semantic retry, and accepted bounded response", len(chatModel.inputs))
 	}
 }
 
@@ -2988,6 +3016,18 @@ func (m *writeVerifyThenReportEinoChatModel) Generate(ctx context.Context, input
 				Arguments: `{}`,
 			},
 		}}), nil
+	case 3:
+		if stringSliceContains(m.toolNames[2], projectToolCommitProjectFiles) {
+			return schema.AssistantMessage("", []schema.ToolCall{{
+				ID:   "call-commit",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      projectToolCommitProjectFiles,
+					Arguments: `{"repositoryRef":"demo-repo","paths":["src/App.tsx"],"message":"Verify application change"}`,
+				},
+			}}), nil
+		}
+		return schema.AssistantMessage("verification succeeded", nil), nil
 	default:
 		return schema.AssistantMessage("verification succeeded", nil), nil
 	}

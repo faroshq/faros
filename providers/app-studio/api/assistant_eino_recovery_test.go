@@ -22,9 +22,11 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
+	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -373,29 +375,152 @@ func TestProjectEinoAssistantShouldRetryModelError(t *testing.T) {
 }
 
 func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
-	config := projectEinoAssistantModelRetryConfig()
+	config := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{
+		TurnProfile: projectAssistantTurnProfileImplementation,
+	}, newProjectEinoAssistantRunState())
 	if config.MaxRetries != 2 {
 		t.Fatalf("MaxRetries = %d, want 2", config.MaxRetries)
 	}
 
-	retry := config.ShouldRetry(context.Background(), &adk.RetryContext{Err: io.ErrUnexpectedEOF})
-	if !retry.Retry {
-		t.Fatalf("retryable decision = %#v, want retry", retry)
-	}
-	if retry.RejectReason != "transient model provider failure" {
-		t.Fatalf("RejectReason = %#v, want transient model provider failure", retry.RejectReason)
+	input := []*schema.Message{schema.UserMessage("Build the app")}
+	tests := []struct {
+		name         string
+		req          projectAssistantRunRequest
+		retryCtx     *adk.RetryContext
+		wantRetry    bool
+		wantReason   any
+		wantReminder bool
+		canceled     bool
+	}{
+		{
+			name: "approval prose retries for required phase progress",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt:  1,
+				InputMessages: input,
+				OutputMessage: schema.AssistantMessage("I have reviewed the requested work.", nil),
+			},
+			wantRetry:    true,
+			wantReason:   "incomplete phase progress: approval",
+			wantReminder: true,
+		},
+		{
+			name: "tool call output is accepted",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt:  1,
+				InputMessages: input,
+				OutputMessage: schema.AssistantMessage("", []schema.ToolCall{{
+					ID:       "call-plan",
+					Function: schema.FunctionCall{Name: projectToolRequestProjectPlanApproval},
+				}}),
+			},
+		},
+		{
+			name: "discussion prose is accepted",
+			req: projectAssistantRunRequest{
+				TurnProfile: projectAssistantTurnProfileDiscussion,
+			},
+			retryCtx: &adk.RetryContext{
+				RetryAttempt:  1,
+				InputMessages: input,
+				OutputMessage: schema.AssistantMessage("Here is the design tradeoff.", nil),
+			},
+		},
+		{
+			name: "report prose is accepted",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt: 1,
+				InputMessages: append(append([]*schema.Message{}, input...), schema.ToolMessage(
+					"committed",
+					"call-commit",
+					schema.WithToolName(projectToolCommitProjectFiles),
+				)),
+				OutputMessage: schema.AssistantMessage("The implementation is complete.", nil),
+			},
+		},
+		{
+			name: "second semantic retry attempt is accepted",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt:  2,
+				InputMessages: input,
+				OutputMessage: schema.AssistantMessage("I have reviewed the requested work.", nil),
+			},
+		},
+		{
+			name: "transient provider error remains retryable",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt: 1,
+				Err:          io.ErrUnexpectedEOF,
+			},
+			wantRetry:  true,
+			wantReason: "transient model provider failure",
+		},
+		{
+			name: "permanent provider error is accepted",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt: 1,
+				Err:          errors.New("provider failed"),
+			},
+		},
+		{
+			name: "canceled context is accepted",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt: 1,
+				Err:          io.ErrUnexpectedEOF,
+			},
+			canceled: true,
+		},
 	}
 
-	permanent := config.ShouldRetry(context.Background(), &adk.RetryContext{Err: errors.New("provider failed")})
-	if permanent.Retry {
-		t.Fatalf("permanent decision = %#v, want no retry", permanent)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.req
+			if req.TurnProfile == "" {
+				req.TurnProfile = projectAssistantTurnProfileImplementation
+			}
+			config := projectEinoAssistantModelRetryConfig(req, newProjectEinoAssistantRunState())
+			ctx := context.Background()
+			if tt.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			decision := config.ShouldRetry(ctx, tt.retryCtx)
+			if decision.Retry != tt.wantRetry {
+				t.Fatalf("Retry = %t, want %t (decision %#v)", decision.Retry, tt.wantRetry, decision)
+			}
+			if decision.RejectReason != tt.wantReason {
+				t.Fatalf("RejectReason = %#v, want %#v", decision.RejectReason, tt.wantReason)
+			}
+			if !tt.wantReminder {
+				if decision.ModifiedInputMessages != nil || decision.PersistModifiedInputMessages || len(decision.AdditionalOptions) != 0 {
+					t.Fatalf("non-semantic decision = %#v, want no modified input or options", decision)
+				}
+				return
+			}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	canceled := config.ShouldRetry(ctx, &adk.RetryContext{Err: io.ErrUnexpectedEOF})
-	if canceled.Retry {
-		t.Fatalf("canceled decision = %#v, want no retry", canceled)
+			if len(decision.ModifiedInputMessages) != len(input)+1 {
+				t.Fatalf("ModifiedInputMessages = %#v, want original input plus reminder", decision.ModifiedInputMessages)
+			}
+			for i := range input {
+				if decision.ModifiedInputMessages[i] != input[i] {
+					t.Fatalf("ModifiedInputMessages[%d] = %#v, want original input %#v", i, decision.ModifiedInputMessages[i], input[i])
+				}
+			}
+			reminder := decision.ModifiedInputMessages[len(input)]
+			if reminder.Role != schema.System || !strings.Contains(reminder.Content, "approval") || !strings.Contains(reminder.Content, projectToolRequestProjectPlanApproval) {
+				t.Fatalf("reminder = %#v, want phase-specific approval action", reminder)
+			}
+			if decision.PersistModifiedInputMessages {
+				t.Fatalf("PersistModifiedInputMessages = true, want false")
+			}
+			if decision.Backoff != 0*time.Second {
+				t.Fatalf("Backoff = %s, want zero", decision.Backoff)
+			}
+			options := einomodel.GetCommonOptions(nil, decision.AdditionalOptions...)
+			if options.ToolChoice == nil || *options.ToolChoice != schema.ToolChoiceForced {
+				t.Fatalf("AdditionalOptions = %#v, want forced tool choice", decision.AdditionalOptions)
+			}
+		})
 	}
 }
 

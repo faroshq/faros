@@ -287,6 +287,8 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	}
 	model := &repositoryFlowEinoChatModel{Steps: []repositoryFlowEinoModelStep{{
 		Message: einoschema.AssistantMessage("Ready.", nil),
+	}, {
+		Message: einoschema.AssistantMessage("Ready.", nil),
 	}}}
 	setProjectAssistantModelForTest(server, model)
 
@@ -303,8 +305,8 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	if reply != "Ready." {
 		t.Fatalf("reply = %q, want Ready.", reply)
 	}
-	if len(model.Inputs) != 1 {
-		t.Fatalf("Eino model request count = %d, want 1", len(model.Inputs))
+	if len(model.Inputs) != 2 {
+		t.Fatalf("Eino model request count = %d, want one bounded semantic retry", len(model.Inputs))
 	}
 	var joined string
 	for _, msg := range model.Inputs[0].Messages {
@@ -1856,6 +1858,7 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 			},
 		}})},
 		{Message: einoschema.AssistantMessage("Thanks, I can build that.", nil)},
+		{Message: einoschema.AssistantMessage("Thanks, I can build that.", nil)},
 	}}
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
@@ -2794,6 +2797,7 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 				}
 			},
 		},
+		{Message: einoschema.AssistantMessage("I wrote src/App.tsx after approval.", nil)},
 	}}
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
@@ -2851,8 +2855,8 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 	if resp.AssistantMessage == nil || resp.AssistantMessage.Content != "I wrote src/App.tsx after approval." {
 		t.Fatalf("assistant message = %#v, want continuation response", resp.AssistantMessage)
 	}
-	if len(model.Inputs) != 2 {
-		t.Fatalf("Eino model request count = %d, want initial request plus resumed continuation", len(model.Inputs))
+	if len(model.Inputs) != 3 {
+		t.Fatalf("Eino model request count = %d, want initial request plus bounded resumed retry", len(model.Inputs))
 	}
 	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/App.tsx"})
 	if err != nil {
@@ -2994,6 +2998,10 @@ func TestGenerateProjectAssistantStreamRejectsUnverifiedCommitProjectFiles(t *te
 				Arguments: `{"repositoryRef":"demo-repo","paths":["index.html"],"message":"Initial app"}`,
 			},
 		}}),
+	}, {
+		Message: einoschema.AssistantMessage("Commit is unavailable until verification succeeds.", nil),
+	}, {
+		Message: einoschema.AssistantMessage("Commit is unavailable until verification succeeds.", nil),
 	}}}
 	_, requests, err := runProjectAssistantStreamWithModel(t, model, mcp.URL)
 	if err != nil {
@@ -3002,8 +3010,8 @@ func TestGenerateProjectAssistantStreamRejectsUnverifiedCommitProjectFiles(t *te
 	if commitCalls != 0 {
 		t.Fatalf("commit call count = %d, want unverified commit denied before execution", commitCalls)
 	}
-	if len(requests) != 2 {
-		t.Fatalf("LLM request count = %d, want denial result followed by a model response", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("LLM request count = %d, want denial result plus one bounded semantic retry", len(requests))
 	}
 }
 

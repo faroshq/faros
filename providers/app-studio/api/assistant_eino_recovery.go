@@ -28,6 +28,7 @@ import (
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/patchtoolcalls"
+	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -110,24 +111,71 @@ func projectEinoAssistantRetryableHTTPStatus(status int) bool {
 		(status >= 500 && status <= 599)
 }
 
-func projectEinoAssistantModelRetryConfig() *adk.ModelRetryConfig {
+func projectEinoAssistantModelRetryConfig(
+	req projectAssistantRunRequest,
+	runState *projectEinoAssistantRunState,
+) *adk.ModelRetryConfig {
 	return &adk.ModelRetryConfig{
 		MaxRetries: 2,
 		ShouldRetry: func(
 			ctx context.Context,
 			retryCtx *adk.RetryContext,
 		) *adk.RetryDecision {
-			if retryCtx == nil || ctx.Err() != nil ||
-				retryCtx.OutputMessage != nil ||
-				!projectEinoAssistantShouldRetryModelError(retryCtx.Err) {
+			if retryCtx == nil || ctx.Err() != nil {
 				return &adk.RetryDecision{}
 			}
+			if retryCtx.OutputMessage == nil {
+				if !projectEinoAssistantShouldRetryModelError(retryCtx.Err) {
+					return &adk.RetryDecision{}
+				}
+				return &adk.RetryDecision{
+					Retry:        true,
+					RejectReason: "transient model provider failure",
+				}
+			}
+			if retryCtx.Err != nil ||
+				len(retryCtx.OutputMessage.ToolCalls) > 0 ||
+				!projectEinoAssistantPhaseLifecycleApplies(req) ||
+				retryCtx.RetryAttempt != 1 {
+				return &adk.RetryDecision{}
+			}
+			phase := projectEinoAssistantPhaseForState(req, runState, &adk.ChatModelAgentState{
+				Messages: retryCtx.InputMessages,
+			})
+			if phase == projectEinoAssistantPhaseReport {
+				return &adk.RetryDecision{}
+			}
+			messages := append([]*schema.Message{}, retryCtx.InputMessages...)
+			messages = append(messages, schema.SystemMessage(projectEinoAssistantPhaseProgressReminder(phase)))
 			return &adk.RetryDecision{
-				Retry:        true,
-				RejectReason: "transient model provider failure",
+				Retry:                 true,
+				RejectReason:          "incomplete phase progress: " + string(phase),
+				ModifiedInputMessages: messages,
+				AdditionalOptions: []einomodel.Option{
+					einomodel.WithToolChoice(schema.ToolChoiceForced),
+				},
 			}
 		},
 	}
+}
+
+func projectEinoAssistantPhaseProgressReminder(phase projectEinoAssistantPhase) string {
+	var nextAction string
+	switch phase {
+	case projectEinoAssistantPhaseApproval:
+		nextAction = "call " + projectToolRequestProjectPlanApproval + " to present the plan for approval"
+	case projectEinoAssistantPhaseMutate:
+		nextAction = "call an available mutation tool to make the approved change"
+	case projectEinoAssistantPhaseVerify:
+		nextAction = "call " + projectToolVerifyDevelopmentRuntime + " to verify the change"
+	case projectEinoAssistantPhaseRepair:
+		nextAction = "call an available repair tool to correct the failed verification"
+	case projectEinoAssistantPhaseCommit:
+		nextAction = "call " + projectToolCommitProjectFiles + " to commit the verified change"
+	default:
+		nextAction = "call an available tool that advances the work"
+	}
+	return "The current " + string(phase) + " phase requires progress: " + nextAction + " before responding with prose."
 }
 
 func projectEinoAssistantWillRetry(err error) bool {

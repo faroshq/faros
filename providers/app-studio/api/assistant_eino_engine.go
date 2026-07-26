@@ -222,7 +222,7 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		WithoutWriteTodos:      !projectEinoAssistantTurnUsesDeepTodos(req.TurnPolicy),
 		WithoutGeneralSubAgent: true,
 		Handlers:               handlers,
-		ModelRetryConfig:       projectEinoAssistantModelRetryConfig(),
+		ModelRetryConfig:       projectEinoAssistantModelRetryConfig(req, runState),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create eino assistant agent: %w", err)
