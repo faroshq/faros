@@ -18,7 +18,10 @@ package api
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -51,6 +54,12 @@ func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
 			approved: true,
 			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`)},
 			want:     projectEinoAssistantPhaseVerify,
+		},
+		{
+			name:     "denied workspace write permits terminal report",
+			approved: true,
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolWriteFile, "Tool call failed: permission denied: denied by user")},
+			want:     projectEinoAssistantPhaseReport,
 		},
 		{
 			name:     "non-ready verification requires repair",
@@ -93,6 +102,51 @@ func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
 			want: projectEinoAssistantPhaseReport,
 		},
 		{
+			name:     "successful direct runtime action reports completion",
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolRestartRuntime, `{"status":"restarted"}`)},
+			want:     projectEinoAssistantPhaseReport,
+		},
+		{
+			name:     "denied direct infrastructure action reports completion",
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolInfrastructureProvision, "Tool call failed: permission denied: denied by user")},
+			want:     projectEinoAssistantPhaseReport,
+		},
+		{
+			name:     "denied template selection reports completion",
+			approved: true,
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolSelectTemplate, "Tool call failed: permission denied: denied by user")},
+			want:     projectEinoAssistantPhaseReport,
+		},
+		{
+			name:     "successful standalone template selection reports completion",
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolSelectTemplate, `{"template":"application"}`)},
+			want:     projectEinoAssistantPhaseReport,
+		},
+		{
+			name:     "successful template selection with persisted plan reports completion",
+			approved: true,
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolSelectTemplate, `{"template":"application"}`)},
+			want:     projectEinoAssistantPhaseReport,
+		},
+		{
+			name:     "successful initial template selection continues source mutation",
+			approved: true,
+			req: projectAssistantRunRequest{
+				InitialApprovedPlan: &projectAssistantApprovedPlan{Steps: []string{"create project"}},
+			},
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolSelectTemplate, `{"template":"application"}`)},
+			want:     projectEinoAssistantPhaseMutate,
+		},
+		{
+			name:     "direct action after source write still requires verification",
+			approved: true,
+			messages: []*schema.Message{
+				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
+				projectEinoAssistantPhaseToolResult(projectToolRestartRuntime, `{"status":"restarted"}`),
+			},
+			want: projectEinoAssistantPhaseVerify,
+		},
+		{
 			name:     "later write invalidates earlier verification",
 			approved: true,
 			messages: []*schema.Message{
@@ -128,6 +182,119 @@ func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
 	}
 }
 
+func TestProjectEinoAssistantPhaseAllowsDirectOperationalActions(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase projectEinoAssistantPhase
+		tool  *schema.ToolInfo
+		want  bool
+	}{
+		{
+			name:  "approval allows restart runtime",
+			phase: projectEinoAssistantPhaseApproval,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "mutate allows set runtime environment",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolSetRuntimeEnv, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "mutate allows promotion",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolPromoteProject, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "mutate allows build retry",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolRebuildProject, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "mutate allows infrastructure provision",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolInfrastructureProvision, projectAssistantToolRiskRuntime, projectAssistantToolBundleInfrastructure),
+			want:  true,
+		},
+		{
+			name:  "approval allows runtime verification before action",
+			phase: projectEinoAssistantPhaseApproval,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "mutate allows build status before promotion",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolCheckProjectBuild, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+			want:  true,
+		},
+		{
+			name:  "mutate allows template discovery before provisioning",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolInfrastructureListTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleInfrastructure),
+			want:  true,
+		},
+		{
+			name:  "mutate rejects namespaced runtime lookalike",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__restart_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "mutate rejects wrong runtime metadata",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskWrite, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "mutate rejects action mislabeled as workspace read",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		},
+		{
+			name:  "approval rejects namespaced action mislabeled as workspace read",
+			phase: projectEinoAssistantPhaseApproval,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__restart_runtime", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		},
+		{
+			name:  "mutate rejects arbitrary runtime tool",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo("delete_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "repair rejects namespaced runtime action",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__restart_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "repair rejects arbitrary runtime action",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo("delete_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "repair allows canonical runtime action",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "repair allows bounded runtime read",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, false, tt.tool); got != tt.want {
+				t.Fatalf("allows %q = %t, want %t", tt.tool.Name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProjectEinoAssistantPhasePreservesInitialCreationReportAfterResume(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	runState.ApprovePlan(projectAssistantInitialCreationPlan())
@@ -149,8 +316,8 @@ func TestProjectEinoAssistantPhaseIgnoresUnsuccessfulToolResults(t *testing.T) {
 		want     projectEinoAssistantPhase
 	}{
 		{
-			name:     "denied write does not require verification",
-			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolWriteFile, "Tool call denied: user declined")},
+			name:     "phase-unavailable write remains actionable",
+			messages: []*schema.Message{projectEinoAssistantPhaseToolResult(projectToolWriteFile, "Tool call denied: write_file is unavailable in the current assistant phase")},
 			want:     projectEinoAssistantPhaseMutate,
 		},
 		{
@@ -212,27 +379,36 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 		want         []string
 	}{
 		{
-			name: "approval exposes workspace reads input and plan tools",
+			name: "approval exposes reads plans and direct operational actions",
 			want: []string{
 				"read_workspace", projectToolListProjectFiles, projectToolSearchProjectFiles,
 				"ask_for_input", projectToolAskFollowUp, projectToolRequestProjectPlanApproval,
-				projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectEinoAssistantToolSearchTool,
+				projectToolPlanProjectChanges, projectToolCheckProjectReadiness,
+				projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolSetRuntimeEnv,
+				projectToolVerifyDevelopmentRuntime, projectEinoAssistantToolSearchTool,
 			},
 		},
 		{
-			name:         "mutate exposes only edits follow-up and multi-step todos",
+			name:         "mutate exposes source and direct operational tools",
 			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
 			want: []string{
-				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectEinoAssistantWriteTodosTool,
+				"read_workspace", projectToolListProjectFiles, projectToolSearchProjectFiles,
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch,
+				projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolSetRuntimeEnv,
+				projectToolVerifyDevelopmentRuntime, projectEinoAssistantWriteTodosTool,
 			},
 		},
 		{
-			name:         "verify exposes only the runtime verifier",
-			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"edit"}},
+			name:         "verify keeps reads and edits available until the model verifies",
+			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
 			messages: []*schema.Message{
 				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
 			},
-			want: []string{projectToolVerifyDevelopmentRuntime},
+			want: []string{
+				"read_workspace", projectToolListProjectFiles, projectToolSearchProjectFiles,
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch,
+				projectToolVerifyDevelopmentRuntime, projectEinoAssistantWriteTodosTool,
+			},
 		},
 		{
 			name:         "repair exposes targeted reads edits runtime tools follow-up and todos",
@@ -296,7 +472,7 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	}
 }
 
-func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutationTools(t *testing.T) {
+func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsCanonicalSourceAndOperationalTools(t *testing.T) {
 	tools := projectEinoAssistantPhaseFactoryToolInfos(t)
 	inventoryNames := projectEinoAssistantPhaseToolNames(tools)
 	if !projectEinoAssistantPhaseToolNamesContain(inventoryNames, projectToolSelectTemplate) {
@@ -314,7 +490,11 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutatio
 		{
 			phase: projectEinoAssistantPhaseMutate,
 			want: []string{
-				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir, projectToolSelectTemplate,
+				projectToolListProjectFiles, projectToolReadProjectFile, projectToolSearchProjectFiles,
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir,
+				projectToolInspectDevelopmentTemplates, projectToolSelectTemplate,
+				projectToolGetCheckpoints, projectToolVerifyDevelopmentRuntime, projectToolCheckProjectBuild,
+				projectToolRestartRuntime, projectToolSetRuntimeEnv, projectToolPromoteProject, projectToolRebuildProject,
 			},
 		},
 		{
@@ -335,24 +515,20 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutatio
 			}
 			for _, tool := range filtered {
 				risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(tool)
-				if ok && bundle == projectAssistantToolBundleInfrastructure {
-					t.Fatalf("%s exposed infrastructure tool %q from real factory inventory", tt.phase, tool.Name)
+				if !ok {
+					t.Fatalf("%s exposed tool %q without phase metadata", tt.phase, tool.Name)
 				}
-				if ok && bundle == projectAssistantToolBundleWorkflow && tool.Name != projectToolSelectTemplate {
-					t.Fatalf("%s exposed non-bootstrap workflow tool %q from real factory inventory", tt.phase, tool.Name)
-				}
-				if !ok || risk != projectAssistantToolRiskWrite || bundle != projectAssistantToolBundleEdit {
+				if (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
+					(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+						bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+					projectEinoAssistantPhaseTemplateBootstrapTool(tool.Name, risk, bundle, true) ||
+					projectEinoAssistantPhaseTemplateInspectionTool(tool.Name, risk, bundle, true) ||
+					projectEinoAssistantPhaseDirectActionTool(tool.Name, risk, bundle) ||
+					projectEinoAssistantPhaseOperationalReadTool(tool.Name, risk, bundle) ||
+					(tool.Name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput) {
 					continue
 				}
-				switch tool.Name {
-				case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
-				default:
-					t.Fatalf("%s exposed noncanonical edit tool %q from real factory inventory", tt.phase, tool.Name)
-				}
-			}
-			if tt.phase == projectEinoAssistantPhaseMutate &&
-				!projectEinoAssistantPhaseStringSlicesEqual(got, tt.want) {
-				t.Fatalf("mutate tools = %#v, want only %#v", got, tt.want)
+				t.Fatalf("%s exposed unexpected tool %q with risk %q bundle %q", tt.phase, tool.Name, risk, bundle)
 			}
 		})
 	}
@@ -376,6 +552,9 @@ func TestProjectEinoAssistantPhaseMiddlewareReevaluatesTemplateBootstrapEligibil
 	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseToolNamesContain(got, projectToolSelectTemplate) {
 		t.Fatalf("template-less tools = %#v, want %s visible", got, projectToolSelectTemplate)
 	}
+	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseToolNamesContain(got, projectToolInspectDevelopmentTemplates) {
+		t.Fatalf("template-less tools = %#v, want %s visible", got, projectToolInspectDevelopmentTemplates)
+	}
 
 	refreshProjectToolSnapshot(project, &aiv1alpha1.Project{
 		Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
@@ -387,6 +566,9 @@ func TestProjectEinoAssistantPhaseMiddlewareReevaluatesTemplateBootstrapEligibil
 	got := projectEinoAssistantPhaseToolNames(state.ToolInfos)
 	if projectEinoAssistantPhaseToolNamesContain(got, projectToolSelectTemplate) {
 		t.Fatalf("bound-project tools = %#v, want %s hidden after live project refresh", got, projectToolSelectTemplate)
+	}
+	if projectEinoAssistantPhaseToolNamesContain(got, projectToolInspectDevelopmentTemplates) {
+		t.Fatalf("bound-project tools = %#v, want %s hidden after live project refresh", got, projectToolInspectDevelopmentTemplates)
 	}
 	if projectEinoAssistantPhaseToolNamesContain(got, projectToolHydrateWorkspace) {
 		t.Fatalf("bound-project tools = %#v, want %s still hidden", got, projectToolHydrateWorkspace)
@@ -500,6 +682,61 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 			want:                     true,
 		},
 		{
+			name:                     "approval allows canonical template bootstrap to request permission",
+			phase:                    projectEinoAssistantPhaseApproval,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			want:                     true,
+		},
+		{
+			name:                     "approval rejects canonical template bootstrap mislabeled as read",
+			phase:                    projectEinoAssistantPhaseApproval,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		},
+		{
+			name:                     "approval rejects namespaced template bootstrap mislabeled as read",
+			phase:                    projectEinoAssistantPhaseApproval,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		},
+		{
+			name:                     "mutate allows template inspection for template-less project",
+			phase:                    projectEinoAssistantPhaseMutate,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+			want:                     true,
+		},
+		{
+			name:  "mutate rejects template inspection for bound project",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		},
+		{
+			name:                     "mutate rejects template inspection with wrong bundle",
+			phase:                    projectEinoAssistantPhaseMutate,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleInfrastructure),
+		},
+		{
+			name:                     "approval allows template inspection for template-less project",
+			phase:                    projectEinoAssistantPhaseApproval,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+			want:                     true,
+		},
+		{
+			name:  "approval rejects template inspection for bound project",
+			phase: projectEinoAssistantPhaseApproval,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		},
+		{
+			name:                     "approval rejects namespaced template inspection",
+			phase:                    projectEinoAssistantPhaseApproval,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo("provider__inspect_development_templates", projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		},
+		{
 			name:  "mutate rejects canonical template bootstrap for bound project",
 			phase: projectEinoAssistantPhaseMutate,
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
@@ -543,6 +780,18 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 			name:  "verify allows canonical verifier metadata",
 			phase: projectEinoAssistantPhaseVerify,
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "verify allows another canonical edit before verification",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+			want:  true,
+		},
+		{
+			name:  "verify allows workspace reads before another edit",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
 			want:  true,
 		},
 		{
@@ -596,6 +845,191 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 	}
 }
 
+func TestProjectEinoAssistantPhaseFiltersTemplateToolsForReadOnlyProfiles(t *testing.T) {
+	tools := []*schema.ToolInfo{
+		projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+		projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo("provider__inspect_development_templates", projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo("provider__restart_runtime", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo("delete_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo("provider__get_runtime_status", projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+	}
+	tests := []struct {
+		name    string
+		project *aiv1alpha1.Project
+		want    []string
+	}{
+		{
+			name:    "template-less exploration can inspect but not select",
+			project: &aiv1alpha1.Project{},
+			want:    []string{projectToolReadProjectFile, projectToolGetRuntimeStatus, projectToolInspectDevelopmentTemplates},
+		},
+		{
+			name: "bound exploration hides template inspection and selection",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+			},
+			want: []string{projectToolReadProjectFile, projectToolGetRuntimeStatus},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := projectAssistantRunRequest{
+				Project:     tt.project,
+				TurnProfile: projectAssistantTurnProfileExploration,
+				TurnPolicy:  projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileExploration),
+			}
+			middleware := projectEinoAssistantPhaseMiddleware(req, newProjectEinoAssistantRunState())
+			state := &adk.ChatModelAgentState{
+				ToolInfos:         append([]*schema.ToolInfo(nil), tools...),
+				DeferredToolInfos: append([]*schema.ToolInfo(nil), tools...),
+			}
+			_, state, err := middleware.BeforeModelRewriteState(context.Background(), state, nil)
+			if err != nil {
+				t.Fatalf("BeforeModelRewriteState returned error: %v", err)
+			}
+			if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseStringSlicesEqual(got, tt.want) {
+				t.Fatalf("tool infos = %#v, want %#v", got, tt.want)
+			}
+			if got := projectEinoAssistantPhaseToolNames(state.DeferredToolInfos); !projectEinoAssistantPhaseStringSlicesEqual(got, tt.want) {
+				t.Fatalf("deferred tool infos = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectEinoAssistantPhaseGatesTemplateToolInvocationForReadOnlyProfiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		project   *aiv1alpha1.Project
+		tool      string
+		toolInfo  *schema.ToolInfo
+		wantCalls int
+		want      string
+	}{
+		{
+			name:      "template-less exploration can inspect",
+			project:   &aiv1alpha1.Project{},
+			tool:      projectToolInspectDevelopmentTemplates,
+			toolInfo:  projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+			wantCalls: 1,
+			want:      "called",
+		},
+		{
+			name:     "template-less exploration rejects inspection with wrong metadata",
+			project:  &aiv1alpha1.Project{},
+			tool:     projectToolInspectDevelopmentTemplates,
+			toolInfo: projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			want:     "Tool call denied: inspect_development_templates is unavailable in the current assistant phase",
+		},
+		{
+			name:    "template-less exploration cannot select",
+			project: &aiv1alpha1.Project{},
+			tool:    projectToolSelectTemplate,
+			want:    "Tool call denied: select_project_template is unavailable in the current assistant phase",
+		},
+		{
+			name:     "template-less exploration cannot invoke namespaced template selection",
+			project:  &aiv1alpha1.Project{},
+			tool:     "provider__select_project_template",
+			toolInfo: projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			want:     "Tool call denied: select_project_template is unavailable in the current assistant phase",
+		},
+		{
+			name: "bound exploration cannot inspect",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+			},
+			tool: projectToolInspectDevelopmentTemplates,
+			want: "Tool call denied: inspect_development_templates is unavailable in the current assistant phase",
+		},
+		{
+			name: "bound exploration cannot invoke namespaced template inspection",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+			},
+			tool:     "provider__inspect_development_templates",
+			toolInfo: projectEinoAssistantPhaseToolInfo("provider__inspect_development_templates", projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+			want:     "Tool call denied: inspect_development_templates is unavailable in the current assistant phase",
+		},
+		{
+			name:     "exploration cannot invoke canonical runtime action",
+			project:  &aiv1alpha1.Project{},
+			tool:     projectToolRestartRuntime,
+			toolInfo: projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:     "Tool call denied: restart_runtime is unavailable in the current assistant phase",
+		},
+		{
+			name:     "exploration cannot invoke namespaced action mislabeled as read",
+			project:  &aiv1alpha1.Project{},
+			tool:     "provider__restart_runtime",
+			toolInfo: projectEinoAssistantPhaseToolInfo("provider__restart_runtime", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			want:     "Tool call denied: restart_runtime is unavailable in the current assistant phase",
+		},
+		{
+			name:     "exploration cannot invoke arbitrary runtime action",
+			project:  &aiv1alpha1.Project{},
+			tool:     "delete_runtime",
+			toolInfo: projectEinoAssistantPhaseToolInfo("delete_runtime", projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+			want:     "Tool call denied: delete_runtime is unavailable in the current assistant phase",
+		},
+		{
+			name:     "exploration rejects runtime status with wrong bundle",
+			project:  &aiv1alpha1.Project{},
+			tool:     projectToolGetRuntimeStatus,
+			toolInfo: projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			want:     "Tool call denied: get_runtime_status is unavailable in the current assistant phase",
+		},
+		{
+			name:     "exploration rejects namespaced runtime status read",
+			project:  &aiv1alpha1.Project{},
+			tool:     "provider__get_runtime_status",
+			toolInfo: projectEinoAssistantPhaseToolInfo("provider__get_runtime_status", projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+			want:     "Tool call denied: get_runtime_status is unavailable in the current assistant phase",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			middleware := &projectEinoAssistantPhaseFilterMiddleware{
+				BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+				req: projectAssistantRunRequest{
+					Project:     tt.project,
+					TurnProfile: projectAssistantTurnProfileExploration,
+					TurnPolicy:  projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileExploration),
+				},
+				toolInfos: []*schema.ToolInfo{tt.toolInfo},
+			}
+			calls := 0
+			wrapped, err := middleware.WrapInvokableToolCall(
+				context.Background(),
+				func(context.Context, string, ...einotool.Option) (string, error) {
+					calls++
+					return "called", nil
+				},
+				&adk.ToolContext{Name: tt.tool},
+			)
+			if err != nil {
+				t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+			}
+			result, err := wrapped(context.Background(), `{}`)
+			if err != nil {
+				t.Fatalf("wrapped invocation returned error: %v", err)
+			}
+			if result != tt.want || calls != tt.wantCalls {
+				t.Fatalf("result = %q calls = %d, want %q calls = %d", result, calls, tt.want, tt.wantCalls)
+			}
+		})
+	}
+}
+
 func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -606,16 +1040,44 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 		wantResult   string
 	}{
 		{
+			name:       "approval rejects hidden write",
+			phase:      projectEinoAssistantPhaseApproval,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+			wantResult: "Tool call denied: write_file is unavailable in the current assistant phase",
+		},
+		{
 			name:       "approval rejects hidden todo",
 			phase:      projectEinoAssistantPhaseApproval,
 			tool:       &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool},
 			wantResult: "Tool call denied: write_todos is unavailable in the current assistant phase",
 		},
 		{
+			name:         "mutate executes workspace read",
+			phase:        projectEinoAssistantPhaseMutate,
+			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
+			tool:         projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			wantCalls:    1,
+			wantResult:   "todo recorded",
+		},
+		{
+			name:         "mutate rejects hidden workflow",
+			phase:        projectEinoAssistantPhaseMutate,
+			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
+			tool:         projectEinoAssistantPhaseToolInfo(projectToolHydrateWorkspace, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			wantResult:   "Tool call denied: hydrate_workspace is unavailable in the current assistant phase",
+		},
+		{
 			name:       "verify rejects hidden commit",
 			phase:      projectEinoAssistantPhaseVerify,
 			tool:       projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
 			wantResult: "Tool call denied: commit_project_files is unavailable in the current assistant phase",
+		},
+		{
+			name:       "verify executes workspace read",
+			phase:      projectEinoAssistantPhaseVerify,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+			wantCalls:  1,
+			wantResult: "todo recorded",
 		},
 		{
 			name:       "verify rejects transformed hidden commit",
@@ -691,6 +1153,7 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 				BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 				phase:                        tt.phase,
 				approvedPlan:                 tt.approvedPlan,
+				toolInfos:                    []*schema.ToolInfo{tt.tool},
 			}
 			calls := 0
 			wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
@@ -711,6 +1174,208 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 				t.Fatalf("inner %s calls = %d, want %d", tt.tool.Name, calls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestProjectEinoAssistantPhaseWriteTodosEmitsSanitizedProgressAfterSuccess(t *testing.T) {
+	var statuses []string
+	middleware := &projectEinoAssistantPhaseFilterMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		req: projectAssistantRunRequest{StreamCallbacks: projectAssistantStreamCallbacks{
+			OnStatus: func(status string) {
+				statuses = append(statuses, status)
+			},
+		}},
+		phase: projectEinoAssistantPhaseMutate,
+		approvedPlan: &projectAssistantApprovedPlan{
+			Steps: []string{"inspect", "edit", "verify"},
+		},
+		toolInfos: []*schema.ToolInfo{{Name: projectEinoAssistantWriteTodosTool}},
+	}
+	wrapped, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			return "todo recorded", nil
+		},
+		&adk.ToolContext{Name: projectEinoAssistantWriteTodosTool},
+	)
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+
+	result, err := wrapped(context.Background(), `{"todos":[
+		{"content":"Inspect files","activeForm":"Inspecting files","status":"completed"},
+		{"content":"Update filters","activeForm":"Updating task filters\n token=secret-value","status":"in_progress"},
+		{"content":"Verify preview","activeForm":"Verifying preview","status":"pending"}
+	]}`)
+	if err != nil {
+		t.Fatalf("write_todos returned error: %v", err)
+	}
+	if result != "todo recorded" {
+		t.Fatalf("write_todos result = %q, want endpoint result", result)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("statuses = %#v, want one progress update", statuses)
+	}
+	if got, want := statuses[0], "Updating task filters token=[REDACTED] · 1 of 3 steps"; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	if strings.Contains(statuses[0], "secret-value") || strings.Contains(statuses[0], `"todos"`) {
+		t.Fatalf("status exposed raw todo data: %q", statuses[0])
+	}
+}
+
+func TestProjectEinoAssistantPhaseWriteTodosProgressRespectsMinimalDisclosure(t *testing.T) {
+	prev := projectAssistantToolDisclosureMinimal
+	projectAssistantToolDisclosureMinimal = true
+	t.Cleanup(func() { projectAssistantToolDisclosureMinimal = prev })
+
+	var statuses []string
+	middleware := &projectEinoAssistantPhaseFilterMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		req: projectAssistantRunRequest{StreamCallbacks: projectAssistantStreamCallbacks{
+			OnStatus: func(status string) {
+				statuses = append(statuses, status)
+			},
+		}},
+		phase: projectEinoAssistantPhaseMutate,
+		approvedPlan: &projectAssistantApprovedPlan{
+			Steps: []string{"inspect", "edit"},
+		},
+		toolInfos: []*schema.ToolInfo{{Name: projectEinoAssistantWriteTodosTool}},
+	}
+	wrapped, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			return "todo recorded", nil
+		},
+		&adk.ToolContext{Name: projectEinoAssistantWriteTodosTool},
+	)
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+
+	_, err = wrapped(context.Background(), `{"todos":[
+		{"content":"Inspect payroll","activeForm":"Reading src/payroll.csv","status":"completed"},
+		{"content":"Update payroll","activeForm":"Updating src/payroll.csv","status":"in_progress"}
+	]}`)
+	if err != nil {
+		t.Fatalf("write_todos returned error: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0] != "1 of 2 steps complete" {
+		t.Fatalf("minimal-disclosure statuses = %#v, want count-only progress", statuses)
+	}
+	if strings.Contains(statuses[0], "payroll") {
+		t.Fatalf("minimal-disclosure status exposed active todo: %q", statuses[0])
+	}
+}
+
+func TestProjectEinoAssistantPhaseWriteTodosProgressValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		phase       projectEinoAssistantPhase
+		arguments   string
+		endpointErr error
+		wantStatus  string
+	}{
+		{
+			name:       "completed list reports completion",
+			phase:      projectEinoAssistantPhaseMutate,
+			arguments:  `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"completed"},{"content":"Edit","activeForm":"Editing","status":"completed"}]}`,
+			wantStatus: "2 of 2 steps complete",
+		},
+		{
+			name:       "no active item reports coarse count",
+			phase:      projectEinoAssistantPhaseVerify,
+			arguments:  `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"completed"},{"content":"Verify","activeForm":"Verifying","status":"pending"}]}`,
+			wantStatus: "1 of 2 steps complete",
+		},
+		{
+			name:      "malformed JSON is ignored",
+			phase:     projectEinoAssistantPhaseMutate,
+			arguments: `{"todos":`,
+		},
+		{
+			name:      "unsupported status is ignored",
+			phase:     projectEinoAssistantPhaseMutate,
+			arguments: `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"blocked"},{"content":"Edit","activeForm":"Editing","status":"pending"}]}`,
+		},
+		{
+			name:      "multiple active items are ignored",
+			phase:     projectEinoAssistantPhaseMutate,
+			arguments: `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"in_progress"},{"content":"Edit","activeForm":"Editing","status":"in_progress"}]}`,
+		},
+		{
+			name:      "empty list is ignored",
+			phase:     projectEinoAssistantPhaseMutate,
+			arguments: `{"todos":[]}`,
+		},
+		{
+			name:        "endpoint failure is ignored",
+			phase:       projectEinoAssistantPhaseMutate,
+			arguments:   `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"in_progress"},{"content":"Edit","activeForm":"Editing","status":"pending"}]}`,
+			endpointErr: errors.New("write failed"),
+		},
+		{
+			name:      "denied phase is ignored",
+			phase:     projectEinoAssistantPhaseApproval,
+			arguments: `{"todos":[{"content":"Inspect","activeForm":"Inspecting","status":"in_progress"},{"content":"Edit","activeForm":"Editing","status":"pending"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var statuses []string
+			middleware := &projectEinoAssistantPhaseFilterMiddleware{
+				BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+				req: projectAssistantRunRequest{StreamCallbacks: projectAssistantStreamCallbacks{
+					OnStatus: func(status string) {
+						statuses = append(statuses, status)
+					},
+				}},
+				phase: tt.phase,
+				approvedPlan: &projectAssistantApprovedPlan{
+					Steps: []string{"inspect", "edit"},
+				},
+				toolInfos: []*schema.ToolInfo{{Name: projectEinoAssistantWriteTodosTool}},
+			}
+			wrapped, err := middleware.WrapInvokableToolCall(
+				context.Background(),
+				func(context.Context, string, ...einotool.Option) (string, error) {
+					return "todo recorded", tt.endpointErr
+				},
+				&adk.ToolContext{Name: projectEinoAssistantWriteTodosTool},
+			)
+			if err != nil {
+				t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+			}
+
+			_, _ = wrapped(context.Background(), tt.arguments)
+			if tt.wantStatus == "" {
+				if len(statuses) != 0 {
+					t.Fatalf("statuses = %#v, want none", statuses)
+				}
+				return
+			}
+			if len(statuses) != 1 || statuses[0] != tt.wantStatus {
+				t.Fatalf("statuses = %#v, want %q", statuses, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestProjectEinoAssistantTodoProgressLabelBoundsUnicodeSafely(t *testing.T) {
+	active := strings.Repeat("🧭", projectEinoAssistantTodoProgressMaxLabelBytes)
+	status := projectEinoAssistantTodoProgressStatus(`{"todos":[
+		{"content":"Update","activeForm":"`+active+`","status":"in_progress"},
+		{"content":"Verify","activeForm":"Verifying","status":"pending"}
+	]}`, true)
+	if !utf8.ValidString(status) {
+		t.Fatalf("status is not valid UTF-8: %q", status)
+	}
+	label := strings.Split(status, " · ")[0]
+	if got := utf8.RuneCountInString(label); got > projectEinoAssistantTodoProgressMaxLabelBytes {
+		t.Fatalf("label rune count = %d, want at most %d", got, projectEinoAssistantTodoProgressMaxLabelBytes)
 	}
 }
 

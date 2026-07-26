@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -44,6 +45,22 @@ const (
 	projectEinoAssistantWriteTodosTool = "write_todos"
 	projectEinoAssistantToolSearchTool = "tool_search"
 )
+
+const (
+	projectEinoAssistantTodoProgressMaxItems      = 50
+	projectEinoAssistantTodoProgressMaxInputBytes = 64 * 1024
+	projectEinoAssistantTodoProgressMaxLabelBytes = 120
+)
+
+type projectEinoAssistantTodoProgressInput struct {
+	Todos []projectEinoAssistantTodoProgressItem `json:"todos"`
+}
+
+type projectEinoAssistantTodoProgressItem struct {
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm"`
+	Status     string `json:"status"`
+}
 
 type projectEinoAssistantPhaseFilterMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
@@ -126,8 +143,15 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	// need the canonical static inventory after resuming a legacy checkpoint
 	// whose persisted ToolInfos were phase-filtered.
 	if !projectEinoAssistantPhaseLifecycleApplies(m.req) {
-		state.ToolInfos = projectEinoAssistantPhaseVisibleTools(m.toolInfos, state.ToolInfos)
-		state.DeferredToolInfos = projectEinoAssistantPhaseMergeTools(m.deferredToolInfos, state.DeferredToolInfos)
+		templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
+		state.ToolInfos = projectEinoAssistantPhaseFilterReadOnlyTools(
+			templateBootstrapAllowed,
+			projectEinoAssistantPhaseVisibleTools(m.toolInfos, state.ToolInfos),
+		)
+		state.DeferredToolInfos = projectEinoAssistantPhaseFilterReadOnlyTools(
+			templateBootstrapAllowed,
+			projectEinoAssistantPhaseMergeTools(m.deferredToolInfos, state.DeferredToolInfos),
+		)
 		return ctx, state, nil
 	}
 	phase := projectEinoAssistantPhaseForState(m.req, m.runState, state)
@@ -135,6 +159,9 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
 	m.phase = phase
 	m.approvedPlan = cloneProjectAssistantApprovedPlan(approvedPlan)
+	if m.req.auditRecorder != nil {
+		m.req.auditRecorder.recordPhase(phase)
+	}
 	state.ToolInfos = projectEinoAssistantPhaseFilterTools(
 		phase,
 		approvedPlan,
@@ -155,47 +182,154 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	endpoint adk.InvokableToolCallEndpoint,
 	toolCtx *adk.ToolContext,
 ) (adk.InvokableToolCallEndpoint, error) {
-	if toolCtx == nil || !projectEinoAssistantPhaseLifecycleApplies(m.req) {
+	if toolCtx == nil {
 		return endpoint, nil
 	}
 	rawName := toolCtx.Name
 	name := projectToolBaseName(rawName)
-	if name != projectEinoAssistantWriteTodosTool &&
-		name != projectToolRequestProjectPlanApproval &&
-		name != projectToolSelectTemplate &&
-		name != projectToolCommitProjectFiles &&
-		name != projectToolCommitFiles {
-		return endpoint, nil
+	if !projectEinoAssistantPhaseLifecycleApplies(m.req) {
+		templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
+		tool := m.toolInfoForInvocation(rawName)
+		risk, bundle, hasMetadata := projectEinoAssistantPhaseToolMetadata(tool)
+		rawName = strings.TrimSpace(rawName)
+		templateInspection := projectEinoAssistantPhaseTemplateInspectionTool(
+			rawName,
+			risk,
+			bundle,
+			templateBootstrapAllowed,
+		)
+		operationalRead := projectEinoAssistantPhaseOperationalReadTool(rawName, risk, bundle)
+		templateToolDenied := name == projectToolSelectTemplate ||
+			(name == projectToolInspectDevelopmentTemplates && !templateInspection)
+		operationalReadDenied := projectEinoAssistantPhaseReservedOperationalReadName(rawName) &&
+			!operationalRead
+		if !templateToolDenied &&
+			!operationalReadDenied &&
+			!projectEinoAssistantPhaseReservedDirectActionName(rawName) &&
+			(!hasMetadata || risk != projectAssistantToolRiskRuntime) {
+			return endpoint, nil
+		}
+		return func(context.Context, string, ...einotool.Option) (string, error) {
+			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
+		}, nil
 	}
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
-		tool := &schema.ToolInfo{Name: rawName}
-		switch name {
-		case projectToolRequestProjectPlanApproval:
-			tool.Extra = map[string]any{
-				"bundle": string(projectAssistantToolBundleCollaboration),
-				"risk":   string(projectAssistantToolRiskPlan),
-			}
-		case projectToolSelectTemplate:
-			tool.Extra = map[string]any{
-				"bundle": string(projectAssistantToolBundleWorkflow),
-				"risk":   string(projectAssistantToolRiskWrite),
-			}
-		case projectToolCommitProjectFiles, projectToolCommitFiles:
-			tool.Extra = map[string]any{
-				"bundle": string(projectAssistantToolBundleRepo),
-				"risk":   string(projectAssistantToolRiskCommit),
-			}
+		tool := m.toolInfoForInvocation(rawName)
+		approvedPlan := projectEinoAssistantPhaseApprovedPlan(m.req, m.runState)
+		if approvedPlan == nil {
+			approvedPlan = m.approvedPlan
 		}
 		if !projectEinoAssistantPhaseAllowsTool(
 			m.phase,
-			m.approvedPlan,
+			approvedPlan,
 			projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project),
 			tool,
 		) {
 			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
 		}
-		return endpoint(ctx, argumentsInJSON, opts...)
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return result, err
+		}
+		if name == projectEinoAssistantWriteTodosTool && m.req.StreamCallbacks.OnStatus != nil {
+			if status := projectEinoAssistantTodoProgressStatus(
+				argumentsInJSON,
+				!projectAssistantToolDisclosureMinimal,
+			); status != "" {
+				m.req.StreamCallbacks.OnStatus(status)
+			}
+		}
+		return result, nil
 	}, nil
+}
+
+func projectEinoAssistantTodoProgressStatus(argumentsInJSON string, includeActiveLabel bool) string {
+	if len(argumentsInJSON) == 0 || len(argumentsInJSON) > projectEinoAssistantTodoProgressMaxInputBytes {
+		return ""
+	}
+	var input projectEinoAssistantTodoProgressInput
+	if err := json.Unmarshal([]byte(argumentsInJSON), &input); err != nil ||
+		len(input.Todos) == 0 ||
+		len(input.Todos) > projectEinoAssistantTodoProgressMaxItems {
+		return ""
+	}
+
+	completed := 0
+	active := ""
+	activeCount := 0
+	for _, todo := range input.Todos {
+		switch todo.Status {
+		case "pending":
+		case "in_progress":
+			activeCount++
+			if activeCount > 1 {
+				return ""
+			}
+			active = todo.ActiveForm
+			if strings.TrimSpace(active) == "" {
+				active = todo.Content
+			}
+		case "completed":
+			completed++
+		default:
+			return ""
+		}
+	}
+
+	total := len(input.Todos)
+	noun := "steps"
+	if total == 1 {
+		noun = "step"
+	}
+	count := fmt.Sprintf("%d of %d %s", completed, total, noun)
+	active = projectEinoAssistantTodoProgressLabel(active)
+	if includeActiveLabel && active != "" {
+		return active + " · " + count
+	}
+	return count + " complete"
+}
+
+func projectEinoAssistantTodoProgressLabel(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = projectEinoAssistantSafeText(value)
+	if len(value) <= projectEinoAssistantTodoProgressMaxLabelBytes {
+		return value
+	}
+	end := projectEinoAssistantTodoProgressMaxLabelBytes - 3
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return strings.TrimSpace(value[:end]) + "..."
+}
+
+func (m *projectEinoAssistantPhaseFilterMiddleware) toolInfoForInvocation(rawName string) *schema.ToolInfo {
+	for _, tools := range [][]*schema.ToolInfo{m.toolInfos, m.deferredToolInfos} {
+		for _, info := range tools {
+			if info != nil && strings.TrimSpace(info.Name) == strings.TrimSpace(rawName) {
+				return info
+			}
+		}
+	}
+
+	tool := &schema.ToolInfo{Name: rawName}
+	switch projectToolBaseName(rawName) {
+	case projectToolRequestProjectPlanApproval:
+		tool.Extra = map[string]any{
+			"bundle": string(projectAssistantToolBundleCollaboration),
+			"risk":   string(projectAssistantToolRiskPlan),
+		}
+	case projectToolSelectTemplate:
+		tool.Extra = map[string]any{
+			"bundle": string(projectAssistantToolBundleWorkflow),
+			"risk":   string(projectAssistantToolRiskWrite),
+		}
+	case projectToolCommitProjectFiles, projectToolCommitFiles:
+		tool.Extra = map[string]any{
+			"bundle": string(projectAssistantToolBundleRepo),
+			"risk":   string(projectAssistantToolRiskCommit),
+		}
+	}
+	return tool
 }
 
 func projectEinoAssistantPhaseLifecycleApplies(req projectAssistantRunRequest) bool {
@@ -235,6 +369,43 @@ func projectEinoAssistantPhaseVisibleTools(canonical, current []*schema.ToolInfo
 	return visible
 }
 
+func projectEinoAssistantPhaseFilterReadOnlyTools(
+	templateBootstrapAllowed bool,
+	tools []*schema.ToolInfo,
+) []*schema.ToolInfo {
+	filtered := make([]*schema.ToolInfo, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		risk, bundle, hasMetadata := projectEinoAssistantPhaseToolMetadata(tool)
+		if projectEinoAssistantPhaseReservedDirectActionName(tool.Name) ||
+			(hasMetadata && risk == projectAssistantToolRiskRuntime) {
+			continue
+		}
+		if projectEinoAssistantPhaseReservedOperationalReadName(tool.Name) &&
+			!projectEinoAssistantPhaseOperationalReadTool(tool.Name, risk, bundle) {
+			continue
+		}
+		rawName := strings.TrimSpace(tool.Name)
+		switch projectToolBaseName(rawName) {
+		case projectToolSelectTemplate:
+			continue
+		case projectToolInspectDevelopmentTemplates:
+			if !projectEinoAssistantPhaseTemplateInspectionTool(
+				rawName,
+				risk,
+				bundle,
+				templateBootstrapAllowed,
+			) {
+				continue
+			}
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
 func projectEinoAssistantPhaseSearchableTool(tool *schema.ToolInfo) bool {
 	if tool == nil || tool.Extra == nil {
 		return false
@@ -269,24 +440,52 @@ func projectEinoAssistantPhaseForStateWithApproval(
 }
 
 type projectEinoAssistantPhaseHistory struct {
-	latestWrite        int
-	latestVerification int
-	latestCommit       int
-	verificationReady  bool
+	latestWrite             int
+	latestDeniedWrite       int
+	latestTemplateBootstrap int
+	latestDirectAction      int
+	latestVerification      int
+	latestCommit            int
+	verificationReady       bool
 }
 
 func projectEinoAssistantPhaseHistoryForState(state *adk.ChatModelAgentState) projectEinoAssistantPhaseHistory {
 	history := projectEinoAssistantPhaseHistory{
-		latestWrite:        -1,
-		latestVerification: -1,
-		latestCommit:       -1,
+		latestWrite:             -1,
+		latestDeniedWrite:       -1,
+		latestTemplateBootstrap: -1,
+		latestDirectAction:      -1,
+		latestVerification:      -1,
+		latestCommit:            -1,
 	}
 	if state != nil {
 		for index, message := range state.Messages {
 			if message == nil {
 				continue
 			}
+			rawName := strings.TrimSpace(message.ToolName)
 			name := projectToolBaseName(message.ToolName)
+			content := strings.ToLower(strings.TrimSpace(message.Content))
+			if rawName == projectToolSelectTemplate {
+				if projectEinoAssistantPhasePermissionDenied(content) {
+					history.latestDeniedWrite = index
+				} else if projectEinoAssistantPhaseSuccessfulToolResult(message) {
+					history.latestTemplateBootstrap = index
+				}
+				continue
+			}
+			if projectEinoAssistantPhaseDirectActionName(rawName) {
+				if projectEinoAssistantPhaseSuccessfulToolResult(message) ||
+					projectEinoAssistantPhasePermissionDenied(content) {
+					history.latestDirectAction = index
+				}
+				continue
+			}
+			if projectEinoAssistantPhaseCanonicalEditTool(name) &&
+				projectEinoAssistantPhasePermissionDenied(content) {
+				history.latestDeniedWrite = index
+				continue
+			}
 			if name == projectToolVerifyDevelopmentRuntime && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(message.Content)), "tool call skipped: waiting for approval") {
 				history.latestVerification = index
 				history.verificationReady = projectEinoAssistantPhaseSuccessfulToolResult(message) &&
@@ -307,6 +506,11 @@ func projectEinoAssistantPhaseHistoryForState(state *adk.ChatModelAgentState) pr
 	return history
 }
 
+func projectEinoAssistantPhasePermissionDenied(content string) bool {
+	content = strings.ToLower(strings.TrimSpace(content))
+	return strings.HasPrefix(content, "tool call failed: permission denied:")
+}
+
 func projectEinoAssistantPhaseForHistory(
 	history projectEinoAssistantPhaseHistory,
 	approved bool,
@@ -315,6 +519,18 @@ func projectEinoAssistantPhaseForHistory(
 	// A completed commit is terminal even though the tool execution clears the
 	// run-local approval grant before the next model call.
 	if history.latestCommit > history.latestWrite {
+		return projectEinoAssistantPhaseReport
+	}
+	if history.latestWrite < 0 && history.latestDeniedWrite >= 0 {
+		return projectEinoAssistantPhaseReport
+	}
+	if history.latestWrite < 0 && history.latestTemplateBootstrap >= 0 {
+		if approved && initialCreation {
+			return projectEinoAssistantPhaseMutate
+		}
+		return projectEinoAssistantPhaseReport
+	}
+	if history.latestWrite < 0 && history.latestDirectAction >= 0 {
 		return projectEinoAssistantPhaseReport
 	}
 	if !approved {
@@ -438,11 +654,17 @@ func projectEinoAssistantPhaseAllowsTool(
 		return false
 	}
 	name := projectToolBaseName(tool.Name)
+	if strings.TrimSpace(tool.Name) == projectToolInspectDevelopmentTemplates &&
+		!templateBootstrapAllowed {
+		return false
+	}
 	if name == projectEinoAssistantToolSearchTool {
 		return phase == projectEinoAssistantPhaseApproval
 	}
 	if name == projectEinoAssistantWriteTodosTool {
-		return (phase == projectEinoAssistantPhaseMutate || phase == projectEinoAssistantPhaseRepair) &&
+		return (phase == projectEinoAssistantPhaseMutate ||
+			phase == projectEinoAssistantPhaseVerify ||
+			phase == projectEinoAssistantPhaseRepair) &&
 			approvedPlan != nil && len(approvedPlan.Steps) > 1
 	}
 	risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(tool)
@@ -455,9 +677,32 @@ func projectEinoAssistantPhaseAllowsTool(
 		bundle,
 		templateBootstrapAllowed,
 	)
+	templateInspection := projectEinoAssistantPhaseTemplateInspectionTool(
+		tool.Name,
+		risk,
+		bundle,
+		templateBootstrapAllowed,
+	)
+	directAction := projectEinoAssistantPhaseDirectActionTool(tool.Name, risk, bundle)
+	operationalRead := projectEinoAssistantPhaseOperationalReadTool(tool.Name, risk, bundle)
+	if name == projectToolSelectTemplate && !templateBootstrap {
+		return false
+	}
+	if name == projectToolInspectDevelopmentTemplates && !templateInspection {
+		return false
+	}
+	if projectEinoAssistantPhaseReservedDirectActionName(tool.Name) && !directAction {
+		return false
+	}
+	if projectEinoAssistantPhaseReservedOperationalReadName(tool.Name) && !operationalRead {
+		return false
+	}
 
 	switch phase {
 	case projectEinoAssistantPhaseApproval:
+		if templateBootstrap || directAction || operationalRead {
+			return true
+		}
 		if bundle == projectAssistantToolBundleRuntime {
 			return false
 		}
@@ -465,21 +710,30 @@ func projectEinoAssistantPhaseAllowsTool(
 			risk == projectAssistantToolRiskInput ||
 			risk == projectAssistantToolRiskPlan
 	case projectEinoAssistantPhaseMutate:
-		return (projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
-			bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
+			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			templateBootstrap ||
+			templateInspection ||
+			directAction ||
+			operationalRead ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseVerify:
-		return tool.Name == projectToolVerifyDevelopmentRuntime &&
-			bundle == projectAssistantToolBundleRuntime &&
-			risk == projectAssistantToolRiskRead
+		return (name != projectToolVerifyDevelopmentRuntime &&
+			bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
+			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			(tool.Name == projectToolVerifyDevelopmentRuntime &&
+				bundle == projectAssistantToolBundleRuntime && risk == projectAssistantToolRiskRead) ||
+			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseRepair:
 		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
 			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
 				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			templateBootstrap ||
-			(bundle == projectAssistantToolBundleRuntime &&
-				(risk == projectAssistantToolRiskRead || risk == projectAssistantToolRiskRuntime)) ||
+			templateInspection ||
+			directAction ||
+			operationalRead ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseCommit:
 		return tool.Name == projectToolCommitProjectFiles &&
@@ -490,6 +744,104 @@ func projectEinoAssistantPhaseAllowsTool(
 	default:
 		return false
 	}
+}
+
+func projectEinoAssistantPhaseReservedDirectActionName(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolRestartRuntime,
+		projectToolSetRuntimeEnv,
+		projectToolPromoteProject,
+		projectToolRebuildProject,
+		"provision":
+		return true
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPhaseDirectActionName(name string) bool {
+	switch strings.TrimSpace(name) {
+	case projectToolRestartRuntime,
+		projectToolSetRuntimeEnv,
+		projectToolPromoteProject,
+		projectToolRebuildProject,
+		projectToolInfrastructureProvision:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPhaseDirectActionTool(
+	name string,
+	risk projectAssistantToolRisk,
+	bundle projectAssistantToolBundle,
+) bool {
+	if risk != projectAssistantToolRiskRuntime || !projectEinoAssistantPhaseDirectActionName(name) {
+		return false
+	}
+	switch strings.TrimSpace(name) {
+	case projectToolInfrastructureProvision:
+		return bundle == projectAssistantToolBundleInfrastructure
+	default:
+		return bundle == projectAssistantToolBundleRuntime
+	}
+}
+
+func projectEinoAssistantPhaseOperationalReadTool(
+	name string,
+	risk projectAssistantToolRisk,
+	bundle projectAssistantToolBundle,
+) bool {
+	if risk != projectAssistantToolRiskRead {
+		return false
+	}
+	switch strings.TrimSpace(name) {
+	case projectToolGetRuntimeStatus,
+		projectToolGetPreviewURL,
+		projectToolGetRuntimeLogs,
+		projectToolVerifyDevelopmentRuntime:
+		return bundle == projectAssistantToolBundleRuntime
+	case projectToolCheckProjectBuild, projectToolGetBuildLogs:
+		return bundle == projectAssistantToolBundleWorkflow
+	case projectToolInfrastructureListTemplates,
+		projectToolInfrastructureDescribeTemplate,
+		projectToolInfrastructureListInstances,
+		projectToolInfrastructureGetInstance:
+		return bundle == projectAssistantToolBundleInfrastructure
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPhaseReservedOperationalReadName(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolGetRuntimeStatus,
+		projectToolGetPreviewURL,
+		projectToolGetRuntimeLogs,
+		projectToolVerifyDevelopmentRuntime,
+		projectToolCheckProjectBuild,
+		projectToolGetBuildLogs,
+		"list_templates",
+		"describe_template",
+		"list_instances",
+		"get_instance":
+		return true
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPhaseTemplateInspectionTool(
+	name string,
+	risk projectAssistantToolRisk,
+	bundle projectAssistantToolBundle,
+	allowed bool,
+) bool {
+	return allowed &&
+		strings.TrimSpace(name) == projectToolInspectDevelopmentTemplates &&
+		risk == projectAssistantToolRiskRead &&
+		bundle == projectAssistantToolBundleWorkflow
 }
 
 // Template selection is the one workflow/write exception because binding the

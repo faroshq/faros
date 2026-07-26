@@ -364,11 +364,34 @@ func TestCollectProjectAssistantTurnEventsIgnoresMessageStreamWillRetryError(t *
 	}
 }
 
+func TestCollectProjectAssistantTurnEventsPropagatesMaxIterations(t *testing.T) {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Err: fmt.Errorf("wrapped: %w", adk.ErrExceedMaxIterations),
+	})
+	generator.Close()
+
+	_, err := collectProjectAssistantTurnEventsResultForTest(iter)
+	if !errors.Is(err, adk.ErrExceedMaxIterations) {
+		t.Fatalf("collectProjectAssistantTurnEvents error = %v, want max-iteration sentinel", err)
+	}
+}
+
 func collectProjectAssistantTurnEventsForTest(
 	t *testing.T,
 	iter *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]],
 ) *projectEinoAssistantTurnOutcome {
 	t.Helper()
+	outcome, err := collectProjectAssistantTurnEventsResultForTest(iter)
+	if err != nil {
+		t.Fatalf("collectProjectAssistantTurnEvents returned error: %v", err)
+	}
+	return outcome
+}
+
+func collectProjectAssistantTurnEventsResultForTest(
+	iter *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]],
+) (*projectEinoAssistantTurnOutcome, error) {
 	loop := adk.NewTurnLoop[projectAssistantTurnItem, *schema.Message](
 		adk.TurnLoopConfig[projectAssistantTurnItem, *schema.Message]{
 			GenInput: func(
@@ -398,10 +421,7 @@ func collectProjectAssistantTurnEventsForTest(
 		newProjectEinoAssistantRunState(),
 		outcome,
 	)
-	if err != nil {
-		t.Fatalf("collectProjectAssistantTurnEvents returned error: %v", err)
-	}
-	return outcome
+	return outcome, err
 }
 
 func TestEinoAssistantEngineDoesNotUseToolSearchForSmallReadToolSet(t *testing.T) {
@@ -496,7 +516,15 @@ func TestEinoAssistantEngineUsesBoundedAppStudioSystemInstruction(t *testing.T) 
 		"inspect after failed edit":     "After an edit or patch fails, inspect the current file content before retrying that path",
 		"complete phase progression":    "advance through plan, mutate, verify, and commit",
 		"report only when terminal":     "only produce the final user report in the terminal report phase",
+		"batch independent reads":       "Batch independent workspace reads in one model response",
+		"sequence dependent reads":      "Keep reads sequential when a later call depends on an earlier result",
 		"batch distinct paths":          "Mutations for distinct paths may be batched",
+		"inspect before existing edit":  "Before editing an existing file, inspect its current content",
+		"one active todo":               "keep exactly one todo item in progress",
+		"prefer direct edits":           "Prefer editing the project files that implement the requested feature over creating side-channel scripts or configuration",
+		"brief milestone narration":     "Brief milestone or blocker prose is allowed",
+		"no per-tool narration":         "do not narrate each tool call",
+		"direct operational actions":    "use its exact operational tool and tool-level approval",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !strings.Contains(strings.ToLower(instruction), strings.ToLower(required)) {
@@ -629,6 +657,7 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 		req       projectAssistantRunRequest
 		wantTodos bool
 		wantCalls int
+		wantErr   bool
 	}{
 		{
 			name: "multi-step implementation plan",
@@ -641,7 +670,8 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 				}},
 			},
 			wantTodos: true,
-			wantCalls: 2,
+			wantCalls: 3,
+			wantErr:   true,
 		},
 		{
 			name: "one-step implementation plan",
@@ -652,7 +682,8 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 					"update the application title",
 				}},
 			},
-			wantCalls: 2,
+			wantCalls: 3,
+			wantErr:   true,
 		},
 		{
 			name: "discussion turn",
@@ -676,7 +707,11 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 				},
 			}
 
-			if _, err := engine.StreamProjectAssistant(context.Background(), tt.req); err != nil {
+			_, err := engine.StreamProjectAssistant(context.Background(), tt.req)
+			if tt.wantErr && !errors.Is(err, adk.ErrExceedMaxRetries) {
+				t.Fatalf("StreamProjectAssistant error = %v, want Eino retry exhaustion", err)
+			}
+			if !tt.wantErr && err != nil {
 				t.Fatalf("StreamProjectAssistant returned error: %v", err)
 			}
 			if len(chatModel.toolNames) != tt.wantCalls {
@@ -702,14 +737,14 @@ func TestEinoAssistantEngineDeepPhaseRejectsHiddenWriteTodos(t *testing.T) {
 	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileImplementation)
 	req.InitialApprovedPlan = &projectAssistantApprovedPlan{Steps: []string{"make the small change"}}
 
-	if _, err := engine.StreamProjectAssistant(context.Background(), req); err != nil {
-		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	if _, err := engine.StreamProjectAssistant(context.Background(), req); !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %v, want Eino retry exhaustion", err)
 	}
 	if chatModel.todosWritten {
 		t.Fatal("hidden write_todos call updated the session outside a multi-step approved plan")
 	}
-	if len(chatModel.inputs) != 3 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-todos", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
-		t.Fatalf("model inputs = %#v, want denied hidden write_todos result and one phase-progress retry", chatModel.inputs)
+	if len(chatModel.inputs) != 4 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-todos", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
+		t.Fatalf("model inputs = %#v, want denied hidden write_todos result and bounded phase-progress retries", chatModel.inputs)
 	}
 }
 
@@ -741,11 +776,11 @@ func TestEinoAssistantEngineDeepPhaseRejectsHiddenRepeatedPlanWithoutWideningGra
 		t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
 	}
 
-	if _, err := engine.StreamProjectAssistant(context.Background(), req); err != nil {
-		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	if _, err := engine.StreamProjectAssistant(context.Background(), req); !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %v, want Eino retry exhaustion", err)
 	}
-	if len(chatModel.inputs) != 3 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-plan", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
-		t.Fatalf("model inputs = %#v, want denied hidden repeated plan result and one phase-progress retry", chatModel.inputs)
+	if len(chatModel.inputs) != 4 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-hidden-plan", "Tool call denied") || !einoMessagesContainContent(chatModel.inputs[2], "mutate phase requires progress") {
+		t.Fatalf("model inputs = %#v, want denied hidden repeated plan result and bounded phase-progress retries", chatModel.inputs)
 	}
 	if runState == nil {
 		t.Fatal("assistant run state was not captured")
@@ -788,11 +823,11 @@ func TestEinoAssistantEngineDeepPhaseHidesApprovalAfterApproval(t *testing.T) {
 	if _, err := engine.ResumeProjectAssistant(context.Background(), req, projectAssistantResumeRequest{
 		RequestID: permissionErr.RequestID,
 		Decision:  string(projectAssistantPermissionAllow),
-	}, checkpoint); err != nil {
-		t.Fatalf("ResumeProjectAssistant returned error: %v", err)
+	}, checkpoint); !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("ResumeProjectAssistant error = %v, want Eino retry exhaustion", err)
 	}
-	if len(chatModel.toolNames) != 3 {
-		t.Fatalf("model calls = %d, want plan, post-approval retry, and accepted bounded response", len(chatModel.toolNames))
+	if len(chatModel.toolNames) != 4 {
+		t.Fatalf("model calls = %d, want plan plus bounded post-approval retries", len(chatModel.toolNames))
 	}
 	if !stringSliceContains(chatModel.toolNames[0], projectToolRequestProjectPlanApproval) {
 		t.Fatalf("initial tools = %#v, want plan approval", chatModel.toolNames[0])
@@ -1386,8 +1421,8 @@ func TestEinoAssistantEngineAsksFollowUpThroughEinoInterrupt(t *testing.T) {
 	if inputErr.RunID == "" || inputErr.RequestID == "" {
 		t.Fatalf("input error = %#v, want run and request IDs", inputErr)
 	}
-	if messages.saveAssistantRunCount != 1 {
-		t.Fatalf("assistant run saves = %d, want one follow-up checkpoint", messages.saveAssistantRunCount)
+	if messages.saveAssistantRunCount != 2 {
+		t.Fatalf("assistant run saves = %d, want running audit plus follow-up checkpoint", messages.saveAssistantRunCount)
 	}
 	if countProjectAssistantEvents(assistantEvents, projectAssistantEventInputNeeded) != 1 || countProjectAssistantEvents(assistantEvents, projectAssistantEventCheckpointSaved) != 1 {
 		t.Fatalf("assistant events = %#v, want input required and checkpoint events", assistantEvents)
@@ -1501,6 +1536,16 @@ func TestProjectEinoAssistantToolInfoClassifiesProductWorkflowBundles(t *testing
 			want: projectAssistantToolBundleRuntime,
 		},
 		{
+			name: "infrastructure read",
+			spec: projectAssistantToolSpec{Name: projectToolInfrastructureListTemplates, Risk: projectAssistantToolRiskRead},
+			want: projectAssistantToolBundleInfrastructure,
+		},
+		{
+			name: "infrastructure provision",
+			spec: projectAssistantToolSpec{Name: projectToolInfrastructureProvision, Risk: projectAssistantToolRiskRuntime},
+			want: projectAssistantToolBundleInfrastructure,
+		},
+		{
 			name: "unknown write risk",
 			spec: projectAssistantToolSpec{Name: "replace_project_file", Risk: projectAssistantToolRiskWrite},
 			want: projectAssistantToolBundleEdit,
@@ -1590,8 +1635,8 @@ func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
 	if !errors.As(err, &permissionErr) {
 		t.Fatalf("StreamProjectAssistant error = %v, want permission required", err)
 	}
-	if messages.saveAssistantRunCount != 1 {
-		t.Fatalf("assistant run saves = %d, want exactly one permission checkpoint", messages.saveAssistantRunCount)
+	if messages.saveAssistantRunCount != 2 {
+		t.Fatalf("assistant run saves = %d, want running audit plus permission checkpoint", messages.saveAssistantRunCount)
 	}
 	if countProjectAssistantEvents(assistantEvents, projectAssistantEventPermissionNeeded) != 1 || countProjectAssistantEvents(assistantEvents, projectAssistantEventCheckpointSaved) != 1 {
 		t.Fatalf("assistant events = %#v, want one permission and one checkpoint", assistantEvents)
@@ -1620,12 +1665,22 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 	messages := &countingAssistantRunStore{MemoryStore: store.NewMemoryStore()}
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	chatModel := &deployRuntimeEinoChatModel{}
+	runtimeSpec, ok := server.projectAssistantToolRegistry().Spec(projectToolRestartRuntime)
+	if !ok {
+		t.Fatal("restart_runtime tool missing")
+	}
+	runtimeTool := &recordingProjectAssistantTool{
+		spec:   runtimeSpec,
+		result: `{"status":"not_configured"}`,
+	}
 	engine := projectEinoAssistantEngine{
 		server: server,
 		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
 			return chatModel, nil
 		},
-		newTools: newProjectEinoAssistantToolsFactory(server),
+		newTools: func(_ context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return []einotool.BaseTool{newProjectEinoAssistantServerTool(server, runtimeTool, req, state)}, nil
+		},
 	}
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
@@ -1666,8 +1721,8 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 	if err := json.Unmarshal(run.Checkpoint, &checkpoint); err != nil {
 		t.Fatalf("decode checkpoint returned error: %v", err)
 	}
-	if checkpoint.Eino == nil || checkpoint.Eino.InterruptType != projectAssistantInterruptTypeApproval || checkpoint.Eino.ToolName != projectToolRestartRuntime {
-		t.Fatalf("checkpoint eino state = %#v, want runtime approval checkpoint", checkpoint.Eino)
+	if checkpoint.Eino == nil || checkpoint.Eino.InterruptType != projectAssistantInterruptTypePermission || checkpoint.Eino.ToolName != projectToolRestartRuntime {
+		t.Fatalf("checkpoint eino state = %#v, want runtime permission checkpoint", checkpoint.Eino)
 	}
 
 	result, err := engine.ResumeProjectAssistant(
@@ -1690,7 +1745,7 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 	}
 }
 
-func TestEinoAssistantEngineRequestsPermissionForDirectWriteTool(t *testing.T) {
+func TestEinoAssistantEngineRejectsHiddenDirectWriteToolBeforeInvocation(t *testing.T) {
 	messages := store.NewMemoryStore()
 	workspaces := workspace.NewFileStore(t.TempDir())
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
@@ -1728,15 +1783,11 @@ func TestEinoAssistantEngineRequestsPermissionForDirectWriteTool(t *testing.T) {
 	}
 
 	_, err := engine.StreamProjectAssistant(context.Background(), req)
-	var permissionErr *projectAssistantPermissionRequiredError
-	if !errors.As(err, &permissionErr) {
-		t.Fatalf("StreamProjectAssistant error = %v, want direct write permission required", err)
+	if !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %v, want Eino retry exhaustion after hidden write denial", err)
 	}
-	if permissionErr.ToolName != projectToolWriteFile {
-		t.Fatalf("permission tool = %q, want write_file", permissionErr.ToolName)
-	}
-	if len(chatModel.toolNames) != 1 {
-		t.Fatalf("model tool names = %#v, want one direct write call", chatModel.toolNames)
+	if len(chatModel.toolNames) == 0 {
+		t.Fatal("model was not invoked")
 	}
 	if stringSliceContains(chatModel.toolNames[0], projectToolWriteFile) {
 		t.Fatalf("initial tools = %#v, must not expose direct write_file before plan approval", chatModel.toolNames[0])
@@ -1744,45 +1795,14 @@ func TestEinoAssistantEngineRequestsPermissionForDirectWriteTool(t *testing.T) {
 	if stringSliceContains(chatModel.toolNames[0], "tool_search") {
 		t.Fatalf("initial tools = %#v, want no tool_search without provider tools", chatModel.toolNames[0])
 	}
-	run, err := messages.GetAssistantRun(context.Background(), req.MessageScope, permissionErr.RunID)
-	if err != nil {
-		t.Fatalf("GetAssistantRun returned error: %v", err)
+	if len(chatModel.inputs) < 2 || !einoMessagesContainToolResult(chatModel.inputs[1], "call-write", "Tool call denied") {
+		t.Fatalf("model inputs = %#v, want model-visible hidden-tool denial", chatModel.inputs)
 	}
-	var checkpoint projectAssistantCheckpointState
-	if err := json.Unmarshal(run.Checkpoint, &checkpoint); err != nil {
-		t.Fatalf("decode checkpoint returned error: %v", err)
+	if writeCompletions != 0 {
+		t.Fatalf("write completions = %d, want hidden write never invoked", writeCompletions)
 	}
-	if checkpoint.Eino == nil || checkpoint.Eino.InterruptType != projectAssistantInterruptTypePermission || checkpoint.Eino.ToolName != projectToolWriteFile {
-		t.Fatalf("checkpoint eino state = %#v, want dynamic write permission checkpoint", checkpoint.Eino)
-	}
-
-	result, err := engine.ResumeProjectAssistant(
-		context.Background(),
-		req,
-		projectAssistantResumeRequest{
-			RequestID: permissionErr.RequestID,
-			Decision:  string(projectAssistantPermissionAllow),
-		},
-		checkpoint,
-	)
-	if err != nil {
-		t.Fatalf("ResumeProjectAssistant returned error: %v", err)
-	}
-	if result.Content != "dynamic write completed" {
-		t.Fatalf("content = %q, want final dynamic write response", result.Content)
-	}
-	read, err := workspaces.ReadFile(context.Background(), req.WorkspaceScope, workspace.ReadOptions{Path: "src/App.tsx"})
-	if err != nil {
-		t.Fatalf("ReadFile returned error: %v", err)
-	}
-	if read.Content != "dynamic write\n" {
-		t.Fatalf("content = %q, want approved dynamic write", read.Content)
-	}
-	if writeCompletions != 1 {
-		t.Fatalf("write completions = %d, want approved write to resume once", writeCompletions)
-	}
-	if len(chatModel.inputs) != 3 {
-		t.Fatalf("model calls = %d, want initial write request, one semantic retry, and accepted bounded response", len(chatModel.inputs))
+	if _, err := workspaces.ReadFile(context.Background(), req.WorkspaceScope, workspace.ReadOptions{Path: "src/App.tsx"}); err == nil {
+		t.Fatal("hidden write created src/App.tsx")
 	}
 }
 
@@ -1835,6 +1855,14 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 			WorkspaceScope:     projectWorkspaceScope(id, project.Name),
 			MessageScope:       projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 			AutoApproveActions: true,
+			TurnProfile:        projectAssistantTurnProfileImplementation,
+			TurnPolicy:         projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+			InitialApprovedPlan: &projectAssistantApprovedPlan{
+				Summary:     "Write the first source file only.",
+				Steps:       []string{"write the first source file"},
+				TargetPaths: []string{"src/one.tsx"},
+				Operations:  []string{projectToolWriteFile},
+			},
 			StreamCallbacks: projectAssistantStreamCallbacks{
 				OnAssistantEvent: func(event projectAssistantEvent) {
 					assistantEvents = append(assistantEvents, event)
@@ -1845,14 +1873,11 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 			},
 		},
 	)
-	if err != nil {
-		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	if !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %v, want retry exhaustion after the bounded write batch", err)
 	}
-	if result.Content != "unexpected continuation" {
-		t.Fatalf("content = %q, want continuation after auto-approved writes", result.Content)
-	}
-	if messages.saveAssistantRunCount != 0 {
-		t.Fatalf("assistant run saves = %d, want no permission checkpoint", messages.saveAssistantRunCount)
+	if result.Content != "" {
+		t.Fatalf("content = %q, want no premature success report", result.Content)
 	}
 	if countProjectAssistantEvents(assistantEvents, projectAssistantEventPermissionNeeded) != 0 || countProjectAssistantEvents(assistantEvents, projectAssistantEventCheckpointSaved) != 0 {
 		t.Fatalf("assistant events = %#v, want no permission events", assistantEvents)
@@ -1860,10 +1885,11 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 	if projectToolEventsWithStatus(toolEvents, "permission_required") != 0 {
 		t.Fatalf("tool events = %#v, want no permission-required event", toolEvents)
 	}
-	for _, path := range []string{"src/one.tsx", "src/two.tsx"} {
-		if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: path}); err != nil {
-			t.Fatalf("ReadFile(%q) returned error: %v", path, err)
-		}
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/one.tsx"}); err != nil {
+		t.Fatalf("approved src/one.tsx write failed: %v", err)
+	}
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/two.tsx"}); err == nil {
+		t.Fatal("out-of-plan src/two.tsx write unexpectedly succeeded")
 	}
 }
 
@@ -1911,8 +1937,8 @@ func TestEinoAssistantEngineInitialCreationPlanAllowsWriteWithoutPersistingGrant
 	if err != nil || read.Content != "initial build\n" {
 		t.Fatalf("initial write = %#v, %v; want initial build", read, err)
 	}
-	if messages.saveAssistantRunCount != 0 {
-		t.Fatalf("assistant run saves = %d, want no permission checkpoint", messages.saveAssistantRunCount)
+	if messages.saveAssistantRunCount != 2 {
+		t.Fatalf("assistant run saves = %d, want running and completed audit rows", messages.saveAssistantRunCount)
 	}
 	if grant := server.loadProjectAssistantApprovedPlan(context.Background(), scope); grant != nil {
 		t.Fatalf("persisted initial creation grant = %#v, want nil", grant)
@@ -2002,8 +2028,47 @@ func TestEinoAssistantEnginePlanApprovalAllowsScopedWriteOnResume(t *testing.T) 
 	if read.Content != "approved plan write\n" {
 		t.Fatalf("content = %q, want approved plan write", read.Content)
 	}
-	if messages.saveAssistantRunCount != 1 {
-		t.Fatalf("assistant run saves = %d, want no second permission checkpoint", messages.saveAssistantRunCount)
+	if messages.saveAssistantRunCount != 2 {
+		t.Fatalf("assistant run saves = %d, want running audit plus plan checkpoint only", messages.saveAssistantRunCount)
+	}
+}
+
+func TestEinoAssistantEngineRejectsPendingApprovalAfterGrantRevisionChanges(t *testing.T) {
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	if err := server.clearProjectAssistantApprovedPlan(context.Background(), scope); err != nil {
+		t.Fatalf("clearProjectAssistantApprovedPlan returned error: %v", err)
+	}
+	engine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			t.Fatal("model factory called for stale checkpoint")
+			return nil, nil
+		},
+		newTools: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			t.Fatal("tool factory called for stale checkpoint")
+			return nil, nil
+		},
+	}
+	project := &aiv1alpha1.Project{}
+	project.Name = scope.ProjectName
+	state := projectAssistantCheckpointState{
+		ApprovedPlanGrantRevision: "",
+		Eino: &projectAssistantEinoCheckpointState{
+			CheckpointID: "run-stale",
+			Checkpoint:   []byte(`{"checkpoint":"stale"}`),
+			InterruptID:  "interrupt-stale",
+		},
+	}
+
+	_, err := engine.ResumeProjectAssistant(
+		context.Background(),
+		projectAssistantRunRequest{Project: project, MessageScope: scope},
+		projectAssistantResumeRequest{RequestID: "perm-stale", Decision: string(projectAssistantPermissionAllow)},
+		state,
+	)
+	if !errors.Is(err, errProjectAssistantCheckpointGrantStale) {
+		t.Fatalf("ResumeProjectAssistant error = %v, want stale grant revision", err)
 	}
 }
 
@@ -2069,8 +2134,8 @@ func TestEinoAssistantEnginePersistedPlanGrantSkipsApprovalOnNewTurn(t *testing.
 	if read.Content != "approved plan write\n" {
 		t.Fatalf("content = %q, want approved plan write", read.Content)
 	}
-	if messages.saveAssistantRunCount != 0 {
-		t.Fatalf("permission checkpoints = %d, want none while a plan grant is active", messages.saveAssistantRunCount)
+	if messages.saveAssistantRunCount != 2 {
+		t.Fatalf("assistant run saves = %d, want running and completed audit rows without a permission checkpoint", messages.saveAssistantRunCount)
 	}
 }
 
@@ -3276,6 +3341,7 @@ func projectEinoToolsForProfileTest(t *testing.T, req projectAssistantRunRequest
 type countingAssistantRunStore struct {
 	*store.MemoryStore
 	saveAssistantRunCount int
+	lastAssistantRun      *store.AssistantRun
 }
 
 func (s *countingAssistantRunStore) SaveAssistantRun(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
@@ -3283,6 +3349,10 @@ func (s *countingAssistantRunStore) SaveAssistantRun(ctx context.Context, scope 
 	// cross-turn approval bookkeeping, not a permission/follow-up checkpoint.
 	if run.ID != projectAssistantApprovedPlanGrantRunID {
 		s.saveAssistantRunCount++
+		copy := run
+		copy.Audit = append([]byte(nil), run.Audit...)
+		copy.Checkpoint = append([]byte(nil), run.Checkpoint...)
+		s.lastAssistantRun = &copy
 	}
 	return s.MemoryStore.SaveAssistantRun(ctx, scope, run)
 }

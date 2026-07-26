@@ -136,8 +136,7 @@ func projectEinoAssistantModelRetryConfig(
 			}
 			if retryCtx.Err != nil ||
 				len(retryCtx.OutputMessage.ToolCalls) > 0 ||
-				!projectEinoAssistantPhaseLifecycleApplies(req) ||
-				retryCtx.RetryAttempt != 1 {
+				!projectEinoAssistantPhaseLifecycleApplies(req) {
 				return &adk.RetryDecision{}
 			}
 			phase := projectEinoAssistantPhaseForState(req, runState, &adk.ChatModelAgentState{
@@ -165,9 +164,10 @@ func projectEinoAssistantPhaseProgressReminder(phase projectEinoAssistantPhase) 
 	var nextAction string
 	switch phase {
 	case projectEinoAssistantPhaseApproval:
-		nextAction = "call " + projectToolRequestProjectPlanApproval + " to present the plan for approval"
+		nextAction = "for source edits call " + projectToolRequestProjectPlanApproval +
+			"; for a direct runtime or infrastructure action call its exact tool and complete tool-level approval"
 	case projectEinoAssistantPhaseMutate:
-		nextAction = "call an available mutation tool to make the approved change"
+		nextAction = "call an available source mutation tool, or call the exact tool for a direct runtime or infrastructure action"
 	case projectEinoAssistantPhaseVerify:
 		nextAction = "call " + projectToolVerifyDevelopmentRuntime + " to verify the change"
 	case projectEinoAssistantPhaseRepair:
@@ -188,6 +188,9 @@ func projectEinoAssistantWillRetry(err error) bool {
 type projectEinoAssistantSafeToolErrorMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 }
+
+var errProjectAssistantPlanRetirement = errors.New("assistant plan retirement failed")
+var errProjectAssistantPlanGrantPersistence = errors.New("assistant plan grant persistence failed")
 
 func (m *projectEinoAssistantSafeToolErrorMiddleware) WrapInvokableToolCall(
 	_ context.Context,
@@ -241,6 +244,8 @@ func projectEinoAssistantPropagateToolError(err error) bool {
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, adk.ErrStreamCanceled) ||
+		errors.Is(err, errProjectAssistantPlanRetirement) ||
+		errors.Is(err, errProjectAssistantPlanGrantPersistence) ||
 		apierrors.IsForbidden(err) ||
 		apierrors.IsUnauthorized(err)
 }
@@ -249,7 +254,11 @@ func projectEinoAssistantSafeErrorText(err error) string {
 	if err == nil {
 		return ""
 	}
-	value := projectEinoAssistantRedactSerializedCookieValues(err.Error())
+	return projectEinoAssistantSafeText(err.Error())
+}
+
+func projectEinoAssistantSafeText(value string) string {
+	value = projectEinoAssistantRedactSerializedCookieValues(value)
 	for _, pattern := range projectEinoAssistantSecretPatterns {
 		value = pattern.pattern.ReplaceAllString(value, pattern.replacement)
 	}

@@ -67,6 +67,7 @@ type projectAssistantRunRequest struct {
 	InitialApprovedPlan *projectAssistantApprovedPlan
 	Continuation        *projectAssistantCheckpointState
 	AssistantRun        *store.AssistantRun
+	auditRecorder       *projectAssistantRunAuditRecorder
 }
 
 type projectAssistantRunResult struct {

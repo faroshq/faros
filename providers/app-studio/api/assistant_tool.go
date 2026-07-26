@@ -67,6 +67,14 @@ func (s projectAssistantToolSpec) chatTool() chatTool {
 }
 
 func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAssistantToolBundle {
+	switch spec.Name {
+	case projectToolInfrastructureListTemplates,
+		projectToolInfrastructureDescribeTemplate,
+		projectToolInfrastructureProvision,
+		projectToolInfrastructureListInstances,
+		projectToolInfrastructureGetInstance:
+		return projectAssistantToolBundleInfrastructure
+	}
 	switch projectToolBaseName(spec.Name) {
 	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment, projectToolInspectDevelopmentTemplates, projectToolCheckProjectBuild, projectToolGetBuildLogs:
 		return projectAssistantToolBundleWorkflow
@@ -87,8 +95,6 @@ func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAss
 	// model narrates a choice it cannot make.
 	case projectToolSelectTemplate:
 		return projectAssistantToolBundleWorkflow
-	case projectToolInfrastructureListTemplates, projectToolInfrastructureDescribeTemplate, projectToolInfrastructureProvision, projectToolInfrastructureListInstances, projectToolInfrastructureGetInstance:
-		return projectAssistantToolBundleInfrastructure
 	}
 	switch spec.Risk {
 	case projectAssistantToolRiskPlan:

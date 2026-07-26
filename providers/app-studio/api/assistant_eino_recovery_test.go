@@ -218,6 +218,18 @@ func TestProjectEinoAssistantSafeErrorTextRedactsMultipleSerializedCookies(t *te
 	}
 }
 
+func TestProjectEinoAssistantPhaseProgressReminderAllowsDirectOperationalAction(t *testing.T) {
+	for _, phase := range []projectEinoAssistantPhase{
+		projectEinoAssistantPhaseApproval,
+		projectEinoAssistantPhaseMutate,
+	} {
+		reminder := projectEinoAssistantPhaseProgressReminder(phase)
+		if !strings.Contains(reminder, "direct runtime or infrastructure action") {
+			t.Fatalf("%s reminder = %q, want direct operational-action guidance", phase, reminder)
+		}
+	}
+}
+
 func TestProjectEinoAssistantSafeToolErrorMiddleware(t *testing.T) {
 	middleware := &projectEinoAssistantSafeToolErrorMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
@@ -307,6 +319,8 @@ func TestProjectEinoAssistantSafeToolErrorMiddlewarePropagatesControlFlow(t *tes
 			errors.New("denied"),
 		)},
 		{name: "unauthorized", err: apierrors.NewUnauthorized("denied")},
+		{name: "plan retirement", err: errProjectAssistantPlanRetirement},
+		{name: "plan grant persistence", err: errProjectAssistantPlanGrantPersistence},
 		{name: "stateful interrupt", err: interruptErr},
 	}
 
@@ -440,12 +454,16 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "second semantic retry attempt is accepted",
+			name: "second semantic retry attempt is rejected until eino exhausts retries",
 			retryCtx: &adk.RetryContext{
 				RetryAttempt:  2,
 				InputMessages: input,
 				OutputMessage: schema.AssistantMessage("I have reviewed the requested work.", nil),
 			},
+			wantRetry:    true,
+			wantReason:   "incomplete phase progress: approval",
+			wantReminder: true,
+			wantBackoff:  -time.Nanosecond,
 		},
 		{
 			name: "transient provider error remains retryable",

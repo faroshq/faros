@@ -45,18 +45,19 @@ type projectAssistantApprovedPlan struct {
 type projectEinoAssistantRunState struct {
 	mu sync.Mutex
 
-	messages             []chatMessage
-	lastToolMessages     []chatMessage
-	toolCalls            []chatToolCall
-	seenToolCalls        map[string]int
-	turn                 int
-	turnPolicy           projectAssistantTurnPolicy
-	projectRepositoryRef string
-	toolPrompt           string
-	toolDiscovery        *projectEinoAssistantToolDiscovery
-	sessionSnapshot      *projectEinoAssistantSessionSnapshot
-	permissionBarrier    bool
-	approvedPlan         *projectAssistantApprovedPlan
+	messages                  []chatMessage
+	lastToolMessages          []chatMessage
+	toolCalls                 []chatToolCall
+	seenToolCalls             map[string]int
+	turn                      int
+	turnPolicy                projectAssistantTurnPolicy
+	projectRepositoryRef      string
+	toolPrompt                string
+	toolDiscovery             *projectEinoAssistantToolDiscovery
+	sessionSnapshot           *projectEinoAssistantSessionSnapshot
+	permissionBarrier         bool
+	approvedPlan              *projectAssistantApprovedPlan
+	approvedPlanGrantRevision string
 }
 
 func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
@@ -174,6 +175,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.turnPolicy = projectAssistantTurnPolicyForCheckpoint(state)
 	s.projectRepositoryRef = strings.TrimSpace(state.ProjectRepositoryRef)
 	s.approvedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
+	s.approvedPlanGrantRevision = strings.TrimSpace(state.ApprovedPlanGrantRevision)
 	s.sessionSnapshot = cloneProjectEinoAssistantSessionSnapshot(state.SessionSnapshot)
 }
 
@@ -212,6 +214,24 @@ func (s *projectEinoAssistantRunState) ClearApprovedPlan() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.approvedPlan = nil
+}
+
+func (s *projectEinoAssistantRunState) SetApprovedPlanGrantRevision(revision string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.approvedPlanGrantRevision = strings.TrimSpace(revision)
+}
+
+func (s *projectEinoAssistantRunState) ApprovedPlanGrantRevision() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.approvedPlanGrantRevision
 }
 
 func (s *projectEinoAssistantRunState) RecordModelInput(messages []chatMessage) {
@@ -311,15 +331,16 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return projectAssistantCheckpointState{
-		Messages:             cloneChatMessages(s.messages),
-		LastToolMessages:     cloneChatMessages(s.lastToolMessages),
-		ToolCalls:            cloneProjectAssistantToolCalls(s.toolCalls),
-		SeenToolCalls:        projectEinoAssistantSanitizeSeenToolCalls(s.seenToolCalls),
-		Turn:                 s.turn,
-		ProjectRepositoryRef: strings.TrimSpace(s.projectRepositoryRef),
-		TurnPolicy:           projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
-		ApprovedPlan:         cloneProjectAssistantApprovedPlan(s.approvedPlan),
-		SessionSnapshot:      cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
+		Messages:                  cloneChatMessages(s.messages),
+		LastToolMessages:          cloneChatMessages(s.lastToolMessages),
+		ToolCalls:                 cloneProjectAssistantToolCalls(s.toolCalls),
+		SeenToolCalls:             projectEinoAssistantSanitizeSeenToolCalls(s.seenToolCalls),
+		Turn:                      s.turn,
+		ProjectRepositoryRef:      strings.TrimSpace(s.projectRepositoryRef),
+		TurnPolicy:                projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
+		ApprovedPlan:              cloneProjectAssistantApprovedPlan(s.approvedPlan),
+		ApprovedPlanGrantRevision: strings.TrimSpace(s.approvedPlanGrantRevision),
+		SessionSnapshot:           cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
 	}
 }
 

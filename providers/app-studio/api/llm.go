@@ -55,11 +55,11 @@ const (
 	projectLLMProviderGoogle       = "google-ai-studio"
 	projectLLMGoogleCloudScope     = "https://www.googleapis.com/auth/cloud-platform"
 
-	// maxAssistantToolTurns bounds how many tool-call/round-trips a single
-	// assistant generation may take before the run returns a progress summary.
-	// It is intentionally high enough for app scaffolding that writes many
-	// files, while still guarding against models that loop on tool calls.
-	maxAssistantToolTurns            = 32
+	// maxAssistantDeepIterations bounds the number of ChatModel reasoning
+	// cycles Eino allows before terminating a DeepAgent run.
+	// Match Eino's reference DeepAgent headroom while retaining a finite guard
+	// against models that loop indefinitely.
+	maxAssistantDeepIterations       = 100
 	projectToolInfoLimit             = 1000
 	projectMCPCallTimeout            = 2 * time.Minute
 	projectCommitProjectFilesMax     = 500
@@ -290,6 +290,9 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	turn := newProjectAssistantTurnItem(projectAssistantTurnMessage, id, p.Name)
 	ctx, finishTurn := s.projectAssistantRunManager().Begin(ctx, turn)
 	defer finishTurn()
+	if cause := context.Cause(ctx); cause != nil {
+		return "", cause
+	}
 	r = r.WithContext(ctx)
 	recent, err := s.store.LoadRecentMessages(ctx, projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), 24)
 	if err != nil {
@@ -1736,7 +1739,8 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 	var b strings.Builder
 	b.WriteString("You are the assistant for a persistent Kedge Project workspace. ")
 	b.WriteString("Help the user reason about and build the application represented by this Project. ")
-	b.WriteString("Do not narrate tool calls or say what tool you will call next in assistant prose; App Studio shows tool progress through its status and tool summary UI. ")
+	b.WriteString("Use brief milestone updates or concise blocker explanations when they help the user understand meaningful progress. ")
+	b.WriteString("Do not narrate each tool call or say what tool you will call next in assistant prose; App Studio shows detailed tool progress through its status and tool summary UI. ")
 	b.WriteString("Do not claim that you changed files or deployed resources unless a tool result or other evidence supports it. ")
 	b.WriteString("Do not invent App Studio product capabilities, UI tabs, cloud providers, infrastructure templates, setup flows, deployment targets, or integrations. ")
 	b.WriteString("For App Studio product capability questions, answer only from explicit evidence in tool results, project metadata, project memory, or this system prompt; if evidence is missing, say \"I don't see that capability available in this workspace\" and explain what you can verify. ")
