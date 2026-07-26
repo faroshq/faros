@@ -53,23 +53,6 @@ func TestEinoAssistantEngineRequiresProject(t *testing.T) {
 	}
 }
 
-func TestProjectEinoAssistantInstructionMiddlewareRetainsBaseAndAppendsDelta(t *testing.T) {
-	middleware := projectEinoAssistantInstructionMiddleware()
-	runCtx := &adk.ChatModelAgentContext{Instruction: "Eino DeepAgent base instruction."}
-
-	_, got, err := middleware.BeforeAgent(context.Background(), runCtx)
-	if err != nil {
-		t.Fatalf("BeforeAgent returned error: %v", err)
-	}
-	if got == nil {
-		t.Fatal("BeforeAgent returned nil run context")
-	}
-	want := "Eino DeepAgent base instruction.\n\n" + projectEinoAssistantDeepInstruction
-	if got.Instruction != want {
-		t.Fatalf("instruction = %q, want %q", got.Instruction, want)
-	}
-}
-
 func TestProjectEinoAssistantMaxIterationsExceededUsesSentinel(t *testing.T) {
 	if !projectEinoAssistantMaxIterationsExceeded(
 		fmt.Errorf("wrapped: %w", adk.ErrExceedMaxIterations),
@@ -474,6 +457,52 @@ func TestEinoAssistantEngineDoesNotUseToolSearchForSmallReadToolSet(t *testing.T
 	}
 	if !einoMessagesContainToolResult(chatModel.inputs[1], "call-inspect", "src/App.tsx") {
 		t.Fatalf("second model input = %#v, want Eino-propagated tool result", chatModel.inputs[1])
+	}
+}
+
+func TestEinoAssistantEngineUsesBoundedAppStudioSystemInstruction(t *testing.T) {
+	chatModel := &capturingEinoChatModel{content: "instruction captured"}
+	engine := newRetryingProjectEinoAssistantEngine(chatModel)
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileDiscussion)
+
+	if _, err := engine.StreamProjectAssistant(context.Background(), req); err != nil {
+		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	}
+	if len(chatModel.inputs) != 1 {
+		t.Fatalf("model calls = %d, want one", len(chatModel.inputs))
+	}
+
+	var instruction string
+	for _, msg := range chatModel.inputs[0] {
+		if msg != nil && msg.Role == schema.System {
+			instruction = msg.Content
+			break
+		}
+	}
+	if instruction == "" {
+		t.Fatal("model input has no system instruction")
+	}
+	if instruction != projectEinoAssistantDeepInstruction {
+		t.Errorf(
+			"system instruction length = %d, want exact bounded App Studio instruction length %d",
+			len(instruction),
+			len(projectEinoAssistantDeepInstruction),
+		)
+	}
+
+	for name, required := range map[string]string{
+		"only exposed App Studio tools": "only the currently exposed App Studio tools",
+		"one mutation per path":         "never emit more than one mutation tool call for the same path",
+		"inspect after failed edit":     "After an edit or patch fails, inspect the current file content before retrying that path",
+		"complete phase progression":    "advance through plan, mutate, verify, and commit",
+		"report only when terminal":     "only produce the final user report in the terminal report phase",
+		"batch distinct paths":          "Mutations for distinct paths may be batched",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(instruction), strings.ToLower(required)) {
+				t.Errorf("system instruction missing %q", required)
+			}
+		})
 	}
 }
 

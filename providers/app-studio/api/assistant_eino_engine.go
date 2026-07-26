@@ -38,7 +38,7 @@ const (
 	projectEinoAssistantSummaryContextMessages = 128
 	projectEinoAssistantSummaryContextTokens   = 24000
 	projectEinoAssistantSummaryInstruction     = "Summarize this App Studio project session for the next builder turn. Preserve user requirements, accepted plans, files touched or inspected, unresolved questions, repository/runtime state, and any constraints. Keep it concise and operational."
-	projectEinoAssistantDeepInstruction        = "Run App Studio project assistant turns through the currently exposed tools. request_project_plan_approval grants mutation authority; write_todos only tracks a previously approved multi-step implementation and never authorizes mutation. Treat the currently exposed tools as the authoritative phase contract. When no tools remain, return a concise evidence-based report to the user."
+	projectEinoAssistantDeepInstruction        = "Run App Studio project assistant turns using only the currently exposed App Studio tools. Do not assume unexposed shell, browser, filesystem, or subagent tools. request_project_plan_approval grants mutation authority; write_todos only tracks a previously approved multi-step implementation and never authorizes mutation. Treat the currently exposed tools as the authoritative phase contract. On mutation turns, advance through plan, mutate, verify, and commit; only produce the final user report in the terminal report phase. Within a single model response, never emit more than one mutation tool call for the same path. Mutations for distinct paths may be batched. After an edit or patch fails, inspect the current file content before retrying that path. When terminal, return a concise evidence-based report."
 	projectEinoAssistantNoOutputFallback       = "I couldn't produce a response for that turn. Please try again or rephrase the request, and I can continue from the current project context."
 )
 
@@ -59,28 +59,6 @@ type projectEinoAssistantToolsFactory func(
 	projectAssistantRunRequest,
 	*projectEinoAssistantRunState,
 ) ([]einotool.BaseTool, error)
-
-type projectEinoAssistantInstructionAppendMiddleware struct {
-	*adk.BaseChatModelAgentMiddleware
-}
-
-func projectEinoAssistantInstructionMiddleware() adk.ChatModelAgentMiddleware {
-	return &projectEinoAssistantInstructionAppendMiddleware{
-		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-	}
-}
-
-func (m *projectEinoAssistantInstructionAppendMiddleware) BeforeAgent(
-	ctx context.Context,
-	runCtx *adk.ChatModelAgentContext,
-) (context.Context, *adk.ChatModelAgentContext, error) {
-	if runCtx == nil {
-		return ctx, runCtx, nil
-	}
-	next := *runCtx
-	next.Instruction += "\n\n" + projectEinoAssistantDeepInstruction
-	return ctx, &next, nil
-}
 
 // NewEinoAssistantEngine returns the Eino-backed assistant engine. The App
 // Studio assistant uses Eino's ChatModelAgent as the only chat/tool execution
@@ -195,7 +173,6 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 	if err != nil {
 		return nil, fmt.Errorf("create eino patch tool calls middleware: %w", err)
 	}
-	handlers = append(handlers, projectEinoAssistantInstructionMiddleware())
 	handlers = append(handlers, patchToolCallsMiddleware)
 	reductionMiddleware, err := projectEinoAssistantReductionMiddleware(ctx)
 	if err != nil {
@@ -239,7 +216,7 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		Name:                   "app-studio-project-assistant",
 		Description:            "Runs App Studio project assistant turns.",
 		ChatModel:              chatModel,
-		Instruction:            "",
+		Instruction:            projectEinoAssistantDeepInstruction,
 		ToolsConfig:            toolsConfig,
 		MaxIteration:           maxAssistantToolTurns,
 		WithoutWriteTodos:      !projectEinoAssistantTurnUsesDeepTodos(req.TurnPolicy),
