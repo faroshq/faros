@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -49,6 +50,8 @@ type projectEinoAssistantPhaseFilterMiddleware struct {
 	runState          *projectEinoAssistantRunState
 	toolInfos         []*schema.ToolInfo
 	deferredToolInfos []*schema.ToolInfo
+	phase             projectEinoAssistantPhase
+	approvedPlan      *projectAssistantApprovedPlan
 }
 
 func projectEinoAssistantPhaseMiddleware(
@@ -100,6 +103,8 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	m.deferredToolInfos = projectEinoAssistantPhaseMergeTools(m.deferredToolInfos, state.DeferredToolInfos)
 	phase := projectEinoAssistantPhaseForState(m.req, m.runState, state)
 	approvedPlan := projectEinoAssistantPhaseApprovedPlan(m.req, m.runState)
+	m.phase = phase
+	m.approvedPlan = cloneProjectAssistantApprovedPlan(approvedPlan)
 	state.ToolInfos = projectEinoAssistantPhaseFilterTools(
 		phase,
 		approvedPlan,
@@ -107,6 +112,22 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	)
 	state.DeferredToolInfos = projectEinoAssistantPhaseFilterTools(phase, approvedPlan, m.deferredToolInfos)
 	return ctx, state, nil
+}
+
+func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
+	_ context.Context,
+	endpoint adk.InvokableToolCallEndpoint,
+	toolCtx *adk.ToolContext,
+) (adk.InvokableToolCallEndpoint, error) {
+	if toolCtx == nil || projectToolBaseName(toolCtx.Name) != projectEinoAssistantWriteTodosTool {
+		return endpoint, nil
+	}
+	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+		if !projectEinoAssistantPhaseAllowsTool(m.phase, m.approvedPlan, &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool}) {
+			return "Tool call denied: write_todos is unavailable in the current assistant phase", nil
+		}
+		return endpoint(ctx, argumentsInJSON, opts...)
+	}, nil
 }
 
 func projectEinoAssistantPhaseVisibleTools(canonical, current []*schema.ToolInfo) []*schema.ToolInfo {

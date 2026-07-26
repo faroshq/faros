@@ -261,6 +261,76 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	}
 }
 
+func TestProjectEinoAssistantPhaseMiddlewareGatesWriteTodosExecution(t *testing.T) {
+	tests := []struct {
+		name         string
+		phase        projectEinoAssistantPhase
+		approvedPlan *projectAssistantApprovedPlan
+		wantCalls    int
+		wantResult   string
+	}{
+		{
+			name:       "approval rejects hidden todo",
+			phase:      projectEinoAssistantPhaseApproval,
+			wantResult: "Tool call denied: write_todos is unavailable in the current assistant phase",
+		},
+		{
+			name:  "one-step mutate rejects hidden todo",
+			phase: projectEinoAssistantPhaseMutate,
+			approvedPlan: &projectAssistantApprovedPlan{
+				Steps: []string{"make the small change"},
+			},
+			wantResult: "Tool call denied: write_todos is unavailable in the current assistant phase",
+		},
+		{
+			name:  "multi-step mutate executes todo",
+			phase: projectEinoAssistantPhaseMutate,
+			approvedPlan: &projectAssistantApprovedPlan{
+				Steps: []string{"inspect", "edit"},
+			},
+			wantCalls:  1,
+			wantResult: "todo recorded",
+		},
+		{
+			name:  "multi-step repair executes todo",
+			phase: projectEinoAssistantPhaseRepair,
+			approvedPlan: &projectAssistantApprovedPlan{
+				Steps: []string{"diagnose", "repair"},
+			},
+			wantCalls:  1,
+			wantResult: "todo recorded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			middleware := &projectEinoAssistantPhaseFilterMiddleware{
+				BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+				phase:                        tt.phase,
+				approvedPlan:                 tt.approvedPlan,
+			}
+			calls := 0
+			wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
+				calls++
+				return "todo recorded", nil
+			}, &adk.ToolContext{Name: projectEinoAssistantWriteTodosTool})
+			if err != nil {
+				t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+			}
+			result, err := wrapped(context.Background(), `{"todos":[]}`)
+			if err != nil {
+				t.Fatalf("wrapped write_todos returned error: %v", err)
+			}
+			if result != tt.wantResult {
+				t.Fatalf("wrapped write_todos result = %q, want %q", result, tt.wantResult)
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("inner write_todos calls = %d, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
 func TestProjectEinoAssistantPhaseMiddlewareRestoresToolsAfterApproval(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	middleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{}, runState)

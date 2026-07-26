@@ -315,8 +315,11 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	if strings.Contains(joined, projectToolReadProjectFile+":") {
 		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
-	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
-		t.Fatalf("model tools = %#v, want direct commit_project_files", model.Inputs[0].Tools)
+	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
+		t.Fatalf("model tools = %#v, must not expose commit before a successful verification", model.Inputs[0].Tools)
+	}
+	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolRequestProjectPlanApproval) {
+		t.Fatalf("model tools = %#v, want plan approval in the initial phase", model.Inputs[0].Tools)
 	}
 	if projectChatToolsInclude(model.Inputs[0].Tools, "tool_search") {
 		t.Fatalf("model tools = %#v, want no tool_search without provider tools", model.Inputs[0].Tools)
@@ -470,8 +473,11 @@ func TestGenerateProjectAssistantStreamFiltersDatabricksToolsOnUnrelatedImplemen
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
-		t.Fatalf("model tools = %#v, want direct commit bridge", model.Inputs[0].Tools)
+	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
+		t.Fatalf("model tools = %#v, must not expose the commit bridge before verification", model.Inputs[0].Tools)
+	}
+	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolRequestProjectPlanApproval) {
+		t.Fatalf("model tools = %#v, want plan approval in the initial phase", model.Inputs[0].Tools)
 	}
 	if projectChatToolsInclude(model.Inputs[0].Tools, "tool_search") {
 		t.Fatalf("model tools = %#v, want no tool_search without provider tools", model.Inputs[0].Tools)
@@ -666,12 +672,7 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	for _, want := range []string{projectToolGetRuntimeStatus, projectToolGetPreviewURL} {
-		if !projectChatToolsInclude(model.Inputs[0].Tools, want) {
-			t.Fatalf("model tools = %#v, want %s", model.Inputs[0].Tools, want)
-		}
-	}
-	for _, unwanted := range []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles} {
+	for _, unwanted := range []string{projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles} {
 		if projectChatToolsInclude(model.Inputs[0].Tools, unwanted) {
 			t.Fatalf("model tools = %#v, should not include %s", model.Inputs[0].Tools, unwanted)
 		}

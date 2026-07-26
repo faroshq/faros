@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/dynamictool/toolsearch"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
+	"github.com/cloudwego/eino/adk/prebuilt/deep"
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -37,6 +38,7 @@ const (
 	projectEinoAssistantSummaryContextMessages = 128
 	projectEinoAssistantSummaryContextTokens   = 24000
 	projectEinoAssistantSummaryInstruction     = "Summarize this App Studio project session for the next builder turn. Preserve user requirements, accepted plans, files touched or inspected, unresolved questions, repository/runtime state, and any constraints. Keep it concise and operational."
+	projectEinoAssistantDeepInstruction        = "Run App Studio project assistant turns through the currently exposed tools. request_project_plan_approval grants mutation authority; write_todos only tracks a previously approved multi-step implementation and never authorizes mutation. Treat the currently exposed tools as the authoritative phase contract. When no tools remain, return a concise evidence-based report to the user."
 	projectEinoAssistantNoOutputFallback       = "I couldn't produce a response for that turn. Please try again or rephrase the request, and I can continue from the current project context."
 )
 
@@ -202,25 +204,34 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 	handlers = append(handlers, &projectEinoAssistantSafeToolErrorMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 	})
-	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:             "app-studio-project-assistant",
-		Description:      "Runs App Studio project assistant turns.",
-		Model:            chatModel,
-		ModelRetryConfig: projectEinoAssistantModelRetryConfig(),
-		Handlers:         handlers,
-		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               staticTools,
-				UnknownToolsHandler: projectEinoUnknownToolHandler(req, runState),
-				ExecuteSequentially: true,
-			},
+	handlers = append(handlers, projectEinoAssistantPhaseMiddleware(req, runState))
+	toolsConfig := adk.ToolsConfig{
+		ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools:               staticTools,
+			UnknownToolsHandler: projectEinoUnknownToolHandler(req, runState),
+			ExecuteSequentially: true,
 		},
-		MaxIterations: maxAssistantToolTurns,
+	}
+	agent, err := deep.New(ctx, &deep.Config{
+		Name:                   "app-studio-project-assistant",
+		Description:            "Runs App Studio project assistant turns.",
+		ChatModel:              chatModel,
+		Instruction:            projectEinoAssistantDeepInstruction,
+		ToolsConfig:            toolsConfig,
+		MaxIteration:           maxAssistantToolTurns,
+		WithoutWriteTodos:      !projectEinoAssistantTurnUsesDeepTodos(req.TurnPolicy),
+		WithoutGeneralSubAgent: true,
+		Handlers:               handlers,
+		ModelRetryConfig:       projectEinoAssistantModelRetryConfig(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create eino assistant agent: %w", err)
 	}
 	return agent, nil
+}
+
+func projectEinoAssistantTurnUsesDeepTodos(policy projectAssistantTurnPolicy) bool {
+	return projectAssistantTurnProfileAllowsMutation(policy.profile)
 }
 
 func projectEinoAssistantFinalizeSummary(ctx context.Context, originalMessages []*schema.Message, summary *schema.Message) ([]*schema.Message, error) {
