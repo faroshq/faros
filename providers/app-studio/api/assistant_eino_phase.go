@@ -416,7 +416,7 @@ func projectEinoAssistantPhaseAllowsTool(
 	}
 	name := projectToolBaseName(tool.Name)
 	if name == projectEinoAssistantToolSearchTool {
-		return phase != projectEinoAssistantPhaseCommit && phase != projectEinoAssistantPhaseReport
+		return phase == projectEinoAssistantPhaseApproval
 	}
 	if name == projectEinoAssistantWriteTodosTool {
 		return (phase == projectEinoAssistantPhaseMutate || phase == projectEinoAssistantPhaseRepair) &&
@@ -436,39 +436,20 @@ func projectEinoAssistantPhaseAllowsTool(
 			risk == projectAssistantToolRiskInput ||
 			risk == projectAssistantToolRiskPlan
 	case projectEinoAssistantPhaseMutate:
-		return name != projectToolRequestProjectPlanApproval &&
-			projectEinoAssistantPhaseMutationRisk(risk)
+		return (bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseVerify:
-		return name == projectToolVerifyDevelopmentRuntime ||
-			(projectEinoAssistantPhaseRepairRisk(risk) &&
-				(bundle == projectAssistantToolBundleEdit || bundle == projectAssistantToolBundleRuntime))
+		return name == projectToolVerifyDevelopmentRuntime
 	case projectEinoAssistantPhaseRepair:
-		return projectEinoAssistantPhaseRepairRisk(risk) &&
-			(bundle == projectAssistantToolBundleWorkspaceRead ||
-				bundle == projectAssistantToolBundleEdit ||
-				bundle == projectAssistantToolBundleRuntime)
+		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
+			(bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			(bundle == projectAssistantToolBundleRuntime &&
+				(risk == projectAssistantToolRiskRead || risk == projectAssistantToolRiskRuntime)) ||
+			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseCommit:
-		return projectEinoAssistantCommitTool(name) && risk == projectAssistantToolRiskCommit
+		return name == projectToolCommitProjectFiles && risk == projectAssistantToolRiskCommit
 	case projectEinoAssistantPhaseReport:
 		return false
-	default:
-		return false
-	}
-}
-
-func projectEinoAssistantPhaseMutationRisk(risk projectAssistantToolRisk) bool {
-	switch risk {
-	case projectAssistantToolRiskRead, projectAssistantToolRiskInput, projectAssistantToolRiskWrite, projectAssistantToolRiskRuntime:
-		return true
-	default:
-		return false
-	}
-}
-
-func projectEinoAssistantPhaseRepairRisk(risk projectAssistantToolRisk) bool {
-	switch risk {
-	case projectAssistantToolRiskRead, projectAssistantToolRiskWrite, projectAssistantToolRiskRuntime:
-		return true
 	default:
 		return false
 	}

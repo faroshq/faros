@@ -180,16 +180,24 @@ func TestProjectEinoAssistantPhaseIgnoresUnsuccessfulToolResults(t *testing.T) {
 func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	allTools := []*schema.ToolInfo{
 		projectEinoAssistantPhaseToolInfo("read_workspace", projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolListProjectFiles, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolSearchProjectFiles, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
 		projectEinoAssistantPhaseToolInfo("ask_for_input", projectAssistantToolRiskInput, projectAssistantToolBundleCollaboration),
+		projectEinoAssistantPhaseToolInfo(projectToolAskFollowUp, projectAssistantToolRiskInput, projectAssistantToolBundleCollaboration),
 		projectEinoAssistantPhaseToolInfo(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
 		projectEinoAssistantPhaseToolInfo(projectToolPlanProjectChanges, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		projectEinoAssistantPhaseToolInfo(projectToolCheckProjectReadiness, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
 		projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		projectEinoAssistantPhaseToolInfo(projectToolApplyPatch, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
 		projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
 		projectEinoAssistantPhaseToolInfo(projectToolRestartRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo(projectToolSetRuntimeEnv, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
 		projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
 		projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+		projectEinoAssistantPhaseToolInfo(projectToolCommitFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
 		projectEinoAssistantPhaseToolInfo("invalid_runtime_commit", projectAssistantToolRiskCommit, projectAssistantToolBundleRuntime),
-		{Name: "write_todos"},
+		{Name: projectEinoAssistantWriteTodosTool},
+		{Name: projectEinoAssistantToolSearchTool},
 	}
 
 	tests := []struct {
@@ -200,43 +208,44 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 		want         []string
 	}{
 		{
-			name: "approval only exposes read input and plan tools",
+			name: "approval exposes workspace reads input and plan tools",
 			want: []string{
-				"read_workspace", "ask_for_input", projectToolRequestProjectPlanApproval, projectToolPlanProjectChanges,
+				"read_workspace", projectToolListProjectFiles, projectToolSearchProjectFiles,
+				"ask_for_input", projectToolAskFollowUp, projectToolRequestProjectPlanApproval,
+				projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectEinoAssistantToolSearchTool,
 			},
 		},
 		{
-			name:         "mutate hides approval and commit while allowing multi-step todos",
+			name:         "mutate exposes only edits follow-up and multi-step todos",
 			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
 			want: []string{
-				"read_workspace", "ask_for_input", projectToolPlanProjectChanges, projectToolWriteFile,
-				projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolVerifyDevelopmentRuntime, "write_todos",
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectEinoAssistantWriteTodosTool,
 			},
 		},
 		{
-			name:         "verify exposes verifier and repair-capable edit runtime tools",
+			name:         "verify exposes only the runtime verifier",
 			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"edit"}},
 			messages: []*schema.Message{
 				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
 			},
-			want: []string{
-				projectToolWriteFile, projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolVerifyDevelopmentRuntime,
-			},
+			want: []string{projectToolVerifyDevelopmentRuntime},
 		},
 		{
-			name:         "repair includes diagnostic workspace and runtime reads",
+			name:         "repair exposes targeted reads edits runtime tools follow-up and todos",
 			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"inspect", "repair"}},
 			messages: []*schema.Message{
 				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
 				projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"not_ready"}`),
 			},
 			want: []string{
-				"read_workspace", projectToolWriteFile, projectToolGetRuntimeStatus, projectToolRestartRuntime,
-				projectToolVerifyDevelopmentRuntime, "write_todos",
+				"read_workspace", projectToolListProjectFiles, projectToolSearchProjectFiles,
+				projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch,
+				projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolSetRuntimeEnv,
+				projectToolVerifyDevelopmentRuntime, projectEinoAssistantWriteTodosTool,
 			},
 		},
 		{
-			name:         "commit exposes only the commit tool",
+			name:         "commit exposes only commit project files",
 			approvedPlan: &projectAssistantApprovedPlan{Steps: []string{"edit"}},
 			messages: []*schema.Message{
 				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
@@ -318,11 +327,10 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 			wantResult: "todo recorded",
 		},
 		{
-			name:       "commit executes transformed verified commit",
+			name:       "commit rejects transformed commit",
 			phase:      projectEinoAssistantPhaseCommit,
 			tool:       projectEinoAssistantPhaseToolInfo(projectToolCodeCommitFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
-			wantCalls:  1,
-			wantResult: "todo recorded",
+			wantResult: "Tool call denied: commit_files is unavailable in the current assistant phase",
 		},
 		{
 			name:       "initial creation report rejects hidden commit",
@@ -532,9 +540,9 @@ func TestProjectEinoAssistantPhaseAllowsToolSearchOnlyWhileDiscoveryCanAdvanceWo
 		want  bool
 	}{
 		{phase: projectEinoAssistantPhaseApproval, want: true},
-		{phase: projectEinoAssistantPhaseMutate, want: true},
-		{phase: projectEinoAssistantPhaseVerify, want: true},
-		{phase: projectEinoAssistantPhaseRepair, want: true},
+		{phase: projectEinoAssistantPhaseMutate, want: false},
+		{phase: projectEinoAssistantPhaseVerify, want: false},
+		{phase: projectEinoAssistantPhaseRepair, want: false},
 		{phase: projectEinoAssistantPhaseCommit, want: false},
 		{phase: projectEinoAssistantPhaseReport, want: false},
 	} {
