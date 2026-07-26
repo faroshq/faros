@@ -215,4 +215,3 @@
   ```
 
   The reviewer must inspect semantic-retry termination, streaming retry behavior, checkpoint/resume compatibility, phase tool availability, approval safety, prompt ordering, and missing regression tests.
-
