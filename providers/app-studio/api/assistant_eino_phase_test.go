@@ -23,6 +23,9 @@ import (
 	"github.com/cloudwego/eino/adk"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/faroshq/provider-app-studio/store"
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
@@ -292,6 +295,142 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	}
 }
 
+func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalEdits(t *testing.T) {
+	tools := projectEinoAssistantPhaseFactoryToolInfos(t)
+	inventoryNames := projectEinoAssistantPhaseToolNames(tools)
+	if !projectEinoAssistantPhaseToolNamesContain(inventoryNames, projectToolHydrateWorkspace) {
+		t.Fatalf("factory inventory = %#v, want %s represented in the real inventory", inventoryNames, projectToolHydrateWorkspace)
+	}
+
+	approvedPlan := &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}}
+	for _, tt := range []struct {
+		phase projectEinoAssistantPhase
+		want  []string
+	}{
+		{
+			phase: projectEinoAssistantPhaseMutate,
+			want:  []string{projectToolAskFollowUp, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir},
+		},
+		{
+			phase: projectEinoAssistantPhaseRepair,
+			want:  []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir},
+		},
+	} {
+		t.Run(string(tt.phase), func(t *testing.T) {
+			filtered := projectEinoAssistantPhaseFilterTools(tt.phase, approvedPlan, tools)
+			got := projectEinoAssistantPhaseToolNames(filtered)
+			if projectEinoAssistantPhaseToolNamesContain(got, projectToolHydrateWorkspace) {
+				t.Fatalf("%s tools = %#v, want %s excluded", tt.phase, got, projectToolHydrateWorkspace)
+			}
+			for _, want := range tt.want {
+				if !projectEinoAssistantPhaseToolNamesContain(got, want) {
+					t.Fatalf("%s tools = %#v, want canonical tool %s", tt.phase, got, want)
+				}
+			}
+			for _, tool := range filtered {
+				risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(tool)
+				if !ok || risk != projectAssistantToolRiskWrite || bundle != projectAssistantToolBundleEdit {
+					continue
+				}
+				switch tool.Name {
+				case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+				default:
+					t.Fatalf("%s exposed noncanonical edit tool %q from real factory inventory", tt.phase, tool.Name)
+				}
+			}
+			if tt.phase == projectEinoAssistantPhaseMutate &&
+				!projectEinoAssistantPhaseStringSlicesEqual(got, tt.want) {
+				t.Fatalf("mutate tools = %#v, want only %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase projectEinoAssistantPhase
+		tool  *schema.ToolInfo
+		want  bool
+	}{
+		{
+			name:  "mutate allows canonical write",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+			want:  true,
+		},
+		{
+			name:  "mutate rejects namespaced write",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__write_file", projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		},
+		{
+			name:  "mutate rejects hydrate workspace",
+			phase: projectEinoAssistantPhaseMutate,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolHydrateWorkspace, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		},
+		{
+			name:  "repair rejects namespaced mkdir",
+			phase: projectEinoAssistantPhaseRepair,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__mkdir", projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		},
+		{
+			name:  "verify allows canonical verifier metadata",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+			want:  true,
+		},
+		{
+			name:  "verify rejects namespaced verifier",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo("provider__verify_development_runtime", projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "verify rejects case lookalike",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo("VERIFY_DEVELOPMENT_RUNTIME", projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "verify rejects wrong risk",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRuntime, projectAssistantToolBundleRuntime),
+		},
+		{
+			name:  "verify rejects wrong bundle",
+			phase: projectEinoAssistantPhaseVerify,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolVerifyDevelopmentRuntime, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		},
+		{
+			name:  "commit allows canonical commit metadata",
+			phase: projectEinoAssistantPhaseCommit,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			want:  true,
+		},
+		{
+			name:  "commit rejects namespaced commit",
+			phase: projectEinoAssistantPhaseCommit,
+			tool:  projectEinoAssistantPhaseToolInfo("code__commit_project_files", projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+		},
+		{
+			name:  "commit rejects case lookalike",
+			phase: projectEinoAssistantPhaseCommit,
+			tool:  projectEinoAssistantPhaseToolInfo("COMMIT_PROJECT_FILES", projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+		},
+		{
+			name:  "commit rejects wrong bundle",
+			phase: projectEinoAssistantPhaseCommit,
+			tool:  projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRuntime),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, tt.tool); got != tt.want {
+				t.Fatalf("allows %q = %t, want %t", tt.tool.Name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -331,6 +470,18 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 			phase:      projectEinoAssistantPhaseCommit,
 			tool:       projectEinoAssistantPhaseToolInfo(projectToolCodeCommitFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
 			wantResult: "Tool call denied: commit_files is unavailable in the current assistant phase",
+		},
+		{
+			name:       "commit rejects namespaced canonical lookalike",
+			phase:      projectEinoAssistantPhaseCommit,
+			tool:       projectEinoAssistantPhaseToolInfo("code__commit_project_files", projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantResult: "Tool call denied: commit_project_files is unavailable in the current assistant phase",
+		},
+		{
+			name:       "commit rejects case canonical lookalike",
+			phase:      projectEinoAssistantPhaseCommit,
+			tool:       projectEinoAssistantPhaseToolInfo("COMMIT_PROJECT_FILES", projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantResult: "Tool call denied: commit_project_files is unavailable in the current assistant phase",
 		},
 		{
 			name:       "initial creation report rejects hidden commit",
@@ -592,6 +743,30 @@ func projectEinoAssistantPhaseSearchableToolInfo(name string) *schema.ToolInfo {
 	return tool
 }
 
+func projectEinoAssistantPhaseFactoryToolInfos(t *testing.T) []*schema.ToolInfo {
+	t.Helper()
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetToolDiscovery(projectEinoAssistantToolDiscovery{IncludeCommitBridge: true})
+	req := projectAssistantRunRequest{
+		TurnProfile: projectAssistantTurnProfileImplementation,
+		TurnPolicy:  projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+	}
+	tools, err := newProjectEinoAssistantToolsFactory(server)(context.Background(), req, runState)
+	if err != nil {
+		t.Fatalf("new factory tools returned error: %v", err)
+	}
+	infos := make([]*schema.ToolInfo, 0, len(tools))
+	for _, tool := range tools {
+		info, err := tool.Info(context.Background())
+		if err != nil {
+			t.Fatalf("factory tool Info returned error: %v", err)
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
 func projectEinoAssistantPhaseToolNames(tools []*schema.ToolInfo) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
@@ -600,6 +775,15 @@ func projectEinoAssistantPhaseToolNames(tools []*schema.ToolInfo) []string {
 		}
 	}
 	return names
+}
+
+func projectEinoAssistantPhaseToolNamesContain(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func projectEinoAssistantPhaseStringSlicesEqual(got, want []string) bool {

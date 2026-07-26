@@ -149,7 +149,8 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	if toolCtx == nil || !projectEinoAssistantPhaseLifecycleApplies(m.req) {
 		return endpoint, nil
 	}
-	name := projectToolBaseName(toolCtx.Name)
+	rawName := toolCtx.Name
+	name := projectToolBaseName(rawName)
 	if name != projectEinoAssistantWriteTodosTool &&
 		name != projectToolRequestProjectPlanApproval &&
 		name != projectToolCommitProjectFiles &&
@@ -157,7 +158,7 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 		return endpoint, nil
 	}
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
-		tool := &schema.ToolInfo{Name: name}
+		tool := &schema.ToolInfo{Name: rawName}
 		switch name {
 		case projectToolRequestProjectPlanApproval:
 			tool.Extra = map[string]any{
@@ -436,20 +437,35 @@ func projectEinoAssistantPhaseAllowsTool(
 			risk == projectAssistantToolRiskInput ||
 			risk == projectAssistantToolRiskPlan
 	case projectEinoAssistantPhaseMutate:
-		return (bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+		return (projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+			bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseVerify:
-		return name == projectToolVerifyDevelopmentRuntime
+		return tool.Name == projectToolVerifyDevelopmentRuntime &&
+			bundle == projectAssistantToolBundleRuntime &&
+			risk == projectAssistantToolRiskRead
 	case projectEinoAssistantPhaseRepair:
 		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
-			(bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			(bundle == projectAssistantToolBundleRuntime &&
 				(risk == projectAssistantToolRiskRead || risk == projectAssistantToolRiskRuntime)) ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseCommit:
-		return name == projectToolCommitProjectFiles && risk == projectAssistantToolRiskCommit
+		return tool.Name == projectToolCommitProjectFiles &&
+			bundle == projectAssistantToolBundleRepo &&
+			risk == projectAssistantToolRiskCommit
 	case projectEinoAssistantPhaseReport:
 		return false
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPhaseCanonicalEditTool(name string) bool {
+	switch name {
+	case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+		return true
 	default:
 		return false
 	}
