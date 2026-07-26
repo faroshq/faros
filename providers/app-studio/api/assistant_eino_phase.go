@@ -119,6 +119,15 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	}
 	m.toolInfos = projectEinoAssistantPhaseMergeTools(m.toolInfos, state.ToolInfos)
 	m.deferredToolInfos = projectEinoAssistantPhaseMergeTools(m.deferredToolInfos, state.DeferredToolInfos)
+	// Read-only profiles already receive their exact tool set from turn-policy
+	// filtering. They do not participate in the mutation lifecycle, but still
+	// need the canonical static inventory after resuming a legacy checkpoint
+	// whose persisted ToolInfos were phase-filtered.
+	if !projectEinoAssistantPhaseLifecycleApplies(m.req) {
+		state.ToolInfos = projectEinoAssistantPhaseVisibleTools(m.toolInfos, state.ToolInfos)
+		state.DeferredToolInfos = projectEinoAssistantPhaseMergeTools(m.deferredToolInfos, state.DeferredToolInfos)
+		return ctx, state, nil
+	}
 	phase := projectEinoAssistantPhaseForState(m.req, m.runState, state)
 	approvedPlan := projectEinoAssistantPhaseApprovedPlan(m.req, m.runState)
 	m.phase = phase
@@ -137,16 +146,25 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	endpoint adk.InvokableToolCallEndpoint,
 	toolCtx *adk.ToolContext,
 ) (adk.InvokableToolCallEndpoint, error) {
-	if toolCtx == nil {
+	if toolCtx == nil || !projectEinoAssistantPhaseLifecycleApplies(m.req) {
 		return endpoint, nil
 	}
 	name := projectToolBaseName(toolCtx.Name)
-	if name != projectEinoAssistantWriteTodosTool && name != projectToolCommitProjectFiles && name != projectToolCommitFiles {
+	if name != projectEinoAssistantWriteTodosTool &&
+		name != projectToolRequestProjectPlanApproval &&
+		name != projectToolCommitProjectFiles &&
+		name != projectToolCommitFiles {
 		return endpoint, nil
 	}
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
 		tool := &schema.ToolInfo{Name: name}
-		if name == projectToolCommitProjectFiles || name == projectToolCommitFiles {
+		switch name {
+		case projectToolRequestProjectPlanApproval:
+			tool.Extra = map[string]any{
+				"bundle": string(projectAssistantToolBundleCollaboration),
+				"risk":   string(projectAssistantToolRiskPlan),
+			}
+		case projectToolCommitProjectFiles, projectToolCommitFiles:
 			tool.Extra = map[string]any{
 				"bundle": string(projectAssistantToolBundleRepo),
 				"risk":   string(projectAssistantToolRiskCommit),
@@ -157,6 +175,20 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 		}
 		return endpoint(ctx, argumentsInJSON, opts...)
 	}, nil
+}
+
+func projectEinoAssistantPhaseLifecycleApplies(req projectAssistantRunRequest) bool {
+	profile := req.TurnPolicy.profile
+	if strings.TrimSpace(string(profile)) == "" {
+		profile = req.TurnProfile
+	}
+	if strings.TrimSpace(string(profile)) == "" {
+		// Phase-helper tests and callers outside the engine historically omit
+		// turn policy. Keep lifecycle control enabled for that legacy shape;
+		// the engine always supplies a normalized profile.
+		return true
+	}
+	return projectAssistantTurnProfileAllowsMutation(profile)
 }
 
 func projectEinoAssistantPhaseVisibleTools(canonical, current []*schema.ToolInfo) []*schema.ToolInfo {

@@ -29,8 +29,9 @@ import (
 const projectEinoAssistantReductionContextTokens int64 = 12000
 
 // projectEinoAssistantReductionMiddleware removes large historical workspace
-// mutation payloads before they force the more expensive session summarizer.
-// It deliberately keeps the latest tool-call group intact for interrupt/resume.
+// mutation payloads before they force the more expensive session summarizer,
+// while retaining compact tool-result evidence for phase derivation and
+// checkpoint resume. It deliberately keeps the latest tool-call group intact.
 func projectEinoAssistantReductionMiddleware(ctx context.Context) (adk.ChatModelAgentMiddleware, error) {
 	return reduction.New(ctx, &reduction.Config{
 		SkipTruncation: true,
@@ -55,16 +56,38 @@ func projectEinoAssistantRewriteWorkspaceMutations(
 	}
 
 	summaries := make([]string, 0, len(toolCallMessage.ToolCalls))
+	compactedCalls := make([]schema.ToolCall, 0, len(toolCallMessage.ToolCalls))
+	compactedResponses := make([]*schema.Message, 0, len(toolCallMessage.ToolCalls))
 	for index, toolCall := range toolCallMessage.ToolCalls {
 		summary := summarizeProjectToolResult(toolCall.Function.Name, toolResponseMessages[index].Content)
 		if summary == "" {
 			return projectEinoAssistantOriginalToolMessageGroup(toolCallMessage, toolResponseMessages), nil
 		}
 		summaries = append(summaries, summary)
+		compactedCall := toolCall
+		compactedCall.Function.Arguments = `{}`
+		compactedCalls = append(compactedCalls, compactedCall)
+		compactedResult, err := json.Marshal(struct {
+			Operation string `json:"operation"`
+		}{
+			Operation: projectToolBaseName(toolCall.Function.Name),
+		})
+		if err != nil {
+			return nil, err
+		}
+		compactedResponses = append(compactedResponses, schema.ToolMessage(
+			string(compactedResult),
+			toolCall.ID,
+			schema.WithToolName(toolCall.Function.Name),
+		))
 	}
-	return []*schema.Message{schema.UserMessage(
-		"<system-reminder>Workspace mutations succeeded: " + strings.Join(summaries, "; ") + ". Inspect the current workspace before relying on prior file contents.</system-reminder>",
-	)}, nil
+	messages := make([]*schema.Message, 0, len(compactedResponses)+2)
+	messages = append(messages, schema.AssistantMessage("", compactedCalls))
+	messages = append(messages, compactedResponses...)
+	messages = append(messages, schema.UserMessage(
+		"<system-reminder>Workspace mutations succeeded: "+strings.Join(summaries, "; ")+". Inspect the current workspace before relying on prior file contents.</system-reminder>",
+	))
+	return messages, nil
 }
 
 func projectEinoAssistantSuccessfulWorkspaceMutationGroup(toolCallMessage *schema.Message, toolResponseMessages []*schema.Message) bool {

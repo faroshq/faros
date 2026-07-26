@@ -673,7 +673,12 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 	for _, msg := range model.Inputs[0].Messages {
 		joined += msg.Content + "\n"
 	}
-	for _, unwanted := range []string{projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles} {
+	for _, want := range []string{projectToolGetRuntimeStatus, projectToolGetPreviewURL} {
+		if !projectChatToolsInclude(model.Inputs[0].Tools, want) {
+			t.Fatalf("model tools = %#v, want %s", model.Inputs[0].Tools, want)
+		}
+	}
+	for _, unwanted := range []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles} {
 		if projectChatToolsInclude(model.Inputs[0].Tools, unwanted) {
 			t.Fatalf("model tools = %#v, should not include %s", model.Inputs[0].Tools, unwanted)
 		}

@@ -17,6 +17,8 @@ limitations under the License.
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
@@ -167,7 +169,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.messages = cloneChatMessages(state.Messages)
 	s.lastToolMessages = cloneChatMessages(state.LastToolMessages)
 	s.toolCalls = cloneProjectAssistantToolCalls(state.ToolCalls)
-	s.seenToolCalls = cloneProjectAssistantSeenToolCalls(state.SeenToolCalls)
+	s.seenToolCalls = projectEinoAssistantSanitizeSeenToolCalls(state.SeenToolCalls)
 	s.turn = state.Turn
 	s.turnPolicy = projectAssistantTurnPolicyForCheckpoint(state)
 	s.projectRepositoryRef = strings.TrimSpace(state.ProjectRepositoryRef)
@@ -231,7 +233,7 @@ func (s *projectEinoAssistantRunState) RecordAssistantReply(reply projectAssista
 		ensureProjectToolCallIDs(reply.ToolCalls)
 		s.toolCalls = cloneProjectAssistantToolCalls(reply.ToolCalls)
 		for _, tc := range reply.ToolCalls {
-			sig := tc.Function.Name + "\x00" + tc.Function.Arguments
+			sig := projectEinoAssistantToolCallSignature(tc.Function.Name, tc.Function.Arguments)
 			s.seenToolCalls[sig]++
 		}
 		s.messages = append(s.messages, chatMessage{
@@ -312,13 +314,30 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		Messages:             cloneChatMessages(s.messages),
 		LastToolMessages:     cloneChatMessages(s.lastToolMessages),
 		ToolCalls:            cloneProjectAssistantToolCalls(s.toolCalls),
-		SeenToolCalls:        cloneProjectAssistantSeenToolCalls(s.seenToolCalls),
+		SeenToolCalls:        projectEinoAssistantSanitizeSeenToolCalls(s.seenToolCalls),
 		Turn:                 s.turn,
 		ProjectRepositoryRef: strings.TrimSpace(s.projectRepositoryRef),
 		TurnPolicy:           projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
 		ApprovedPlan:         cloneProjectAssistantApprovedPlan(s.approvedPlan),
 		SessionSnapshot:      cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
 	}
+}
+
+func projectEinoAssistantToolCallSignature(name, arguments string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(name) + "\x00" + arguments))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func projectEinoAssistantSanitizeSeenToolCalls(src map[string]int) map[string]int {
+	out := make(map[string]int, len(src))
+	for signature, count := range src {
+		if !strings.HasPrefix(signature, "sha256:") {
+			sum := sha256.Sum256([]byte(signature))
+			signature = "sha256:" + hex.EncodeToString(sum[:])
+		}
+		out[signature] += count
+	}
+	return out
 }
 
 func (s *projectEinoAssistantRunState) ToolLoopFallback() string {

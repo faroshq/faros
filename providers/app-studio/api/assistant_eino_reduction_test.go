@@ -53,17 +53,35 @@ func TestProjectEinoAssistantRewriteWorkspaceMutationsCompactsSuccessfulBatch(t 
 	if err != nil {
 		t.Fatalf("rewrite returned error: %v", err)
 	}
-	if len(got) != 1 || got[0].Role != schema.User {
-		t.Fatalf("rewritten messages = %#v, want one user reminder", got)
+	if len(got) != 4 || got[0].Role != schema.Assistant || got[1].Role != schema.Tool || got[2].Role != schema.Tool || got[3].Role != schema.User {
+		t.Fatalf("rewritten messages = %#v, want compact tool evidence followed by one user reminder", got)
+	}
+	if len(got[0].ToolCalls) != 2 ||
+		got[0].ToolCalls[0].Function.Name != projectToolWriteFile ||
+		got[0].ToolCalls[1].Function.Name != projectToolApplyPatch {
+		t.Fatalf("compacted tool calls = %#v, want write and patch phase evidence", got[0].ToolCalls)
+	}
+	for _, call := range got[0].ToolCalls {
+		if call.Function.Arguments != `{}` {
+			t.Fatalf("compacted %s arguments = %q, want empty object", call.Function.Name, call.Function.Arguments)
+		}
+	}
+	if got[1].ToolName != projectToolWriteFile || got[1].Content != `{"operation":"write_file"}` {
+		t.Fatalf("compacted write result = %#v, want machine-readable write evidence", got[1])
+	}
+	if got[2].ToolName != projectToolApplyPatch || got[2].Content != `{"operation":"apply_patch"}` {
+		t.Fatalf("compacted patch result = %#v, want machine-readable patch evidence", got[2])
 	}
 	for _, want := range []string{"Workspace mutations succeeded", "write_file", "src/App.jsx", "apply_patch", "src/style.css"} {
-		if !strings.Contains(got[0].Content, want) {
-			t.Fatalf("reminder = %q, want %q", got[0].Content, want)
+		if !strings.Contains(got[3].Content, want) {
+			t.Fatalf("reminder = %q, want %q", got[3].Content, want)
 		}
 	}
 	for _, forbidden := range []string{"super-secret-source", "old-secret", "new-secret"} {
-		if strings.Contains(got[0].Content, forbidden) {
-			t.Fatalf("reminder leaked workspace payload %q: %q", forbidden, got[0].Content)
+		for _, message := range got {
+			if strings.Contains(message.Content, forbidden) || einoMessagesContainToolArguments([]*schema.Message{message}, forbidden) {
+				t.Fatalf("compaction leaked workspace payload %q: %#v", forbidden, got)
+			}
 		}
 	}
 }

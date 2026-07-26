@@ -498,6 +498,33 @@ func TestProjectEinoAssistantPhaseMiddlewareRestoresCanonicalToolsAfterResume(t 
 	}
 }
 
+func TestProjectEinoAssistantPhaseMiddlewareRestoresReadOnlyPolicyToolsFromLegacyCheckpoint(t *testing.T) {
+	tools := []einotool.BaseTool{
+		projectEinoAssistantPhaseBaseTool(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseBaseTool(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseBaseTool(projectToolGetPreviewURL, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+	}
+	runCtx := &adk.ChatModelAgentContext{Tools: tools}
+	persistedPrunedState := &adk.ChatModelAgentState{ToolInfos: []*schema.ToolInfo{
+		projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+	}}
+	middleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{
+		TurnPolicy: projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugging),
+	}, newProjectEinoAssistantRunState())
+	if _, _, err := middleware.BeforeAgent(context.Background(), runCtx); err != nil {
+		t.Fatalf("BeforeAgent returned error: %v", err)
+	}
+
+	_, state, err := middleware.BeforeModelRewriteState(context.Background(), persistedPrunedState, nil)
+	if err != nil {
+		t.Fatalf("BeforeModelRewriteState returned error: %v", err)
+	}
+	want := []string{projectToolReadProjectFile, projectToolGetRuntimeStatus, projectToolGetPreviewURL}
+	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseStringSlicesEqual(got, want) {
+		t.Fatalf("restored read-only tools = %#v, want legacy checkpoint restored to %#v", got, want)
+	}
+}
+
 func TestProjectEinoAssistantPhaseAllowsToolSearchOnlyWhileDiscoveryCanAdvanceWork(t *testing.T) {
 	toolSearch := &schema.ToolInfo{Name: "tool_search"}
 	for _, tt := range []struct {
