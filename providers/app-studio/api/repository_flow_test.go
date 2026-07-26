@@ -101,9 +101,11 @@ func TestProjectToolAllowlistSeparatesWorkspaceAndGitTools(t *testing.T) {
 		"plan_project_changes",
 		"check_project_readiness",
 		"prepare_project_deployment",
+		"inspect_development_templates",
 		"get_runtime_status",
 		"get_preview_url",
 		"get_runtime_logs",
+		"verify_development_runtime",
 		"restart_runtime",
 		"set_runtime_env",
 		"ask_follow_up",
@@ -154,9 +156,11 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 		"plan_project_changes",
 		"check_project_readiness",
 		"prepare_project_deployment",
+		"inspect_development_templates",
 		"get_runtime_status",
 		"get_preview_url",
 		"get_runtime_logs",
+		"verify_development_runtime",
 		"restart_runtime",
 		"set_runtime_env",
 		"ask_follow_up",
@@ -686,7 +690,7 @@ func TestProjectSystemPromptRequiresWorkspaceInspectBeforeEdit(t *testing.T) {
 	}
 
 	prompt := projectSystemPrompt(project, repository, projectAssistantTurnProfileImplementation)
-	for _, want := range []string{"check_project_readiness", "prepare_project_deployment", "get_runtime_status", "get_preview_url", "list_project_files", "read_project_file", "search_project_files", "write_file", "apply_patch", "mkdir", "commit_project_files"} {
+	for _, want := range []string{"check_project_readiness", "prepare_project_deployment", "inspect_development_templates", "verify_development_runtime", "list_project_files", "read_project_file", "search_project_files", "write_file", "apply_patch", "mkdir", "commit_project_files"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}

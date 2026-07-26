@@ -83,6 +83,73 @@ func TestProjectAssistantStreamWriterStreamsAssistantDeltasWithoutReplayingConte
 	}
 }
 
+func TestProjectAssistantStreamWriterReplacesProvisionalContentAndCommitsOnce(t *testing.T) {
+	var got []projectMessageStreamEvent
+	writer := projectAssistantStreamWriter{
+		assistantID: "assistant-1",
+		write: func(event projectMessageStreamEvent) error {
+			got = append(got, event)
+			return nil
+		},
+	}
+
+	if err := writer.WriteProvisionalAssistantContent(context.Background(), "hel"); err != nil {
+		t.Fatalf("WriteProvisionalAssistantContent returned error: %v", err)
+	}
+	if err := writer.WriteProvisionalAssistantContent(context.Background(), "hello"); err != nil {
+		t.Fatalf("WriteProvisionalAssistantContent returned error: %v", err)
+	}
+	if err := writer.WriteAcceptedAssistantContent(context.Background(), "hello"); err != nil {
+		t.Fatalf("WriteAcceptedAssistantContent returned error: %v", err)
+	}
+
+	if len(got) != 4 {
+		t.Fatalf("events = %#v, want begin, shell, and two provisional replacements only", got)
+	}
+	for i, want := range []string{"hel", "hello"} {
+		content := got[i+2].DataModelUpdate.Contents[0]
+		if content.ValueString != want || content.Append {
+			t.Fatalf("event[%d] content = %#v, want replacement %q", i+2, content, want)
+		}
+	}
+	if writer.acceptedAssistantContent != "hello" || writer.provisionalAssistantContent != "" {
+		t.Fatalf("writer state = accepted %q provisional %q", writer.acceptedAssistantContent, writer.provisionalAssistantContent)
+	}
+}
+
+func TestProjectAssistantStreamWriterResetsRejectedProvisionalContent(t *testing.T) {
+	var got []projectMessageStreamEvent
+	writer := projectAssistantStreamWriter{
+		assistantID: "assistant-1",
+		write: func(event projectMessageStreamEvent) error {
+			got = append(got, event)
+			return nil
+		},
+	}
+
+	if err := writer.WriteAcceptedAssistantContent(context.Background(), "kept"); err != nil {
+		t.Fatalf("WriteAcceptedAssistantContent returned error: %v", err)
+	}
+	if err := writer.WriteProvisionalAssistantContent(context.Background(), " rejected"); err != nil {
+		t.Fatalf("WriteProvisionalAssistantContent returned error: %v", err)
+	}
+	if err := writer.ResetProvisionalAssistantContent(context.Background()); err != nil {
+		t.Fatalf("ResetProvisionalAssistantContent returned error: %v", err)
+	}
+
+	if len(got) != 5 {
+		t.Fatalf("events = %#v, want begin, shell, accepted append, provisional replacement, and reset", got)
+	}
+	provisional := got[3].DataModelUpdate.Contents[0]
+	if provisional.ValueString != "kept rejected" || provisional.Append {
+		t.Fatalf("provisional content = %#v, want full replacement", provisional)
+	}
+	reset := got[4].DataModelUpdate.Contents[0]
+	if reset.ValueString != "kept" || reset.Append {
+		t.Fatalf("reset content = %#v, want accepted replacement", reset)
+	}
+}
+
 func TestProjectAssistantStreamWriterEmitsCanonicalLifecycleSequence(t *testing.T) {
 	got, err := collectProjectAssistantStreamEvents(
 		projectAssistantEvent{

@@ -68,10 +68,10 @@ func (s projectAssistantToolSpec) chatTool() chatTool {
 
 func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAssistantToolBundle {
 	switch projectToolBaseName(spec.Name) {
-	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment, projectToolCheckProjectBuild, projectToolGetBuildLogs:
+	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment, projectToolInspectDevelopmentTemplates, projectToolCheckProjectBuild, projectToolGetBuildLogs:
 		return projectAssistantToolBundleWorkflow
 	case projectToolGetRuntimeStatus, projectToolGetPreviewURL,
-		projectToolGetRuntimeLogs, projectToolRestartRuntime, projectToolSetRuntimeEnv, projectToolPromoteProject, projectToolRebuildProject:
+		projectToolGetRuntimeLogs, projectToolVerifyDevelopmentRuntime, projectToolRestartRuntime, projectToolSetRuntimeEnv, projectToolPromoteProject, projectToolRebuildProject:
 		return projectAssistantToolBundleRuntime
 	case projectToolListProjectFiles, projectToolReadProjectFile, projectToolSearchProjectFiles:
 		return projectAssistantToolBundleWorkspaceRead

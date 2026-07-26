@@ -28,7 +28,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -98,13 +97,15 @@ func TestProjectEinoAssistantMessageOutputPublishesAcceptedStreamAfterEOF(t *tes
 		Role:          schema.Assistant,
 	}
 	chunks := make(chan string, 2)
+	provisional := make(chan string, 2)
 	result := make(chan struct {
 		msg *schema.Message
 		err error
 	}, 1)
 	go func() {
 		msg, err := projectEinoAssistantMessageOutput(context.Background(), output, projectAssistantStreamCallbacks{
-			OnChunk: func(chunk string) { chunks <- chunk },
+			OnChunk:           func(chunk string) { chunks <- chunk },
+			OnProvisionalText: func(content string) { provisional <- content },
 		})
 		result <- struct {
 			msg *schema.Message
@@ -115,19 +116,20 @@ func TestProjectEinoAssistantMessageOutputPublishesAcceptedStreamAfterEOF(t *tes
 	if closed := writer.Send(schema.AssistantMessage("Hello ", nil), nil); closed {
 		t.Fatal("stream closed before first chunk was sent")
 	}
-	select {
-	case got := <-chunks:
-		t.Fatalf("assistant chunk %q was published before stream EOF", got)
-	case <-time.After(250 * time.Millisecond):
+	if got := <-provisional; got != "Hello " {
+		t.Fatalf("first provisional text = %q, want %q", got, "Hello ")
 	}
 
 	if closed := writer.Send(schema.AssistantMessage("world", nil), nil); closed {
 		t.Fatal("stream closed before second chunk was sent")
 	}
+	if got := <-provisional; got != "Hello world" {
+		t.Fatalf("second provisional text = %q, want %q", got, "Hello world")
+	}
 	select {
 	case got := <-chunks:
-		t.Fatalf("assistant chunk %q was published before stream EOF", got)
-	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("accepted assistant chunk %q was published before stream EOF", got)
+	default:
 	}
 	writer.Close()
 	got := <-result
@@ -163,15 +165,25 @@ func TestProjectEinoAssistantMessageOutputDoesNotPublishFailedStream(t *testing.
 		Role:          schema.Assistant,
 	}
 	var chunks []string
+	var provisional []string
+	resets := 0
 
 	_, err := projectEinoAssistantMessageOutput(context.Background(), output, projectAssistantStreamCallbacks{
-		OnChunk: func(chunk string) { chunks = append(chunks, chunk) },
+		OnChunk:            func(chunk string) { chunks = append(chunks, chunk) },
+		OnProvisionalText:  func(content string) { provisional = append(provisional, content) },
+		OnProvisionalReset: func() { resets++ },
 	})
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("message output error = %v, want unexpected EOF", err)
 	}
 	if len(chunks) != 0 {
 		t.Fatalf("chunks = %#v, want no output from failed stream", chunks)
+	}
+	if len(provisional) != 1 || provisional[0] != "rejected response" {
+		t.Fatalf("provisional = %#v, want rejected partial text shown provisionally", provisional)
+	}
+	if resets != 1 {
+		t.Fatalf("resets = %d, want provisional reset on stream failure", resets)
 	}
 }
 
@@ -1427,6 +1439,58 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 		if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: path}); err != nil {
 			t.Fatalf("ReadFile(%q) returned error: %v", path, err)
 		}
+	}
+}
+
+func TestEinoAssistantEngineInitialCreationPlanAllowsWriteWithoutPersistingGrant(t *testing.T) {
+	messages := &countingAssistantRunStore{MemoryStore: store.NewMemoryStore()}
+	workspaces := workspace.NewFileStore(t.TempDir())
+	server := NewWithWorkspace(nil, messages, workspaces, "", false)
+	writeTool, ok := server.projectAssistantToolRegistry().Get(projectToolWriteFile)
+	if !ok {
+		t.Fatal("write_file tool missing")
+	}
+	chatModel := &multipleToolCallEinoChatModel{toolCalls: []schema.ToolCall{{
+		ID:   "call-write",
+		Type: "function",
+		Function: schema.FunctionCall{
+			Name:      projectToolWriteFile,
+			Arguments: `{"path":"src/App.tsx","content":"initial build\n"}`,
+		},
+	}}}
+	engine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return chatModel, nil
+		},
+		newTools: func(_ context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return []einotool.BaseTool{newProjectEinoAssistantServerTool(server, writeTool, req, state)}, nil
+		},
+	}
+	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	_, err := engine.StreamProjectAssistant(context.Background(), projectAssistantRunRequest{
+		Identity:            id,
+		Project:             project,
+		Workspace:           workspaces,
+		WorkspaceScope:      projectWorkspaceScope(id, project.Name),
+		MessageScope:        scope,
+		InitialApprovedPlan: ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan()),
+	})
+	if err != nil {
+		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	}
+	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/App.tsx"})
+	if err != nil || read.Content != "initial build\n" {
+		t.Fatalf("initial write = %#v, %v; want initial build", read, err)
+	}
+	if messages.saveAssistantRunCount != 0 {
+		t.Fatalf("assistant run saves = %d, want no permission checkpoint", messages.saveAssistantRunCount)
+	}
+	if grant := server.loadProjectAssistantApprovedPlan(context.Background(), scope); grant != nil {
+		t.Fatalf("persisted initial creation grant = %#v, want nil", grant)
 	}
 }
 

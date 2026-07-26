@@ -34,6 +34,22 @@ import (
 // which matches the approval prompt's promise to the user.
 const projectAssistantApprovedPlanGrantRunID = "approved-plan-grant"
 
+// projectAssistantInitialCreationPlan is the narrow authorization implied by
+// an explicit prompt submitted to create a new Project. It stays in the
+// Eino run/checkpoint only; unlike a user-approved plan it is never written to
+// the cross-turn grant store. Permission policy further limits it to source
+// edits and always requires a separate commit approval.
+func projectAssistantInitialCreationPlan() projectAssistantApprovedPlan {
+	return normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Summary:        "Initial project creation prompt authorizes source edits for this run.",
+		Operations:     []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir},
+		AllowAllWrites: true,
+		ApprovedAt:     time.Now().UTC(),
+		ApprovalTool:   "project_create_prompt",
+		RunLocal:       true,
+	})
+}
+
 func projectAssistantApprovedPlanScopeReady(scope store.Scope) bool {
 	return scope.OrgUUID != "" && scope.WorkspaceUUID != "" && scope.ProjectName != ""
 }
@@ -69,7 +85,7 @@ func (s *Server) loadProjectAssistantApprovedPlan(ctx context.Context, scope sto
 }
 
 func (s *Server) saveProjectAssistantApprovedPlan(ctx context.Context, scope store.Scope, plan *projectAssistantApprovedPlan) error {
-	if s == nil || s.store == nil || plan == nil || !projectAssistantApprovedPlanScopeReady(scope) {
+	if s == nil || s.store == nil || plan == nil || plan.RunLocal || !projectAssistantApprovedPlanScopeReady(scope) {
 		return nil
 	}
 	raw, err := json.Marshal(plan)
@@ -110,5 +126,6 @@ func mergeProjectAssistantApprovedPlans(existing, next projectAssistantApprovedP
 	merged.TargetPaths = normalizeProjectAssistantStringList(append(append([]string(nil), existing.TargetPaths...), next.TargetPaths...))
 	merged.Operations = normalizeProjectAssistantStringList(append(append([]string(nil), existing.Operations...), next.Operations...))
 	merged.AllowAllWrites = existing.AllowAllWrites || next.AllowAllWrites
+	merged.RunLocal = existing.RunLocal || next.RunLocal
 	return merged
 }

@@ -141,6 +141,30 @@ func TestProjectAssistantAllowAllWritesGrantAuthorizesAnyPath(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantInitialCreationGrantAllowsOnlySourceEdits(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.ApprovePlan(projectAssistantInitialCreationPlan())
+
+	for _, tool := range []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir} {
+		decision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{Name: tool, Risk: projectAssistantToolRiskWrite}, false, state, map[string]any{"path": "src/App.tsx"})
+		if decision != projectAssistantPermissionAllow {
+			t.Fatalf("%s permission = %q, want allow", tool, decision)
+		}
+	}
+	for _, spec := range []projectAssistantToolSpec{
+		{Name: projectToolSelectTemplate, Risk: projectAssistantToolRiskWrite},
+		{Name: projectToolHydrateWorkspace, Risk: projectAssistantToolRiskWrite},
+		{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
+		{Name: projectToolInfrastructureProvision, Risk: projectAssistantToolRiskWrite},
+		{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit},
+	} {
+		decision := projectAssistantPermissionForToolWithRunState(spec, false, state, map[string]any{"path": "src/App.tsx"})
+		if decision != projectAssistantPermissionAsk {
+			t.Fatalf("%s permission = %q, want ask", spec.Name, decision)
+		}
+	}
+}
+
 func TestProjectAssistantPlanApprovalWithoutOperationsDoesNotAuthorizeWrites(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	state.ApprovePlan(projectAssistantApprovedPlan{

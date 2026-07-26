@@ -30,6 +30,9 @@ type projectAssistantApprovedPlan struct {
 	AcceptanceCriteria []string  `json:"acceptanceCriteria,omitempty"`
 	ApprovedAt         time.Time `json:"approvedAt,omitempty"`
 	ApprovalTool       string    `json:"approvalTool,omitempty"`
+	// RunLocal marks authorization that is valid only for the current Eino
+	// run/checkpoint and must never be promoted into the cross-turn grant.
+	RunLocal bool `json:"runLocal,omitempty"`
 	// AllowAllWrites grants every workspace write tool, on any path, until the
 	// next commit. It is set when the user approves a write prompt directly (as
 	// opposed to a model-supplied plan envelope), so a single "Allow" does not

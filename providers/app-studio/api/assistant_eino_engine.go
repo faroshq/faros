@@ -96,6 +96,13 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 			runState.ApprovePlan(*grant)
 		}
 	}
+	// A fresh Project creation prompt is explicit authorization to build the
+	// initial source tree. Keep this grant run-local: it may survive an
+	// interrupt through the run checkpoint, but is never persisted as the
+	// cross-turn plan grant used by subsequent conversations.
+	if req.InitialApprovedPlan != nil {
+		runState.ApprovePlan(*req.InitialApprovedPlan)
+	}
 
 	checkpointID := newProjectAssistantRunID()
 	checkpointStore := newProjectEinoAssistantCheckpointStore()
@@ -165,6 +172,11 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		return nil, fmt.Errorf("create eino patch tool calls middleware: %w", err)
 	}
 	handlers = append(handlers, patchToolCallsMiddleware)
+	reductionMiddleware, err := projectEinoAssistantReductionMiddleware(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create eino reduction middleware: %w", err)
+	}
+	handlers = append(handlers, reductionMiddleware)
 	summaryMiddleware, err := summarization.New(ctx, &summarization.Config{
 		Model: chatModel,
 		Trigger: &summarization.TriggerCondition{
@@ -530,8 +542,16 @@ func projectEinoAssistantMessageOutput(
 	defer output.MessageStream.Close()
 
 	var chunks []*schema.Message
+	var provisional strings.Builder
+	provisionalSent := false
+	resetProvisional := func() {
+		if provisionalSent && streamCallbacks.OnProvisionalReset != nil {
+			streamCallbacks.OnProvisionalReset()
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
+			resetProvisional()
 			return nil, err
 		}
 		msg, err := output.MessageStream.Recv()
@@ -539,21 +559,46 @@ func projectEinoAssistantMessageOutput(
 			break
 		}
 		if err != nil {
+			resetProvisional()
 			return nil, err
 		}
 		if msg == nil {
 			continue
 		}
 		chunks = append(chunks, msg)
+		if output.Role == schema.Assistant && streamCallbacks.OnProvisionalText != nil {
+			if text := projectEinoAssistantStreamText(msg); text != "" {
+				provisional.WriteString(text)
+				streamCallbacks.OnProvisionalText(provisional.String())
+				provisionalSent = true
+			}
+		}
 	}
 	msg, err := schema.ConcatMessages(chunks)
 	if err != nil {
+		resetProvisional()
 		return nil, err
 	}
 	if output.Role == schema.Assistant && streamCallbacks.OnChunk != nil && msg.Content != "" {
 		streamCallbacks.OnChunk(msg.Content)
 	}
 	return msg, nil
+}
+
+func projectEinoAssistantStreamText(msg *schema.Message) string {
+	if msg == nil {
+		return ""
+	}
+	if len(msg.AssistantGenMultiContent) == 0 {
+		return msg.Content
+	}
+	var b strings.Builder
+	for _, part := range msg.AssistantGenMultiContent {
+		if part.Type == schema.ChatMessagePartTypeText {
+			b.WriteString(part.Text)
+		}
+	}
+	return b.String()
 }
 
 func (e projectEinoAssistantEngine) projectAssistantToolLoopFinalAnswer(
@@ -778,7 +823,7 @@ func projectEinoAssistantInputMessages(ctx context.Context, req projectAssistant
 	if req.Continuation != nil && len(req.Continuation.Messages) > 0 {
 		chatMessages = cloneChatMessages(req.Continuation.Messages)
 	} else {
-		chatMessages = projectPromptMessagesForProfile(req.Project, req.Repository, req.History, req.TurnProfile)
+		chatMessages = projectPromptMessagesForInitialPlan(req.Project, req.Repository, req.History, req.TurnProfile, req.InitialApprovedPlan != nil)
 		if snapshot, ok := projectEinoAssistantSessionContextMessage(ctx, req, runState); ok {
 			chatMessages = append(chatMessages, snapshot)
 		}
