@@ -31,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	einomodel "github.com/cloudwego/eino/components/model"
+	einotool "github.com/cloudwego/eino/components/tool"
 	einoschema "github.com/cloudwego/eino/schema"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1408,6 +1409,47 @@ func setProjectAssistantModelForTest(server *Server, model einomodel.BaseChatMod
 	server.assistantTurnRouter = projectAssistantFallbackTurnRouter
 }
 
+func setProjectAssistantModelWithReachableVerificationForTest(server *Server, model einomodel.BaseChatModel) {
+	baseTools := newProjectEinoAssistantToolsFactory(server)
+	verifyTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{
+			Name:        projectToolVerifyDevelopmentRuntime,
+			Description: "Verify the development runtime.",
+			Parameters:  json.RawMessage(`{"type":"object"}`),
+			Risk:        projectAssistantToolRiskRead,
+		},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			return `{"status":"reachable"}`, nil
+		},
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.assistantEngine = projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(ctx context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			tools, err := baseTools(ctx, req, state)
+			if err != nil {
+				return nil, err
+			}
+			filtered := make([]einotool.BaseTool, 0, len(tools))
+			for _, tool := range tools {
+				info, err := tool.Info(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if projectToolBaseName(info.Name) != projectToolVerifyDevelopmentRuntime {
+					filtered = append(filtered, tool)
+				}
+			}
+			return append(filtered, newProjectEinoAssistantServerTool(server, verifyTool, req, state)), nil
+		},
+	}
+	server.assistantTurnRouter = projectAssistantFallbackTurnRouter
+}
+
 func startEinoPermissionForTest(
 	t *testing.T,
 	server *Server,
@@ -1427,7 +1469,58 @@ func startEinoPermissionForTest(
 		{Message: einoschema.AssistantMessage(finalContent, nil)},
 	}}
 	setProjectAssistantModelForTest(server, model)
+	return startEinoPermissionWithConfiguredModelForTest(t, server, messages, id, project, prompt, model)
+}
 
+func startVerifiedEinoCommitPermissionForTest(
+	t *testing.T,
+	server *Server,
+	messages store.Store,
+	id identity,
+	project *aiv1alpha1.Project,
+	prompt string,
+	finalContent string,
+	commitCall chatStreamingCall,
+) projectAssistantPermissionFixture {
+	t.Helper()
+	if strings.TrimSpace(finalContent) == "" {
+		finalContent = "Approval completed."
+	}
+	writeCall := chatStreamingCall{Index: 0, ID: "call-write-before-commit", Type: "function"}
+	writeCall.Function.Name = projectToolWriteFile
+	writeCall.Function.Arguments = `{"path":"src/App.tsx","content":"approved\n"}`
+	verifyCall := chatStreamingCall{Index: 0, ID: "call-verify-before-commit", Type: "function"}
+	verifyCall.Function.Name = projectToolVerifyDevelopmentRuntime
+	verifyCall.Function.Arguments = `{}`
+	model := &repositoryFlowEinoChatModel{Steps: []repositoryFlowEinoModelStep{
+		{Message: einoschema.AssistantMessage("", projectEinoToolCallsFromStreamingForTest([]chatStreamingCall{writeCall}))},
+		{Message: einoschema.AssistantMessage("", projectEinoToolCallsFromStreamingForTest([]chatStreamingCall{verifyCall}))},
+		{Message: einoschema.AssistantMessage("", projectEinoToolCallsFromStreamingForTest([]chatStreamingCall{commitCall}))},
+		{Message: einoschema.AssistantMessage(finalContent, nil)},
+	}}
+	setProjectAssistantModelWithReachableVerificationForTest(server, model)
+	grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Summary:     "Apply and verify the approved project change.",
+		Steps:       []string{"write the project change", "verify the development runtime"},
+		TargetPaths: []string{"src/"},
+		Operations:  []string{projectToolWriteFile},
+	})
+	if err := server.saveProjectAssistantApprovedPlan(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), &grant); err != nil {
+		t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
+	}
+	return startEinoPermissionWithConfiguredModelForTest(t, server, messages, id, project, prompt, model)
+}
+
+func startEinoPermissionWithConfiguredModelForTest(
+	t *testing.T,
+	server *Server,
+	messages store.Store,
+	id identity,
+	project *aiv1alpha1.Project,
+	prompt string,
+	model *repositoryFlowEinoChatModel,
+) projectAssistantPermissionFixture {
+	t.Helper()
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
@@ -2239,7 +2332,7 @@ func TestResumeProjectAssistantRunClaimsBeforeCommitSideEffects(t *testing.T) {
 	call := chatStreamingCall{Index: 0, ID: "call-commit", Type: "function"}
 	call.Function.Name = projectToolCommitProjectFiles
 	call.Function.Arguments = `{"repositoryRef":"demo-repo","paths":["src/App.tsx"],"message":"Initial app"}`
-	fixture := startEinoPermissionForTest(t, server, messages, id, project, "commit files", "Committed files.", call)
+	fixture := startVerifiedEinoCommitPermissionForTest(t, server, messages, id, project, "commit files", "Committed files.", call)
 	permissionErr := fixture.PermissionErr
 
 	firstErr := make(chan error, 1)
@@ -2510,7 +2603,7 @@ func TestResumeProjectAssistantRunRejectsStaleRepositoryBinding(t *testing.T) {
 	call := chatStreamingCall{Index: 0, ID: "call-commit", Type: "function"}
 	call.Function.Name = projectToolCommitProjectFiles
 	call.Function.Arguments = `{"repositoryRef":"old-repo","paths":["src/App.tsx"],"message":"Initial app"}`
-	fixture := startEinoPermissionForTest(t, server, messages, id, project, "commit files", "Committed files.", call)
+	fixture := startVerifiedEinoCommitPermissionForTest(t, server, messages, id, project, "commit files", "Committed files.", call)
 	permissionErr := fixture.PermissionErr
 	permission := fixture.Permission
 	checkpoint := fixture.Checkpoint
@@ -2859,7 +2952,7 @@ func TestProjectPromptMessagesCollapsesConsecutiveDuplicateUserMessages(t *testi
 	}
 }
 
-func TestGenerateProjectAssistantStreamRequestsPermissionForCommitProjectFiles(t *testing.T) {
+func TestGenerateProjectAssistantStreamRejectsUnverifiedCommitProjectFiles(t *testing.T) {
 	var commitCalls int
 	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var envelope struct {
@@ -2898,18 +2991,14 @@ func TestGenerateProjectAssistantStreamRequestsPermissionForCommitProjectFiles(t
 		}}),
 	}}}
 	_, requests, err := runProjectAssistantStreamWithModel(t, model, mcp.URL)
-	var permissionErr *projectAssistantPermissionRequiredError
-	if !errors.As(err, &permissionErr) {
-		t.Fatalf("generateProjectAssistantStream error = %v, want permission required", err)
-	}
-	if permissionErr.ToolName != "commit_project_files" {
-		t.Fatalf("permission error = %#v, want commit_project_files", permissionErr)
+	if err != nil {
+		t.Fatalf("generateProjectAssistantStream returned error: %v", err)
 	}
 	if commitCalls != 0 {
-		t.Fatalf("commit call count = %d, want no commit before approval", commitCalls)
+		t.Fatalf("commit call count = %d, want unverified commit denied before execution", commitCalls)
 	}
-	if len(requests) != 1 {
-		t.Fatalf("LLM request count = %d, want 1", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("LLM request count = %d, want denial result followed by a model response", len(requests))
 	}
 }
 

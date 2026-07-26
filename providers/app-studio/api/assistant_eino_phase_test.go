@@ -98,6 +98,16 @@ func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
 			},
 			want: projectEinoAssistantPhaseVerify,
 		},
+		{
+			name:     "later failed verification invalidates earlier reachable verification",
+			approved: true,
+			messages: []*schema.Message{
+				projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
+				projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"ready"}`),
+				projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, "Tool call failed: runtime unavailable"),
+			},
+			want: projectEinoAssistantPhaseRepair,
+		},
 	}
 
 	for _, tt := range tests {
@@ -111,6 +121,18 @@ func TestProjectEinoAssistantPhaseDerivation(t *testing.T) {
 				t.Fatalf("phase = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProjectEinoAssistantPhasePreservesInitialCreationReportAfterResume(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.ApprovePlan(projectAssistantInitialCreationPlan())
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{
+		projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
+		projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"reachable"}`),
+	}}
+	if got := projectEinoAssistantPhaseForState(projectAssistantRunRequest{}, runState, state); got != projectEinoAssistantPhaseReport {
+		t.Fatalf("resumed initial-creation phase = %q, want report", got)
 	}
 }
 
@@ -261,22 +283,57 @@ func TestProjectEinoAssistantPhaseMiddlewareFiltersTools(t *testing.T) {
 	}
 }
 
-func TestProjectEinoAssistantPhaseMiddlewareGatesWriteTodosExecution(t *testing.T) {
+func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.T) {
 	tests := []struct {
 		name         string
 		phase        projectEinoAssistantPhase
 		approvedPlan *projectAssistantApprovedPlan
+		tool         *schema.ToolInfo
 		wantCalls    int
 		wantResult   string
 	}{
 		{
 			name:       "approval rejects hidden todo",
 			phase:      projectEinoAssistantPhaseApproval,
+			tool:       &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool},
 			wantResult: "Tool call denied: write_todos is unavailable in the current assistant phase",
+		},
+		{
+			name:       "verify rejects hidden commit",
+			phase:      projectEinoAssistantPhaseVerify,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantResult: "Tool call denied: commit_project_files is unavailable in the current assistant phase",
+		},
+		{
+			name:       "verify rejects transformed hidden commit",
+			phase:      projectEinoAssistantPhaseVerify,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolCodeCommitFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantResult: "Tool call denied: commit_files is unavailable in the current assistant phase",
+		},
+		{
+			name:       "commit executes verified commit",
+			phase:      projectEinoAssistantPhaseCommit,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantCalls:  1,
+			wantResult: "todo recorded",
+		},
+		{
+			name:       "commit executes transformed verified commit",
+			phase:      projectEinoAssistantPhaseCommit,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolCodeCommitFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantCalls:  1,
+			wantResult: "todo recorded",
+		},
+		{
+			name:       "initial creation report rejects hidden commit",
+			phase:      projectEinoAssistantPhaseReport,
+			tool:       projectEinoAssistantPhaseToolInfo(projectToolCommitProjectFiles, projectAssistantToolRiskCommit, projectAssistantToolBundleRepo),
+			wantResult: "Tool call denied: commit_project_files is unavailable in the current assistant phase",
 		},
 		{
 			name:  "one-step mutate rejects hidden todo",
 			phase: projectEinoAssistantPhaseMutate,
+			tool:  &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool},
 			approvedPlan: &projectAssistantApprovedPlan{
 				Steps: []string{"make the small change"},
 			},
@@ -285,6 +342,7 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesWriteTodosExecution(t *testing.
 		{
 			name:  "multi-step mutate executes todo",
 			phase: projectEinoAssistantPhaseMutate,
+			tool:  &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool},
 			approvedPlan: &projectAssistantApprovedPlan{
 				Steps: []string{"inspect", "edit"},
 			},
@@ -294,6 +352,7 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesWriteTodosExecution(t *testing.
 		{
 			name:  "multi-step repair executes todo",
 			phase: projectEinoAssistantPhaseRepair,
+			tool:  &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool},
 			approvedPlan: &projectAssistantApprovedPlan{
 				Steps: []string{"diagnose", "repair"},
 			},
@@ -313,21 +372,78 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesWriteTodosExecution(t *testing.
 			wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
 				calls++
 				return "todo recorded", nil
-			}, &adk.ToolContext{Name: projectEinoAssistantWriteTodosTool})
+			}, &adk.ToolContext{Name: tt.tool.Name})
 			if err != nil {
 				t.Fatalf("WrapInvokableToolCall returned error: %v", err)
 			}
 			result, err := wrapped(context.Background(), `{"todos":[]}`)
 			if err != nil {
-				t.Fatalf("wrapped write_todos returned error: %v", err)
+				t.Fatalf("wrapped %s returned error: %v", tt.tool.Name, err)
 			}
 			if result != tt.wantResult {
-				t.Fatalf("wrapped write_todos result = %q, want %q", result, tt.wantResult)
+				t.Fatalf("wrapped %s result = %q, want %q", tt.tool.Name, result, tt.wantResult)
 			}
 			if calls != tt.wantCalls {
-				t.Fatalf("inner write_todos calls = %d, want %d", calls, tt.wantCalls)
+				t.Fatalf("inner %s calls = %d, want %d", tt.tool.Name, calls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestProjectEinoAssistantPhaseMiddlewareRestoresVerifiedCommitPhaseForResume(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	middleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{
+		Continuation: &projectAssistantCheckpointState{Messages: []chatMessage{
+			{Role: string(schema.Tool), Name: projectToolWriteFile, Content: `{"operation":"write_file"}`},
+			{Role: string(schema.Tool), Name: projectToolVerifyDevelopmentRuntime, Content: `{"status":"ready"}`},
+		}, Eino: &projectAssistantEinoCheckpointState{ToolName: projectToolCommitProjectFiles}},
+	}, runState).(*projectEinoAssistantPhaseFilterMiddleware)
+	if middleware.phase != projectEinoAssistantPhaseCommit {
+		t.Fatalf("resumed phase = %q, want commit", middleware.phase)
+	}
+	if middleware.approvedPlan != nil || runState.ApprovedPlan() != nil {
+		t.Fatalf("resumed approval = %#v, want commit resume without restoring the consumed plan", middleware.approvedPlan)
+	}
+	calls := 0
+	wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
+		calls++
+		return "commit requested", nil
+	}, &adk.ToolContext{Name: projectToolCommitProjectFiles})
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+	result, err := wrapped(context.Background(), `{}`)
+	if err != nil {
+		t.Fatalf("wrapped commit returned error: %v", err)
+	}
+	if result != "commit requested" || calls != 1 {
+		t.Fatalf("resumed commit result = %q calls = %d, want execution", result, calls)
+	}
+}
+
+func TestProjectEinoAssistantPhaseMiddlewareRejectsUnverifiedCommitResume(t *testing.T) {
+	middleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{
+		Continuation: &projectAssistantCheckpointState{
+			Messages: []chatMessage{
+				{Role: string(schema.Tool), Name: projectToolWriteFile, Content: `{"operation":"write_file"}`},
+			},
+			Eino: &projectAssistantEinoCheckpointState{ToolName: projectToolCommitProjectFiles},
+		},
+	}, newProjectEinoAssistantRunState()).(*projectEinoAssistantPhaseFilterMiddleware)
+	calls := 0
+	wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
+		calls++
+		return "commit requested", nil
+	}, &adk.ToolContext{Name: projectToolCommitProjectFiles})
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+	result, err := wrapped(context.Background(), `{}`)
+	if err != nil {
+		t.Fatalf("wrapped commit returned error: %v", err)
+	}
+	if result != "Tool call denied: commit_project_files is unavailable in the current assistant phase" || calls != 0 {
+		t.Fatalf("unverified resumed commit result = %q calls = %d, want denial", result, calls)
 	}
 }
 

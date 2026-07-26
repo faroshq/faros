@@ -1871,6 +1871,15 @@ func TestEinoAssistantEngineCommitRequestConsumesApprovedPlan(t *testing.T) {
 	if !ok {
 		t.Fatal("write_file tool missing")
 	}
+	verifyTool := &recordingProjectAssistantTool{
+		spec: projectAssistantToolSpec{
+			Name:        projectToolVerifyDevelopmentRuntime,
+			Description: "Verify the development runtime.",
+			Parameters:  json.RawMessage(`{"type":"object"}`),
+			Risk:        projectAssistantToolRiskRead,
+		},
+		result: `{"status":"reachable"}`,
+	}
 	commitTool := &recordingProjectAssistantTool{
 		spec: projectAssistantToolSpec{
 			Name:        projectToolCommitProjectFiles,
@@ -1890,6 +1899,7 @@ func TestEinoAssistantEngineCommitRequestConsumesApprovedPlan(t *testing.T) {
 			return []einotool.BaseTool{
 				newProjectEinoAssistantServerTool(server, planTool, req, state),
 				newProjectEinoAssistantServerTool(server, writeTool, req, state),
+				newProjectEinoAssistantServerTool(server, verifyTool, req, state),
 				newProjectEinoAssistantTool(commitTool, req, state),
 			}, nil
 		},
@@ -2556,6 +2566,15 @@ func (m *planWriteCommitWriteEinoChatModel) Generate(ctx context.Context, input 
 		}}), nil
 	case 3:
 		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "call-verify",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      projectToolVerifyDevelopmentRuntime,
+				Arguments: `{}`,
+			},
+		}}), nil
+	case 4:
+		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID:   "call-commit",
 			Type: "function",
 			Function: schema.FunctionCall{
@@ -2563,7 +2582,7 @@ func (m *planWriteCommitWriteEinoChatModel) Generate(ctx context.Context, input 
 				Arguments: `{"repositoryRef":"repo-1","paths":["src/App.tsx"],"message":"Initial app"}`,
 			},
 		}}), nil
-	case 4:
+	case 5:
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID:   "call-post-commit-write",
 			Type: "function",

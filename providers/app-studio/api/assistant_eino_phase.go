@@ -58,10 +58,28 @@ func projectEinoAssistantPhaseMiddleware(
 	req projectAssistantRunRequest,
 	runState *projectEinoAssistantRunState,
 ) adk.ChatModelAgentMiddleware {
+	phase := projectEinoAssistantPhaseApproval
+	if req.Continuation != nil {
+		if messages, err := projectChatMessagesToEino(req.Continuation.Messages); err == nil {
+			state := &adk.ChatModelAgentState{Messages: messages}
+			phase = projectEinoAssistantPhaseForState(req, runState, state)
+			// Asking permission for a commit consumes the plan grant before
+			// checkpointing. Restore only the execution phase for that exact
+			// interrupted commit after re-validating write -> verification
+			// ordering from the persisted message history.
+			if phase == projectEinoAssistantPhaseApproval &&
+				req.Continuation.Eino != nil &&
+				projectEinoAssistantCommitTool(req.Continuation.Eino.ToolName) {
+				phase = projectEinoAssistantPhaseForStateWithApproval(req, state, true)
+			}
+		}
+	}
 	return &projectEinoAssistantPhaseFilterMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		req:                          req,
 		runState:                     runState,
+		phase:                        phase,
+		approvedPlan:                 cloneProjectAssistantApprovedPlan(projectEinoAssistantPhaseApprovedPlan(req, runState)),
 	}
 }
 
@@ -119,12 +137,23 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	endpoint adk.InvokableToolCallEndpoint,
 	toolCtx *adk.ToolContext,
 ) (adk.InvokableToolCallEndpoint, error) {
-	if toolCtx == nil || projectToolBaseName(toolCtx.Name) != projectEinoAssistantWriteTodosTool {
+	if toolCtx == nil {
+		return endpoint, nil
+	}
+	name := projectToolBaseName(toolCtx.Name)
+	if name != projectEinoAssistantWriteTodosTool && name != projectToolCommitProjectFiles && name != projectToolCommitFiles {
 		return endpoint, nil
 	}
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
-		if !projectEinoAssistantPhaseAllowsTool(m.phase, m.approvedPlan, &schema.ToolInfo{Name: projectEinoAssistantWriteTodosTool}) {
-			return "Tool call denied: write_todos is unavailable in the current assistant phase", nil
+		tool := &schema.ToolInfo{Name: name}
+		if name == projectToolCommitProjectFiles || name == projectToolCommitFiles {
+			tool.Extra = map[string]any{
+				"bundle": string(projectAssistantToolBundleRepo),
+				"risk":   string(projectAssistantToolRiskCommit),
+			}
+		}
+		if !projectEinoAssistantPhaseAllowsTool(m.phase, m.approvedPlan, tool) {
+			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
 		}
 		return endpoint(ctx, argumentsInJSON, opts...)
 	}, nil
@@ -166,48 +195,100 @@ func projectEinoAssistantPhaseForState(
 	runState *projectEinoAssistantRunState,
 	state *adk.ChatModelAgentState,
 ) projectEinoAssistantPhase {
-	latestWrite := -1
-	latestVerification := -1
-	latestCommit := -1
-	verificationReady := false
+	approvedPlan := projectEinoAssistantPhaseApprovedPlan(req, runState)
+	return projectEinoAssistantPhaseForHistory(
+		projectEinoAssistantPhaseHistoryForState(state),
+		approvedPlan != nil,
+		req.InitialApprovedPlan != nil || (approvedPlan != nil && approvedPlan.RunLocal),
+	)
+}
+
+func projectEinoAssistantPhaseForStateWithApproval(
+	req projectAssistantRunRequest,
+	state *adk.ChatModelAgentState,
+	approved bool,
+) projectEinoAssistantPhase {
+	return projectEinoAssistantPhaseForHistory(
+		projectEinoAssistantPhaseHistoryForState(state),
+		approved,
+		req.InitialApprovedPlan != nil,
+	)
+}
+
+type projectEinoAssistantPhaseHistory struct {
+	latestWrite        int
+	latestVerification int
+	latestCommit       int
+	verificationReady  bool
+}
+
+func projectEinoAssistantPhaseHistoryForState(state *adk.ChatModelAgentState) projectEinoAssistantPhaseHistory {
+	history := projectEinoAssistantPhaseHistory{
+		latestWrite:        -1,
+		latestVerification: -1,
+		latestCommit:       -1,
+	}
 	if state != nil {
 		for index, message := range state.Messages {
+			if message == nil {
+				continue
+			}
+			name := projectToolBaseName(message.ToolName)
+			if name == projectToolVerifyDevelopmentRuntime && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(message.Content)), "tool call skipped: waiting for approval") {
+				history.latestVerification = index
+				history.verificationReady = projectEinoAssistantPhaseSuccessfulToolResult(message) &&
+					projectEinoAssistantPhaseVerificationReady(message.Content)
+				continue
+			}
 			if !projectEinoAssistantPhaseSuccessfulToolResult(message) {
 				continue
 			}
-			switch projectToolBaseName(message.ToolName) {
+			switch name {
 			case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
-				latestWrite = index
-			case projectToolVerifyDevelopmentRuntime:
-				latestVerification = index
-				verificationReady = projectEinoAssistantPhaseVerificationReady(message.Content)
-			case projectToolCommitProjectFiles:
-				latestCommit = index
+				history.latestWrite = index
+			case projectToolCommitProjectFiles, projectToolCommitFiles:
+				history.latestCommit = index
 			}
 		}
 	}
+	return history
+}
 
+func projectEinoAssistantPhaseForHistory(
+	history projectEinoAssistantPhaseHistory,
+	approved bool,
+	initialCreation bool,
+) projectEinoAssistantPhase {
 	// A completed commit is terminal even though the tool execution clears the
 	// run-local approval grant before the next model call.
-	if latestCommit > latestWrite {
+	if history.latestCommit > history.latestWrite {
 		return projectEinoAssistantPhaseReport
 	}
-	if projectEinoAssistantPhaseApprovedPlan(req, runState) == nil {
+	if !approved {
 		return projectEinoAssistantPhaseApproval
 	}
-	if latestWrite < 0 {
+	if history.latestWrite < 0 {
 		return projectEinoAssistantPhaseMutate
 	}
-	if latestVerification < latestWrite {
+	if history.latestVerification < history.latestWrite {
 		return projectEinoAssistantPhaseVerify
 	}
-	if !verificationReady {
+	if !history.verificationReady {
 		return projectEinoAssistantPhaseRepair
 	}
-	if req.InitialApprovedPlan != nil {
+	if initialCreation {
 		return projectEinoAssistantPhaseReport
 	}
 	return projectEinoAssistantPhaseCommit
+}
+
+func projectEinoAssistantCommitTool(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolCommitProjectFiles, projectToolCommitFiles:
+		return true
+	default:
+		return false
+	}
 }
 
 func projectEinoAssistantPhaseApprovedPlan(
@@ -335,7 +416,7 @@ func projectEinoAssistantPhaseAllowsTool(
 				bundle == projectAssistantToolBundleEdit ||
 				bundle == projectAssistantToolBundleRuntime)
 	case projectEinoAssistantPhaseCommit:
-		return name == projectToolCommitProjectFiles && risk == projectAssistantToolRiskCommit
+		return projectEinoAssistantCommitTool(name) && risk == projectAssistantToolRiskCommit
 	case projectEinoAssistantPhaseReport:
 		return false
 	default:
