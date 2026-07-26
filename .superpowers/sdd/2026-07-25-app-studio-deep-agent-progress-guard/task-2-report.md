@@ -5,9 +5,9 @@
 `projectEinoAssistantPhaseAllowsTool` now makes the mutation lifecycle directional while retaining the existing tool metadata as the source of truth for ordinary tools.
 
 - Approval retains read, input, and plan tools plus discovery through `tool_search`.
-- Mutate allows canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection, `ask_follow_up`, and eligible `write_todos`.
+- Mutate allows canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection only while the live project is template-less, `ask_follow_up`, and eligible `write_todos`.
 - Verify allows `verify_development_runtime` only.
-- Repair allows targeted workspace reads, canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection, runtime tools, `ask_follow_up`, and eligible `write_todos`.
+- Repair allows targeted workspace reads, canonical `write_file`, `apply_patch`, and `mkdir` edits, exact initial-template selection only while the live project is template-less, runtime tools, `ask_follow_up`, and eligible `write_todos`.
 - Commit allows `commit_project_files` only; report allows no tools.
 
 ## Test-first evidence
@@ -41,6 +41,8 @@ A local `neat-todo` run reached mutation without a bound development template. T
 Mutate and repair now carry one documented workflow/write exception for the exact raw canonical `select_project_template` tool with its actual factory metadata. Real factory-inventory tests prove it is visible in both phases while `hydrate_workspace` remains hidden; namespaced/case lookalikes and wrong bundle metadata are rejected. Permission middleware continues to own automatic approval or user interruption for the operation.
 
 The focused phase suite and full API suite passed after the E2E follow-up.
+
+Final review found the exception still remained visible after a project already had a bound template, which could allow an auto-approved template switch to tear down and reprovision the environment. The exception now fails closed without a live project and permits only a nil or blank template name. Model-time filtering recomputes that state on every rewrite, and the invocation wrapper recomputes it on every call, so `refreshProjectToolSnapshot` after the first selection immediately denies a second selection in the same run. Tests cover nil, blank, whitespace, and bound template states plus live middleware and wrapper rechecks.
 
 ## Scope and review
 

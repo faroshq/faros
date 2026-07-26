@@ -24,6 +24,7 @@ import (
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
+	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
@@ -322,7 +323,7 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutatio
 		},
 	} {
 		t.Run(string(tt.phase), func(t *testing.T) {
-			filtered := projectEinoAssistantPhaseFilterTools(tt.phase, approvedPlan, tools)
+			filtered := projectEinoAssistantPhaseFilterTools(tt.phase, approvedPlan, true, tools)
 			got := projectEinoAssistantPhaseToolNames(filtered)
 			if projectEinoAssistantPhaseToolNamesContain(got, projectToolHydrateWorkspace) {
 				t.Fatalf("%s tools = %#v, want %s excluded", tt.phase, got, projectToolHydrateWorkspace)
@@ -357,12 +358,123 @@ func TestProjectEinoAssistantPhaseRealFactoryInventoryAllowsOnlyCanonicalMutatio
 	}
 }
 
+func TestProjectEinoAssistantPhaseMiddlewareReevaluatesTemplateBootstrapEligibility(t *testing.T) {
+	project := &aiv1alpha1.Project{}
+	runState := newProjectEinoAssistantRunState()
+	runState.ApprovePlan(projectAssistantApprovedPlan{Steps: []string{"bind template", "build app"}})
+	tools := projectEinoAssistantPhaseFactoryToolInfos(t)
+	state := &adk.ChatModelAgentState{
+		ToolInfos:         append([]*schema.ToolInfo(nil), tools...),
+		DeferredToolInfos: append([]*schema.ToolInfo(nil), tools...),
+	}
+	middleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{Project: project}, runState)
+
+	_, state, err := middleware.BeforeModelRewriteState(context.Background(), state, nil)
+	if err != nil {
+		t.Fatalf("template-less filtering returned error: %v", err)
+	}
+	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseToolNamesContain(got, projectToolSelectTemplate) {
+		t.Fatalf("template-less tools = %#v, want %s visible", got, projectToolSelectTemplate)
+	}
+
+	refreshProjectToolSnapshot(project, &aiv1alpha1.Project{
+		Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+	})
+	_, state, err = middleware.BeforeModelRewriteState(context.Background(), state, nil)
+	if err != nil {
+		t.Fatalf("bound-project filtering returned error: %v", err)
+	}
+	got := projectEinoAssistantPhaseToolNames(state.ToolInfos)
+	if projectEinoAssistantPhaseToolNamesContain(got, projectToolSelectTemplate) {
+		t.Fatalf("bound-project tools = %#v, want %s hidden after live project refresh", got, projectToolSelectTemplate)
+	}
+	if projectEinoAssistantPhaseToolNamesContain(got, projectToolHydrateWorkspace) {
+		t.Fatalf("bound-project tools = %#v, want %s still hidden", got, projectToolHydrateWorkspace)
+	}
+}
+
+func TestProjectEinoAssistantPhaseWrapperRechecksTemplateBootstrapEligibility(t *testing.T) {
+	project := &aiv1alpha1.Project{}
+	middleware := &projectEinoAssistantPhaseFilterMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		req:                          projectAssistantRunRequest{Project: project},
+		phase:                        projectEinoAssistantPhaseMutate,
+		approvedPlan:                 &projectAssistantApprovedPlan{Steps: []string{"bind template", "build app"}},
+	}
+	calls := 0
+	wrapped, err := middleware.WrapInvokableToolCall(context.Background(), func(context.Context, string, ...einotool.Option) (string, error) {
+		calls++
+		return "template selected", nil
+	}, &adk.ToolContext{Name: projectToolSelectTemplate})
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+
+	result, err := wrapped(context.Background(), `{"template":"application"}`)
+	if err != nil {
+		t.Fatalf("template-less select returned error: %v", err)
+	}
+	if result != "template selected" || calls != 1 {
+		t.Fatalf("template-less select result = %q calls = %d, want first selection executed", result, calls)
+	}
+
+	refreshProjectToolSnapshot(project, &aiv1alpha1.Project{
+		Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+	})
+	result, err = wrapped(context.Background(), `{"template":"application"}`)
+	if err != nil {
+		t.Fatalf("bound-project select returned error: %v", err)
+	}
+	if result != "Tool call denied: select_project_template is unavailable in the current assistant phase" || calls != 1 {
+		t.Fatalf("bound-project select result = %q calls = %d, want second selection denied", result, calls)
+	}
+}
+
+func TestProjectEinoAssistantPhaseTemplateBootstrapEligibility(t *testing.T) {
+	tests := []struct {
+		name    string
+		project *aiv1alpha1.Project
+		want    bool
+	}{
+		{name: "missing project fails closed"},
+		{name: "nil template permits bootstrap", project: &aiv1alpha1.Project{}, want: true},
+		{
+			name: "blank template permits bootstrap",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{}},
+			},
+			want: true,
+		},
+		{
+			name: "whitespace template permits bootstrap",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "  "}},
+			},
+			want: true,
+		},
+		{
+			name: "bound template rejects bootstrap",
+			project: &aiv1alpha1.Project{
+				Spec: aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectEinoAssistantPhaseTemplateBootstrapAllowed(tt.project); got != tt.want {
+				t.Fatalf("template bootstrap allowed = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *testing.T) {
 	tests := []struct {
-		name  string
-		phase projectEinoAssistantPhase
-		tool  *schema.ToolInfo
-		want  bool
+		name                     string
+		phase                    projectEinoAssistantPhase
+		templateBootstrapAllowed bool
+		tool                     *schema.ToolInfo
+		want                     bool
 	}{
 		{
 			name:  "mutate allows canonical write",
@@ -381,31 +493,46 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolHydrateWorkspace, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
 		},
 		{
-			name:  "mutate allows canonical template bootstrap",
+			name:                     "mutate allows canonical template bootstrap for template-less project",
+			phase:                    projectEinoAssistantPhaseMutate,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			want:                     true,
+		},
+		{
+			name:  "mutate rejects canonical template bootstrap for bound project",
 			phase: projectEinoAssistantPhaseMutate,
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
-			want:  true,
 		},
 		{
-			name:  "mutate rejects namespaced template bootstrap",
-			phase: projectEinoAssistantPhaseMutate,
-			tool:  projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			name:                     "mutate rejects namespaced template bootstrap",
+			phase:                    projectEinoAssistantPhaseMutate,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo("provider__select_project_template", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
 		},
 		{
-			name:  "mutate rejects template bootstrap with infrastructure bundle",
-			phase: projectEinoAssistantPhaseMutate,
-			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleInfrastructure),
+			name:                     "mutate rejects template bootstrap with infrastructure bundle",
+			phase:                    projectEinoAssistantPhaseMutate,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleInfrastructure),
 		},
 		{
-			name:  "repair allows canonical template bootstrap",
+			name:                     "repair allows canonical template bootstrap for template-less project",
+			phase:                    projectEinoAssistantPhaseRepair,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			want:                     true,
+		},
+		{
+			name:  "repair rejects canonical template bootstrap for bound project",
 			phase: projectEinoAssistantPhaseRepair,
 			tool:  projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
-			want:  true,
 		},
 		{
-			name:  "repair rejects case template bootstrap lookalike",
-			phase: projectEinoAssistantPhaseRepair,
-			tool:  projectEinoAssistantPhaseToolInfo("SELECT_PROJECT_TEMPLATE", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
+			name:                     "repair rejects case template bootstrap lookalike",
+			phase:                    projectEinoAssistantPhaseRepair,
+			templateBootstrapAllowed: true,
+			tool:                     projectEinoAssistantPhaseToolInfo("SELECT_PROJECT_TEMPLATE", projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
 		},
 		{
 			name:  "repair rejects namespaced mkdir",
@@ -462,7 +589,7 @@ func TestProjectEinoAssistantPhaseRequiresCanonicalExclusiveToolMetadata(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, tt.tool); got != tt.want {
+			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, tt.templateBootstrapAllowed, tt.tool); got != tt.want {
 				t.Fatalf("allows %q = %t, want %t", tt.tool.Name, got, tt.want)
 			}
 		})
@@ -736,7 +863,7 @@ func TestProjectEinoAssistantPhaseAllowsToolSearchOnlyWhileDiscoveryCanAdvanceWo
 		{phase: projectEinoAssistantPhaseReport, want: false},
 	} {
 		t.Run(string(tt.phase), func(t *testing.T) {
-			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, toolSearch); got != tt.want {
+			if got := projectEinoAssistantPhaseAllowsTool(tt.phase, nil, false, toolSearch); got != tt.want {
 				t.Fatalf("tool_search allowed = %t, want %t", got, tt.want)
 			}
 		})

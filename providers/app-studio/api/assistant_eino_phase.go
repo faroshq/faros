@@ -25,6 +25,8 @@ import (
 	"github.com/cloudwego/eino/adk"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+
+	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 )
 
 type projectEinoAssistantPhase string
@@ -130,14 +132,21 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	}
 	phase := projectEinoAssistantPhaseForState(m.req, m.runState, state)
 	approvedPlan := projectEinoAssistantPhaseApprovedPlan(m.req, m.runState)
+	templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
 	m.phase = phase
 	m.approvedPlan = cloneProjectAssistantApprovedPlan(approvedPlan)
 	state.ToolInfos = projectEinoAssistantPhaseFilterTools(
 		phase,
 		approvedPlan,
+		templateBootstrapAllowed,
 		projectEinoAssistantPhaseVisibleTools(m.toolInfos, state.ToolInfos),
 	)
-	state.DeferredToolInfos = projectEinoAssistantPhaseFilterTools(phase, approvedPlan, m.deferredToolInfos)
+	state.DeferredToolInfos = projectEinoAssistantPhaseFilterTools(
+		phase,
+		approvedPlan,
+		templateBootstrapAllowed,
+		m.deferredToolInfos,
+	)
 	return ctx, state, nil
 }
 
@@ -153,6 +162,7 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	name := projectToolBaseName(rawName)
 	if name != projectEinoAssistantWriteTodosTool &&
 		name != projectToolRequestProjectPlanApproval &&
+		name != projectToolSelectTemplate &&
 		name != projectToolCommitProjectFiles &&
 		name != projectToolCommitFiles {
 		return endpoint, nil
@@ -165,13 +175,23 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 				"bundle": string(projectAssistantToolBundleCollaboration),
 				"risk":   string(projectAssistantToolRiskPlan),
 			}
+		case projectToolSelectTemplate:
+			tool.Extra = map[string]any{
+				"bundle": string(projectAssistantToolBundleWorkflow),
+				"risk":   string(projectAssistantToolRiskWrite),
+			}
 		case projectToolCommitProjectFiles, projectToolCommitFiles:
 			tool.Extra = map[string]any{
 				"bundle": string(projectAssistantToolBundleRepo),
 				"risk":   string(projectAssistantToolRiskCommit),
 			}
 		}
-		if !projectEinoAssistantPhaseAllowsTool(m.phase, m.approvedPlan, tool) {
+		if !projectEinoAssistantPhaseAllowsTool(
+			m.phase,
+			m.approvedPlan,
+			projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project),
+			tool,
+		) {
 			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
 		}
 		return endpoint(ctx, argumentsInJSON, opts...)
@@ -370,6 +390,7 @@ func projectEinoAssistantPhaseVerificationReady(content string) bool {
 func projectEinoAssistantPhaseFilterTools(
 	phase projectEinoAssistantPhase,
 	approvedPlan *projectAssistantApprovedPlan,
+	templateBootstrapAllowed bool,
 	tools []*schema.ToolInfo,
 ) []*schema.ToolInfo {
 	if tools == nil {
@@ -377,7 +398,7 @@ func projectEinoAssistantPhaseFilterTools(
 	}
 	filtered := make([]*schema.ToolInfo, 0, len(tools))
 	for _, tool := range tools {
-		if projectEinoAssistantPhaseAllowsTool(phase, approvedPlan, tool) {
+		if projectEinoAssistantPhaseAllowsTool(phase, approvedPlan, templateBootstrapAllowed, tool) {
 			filtered = append(filtered, tool)
 		}
 	}
@@ -410,6 +431,7 @@ func projectEinoAssistantPhaseMergeTools(existing, current []*schema.ToolInfo) [
 func projectEinoAssistantPhaseAllowsTool(
 	phase projectEinoAssistantPhase,
 	approvedPlan *projectAssistantApprovedPlan,
+	templateBootstrapAllowed bool,
 	tool *schema.ToolInfo,
 ) bool {
 	if tool == nil {
@@ -427,7 +449,12 @@ func projectEinoAssistantPhaseAllowsTool(
 	if !ok {
 		return false
 	}
-	templateBootstrap := projectEinoAssistantPhaseTemplateBootstrapTool(tool.Name, risk, bundle)
+	templateBootstrap := projectEinoAssistantPhaseTemplateBootstrapTool(
+		tool.Name,
+		risk,
+		bundle,
+		templateBootstrapAllowed,
+	)
 
 	switch phase {
 	case projectEinoAssistantPhaseApproval:
@@ -471,10 +498,17 @@ func projectEinoAssistantPhaseTemplateBootstrapTool(
 	name string,
 	risk projectAssistantToolRisk,
 	bundle projectAssistantToolBundle,
+	allowed bool,
 ) bool {
-	return name == projectToolSelectTemplate &&
+	return allowed &&
+		name == projectToolSelectTemplate &&
 		risk == projectAssistantToolRiskWrite &&
 		bundle == projectAssistantToolBundleWorkflow
+}
+
+func projectEinoAssistantPhaseTemplateBootstrapAllowed(project *aiv1alpha1.Project) bool {
+	return project != nil &&
+		(project.Spec.Template == nil || strings.TrimSpace(project.Spec.Template.Name) == "")
 }
 
 func projectEinoAssistantPhaseCanonicalEditTool(name string) bool {
