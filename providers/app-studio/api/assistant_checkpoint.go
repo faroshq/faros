@@ -210,9 +210,16 @@ func (s *Server) saveProjectAssistantEinoPermissionCheckpoint(
 	run.RequestID = requestID
 	run.Checkpoint = raw
 	run.UpdatedAt = now
-	if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
+	if req.snapshotAccumulator != nil {
+		if err := req.snapshotAccumulator.UpdateRun(ctx, func(current *store.AssistantRun) {
+			current.Status, current.RequestID, current.Checkpoint = run.Status, run.RequestID, run.Checkpoint
+		}); err != nil {
+			return nil, projectAssistantPermission{}, projectAssistantCheckpoint{}, err
+		}
+	} else if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
 		return nil, projectAssistantPermission{}, projectAssistantCheckpoint{}, err
 	}
+	req.AssistantRun = &run
 
 	checkpointCreatedAt := now
 	permission := projectAssistantPermissionForEinoInterrupt(requestID, state.ToolCalls[state.CurrentIndex], info)
@@ -274,9 +281,16 @@ func (s *Server) saveProjectAssistantEinoFollowUpCheckpoint(
 	run.RequestID = requestID
 	run.Checkpoint = raw
 	run.UpdatedAt = now
-	if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
+	if req.snapshotAccumulator != nil {
+		if err := req.snapshotAccumulator.UpdateRun(ctx, func(current *store.AssistantRun) {
+			current.Status, current.RequestID, current.Checkpoint = run.Status, run.RequestID, run.Checkpoint
+		}); err != nil {
+			return nil, projectAssistantFollowUp{}, projectAssistantCheckpoint{}, err
+		}
+	} else if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
 		return nil, projectAssistantFollowUp{}, projectAssistantCheckpoint{}, err
 	}
+	req.AssistantRun = &run
 
 	checkpointCreatedAt := now
 	followUp := projectAssistantFollowUpForEinoInterrupt(requestID, info)
@@ -641,6 +655,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		streamedToolCalls = upsertProjectToolCallStreamEvent(streamedToolCalls, toolCall)
 	}
 	resumeRun := run
+	accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, run.ID)
 	engineReq := projectAssistantRunRequest{
 		Identity:                 id,
 		HTTPRequest:              r,
@@ -656,13 +671,20 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		AutoApproveActions:       s.autoApproveAssistantActions(),
 		Continuation:             &state,
 		AssistantRun:             &resumeRun,
+		snapshotAccumulator:      accumulator,
 		StreamCallbacks: projectAssistantStreamCallbacks{
 			OnChunk: func(chunk string) {
 				assistantContent.WriteString(chunk)
+				if accumulator != nil {
+					_ = accumulator.UpdateText(ctx, assistantContent.String(), false)
+				}
 			},
 			OnStatus: func(string) {},
 			OnToolCall: func(toolCall projectToolCallStreamEvent) {
 				streamToolCall(toolCall)
+				if accumulator != nil {
+					_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(streamedToolCalls)))
+				}
 			},
 			OnAssistantEvent: emitAssistantEvent,
 		},

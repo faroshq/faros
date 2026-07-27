@@ -98,6 +98,19 @@ func (s *projectAssistantSupervisor) Attach(scope store.Scope, run store.Assista
 	return &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: run.ID}, nil
 }
 
+func (s *projectAssistantSupervisor) accumulatorFor(scope store.Scope, runID string) *projectAssistantSnapshotAccumulator {
+	if s == nil {
+		return nil
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.runs[key]; active != nil && active.run.ID == runID {
+		return &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: runID}
+	}
+	return nil
+}
+
 // Start deliberately ignores starterCtx. The worker is derived from the
 // provider lifecycle so an HTTP disconnect can only detach a subscriber.
 func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope, run store.AssistantRun, message store.Message, worker func(context.Context, *projectAssistantSnapshotAccumulator)) error {
@@ -247,6 +260,10 @@ func (a *projectAssistantSnapshotAccumulator) SetStatus(ctx context.Context, sta
 
 func (a *projectAssistantSnapshotAccumulator) SetMessageMetadata(ctx context.Context, metadata map[string]any) error {
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { active.message.Metadata = metadata }, true)
+}
+
+func (a *projectAssistantSnapshotAccumulator) UpdateRun(ctx context.Context, mutate func(*store.AssistantRun)) error {
+	return a.update(ctx, func(active *projectAssistantSupervisedRun) { mutate(&active.run) }, true)
 }
 
 func (a *projectAssistantSnapshotAccumulator) update(ctx context.Context, mutate func(*projectAssistantSupervisedRun), immediate bool) error {

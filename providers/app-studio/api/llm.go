@@ -331,6 +331,11 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
 	}
+	if durable, ok := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun); ok {
+		durableCopy := durable
+		req.AssistantRun = &durableCopy
+		req.snapshotAccumulator = s.projectAssistantSupervisor().accumulatorFor(req.MessageScope, durable.ID)
+	}
 	if start != nil && start.InitialApprovedPlan != nil {
 		req.InitialApprovedPlan = cloneProjectAssistantApprovedPlan(start.InitialApprovedPlan)
 	}

@@ -36,6 +36,8 @@ type projectAssistantRunStartResponse struct {
 	Assistant aiv1alpha1.ProjectMessage `json:"assistant"`
 }
 
+type projectAssistantSupervisorRunContextKey struct{}
+
 func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request) {
 	c, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
@@ -80,7 +82,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 	if err := supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 		content := &strings.Builder{}
 		var toolCalls []projectToolCallStreamEvent
-		req := r.Clone(ctx)
+		req := r.Clone(context.WithValue(ctx, projectAssistantSupervisorRunContextKey{}, created))
 		_, err := s.generateProjectAssistantStream(req, id, c, project, projectAssistantStreamCallbacks{
 			OnChunk: func(chunk string) {
 				content.WriteString(chunk)
@@ -89,6 +91,22 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 			OnStatus: func(status string) { _ = status },
 			OnToolCall: func(event projectToolCallStreamEvent) {
 				toolCalls = upsertProjectToolCallStreamEvent(toolCalls, event)
+				_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls)))
+			},
+			OnAssistantEvent: func(event projectAssistantEvent) {
+				if event.Permission != nil && event.Permission.ToolCallID != "" {
+					toolCalls = upsertProjectToolCallStreamEvent(toolCalls, projectToolCallStreamEvent{ID: event.Permission.ToolCallID, Name: event.Permission.ToolName, Status: "permission_required", Summary: event.Permission.Reason, Permission: event.Permission})
+				}
+				if event.FollowUp != nil && event.FollowUp.ToolCallID != "" {
+					toolCalls = upsertProjectToolCallStreamEvent(toolCalls, projectToolCallStreamEvent{ID: event.FollowUp.ToolCallID, Name: projectToolAskFollowUp, Status: "input_required", Summary: event.FollowUp.Prompt, FollowUp: event.FollowUp})
+				}
+				if event.Checkpoint != nil {
+					for i := range toolCalls {
+						if toolCalls[i].Status == "permission_required" || toolCalls[i].Status == "input_required" {
+							toolCalls[i].Checkpoint = event.Checkpoint
+						}
+					}
+				}
 				_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls)))
 			},
 		})
