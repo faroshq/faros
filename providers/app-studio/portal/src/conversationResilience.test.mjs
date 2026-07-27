@@ -67,6 +67,12 @@ test('a delayed latest response for an old run cannot replace a newer start', ()
   assert.equal(result.current.id, 'run-2')
 })
 
+test('a snapshot captured for a project is rejected after selection changes', () => {
+  const incoming = snapshot(1, 'old project')
+  const result = state.acceptScopedConversationSnapshot('project-b', 'project-a', undefined, 'project-a', incoming.run, 'latest')
+  assert.equal(result.accepted, false)
+})
+
 test('a successful abort snapshot immediately makes the run terminal and non-provisional', () => {
   const stopped = state.abortedConversationSnapshot(snapshot(4, 'working'))
   assert.equal(stopped.run.status, 'aborted')

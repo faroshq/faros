@@ -459,6 +459,7 @@ func (a *projectAssistantSnapshotAccumulator) ClaimPending(ctx context.Context, 
 	active.run = claimed
 	active.message.UpdatedAt = claimed.UpdatedAt
 	active.message.Metadata = projectAssistantDurableMetadataFromExisting(claimed, "Working", false, active.message.Metadata)
+	delete(active.message.Metadata, projectMessageMetadataAssistantInterrupt)
 	run, message := active.run, active.message
 	s.mu.Unlock()
 	err = s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1)

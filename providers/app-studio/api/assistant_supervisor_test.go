@@ -83,7 +83,11 @@ func TestProjectAssistantSupervisorReservationProtectsFreshDurableRunUntilAttach
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", Metadata: map[string]any{
+		projectMessageMetadataAssistantActions:       []projectAssistantUIAction{{ID: "prior", Status: "succeeded", Label: "Wrote file"}},
+		projectAssistantMetadataPreviewRefreshNeeded: true,
+		projectMessageMetadataAssistantInterrupt:     &projectAssistantUIInterruptRequest{InterruptID: "resolved"},
+	}, CreatedAt: now, UpdatedAt: now}
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
 	}
@@ -163,7 +167,11 @@ func TestProjectAssistantSupervisorTrailingFlushKeepsNewerText(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", Metadata: map[string]any{
+		projectMessageMetadataAssistantActions:       []projectAssistantUIAction{{ID: "prior", Status: "succeeded", Label: "Wrote file"}},
+		projectAssistantMetadataPreviewRefreshNeeded: true,
+		projectMessageMetadataAssistantInterrupt:     &projectAssistantUIInterruptRequest{InterruptID: "resolved"},
+	}, CreatedAt: now, UpdatedAt: now}
 	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
 	if err != nil {
 		t.Fatal(err)
@@ -518,7 +526,11 @@ func TestProjectAssistantSupervisorClaimPublishesRunningRevision(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", Metadata: map[string]any{
+		projectMessageMetadataAssistantActions:       []projectAssistantUIAction{{ID: "prior", Status: "succeeded", Label: "Wrote file"}},
+		projectAssistantMetadataPreviewRefreshNeeded: true,
+		projectMessageMetadataAssistantInterrupt:     &projectAssistantUIInterruptRequest{InterruptID: "resolved"},
+	}, CreatedAt: now, UpdatedAt: now}
 	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
 	if err != nil {
 		t.Fatal(err)
@@ -549,8 +561,14 @@ func TestProjectAssistantSupervisorClaimPublishesRunningRevision(t *testing.T) {
 		if message.ID != assistant.ID {
 			continue
 		}
-		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Working" || message.Metadata[projectAssistantMetadataRevision] != claimed.Revision {
+		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Working" || message.Metadata[projectAssistantMetadataRevision] != claimed.Revision || message.Metadata[projectAssistantMetadataPreviewRefreshNeeded] != true {
 			t.Fatalf("claimed message metadata = %#v, want durable running revision", message.Metadata)
+		}
+		if _, found := message.Metadata[projectMessageMetadataAssistantInterrupt]; found {
+			t.Fatalf("claimed metadata retained resolved interrupt: %#v", message.Metadata)
+		}
+		if len(projectAssistantUIActionsFromMetadata(message.Metadata[projectMessageMetadataAssistantActions])) != 1 {
+			t.Fatalf("claimed metadata lost prior action: %#v", message.Metadata)
 		}
 		break
 	}

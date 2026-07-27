@@ -1807,9 +1807,10 @@ async function refreshSelectedProjectConversation(projectName: string) {
 }
 
 function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? '', source: 'stream' | 'start' | 'latest' = 'stream', expectedRunID = ''): { accepted: boolean; current: AssistantRun | undefined } {
+  const selectedProject = selected.value?.name ?? ''
   const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
   const previousRun = assistantRunRevisions[normalized.run.id]
-  const accepted = acceptScopedConversationSnapshot(projectName, activeAssistantProject, activeAssistantRun ?? previousRun, projectName, normalized.run, source, expectedRunID)
+  const accepted = acceptScopedConversationSnapshot(selectedProject, activeAssistantProject, activeAssistantRun ?? previousRun, projectName, normalized.run, source, expectedRunID)
   if (!accepted.accepted) return accepted
   const current = mergeConversationSnapshot(
     { messages: messages.value, runs: assistantRunRevisions },
@@ -2611,8 +2612,8 @@ async function handleResumeFailure(
 }
 
 function applyPermissionResponse(interrupt: ProjectAssistantUIInterruptRequest, response: ProjectAssistantSnapshot): boolean {
-  applyAssistantSnapshot(response)
-  if (!assistantRunTerminal(response.run.status)) assistantRunController.start(response.run.id, response.run.revision)
+  const applied = applyAssistantSnapshot(response, selected.value?.name ?? '', 'latest', activeAssistantRun?.id ?? '')
+  if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
   const key = permissionKey(interrupt)
   if (key) {
     const errors = { ...permissionErrors.value }

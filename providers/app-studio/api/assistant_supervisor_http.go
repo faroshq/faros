@@ -112,13 +112,26 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		}
 		next := *run
 		next.Revision++
-		message.Metadata = projectAssistantDurableMetadataForTransition(
+		metadata := projectAssistantDurableMetadataForTransition(
 			next,
 			projectAssistantRunDisplayStatus(run.Status, state.status),
 			state.provisional,
 			s.projectAssistantPreviewRefreshNeeded(ctx, workspaceScope, "", false, state.toolCalls),
 			state.toolCalls,
 		)
+		// Resumed segments begin with durable actions from the previous segment.
+		// Keep that history and only upsert new action updates.
+		actions := projectAssistantUIActionsFromMetadata(message.Metadata[projectMessageMetadataAssistantActions])
+		for _, action := range projectAssistantUIActionsFromMetadata(metadata[projectMessageMetadataAssistantActions]) {
+			actions = upsertProjectAssistantUIAction(actions, action)
+		}
+		if len(actions) > 0 {
+			metadata[projectMessageMetadataAssistantActions] = actions
+		}
+		if preview, _ := message.Metadata[projectAssistantMetadataPreviewRefreshNeeded].(bool); preview {
+			metadata[projectAssistantMetadataPreviewRefreshNeeded] = true
+		}
+		message.Metadata = metadata
 	})
 }
 
