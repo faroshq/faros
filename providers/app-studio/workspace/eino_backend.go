@@ -460,6 +460,22 @@ func compileEinoGrepPattern(req *einofs.GrepRequest) (*regexp.Regexp, error) {
 	return re, nil
 }
 
+type einoLineIndex []int
+
+func newEinoLineIndex(content string) einoLineIndex {
+	var index einoLineIndex
+	for offset := 0; offset < len(content); offset++ {
+		if content[offset] == '\n' {
+			index = append(index, offset)
+		}
+	}
+	return index
+}
+
+func (i einoLineIndex) lineAtByteOffset(offset int) int {
+	return sort.SearchInts(i, offset) + 1
+}
+
 func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, req *einofs.GrepRequest, re *regexp.Regexp, limit int) ([]einofs.GrepMatch, error) {
 	lines := strings.Split(content, "\n")
 	results := make([]einofs.GrepMatch, 0)
@@ -505,12 +521,13 @@ func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, re
 		if len(indices) > maxEinoBackendRawMatches {
 			return nil, fmt.Errorf("search produced more than %d raw matches; narrow request", maxEinoBackendRawMatches)
 		}
+		lineIndex := newEinoLineIndex(content)
 		for _, index := range indices {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			startLine := strings.Count(content[:index[0]], "\n") + 1
-			endLine := strings.Count(content[:index[1]], "\n") + 1
+			startLine := lineIndex.lineAtByteOffset(index[0])
+			endLine := lineIndex.lineAtByteOffset(index[1])
 			for line := startLine; line <= endLine && line <= len(lines); line++ {
 				if err := appendMatchLine(line); err != nil {
 					return nil, err

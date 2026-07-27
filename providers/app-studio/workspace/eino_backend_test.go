@@ -724,6 +724,64 @@ func TestEinoReadOnlyBackendGrepRejectsExcessRawMultilineMatches(t *testing.T) {
 	}
 }
 
+func TestEinoLineIndexMapsByteOffsetsLikeEino(t *testing.T) {
+	content := "α\nβ\n"
+	index := newEinoLineIndex(content)
+	for _, test := range []struct {
+		name   string
+		offset int
+		want   int
+	}{
+		{name: "start", offset: 0, want: 1},
+		{name: "inside unicode rune", offset: 1, want: 1},
+		{name: "on first newline", offset: 2, want: 1},
+		{name: "after first newline", offset: 3, want: 2},
+		{name: "inside second unicode rune", offset: 4, want: 2},
+		{name: "on final newline", offset: 5, want: 2},
+		{name: "after final newline", offset: 6, want: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := index.lineAtByteOffset(test.offset); got != test.want {
+				t.Fatalf("lineAtByteOffset(%d) = %d, want %d", test.offset, got, test.want)
+			}
+		})
+	}
+}
+
+func TestEinoReadOnlyBackendGrepMapsTenThousandMatchesAfterLongPrefix(t *testing.T) {
+	prefix := strings.Repeat("x", 256<<10)
+	matchLine := strings.Repeat("needle", maxEinoBackendRawMatches)
+	content := prefix + "\n" + matchLine + "\nafter"
+
+	matches, err := boundedEinoGrepFile(context.Background(), "adversarial.txt", content, &einofs.GrepRequest{
+		Pattern:         "needle",
+		EnableMultiline: true,
+		BeforeLines:     1,
+		AfterLines:      1,
+	})
+	if err != nil {
+		t.Fatalf("boundedEinoGrepFile returned error: %v", err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("match count = %d, want 3 context-deduplicated lines", len(matches))
+	}
+	for index, want := range []struct {
+		line       int
+		contentLen int
+	}{
+		{line: 1, contentLen: len(prefix)},
+		{line: 2, contentLen: len(matchLine)},
+		{line: 3, contentLen: len("after")},
+	} {
+		if got := matches[index]; got.Path != "adversarial.txt" || got.Line != want.line || len(got.Content) != want.contentLen {
+			t.Fatalf("match %d = {path:%q line:%d content bytes:%d}, want line %d with %d content bytes", index, got.Path, got.Line, len(got.Content), want.line, want.contentLen)
+		}
+	}
+	if matches[0].Content != prefix || matches[1].Content != matchLine || matches[2].Content != "after" {
+		t.Fatal("context-deduplicated match content differs from fixture")
+	}
+}
+
 func TestEinoReadOnlyBackendGrepPreservesZeroWidthMultilineMatches(t *testing.T) {
 	ctx := context.Background()
 	content := "aa\nb\n"
