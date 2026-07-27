@@ -593,6 +593,92 @@ func TestProjectAssistantSupervisorClaimPublishesRunningRevision(t *testing.T) {
 	}
 }
 
+func TestResumedAssistantSegmentPublishesTerminalMessageAndRunAtomically(t *testing.T) {
+	msgStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), msgStore)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil), CreatedAt: now, UpdatedAt: now}
+	if _, err := msgStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	accumulator, err := supervisor.Attach(scope, run, assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, unsubscribe, err := supervisor.Subscribe(scope, run.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+	<-updates
+	state := &projectAssistantDurableMetadataState{status: "Writing files", toolCalls: []projectToolCallStreamEvent{{ID: "tool-1", Name: projectToolWriteFile, Status: "succeeded"}}}
+	server := NewWithWorkspace(nil, msgStore, nil, "", false)
+	if err := server.persistProjectAssistantDurableMetadata(context.Background(), accumulator, projectWorkspaceScope(identity{}, scope.ProjectName), state, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.UpdateText(context.Background(), "done", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	var terminal projectAssistantRunSnapshot
+	select {
+	case terminal = <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("missing resumed terminal snapshot")
+	}
+	if terminal.Run.Status != store.AssistantRunStatusCompleted || terminal.Message.Content != "done" || terminal.Message.Metadata[projectAssistantMetadataPreviewRefreshNeeded] != true {
+		t.Fatalf("terminal snapshot = %#v", terminal)
+	}
+	if _, ok := terminal.Message.Metadata[projectMessageMetadataAssistantActions]; !ok {
+		t.Fatalf("terminal metadata lost actions: %#v", terminal.Message.Metadata)
+	}
+}
+
+type failingResumeSnapshotStore struct {
+	store.Store
+	err error
+}
+
+func (s failingResumeSnapshotStore) SaveAssistantRunSnapshot(context.Context, store.Scope, store.AssistantRun, []store.Message, int64) error {
+	return s.err
+}
+
+func TestResumeSnapshotPersistenceFailurePreventsSuccessfulTerminalTransition(t *testing.T) {
+	inner := store.NewMemoryStore()
+	failing := failingResumeSnapshotStore{Store: inner, err: errors.New("snapshot unavailable")}
+	supervisor := newProjectAssistantSupervisor(context.Background(), failing)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	accumulator, err := supervisor.Attach(scope, run, assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.UpdateText(context.Background(), "partial", true); err == nil {
+		t.Fatal("expected snapshot persistence error")
+	}
+	if err := accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := inner.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status == store.AssistantRunStatusCompleted {
+		t.Fatalf("persistence failure allowed successful completion: %#v", persisted)
+	}
+}
+
 func TestWriteProjectAssistantRunStartReturnsRunUserMessage(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
