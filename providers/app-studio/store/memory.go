@@ -193,8 +193,12 @@ func (s *MemoryStore) CreateAssistantRun(_ context.Context, scope Scope, user Me
 		if existing.ClientRequestID == run.ClientRequestID {
 			return cloneAssistantRun(existing), nil
 		}
-		if !assistantRunStatusTerminal(existing.Status) {
-			return AssistantRun{}, fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
+	}
+	if !assistantRunStatusTerminal(run.Status) {
+		for _, existing := range s.assistantRuns[scope] {
+			if !assistantRunStatusTerminal(existing.Status) {
+				return AssistantRun{}, fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
+			}
 		}
 	}
 	if s.messages[scope] == nil {

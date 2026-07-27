@@ -104,3 +104,54 @@ idempotent create/CAS behavior, and migration of a legacy pending row to
 - Task 2 must switch the assistant execution lifecycle to the new atomic store
   operations; this task intentionally does not change API, supervisor, or
   portal behavior.
+
+## Review fix round 1
+
+### Findings fixed
+
+- Memory idempotent recovery now performs a complete client-request lookup
+  before it evaluates active-run exclusivity. A retry for a completed request
+  deterministically returns that completed run even while a newer run is active.
+- Durable encrypted-create and encrypted-snapshot tests now verify encrypted
+  user and assistant message content in the raw inner store, as well as
+  decrypted wrapper reads.
+- Durable `DeleteProjectMessages` tests now cover memory, encrypted, and
+  DSN-gated Postgres stores for both messages and assistant runs.
+
+### RED / GREEN evidence
+
+Focused RED before the retry-ordering fix:
+
+```text
+go test ./store -run TestMemoryStoreRecoversCompletedRequestWhileAnotherRunIsActive -count=1
+FAIL: retry completed request on attempt 0: assistant run version conflict:
+project already has active assistant run "run-2"
+```
+
+Focused GREEN after the two-pass lookup change and added encryption/deletion
+coverage:
+
+```text
+go test ./store -run 'Test(MemoryStoreRecoversCompletedRequestWhileAnotherRunIsActive|MemoryAndEncryptedStoresDeleteDurableRunAndMessages|EncryptedStoreEncryptsDurableAssistantRunSnapshots)' -count=1
+ok github.com/faroshq/provider-app-studio/store
+
+go test ./store -count=1
+ok github.com/faroshq/provider-app-studio/store
+
+go test -race ./store -count=1
+ok github.com/faroshq/provider-app-studio/store
+
+go test ./...
+ok github.com/faroshq/provider-app-studio
+ok github.com/faroshq/provider-app-studio/api
+ok github.com/faroshq/provider-app-studio/client
+ok github.com/faroshq/provider-app-studio/store
+ok github.com/faroshq/provider-app-studio/workspace
+
+git diff --check
+exit 0
+```
+
+The expanded Postgres deletion assertion remains DSN-gated alongside the
+existing Postgres migration/index coverage and was not runnable locally because
+`APP_STUDIO_TEST_POSTGRES_DSN` is unset.

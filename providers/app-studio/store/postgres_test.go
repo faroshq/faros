@@ -274,6 +274,19 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 			t.Fatalf("missing durable assistant-run index %q", indexName)
 		}
 	}
+	if err := store.DeleteProjectMessages(ctx, scope); err != nil {
+		t.Fatalf("DeleteProjectMessages: %v", err)
+	}
+	if _, err := store.GetAssistantRun(ctx, scope, run.ID); !errors.Is(err, ErrAssistantRunNotFound) {
+		t.Fatalf("GetAssistantRun after deletion error = %v, want not found", err)
+	}
+	page, err := store.ListMessages(ctx, scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages after deletion: %v", err)
+	}
+	if len(page.Items) != 0 {
+		t.Fatalf("messages after deletion = %#v, want empty", page.Items)
+	}
 }
 
 func TestPostgresStoreMigratesLegacyPendingRunExternalDSN(t *testing.T) {

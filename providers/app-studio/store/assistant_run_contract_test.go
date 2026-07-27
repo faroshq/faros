@@ -282,6 +282,84 @@ func TestMemoryStoreFindsLatestRunAndClientRequest(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRecoversCompletedRequestWhileAnotherRunIsActive(t *testing.T) {
+	store := mustDurableAssistantRunStore(t, NewMemoryStore())
+	scope := testAssistantRunScope()
+	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	completed := createTestAssistantRun(t, store, scope, createdAt)
+	completed.Status = AssistantRunStatusCompleted
+	completed.Revision = 2
+	completed.UpdatedAt = createdAt.Add(time.Minute)
+	if err := store.SaveAssistantRunSnapshot(context.Background(), scope, completed, nil, 1); err != nil {
+		t.Fatalf("complete first run: %v", err)
+	}
+	active := testAssistantRun(t, "run-2", "request-2", "assistant-2", createdAt.Add(2*time.Minute))
+	if _, err := store.CreateAssistantRun(context.Background(), scope,
+		Message{ID: "user-2", Role: "user", Content: "second", CreatedAt: active.CreatedAt, UpdatedAt: active.CreatedAt},
+		Message{ID: active.ActiveMessageID, Role: "assistant", CreatedAt: active.CreatedAt, UpdatedAt: active.CreatedAt},
+		active,
+	); err != nil {
+		t.Fatalf("CreateAssistantRun active: %v", err)
+	}
+	for attempt := 0; attempt < 100; attempt++ {
+		recovered, err := store.CreateAssistantRun(context.Background(), scope,
+			Message{ID: "user-retry", Role: "user", Content: "retry", CreatedAt: createdAt.Add(3 * time.Minute), UpdatedAt: createdAt.Add(3 * time.Minute)},
+			Message{ID: "assistant-retry", Role: "assistant", CreatedAt: createdAt.Add(3 * time.Minute), UpdatedAt: createdAt.Add(3 * time.Minute)},
+			testAssistantRun(t, "run-retry", completed.ClientRequestID, "assistant-retry", createdAt.Add(3*time.Minute)),
+		)
+		if err != nil {
+			t.Fatalf("retry completed request on attempt %d: %v", attempt, err)
+		}
+		if recovered.ID != completed.ID {
+			t.Fatalf("retry recovered %q, want %q", recovered.ID, completed.ID)
+		}
+	}
+}
+
+func TestMemoryAndEncryptedStoresDeleteDurableRunAndMessages(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			base := NewMemoryStore()
+			wrapped, err := NewEncryptedStore(base, testEncryptionKeys(t))
+			if err != nil {
+				t.Fatalf("NewEncryptedStore: %v", err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := mustDurableAssistantRunStore(t, tt.new(t))
+			scope := testAssistantRunScope()
+			createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+			run := testAssistantRun(t, "run-1", "request-1", "assistant-1", createdAt)
+			if _, err := store.CreateAssistantRun(context.Background(), scope,
+				Message{ID: "user-1", Role: "user", Content: "delete me", CreatedAt: createdAt, UpdatedAt: createdAt},
+				Message{ID: run.ActiveMessageID, Role: "assistant", Content: "delete me too", CreatedAt: createdAt, UpdatedAt: createdAt},
+				run,
+			); err != nil {
+				t.Fatalf("CreateAssistantRun: %v", err)
+			}
+			if err := store.DeleteProjectMessages(context.Background(), scope); err != nil {
+				t.Fatalf("DeleteProjectMessages: %v", err)
+			}
+			if _, err := store.GetAssistantRun(context.Background(), scope, run.ID); !errors.Is(err, ErrAssistantRunNotFound) {
+				t.Fatalf("GetAssistantRun after deletion error = %v, want not found", err)
+			}
+			page, err := store.ListMessages(context.Background(), scope, 10, "")
+			if err != nil {
+				t.Fatalf("ListMessages after deletion: %v", err)
+			}
+			if len(page.Items) != 0 {
+				t.Fatalf("messages after deletion = %#v, want empty", page.Items)
+			}
+		})
+	}
+}
+
 func TestEncryptedStoreEncryptsDurableAssistantRunSnapshots(t *testing.T) {
 	base := NewMemoryStore()
 	store, err := NewEncryptedStore(base, testEncryptionKeys(t))
@@ -308,6 +386,13 @@ func TestEncryptedStoreEncryptsDurableAssistantRunSnapshots(t *testing.T) {
 	if bytes.Equal(raw.Checkpoint, run.Checkpoint) || bytes.Equal(raw.Audit, run.Audit) {
 		t.Fatalf("encrypted store persisted plaintext run blobs: %#v", raw)
 	}
+	rawMessages, err := base.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatalf("raw ListMessages after create: %v", err)
+	}
+	if len(rawMessages.Items) != 2 || rawMessages.Items[1].Content == "secret prompt" || !rawMessages.Items[1].ContentEncrypted {
+		t.Fatalf("encrypted create persisted plaintext user message: %#v", rawMessages.Items)
+	}
 	got, err := durable.GetAssistantRun(context.Background(), scope, run.ID)
 	if err != nil {
 		t.Fatalf("GetAssistantRun: %v", err)
@@ -319,7 +404,14 @@ func TestEncryptedStoreEncryptsDurableAssistantRunSnapshots(t *testing.T) {
 	run.Checkpoint = json.RawMessage(`{"tool":"write_file","content":"new secret"}`)
 	run.Audit = json.RawMessage(`{"result":"new secret"}`)
 	run.UpdatedAt = createdAt.Add(time.Minute)
-	if err := durable.SaveAssistantRunSnapshot(context.Background(), scope, run, nil, 1); err != nil {
+	snapshotMessage := Message{
+		ID:        run.ActiveMessageID,
+		Role:      "assistant",
+		Content:   "snapshot secret",
+		CreatedAt: createdAt,
+		UpdatedAt: run.UpdatedAt,
+	}
+	if err := durable.SaveAssistantRunSnapshot(context.Background(), scope, run, []Message{snapshotMessage}, 1); err != nil {
 		t.Fatalf("SaveAssistantRunSnapshot: %v", err)
 	}
 	raw, err = base.GetAssistantRun(context.Background(), scope, run.ID)
@@ -328,6 +420,20 @@ func TestEncryptedStoreEncryptsDurableAssistantRunSnapshots(t *testing.T) {
 	}
 	if bytes.Equal(raw.Checkpoint, run.Checkpoint) || bytes.Equal(raw.Audit, run.Audit) {
 		t.Fatalf("encrypted snapshot persisted plaintext run blobs: %#v", raw)
+	}
+	rawMessages, err = base.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatalf("raw ListMessages after snapshot: %v", err)
+	}
+	if rawMessages.Items[0].Content == snapshotMessage.Content || !rawMessages.Items[0].ContentEncrypted {
+		t.Fatalf("encrypted snapshot persisted plaintext assistant message: %#v", rawMessages.Items[0])
+	}
+	page, err := durable.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages after snapshot: %v", err)
+	}
+	if page.Items[0].Content != snapshotMessage.Content || page.Items[0].ContentEncrypted {
+		t.Fatalf("encrypted snapshot message read = %#v, want decrypted snapshot", page.Items[0])
 	}
 	got, err = durable.GetAssistantRun(context.Background(), scope, run.ID)
 	if err != nil {
