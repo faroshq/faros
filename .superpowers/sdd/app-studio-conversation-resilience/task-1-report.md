@@ -155,3 +155,29 @@ exit 0
 The expanded Postgres deletion assertion remains DSN-gated alongside the
 existing Postgres migration/index coverage and was not runnable locally because
 `APP_STUDIO_TEST_POSTGRES_DSN` is unset.
+
+## Review fix round 2
+
+### Finding fixed
+
+`MemoryStore.SaveAssistantRun` now rejects a second, different run with the
+same non-empty `ClientRequestID`, matching the Postgres scoped unique index.
+The guard runs under the existing store mutex and excludes the same run ID, so
+normal updates remain valid. `encryptedStore.SaveAssistantRun` delegates to the
+same inner-store check; the regression covers both wrappers.
+
+### RED / GREEN evidence
+
+Focused RED before the memory parity fix:
+
+```text
+go test ./store -run TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID -count=1
+FAIL: duplicate SaveAssistantRun error = <nil>, want conflict
+```
+
+Focused GREEN after adding the locked duplicate client-request check:
+
+```text
+go test ./store -run TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID -count=1
+ok github.com/faroshq/provider-app-studio/store
+```

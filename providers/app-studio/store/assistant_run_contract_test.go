@@ -177,6 +177,61 @@ func TestMemoryStoreLegacyWritersRejectSecondNonterminalAssistantRun(t *testing.
 	}
 }
 
+func TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatalf("NewEncryptedStore: %v", err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := tt.new(t)
+			scope := testAssistantRunScope()
+			createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+			first := AssistantRun{
+				ID:              "run-1",
+				Status:          AssistantRunStatusCompleted,
+				ClientRequestID: "request-1",
+				Checkpoint:      json.RawMessage(`{"checkpoint":"first"}`),
+				Audit:           json.RawMessage(`{"audit":"first"}`),
+				CreatedAt:       createdAt,
+				UpdatedAt:       createdAt,
+			}
+			if err := store.SaveAssistantRun(context.Background(), scope, first); err != nil {
+				t.Fatalf("first SaveAssistantRun: %v", err)
+			}
+			if err := store.SaveAssistantRun(context.Background(), scope, AssistantRun{
+				ID:              "run-2",
+				Status:          AssistantRunStatusCompleted,
+				ClientRequestID: first.ClientRequestID,
+				CreatedAt:       createdAt.Add(time.Minute),
+				UpdatedAt:       createdAt.Add(time.Minute),
+			}); !errors.Is(err, ErrAssistantRunConflict) {
+				t.Fatalf("duplicate SaveAssistantRun error = %v, want conflict", err)
+			}
+			first.Audit = json.RawMessage(`{"audit":"updated"}`)
+			first.UpdatedAt = createdAt.Add(2 * time.Minute)
+			if err := store.SaveAssistantRun(context.Background(), scope, first); err != nil {
+				t.Fatalf("same-run SaveAssistantRun update: %v", err)
+			}
+			got, err := store.GetAssistantRun(context.Background(), scope, first.ID)
+			if err != nil {
+				t.Fatalf("GetAssistantRun: %v", err)
+			}
+			if string(got.Audit) != string(first.Audit) {
+				t.Fatalf("same-run audit = %s, want %s", got.Audit, first.Audit)
+			}
+		})
+	}
+}
+
 func TestMemoryStoreSaveAssistantRunSnapshotRequiresNextRevision(t *testing.T) {
 	store := mustDurableAssistantRunStore(t, NewMemoryStore())
 	scope := testAssistantRunScope()

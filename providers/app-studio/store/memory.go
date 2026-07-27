@@ -165,6 +165,13 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 		run.ClientRequestID = existing.ClientRequestID
 		run.Revision = existing.Revision
 	}
+	if run.ClientRequestID != "" {
+		for id, existing := range s.assistantRuns[scope] {
+			if id != run.ID && existing.ClientRequestID == run.ClientRequestID {
+				return fmt.Errorf("%w: client request %q", ErrAssistantRunConflict, run.ClientRequestID)
+			}
+		}
+	}
 	if !assistantRunStatusTerminal(run.Status) {
 		for id, existing := range s.assistantRuns[scope] {
 			if id != run.ID && !assistantRunStatusTerminal(existing.Status) {
