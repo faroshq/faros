@@ -65,6 +65,7 @@ func TestProjectEinoAssistantFilesystemMiddlewareInventory(t *testing.T) {
 			"pagination",
 			"offset",
 			"limit",
+			"always specify a positive limit",
 			"line numbers starting at 1",
 			"multiple tools in a single response",
 			"batch",
@@ -81,6 +82,12 @@ func TestProjectEinoAssistantFilesystemMiddlewareInventory(t *testing.T) {
 			"glob parameter",
 			"files_with_matches",
 			"multiline",
+		},
+	}
+	forbiddenGuidance := map[string][]string{
+		projectToolReadFile: {
+			"omit limit",
+			"full-file read",
 		},
 	}
 	if len(runCtx.Tools) != len(want) {
@@ -106,6 +113,11 @@ func TestProjectEinoAssistantFilesystemMiddlewareInventory(t *testing.T) {
 		for _, phrase := range requiredGuidance[info.Name] {
 			if !strings.Contains(desc, phrase) {
 				t.Errorf("%s description = %q, want guidance %q", info.Name, info.Desc, phrase)
+			}
+		}
+		for _, phrase := range forbiddenGuidance[info.Name] {
+			if strings.Contains(desc, phrase) {
+				t.Errorf("%s description = %q, must not contain misleading guidance %q", info.Name, info.Desc, phrase)
 			}
 		}
 	}

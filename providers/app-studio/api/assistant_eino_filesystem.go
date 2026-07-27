@@ -49,9 +49,9 @@ Usage:
 - The file_path parameter must be project-relative.
 - By default, it reads up to 2000 lines starting from the beginning of the file.
 - For large files and project exploration, use pagination with offset and limit parameters to avoid context overflow.
-  - First scan: read_file(file_path, limit=100) to see file structure.
-  - Read more sections: read_file(file_path, offset=101, limit=200) for the next 200 lines.
-  - Omit limit only when a full-file read is necessary.
+	  - First scan: read_file(file_path, limit=100) to see file structure.
+	  - Read more sections: read_file(file_path, offset=101, limit=200) for the next 200 lines.
+	  - Always specify a positive limit. Omitted or non-positive limits default to 2000 lines; continue with explicit offset and limit values for later ranges.
 - Offset is a one-based line number and limit is the number of lines to return.
 - Results include line numbers starting at 1.
 - You can call multiple tools in a single response. Batch independent reads of potentially useful files.
