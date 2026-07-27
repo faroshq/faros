@@ -1205,6 +1205,131 @@ func TestEinoAssistantEngineUsesScopedCanonicalFilesystemReads(t *testing.T) {
 	}
 }
 
+func TestEinoAssistantEngineReportsCanonicalFilesystemBackendFailureAsFailed(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
+	model := &canonicalFilesystemReadEinoChatModel{
+		readPath:   "missing/README.md",
+		completion: "continued after safe read failure",
+	}
+	var events []projectToolCallStreamEvent
+	var runState *projectEinoAssistantRunState
+	engine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(ctx context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			runState = state
+			return newProjectEinoAssistantToolsFactory(server)(ctx, req, state)
+		},
+	}
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileExploration)
+	req.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileExploration)
+	req.StreamCallbacks.OnToolCall = func(event projectToolCallStreamEvent) {
+		events = append(events, event)
+	}
+
+	result, err := engine.StreamProjectAssistant(ctx, req)
+	if err != nil {
+		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	}
+	if result.Content != "continued after safe read failure" {
+		t.Fatalf("result content = %q, want model to continue after safe tool error", result.Content)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want requested/running/failed", events)
+	}
+	for i, status := range []string{"requested", "running", "failed"} {
+		if events[i].Status != status || events[i].ID != "call-read-readme" {
+			t.Errorf("event %d = %#v, want call-read-readme %s", i, events[i], status)
+		}
+	}
+	for _, event := range events {
+		if event.Status == "succeeded" {
+			t.Fatalf("backend failure emitted succeeded telemetry: %#v", events)
+		}
+	}
+	if len(model.inputs) < 2 ||
+		!einoMessagesContainToolResult(model.inputs[1], "call-read-readme", "Tool call failed:") {
+		t.Fatalf("second model input = %#v, want existing safe-shaped tool failure", model.inputs)
+	}
+	if runState == nil {
+		t.Fatal("run state was not captured")
+	}
+	evidence := runState.CheckpointState().LastToolMessages
+	if len(evidence) != 1 || evidence[0].ToolCallID != "call-read-readme" ||
+		!strings.HasPrefix(evidence[0].Content, "Tool call failed: ") ||
+		evidence[0].Content != truncateProjectToolInfo(evidence[0].Content) {
+		t.Fatalf("run-state failure evidence = %#v, want bounded safe failure with real call ID", evidence)
+	}
+}
+
+func TestEinoAssistantEngineTerminalPhaseDeniesCanonicalReadBeforeTelemetry(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	const unreadContent = "terminal-phase-endpoint-must-not-run"
+	if _, err := workspaces.WriteFile(ctx, scope, workspace.WriteOptions{
+		Path:    "README.md",
+		Content: unreadContent,
+	}); err != nil {
+		t.Fatalf("write README fixture returned error: %v", err)
+	}
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
+	model := &canonicalFilesystemReadEinoChatModel{completion: "reported terminal denial"}
+	var events []projectToolCallStreamEvent
+	req := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileImplementation)
+	req.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation)
+	req.StreamCallbacks.OnToolCall = func(event projectToolCallStreamEvent) {
+		events = append(events, event)
+	}
+	req.InitialApprovedPlan = &projectAssistantApprovedPlan{
+		Summary:    "Previously completed initial project build.",
+		Steps:      []string{"Write", "Verify"},
+		Operations: []string{projectToolWriteFile},
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetTurnPolicy(req.TurnPolicy)
+	runState.ApprovePlan(*req.InitialApprovedPlan)
+	engine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: newProjectEinoAssistantToolsFactory(server),
+	}
+	agent, err := engine.newAgent(ctx, req, runState)
+	if err != nil {
+		t.Fatalf("newAgent returned error: %v", err)
+	}
+	iter := agent.Run(ctx, &adk.AgentInput{Messages: []*schema.Message{
+		schema.UserMessage("Report the completed work."),
+		projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"operation":"write_file"}`),
+		projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"ready"}`),
+	}})
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Fatalf("agent event returned error: %v", event.Err)
+		}
+	}
+	if len(model.inputs) < 2 ||
+		!einoMessagesContainToolResult(model.inputs[1], "call-read-readme", "Tool call denied:") {
+		t.Fatalf("second model input = %#v, want terminal-phase denial", model.inputs)
+	}
+	if einoMessagesContainContent(model.inputs[1], unreadContent) {
+		t.Fatal("terminal phase reached the canonical filesystem endpoint")
+	}
+	if len(events) != 0 {
+		t.Fatalf("terminal phase denial emitted filesystem telemetry: %#v", events)
+	}
+}
+
 func TestEinoAssistantEngineWriteProfilesRetainPlanApprovalBeforeWrites(t *testing.T) {
 	for _, profile := range []projectAssistantTurnProfile{
 		projectAssistantTurnProfileImplementation,
@@ -2713,6 +2838,8 @@ type canonicalFilesystemReadEinoChatModel struct {
 	requestPlan     bool
 	requestFollowUp bool
 	directAnswer    bool
+	readPath        string
+	completion      string
 }
 
 type planThenReportToolCapturingEinoChatModel struct {
@@ -3286,16 +3413,24 @@ func (m *canonicalFilesystemReadEinoChatModel) Generate(
 		}}), nil
 	}
 	if len(m.inputs) == 1 {
+		readPath := strings.TrimSpace(m.readPath)
+		if readPath == "" {
+			readPath = "README.md"
+		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID:   "call-read-readme",
 			Type: "function",
 			Function: schema.FunctionCall{
 				Name:      projectToolReadFile,
-				Arguments: `{"file_path":"README.md","offset":1,"limit":20}`,
+				Arguments: fmt.Sprintf(`{"file_path":%q,"offset":1,"limit":20}`, readPath),
 			},
 		}}), nil
 	}
-	return schema.AssistantMessage("README inspected", nil), nil
+	completion := strings.TrimSpace(m.completion)
+	if completion == "" {
+		completion = "README inspected"
+	}
+	return schema.AssistantMessage(completion, nil), nil
 }
 
 func (m *canonicalFilesystemReadEinoChatModel) Stream(

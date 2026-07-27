@@ -1463,27 +1463,40 @@ func TestProjectEinoAssistantPhaseMiddlewareRestoresToolsAfterApproval(t *testin
 }
 
 func TestProjectEinoAssistantPhaseMiddlewareRestoresCanonicalToolsAfterResume(t *testing.T) {
+	ctx := context.Background()
 	runState := newProjectEinoAssistantRunState()
 	tools := []einotool.BaseTool{
 		projectEinoAssistantPhaseBaseTool(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
 		projectEinoAssistantPhaseBaseTool(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
 	}
 	runCtx := &adk.ChatModelAgentContext{Tools: tools}
+	filesystemMiddleware, err := projectEinoAssistantFilesystemMiddleware(ctx, workspace.NewFileStore(t.TempDir()), projectAssistantRunRequest{
+		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+	})
+	if err != nil {
+		t.Fatalf("projectEinoAssistantFilesystemMiddleware returned error: %v", err)
+	}
+	_, runCtx, err = filesystemMiddleware.BeforeAgent(ctx, runCtx)
+	if err != nil {
+		t.Fatalf("filesystem BeforeAgent returned error: %v", err)
+	}
 	persistedApprovalState := &adk.ChatModelAgentState{ToolInfos: []*schema.ToolInfo{
 		projectEinoAssistantPhaseToolInfo(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
 	}}
 
 	resumedMiddleware := projectEinoAssistantPhaseMiddleware(projectAssistantRunRequest{}, runState)
-	if _, _, err := resumedMiddleware.BeforeAgent(context.Background(), runCtx); err != nil {
+	if _, _, err := resumedMiddleware.BeforeAgent(ctx, runCtx); err != nil {
 		t.Fatalf("BeforeAgent returned error: %v", err)
 	}
 	runState.ApprovePlan(projectAssistantApprovedPlan{Steps: []string{"edit"}})
-	_, state, err := resumedMiddleware.BeforeModelRewriteState(context.Background(), persistedApprovalState, nil)
+	_, state, err := resumedMiddleware.BeforeModelRewriteState(ctx, persistedApprovalState, nil)
 	if err != nil {
 		t.Fatalf("mutate filtering returned error: %v", err)
 	}
-	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseStringSlicesEqual(got, []string{projectToolWriteFile}) {
-		t.Fatalf("resumed mutate tool infos = %#v, want recovered workspace write without plan tool", got)
+	want := []string{projectToolWriteFile, projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep}
+	if got := projectEinoAssistantPhaseToolNames(state.ToolInfos); !projectEinoAssistantPhaseStringSlicesEqual(got, want) {
+		t.Fatalf("resumed mutate tool infos = %#v, want recovered registry write and canonical Eino reads %#v", got, want)
 	}
 }
 
