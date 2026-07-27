@@ -2248,10 +2248,12 @@ async function sendMessage() {
   messages.value = [...messages.value, optimisticUserMessage]
   try {
     const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
-    messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
-    if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
-    pendingMessageSubmission = null
+    if (applied.accepted && applied.current) {
+      messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
+      if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
+      pendingMessageSubmission = null
+    }
   } catch (e) {
     messages.value = messages.value.filter((message) => message.id !== optimisticID)
     if (e instanceof ProjectAPIRequestError && e.status === 409) {
@@ -2485,7 +2487,7 @@ function markAssistantMessageInterrupted(projectName: string, assistantMessageID
 }
 
 async function resolveToolPermission(message: ProjectMessageView, interrupt: ProjectAssistantUIInterruptRequest, decision: 'allow' | 'deny') {
-  const projectName = selected.value?.name || message.projectID
+  const projectName = message.projectID
   const runID = interrupt.action?.runId
   const requestID = interrupt.action?.requestId
   const key = permissionKey(interrupt)
@@ -2502,7 +2504,7 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
       decision,
       assistantMessageID: message.id,
     })
-    const shouldRefreshPreview = applyPermissionResponse(interrupt, response)
+    const shouldRefreshPreview = applyPermissionResponse(projectName, interrupt, response)
     responseApplied = true
     await refreshSelectedProjectConversation(projectName)
     if (shouldRefreshPreview) {
@@ -2525,7 +2527,7 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
 }
 
 async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: ProjectAssistantUIInterruptRequest) {
-  const projectName = selected.value?.name || message.projectID
+  const projectName = message.projectID
   const runID = interrupt.action?.runId
   const requestID = interrupt.action?.requestId
   const key = followUpKey(interrupt)
@@ -2547,7 +2549,7 @@ async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: Proj
       answer,
       assistantMessageID: message.id,
     })
-    const shouldRefreshPreview = applyPermissionResponse(interrupt, response)
+    const shouldRefreshPreview = applyPermissionResponse(projectName, interrupt, response)
     responseApplied = true
     await refreshSelectedProjectConversation(projectName)
     if (shouldRefreshPreview) {
@@ -2611,8 +2613,9 @@ async function handleResumeFailure(
   error.value = e instanceof Error ? e.message : String(e)
 }
 
-function applyPermissionResponse(interrupt: ProjectAssistantUIInterruptRequest, response: ProjectAssistantSnapshot): boolean {
-  const applied = applyAssistantSnapshot(response, selected.value?.name ?? '', 'latest', activeAssistantRun?.id ?? '')
+function applyPermissionResponse(projectName: string, interrupt: ProjectAssistantUIInterruptRequest, response: ProjectAssistantSnapshot): boolean {
+  const applied = applyAssistantSnapshot(response, projectName, 'latest', activeAssistantRun?.id ?? '')
+  if (!applied.accepted || !applied.current) return false
   if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
   const key = permissionKey(interrupt)
   if (key) {

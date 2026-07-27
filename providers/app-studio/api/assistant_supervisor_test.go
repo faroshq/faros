@@ -83,11 +83,7 @@ func TestProjectAssistantSupervisorReservationProtectsFreshDurableRunUntilAttach
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", Metadata: map[string]any{
-		projectMessageMetadataAssistantActions:       []projectAssistantUIAction{{ID: "prior", Status: "succeeded", Label: "Wrote file"}},
-		projectAssistantMetadataPreviewRefreshNeeded: true,
-		projectMessageMetadataAssistantInterrupt:     &projectAssistantUIInterruptRequest{InterruptID: "resolved"},
-	}, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
 	}
@@ -167,11 +163,7 @@ func TestProjectAssistantSupervisorTrailingFlushKeepsNewerText(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", Metadata: map[string]any{
-		projectMessageMetadataAssistantActions:       []projectAssistantUIAction{{ID: "prior", Status: "succeeded", Label: "Wrote file"}},
-		projectAssistantMetadataPreviewRefreshNeeded: true,
-		projectMessageMetadataAssistantInterrupt:     &projectAssistantUIInterruptRequest{InterruptID: "resolved"},
-	}, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
 	if err != nil {
 		t.Fatal(err)
