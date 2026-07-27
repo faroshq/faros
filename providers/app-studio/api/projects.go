@@ -66,8 +66,9 @@ type PatchProjectMemoryRequest struct {
 }
 
 type CreateProjectMessageRequest struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content"`
+	Role            string `json:"role,omitempty"`
+	Content         string `json:"content"`
+	ClientRequestID string `json:"clientRequestID,omitempty"`
 }
 
 type ProjectView struct {
@@ -676,17 +677,60 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	resp, err := s.resumeProjectAssistantRunWithRepositoryAndClient(r.Context(), r, id, c, p, projectRepositoryView(r.Context(), c, p), mux.Vars(r)["run"], req)
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	runID := mux.Vars(r)["run"]
+	run, err := s.store.GetAssistantRun(r.Context(), scope, runID)
 	if err != nil {
 		writeProjectError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	if run.Status != store.AssistantRunStatusPendingPermission && run.Status != store.AssistantRunStatusPendingInput {
+		writeProjectError(w, newValidationError("assistant run is not waiting for input"))
+		return
+	}
+	message, err := s.findProjectMessage(r.Context(), scope, run.ActiveMessageID)
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	supervisor := s.projectAssistantSupervisor()
+	if err := supervisor.Start(r.Context(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
+		if err := accumulator.SetStatus(ctx, store.AssistantRunStatusRunning); err != nil {
+			return
+		}
+		resp, resumeErr := s.resumeProjectAssistantRunWithRepositoryAndClient(ctx, r.Clone(ctx), id, c, p, projectRepositoryView(ctx, c, p), runID, req)
+		if resumeErr == nil && resp.Status == store.AssistantRunStatusCompleted {
+			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted)
+			return
+		}
+		if errors.Is(resumeErr, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
+			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusAborted)
+			return
+		}
+		if resumeErr != nil {
+			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusFailed)
+			return
+		}
+		_ = accumulator.SetStatus(context.Background(), resp.Status)
+	}); err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshot{Run: run, Message: message})
 }
 
 func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	_, id, p, ok := s.requireProjectWithClient(w, r)
 	if !ok {
+		return
+	}
+	if s.projectAssistantSupervisor().Abort(projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), mux.Vars(r)["run"]) {
+		run, err := s.store.GetAssistantRun(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), mux.Vars(r)["run"])
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, projectAssistantResumeResponse{RunID: run.ID, RequestID: run.RequestID, Status: run.Status, Decision: projectAssistantPermissionDeny})
 		return
 	}
 	resp, err := s.abortProjectAssistantRun(r.Context(), id, p, mux.Vars(r)["run"])
