@@ -32,9 +32,9 @@ import (
 )
 
 type projectAssistantRunStartResponse struct {
-	Run       store.AssistantRun        `json:"run"`
-	User      aiv1alpha1.ProjectMessage `json:"user"`
-	Assistant aiv1alpha1.ProjectMessage `json:"assistant"`
+	Run       store.AssistantRun         `json:"run"`
+	User      *aiv1alpha1.ProjectMessage `json:"user,omitempty"`
+	Assistant aiv1alpha1.ProjectMessage  `json:"assistant"`
 }
 
 type projectAssistantSupervisorRunContextKey struct{}
@@ -182,12 +182,17 @@ func (s *Server) writeProjectAssistantRunStart(w http.ResponseWriter, status int
 		writeProjectError(w, err)
 		return
 	}
-	user, err := s.findProjectMessage(context.Background(), scope, run.UserMessageID)
-	if err != nil {
-		writeProjectError(w, err)
-		return
+	response := projectAssistantRunStartResponse{Run: run, Assistant: projectMessageToAPI(message)}
+	if strings.TrimSpace(run.UserMessageID) != "" {
+		user, err := s.findProjectMessage(context.Background(), scope, run.UserMessageID)
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		apiUser := projectMessageToAPI(user)
+		response.User = &apiUser
 	}
-	writeJSON(w, status, projectAssistantRunStartResponse{Run: run, User: projectMessageToAPI(user), Assistant: projectMessageToAPI(message)})
+	writeJSON(w, status, response)
 }
 
 func (s *Server) writeProjectAssistantRunConflict(w http.ResponseWriter, scope store.Scope) {

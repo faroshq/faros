@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -534,8 +535,82 @@ func TestWriteProjectAssistantRunStartReturnsRunUserMessage(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.User.ID != user.ID || response.User.Content != user.Content {
+	if response.User == nil || response.User.ID != user.ID || response.User.Content != user.Content {
 		t.Fatalf("response user = %#v, want %#v", response.User, projectMessageToAPI(user))
+	}
+}
+
+func TestWriteProjectAssistantRunStartFindsOriginatingUserBeyondFirstFiveHundredMessages(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	user := store.Message{ID: "user-target", Role: "user", Content: "the intended prompt", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-target", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusCompleted, ClientRequestID: "request-1", UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 2, CreatedAt: now, UpdatedAt: now}
+	if err := memoryStore.SaveAssistantRun(context.Background(), scope, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := memoryStore.AppendMessage(context.Background(), scope, user); err != nil {
+		t.Fatal(err)
+	}
+	if err := memoryStore.AppendMessage(context.Background(), scope, assistant); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 550; i++ {
+		if err := memoryStore.AppendMessage(context.Background(), scope, store.Message{ID: fmt.Sprintf("noise-%03d", i), Role: "user", Content: "unrelated", CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.writeProjectAssistantRunStart(recorder, http.StatusAccepted, scope, run)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	var response projectAssistantRunStartResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.User == nil || response.User.ID != user.ID || response.Assistant.ID != assistant.ID {
+		t.Fatalf("response did not load exact long-history messages: %#v", response)
+	}
+}
+
+func TestProjectAssistantRunStartIdempotentLegacyRunOmitsUnknownUser(t *testing.T) {
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\nspec: {}\n"}}}})
+	}))
+	defer graphQL.Close()
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", Content: "still readable", CreatedAt: now, UpdatedAt: now}
+	if err := memoryStore.AppendMessage(context.Background(), scope, assistant); err != nil {
+		t.Fatal(err)
+	}
+	legacy := store.AssistantRun{ID: "run-legacy", Status: store.AssistantRunStatusCompleted, ClientRequestID: "request-legacy", ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := memoryStore.SaveAssistantRun(context.Background(), scope, legacy); err != nil {
+		t.Fatal(err)
+	}
+	router := mux.NewRouter()
+	server.Register(router)
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"retry","clientRequestID":"request-legacy"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+	request.Header.Set("X-Kedge-Cluster", "cluster-a")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("legacy retry status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	var response projectAssistantRunStartResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Run.ID != legacy.ID || response.Assistant.ID != assistant.ID || response.User != nil {
+		t.Fatalf("legacy retry response = %#v, want readable run/assistant and no fabricated user", response)
 	}
 }
 
@@ -634,7 +709,7 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	if err := json.NewDecoder(started.Body).Decode(&start); err != nil {
 		t.Fatal(err)
 	}
-	if start.Run.UserMessageID != start.User.ID || start.Assistant.ID != start.Run.ActiveMessageID {
+	if start.User == nil || start.Run.UserMessageID != start.User.ID || start.Assistant.ID != start.Run.ActiveMessageID {
 		t.Fatalf("start response has unstable message identity: %#v", start)
 	}
 	select {
@@ -649,14 +724,21 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	if latest.Code != http.StatusOK {
 		t.Fatalf("latest status = %d, want %d: %s", latest.Code, http.StatusOK, latest.Body.String())
 	}
-	otherTenant := httptest.NewRecorder()
-	otherTenantRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/"+start.Run.ID+"/stream", nil)
-	otherTenantRequest.Header = request.Header.Clone()
-	otherTenantRequest.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-b:workspace-b")
-	otherTenantRequest.Header.Set("X-Kedge-Cluster", "cluster-b")
-	router.ServeHTTP(otherTenant, otherTenantRequest)
-	if otherTenant.Code == http.StatusOK {
-		t.Fatalf("cross-tenant stream unexpectedly succeeded: %s", otherTenant.Body.String())
+	var latestSnapshot projectAssistantRunSnapshot
+	if err := json.NewDecoder(latest.Body).Decode(&latestSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if latestSnapshot.Run.ID != start.Run.ID || latestSnapshot.Run.Status != start.Run.Status || latestSnapshot.Run.Revision != start.Run.Revision || latestSnapshot.Message.ID != start.Run.ActiveMessageID {
+		t.Fatalf("latest snapshot = %#v, want started run and active assistant message", latestSnapshot)
+	}
+	otherWorkspace := httptest.NewRecorder()
+	otherWorkspaceRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/"+start.Run.ID+"/stream", nil)
+	otherWorkspaceRequest.Header = request.Header.Clone()
+	otherWorkspaceRequest.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-b")
+	otherWorkspaceRequest.Header.Set("X-Kedge-Cluster", "cluster-a")
+	router.ServeHTTP(otherWorkspace, otherWorkspaceRequest)
+	if otherWorkspace.Code == http.StatusOK {
+		t.Fatalf("cross-workspace stream unexpectedly succeeded: %s", otherWorkspace.Body.String())
 	}
 	abort := httptest.NewRecorder()
 	abortRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/"+start.Run.ID+"/abort", nil)
