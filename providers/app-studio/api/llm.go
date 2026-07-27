@@ -1047,7 +1047,7 @@ func projectAssistantGrepResultLineCount(value string) int {
 func summarizeProjectEinoGrepResult(args map[string]any, result string) string {
 	mode, _ := args["output_mode"].(string)
 	count := 0
-	switch strings.TrimSpace(mode) {
+	switch mode {
 	case "content":
 		count = projectAssistantNonEmptyLineCount(result)
 	case "count":

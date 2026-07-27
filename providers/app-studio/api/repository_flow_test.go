@@ -1092,6 +1092,20 @@ func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 			want:       "0 result line(s)",
 			forbidden:  []string{"src/secret.ts"},
 		},
+		{
+			name:       "whitespace padded count mode fails closed",
+			outputMode: " count ",
+			result:     "Found 1 file\nsrc/attacker\nFound 99 total occurrences across 99 files.",
+			want:       "0 result line(s)",
+			forbidden:  []string{"src/attacker", "99"},
+		},
+		{
+			name:       "wrong case count mode fails closed",
+			outputMode: "COUNT",
+			result:     "Found 1 file\nsrc/attacker\nFound 99 total occurrences across 99 files.",
+			want:       "0 result line(s)",
+			forbidden:  []string{"src/attacker", "99"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
