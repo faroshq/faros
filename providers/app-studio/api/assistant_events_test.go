@@ -421,6 +421,16 @@ func TestProjectAssistantUIActionUsesSpecificSafeLabels(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantUICanonicalReadsAreInspectActions(t *testing.T) {
+	for _, name := range []string{projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep} {
+		t.Run(name, func(t *testing.T) {
+			if got := projectAssistantUIActionKind(name); got != projectAssistantUIActionInspect {
+				t.Fatalf("projectAssistantUIActionKind(%q) = %q, want %q", name, got, projectAssistantUIActionInspect)
+			}
+		})
+	}
+}
+
 func TestProjectAssistantUIActionSpecificLabelsRespectMinimalDisclosure(t *testing.T) {
 	prev := projectAssistantToolDisclosureMinimal
 	projectAssistantToolDisclosureMinimal = true

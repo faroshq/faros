@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -736,17 +737,20 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 		}
 		return truncateProjectToolInfo(strings.Join(parts, "; "))
 	case projectToolLS:
-		return summarizeProjectToolKeyValues(args, []string{"path"})
+		return summarizeProjectCanonicalToolKeyValues(args, []string{"path"})
 	case projectToolReadFile:
-		return summarizeProjectToolKeyValues(map[string]any{
+		return summarizeProjectCanonicalToolKeyValues(map[string]any{
 			"path":   args["file_path"],
 			"offset": args["offset"],
 			"limit":  args["limit"],
 		}, []string{"path", "offset", "limit"})
 	case projectToolGlob:
-		return summarizeProjectToolKeyValues(args, []string{"pattern", "path"})
+		return summarizeProjectCanonicalToolKeyValues(args, []string{"path", "pattern"})
 	case projectToolGrep:
-		return summarizeProjectToolKeyValues(args, []string{"pattern", "path", "glob", "type", "output_mode", "head_limit", "offset"})
+		return summarizeProjectCanonicalToolKeyValues(args, []string{
+			"path", "pattern", "glob", "type", "output_mode",
+			"-C", "-B", "-A", "-n", "-i", "head_limit", "offset", "multiline",
+		})
 	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment:
 		return summarizeProjectPlanningWorkflowArgs(args)
 	case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolRestartRuntime:
@@ -802,7 +806,7 @@ func summarizeProjectToolResult(name, result string) string {
 	case projectToolLS, projectToolGlob:
 		return fmt.Sprintf("%d path(s)", projectAssistantNonEmptyLineCount(result))
 	case projectToolGrep:
-		return fmt.Sprintf("%d result line(s)", projectAssistantNonEmptyLineCount(result))
+		return fmt.Sprintf("%d result line(s)", projectAssistantGrepResultLineCount(result))
 	}
 	decoded := map[string]any{}
 	if err := json.Unmarshal([]byte(result), &decoded); err == nil {
@@ -891,9 +895,13 @@ func summarizeProjectToolKeyValues(args map[string]any, keys []string) string {
 	parts := []string{}
 	for _, key := range keys {
 		switch key {
-		case "maxBytes", "maxResults", "limit", "offset", "head_limit":
+		case "maxBytes", "maxResults", "limit", "offset", "head_limit", "-C", "-B", "-A":
 			if n, ok := projectToolNumber(args[key]); ok {
 				parts = append(parts, fmt.Sprintf("%s %d", key, n))
+			}
+		case "-n", "-i", "multiline":
+			if value, ok := args[key].(bool); ok {
+				parts = append(parts, fmt.Sprintf("%s %t", key, value))
 			}
 		default:
 			if value := projectToolString(args[key]); value != "" {
@@ -902,6 +910,34 @@ func summarizeProjectToolKeyValues(args map[string]any, keys []string) string {
 		}
 	}
 	return truncateProjectToolInfo(strings.Join(parts, "; "))
+}
+
+func summarizeProjectCanonicalToolKeyValues(args map[string]any, keys []string) string {
+	safeArgs := make(map[string]any, len(keys))
+	for _, key := range keys {
+		value, ok := args[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			safeArgs[key] = sanitizeProjectCanonicalToolSummaryValue(text)
+			continue
+		}
+		safeArgs[key] = value
+	}
+	return summarizeProjectToolKeyValues(safeArgs, keys)
+}
+
+func sanitizeProjectCanonicalToolSummaryValue(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case ';', '\r', '\n', '\x00':
+			return ' '
+		default:
+			return r
+		}
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func projectAssistantNonEmptyLineCount(value string) int {
@@ -916,6 +952,81 @@ func projectAssistantNonEmptyLineCount(value string) int {
 		}
 	}
 	return count
+}
+
+func projectAssistantGrepResultLineCount(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "No matches found" || value == "No files found" {
+		return 0
+	}
+	lines := strings.Split(value, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if count, ok := projectAssistantGrepCountTrailer(line); ok {
+			return count
+		}
+		break
+	}
+
+	first := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			first = i
+			break
+		}
+	}
+	if first >= 0 && projectAssistantGrepFilesHeader(strings.TrimSpace(lines[first])) {
+		count := 0
+		for _, line := range lines[first+1:] {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+		return count
+	}
+	return projectAssistantNonEmptyLineCount(value)
+}
+
+func projectAssistantGrepCountTrailer(line string) (int, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 7 ||
+		fields[0] != "Found" ||
+		fields[2] != "total" ||
+		(fields[3] != "occurrence" && fields[3] != "occurrences") ||
+		fields[4] != "across" ||
+		(fields[6] != "file." && fields[6] != "files.") {
+		return 0, false
+	}
+	count, err := strconv.Atoi(fields[1])
+	if err != nil || count < 0 {
+		return 0, false
+	}
+	files, err := strconv.Atoi(fields[5])
+	if err != nil || files < 0 {
+		return 0, false
+	}
+	if (count == 1) != (fields[3] == "occurrence") ||
+		(files == 1) != (fields[6] == "file.") {
+		return 0, false
+	}
+	return count, true
+}
+
+func projectAssistantGrepFilesHeader(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) != 3 ||
+		fields[0] != "Found" ||
+		(fields[2] != "file" && fields[2] != "files") {
+		return false
+	}
+	count, err := strconv.Atoi(fields[1])
+	if err != nil || count < 0 {
+		return false
+	}
+	return (count == 1) == (fields[2] == "file")
 }
 
 func summarizeProjectPlanningWorkflowArgs(args map[string]any) string {

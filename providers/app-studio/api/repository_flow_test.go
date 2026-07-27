@@ -824,12 +824,12 @@ func TestSummarizeProjectToolArgumentsWorkspaceReadTools(t *testing.T) {
 		{
 			name: projectToolGlob,
 			args: `{"pattern":"**/*.tsx","path":"src"}`,
-			want: []string{"pattern **/*.tsx", "path src"},
+			want: []string{"path src", "pattern **/*.tsx"},
 		},
 		{
 			name: projectToolGrep,
-			args: `{"pattern":"secret-ish user query","path":"src","glob":"**/*.tsx","type":"tsx","output_mode":"content","head_limit":10,"offset":2}`,
-			want: []string{"pattern secret-ish user query", "path src", "glob **/*.tsx", "type tsx", "output_mode content", "head_limit 10", "offset 2"},
+			args: `{"pattern":"secret-ish user query","path":"src","glob":"**/*.tsx","type":"tsx","output_mode":"content","-C":3,"-B":1,"-A":2,"-n":false,"-i":true,"head_limit":10,"offset":2,"multiline":true}`,
+			want: []string{"path src", "pattern secret-ish user query", "glob **/*.tsx", "type tsx", "output_mode content", "-C 3", "-B 1", "-A 2", "-n false", "-i true", "head_limit 10", "offset 2", "multiline true"},
 		},
 		{
 			name: "plan_project_changes",
@@ -870,6 +870,9 @@ func TestSummarizeProjectToolArgumentsWorkspaceReadTools(t *testing.T) {
 					t.Fatalf("summary = %q, want %q", got, want)
 				}
 			}
+			if (tt.name == projectToolGlob || tt.name == projectToolGrep) && !strings.HasPrefix(got, "path src; ") {
+				t.Fatalf("summary = %q, want real path first", got)
+			}
 			if (tt.name == "write_file" || tt.name == "apply_patch") && strings.Contains(got, "secret-ish") {
 				t.Fatalf("summary leaked content: %q", got)
 			}
@@ -887,9 +890,7 @@ func TestSummarizeProjectToolResultWorkspaceReadTools(t *testing.T) {
 		{name: projectToolReadFile, result: "1\tsecret-ish file body\n2\tmore source", want: "file read", forbidden: "secret-ish"},
 		{name: projectToolLS, result: "src\nREADME.md", want: "2 path(s)", forbidden: "README.md"},
 		{name: projectToolGlob, result: "src/App.tsx\nsrc/main.ts", want: "2 path(s)", forbidden: "src/App.tsx"},
-		{name: projectToolGrep, result: "src/App.tsx:4:secret-ish matching source\nsrc/main.ts:9:another line", want: "2 result line(s)", forbidden: "secret-ish"},
 		{name: projectToolLS, result: "No files found", want: "0 path(s)"},
-		{name: projectToolGrep, result: "No matches found", want: "0 result line(s)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+"_"+tt.want, func(t *testing.T) {
@@ -948,6 +949,81 @@ func TestProjectAssistantMessageMetadataSafeActions(t *testing.T) {
 	}
 	if actions[0].Kind != projectAssistantUIActionCommit || actions[0].Status != "succeeded" || actions[0].Label != "Committed changes" {
 		t.Fatalf("unexpected assistant action metadata: %#v", actions[0])
+	}
+}
+
+func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    string
+		want      string
+		forbidden []string
+	}{
+		{
+			name:      "content",
+			result:    "src/App.tsx:4:secret-ish matching source\nsrc/main.ts:9:another line",
+			want:      "2 result line(s)",
+			forbidden: []string{"secret-ish", "another line"},
+		},
+		{
+			name:      "default files with matches header",
+			result:    "Found 2 files\nsrc/App.tsx\nsrc/main.ts",
+			want:      "2 result line(s)",
+			forbidden: []string{"src/App.tsx", "Found 2 files"},
+		},
+		{
+			name:      "files with matches pagination header",
+			result:    "Found 3 files\nsrc/main.ts",
+			want:      "1 result line(s)",
+			forbidden: []string{"src/main.ts", "Found 3 files"},
+		},
+		{
+			name:      "count nonzero uses total occurrence trailer",
+			result:    "src/App.tsx:2\nsrc/main.ts:2\n\nFound 4 total occurrences across 2 files.",
+			want:      "4 result line(s)",
+			forbidden: []string{"src/App.tsx", "Found 4 total occurrences"},
+		},
+		{
+			name:      "count singular trailer",
+			result:    "src/App.tsx:1\n\nFound 1 total occurrence across 1 file.",
+			want:      "1 result line(s)",
+			forbidden: []string{"src/App.tsx", "Found 1 total occurrence"},
+		},
+		{
+			name:      "count pagination still uses unpaginated trailer",
+			result:    "src/main.ts:3\n\nFound 8 total occurrences across 3 files.",
+			want:      "8 result line(s)",
+			forbidden: []string{"src/main.ts", "Found 8 total occurrences"},
+		},
+		{
+			name:      "count zero",
+			result:    "No matches found\n\nFound 0 total occurrences across 0 files.",
+			want:      "0 result line(s)",
+			forbidden: []string{"No matches found", "Found 0 total occurrences"},
+		},
+		{
+			name:   "content no result sentinel",
+			result: "No matches found",
+			want:   "0 result line(s)",
+		},
+		{
+			name:   "files no result sentinel",
+			result: "No files found",
+			want:   "0 result line(s)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarizeProjectToolResult(projectToolGrep, tt.result)
+			if got != tt.want {
+				t.Fatalf("summary = %q, want %q", got, tt.want)
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(got, forbidden) {
+					t.Fatalf("summary leaked Eino grep output %q: %q", forbidden, got)
+				}
+			}
+		})
 	}
 }
 

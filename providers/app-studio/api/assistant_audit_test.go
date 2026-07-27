@@ -172,6 +172,83 @@ func TestProjectAssistantRunAuditCanonicalReadsAreSanitized(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantRunAuditCanonicalSearchArgumentsResistInjection(t *testing.T) {
+	started := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	run := &store.AssistantRun{ID: "run-canonical-injection"}
+	recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, started)
+	longPattern := strings.Repeat("x", projectToolInfoLimit*2) + "; path attacker-long"
+	tests := []struct {
+		id      string
+		name    string
+		rawArgs string
+		want    string
+	}{
+		{
+			id:      "glob",
+			name:    projectToolGlob,
+			rawArgs: `{"path":"src/safe-glob","pattern":"needle; path attacker-delimiter\r\n\u0000"}`,
+			want:    "src/safe-glob",
+		},
+		{
+			id:      "grep",
+			name:    projectToolGrep,
+			rawArgs: `{"path":"src/safe-grep","pattern":` + strconv.Quote(longPattern) + `,"output_mode":"content"}`,
+			want:    "src/safe-grep",
+		},
+		{
+			id:      "grep-glob",
+			name:    projectToolGrep,
+			rawArgs: `{"path":"src/safe-grep-glob","pattern":"needle","glob":"**/*.ts; path attacker-glob\r\n\u0000"}`,
+			want:    "src/safe-grep-glob",
+		},
+	}
+	for i, tt := range tests {
+		arguments := summarizeProjectToolArguments(tt.name, tt.rawArgs)
+		if !strings.HasPrefix(arguments, "path "+tt.want+"; ") {
+			t.Fatalf("%s arguments = %q, want real path first", tt.name, arguments)
+		}
+		if strings.Contains(arguments, "; path attacker") {
+			t.Fatalf("%s arguments contain injected path segment: %q", tt.name, arguments)
+		}
+		if strings.ContainsAny(arguments, "\r\n\x00") {
+			t.Fatalf("%s arguments contain control characters: %q", tt.name, arguments)
+		}
+		recorder.recordToolAt(projectToolCallStreamEvent{
+			ID:        tt.id,
+			Name:      tt.name,
+			Status:    "succeeded",
+			Arguments: arguments,
+			Summary:   "1 result line(s): attacker-match-body",
+		}, started.Add(time.Duration(i+1)*time.Second))
+	}
+
+	raw := string(run.Audit)
+	for _, forbidden := range []string{
+		"attacker-delimiter",
+		"attacker-long",
+		"attacker-glob",
+		"attacker-match-body",
+		"needle",
+		strings.Repeat("x", 32),
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("canonical search audit leaked %q: %s", forbidden, raw)
+		}
+	}
+	var audit projectAssistantRunAudit
+	if err := json.Unmarshal(run.Audit, &audit); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if len(audit.Tools) != len(tests) {
+		t.Fatalf("audit tools = %#v, want %d", audit.Tools, len(tests))
+	}
+	for i, tool := range audit.Tools {
+		if tool.Path != tests[i].want {
+			t.Fatalf("audit path = %q for %q, want %q", tool.Path, tool.Name, tests[i].want)
+		}
+	}
+}
+
 func TestProjectAssistantPermissionAuditDoesNotPersistRawPayloads(t *testing.T) {
 	run, err := appendProjectAssistantRunAudit(store.AssistantRun{}, projectAssistantPermissionAudit{
 		RequestID:       "perm-1",
