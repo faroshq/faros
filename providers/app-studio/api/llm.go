@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	einoschema "github.com/cloudwego/eino/schema"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -920,7 +922,7 @@ func summarizeProjectCanonicalToolKeyValues(args map[string]any, keys []string) 
 			continue
 		}
 		if text, ok := value.(string); ok {
-			safeArgs[key] = sanitizeProjectCanonicalToolSummaryValue(text)
+			safeArgs[key] = escapeProjectCanonicalToolSummaryValue(text)
 			continue
 		}
 		safeArgs[key] = value
@@ -928,16 +930,73 @@ func summarizeProjectCanonicalToolKeyValues(args map[string]any, keys []string) 
 	return summarizeProjectToolKeyValues(safeArgs, keys)
 }
 
-func sanitizeProjectCanonicalToolSummaryValue(value string) string {
-	value = strings.Map(func(r rune) rune {
-		switch r {
-		case ';', '\r', '\n', '\x00':
-			return ' '
-		default:
-			return r
+func escapeProjectCanonicalToolSummaryValue(value string) string {
+	const hex = "0123456789ABCDEF"
+	var escaped strings.Builder
+	for _, r := range value {
+		if r != ';' && r != '%' && !unicode.IsControl(r) {
+			escaped.WriteRune(r)
+			continue
 		}
-	}, value)
-	return strings.Join(strings.Fields(value), " ")
+		var encoded [utf8.UTFMax]byte
+		n := utf8.EncodeRune(encoded[:], r)
+		for _, b := range encoded[:n] {
+			escaped.WriteByte('%')
+			escaped.WriteByte(hex[b>>4])
+			escaped.WriteByte(hex[b&0x0f])
+		}
+	}
+	return escaped.String()
+}
+
+func unescapeProjectCanonicalToolSummaryValue(value string) (string, bool) {
+	var unescaped strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] != '%' {
+			unescaped.WriteByte(value[i])
+			continue
+		}
+		if i+2 >= len(value) {
+			return "", false
+		}
+		high, ok := projectAssistantHexNibble(value[i+1])
+		if !ok {
+			return "", false
+		}
+		low, ok := projectAssistantHexNibble(value[i+2])
+		if !ok {
+			return "", false
+		}
+		unescaped.WriteByte(high<<4 | low)
+		i += 2
+	}
+	decoded := unescaped.String()
+	if !utf8.ValidString(decoded) || strings.IndexFunc(decoded, unicode.IsControl) >= 0 {
+		return "", false
+	}
+	return decoded, true
+}
+
+func projectAssistantHexNibble(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func projectAssistantCanonicalFilesystemReadTool(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep:
+		return true
+	default:
+		return false
+	}
 }
 
 func projectAssistantNonEmptyLineCount(value string) int {
@@ -960,6 +1019,27 @@ func projectAssistantGrepResultLineCount(value string) int {
 		return 0
 	}
 	lines := strings.Split(value, "\n")
+	first := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			first = i
+			break
+		}
+	}
+	if first >= 0 {
+		if total, ok := projectAssistantGrepFilesHeader(strings.TrimSpace(lines[first])); ok {
+			count := 0
+			for _, line := range lines[first+1:] {
+				if strings.TrimSpace(line) != "" {
+					count++
+				}
+			}
+			if count > total {
+				return total
+			}
+			return count
+		}
+	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
@@ -969,23 +1049,6 @@ func projectAssistantGrepResultLineCount(value string) int {
 			return count
 		}
 		break
-	}
-
-	first := -1
-	for i, line := range lines {
-		if strings.TrimSpace(line) != "" {
-			first = i
-			break
-		}
-	}
-	if first >= 0 && projectAssistantGrepFilesHeader(strings.TrimSpace(lines[first])) {
-		count := 0
-		for _, line := range lines[first+1:] {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		return count
 	}
 	return projectAssistantNonEmptyLineCount(value)
 }
@@ -1015,18 +1078,18 @@ func projectAssistantGrepCountTrailer(line string) (int, bool) {
 	return count, true
 }
 
-func projectAssistantGrepFilesHeader(line string) bool {
+func projectAssistantGrepFilesHeader(line string) (int, bool) {
 	fields := strings.Fields(line)
 	if len(fields) != 3 ||
 		fields[0] != "Found" ||
 		(fields[2] != "file" && fields[2] != "files") {
-		return false
+		return 0, false
 	}
 	count, err := strconv.Atoi(fields[1])
 	if err != nil || count < 0 {
-		return false
+		return 0, false
 	}
-	return (count == 1) == (fields[2] == "file")
+	return count, (count == 1) == (fields[2] == "file")
 }
 
 func summarizeProjectPlanningWorkflowArgs(args map[string]any) string {

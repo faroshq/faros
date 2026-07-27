@@ -313,6 +313,13 @@ func projectAssistantUIActionSpecificLabel(action projectAssistantUIAction) stri
 	if path == "" {
 		path = projectAssistantUISummaryField(action.Detail, "file")
 	}
+	if path != "" && projectAssistantCanonicalFilesystemReadTool(base) {
+		var ok bool
+		path, ok = unescapeProjectCanonicalToolSummaryValue(path)
+		if !ok {
+			path = ""
+		}
+	}
 	switch base {
 	case projectToolReadFile:
 		if path != "" {
@@ -330,11 +337,15 @@ func projectAssistantUIActionSpecificLabel(action projectAssistantUIAction) stri
 		}
 	case projectToolGrep:
 		if count, ok := projectAssistantUISummaryCount(action.Detail, "result line(s)"); ok {
+			noun := "search results"
+			if count == 1 {
+				noun = "search result"
+			}
 			return projectAssistantUIActionLabel(
 				active,
 				false,
 				"Searching project",
-				fmt.Sprintf("Found %d project matches", count),
+				fmt.Sprintf("Found %d %s", count, noun),
 				action.Label,
 			)
 		}

@@ -249,6 +249,121 @@ func TestProjectAssistantRunAuditCanonicalSearchArgumentsResistInjection(t *test
 	}
 }
 
+func TestProjectAssistantCanonicalFilesystemPathsRoundTripToAuditAndUI(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		wantSummary string
+	}{
+		{name: "semicolon", path: "src/a;b.ts", wantSummary: "path src/a%3Bb.ts"},
+		{name: "repeated spaces", path: "src/My  File.tsx", wantSummary: "path src/My  File.tsx"},
+		{name: "percent", path: "src/100% done.ts", wantSummary: "path src/100%25 done.ts"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawArgs, err := json.Marshal(map[string]any{"file_path": tt.path})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			arguments := summarizeProjectToolArguments(projectToolReadFile, string(rawArgs))
+			if arguments != tt.wantSummary {
+				t.Fatalf("arguments = %q, want %q", arguments, tt.wantSummary)
+			}
+
+			started := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+			run := &store.AssistantRun{ID: "run-path-" + tt.name}
+			recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, started)
+			recorder.recordToolAt(projectToolCallStreamEvent{
+				ID:        "read",
+				Name:      projectToolReadFile,
+				Status:    "succeeded",
+				Arguments: arguments,
+				Summary:   "file read",
+			}, started.Add(time.Second))
+
+			var audit projectAssistantRunAudit
+			if err := json.Unmarshal(run.Audit, &audit); err != nil {
+				t.Fatalf("decode audit: %v", err)
+			}
+			if len(audit.Tools) != 1 || audit.Tools[0].Path != tt.path {
+				t.Fatalf("audit tools = %#v, want exact path %q", audit.Tools, tt.path)
+			}
+
+			action := projectAssistantUIActionFromAssistantToolCall(projectAssistantToolCall{
+				ID:        "read",
+				Name:      projectToolReadFile,
+				Status:    "succeeded",
+				Arguments: arguments,
+				Summary:   "file read",
+			})
+			if action.Label != "Read "+tt.path {
+				t.Fatalf("label = %q, want exact path %q", action.Label, tt.path)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantCanonicalFilesystemControlPathsAreOmittedFromAuditAndUI(t *testing.T) {
+	for _, path := range []string{"src/bad\tname.tsx", "src/bad\nname.tsx"} {
+		t.Run(strconv.Quote(path), func(t *testing.T) {
+			rawArgs, err := json.Marshal(map[string]any{"file_path": path})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			arguments := summarizeProjectToolArguments(projectToolReadFile, string(rawArgs))
+
+			started := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+			run := &store.AssistantRun{ID: "run-control-path"}
+			recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, started)
+			recorder.recordToolAt(projectToolCallStreamEvent{
+				ID:        "read",
+				Name:      projectToolReadFile,
+				Status:    "succeeded",
+				Arguments: arguments,
+				Summary:   "file read",
+			}, started.Add(time.Second))
+
+			var audit projectAssistantRunAudit
+			if err := json.Unmarshal(run.Audit, &audit); err != nil {
+				t.Fatalf("decode audit: %v", err)
+			}
+			if len(audit.Tools) != 1 || audit.Tools[0].Path != "" {
+				t.Fatalf("audit tools = %#v, want unsafe canonical path omitted", audit.Tools)
+			}
+
+			action := projectAssistantUIActionFromAssistantToolCall(projectAssistantToolCall{
+				ID:        "read",
+				Name:      projectToolReadFile,
+				Status:    "succeeded",
+				Arguments: arguments,
+				Summary:   "file read",
+			})
+			if action.Label != "Inspected project" {
+				t.Fatalf("label = %q, want generic label with unsafe path omitted", action.Label)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantMutationPercentPathsAreNotCanonicalDecoded(t *testing.T) {
+	const path = "src/literal%3Bsegment.tsx"
+	const arguments = "path " + path
+
+	if got := projectAssistantAuditToolPath(projectToolWriteFile, arguments); got != path {
+		t.Fatalf("mutation audit path = %q, want literal %q", got, path)
+	}
+	action := projectAssistantUIActionFromAssistantToolCall(projectAssistantToolCall{
+		ID:        "write",
+		Name:      projectToolWriteFile,
+		Status:    "succeeded",
+		Arguments: arguments,
+		Summary:   "write_file",
+	})
+	if action.Label != "Updated "+path {
+		t.Fatalf("mutation label = %q, want literal percent path", action.Label)
+	}
+}
+
 func TestProjectAssistantPermissionAuditDoesNotPersistRawPayloads(t *testing.T) {
 	run, err := appendProjectAssistantRunAudit(store.AssistantRun{}, projectAssistantPermissionAudit{
 		RequestID:       "perm-1",

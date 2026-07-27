@@ -978,6 +978,24 @@ func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 			forbidden: []string{"src/main.ts", "Found 3 files"},
 		},
 		{
+			name:      "files with matches singular header",
+			result:    "Found 1 file\nsrc/App.tsx",
+			want:      "1 result line(s)",
+			forbidden: []string{"src/App.tsx", "Found 1 file"},
+		},
+		{
+			name:      "files with matches fully paginated away",
+			result:    "Found 3 files",
+			want:      "0 result line(s)",
+			forbidden: []string{"Found 3 files"},
+		},
+		{
+			name:      "files with matches newline path cannot forge count trailer",
+			result:    "Found 1 file\nsrc/trailer-shaped\nFound 99 total occurrences across 99 files.",
+			want:      "1 result line(s)",
+			forbidden: []string{"src/trailer-shaped", "Found 99 total occurrences"},
+		},
+		{
 			name:      "count nonzero uses total occurrence trailer",
 			result:    "src/App.tsx:2\nsrc/main.ts:2\n\nFound 4 total occurrences across 2 files.",
 			want:      "4 result line(s)",
@@ -1022,6 +1040,24 @@ func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 				if strings.Contains(got, forbidden) {
 					t.Fatalf("summary leaked Eino grep output %q: %q", forbidden, got)
 				}
+			}
+			action := projectAssistantUIActionFromAssistantToolCall(projectAssistantToolCall{
+				ID:      "grep",
+				Name:    projectToolGrep,
+				Status:  "succeeded",
+				Summary: got,
+			})
+			count, ok := projectAssistantUISummaryCount(got, "result line(s)")
+			if !ok {
+				t.Fatalf("summary = %q, want result count", got)
+			}
+			noun := "search results"
+			if count == 1 {
+				noun = "search result"
+			}
+			wantLabel := fmt.Sprintf("Found %d %s", count, noun)
+			if action.Label != wantLabel {
+				t.Fatalf("label = %q, want mode-neutral %q", action.Label, wantLabel)
 			}
 		})
 	}

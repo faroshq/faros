@@ -385,7 +385,7 @@ func TestProjectAssistantUIActionUsesSpecificSafeLabels(t *testing.T) {
 			toolName: projectToolGrep,
 			status:   "succeeded",
 			summary:  "3 result line(s)",
-			want:     "Found 3 project matches",
+			want:     "Found 3 search results",
 		},
 		{
 			name:     "verify preview",
