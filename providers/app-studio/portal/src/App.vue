@@ -1624,8 +1624,7 @@ async function createProjectAndStartConversation(content: string) {
   const description = selectedLandingCategory.value?.subtitle ?? ''
 	const controller = new AbortController()
 	let projectName = ''
-	let assistantMessageID = ''
-	let shouldRefreshPreviewAfterRun = false
+  let assistantMessageID = ''
 
   activeMessageStreamController = controller
   busy.value = true
@@ -1654,40 +1653,29 @@ async function createProjectAndStartConversation(content: string) {
 
   try {
     await nextTick()
-    await api.createProjectStream(props.ctx, { description: description || undefined, prompt: content }, (event: ProjectMessageStreamEvent) => {
-      if (isProjectAssistantUIStreamEvent(event)) {
-        if (projectAssistantUIEventRequestsPreviewRefresh(event)) {
-          shouldRefreshPreviewAfterRun = true
-        }
-        const nextAssistantMessageID = applyAssistantUIEvent(projectName, event)
-        if (!assistantMessageID && nextAssistantMessageID) {
-          assistantMessageID = nextAssistantMessageID
-        }
-      } else if (event.type === 'project') {
-        if (!event.project) return
-        projectName = event.project.name
-        selected.value = event.project
-        messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
-        props.navigate(encodeURIComponent(projectName))
-      } else if (event.type === 'run_finished') {
-        conversationStatus.value = ''
-        if (!assistantMessageID) {
-          assistantMessageID = event.assistantMessageID ?? ''
-        }
-      } else if (event.type === 'run_failed') {
-        throw new Error(event.error ?? 'Streaming error')
-      }
-    }, controller.signal)
+    // Project creation remains request-bound through readiness, repository and
+    // naming setup. Once the Project exists, the first turn uses the same
+    // server-owned start/subscribe contract as every later message.
+    const created = await api.createProject(props.ctx, { description: description || undefined, prompt: content })
+    projectName = created.name
+    selected.value = created
+    messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
+    props.navigate(encodeURIComponent(projectName))
 
-    if (projectName) {
-      if (await refreshProjectConversationAfterAssistantRun(projectName) && shouldRefreshPreviewAfterRun) {
-        await refreshDevelopmentPreviewFrame('Preview refreshed')
-      }
+    const clientRequestID = crypto.randomUUID()
+    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
+    const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
+    if (applied.accepted && applied.current) {
+      assistantMessageID = started.assistant.id
+      messages.value = replaceOptimisticUserMessage(messages.value, messages.value[0]?.id ?? '', started.user ?? messages.value[0]).map(toProjectMessageView)
+      if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
     }
   } catch (e) {
     if (isAbortError(e)) {
       if (projectName) {
-        markAssistantMessageInterrupted(projectName, assistantMessageID)
+        // The request that created the Project has ended; a route change only
+        // detaches this view. The durable run is recovered on project entry.
+        void recoverAssistantConversation(projectName)
       } else {
         selected.value = null
         messages.value = []
@@ -1862,6 +1850,14 @@ async function refreshProjectConversationAfterAssistantRun(projectName: string):
 		return false
 	}
 }
+
+// Retained while older embedded portals can still render the legacy UI event
+// protocol. New project creation consumes durable snapshots instead.
+void refreshProjectConversationAfterAssistantRun
+void applyAssistantUIEvent
+void projectAssistantUIEventRequestsPreviewRefresh
+void isProjectAssistantUIStreamEvent
+void markAssistantMessageInterrupted
 
 async function syncDevelopmentPreview() {
 	const projectName = selected.value?.name

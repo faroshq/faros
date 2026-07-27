@@ -57,6 +57,27 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	}
 }
 
+func TestLegacyAssistantStreamEventsTranslateDurableTerminalSnapshots(t *testing.T) {
+	message := store.Message{ID: "assistant-1", Role: "assistant", Content: "completed response"}
+	events := projectAssistantLegacyStreamEvents(projectAssistantRunSnapshot{
+		Run:     store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusCompleted, Revision: 3},
+		Message: message,
+	})
+	var content *projectMessageStreamEvent
+	for i := range events {
+		if events[i].DataModelUpdate != nil {
+			content = &events[i]
+		}
+	}
+	if content == nil {
+		t.Fatalf("events = %#v, want durable assistant content", events)
+	}
+	terminal := events[len(events)-1]
+	if terminal.Type != string(projectAssistantEventRunFinished) || terminal.AssistantMessageID != message.ID {
+		t.Fatalf("terminal event = %#v, want run_finished for assistant", terminal)
+	}
+}
+
 func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminalTransitions(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	"github.com/faroshq/provider-app-studio/store"
 )
 
@@ -66,6 +68,15 @@ type projectAssistantSnapshotAccumulator struct {
 	supervisor *projectAssistantSupervisor
 	key        projectAssistantRunKey
 	runID      string
+}
+
+// logProjectAssistantLifecycle deliberately records only durable routing and
+// state fields. Never add prompts, assistant content, tool arguments, or
+// credentials here.
+func logProjectAssistantLifecycle(event string, scope store.Scope, run store.AssistantRun) {
+	klog.Background().Info("app studio assistant lifecycle", "event", event,
+		"org", scope.OrgUUID, "workspace", scope.WorkspaceUUID, "project", scope.ProjectName,
+		"run", run.ID, "revision", run.Revision, "status", run.Status)
 }
 
 func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store) *projectAssistantSupervisor {
@@ -224,6 +235,7 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 	// share it, rather than derive from the initiating request.
 	workerCtx, active.cancel = context.WithCancelCause(s.ctx)
 	s.mu.Unlock()
+	logProjectAssistantLifecycle("start", scope, run)
 	go func() {
 		defer s.finish(acc.key, run.ID)
 		worker(workerCtx, acc)
@@ -316,6 +328,7 @@ func (s *projectAssistantSupervisor) AbortWith(scope store.Scope, runID string, 
 		}
 	}
 	s.mu.Unlock()
+	logProjectAssistantLifecycle("abort", scope, run)
 	return true, nil
 }
 
@@ -344,6 +357,7 @@ func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, 
 	ch := make(chan projectAssistantRunSnapshot, 1)
 	active.subscribers[id] = ch
 	snapshot := projectAssistantRunSnapshot{Run: active.committedRun, Message: active.committedMessage}
+	logProjectAssistantLifecycle("subscribe", scope, active.committedRun)
 	s.sendCoalesced(ch, snapshot)
 	s.mu.Unlock()
 	var once sync.Once
@@ -584,6 +598,7 @@ func (s *projectAssistantSupervisor) recordPersistenceFailure(key projectAssista
 	run, message, scope := active.run, active.message, active.scope
 	active.cancel(errors.New("assistant snapshot persistence failed"))
 	s.mu.Unlock()
+	logProjectAssistantLifecycle("persistence_failure", scope, run)
 	ctx, cancel := context.WithTimeout(context.Background(), projectMessagePersistTimeout)
 	defer cancel()
 	if s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1) != nil {

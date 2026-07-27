@@ -87,6 +87,37 @@ To use your own database, set `APP_STUDIO_DATABASE_URL` in the environment or in
 `providers/app-studio/.env` (copy from `.env.example`). To intentionally use the
 old throwaway behavior, set `APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true`.
 
+## Resilient assistant conversations
+
+Once a Project and its first user message exist, App Studio owns assistant work
+on the provider lifecycle rather than on an HTTP request. `POST
+/api/projects/{project}/messages` creates durable user, assistant, and run
+records, and clients recover with `GET .../assistant/runs/latest` then subscribe
+to `GET .../assistant/{run}/stream`. Closing a stream only removes that
+subscriber; it never cancels the worker. The portal uses this contract for the
+first project turn as well as later messages, so a refresh during generation
+reconnects without adding another prompt.
+
+This remains a single-replica design: execution cannot continue across a
+provider restart. On the next read, an orphaned running run is surfaced as
+`interrupted`; permission and input checkpoints stay resumable. The legacy
+`POST /messages/stream` endpoint is retained for older portals as a
+compatibility adapter while consumers migrate to start/latest/stream. New
+clients must not depend on token replay: streams provide complete revisioned
+snapshots and a reconnect receives the latest one.
+
+Lifecycle logs contain only organization, workspace, project, run, revision,
+and status fields. They intentionally omit prompt text, assistant content,
+tool arguments, and credentials.
+
+Useful checks from this module:
+
+```sh
+go test ./...
+go test -race ./api ./store
+cd portal && npm test && npm run typecheck && npm run build
+```
+
 ## Local project files
 
 App Studio keeps project files in its own workspace root so the assistant can

@@ -38,6 +38,35 @@ type projectAssistantRunStartResponse struct {
 	Assistant aiv1alpha1.ProjectMessage  `json:"assistant"`
 }
 
+// projectAssistantLegacyStreamEvents adapts a complete durable snapshot to the
+// historic UI event protocol.  It deliberately emits a replacement of the
+// assistant body (rather than a token delta) because durable subscriptions are
+// revision snapshots, not a replay log.
+func projectAssistantLegacyStreamEvents(snapshot projectAssistantRunSnapshot) []projectMessageStreamEvent {
+	message := snapshot.Message
+	if message.ID == "" {
+		return nil
+	}
+	events := make([]projectMessageStreamEvent, 0, 3)
+	writer := projectAssistantStreamWriter{assistantID: message.ID, write: func(event projectMessageStreamEvent) error {
+		events = append(events, event)
+		return nil
+	}}
+	if message.Content != "" {
+		_ = writer.WriteAcceptedAssistantContent(context.Background(), message.Content)
+	}
+	if status, _ := message.Metadata[projectAssistantMetadataWorkingStatus].(string); status != "" {
+		_ = writer.EmitProjectAssistantEvent(context.Background(), projectAssistantEvent{Type: projectAssistantEventStatus, Status: status})
+	}
+	switch snapshot.Run.Status {
+	case store.AssistantRunStatusCompleted:
+		_ = writer.EmitProjectAssistantEvent(context.Background(), projectAssistantEvent{Type: projectAssistantEventRunFinished})
+	case store.AssistantRunStatusFailed, store.AssistantRunStatusInterrupted, store.AssistantRunStatusAborted:
+		_ = writer.EmitProjectAssistantEvent(context.Background(), projectAssistantEvent{Type: projectAssistantEventRunFailed, Error: projectAssistantRunDisplayStatus(snapshot.Run.Status, "Failed")})
+	}
+	return events
+}
+
 type projectAssistantSupervisorRunContextKey struct{}
 
 const (
