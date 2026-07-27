@@ -88,7 +88,7 @@ func (s *Server) startProjectAssistantRunDurably(ctx context.Context, scope stor
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, Content: content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: now, UpdatedAt: now}
 	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	assistant.Metadata = projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil)
+	assistant.Metadata = projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil)
 	created, err := s.store.CreateAssistantRun(ctx, scope, user, assistant, run)
 	if err != nil {
 		return projectAssistantDurableStartResult{}, err
@@ -181,15 +181,19 @@ const (
 	projectAssistantMetadataWorkingStatus        = "assistantStatus"
 	projectAssistantMetadataProvisional          = "assistantProvisional"
 	projectAssistantMetadataPreviewRefreshNeeded = "previewRefreshNeeded"
+	projectAssistantMetadataPlan                 = "assistantPlan"
 )
 
-func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status string, provisional, preview bool, toolCalls []projectToolCallStreamEvent) map[string]any {
+func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status string, provisional, preview bool, toolCalls []projectToolCallStreamEvent, plan *projectAssistantPlanSnapshot) map[string]any {
 	metadata := projectAssistantMessageMetadata(status, sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))
 	metadata[projectAssistantMetadataRunID] = run.ID
 	metadata[projectAssistantMetadataRevision] = run.Revision
 	metadata[projectAssistantMetadataWorkingStatus] = status
 	metadata[projectAssistantMetadataProvisional] = provisional
 	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
+	if plan != nil && len(plan.Steps) > 0 {
+		metadata[projectAssistantMetadataPlan] = *plan
+	}
 	return metadata
 }
 
@@ -200,6 +204,9 @@ func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status 
 	}
 	if interrupt := projectAssistantUIInterruptFromMetadata(existing[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
 		metadata[projectMessageMetadataAssistantInterrupt] = interrupt
+	}
+	if plan, ok := existing[projectAssistantMetadataPlan]; ok {
+		metadata[projectAssistantMetadataPlan] = plan
 	}
 	preview, _ := existing[projectAssistantMetadataPreviewRefreshNeeded].(bool)
 	metadata[projectAssistantMetadataRunID] = run.ID
@@ -214,6 +221,7 @@ type projectAssistantDurableMetadataState struct {
 	status      string
 	provisional bool
 	toolCalls   []projectToolCallStreamEvent
+	plan        *projectAssistantPlanSnapshot
 }
 
 func projectAssistantRunDisplayStatus(status store.AssistantRunStatus, fallback string) string {
@@ -253,6 +261,7 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 			state.provisional,
 			s.projectAssistantPreviewRefreshNeeded(ctx, workspaceScope, "", false, state.toolCalls),
 			state.toolCalls,
+			state.plan,
 		)
 		// Resumed segments begin with durable actions from the previous segment.
 		// Keep that history and only upsert new action updates.
@@ -265,6 +274,11 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		}
 		if preview, _ := message.Metadata[projectAssistantMetadataPreviewRefreshNeeded].(bool); preview {
 			metadata[projectAssistantMetadataPreviewRefreshNeeded] = true
+		}
+		if _, ok := metadata[projectAssistantMetadataPlan]; !ok {
+			if plan, ok := message.Metadata[projectAssistantMetadataPlan]; ok {
+				metadata[projectAssistantMetadataPlan] = plan
+			}
 		}
 		message.Metadata = metadata
 	})
@@ -345,6 +359,10 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		OnProvisionalText:  func(_ string) { state.provisional = true; recordSnapshotErr(persistMetadata(ctx, nil)) },
 		OnProvisionalReset: func() { state.provisional = false; recordSnapshotErr(persistMetadata(ctx, nil)) },
 		OnStatus:           func(nextStatus string) { state.status = nextStatus; recordSnapshotErr(persistMetadata(ctx, nil)) },
+		OnPlan: func(plan projectAssistantPlanSnapshot) {
+			state.plan = &plan
+			recordSnapshotErr(persistMetadata(ctx, nil))
+		},
 		OnToolCall: func(event projectToolCallStreamEvent) {
 			state.toolCalls = upsertProjectToolCallStreamEvent(state.toolCalls, event)
 			recordSnapshotErr(persistMetadata(ctx, nil))

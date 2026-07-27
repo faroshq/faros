@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -54,9 +55,13 @@ func countProjectAssistantToolCards(events []projectMessageStreamEvent) int {
 func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, Revision: 2, CreatedAt: now, UpdatedAt: now}
+	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
+		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
+	}}
 	metadata := projectAssistantDurableMetadataForTransition(run, "Writing files", true, false, []projectToolCallStreamEvent{{
 		ID: "tool-1", Name: projectToolWriteFile, Status: "running", Arguments: `{"path":"src/App.tsx"}`,
-	}})
+	}}, &plan)
 	if got := metadata[projectAssistantMetadataRevision]; got != int64(2) {
 		t.Fatalf("revision = %#v, want current run revision", got)
 	}
@@ -69,12 +74,15 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	if _, ok := metadata[projectMessageMetadataAssistantActions]; !ok {
 		t.Fatalf("metadata = %#v, want sanitized assistant actions", metadata)
 	}
+	if got := metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, plan) {
+		t.Fatalf("assistant plan = %#v, want %#v", got, plan)
+	}
 
 	run.Status = store.AssistantRunStatusCompleted
 	run.Revision = 5
 	metadata = projectAssistantDurableMetadataForTransition(run, "Completed", false, true, []projectToolCallStreamEvent{{
 		ID: "tool-1", Name: projectToolWriteFile, Status: "succeeded", Arguments: `{"path":"src/App.tsx"}`,
-	}})
+	}}, &plan)
 	if got := metadata[projectAssistantMetadataRevision]; got != int64(5) {
 		t.Fatalf("terminal revision = %#v, want 5", got)
 	}
@@ -83,6 +91,32 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	}
 	if got := metadata[projectAssistantMetadataPreviewRefreshNeeded]; got != true {
 		t.Fatalf("preview refresh = %#v, want true for successful mutation", got)
+	}
+}
+
+func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitions(t *testing.T) {
+	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
+		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
+	}}
+	existing := map[string]any{projectAssistantMetadataPlan: plan}
+	for _, tt := range []struct {
+		name   string
+		status store.AssistantRunStatus
+	}{
+		{name: "running", status: store.AssistantRunStatusRunning},
+		{name: "interrupted", status: store.AssistantRunStatusInterrupted},
+		{name: "aborted", status: store.AssistantRunStatusAborted},
+		{name: "failed", status: store.AssistantRunStatusFailed},
+		{name: "claimed", status: store.AssistantRunStatusRunning},
+		{name: "completed", status: store.AssistantRunStatusCompleted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := projectAssistantDurableMetadataFromExisting(store.AssistantRun{ID: "run-1", Status: tt.status, Revision: 3}, tt.name, false, existing)
+			if got := metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, plan) {
+				t.Fatalf("assistant plan = %#v, want %#v", got, plan)
+			}
+		})
 	}
 }
 
@@ -205,7 +239,7 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1"}
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", Content: "make it", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil), CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
 	msgStore := store.NewMemoryStore()
 	if _, err := msgStore.CreateAssistantRun(ctx, scope, user, assistant, run); err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
@@ -230,7 +264,7 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 			}
 			next := *current
 			next.Revision++
-			message.Metadata = projectAssistantDurableMetadataForTransition(next, status, provisional, server.projectAssistantPreviewRefreshNeeded(ctx, projectWorkspaceScope(identity{}, scope.ProjectName), "", false, toolCalls), toolCalls)
+			message.Metadata = projectAssistantDurableMetadataForTransition(next, status, provisional, server.projectAssistantPreviewRefreshNeeded(ctx, projectWorkspaceScope(identity{}, scope.ProjectName), "", false, toolCalls), toolCalls, nil)
 		}); err != nil {
 			t.Fatalf("UpdateSnapshot: %v", err)
 		}
@@ -285,7 +319,7 @@ func TestReconcileOrphanedProjectAssistantRunPersistsInterruptedMessageMetadata(
 	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1"}
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil), CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
 	msgStore := store.NewMemoryStore()
 	if _, err := msgStore.CreateAssistantRun(ctx, scope, user, assistant, run); err != nil {
 		t.Fatal(err)
