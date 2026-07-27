@@ -94,7 +94,33 @@ func TestEinoReadOnlyBackendRejectsSymlinkedScopeComponents(t *testing.T) {
 	}
 }
 
-func TestEinoReadOnlyBackendRejectsScopeReplacedBySymlink(t *testing.T) {
+func TestEinoReadOnlyBackendRejectsSymlinkedStoreRoot(t *testing.T) {
+	outside := t.TempDir()
+	root := filepath.Join(t.TempDir(), "workspace-root")
+	if err := os.Symlink(outside, root); err != nil {
+		t.Fatalf("Symlink returned error: %v", err)
+	}
+	if backend, err := NewEinoReadOnlyBackend(NewFileStore(root), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "alpha"}); err == nil || backend != nil {
+		t.Fatalf("NewEinoReadOnlyBackend = (%#v, %v), want store root symlink rejection", backend, err)
+	}
+}
+
+func TestEinoReadOnlyBackendAllowsNonexistentStoreRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace-root")
+	backend, err := NewEinoReadOnlyBackend(NewFileStore(root), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "new-project"})
+	if err != nil {
+		t.Fatalf("NewEinoReadOnlyBackend returned error for a nonexistent root: %v", err)
+	}
+	infos, err := backend.GlobInfo(context.Background(), &einofs.GlobInfoRequest{Pattern: "**/*"})
+	if err != nil {
+		t.Fatalf("GlobInfo returned error for a nonexistent root: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("GlobInfo nonexistent root = %#v, want no files", infos)
+	}
+}
+
+func TestEinoReadOnlyBackendRejectsStoreRootReplacedBySymlink(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(t.TempDir())
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "alpha"}
@@ -105,21 +131,71 @@ func TestEinoReadOnlyBackendRejectsScopeReplacedBySymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
 	}
-	dir, err := store.scopeDir(scope)
-	if err != nil {
-		t.Fatalf("scopeDir returned error: %v", err)
-	}
 	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside secret\n"), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Join(outside, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName), 0o755); err != nil {
+		t.Fatalf("MkdirAll outside scope returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, "secret.txt"), []byte("outside secret\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile outside secret returned error: %v", err)
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("RemoveAll scoped directory returned error: %v", err)
+	if err := os.RemoveAll(store.Root()); err != nil {
+		t.Fatalf("RemoveAll store root returned error: %v", err)
 	}
-	if err := os.Symlink(outside, dir); err != nil {
+	if err := os.Symlink(outside, store.Root()); err != nil {
 		t.Fatalf("Symlink returned error: %v", err)
 	}
+	assertEinoReadOperationsRejectSymlink(t, ctx, backend)
+}
 
+func TestEinoReadOnlyBackendRejectsScopeReplacedBySymlink(t *testing.T) {
+	ctx := context.Background()
+	for _, component := range []string{"org", "workspace", "project"} {
+		t.Run(component, func(t *testing.T) {
+			store := NewFileStore(t.TempDir())
+			scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "alpha"}
+			if err := store.ApplyFiles(ctx, scope, []File{{Path: "inside.txt", Content: "inside\n"}}); err != nil {
+				t.Fatalf("ApplyFiles returned error: %v", err)
+			}
+			backend, err := NewEinoReadOnlyBackend(store, scope)
+			if err != nil {
+				t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+			}
+			outside := t.TempDir()
+			var replaced string
+			var secretDir string
+			switch component {
+			case "org":
+				replaced = filepath.Join(store.Root(), scope.OrgUUID)
+				secretDir = filepath.Join(outside, scope.WorkspaceUUID, scope.ProjectName)
+				if err := os.MkdirAll(secretDir, 0o755); err != nil {
+					t.Fatalf("MkdirAll outside org returned error: %v", err)
+				}
+			case "workspace":
+				replaced = filepath.Join(store.Root(), scope.OrgUUID, scope.WorkspaceUUID)
+				secretDir = filepath.Join(outside, scope.ProjectName)
+				if err := os.MkdirAll(secretDir, 0o755); err != nil {
+					t.Fatalf("MkdirAll outside workspace returned error: %v", err)
+				}
+			case "project":
+				replaced = filepath.Join(store.Root(), scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName)
+				secretDir = outside
+			}
+			if err := os.WriteFile(filepath.Join(secretDir, "secret.txt"), []byte("outside secret\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile outside secret returned error: %v", err)
+			}
+			if err := os.RemoveAll(replaced); err != nil {
+				t.Fatalf("RemoveAll replaced scope returned error: %v", err)
+			}
+			if err := os.Symlink(outside, replaced); err != nil {
+				t.Fatalf("Symlink returned error: %v", err)
+			}
+			assertEinoReadOperationsRejectSymlink(t, ctx, backend)
+		})
+	}
+}
+
+func assertEinoReadOperationsRejectSymlink(t *testing.T, ctx context.Context, backend *EinoReadOnlyBackend) {
+	t.Helper()
 	for name, operation := range map[string]func() error{
 		"Read": func() error {
 			_, err := backend.Read(ctx, &einofs.ReadRequest{FilePath: "secret.txt"})
@@ -140,7 +216,7 @@ func TestEinoReadOnlyBackendRejectsScopeReplacedBySymlink(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := operation(); err == nil {
-				t.Fatalf("%s returned nil error after the project root became a symlink", name)
+				t.Fatalf("%s returned nil error after a scope component became a symlink", name)
 			}
 		})
 	}
@@ -502,6 +578,64 @@ func TestEinoReadOnlyBackendGrepStopsBeforeMaterializingDenseResults(t *testing.
 	_, err := boundedEinoGrepFile(context.Background(), "dense.txt", strings.Repeat("needle\n", maxEinoBackendMatches+1), &einofs.GrepRequest{Pattern: "needle"})
 	if err == nil || !strings.Contains(err.Error(), "narrow request") {
 		t.Fatalf("boundedEinoGrepFile dense result error = %v, want narrow request error", err)
+	}
+}
+
+func TestEinoReadOnlyBackendGrepScansPastDenseMultilineContextMatches(t *testing.T) {
+	content := strings.Repeat("x", maxEinoBackendMatches+1) + "\n" + strings.Repeat("needle\n", maxEinoBackendMatches+1)
+	_, err := boundedEinoGrepFile(context.Background(), "dense.txt", content, &einofs.GrepRequest{
+		Pattern:         "x|needle",
+		EnableMultiline: true,
+		BeforeLines:     1,
+		AfterLines:      1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "narrow request") {
+		t.Fatalf("boundedEinoGrepFile dense multiline context error = %v, want narrow request error", err)
+	}
+}
+
+func TestEinoReadOnlyBackendGrepPreservesZeroWidthMultilineMatches(t *testing.T) {
+	ctx := context.Background()
+	content := "aa\nb\n"
+	request := &einofs.GrepRequest{Pattern: "a*", EnableMultiline: true}
+	reference := einofs.NewInMemoryBackend()
+	if err := reference.Write(ctx, &einofs.WriteRequest{FilePath: "/zero.txt", Content: content}); err != nil {
+		t.Fatalf("Write reference content returned error: %v", err)
+	}
+	want, err := reference.GrepRaw(ctx, request)
+	if err != nil {
+		t.Fatalf("reference GrepRaw returned error: %v", err)
+	}
+	for index := range want {
+		want[index].Path = strings.TrimPrefix(want[index].Path, "/")
+	}
+	got, err := boundedEinoGrepFile(ctx, "zero.txt", content, request)
+	if err != nil {
+		t.Fatalf("boundedEinoGrepFile returned error: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("zero-width matches = %#v, want Eino %#v", got, want)
+	}
+}
+
+func TestEinoReadOnlyBackendGrepValidatesPatternBeforeFiltering(t *testing.T) {
+	ctx := context.Background()
+	backend, err := NewEinoReadOnlyBackend(NewFileStore(t.TempDir()), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "empty"})
+	if err != nil {
+		t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+	}
+	for name, request := range map[string]*einofs.GrepRequest{
+		"empty project": {Pattern: "["},
+		"path":          {Pattern: "[", Path: "missing"},
+		"glob":          {Pattern: "[", Glob: "*.does-not-exist"},
+		"file type":     {Pattern: "[", FileType: "js"},
+		"empty pattern": {Pattern: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := backend.GrepRaw(ctx, request); err == nil {
+				t.Fatalf("GrepRaw(%#v) returned nil error", request)
+			}
+		})
 	}
 }
 

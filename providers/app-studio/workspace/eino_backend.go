@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	einofs "github.com/cloudwego/eino/adk/filesystem"
 )
@@ -75,6 +76,19 @@ func (b *EinoReadOnlyBackend) projectFiles(ctx context.Context) ([]FileInfo, err
 
 func validateEinoScopeDirectories(store *FileStore, scope Scope) error {
 	current := store.Root()
+	info, err := os.Lstat(current)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat workspace root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("project workspace root is a symlink")
+	}
+	if !info.IsDir() {
+		return errors.New("project workspace root is not a directory")
+	}
 	for _, component := range []string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName} {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
@@ -251,6 +265,9 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 	if err != nil {
 		return nil, err
 	}
+	if _, err := compileEinoGrepPattern(req); err != nil {
+		return nil, err
+	}
 	files, err := b.projectFiles(ctx)
 	if err != nil {
 		return nil, err
@@ -326,6 +343,14 @@ func boundedEinoGrepFile(ctx context.Context, path, content string, req *einofs.
 }
 
 func boundedEinoGrepFileLimit(ctx context.Context, path, content string, req *einofs.GrepRequest, limit int) ([]einofs.GrepMatch, error) {
+	re, err := compileEinoGrepPattern(req)
+	if err != nil {
+		return nil, err
+	}
+	return boundedEinoGrepFileWithRegexp(ctx, path, content, req, re, limit)
+}
+
+func compileEinoGrepPattern(req *einofs.GrepRequest) (*regexp.Regexp, error) {
 	if req.Pattern == "" {
 		return nil, errors.New("pattern cannot be empty")
 	}
@@ -337,7 +362,12 @@ func boundedEinoGrepFileLimit(ctx context.Context, path, content string, req *ei
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex pattern: %w", err)
 	}
+	return re, nil
+}
+
+func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, req *einofs.GrepRequest, re *regexp.Regexp, limit int) ([]einofs.GrepMatch, error) {
 	lines := strings.Split(content, "\n")
+	lineStarts := einoLineStarts(content)
 	results := make([]einofs.GrepMatch, 0)
 	seenLines := make(map[int]struct{})
 	appendMatchLine := func(line int) error {
@@ -377,20 +407,16 @@ func boundedEinoGrepFileLimit(ctx context.Context, path, content string, req *ei
 		return nil
 	}
 	if req.EnableMultiline {
-		indices := re.FindAllStringIndex(content, limit+1)
-		for _, index := range indices {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			startLine := 1 + strings.Count(content[:index[0]], "\n")
-			endLine := 1 + strings.Count(content[:index[1]], "\n")
+		return results, forEachEinoRegexpMatch(ctx, re, content, func(start, end int) error {
+			startLine := einoLineNumber(lineStarts, start)
+			endLine := einoLineNumber(lineStarts, end)
 			for line := startLine; line <= endLine && line <= len(lines); line++ {
 				if err := appendMatchLine(line); err != nil {
-					return nil, err
+					return err
 				}
 			}
-		}
-		return results, nil
+			return nil
+		})
 	}
 	for line, value := range lines {
 		if err := ctx.Err(); err != nil {
@@ -403,6 +429,54 @@ func boundedEinoGrepFileLimit(ctx context.Context, path, content string, req *ei
 		}
 	}
 	return results, nil
+}
+
+func einoLineStarts(content string) []int {
+	starts := []int{0}
+	for index := 0; index < len(content); index++ {
+		if content[index] == '\n' {
+			starts = append(starts, index+1)
+		}
+	}
+	return starts
+}
+
+func einoLineNumber(starts []int, offset int) int {
+	return sort.Search(len(starts), func(index int) bool { return starts[index] > offset })
+}
+
+func forEachEinoRegexpMatch(ctx context.Context, re *regexp.Regexp, content string, visit func(start, end int) error) error {
+	for position, previousEnd := 0, -1; position <= len(content); {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		match := re.FindStringIndex(content[position:])
+		if match == nil {
+			return nil
+		}
+		start, end := position+match[0], position+match[1]
+		accept := true
+		if end == position {
+			if start == previousEnd {
+				accept = false
+			}
+			_, width := utf8.DecodeRuneInString(content[position:])
+			if width > 0 {
+				position += width
+			} else {
+				position = len(content) + 1
+			}
+		} else {
+			position = end
+		}
+		previousEnd = end
+		if accept {
+			if err := visit(start, end); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (b *EinoReadOnlyBackend) Write(context.Context, *einofs.WriteRequest) error {
