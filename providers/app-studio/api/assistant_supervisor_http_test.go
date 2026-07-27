@@ -139,6 +139,66 @@ func TestLegacyAssistantStreamAdapterReplacesDurableRevisionsWithoutDuplicatingC
 	}
 }
 
+func TestProjectAssistantDurableFinalContentUsesReturnedReplyWithoutDuplicatingPartialStream(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		streamed string
+		replied  string
+		want     string
+	}{
+		{name: "returned only", replied: "final response", want: "final response"},
+		{name: "partial stream", streamed: "partial", replied: "partial final response", want: "partial final response"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectAssistantDurableFinalContent(tt.replied, tt.streamed); got != tt.want {
+				t.Fatalf("durable final content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLegacyAssistantStreamAdapterCarriesInterruptPreviewAndEachTerminalStatus(t *testing.T) {
+	interrupt := &projectAssistantUIInterruptRequest{InterruptID: "interrupt-1", Kind: "permission", Status: "pending"}
+	for _, status := range []store.AssistantRunStatus{
+		store.AssistantRunStatusCompleted,
+		store.AssistantRunStatusFailed,
+		store.AssistantRunStatusInterrupted,
+		store.AssistantRunStatusAborted,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			adapter := newProjectAssistantLegacyStreamAdapter()
+			snapshot := projectAssistantRunSnapshot{Run: store.AssistantRun{ID: "run-1", Status: status, Revision: 1}, Message: store.Message{ID: "assistant-1", Metadata: map[string]any{
+				projectMessageMetadataAssistantInterrupt:     interrupt,
+				projectAssistantMetadataPreviewRefreshNeeded: true,
+			}}}
+			events := adapter.Events(snapshot)
+			if !projectMessageStreamEventsHaveInterrupt(events) || !projectMessageStreamEventsHaveContent(events, projectAssistantUIDevelopmentPreviewRefreshKey) {
+				t.Fatalf("events = %#v, want interrupt and preview refresh", events)
+			}
+			terminal := events[len(events)-1]
+			if status == store.AssistantRunStatusCompleted && terminal.Type != string(projectAssistantEventRunFinished) {
+				t.Fatalf("terminal = %#v, want completed event", terminal)
+			}
+			if status != store.AssistantRunStatusCompleted && terminal.Type != string(projectAssistantEventRunFailed) {
+				t.Fatalf("terminal = %#v, want failed legacy event", terminal)
+			}
+			snapshot.Run.Revision++
+			if replay := adapter.Events(snapshot); projectMessageStreamEventsHaveContent(replay, projectAssistantUIDevelopmentPreviewRefreshKey) {
+				t.Fatalf("preview refresh replayed on later revision: %#v", replay)
+			}
+		})
+	}
+}
+
+func projectMessageStreamEventsHaveInterrupt(events []projectMessageStreamEvent) bool {
+	for _, event := range events {
+		if event.InterruptRequest != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminalTransitions(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()

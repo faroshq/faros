@@ -697,7 +697,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		writeProjectError(w, err)
 		return
 	}
-	logProjectAssistantLifecycle("resume", scope, run)
+	projectAssistantLifecycleLog("resume", scope, run)
 	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshot{Run: run, Message: message})
 }
 

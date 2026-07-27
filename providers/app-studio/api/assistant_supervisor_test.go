@@ -69,6 +69,42 @@ func TestProjectAssistantSupervisorOwnsExecutionAfterStarterCancellation(t *test
 	}
 }
 
+func TestProjectAssistantSupervisorShutdownLogsOneInterruptedTerminalTransition(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	oldLog := projectAssistantLifecycleLog
+	defer func() { projectAssistantLifecycleLog = oldLog }()
+	var interrupted int
+	projectAssistantLifecycleLog = func(event string, gotScope store.Scope, gotRun store.AssistantRun) {
+		if event == "interrupted" {
+			interrupted++
+			if gotScope != scope || gotRun.Status != store.AssistantRunStatusInterrupted || gotRun.ID != run.ID {
+				t.Fatalf("interrupted lifecycle fields = %#v %#v", gotScope, gotRun)
+			}
+		}
+	}
+	entered := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, run, assistant, func(ctx context.Context, _ *projectAssistantSnapshotAccumulator) {
+		close(entered)
+		<-ctx.Done()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	supervisor.Shutdown(context.Background())
+	if interrupted != 1 {
+		t.Fatalf("interrupted lifecycle events = %d, want one", interrupted)
+	}
+}
+
 func TestProjectAssistantSupervisorReservationProtectsFreshDurableRunUntilAttach(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
@@ -949,6 +985,42 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	terminal, err := memoryStore.GetAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}, run.ID)
 	if err != nil || terminal.Status != store.AssistantRunStatusAborted {
 		t.Fatalf("latest durable run after legacy disconnect/abort = %#v, %v; want recoverable aborted run", terminal, err)
+	}
+
+	// The modern POST response is short-lived too: canceling its request after
+	// the durable start must not cancel the server-owned worker.
+	normalEngine := &blockingStartRouteEngine{entered: make(chan struct{}), finished: make(chan struct{})}
+	server.assistantEngine = normalEngine
+	normalContext, cancelNormal := context.WithCancel(context.Background())
+	normalRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"continue building","clientRequestID":"request-2"}`)).WithContext(normalContext)
+	normalRequest.Header = request.Header.Clone()
+	normal := httptest.NewRecorder()
+	router.ServeHTTP(normal, normalRequest)
+	if normal.Code != http.StatusAccepted {
+		t.Fatalf("normal start status = %d, want %d: %s", normal.Code, http.StatusAccepted, normal.Body.String())
+	}
+	select {
+	case <-normalEngine.entered:
+	case <-time.After(time.Second):
+		t.Fatal("normal start worker did not enter")
+	}
+	cancelNormal()
+	select {
+	case <-normalEngine.finished:
+		t.Fatal("canceling normal start request canceled worker")
+	case <-time.After(25 * time.Millisecond):
+	}
+	normalRun, err := memoryStore.LatestAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"})
+	if err != nil || normalRun.ClientRequestID != "request-2" {
+		t.Fatalf("latest normal durable run = %#v, %v", normalRun, err)
+	}
+	if !server.projectAssistantSupervisor().Abort(store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}, normalRun.ID) {
+		t.Fatal("Abort did not find normal worker")
+	}
+	select {
+	case <-normalEngine.finished:
+	case <-time.After(time.Second):
+		t.Fatal("abort did not stop normal worker")
 	}
 }
 

@@ -43,7 +43,11 @@ import {
   abortedConversationSnapshot,
   acceptScopedConversationSnapshot,
   assistantRunTerminal,
+  firstProjectStartPlan,
+  firstProjectSubmissionAccepted,
+  firstProjectSubmissionWithProject,
   mergeConversationSnapshot,
+  newFirstProjectSubmission,
   normalizeSnapshotMessage,
   replaceOptimisticUserMessage,
   type AssistantRun,
@@ -387,11 +391,12 @@ let landingPlaceholderIndex = 0
 let developmentPreviewAuthorizationSerial = 0
 let developmentPreviewAuthorizationRetryTimer: number | undefined
 let developmentPreviewAuthorizationRenewalTimer: number | undefined
-let activeMessageStreamController: AbortController | null = null
 let activeAssistantSubscription: AbortController | null = null
 let activeAssistantRun: AssistantRun | null = null
 let activeAssistantProject = ''
 let pendingMessageSubmission: { projectName: string; content: string; clientRequestID: string } | null = null
+let pendingFirstProjectSubmission: ReturnType<typeof newFirstProjectSubmission> | null = null
+let projectCreateGeneration = 0
 const assistantRunRevisions: Record<string, AssistantRun> = {}
 const assistantRunController = new ConversationRunController({
   connect: async (runID, afterRevision, setDisconnect) => {
@@ -1617,58 +1622,59 @@ async function ensureCreateSetupReady(): Promise<boolean> {
 }
 
 async function createProjectAndStartConversation(content: string) {
+  const retry = pendingFirstProjectSubmission?.projectName && pendingFirstProjectSubmission.content === content
+  let submission = retry
+    ? pendingFirstProjectSubmission!
+    : newFirstProjectSubmission(content, crypto.randomUUID())
+  pendingFirstProjectSubmission = submission
+  const generation = ++projectCreateGeneration
   const now = new Date().toISOString()
   const draftName = `draft-${Date.now()}`
   const description = selectedLandingCategory.value?.subtitle ?? ''
-	const controller = new AbortController()
-	let projectName = ''
-  let assistantMessageID = ''
-
-  activeMessageStreamController = controller
+  let acceptedRun = false
+	let projectName = submission.projectName
   busy.value = true
   messageStreaming.value = true
   conversationStatus.value = 'Starting'
   error.value = null
-  prompt.value = ''
-  selectedLandingCategory.value = null
-  resetWorkbench()
-  selected.value = {
-    name: draftName,
-    displayName: 'New project',
-    description,
-    phase: 'Creating',
-    createdAt: now,
+  if (!retry) {
+    prompt.value = ''
+    selectedLandingCategory.value = null
+    resetWorkbench()
+    selected.value = { name: draftName, displayName: 'New project', description, phase: 'Creating', createdAt: now }
+    messages.value = [{ id: `temp-${Date.now()}-user`, projectID: draftName, role: 'user', content, createdAt: now }]
   }
-  messages.value = [
-    {
-      id: `temp-${Date.now()}-user`,
-      projectID: draftName,
-      role: 'user',
-      content,
-      createdAt: now,
-    },
-  ]
+
+  const current = () => generation === projectCreateGeneration && pendingFirstProjectSubmission === submission &&
+    (!selectedNameFromPath.value || selectedNameFromPath.value === projectName || selectedNameFromPath.value === draftName)
 
   try {
     await nextTick()
     // Project creation remains request-bound through readiness, repository and
     // naming setup. Once the Project exists, the first turn uses the same
     // server-owned start/subscribe contract as every later message.
-    const created = await api.createProject(props.ctx, { description: description || undefined, prompt: content })
-    projectName = created.name
-    selected.value = created
-    messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
-    props.navigate(encodeURIComponent(projectName))
+    if (firstProjectStartPlan(submission).createProject) {
+      const created = await api.createProject(props.ctx, { description: description || undefined, prompt: content })
+      if (!current()) return
+      projectName = created.name
+      submission = firstProjectSubmissionWithProject(submission, projectName)
+      pendingFirstProjectSubmission = submission
+      selected.value = created
+      messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
+      props.navigate(encodeURIComponent(projectName))
+    }
 
-    const clientRequestID = crypto.randomUUID()
-    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
+    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID: submission.clientRequestID })
+    if (!current()) return
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
     if (applied.accepted && applied.current) {
-      assistantMessageID = started.assistant.id
       messages.value = replaceOptimisticUserMessage(messages.value, messages.value[0]?.id ?? '', started.user ?? messages.value[0]).map(toProjectMessageView)
       if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
+      acceptedRun = true
+      if (firstProjectSubmissionAccepted(submission, started.user)) pendingFirstProjectSubmission = null
     }
   } catch (e) {
+    if (!current()) return
     if (isAbortError(e)) {
       if (projectName) {
         // The request that created the Project has ended; a route change only
@@ -1694,16 +1700,13 @@ async function createProjectAndStartConversation(content: string) {
       selected.value = null
       messages.value = []
       props.navigate(CREATE_PROJECT_ROUTE)
-    } else {
-      messages.value = messages.value.filter((message) => message.id !== assistantMessageID)
     }
   } finally {
-    if (activeMessageStreamController === controller) {
-      activeMessageStreamController = null
+    if (current() && !acceptedRun) {
+      conversationStatus.value = ''
+      messageStreaming.value = false
     }
-    conversationStatus.value = ''
-    messageStreaming.value = false
-    busy.value = false
+    if (generation === projectCreateGeneration) busy.value = false
   }
 }
 

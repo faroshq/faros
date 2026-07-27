@@ -19,6 +19,33 @@ export interface ConversationState<TMessage extends ProjectMessage = ProjectMess
   runs: Record<string, AssistantRun>
 }
 
+export interface PendingFirstProjectSubmission {
+  content: string
+  clientRequestID: string
+  projectName: string
+}
+
+export function newFirstProjectSubmission(content: string, clientRequestID: string): PendingFirstProjectSubmission {
+  return { content, clientRequestID, projectName: '' }
+}
+
+export function firstProjectSubmissionWithProject(submission: PendingFirstProjectSubmission, projectName: string): PendingFirstProjectSubmission {
+  return { ...submission, projectName }
+}
+
+export function firstProjectStartPlan(submission: PendingFirstProjectSubmission) {
+  return {
+    createProject: !submission.projectName,
+    projectName: submission.projectName,
+    content: submission.content,
+    clientRequestID: submission.clientRequestID,
+  }
+}
+
+export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {
+  return Boolean(user?.id && user.content === submission.content)
+}
+
 export function assistantRunTerminal(status: AssistantRun['status']): boolean {
   return status === 'completed' || status === 'aborted' || status === 'failed' || status === 'interrupted'
 }

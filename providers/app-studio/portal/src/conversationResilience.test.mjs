@@ -28,6 +28,15 @@ test('first-project durable start replaces its optimistic user message without d
   assert.deepEqual(result.map((item) => item.id), ['prior', 'user-1'])
 })
 
+test('first-project retry reuses the created project and durable request identity', () => {
+  const pending = state.newFirstProjectSubmission('ship it', 'request-1')
+  assert.deepEqual(state.firstProjectStartPlan(pending), { createProject: true, projectName: '', content: 'ship it', clientRequestID: 'request-1' })
+  const created = state.firstProjectSubmissionWithProject(pending, 'demo')
+  assert.deepEqual(state.firstProjectStartPlan(created), { createProject: false, projectName: 'demo', content: 'ship it', clientRequestID: 'request-1' })
+  assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-1', content: 'ship it' }), true)
+  assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
+})
+
 test('equal revision rehydrates active controls but an older active snapshot cannot revive a terminal run', () => {
   const active = snapshot(4, 'waiting', 'pending_input')
   const terminal = snapshot(5, 'done', 'completed')

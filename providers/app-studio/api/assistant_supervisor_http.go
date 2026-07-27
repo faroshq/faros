@@ -46,6 +46,14 @@ type projectAssistantDurableStartResult struct {
 	Started   bool
 }
 
+// projectAssistantDurableFinalContent makes the engine's returned response
+// authoritative when present. Chunk callbacks are progressive UI snapshots;
+// they can be empty or partial and must never truncate or duplicate the final
+// durable assistant message.
+func projectAssistantDurableFinalContent(reply, streamed string) string {
+	return projectAssistantStoredContent(reply, streamed)
+}
+
 // startProjectAssistantRunDurably is the one start boundary for every new
 // conversation turn. It validates its durable inputs, reserves the project,
 // atomically creates the user message, assistant placeholder and run, then
@@ -319,7 +327,7 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		return snapshotErr
 	}
 	req := request.Clone(context.WithValue(ctx, projectAssistantSupervisorRunContextKey{}, run))
-	_, err := s.generateProjectAssistantStreamWithStart(req, id, c, project, projectAssistantStreamCallbacks{
+	reply, err := s.generateProjectAssistantStreamWithStart(req, id, c, project, projectAssistantStreamCallbacks{
 		OnChunk: func(chunk string) {
 			content.WriteString(chunk)
 			recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), false))
@@ -348,14 +356,20 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 			recordSnapshotErr(persistMetadata(ctx, nil))
 		},
 	}, start)
-	recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), true))
+	finalContent := projectAssistantDurableFinalContent(reply, content.String())
+	recordSnapshotErr(accumulator.UpdateText(ctx, finalContent, true))
 	if getSnapshotErr() != nil {
 		return
 	}
 	if err == nil {
 		state.status = "Completed"
 		runStatus := store.AssistantRunStatusCompleted
-		recordSnapshotErr(persistMetadata(ctx, &runStatus))
+		transitionErr := persistMetadata(ctx, &runStatus)
+		recordSnapshotErr(transitionErr)
+		if transitionErr == nil {
+			run.Status = runStatus
+			projectAssistantLifecycleLog("completed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+		}
 		return
 	}
 	var permissionErr *projectAssistantPermissionRequiredError
@@ -375,12 +389,22 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	if errors.Is(err, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
 		state.status = "Aborted"
 		runStatus := store.AssistantRunStatusAborted
-		recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
+		transitionErr := persistMetadata(context.Background(), &runStatus)
+		recordSnapshotErr(transitionErr)
+		if transitionErr == nil {
+			run.Status = runStatus
+			projectAssistantLifecycleLog("aborted", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+		}
 		return
 	}
 	state.status = "Failed"
 	runStatus := store.AssistantRunStatusFailed
-	recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
+	transitionErr := persistMetadata(context.Background(), &runStatus)
+	recordSnapshotErr(transitionErr)
+	if transitionErr == nil {
+		run.Status = runStatus
+		projectAssistantLifecycleLog("failed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+	}
 }
 
 // startAndStreamLegacyProjectAssistant preserves the historical POST SSE
@@ -629,6 +653,6 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return err
 	}
-	logProjectAssistantLifecycle("orphan_interrupted", scope, run)
+	projectAssistantLifecycleLog("orphan_interrupted", scope, run)
 	return nil
 }
