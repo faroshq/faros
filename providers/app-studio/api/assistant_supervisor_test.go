@@ -293,6 +293,38 @@ func TestProjectAssistantSupervisorReservationReleaseAllowsRetryAfterStartFailur
 	retryRelease()
 }
 
+func TestProjectAssistantSupervisorScopesLiveSnapshotMessages(t *testing.T) {
+	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{
+		ID:              "run-1",
+		Status:          store.AssistantRunStatusRunning,
+		ActiveMessageID: "assistant-1",
+		Revision:        1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	message := store.Message{
+		ID:        run.ActiveMessageID,
+		Role:      "assistant",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if _, err := supervisor.Attach(scope, run, message); err != nil {
+		t.Fatal(err)
+	}
+	updates, unsubscribe, err := supervisor.Subscribe(scope, run.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+	snapshot := <-updates
+	if snapshot.Run.ProjectName != scope.ProjectName || snapshot.Message.ProjectName != scope.ProjectName {
+		t.Fatalf("snapshot scope = run %q message %q, want %q", snapshot.Run.ProjectName, snapshot.Message.ProjectName, scope.ProjectName)
+	}
+}
+
 func TestProjectAssistantSupervisorCoalescesSlowSubscriberSnapshots(t *testing.T) {
 	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
