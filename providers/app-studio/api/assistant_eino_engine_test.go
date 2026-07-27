@@ -1185,6 +1185,9 @@ func TestEinoAssistantEngineUsesScopedCanonicalFilesystemReads(t *testing.T) {
 				newTools: newProjectEinoAssistantToolsFactory(server),
 			}
 			req := projectEinoRunRequestForProfileTest(profile)
+			req.Project.Name = "demo-" + string(profile)
+			req.WorkspaceScope.ProjectName = req.Project.Name
+			req.MessageScope.ProjectName = req.Project.Name
 			req.TurnPolicy = projectAssistantTurnPolicyForProfile(profile)
 			if _, err := engine.StreamProjectAssistant(ctx, req); err != nil {
 				t.Fatalf("StreamProjectAssistant returned error: %v", err)
