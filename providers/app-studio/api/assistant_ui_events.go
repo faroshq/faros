@@ -313,7 +313,7 @@ func projectAssistantUIActionSpecificLabel(action projectAssistantUIAction) stri
 	if path == "" {
 		path = projectAssistantUISummaryField(action.Detail, "file")
 	}
-	if path != "" && projectAssistantCanonicalFilesystemReadTool(base) {
+	if path != "" && projectAssistantCanonicalFilesystemReadTool(action.Tool) {
 		var ok bool
 		path, ok = unescapeProjectCanonicalToolSummaryValue(path)
 		if !ok {

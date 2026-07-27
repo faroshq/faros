@@ -991,7 +991,7 @@ func projectAssistantHexNibble(value byte) (byte, bool) {
 }
 
 func projectAssistantCanonicalFilesystemReadTool(name string) bool {
-	switch projectToolBaseName(name) {
+	switch strings.TrimSpace(name) {
 	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep:
 		return true
 	default:
@@ -1028,16 +1028,7 @@ func projectAssistantGrepResultLineCount(value string) int {
 	}
 	if first >= 0 {
 		if total, ok := projectAssistantGrepFilesHeader(strings.TrimSpace(lines[first])); ok {
-			count := 0
-			for _, line := range lines[first+1:] {
-				if strings.TrimSpace(line) != "" {
-					count++
-				}
-			}
-			if count > total {
-				return total
-			}
-			return count
+			return total
 		}
 	}
 	for i := len(lines) - 1; i >= 0; i-- {

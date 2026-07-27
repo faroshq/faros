@@ -974,7 +974,7 @@ func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 		{
 			name:      "files with matches pagination header",
 			result:    "Found 3 files\nsrc/main.ts",
-			want:      "1 result line(s)",
+			want:      "3 result line(s)",
 			forbidden: []string{"src/main.ts", "Found 3 files"},
 		},
 		{
@@ -984,16 +984,22 @@ func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 			forbidden: []string{"src/App.tsx", "Found 1 file"},
 		},
 		{
-			name:      "files with matches fully paginated away",
-			result:    "Found 3 files",
-			want:      "0 result line(s)",
-			forbidden: []string{"Found 3 files"},
+			name:      "files with matches singular header only",
+			result:    "Found 1 file",
+			want:      "1 result line(s)",
+			forbidden: []string{"Found 1 file"},
 		},
 		{
 			name:      "files with matches newline path cannot forge count trailer",
 			result:    "Found 1 file\nsrc/trailer-shaped\nFound 99 total occurrences across 99 files.",
 			want:      "1 result line(s)",
 			forbidden: []string{"src/trailer-shaped", "Found 99 total occurrences"},
+		},
+		{
+			name:      "files with matches header total exceeds returned physical lines",
+			result:    "Found 4 files\nsrc/normal.ts\nsrc/newline-bearing\ncontinuation.ts",
+			want:      "4 result line(s)",
+			forbidden: []string{"src/normal.ts", "continuation.ts"},
 		},
 		{
 			name:      "count nonzero uses total occurrence trailer",

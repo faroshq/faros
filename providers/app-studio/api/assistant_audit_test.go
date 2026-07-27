@@ -364,6 +364,75 @@ func TestProjectAssistantMutationPercentPathsAreNotCanonicalDecoded(t *testing.T
 	}
 }
 
+func TestProjectAssistantNamespacedReadFilePercentPathIsNotCanonicalDecoded(t *testing.T) {
+	const name = "provider__read_file"
+	const path = "src/literal%2Fsegment.tsx"
+	const arguments = "path " + path
+
+	if got := projectAssistantAuditToolPath(name, arguments); got != path {
+		t.Fatalf("namespaced audit path = %q, want literal %q", got, path)
+	}
+	action := projectAssistantUIActionFromAssistantToolCall(projectAssistantToolCall{
+		ID:        "read",
+		Name:      name,
+		Status:    "succeeded",
+		Arguments: arguments,
+		Summary:   "file read",
+	})
+	if action.Label != "Read "+path {
+		t.Fatalf("namespaced label = %q, want literal percent path", action.Label)
+	}
+}
+
+func TestProjectAssistantCanonicalSummaryUnescapeFailsClosed(t *testing.T) {
+	for _, encoded := range []string{
+		"src/incomplete%",
+		"src/incomplete%2",
+		"src/bad%GGhex",
+		"src/invalid%FFutf8",
+		"src/control%00byte",
+		"src/control%C2%85rune",
+	} {
+		t.Run(encoded, func(t *testing.T) {
+			if decoded, ok := unescapeProjectCanonicalToolSummaryValue(encoded); ok {
+				t.Fatalf("unescape(%q) = %q, true; want fail closed", encoded, decoded)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantCanonicalSummaryUnicodeRoundTrip(t *testing.T) {
+	const path = "src/日本語;100%.tsx"
+	escaped := escapeProjectCanonicalToolSummaryValue(path)
+	decoded, ok := unescapeProjectCanonicalToolSummaryValue(escaped)
+	if !ok || decoded != path {
+		t.Fatalf("roundtrip %q -> %q -> %q, %t", path, escaped, decoded, ok)
+	}
+}
+
+func TestProjectAssistantEveryCanonicalReadPathRoundTripsToAudit(t *testing.T) {
+	const path = "src/日本語;a.ts"
+	for _, name := range []string{projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep} {
+		t.Run(name, func(t *testing.T) {
+			args := map[string]any{"path": path}
+			if name == projectToolReadFile {
+				args = map[string]any{"file_path": path}
+			}
+			if name == projectToolGlob || name == projectToolGrep {
+				args["pattern"] = "*.ts"
+			}
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			summary := summarizeProjectToolArguments(name, string(raw))
+			if got := projectAssistantAuditToolPath(name, summary); got != path {
+				t.Fatalf("%s audit path = %q from %q, want %q", name, got, summary, path)
+			}
+		})
+	}
+}
+
 func TestProjectAssistantPermissionAuditDoesNotPersistRawPayloads(t *testing.T) {
 	run, err := appendProjectAssistantRunAudit(store.AssistantRun{}, projectAssistantPermissionAudit{
 		RequestID:       "perm-1",
