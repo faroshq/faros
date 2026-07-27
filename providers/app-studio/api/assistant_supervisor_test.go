@@ -203,7 +203,7 @@ func TestProjectAssistantNormalizesPausedLegacyRunFromCheckpointBeforeClaim(t *t
 		t.Fatalf("AppendMessage: %v", err)
 	}
 
-	normalized, err := server.normalizeProjectAssistantPausedRun(context.Background(), scope, run)
+	normalized, err := server.normalizeProjectAssistantPausedRun(context.Background(), scope, run, "")
 	if err != nil {
 		t.Fatalf("normalizeProjectAssistantPausedRun: %v", err)
 	}
@@ -216,6 +216,58 @@ func TestProjectAssistantNormalizesPausedLegacyRunFromCheckpointBeforeClaim(t *t
 	}
 	if claimed.ActiveMessageID != "assistant-legacy" || claimed.Status != store.AssistantRunStatusRunning {
 		t.Fatalf("claimed run = %#v, want running run with normalized active message", claimed)
+	}
+}
+
+func TestAbortProjectAssistantRunRepairsPrePatchMessageIdentityFromInterrupt(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	id := identity{orgUUID: "org-a", workspaceUUID: "workspace-a"}
+	project := projectWithRepository("demo-repo", "demo", "github")
+	project.Name = "demo"
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	run := store.AssistantRun{
+		ID:              "run-pre-patch",
+		ClientRequestID: "client-pre-patch",
+		Status:          store.AssistantRunStatusPendingPermission,
+		RequestID:       "permission-pre-patch",
+		Checkpoint:      json.RawMessage(`{}`),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := messages.SaveAssistantRun(context.Background(), scope, run); err != nil {
+		t.Fatalf("SaveAssistantRun: %v", err)
+	}
+	if err := messages.AppendMessage(context.Background(), scope, store.Message{
+		ID:   "assistant-pre-patch",
+		Role: "assistant",
+		Metadata: map[string]any{
+			projectMessageMetadataStatus: projectMessageStatusPendingPermission,
+			projectMessageMetadataAssistantInterrupt: projectAssistantUIInterruptRequest{
+				Status: "pending",
+				Action: &projectAssistantUIInterruptAction{RunID: run.ID, RequestID: run.RequestID},
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	resp, err := server.abortProjectAssistantRun(context.Background(), id, project, run.ID)
+	if err != nil {
+		t.Fatalf("abortProjectAssistantRun: %v", err)
+	}
+	if resp.Status != store.AssistantRunStatusAborted {
+		t.Fatalf("abort status = %q, want aborted", resp.Status)
+	}
+	persisted, err := messages.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantRun: %v", err)
+	}
+	if persisted.ActiveMessageID != "assistant-pre-patch" {
+		t.Fatalf("ActiveMessageID = %q, want interrupt-bound assistant message", persisted.ActiveMessageID)
 	}
 }
 

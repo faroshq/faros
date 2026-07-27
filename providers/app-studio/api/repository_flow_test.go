@@ -1881,11 +1881,114 @@ func TestResumeProjectAssistantRunApprovesPendingTool(t *testing.T) {
 		t.Fatalf("assistant metadata = %#v, should not persist raw toolCalls", updatedMessage.Metadata)
 	}
 	updatedActions := projectAssistantUIActionsFromMetadata(updatedMessage.Metadata[projectMessageMetadataAssistantActions])
-	if len(updatedActions) != 1 || updatedActions[0].Status != "succeeded" {
-		t.Fatalf("updated actions = %#v, want persisted succeeded action", updatedActions)
+	var writeAction *projectAssistantUIAction
+	for i := range updatedActions {
+		if updatedActions[i].ID == call.ID {
+			writeAction = &updatedActions[i]
+			break
+		}
+	}
+	if writeAction == nil || writeAction.Status != "succeeded" {
+		t.Fatalf("updated actions = %#v, want persisted succeeded write action", updatedActions)
 	}
 	if interrupt := projectAssistantUIInterruptFromMetadata(updatedMessage.Metadata[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
 		t.Fatalf("assistant interrupt = %#v, want cleared after approval", interrupt)
+	}
+}
+
+func TestResumeProjectAssistantRunRepairsPrePatchCheckpointMessageIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) store.Store
+	}{
+		{name: "memory", new: func(*testing.T) store.Store { return store.NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) store.Store {
+			t.Helper()
+			wrapped, err := store.NewEncryptedStore(store.NewMemoryStore(), []store.EncryptionKey{{
+				ID:    "test-key",
+				Value: []byte("0123456789abcdef0123456789abcdef"),
+			}})
+			if err != nil {
+				t.Fatalf("NewEncryptedStore: %v", err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := tt.new(t)
+			workspaces := workspace.NewFileStore(t.TempDir())
+			server := NewWithWorkspace(nil, messages, workspaces, "", false)
+			project := projectWithRepository("demo-repo", "demo", "github")
+			project.Name = "demo"
+			id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
+			messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+			call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
+			call.Function.Name = projectToolWriteFile
+			call.Function.Arguments = `{"path":"src/App.tsx","content":"approved\n"}`
+			fixture := startEinoPermissionForTest(t, server, messages, id, project, "write src/app", "I wrote src/App.tsx.", call)
+			assistantMessageID := "msg-pre-patch-assistant"
+			if err := appendProjectAssistantMessage(context.Background(), messages, messageScope, assistantMessageID, "", projectAssistantMessageMetadata(projectMessageStatusPendingPermission, []projectToolCallStreamEvent{{
+				ID:         call.ID,
+				Name:       call.Function.Name,
+				Status:     "permission_required",
+				Arguments:  "path src/App.tsx, 9 bytes",
+				Summary:    fixture.Permission.Reason,
+				Permission: &fixture.Permission,
+				Checkpoint: &fixture.Checkpoint,
+			}})); err != nil {
+				t.Fatalf("appendProjectAssistantMessage: %v", err)
+			}
+
+			// This is the shape persisted before durable active_message_id and
+			// checkpoint.assistantMessageID were introduced. The interrupt metadata
+			// remains the durable run/request association for the candidate supplied
+			// by the resume request.
+			run, err := messages.GetAssistantRun(context.Background(), messageScope, fixture.PermissionErr.RunID)
+			if err != nil {
+				t.Fatalf("GetAssistantRun: %v", err)
+			}
+			var state projectAssistantCheckpointState
+			if err := json.Unmarshal(run.Checkpoint, &state); err != nil {
+				t.Fatalf("decode checkpoint: %v", err)
+			}
+			state.AssistantMessageID = ""
+			run.ActiveMessageID = ""
+			run.Checkpoint, err = json.Marshal(state)
+			if err != nil {
+				t.Fatalf("encode legacy checkpoint: %v", err)
+			}
+			if err := messages.SaveAssistantRun(context.Background(), messageScope, run); err != nil {
+				t.Fatalf("SaveAssistantRun legacy shape: %v", err)
+			}
+
+			resp, err := server.resumeProjectAssistantRunWithRepositoryAndClient(
+				context.Background(),
+				httptest.NewRequest(http.MethodPost, "/", nil),
+				id,
+				fixture.Client,
+				project,
+				&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady},
+				fixture.PermissionErr.RunID,
+				projectAssistantResumeRequest{
+					RequestID:          fixture.PermissionErr.RequestID,
+					Decision:           string(projectAssistantPermissionAllow),
+					AssistantMessageID: assistantMessageID,
+				},
+			)
+			if err != nil {
+				t.Fatalf("resumeProjectAssistantRun: %v", err)
+			}
+			if resp.Status != store.AssistantRunStatusCompleted {
+				t.Fatalf("resume status = %q, want completed", resp.Status)
+			}
+			persisted, err := messages.GetAssistantRun(context.Background(), messageScope, fixture.PermissionErr.RunID)
+			if err != nil {
+				t.Fatalf("GetAssistantRun after resume: %v", err)
+			}
+			if persisted.ActiveMessageID != assistantMessageID {
+				t.Fatalf("ActiveMessageID = %q, want recovered request message %q", persisted.ActiveMessageID, assistantMessageID)
+			}
+		})
 	}
 }
 

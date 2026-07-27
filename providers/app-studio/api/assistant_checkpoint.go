@@ -93,13 +93,58 @@ func projectAssistantCheckpointActiveMessageID(state projectAssistantCheckpointS
 	return strings.TrimSpace(state.AssistantMessageID)
 }
 
+func projectAssistantPausedRunInterruptMatchesMessage(run store.AssistantRun, message store.Message) bool {
+	if message.Role != aiv1alpha1.ProjectMessageRoleAssistant {
+		return false
+	}
+	if messageRunID, _ := message.Metadata[projectAssistantMetadataRunID].(string); messageRunID != "" && messageRunID != run.ID {
+		return false
+	}
+	interrupt := projectAssistantUIInterruptFromMetadata(message.Metadata[projectMessageMetadataAssistantInterrupt])
+	return interrupt != nil && interrupt.Action != nil && interrupt.Status == "pending" &&
+		interrupt.Action.RunID == run.ID && interrupt.Action.RequestID == run.RequestID &&
+		(interrupt.Action.AssistantMessageID == "" || interrupt.Action.AssistantMessageID == message.ID)
+}
+
+func (s *Server) findProjectAssistantPausedRunMessageByInterrupt(ctx context.Context, scope store.Scope, run store.AssistantRun) (store.Message, bool, error) {
+	var candidate *store.Message
+	cursor := ""
+	for {
+		page, err := s.store.ListMessages(ctx, scope, 250, cursor)
+		if err != nil {
+			return store.Message{}, false, err
+		}
+		for _, message := range page.Items {
+			if !projectAssistantPausedRunInterruptMatchesMessage(run, message) {
+				continue
+			}
+			if candidate != nil {
+				return store.Message{}, false, nil
+			}
+			candidateMessage := message
+			candidate = &candidateMessage
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if candidate == nil {
+		return store.Message{}, false, nil
+	}
+	return *candidate, true, nil
+}
+
 // normalizeProjectAssistantPausedRun repairs legacy paused rows that predate
 // durable message identity columns. The checkpoint is the authoritative source
 // for its assistant message; do not infer a message by chronology or content.
+// For checkpoints written before that field existed, a resume request may name
+// the message only when its persisted interrupt binds the exact run and request.
 func (s *Server) normalizeProjectAssistantPausedRun(
 	ctx context.Context,
 	scope store.Scope,
 	run store.AssistantRun,
+	resumeAssistantMessageID string,
 ) (store.AssistantRun, error) {
 	if s == nil || s.store == nil || run.ActiveMessageID != "" ||
 		(run.Status != store.AssistantRunStatusPendingPermission && run.Status != store.AssistantRunStatusPendingInput) {
@@ -110,12 +155,34 @@ func (s *Server) normalizeProjectAssistantPausedRun(
 		return run, fmt.Errorf("decode assistant checkpoint for run normalization: %w", err)
 	}
 	assistantMessageID := projectAssistantCheckpointActiveMessageID(checkpoint)
-	if assistantMessageID == "" {
-		return run, nil
+	fromCheckpoint := assistantMessageID != ""
+	var message store.Message
+	if !fromCheckpoint {
+		assistantMessageID = strings.TrimSpace(resumeAssistantMessageID)
+		if assistantMessageID != "" {
+			candidate, err := s.findProjectMessage(ctx, scope, assistantMessageID)
+			if err != nil || !projectAssistantPausedRunInterruptMatchesMessage(run, candidate) {
+				return run, nil
+			}
+			message = candidate
+		} else {
+			candidate, found, err := s.findProjectAssistantPausedRunMessageByInterrupt(ctx, scope, run)
+			if err != nil {
+				return run, fmt.Errorf("find interrupt-bound assistant message: %w", err)
+			}
+			if !found {
+				return run, nil
+			}
+			assistantMessageID = candidate.ID
+			message = candidate
+		}
 	}
-	message, err := s.findProjectMessage(ctx, scope, assistantMessageID)
-	if err != nil {
-		return run, fmt.Errorf("find checkpoint assistant message: %w", err)
+	if fromCheckpoint {
+		var err error
+		message, err = s.findProjectMessage(ctx, scope, assistantMessageID)
+		if err != nil {
+			return run, fmt.Errorf("find checkpoint assistant message: %w", err)
+		}
 	}
 	if message.Role != aiv1alpha1.ProjectMessageRoleAssistant {
 		return run, fmt.Errorf("checkpoint assistant message %q is not an assistant message", assistantMessageID)
@@ -486,7 +553,7 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
-	preflightRun, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, preflightRun)
+	preflightRun, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, preflightRun, req.AssistantMessageID)
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
@@ -1101,7 +1168,7 @@ func (s *Server) abortProjectAssistantRun(
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
-	run, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, run)
+	run, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, run, "")
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
