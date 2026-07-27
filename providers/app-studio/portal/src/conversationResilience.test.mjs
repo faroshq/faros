@@ -43,6 +43,22 @@ test('a stale nonterminal snapshot is rejected and cannot be used to attach a su
   assert.deepEqual(result.current, current.run)
 })
 
+test('a delayed different run cannot replace the accepted run for the same project', () => {
+  const current = snapshot(4, 'newer')
+  const delayed = { ...snapshot(1, 'older'), run: { ...snapshot(1, 'older').run, id: 'run-old' } }
+  const result = state.acceptScopedConversationSnapshot('project-a', 'project-a', current.run, 'project-a', delayed.run)
+  assert.equal(result.accepted, false)
+  assert.equal(result.current.id, 'run-1')
+})
+
+test('a successful abort snapshot immediately makes the run terminal and non-provisional', () => {
+  const stopped = state.abortedConversationSnapshot(snapshot(4, 'working'))
+  assert.equal(stopped.run.status, 'aborted')
+  assert.equal(stopped.run.revision, 5)
+  assert.equal(stopped.message.metadata.assistantStatus, 'Aborted')
+  assert.equal(stopped.message.metadata.assistantProvisional, false)
+})
+
 test('normalizes supervisor snapshot projectName into the portal projectID contract', () => {
   const normalized = state.normalizeSnapshotMessage({ id: 'a-1', projectName: 'project-a', role: 'assistant', content: 'hello', createdAt: '2026-01-01T00:00:00Z' })
   assert.equal(normalized.projectID, 'project-a')

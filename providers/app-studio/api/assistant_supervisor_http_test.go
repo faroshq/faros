@@ -136,3 +136,41 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 		t.Fatalf("metadata = %#v, tool update discarded actions", message.Metadata)
 	}
 }
+
+func TestReconcileOrphanedProjectAssistantRunPersistsInterruptedMessageMetadata(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1"}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil), CreatedAt: now, UpdatedAt: now}
+	msgStore := store.NewMemoryStore()
+	if _, err := msgStore.CreateAssistantRun(ctx, scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	server := NewWithWorkspace(nil, msgStore, nil, "", false)
+	if err := server.reconcileOrphanedProjectAssistantRun(ctx, scope); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	updatedRun, err := msgStore.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRun.Status != store.AssistantRunStatusInterrupted || updatedRun.Revision != 2 {
+		t.Fatalf("run = %#v, want interrupted revision 2", updatedRun)
+	}
+	page, err := msgStore.ListMessages(ctx, scope, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range page.Items {
+		if message.ID != assistant.ID {
+			continue
+		}
+		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Interrupted" || message.Metadata[projectAssistantMetadataRevision] != int64(2) {
+			t.Fatalf("message metadata = %#v, want interrupted revision 2", message.Metadata)
+		}
+		return
+	}
+	t.Fatal("assistant message not found")
+}

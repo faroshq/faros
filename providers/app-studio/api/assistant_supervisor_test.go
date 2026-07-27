@@ -377,6 +377,22 @@ func TestProjectAssistantSupervisorShutdownInterruptsWorker(t *testing.T) {
 	if got.Status != store.AssistantRunStatusInterrupted {
 		t.Fatalf("status = %q, want interrupted", got.Status)
 	}
+	page, err := supervisor.store.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("message count = %d, want 2", len(page.Items))
+	}
+	for _, message := range page.Items {
+		if message.ID != assistant.ID {
+			continue
+		}
+		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Interrupted" || message.Metadata[projectAssistantMetadataRevision] != int64(2) {
+			t.Fatalf("interrupted message metadata = %#v", message.Metadata)
+		}
+		break
+	}
 }
 
 func TestProjectAssistantSupervisorParentCancellationPersistsInterrupted(t *testing.T) {
@@ -501,13 +517,55 @@ func TestProjectAssistantSupervisorClaimPublishesRunningRevision(t *testing.T) {
 	if claimed.Status != store.AssistantRunStatusRunning || claimed.Revision != created.Revision+1 {
 		t.Fatalf("claimed run = %#v, want durable running revision", claimed)
 	}
+	page, err := memoryStore.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range page.Items {
+		if message.ID != assistant.ID {
+			continue
+		}
+		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Working" || message.Metadata[projectAssistantMetadataRevision] != claimed.Revision {
+			t.Fatalf("claimed message metadata = %#v, want durable running revision", message.Metadata)
+		}
+		break
+	}
+	if err := accumulator.UpdateSnapshot(context.Background(), func(current *store.AssistantRun, message *store.Message) {
+		next := *current
+		next.Revision++
+		message.Metadata = projectAssistantDurableMetadataForTransition(next, "Writing files", false, true, []projectToolCallStreamEvent{{ID: "tool-1", Name: projectToolWriteFile, Status: "succeeded"}})
+	}); err != nil {
+		t.Fatalf("persist resumed tool metadata: %v", err)
+	}
+	if err := accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingInput); err != nil {
+		t.Fatalf("persist resumed pending status: %v", err)
+	}
+	if err := accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted); err != nil {
+		t.Fatalf("persist resumed terminal status: %v", err)
+	}
+	page, err = memoryStore.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range page.Items {
+		if message.ID != assistant.ID {
+			continue
+		}
+		if message.Metadata[projectAssistantMetadataWorkingStatus] != "Completed" || message.Metadata[projectAssistantMetadataPreviewRefreshNeeded] != true {
+			t.Fatalf("resumed terminal metadata = %#v", message.Metadata)
+		}
+		if _, ok := message.Metadata[projectMessageMetadataAssistantActions]; !ok {
+			t.Fatalf("resumed terminal metadata lost actions: %#v", message.Metadata)
+		}
+		break
+	}
 	select {
 	case snapshot := <-updates:
-		if snapshot.Run.Status != store.AssistantRunStatusRunning || snapshot.Run.Revision != claimed.Revision {
-			t.Fatalf("snapshot = %#v, want claimed running revision", snapshot.Run)
+		if snapshot.Run.Status != store.AssistantRunStatusCompleted || snapshot.Run.Revision <= claimed.Revision {
+			t.Fatalf("snapshot = %#v, want later completed metadata revision", snapshot.Run)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("claim did not publish a running snapshot")
+		t.Fatal("resumed metadata transitions did not publish a terminal snapshot")
 	}
 }
 

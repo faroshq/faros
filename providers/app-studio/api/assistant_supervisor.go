@@ -379,7 +379,16 @@ func (a *projectAssistantSnapshotAccumulator) UpdateText(ctx context.Context, co
 }
 
 func (a *projectAssistantSnapshotAccumulator) SetStatus(ctx context.Context, status store.AssistantRunStatus) error {
-	return a.update(ctx, func(active *projectAssistantSupervisedRun) { active.run.Status = status }, true)
+	return a.UpdateSnapshot(ctx, func(run *store.AssistantRun, message *store.Message) {
+		run.Status = status
+		next := *run
+		next.Revision++
+		provisional, _ := message.Metadata[projectAssistantMetadataProvisional].(bool)
+		if assistantRunTerminal(status) {
+			provisional = false
+		}
+		message.Metadata = projectAssistantDurableMetadataFromExisting(next, projectAssistantRunDisplayStatus(status, "Working"), provisional, message.Metadata)
+	})
 }
 
 func (a *projectAssistantSnapshotAccumulator) SetMessageMetadata(ctx context.Context, metadata map[string]any) error {
@@ -449,6 +458,7 @@ func (a *projectAssistantSnapshotAccumulator) ClaimPending(ctx context.Context, 
 	claimed.UpdatedAt = time.Now().UTC()
 	active.run = claimed
 	active.message.UpdatedAt = claimed.UpdatedAt
+	active.message.Metadata = projectAssistantDurableMetadataFromExisting(claimed, "Working", false, active.message.Metadata)
 	run, message := active.run, active.message
 	s.mu.Unlock()
 	err = s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1)

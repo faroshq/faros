@@ -36,6 +36,28 @@ export function acceptConversationSnapshot(current: AssistantRun | undefined, in
   return { accepted: true, current: incoming }
 }
 
+// A project can have more than one run over its lifetime. Once this tab has
+// accepted a run, a delayed latest response or buffered stream from a different
+// run must not replace its global controls.
+export function acceptScopedConversationSnapshot(
+  selectedProject: string,
+  currentProject: string,
+  current: AssistantRun | undefined,
+  incomingProject: string,
+  incoming: AssistantRun,
+): { accepted: boolean; current: AssistantRun | undefined } {
+  if (!selectedProject || selectedProject !== incomingProject) return { accepted: false, current }
+  if (current && currentProject === incomingProject && current.id !== incoming.id && !assistantRunTerminal(current.status)) return { accepted: false, current }
+  return acceptConversationSnapshot(current, incoming)
+}
+
+export function abortedConversationSnapshot(snapshot: AssistantSnapshot): AssistantSnapshot {
+  return {
+    run: { ...snapshot.run, status: 'aborted', revision: snapshot.run.revision + 1 },
+    message: { ...snapshot.message, metadata: { ...snapshot.message.metadata, assistantStatus: 'Aborted', assistantProvisional: false } },
+  }
+}
+
 export function normalizeSnapshotMessage(message: ProjectMessage & { projectName?: string }): ProjectMessage {
   return { ...message, projectID: message.projectID || message.projectName || '' }
 }

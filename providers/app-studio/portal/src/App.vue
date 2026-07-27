@@ -40,7 +40,8 @@ import {
 import { parseAssistantTraceHeader, summarizeAssistantTrace } from './assistantProgress'
 import {
   ConversationRunController,
-  acceptConversationSnapshot,
+  abortedConversationSnapshot,
+  acceptScopedConversationSnapshot,
   assistantRunTerminal,
   mergeConversationSnapshot,
   normalizeSnapshotMessage,
@@ -391,6 +392,7 @@ let developmentPreviewAuthorizationRenewalTimer: number | undefined
 let activeMessageStreamController: AbortController | null = null
 let activeAssistantSubscription: AbortController | null = null
 let activeAssistantRun: AssistantRun | null = null
+let activeAssistantProject = ''
 let pendingMessageSubmission: { projectName: string; content: string; clientRequestID: string } | null = null
 const assistantRunRevisions: Record<string, AssistantRun> = {}
 const assistantRunController = new ConversationRunController({
@@ -408,7 +410,16 @@ const assistantRunController = new ConversationRunController({
   abort: async (runID) => {
     const projectName = selected.value?.name
     if (!projectName) return
-    await api.abortAssistantRun(props.ctx, projectName, runID)
+    const response = await api.abortAssistantRun(props.ctx, projectName, runID)
+    if (response.status === 'aborted' && activeAssistantRun?.id === runID) {
+      const message = messages.value.find((item) => item.id === activeAssistantRun?.activeMessageID)
+      if (message) applyAssistantSnapshot(abortedConversationSnapshot({ run: activeAssistantRun, message }), projectName)
+      else {
+        activeAssistantRun = { ...activeAssistantRun, status: 'aborted', revision: activeAssistantRun.revision + 1 }
+        messageStreaming.value = false
+        conversationStatus.value = ''
+      }
+    }
   },
   recover: async () => {
     const projectName = selected.value?.name
@@ -1766,6 +1777,7 @@ async function openProject(name: string, updateURL = true) {
     assistantRunController.disconnect()
     activeAssistantSubscription?.abort()
     activeAssistantRun = null
+    activeAssistantProject = ''
     messageStreaming.value = false
   }
   error.value = null
@@ -1794,10 +1806,10 @@ async function refreshSelectedProjectConversation(projectName: string) {
   await recoverAssistantConversation(projectName)
 }
 
-function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot): { accepted: boolean; current: AssistantRun | undefined } {
+function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? ''): { accepted: boolean; current: AssistantRun | undefined } {
   const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
   const previousRun = assistantRunRevisions[normalized.run.id]
-  const accepted = acceptConversationSnapshot(previousRun, normalized.run)
+  const accepted = acceptScopedConversationSnapshot(projectName, activeAssistantProject, activeAssistantRun ?? previousRun, projectName, normalized.run)
   if (!accepted.accepted) return accepted
   const current = mergeConversationSnapshot(
     { messages: messages.value, runs: assistantRunRevisions },
@@ -1807,6 +1819,7 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot): { accepted:
   Object.assign(assistantRunRevisions, current.runs)
   const acceptedTerminal = assistantRunTerminal(normalized.run.status) && (!previousRun || !assistantRunTerminal(previousRun.status) || normalized.run.revision > previousRun.revision)
   activeAssistantRun = normalized.run
+  activeAssistantProject = projectName
   assistantRunController.markHealthySnapshot(normalized.run.revision)
   messageStreaming.value = !assistantRunTerminal(normalized.run.status)
   if (assistantRunTerminal(normalized.run.status) && acceptedTerminal) {
@@ -1825,7 +1838,7 @@ async function recoverAssistantConversation(projectName: string): Promise<{ acce
   if (selected.value?.name !== projectName) return undefined
   const snapshot = await api.getLatestAssistantRun(props.ctx, projectName)
   if (!snapshot || selected.value?.name !== projectName) return undefined
-  const applied = applyAssistantSnapshot(snapshot)
+  const applied = applyAssistantSnapshot(snapshot, projectName)
   if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) {
     assistantRunController.start(applied.current.id, applied.current.revision)
   }
