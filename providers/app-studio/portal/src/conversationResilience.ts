@@ -31,6 +31,11 @@ export function canHydrateConversationRun(current: AssistantRun | undefined, inc
   return !(assistantRunTerminal(current.status) && !assistantRunTerminal(incoming.status) && incoming.revision === current.revision)
 }
 
+export function acceptConversationSnapshot(current: AssistantRun | undefined, incoming: AssistantRun): { accepted: boolean; current: AssistantRun | undefined } {
+  if (!canHydrateConversationRun(current, incoming)) return { accepted: false, current }
+  return { accepted: true, current: incoming }
+}
+
 export function normalizeSnapshotMessage(message: ProjectMessage & { projectName?: string }): ProjectMessage {
   return { ...message, projectID: message.projectID || message.projectName || '' }
 }
@@ -64,8 +69,9 @@ export function replaceOptimisticUserMessage<TMessage extends ProjectMessage>(
 }
 
 interface ConversationRunTransport {
-  connect(runID: string, afterRevision: number): Promise<void>
+  connect(runID: string, afterRevision: number, setDisconnect: (disconnect: () => void) => void): Promise<void>
   abort(runID: string): Promise<void>
+  recover?(): Promise<void>
   setTimeout(fn: () => void, delay: number): ReturnType<typeof setTimeout>
   clearTimeout(timer: ReturnType<typeof setTimeout>): void
 }
@@ -108,10 +114,19 @@ export class ConversationRunController {
 
   async stop() {
     if (!this.runID) return
+    let aborted = false
     try {
       await this.transport.abort(this.runID)
+      aborted = true
     } finally {
       this.disconnect()
+    }
+    if (aborted) {
+      try {
+        await this.transport.recover?.()
+      } catch {
+        // The abort response is authoritative. Recovery only updates local UI.
+      }
     }
   }
 
@@ -120,7 +135,13 @@ export class ConversationRunController {
     const runID = this.runID
     const revision = this.revision
     try {
-      await this.transport.connect(runID, revision)
+      await this.transport.connect(runID, revision, (disconnect) => {
+        if (this.disconnected || generation !== this.generation) {
+          disconnect()
+          return
+        }
+        this.setDisconnect(disconnect)
+      })
       if (this.disconnected || generation !== this.generation) return
       this.scheduleReconnect(generation)
     } catch {

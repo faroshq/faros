@@ -35,6 +35,14 @@ test('equal revision rehydrates active controls but an older active snapshot can
   assert.equal(state.canHydrateConversationRun(terminal.run, active.run), false)
 })
 
+test('a stale nonterminal snapshot is rejected and cannot be used to attach a subscription', () => {
+  const current = snapshot(4, 'newer')
+  const stale = snapshot(3, 'older')
+  const result = state.acceptConversationSnapshot(current.run, stale.run)
+  assert.equal(result.accepted, false)
+  assert.deepEqual(result.current, current.run)
+})
+
 test('normalizes supervisor snapshot projectName into the portal projectID contract', () => {
   const normalized = state.normalizeSnapshotMessage({ id: 'a-1', projectName: 'project-a', role: 'assistant', content: 'hello', createdAt: '2026-01-01T00:00:00Z' })
   assert.equal(normalized.projectID, 'project-a')
@@ -65,8 +73,11 @@ test('conversation run controller reconnects from the accepted revision with cap
 
 test('a healthy snapshot resets reconnect backoff and stale callbacks are ignored after a new run starts', async () => {
   const scheduled = []
-  const controller = new state.ConversationRunController({
-    connect: async () => { throw new Error('network') }, abort: async () => {},
+  const calls = []
+  let latestDisconnect
+  let controller
+  controller = new state.ConversationRunController({
+    connect: async (runID, _revision, setDisconnect) => { calls.push(runID); setDisconnect(() => { latestDisconnect = runID }); throw new Error('network') }, abort: async () => {},
     setTimeout: (fn, delay) => { scheduled.push({ fn, delay }); return scheduled.length }, clearTimeout: () => {},
   })
   controller.start('run-1', 1)
@@ -75,19 +86,24 @@ test('a healthy snapshot resets reconnect backoff and stale callbacks are ignore
   scheduled.shift().fn()
   await Promise.resolve()
   assert.equal(scheduled.at(-1).delay, 1_000)
-  controller.start('run-2', 1)
   const stale = scheduled.shift()
+  controller.start('run-2', 1)
+  controller.setDisconnect(() => { latestDisconnect = 'run-2' })
+  const callsBeforeStaleTimer = [...calls]
   stale.fn()
   await Promise.resolve()
+  assert.deepEqual(calls, callsBeforeStaleTimer)
   assert.equal(scheduled.at(-1).delay, 1_000)
   controller.disconnect()
+  assert.equal(latestDisconnect, 'run-2')
 })
 
-test('stop aborts the backend run before disconnecting the active subscription', async () => {
+test('stop aborts then disconnects before best-effort recovery failure', async () => {
   const events = []
   const controller = new state.ConversationRunController({
     connect: async () => { events.push('connect') },
     abort: async () => { events.push('abort') },
+    recover: async () => { events.push('recover'); throw new Error('latest unavailable') },
     setTimeout: () => 0,
     clearTimeout: () => {},
   })
@@ -95,5 +111,5 @@ test('stop aborts the backend run before disconnecting the active subscription',
   await Promise.resolve()
   controller.setDisconnect(() => events.push('disconnect'))
   await controller.stop()
-  assert.deepEqual(events, ['connect', 'abort', 'disconnect'])
+  assert.deepEqual(events, ['connect', 'abort', 'disconnect', 'recover'])
 })

@@ -47,12 +47,29 @@ const (
 	projectAssistantMetadataPreviewRefreshNeeded = "previewRefreshNeeded"
 )
 
-func projectAssistantDurableMetadata(run store.AssistantRun, status string, preview bool, toolCalls []projectToolCallStreamEvent) map[string]any {
+func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status string, provisional, preview bool, toolCalls []projectToolCallStreamEvent) map[string]any {
 	metadata := projectAssistantMessageMetadata(status, sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))
 	metadata[projectAssistantMetadataRunID] = run.ID
 	metadata[projectAssistantMetadataRevision] = run.Revision
 	metadata[projectAssistantMetadataWorkingStatus] = status
-	metadata[projectAssistantMetadataProvisional] = !assistantRunTerminal(run.Status)
+	metadata[projectAssistantMetadataProvisional] = provisional
+	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
+	return metadata
+}
+
+func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status string, provisional bool, existing map[string]any) map[string]any {
+	metadata := map[string]any{}
+	if actions := projectAssistantUIActionsFromMetadata(existing[projectMessageMetadataAssistantActions]); len(actions) > 0 {
+		metadata[projectMessageMetadataAssistantActions] = actions
+	}
+	if interrupt := projectAssistantUIInterruptFromMetadata(existing[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
+		metadata[projectMessageMetadataAssistantInterrupt] = interrupt
+	}
+	preview, _ := existing[projectAssistantMetadataPreviewRefreshNeeded].(bool)
+	metadata[projectAssistantMetadataRunID] = run.ID
+	metadata[projectAssistantMetadataRevision] = run.Revision
+	metadata[projectAssistantMetadataWorkingStatus] = status
+	metadata[projectAssistantMetadataProvisional] = provisional
 	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
 	return metadata
 }
@@ -103,7 +120,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, Content: request.Content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, Content: "", CreatedAt: now, UpdatedAt: now}
 	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Status: store.AssistantRunStatusRunning, ClientRequestID: request.ClientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	assistant.Metadata = projectAssistantDurableMetadata(run, "Working", false, nil)
+	assistant.Metadata = projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil)
 	created, err := s.store.CreateAssistantRun(r.Context(), scope, user, assistant, run)
 	if err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
@@ -116,6 +133,30 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 	if err := supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 		content := &strings.Builder{}
 		var toolCalls []projectToolCallStreamEvent
+		status := "Working"
+		provisional := false
+		workspaceScope := projectWorkspaceScope(id, project.Name)
+		persistMetadata := func(ctx context.Context, runStatus *store.AssistantRunStatus) error {
+			return accumulator.UpdateSnapshot(ctx, func(run *store.AssistantRun, message *store.Message) {
+				if runStatus != nil {
+					run.Status = *runStatus
+				}
+				if assistantRunTerminal(run.Status) {
+					provisional = false
+				}
+				// update increments the run after this callback; derive metadata from
+				// that exact persisted revision rather than the initial run.
+				next := *run
+				next.Revision++
+				message.Metadata = projectAssistantDurableMetadataForTransition(
+					next,
+					status,
+					provisional,
+					s.projectAssistantPreviewRefreshNeeded(ctx, workspaceScope, "", false, toolCalls),
+					toolCalls,
+				)
+			})
+		}
 		var snapshotErr error
 		var snapshotErrMu sync.Mutex
 		recordSnapshotErr := func(err error) {
@@ -139,12 +180,21 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 				content.WriteString(chunk)
 				recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), false))
 			},
-			OnStatus: func(status string) {
-				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantDurableMetadata(created, status, false, toolCalls)))
+			OnProvisionalText: func(_ string) {
+				provisional = true
+				recordSnapshotErr(persistMetadata(ctx, nil))
+			},
+			OnProvisionalReset: func() {
+				provisional = false
+				recordSnapshotErr(persistMetadata(ctx, nil))
+			},
+			OnStatus: func(nextStatus string) {
+				status = nextStatus
+				recordSnapshotErr(persistMetadata(ctx, nil))
 			},
 			OnToolCall: func(event projectToolCallStreamEvent) {
 				toolCalls = upsertProjectToolCallStreamEvent(toolCalls, event)
-				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))))
+				recordSnapshotErr(persistMetadata(ctx, nil))
 			},
 			OnAssistantEvent: func(event projectAssistantEvent) {
 				if event.Permission != nil && event.Permission.ToolCallID != "" {
@@ -160,7 +210,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 						}
 					}
 				}
-				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))))
+				recordSnapshotErr(persistMetadata(ctx, nil))
 			},
 		})
 		recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), true))
@@ -168,24 +218,34 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if err == nil {
-			recordSnapshotErr(accumulator.SetStatus(ctx, store.AssistantRunStatusCompleted))
+			status = "Completed"
+			runStatus := store.AssistantRunStatusCompleted
+			recordSnapshotErr(persistMetadata(ctx, &runStatus))
 			return
 		}
 		var permissionErr *projectAssistantPermissionRequiredError
 		if errors.As(err, &permissionErr) {
-			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingPermission))
+			status = projectMessageStatusPendingPermission
+			runStatus := store.AssistantRunStatusPendingPermission
+			recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
 			return
 		}
 		var inputErr *projectAssistantInputRequiredError
 		if errors.As(err, &inputErr) {
-			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingInput))
+			status = projectMessageStatusPendingInput
+			runStatus := store.AssistantRunStatusPendingInput
+			recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
 			return
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
-			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusAborted))
+			status = "Aborted"
+			runStatus := store.AssistantRunStatusAborted
+			recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
 			return
 		}
-		recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusFailed))
+		status = "Failed"
+		runStatus := store.AssistantRunStatusFailed
+		recordSnapshotErr(persistMetadata(context.Background(), &runStatus))
 	}); err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
 			s.writeProjectAssistantRunStart(w, http.StatusAccepted, scope, created)

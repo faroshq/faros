@@ -296,6 +296,7 @@ func (s *projectAssistantSupervisor) AbortWith(scope store.Scope, runID string, 
 	active.run.Revision++
 	active.run.UpdatedAt = time.Now().UTC()
 	active.message.UpdatedAt = active.run.UpdatedAt
+	active.message.Metadata = projectAssistantDurableMetadataFromExisting(active.run, "Aborted", false, active.message.Metadata)
 	run, message := active.run, active.message
 	active.cancel(context.Canceled)
 	s.mu.Unlock()
@@ -383,6 +384,13 @@ func (a *projectAssistantSnapshotAccumulator) SetStatus(ctx context.Context, sta
 
 func (a *projectAssistantSnapshotAccumulator) SetMessageMetadata(ctx context.Context, metadata map[string]any) error {
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { active.message.Metadata = metadata }, true)
+}
+
+// UpdateSnapshot keeps run state and its durable assistant-message metadata in
+// one revisioned persistence transition. Callers that publish metadata derived
+// from the run must use this rather than separate status and metadata updates.
+func (a *projectAssistantSnapshotAccumulator) UpdateSnapshot(ctx context.Context, mutate func(*store.AssistantRun, *store.Message)) error {
+	return a.update(ctx, func(active *projectAssistantSupervisedRun) { mutate(&active.run, &active.message) }, true)
 }
 
 func (a *projectAssistantSnapshotAccumulator) UpdateMessage(ctx context.Context, content string, metadata map[string]any) error {
@@ -561,6 +569,7 @@ func (s *projectAssistantSupervisor) recordPersistenceFailure(key projectAssista
 	active.run.Revision++
 	active.run.UpdatedAt = time.Now().UTC()
 	active.message.UpdatedAt = active.run.UpdatedAt
+	active.message.Metadata = projectAssistantDurableMetadataFromExisting(active.run, "Failed", false, active.message.Metadata)
 	run, message, scope := active.run, active.message, active.scope
 	active.cancel(errors.New("assistant snapshot persistence failed"))
 	s.mu.Unlock()

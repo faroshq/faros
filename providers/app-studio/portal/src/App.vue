@@ -40,8 +40,8 @@ import {
 import { parseAssistantTraceHeader, summarizeAssistantTrace } from './assistantProgress'
 import {
   ConversationRunController,
+  acceptConversationSnapshot,
   assistantRunTerminal,
-  canHydrateConversationRun,
   mergeConversationSnapshot,
   normalizeSnapshotMessage,
   replaceOptimisticUserMessage,
@@ -394,12 +394,12 @@ let activeAssistantRun: AssistantRun | null = null
 let pendingMessageSubmission: { projectName: string; content: string; clientRequestID: string } | null = null
 const assistantRunRevisions: Record<string, AssistantRun> = {}
 const assistantRunController = new ConversationRunController({
-  connect: async (runID, afterRevision) => {
+  connect: async (runID, afterRevision, setDisconnect) => {
     const projectName = selected.value?.name
     if (!projectName) return
     const controller = new AbortController()
     activeAssistantSubscription = controller
-    assistantRunController.setDisconnect(() => controller.abort())
+    setDisconnect(() => controller.abort())
     await api.streamAssistantRun(props.ctx, projectName, runID, afterRevision, (snapshot) => {
       if (selected.value?.name !== projectName || snapshot.run.id !== runID) return
       applyAssistantSnapshot(snapshot)
@@ -409,6 +409,10 @@ const assistantRunController = new ConversationRunController({
     const projectName = selected.value?.name
     if (!projectName) return
     await api.abortAssistantRun(props.ctx, projectName, runID)
+  },
+  recover: async () => {
+    const projectName = selected.value?.name
+    if (!projectName) return
     await recoverAssistantConversation(projectName)
   },
   setTimeout: (fn, delay) => window.setTimeout(fn, delay),
@@ -1790,16 +1794,17 @@ async function refreshSelectedProjectConversation(projectName: string) {
   await recoverAssistantConversation(projectName)
 }
 
-function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot) {
+function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot): { accepted: boolean; current: AssistantRun | undefined } {
   const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
   const previousRun = assistantRunRevisions[normalized.run.id]
+  const accepted = acceptConversationSnapshot(previousRun, normalized.run)
+  if (!accepted.accepted) return accepted
   const current = mergeConversationSnapshot(
     { messages: messages.value, runs: assistantRunRevisions },
     normalized,
   )
   if (current.messages !== messages.value) messages.value = current.messages.map(toProjectMessageView)
   Object.assign(assistantRunRevisions, current.runs)
-  if (!canHydrateConversationRun(previousRun, normalized.run)) return
   const acceptedTerminal = assistantRunTerminal(normalized.run.status) && (!previousRun || !assistantRunTerminal(previousRun.status) || normalized.run.revision > previousRun.revision)
   activeAssistantRun = normalized.run
   assistantRunController.markHealthySnapshot(normalized.run.revision)
@@ -1813,14 +1818,18 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot) {
     const status = normalized.message.metadata?.assistantStatus
     conversationStatus.value = typeof status === 'string' ? status : 'Working'
   }
+  return accepted
 }
 
-async function recoverAssistantConversation(projectName: string) {
-  if (selected.value?.name !== projectName) return
+async function recoverAssistantConversation(projectName: string): Promise<{ accepted: boolean; current: AssistantRun | undefined } | undefined> {
+  if (selected.value?.name !== projectName) return undefined
   const snapshot = await api.getLatestAssistantRun(props.ctx, projectName)
-  if (!snapshot || selected.value?.name !== projectName) return
-  applyAssistantSnapshot(snapshot)
-  if (!assistantRunTerminal(snapshot.run.status)) assistantRunController.start(snapshot.run.id, snapshot.run.revision)
+  if (!snapshot || selected.value?.name !== projectName) return undefined
+  const applied = applyAssistantSnapshot(snapshot)
+  if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) {
+    assistantRunController.start(applied.current.id, applied.current.revision)
+  }
+  return applied
 }
 
 function reloadActiveAssistantConversation() {
@@ -2231,11 +2240,29 @@ async function sendMessage() {
   } catch (e) {
     messages.value = messages.value.filter((message) => message.id !== optimisticID)
     if (e instanceof ProjectAPIRequestError && e.status === 409) {
-      await recoverAssistantConversation(projectName)
+      try {
+        const recovered = await recoverAssistantConversation(projectName)
+        const persistedUserID = recovered?.current?.userMessageID
+        const persistedPrompt = persistedUserID
+          ? messages.value.find((message) => message.id === persistedUserID && message.role === 'user')
+          : undefined
+        if (persistedPrompt?.content === content) {
+          pendingMessageSubmission = null
+        } else {
+          prompt.value = content
+        }
+        if (!recovered?.current) messageStreaming.value = false
+      } catch (recoveryError) {
+        messageStreaming.value = false
+        prompt.value = content
+        const detail = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+        error.value = detail ? `Could not recover the active assistant run: ${detail}` : 'Could not recover the active assistant run. Your prompt is preserved.'
+      }
       return
     }
     error.value = e instanceof Error ? e.message : String(e)
     prompt.value = content
+    messageStreaming.value = false
   } finally {
     busy.value = false
     // The assistant may have advanced a checkpoint (selected a template,
