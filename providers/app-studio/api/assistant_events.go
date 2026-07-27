@@ -61,6 +61,15 @@ func (w *projectAssistantStreamWriter) EmitProjectAssistantEvent(
 			return nil
 		}
 		return w.writeUI(ctx, w.assistantID, projectAssistantUIStatusEvent(event.Status), false)
+	case projectAssistantEventPlan:
+		if event.Plan == nil || len(event.Plan.Steps) == 0 {
+			return nil
+		}
+		return w.write(projectMessageStreamEvent{
+			Type:               string(projectAssistantEventPlan),
+			AssistantMessageID: w.assistantID,
+			Plan:               event.Plan,
+		})
 	case projectAssistantEventToolCallStarted, projectAssistantEventToolCallFinished:
 		if event.ToolCall == nil || event.ToolCall.ID == "" || event.ToolCall.Status == "" {
 			return nil

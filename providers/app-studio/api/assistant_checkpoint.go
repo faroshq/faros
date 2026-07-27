@@ -884,6 +884,9 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 			OnProvisionalText:  func(string) { metadataState.provisional = true; persistMetadata(ctx, nil) },
 			OnProvisionalReset: func() { metadataState.provisional = false; persistMetadata(ctx, nil) },
 			OnStatus:           func(status string) { metadataState.status = status; persistMetadata(ctx, nil) },
+			OnPlan: func(plan projectAssistantPlanSnapshot) {
+				emitAssistantEvent(projectAssistantEvent{Type: projectAssistantEventPlan, Plan: &plan})
+			},
 			OnToolCall: func(toolCall projectToolCallStreamEvent) {
 				streamToolCall(toolCall)
 				persistMetadata(ctx, nil)

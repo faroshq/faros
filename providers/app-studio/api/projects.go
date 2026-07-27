@@ -134,6 +134,7 @@ type projectMessageStreamEvent struct {
 	Type               string                              `json:"type,omitempty"`
 	AssistantMessageID string                              `json:"assistantMessageID,omitempty"`
 	Error              string                              `json:"error,omitempty"`
+	Plan               *projectAssistantPlanSnapshot       `json:"plan,omitempty"`
 	Project            *ProjectView                        `json:"project,omitempty"`
 	BeginRendering     *projectAssistantUIBeginRendering   `json:"beginRendering,omitempty"`
 	SurfaceUpdate      *projectAssistantUISurfaceUpdate    `json:"surfaceUpdate,omitempty"`
@@ -977,8 +978,11 @@ func (s *Server) streamProjectAssistantWithStart(
 		OnProvisionalText:  streamProvisionalText,
 		OnProvisionalReset: resetProvisionalText,
 		OnStatus:           streamStatus,
-		OnToolCall:         streamToolCall,
-		OnAssistantEvent:   emitAssistantEvent,
+		OnPlan: func(plan projectAssistantPlanSnapshot) {
+			emitAssistantEvent(projectAssistantEvent{Type: projectAssistantEventPlan, Plan: &plan})
+		},
+		OnToolCall:       streamToolCall,
+		OnAssistantEvent: emitAssistantEvent,
 	}, start)
 	if err != nil {
 		var permissionErr *projectAssistantPermissionRequiredError
