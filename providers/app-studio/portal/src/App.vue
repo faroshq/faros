@@ -38,6 +38,13 @@ import {
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantTraceHeader, summarizeAssistantTrace } from './assistantProgress'
+import {
+  ConversationRunController,
+  assistantRunTerminal,
+  mergeConversationSnapshot,
+  replaceOptimisticUserMessage,
+  type AssistantRun,
+} from './conversationResilience'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import CheckpointChip from '@/components/CheckpointChip.vue'
@@ -61,7 +68,7 @@ import type {
   ImportRepository,
   KedgeContext,
   Project,
-  ProjectAssistantResumeResponse,
+  ProjectAssistantSnapshot,
   ProjectAssistantUIAction,
   ProjectAssistantUIComponent,
   ProjectAssistantUIEvent,
@@ -380,6 +387,27 @@ let developmentPreviewAuthorizationSerial = 0
 let developmentPreviewAuthorizationRetryTimer: number | undefined
 let developmentPreviewAuthorizationRenewalTimer: number | undefined
 let activeMessageStreamController: AbortController | null = null
+let activeAssistantSubscription: AbortController | null = null
+let activeAssistantRun: AssistantRun | null = null
+const assistantRunRevisions: Record<string, AssistantRun> = {}
+const assistantRunController = new ConversationRunController({
+  connect: async (runID, afterRevision) => {
+    const projectName = selected.value?.name
+    if (!projectName) return
+    const controller = new AbortController()
+    activeAssistantSubscription = controller
+    assistantRunController.setDisconnect(() => controller.abort())
+    await api.streamAssistantRun(props.ctx, projectName, runID, afterRevision, applyAssistantSnapshot, controller.signal)
+  },
+  abort: async (runID) => {
+    const projectName = selected.value?.name
+    if (!projectName) return
+    const response = await api.abortAssistantRun(props.ctx, projectName, runID)
+    applyAssistantSnapshot(response)
+  },
+  setTimeout: (fn, delay) => window.setTimeout(fn, delay),
+  clearTimeout: (timer) => window.clearTimeout(timer),
+})
 
 const routeSegment = computed(() => {
   const raw = (props.ctx?.subPath ?? '').split('/').filter(Boolean)[0] ?? ''
@@ -783,6 +811,9 @@ onMounted(() => {
   window.addEventListener('focus', handleDevelopmentPreviewAuthorizationWake)
   window.addEventListener('online', handleDevelopmentPreviewAuthorizationWake)
   window.addEventListener('pageshow', handleDevelopmentPreviewAuthorizationWake)
+  window.addEventListener('focus', reloadActiveAssistantConversation)
+  window.addEventListener('online', reloadActiveAssistantConversation)
+  window.addEventListener('pageshow', reloadActiveAssistantConversation)
   document.addEventListener('visibilitychange', handleDevelopmentPreviewVisibilityChange)
 })
 
@@ -899,11 +930,15 @@ onBeforeUnmount(() => {
   clearDevelopmentPreviewAuthorizationRetry()
   clearDevelopmentPreviewAuthorizationRenewal()
   clearLandingPlaceholderRotation()
-  cancelMessageStream()
+  assistantRunController.disconnect()
+  activeAssistantSubscription?.abort()
   detachMountedTool()
   window.removeEventListener('focus', handleDevelopmentPreviewAuthorizationWake)
   window.removeEventListener('online', handleDevelopmentPreviewAuthorizationWake)
   window.removeEventListener('pageshow', handleDevelopmentPreviewAuthorizationWake)
+  window.removeEventListener('focus', reloadActiveAssistantConversation)
+  window.removeEventListener('online', reloadActiveAssistantConversation)
+  window.removeEventListener('pageshow', reloadActiveAssistantConversation)
   document.removeEventListener('visibilitychange', handleDevelopmentPreviewVisibilityChange)
   window.removeEventListener('pointermove', resizeWorkspace)
   window.removeEventListener('pointerup', stopResize)
@@ -1705,10 +1740,17 @@ async function saveProjectSettings() {
 
 async function openProject(name: string, updateURL = true) {
   if (!name) return
+  if (selected.value?.name !== name) {
+    assistantRunController.disconnect()
+    activeAssistantSubscription?.abort()
+    activeAssistantRun = null
+    messageStreaming.value = false
+  }
   error.value = null
   try {
     selected.value = await api.getProject(props.ctx, name)
     messages.value = (await api.listAllMessages(props.ctx, name)).map(toProjectMessageView)
+    await recoverAssistantConversation(name)
     if (updateURL) props.navigate(encodeURIComponent(name))
   } catch (e) {
     if (handleProjectAPIInitializing(e)) return
@@ -1727,6 +1769,37 @@ async function refreshSelectedProjectConversation(projectName: string) {
   selected.value = project
   messages.value = loadedMessages.map(toProjectMessageView)
   projects.value = projectList
+  await recoverAssistantConversation(projectName)
+}
+
+function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot) {
+  const current = mergeConversationSnapshot(
+    { messages: messages.value, runs: assistantRunRevisions },
+    snapshot,
+  )
+  if (current.messages === messages.value) return
+  messages.value = current.messages.map(toProjectMessageView)
+  Object.assign(assistantRunRevisions, current.runs)
+  activeAssistantRun = snapshot.run
+  assistantRunController.setRevision(snapshot.run.revision)
+  messageStreaming.value = !assistantRunTerminal(snapshot.run.status)
+  if (assistantRunTerminal(snapshot.run.status)) {
+    conversationStatus.value = ''
+    assistantRunController.disconnect()
+  }
+}
+
+async function recoverAssistantConversation(projectName: string) {
+  if (selected.value?.name !== projectName) return
+  const snapshot = await api.getLatestAssistantRun(props.ctx, projectName)
+  if (!snapshot || selected.value?.name !== projectName) return
+  applyAssistantSnapshot(snapshot)
+  if (!assistantRunTerminal(snapshot.run.status)) assistantRunController.start(snapshot.run.id, snapshot.run.revision)
+}
+
+function reloadActiveAssistantConversation() {
+  const projectName = selected.value?.name
+  if (projectName) void recoverAssistantConversation(projectName)
 }
 
 async function refreshProjectConversationAfterAssistantRun(projectName: string): Promise<boolean> {
@@ -2110,56 +2183,26 @@ async function sendMessage() {
   busy.value = true
   messageStreaming.value = true
   error.value = null
-  let assistantMessageID = ''
-  let shouldRefreshPreviewAfterRun = false
-  const controller = new AbortController()
-  activeMessageStreamController = controller
-
+  const clientRequestID = crypto.randomUUID()
+  const optimisticID = `optimistic-${clientRequestID}`
   const optimisticUserMessage: ProjectMessage = {
-    id: `temp-${Date.now()}-user`,
+    id: optimisticID,
     projectID: projectName,
     role: 'user',
     content,
     createdAt: new Date().toISOString(),
   }
-  const optimisticMessages = [...messages.value, optimisticUserMessage]
-  messages.value = optimisticMessages
+  messages.value = [...messages.value, optimisticUserMessage]
   try {
-    await api.createMessageStream(props.ctx, projectName, content, (event: ProjectMessageStreamEvent) => {
-      if (isProjectAssistantUIStreamEvent(event)) {
-        if (projectAssistantUIEventRequestsPreviewRefresh(event)) {
-          shouldRefreshPreviewAfterRun = true
-        }
-        const nextAssistantMessageID = applyAssistantUIEvent(projectName, event)
-        if (!assistantMessageID && nextAssistantMessageID) {
-          assistantMessageID = nextAssistantMessageID
-        }
-      } else if (event.type === 'run_finished') {
-        conversationStatus.value = ''
-        if (!assistantMessageID) {
-          assistantMessageID = event.assistantMessageID ?? ''
-        }
-      } else if (event.type === 'run_failed') {
-        throw new Error(event.error ?? 'Streaming error')
-      }
-    }, controller.signal)
-    if (await refreshProjectConversationAfterAssistantRun(projectName) && shouldRefreshPreviewAfterRun) {
-      await refreshDevelopmentPreviewFrame('Preview refreshed')
-    }
+    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
+    messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
+    applyAssistantSnapshot({ run: started.run, message: started.assistant })
+    if (!assistantRunTerminal(started.run.status)) assistantRunController.start(started.run.id, started.run.revision)
   } catch (e) {
-    if (isAbortError(e)) {
-      markAssistantMessageInterrupted(projectName, assistantMessageID)
-      return
-    }
-    messages.value = messages.value.filter((message) => message.id !== assistantMessageID)
+    messages.value = messages.value.filter((message) => message.id !== optimisticID)
     error.value = e instanceof Error ? e.message : String(e)
     prompt.value = content
   } finally {
-    if (activeMessageStreamController === controller) {
-      activeMessageStreamController = null
-    }
-    conversationStatus.value = ''
-    messageStreaming.value = false
     busy.value = false
     // The assistant may have advanced a checkpoint (selected a template,
     // committed CI, …); refresh the header chips to reflect it.
@@ -2168,8 +2211,8 @@ async function sendMessage() {
 }
 
 function cancelMessageStream() {
-  if (!activeMessageStreamController || activeMessageStreamController.signal.aborted) return
-  activeMessageStreamController.abort()
+  if (!activeAssistantRun || assistantRunTerminal(activeAssistantRun.status)) return
+  void assistantRunController.stop().catch((e) => { error.value = e instanceof Error ? e.message : String(e) })
 }
 
 function ensureAssistantMessage(projectName: string, assistantMessageID: string): number {
@@ -2383,7 +2426,7 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
       decision,
       assistantMessageID: message.id,
     })
-    const shouldRefreshPreview = applyPermissionResponse(projectName, message.id, interrupt, response)
+    const shouldRefreshPreview = applyPermissionResponse(interrupt, response)
     responseApplied = true
     await refreshSelectedProjectConversation(projectName)
     if (shouldRefreshPreview) {
@@ -2428,7 +2471,7 @@ async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: Proj
       answer,
       assistantMessageID: message.id,
     })
-    const shouldRefreshPreview = applyPermissionResponse(projectName, message.id, interrupt, response)
+    const shouldRefreshPreview = applyPermissionResponse(interrupt, response)
     responseApplied = true
     await refreshSelectedProjectConversation(projectName)
     if (shouldRefreshPreview) {
@@ -2492,24 +2535,10 @@ async function handleResumeFailure(
   error.value = e instanceof Error ? e.message : String(e)
 }
 
-function applyPermissionResponse(
-  projectName: string,
-  assistantMessageID: string,
-  interrupt: ProjectAssistantUIInterruptRequest,
-  response: ProjectAssistantResumeResponse,
-): boolean {
+function applyPermissionResponse(interrupt: ProjectAssistantUIInterruptRequest, response: ProjectAssistantSnapshot): boolean {
+  applyAssistantSnapshot(response)
+  if (!assistantRunTerminal(response.run.status)) assistantRunController.start(response.run.id, response.run.revision)
   const key = permissionKey(interrupt)
-  let shouldRefreshPreview = false
-  if (response.uiEvents?.length) {
-    for (const uiEvent of response.uiEvents) {
-      if (projectAssistantUIEventRequestsPreviewRefresh(uiEvent)) {
-        shouldRefreshPreview = true
-      }
-      applyAssistantUIEvent(projectName, uiEvent)
-    }
-  } else {
-    applyAssistantInterrupt(projectName, assistantMessageID, { ...interrupt, status: 'resolved' })
-  }
   if (key) {
     const errors = { ...permissionErrors.value }
     delete errors[key]
@@ -2518,22 +2547,7 @@ function applyPermissionResponse(
     delete followErrors[key]
     followUpErrors.value = followErrors
   }
-  if (response.assistantMessage) {
-    upsertProjectMessage(response.assistantMessage)
-  }
-  return shouldRefreshPreview
-}
-
-function upsertProjectMessage(message: ProjectMessage) {
-  const view = toProjectMessageView(message)
-  const idx = messages.value.findIndex((item) => item.id === view.id)
-  if (idx >= 0) {
-    messages.value[idx] = view
-  } else {
-    messages.value = [...messages.value, view]
-    return
-  }
-  messages.value = [...messages.value]
+  return false
 }
 
 function projectMessagesForConversation(source: ProjectMessageView[]): ProjectMessageView[] {
