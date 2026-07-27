@@ -377,6 +377,109 @@ func TestMemoryStoreFindsLatestRunAndClientRequest(t *testing.T) {
 	}
 }
 
+func TestMemoryAndEncryptedStoresExcludeInternalAssistantRunFromConversationSemantics(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := mustDurableAssistantRunStore(t, tt.new(t))
+			scope := testAssistantRunScope()
+			createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+			run := createTestAssistantRun(t, store, scope, createdAt)
+
+			grant := AssistantRun{
+				ID:              AssistantRunIDApprovedPlanGrant,
+				Status:          AssistantRunStatusCompleted,
+				ClientRequestID: "internal-grant-request",
+				RequestID:       "grant-revision",
+				Checkpoint:      json.RawMessage(`{"revision":"grant-revision"}`),
+				CreatedAt:       createdAt.Add(time.Minute),
+				UpdatedAt:       createdAt.Add(time.Minute),
+			}
+			if err := store.CompareAndSwapAssistantRun(ctx, scope, grant, ""); err != nil {
+				t.Fatalf("persist internal grant: %v", err)
+			}
+
+			latest, err := store.LatestAssistantRun(ctx, scope)
+			if err != nil {
+				t.Fatalf("LatestAssistantRun: %v", err)
+			}
+			if latest.ID != run.ID {
+				t.Fatalf("latest run = %q, want conversation run %q", latest.ID, run.ID)
+			}
+			if _, err := store.FindAssistantRunByClientRequestID(ctx, scope, grant.ClientRequestID); !errors.Is(err, ErrAssistantRunNotFound) {
+				t.Fatalf("internal grant client request lookup error = %v, want not found", err)
+			}
+
+			deleted, err := store.DeleteMessagesOlderThan(ctx, createdAt.Add(30*time.Second))
+			if err != nil {
+				t.Fatalf("DeleteMessagesOlderThan: %v", err)
+			}
+			if deleted != 3 { // user, assistant, and the real conversation run
+				t.Fatalf("deleted = %d, want 3 conversation records", deleted)
+			}
+			if _, err := store.GetAssistantRun(ctx, scope, grant.ID); err != nil {
+				t.Fatalf("GetAssistantRun internal grant after retention: %v", err)
+			}
+			if _, err := store.LatestAssistantRun(ctx, scope); !errors.Is(err, ErrAssistantRunNotFound) {
+				t.Fatalf("LatestAssistantRun after retaining only internal grant error = %v, want not found", err)
+			}
+		})
+	}
+}
+
+func TestMemoryAndEncryptedStoresKeepPausedLegacyRunsResumable(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := tt.new(t)
+			scope := testAssistantRunScope()
+			now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+			legacy := AssistantRun{
+				ID:         "legacy-paused",
+				Status:     AssistantRunStatusPendingPermission,
+				RequestID:  "permission-1",
+				Checkpoint: json.RawMessage(`{"checkpoint":"legacy"}`),
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			if err := store.SaveAssistantRun(ctx, scope, legacy); err != nil {
+				t.Fatalf("SaveAssistantRun legacy paused: %v", err)
+			}
+			claimed, err := store.ClaimAssistantRun(ctx, scope, legacy.ID, legacy.RequestID, now.Add(time.Minute))
+			if err != nil {
+				t.Fatalf("ClaimAssistantRun legacy paused: %v", err)
+			}
+			if claimed.Status != AssistantRunStatusRunning {
+				t.Fatalf("claimed legacy status = %q, want running", claimed.Status)
+			}
+		})
+	}
+}
+
 func TestMemoryStoreRecoversCompletedRequestWhileAnotherRunIsActive(t *testing.T) {
 	store := mustDurableAssistantRunStore(t, NewMemoryStore())
 	scope := testAssistantRunScope()

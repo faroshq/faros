@@ -137,6 +137,88 @@ func TestProjectAssistantSupervisorReservationProtectsFreshDurableRunUntilAttach
 	}
 }
 
+func TestProjectAssistantApprovedPlanGrantDoesNotShadowOrphanedConversationRun(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	stale := store.AssistantRun{ID: "run-stale", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-stale", UserMessageID: "user-stale", ActiveMessageID: "assistant-stale", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if _, err := messages.CreateAssistantRun(context.Background(), scope,
+		store.Message{ID: stale.UserMessageID, Role: "user", Content: "stale", CreatedAt: now, UpdatedAt: now},
+		store.Message{ID: stale.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}, stale,
+	); err != nil {
+		t.Fatalf("CreateAssistantRun stale: %v", err)
+	}
+	if err := server.saveProjectAssistantApprovedPlan(context.Background(), scope, &projectAssistantApprovedPlan{Operations: []string{projectToolWriteFile}}); err != nil {
+		t.Fatalf("saveProjectAssistantApprovedPlan: %v", err)
+	}
+
+	if err := server.reconcileOrphanedProjectAssistantRun(context.Background(), scope); err != nil {
+		t.Fatalf("reconcileOrphanedProjectAssistantRun: %v", err)
+	}
+	interrupted, err := messages.GetAssistantRun(context.Background(), scope, stale.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantRun stale: %v", err)
+	}
+	if interrupted.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("stale run status = %q, want interrupted", interrupted.Status)
+	}
+
+	started, err := server.startProjectAssistantRunDurably(context.Background(), scope, "new conversation", "request-new", func(store.AssistantRun, store.Message) error { return nil })
+	if err != nil {
+		t.Fatalf("startProjectAssistantRunDurably after reconciliation: %v", err)
+	}
+	if !started.Started || started.Run.ClientRequestID != "request-new" {
+		t.Fatalf("started run = %#v, want a new started conversation", started)
+	}
+}
+
+func TestProjectAssistantNormalizesPausedLegacyRunFromCheckpointBeforeClaim(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	checkpoint, err := json.Marshal(projectAssistantCheckpointState{AssistantMessageID: "assistant-legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := store.AssistantRun{
+		ID:         "run-legacy",
+		Status:     store.AssistantRunStatusPendingPermission,
+		RequestID:  "permission-legacy",
+		Checkpoint: checkpoint,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := messages.SaveAssistantRun(context.Background(), scope, run); err != nil {
+		t.Fatalf("SaveAssistantRun: %v", err)
+	}
+	if err := messages.AppendMessage(context.Background(), scope, store.Message{
+		ID:        "assistant-legacy",
+		Role:      "assistant",
+		Metadata:  map[string]any{projectAssistantMetadataRunID: run.ID},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	normalized, err := server.normalizeProjectAssistantPausedRun(context.Background(), scope, run)
+	if err != nil {
+		t.Fatalf("normalizeProjectAssistantPausedRun: %v", err)
+	}
+	if normalized.ActiveMessageID != "assistant-legacy" {
+		t.Fatalf("active message id = %q, want checkpoint message", normalized.ActiveMessageID)
+	}
+	claimed, err := messages.ClaimAssistantRun(context.Background(), scope, run.ID, run.RequestID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimAssistantRun after normalization: %v", err)
+	}
+	if claimed.ActiveMessageID != "assistant-legacy" || claimed.Status != store.AssistantRunStatusRunning {
+		t.Fatalf("claimed run = %#v, want running run with normalized active message", claimed)
+	}
+}
+
 func TestProjectAssistantSupervisorReservationReleaseAllowsRetryAfterStartFailure(t *testing.T) {
 	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}

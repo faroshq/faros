@@ -166,16 +166,16 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 		run.UserMessageID = existing.UserMessageID
 		run.Revision = existing.Revision
 	}
-	if run.ClientRequestID != "" {
+	if AssistantRunIsConversation(run) && run.ClientRequestID != "" {
 		for id, existing := range s.assistantRuns[scope] {
-			if id != run.ID && existing.ClientRequestID == run.ClientRequestID {
+			if id != run.ID && AssistantRunIsConversation(existing) && existing.ClientRequestID == run.ClientRequestID {
 				return fmt.Errorf("%w: client request %q", ErrAssistantRunConflict, run.ClientRequestID)
 			}
 		}
 	}
-	if !assistantRunStatusTerminal(run.Status) {
+	if AssistantRunIsConversation(run) && !assistantRunStatusTerminal(run.Status) {
 		for id, existing := range s.assistantRuns[scope] {
-			if id != run.ID && !assistantRunStatusTerminal(existing.Status) {
+			if id != run.ID && AssistantRunIsConversation(existing) && !assistantRunStatusTerminal(existing.Status) {
 				return fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
 			}
 		}
@@ -198,13 +198,13 @@ func (s *MemoryStore) CreateAssistantRun(_ context.Context, scope Scope, user Me
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.assistantRuns[scope] {
-		if existing.ClientRequestID == run.ClientRequestID {
+		if AssistantRunIsConversation(existing) && existing.ClientRequestID == run.ClientRequestID {
 			return cloneAssistantRun(existing), nil
 		}
 	}
-	if !assistantRunStatusTerminal(run.Status) {
+	if AssistantRunIsConversation(run) && !assistantRunStatusTerminal(run.Status) {
 		for _, existing := range s.assistantRuns[scope] {
-			if !assistantRunStatusTerminal(existing.Status) {
+			if AssistantRunIsConversation(existing) && !assistantRunStatusTerminal(existing.Status) {
 				return AssistantRun{}, fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
 			}
 		}
@@ -240,9 +240,9 @@ func (s *MemoryStore) SaveAssistantRunSnapshot(_ context.Context, scope Scope, r
 	if !ok || current.Revision != expectedRevision {
 		return fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, run.ID)
 	}
-	if !assistantRunStatusTerminal(run.Status) {
+	if AssistantRunIsConversation(run) && !assistantRunStatusTerminal(run.Status) {
 		for id, existing := range s.assistantRuns[scope] {
-			if id != run.ID && !assistantRunStatusTerminal(existing.Status) {
+			if id != run.ID && AssistantRunIsConversation(existing) && !assistantRunStatusTerminal(existing.Status) {
 				return fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
 			}
 		}
@@ -296,9 +296,9 @@ func (s *MemoryStore) CompareAndSwapAssistantRun(_ context.Context, scope Scope,
 		run.UserMessageID = current.UserMessageID
 		run.Revision = current.Revision
 	}
-	if !assistantRunStatusTerminal(run.Status) {
+	if AssistantRunIsConversation(run) && !assistantRunStatusTerminal(run.Status) {
 		for id, existing := range s.assistantRuns[scope] {
-			if id != run.ID && !assistantRunStatusTerminal(existing.Status) {
+			if id != run.ID && AssistantRunIsConversation(existing) && !assistantRunStatusTerminal(existing.Status) {
 				return fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
 			}
 		}
@@ -374,7 +374,7 @@ func (s *MemoryStore) FindAssistantRunByClientRequestID(_ context.Context, scope
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, run := range s.assistantRuns[scope] {
-		if run.ClientRequestID == clientRequestID {
+		if AssistantRunIsConversation(run) && run.ClientRequestID == clientRequestID {
 			return cloneAssistantRun(run), nil
 		}
 	}
@@ -390,7 +390,7 @@ func (s *MemoryStore) LatestAssistantRun(_ context.Context, scope Scope) (Assist
 	var latest AssistantRun
 	found := false
 	for _, run := range s.assistantRuns[scope] {
-		if !found || run.UpdatedAt.After(latest.UpdatedAt) || (run.UpdatedAt.Equal(latest.UpdatedAt) && run.ID > latest.ID) {
+		if AssistantRunIsConversation(run) && (!found || run.UpdatedAt.After(latest.UpdatedAt) || (run.UpdatedAt.Equal(latest.UpdatedAt) && run.ID > latest.ID)) {
 			latest = run
 			found = true
 		}
@@ -429,7 +429,7 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 	}
 	for scope, runs := range s.assistantRuns {
 		for id, run := range runs {
-			if run.UpdatedAt.Before(before) {
+			if AssistantRunIsConversation(run) && run.UpdatedAt.Before(before) {
 				delete(runs, id)
 				deleted++
 			}

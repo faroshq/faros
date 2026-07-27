@@ -35,6 +35,7 @@ import (
 )
 
 type projectAssistantCheckpointState struct {
+	AssistantMessageID        string                               `json:"assistantMessageID,omitempty"`
 	ToolCalls                 []chatToolCall                       `json:"toolCalls"`
 	CurrentIndex              int                                  `json:"currentIndex"`
 	ProjectRepositoryRef      string                               `json:"projectRepositoryRef,omitempty"`
@@ -86,6 +87,47 @@ type projectAssistantResumeResponse struct {
 	Checkpoint       *projectAssistantCheckpoint        `json:"-"`
 	AssistantContent string                             `json:"-"`
 	Result           string                             `json:"-"`
+}
+
+func projectAssistantCheckpointActiveMessageID(state projectAssistantCheckpointState) string {
+	return strings.TrimSpace(state.AssistantMessageID)
+}
+
+// normalizeProjectAssistantPausedRun repairs legacy paused rows that predate
+// durable message identity columns. The checkpoint is the authoritative source
+// for its assistant message; do not infer a message by chronology or content.
+func (s *Server) normalizeProjectAssistantPausedRun(
+	ctx context.Context,
+	scope store.Scope,
+	run store.AssistantRun,
+) (store.AssistantRun, error) {
+	if s == nil || s.store == nil || run.ActiveMessageID != "" ||
+		(run.Status != store.AssistantRunStatusPendingPermission && run.Status != store.AssistantRunStatusPendingInput) {
+		return run, nil
+	}
+	var checkpoint projectAssistantCheckpointState
+	if err := json.Unmarshal(run.Checkpoint, &checkpoint); err != nil {
+		return run, fmt.Errorf("decode assistant checkpoint for run normalization: %w", err)
+	}
+	assistantMessageID := projectAssistantCheckpointActiveMessageID(checkpoint)
+	if assistantMessageID == "" {
+		return run, nil
+	}
+	message, err := s.findProjectMessage(ctx, scope, assistantMessageID)
+	if err != nil {
+		return run, fmt.Errorf("find checkpoint assistant message: %w", err)
+	}
+	if message.Role != aiv1alpha1.ProjectMessageRoleAssistant {
+		return run, fmt.Errorf("checkpoint assistant message %q is not an assistant message", assistantMessageID)
+	}
+	if messageRunID, _ := message.Metadata[projectAssistantMetadataRunID].(string); messageRunID != "" && messageRunID != run.ID {
+		return run, fmt.Errorf("checkpoint assistant message %q belongs to run %q", assistantMessageID, messageRunID)
+	}
+	run.ActiveMessageID = assistantMessageID
+	if err := s.store.SaveAssistantRun(ctx, scope, run); err != nil {
+		return run, fmt.Errorf("save normalized assistant run: %w", err)
+	}
+	return run, nil
 }
 
 func (s *Server) saveProjectAssistantRun(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
@@ -199,6 +241,9 @@ func (s *Server) saveProjectAssistantEinoPermissionCheckpoint(
 	state.LastToolMessages = cloneChatMessages(state.LastToolMessages)
 	state.ApprovedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
 	state.Eino = cloneProjectAssistantEinoCheckpointState(state.Eino)
+	if state.AssistantMessageID == "" && req.AssistantRun != nil {
+		state.AssistantMessageID = strings.TrimSpace(req.AssistantRun.ActiveMessageID)
+	}
 	if strings.TrimSpace(state.Eino.InterruptType) == "" {
 		state.Eino.InterruptType = projectAssistantInterruptTypePermission
 	}
@@ -272,6 +317,9 @@ func (s *Server) saveProjectAssistantEinoFollowUpCheckpoint(
 	state.LastToolMessages = cloneChatMessages(state.LastToolMessages)
 	state.ApprovedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
 	state.Eino = cloneProjectAssistantEinoCheckpointState(state.Eino)
+	if state.AssistantMessageID == "" && req.AssistantRun != nil {
+		state.AssistantMessageID = strings.TrimSpace(req.AssistantRun.ActiveMessageID)
+	}
 	state.Eino.InterruptType = projectAssistantInterruptTypeFollowUp
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -435,6 +483,10 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 	}
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
 	preflightRun, err := s.store.GetAssistantRun(ctx, messageScope, runID)
+	if err != nil {
+		return projectAssistantResumeResponse{}, err
+	}
+	preflightRun, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, preflightRun)
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
@@ -1046,6 +1098,10 @@ func (s *Server) abortProjectAssistantRun(
 	}
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
 	run, err := s.store.GetAssistantRun(ctx, messageScope, runID)
+	if err != nil {
+		return projectAssistantResumeResponse{}, err
+	}
+	run, err = s.normalizeProjectAssistantPausedRun(ctx, messageScope, run)
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}

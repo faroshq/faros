@@ -59,6 +59,11 @@ type Message struct {
 type AssistantRunStatus string
 
 const (
+	// AssistantRunIDApprovedPlanGrant is reserved for the cross-turn plan grant.
+	// It is persisted as an AssistantRun so its blob remains encrypted, but it
+	// does not participate in user-visible conversation lifecycle semantics.
+	AssistantRunIDApprovedPlanGrant = "approved-plan-grant"
+
 	AssistantRunStatusPendingPermission AssistantRunStatus = "pending_permission"
 	AssistantRunStatusPendingInput      AssistantRunStatus = "pending_input"
 	AssistantRunStatusRunning           AssistantRunStatus = "running"
@@ -84,6 +89,13 @@ type AssistantRun struct {
 	Audit           json.RawMessage    `json:"audit,omitempty"`
 	CreatedAt       time.Time          `json:"createdAt"`
 	UpdatedAt       time.Time          `json:"updatedAt"`
+}
+
+// AssistantRunIsConversation reports whether a row participates in durable
+// assistant conversation lifecycle semantics. Reserved rows remain available
+// through GetAssistantRun for their owning feature.
+func AssistantRunIsConversation(run AssistantRun) bool {
+	return run.ID != AssistantRunIDApprovedPlanGrant
 }
 
 // Page is an ordered slice of messages plus the next cursor for pagination.

@@ -28,6 +28,7 @@ import (
 
 const messageSchemaVersion = "v3"
 const durableAssistantRunSchemaVersion = "v4"
+const assistantRunConversationIndexSchemaVersion = "v5"
 
 const createMessageSchemaMigrationsTable = `CREATE TABLE IF NOT EXISTS app_studio_message_schema_migrations (
 	version text PRIMARY KEY,
@@ -138,15 +139,28 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0`,
 		`UPDATE app_studio_assistant_runs
 		SET status = 'interrupted'
-		WHERE status NOT IN ('completed', 'aborted', 'failed', 'interrupted')`,
+		WHERE status = 'running'`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
 			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, client_request_id)
-			WHERE client_request_id <> ''`,
+			WHERE client_request_id <> '' AND run_id <> 'approved-plan-grant'`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_active_idx
 			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name)
-			WHERE status NOT IN ('completed', 'aborted', 'failed', 'interrupted')`,
+			WHERE run_id <> 'approved-plan-grant' AND status NOT IN ('completed', 'aborted', 'failed', 'interrupted')`,
 	}
 	if err := ensureSchemaVersion(ctx, tx, durableAssistantRunSchemaVersion, durableRunStmts...); err != nil {
+		return err
+	}
+	conversationIndexStmts := []string{
+		`DROP INDEX IF EXISTS app_studio_assistant_runs_scope_client_request_idx`,
+		`DROP INDEX IF EXISTS app_studio_assistant_runs_scope_active_idx`,
+		`CREATE UNIQUE INDEX app_studio_assistant_runs_scope_client_request_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, client_request_id)
+			WHERE client_request_id <> '' AND run_id <> 'approved-plan-grant'`,
+		`CREATE UNIQUE INDEX app_studio_assistant_runs_scope_active_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name)
+			WHERE run_id <> 'approved-plan-grant' AND status NOT IN ('completed', 'aborted', 'failed', 'interrupted')`,
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantRunConversationIndexSchemaVersion, conversationIndexStmts...); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -746,9 +760,10 @@ func (s *PostgresStore) LatestAssistantRun(ctx context.Context, scope Scope) (As
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3
+		  AND run_id <> $4
 		ORDER BY updated_at DESC, run_id DESC
 		LIMIT 1
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName)
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, AssistantRunIDApprovedPlanGrant)
 	run, err := scanAssistantRun(row, scope.ProjectName)
 	if err == sql.ErrNoRows {
 		return AssistantRun{}, fmt.Errorf("%w: latest run", ErrAssistantRunNotFound)
@@ -793,7 +808,7 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	if err != nil {
 		return 0, fmt.Errorf("count deleted messages: %w", err)
 	}
-	runRes, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs WHERE updated_at < $1`, before.UTC())
+	runRes, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs WHERE updated_at < $1 AND run_id <> $2`, before.UTC(), AssistantRunIDApprovedPlanGrant)
 	if err != nil {
 		return 0, fmt.Errorf("delete stale assistant runs: %w", err)
 	}
@@ -896,7 +911,8 @@ func getAssistantRunByClientRequestID(ctx context.Context, queryer interface {
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND client_request_id = $4
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, clientRequestID)
+		  AND run_id <> $5
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, clientRequestID, AssistantRunIDApprovedPlanGrant)
 	run, err := scanAssistantRun(row, scope.ProjectName)
 	if err == sql.ErrNoRows {
 		return AssistantRun{}, fmt.Errorf("%w: client request %q", ErrAssistantRunNotFound, clientRequestID)

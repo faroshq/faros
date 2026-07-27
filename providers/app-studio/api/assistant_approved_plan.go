@@ -36,7 +36,7 @@ import (
 // blob keeps the grant encrypted at rest and persisted per project without a
 // new store method or schema migration. The grant lives until the next commit,
 // which matches the approval prompt's promise to the user.
-const projectAssistantApprovedPlanGrantRunID = "approved-plan-grant"
+const projectAssistantApprovedPlanGrantRunID = store.AssistantRunIDApprovedPlanGrant
 
 var errProjectAssistantCheckpointGrantStale = errors.New("assistant checkpoint plan grant is stale")
 

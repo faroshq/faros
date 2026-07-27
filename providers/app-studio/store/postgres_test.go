@@ -267,17 +267,42 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 	if latest.ID != run.ID {
 		t.Fatalf("latest run = %q, want %q", latest.ID, run.ID)
 	}
+	grant := AssistantRun{
+		ID:              AssistantRunIDApprovedPlanGrant,
+		Status:          AssistantRunStatusCompleted,
+		ClientRequestID: "internal-grant-request",
+		RequestID:       "grant-revision",
+		Checkpoint:      json.RawMessage(`{"revision":"grant-revision"}`),
+		CreatedAt:       createdAt.Add(4 * time.Minute),
+		UpdatedAt:       createdAt.Add(4 * time.Minute),
+	}
+	if err := store.CompareAndSwapAssistantRun(ctx, scope, grant, ""); err != nil {
+		t.Fatalf("persist grant: %v", err)
+	}
+	latest, err = durable.LatestAssistantRun(ctx, scope)
+	if err != nil {
+		t.Fatalf("LatestAssistantRun after grant: %v", err)
+	}
+	if latest.ID != run.ID {
+		t.Fatalf("latest run after grant = %q, want conversation run %q", latest.ID, run.ID)
+	}
+	if _, err := durable.FindAssistantRunByClientRequestID(ctx, scope, grant.ClientRequestID); !errors.Is(err, ErrAssistantRunNotFound) {
+		t.Fatalf("FindAssistantRunByClientRequestID grant error = %v, want not found", err)
+	}
+	if _, err := durable.GetAssistantRun(ctx, scope, grant.ID); err != nil {
+		t.Fatalf("GetAssistantRun grant: %v", err)
+	}
 
 	for _, indexName := range []string{
 		"app_studio_assistant_runs_scope_client_request_idx",
 		"app_studio_assistant_runs_scope_active_idx",
 	} {
-		var exists bool
-		if err := store.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2)`, schemaName, indexName).Scan(&exists); err != nil {
+		var indexDef string
+		if err := store.db.QueryRowContext(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2`, schemaName, indexName).Scan(&indexDef); err != nil {
 			t.Fatalf("check %s: %v", indexName, err)
 		}
-		if !exists {
-			t.Fatalf("missing durable assistant-run index %q", indexName)
+		if !strings.Contains(indexDef, AssistantRunIDApprovedPlanGrant) {
+			t.Fatalf("durable assistant-run index %q = %q, want reserved grant predicate", indexName, indexDef)
 		}
 	}
 	if err := store.DeleteProjectMessages(ctx, scope); err != nil {
@@ -295,7 +320,7 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 	}
 }
 
-func TestPostgresStoreMigratesLegacyPendingRunExternalDSN(t *testing.T) {
+func TestPostgresStoreMigratesOnlyLegacyRunningRunsExternalDSN(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))
 	if dsn == "" {
 		t.Skip("APP_STUDIO_TEST_POSTGRES_DSN is not set")
@@ -339,27 +364,56 @@ func TestPostgresStoreMigratesLegacyPendingRunExternalDSN(t *testing.T) {
 	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	if _, err := db.ExecContext(ctx, `INSERT INTO `+pq.QuoteIdentifier(schemaName)+`.app_studio_assistant_runs (
 		org_uuid, workspace_uuid, project_name, run_id, status, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, "legacy-pending", AssistantRunStatusPendingInput, createdAt, createdAt); err != nil {
-		t.Fatalf("insert legacy pending run: %v", err)
+	) VALUES
+		($1,$2,'running-project','legacy-running','running',$3,$3),
+		($1,$2,'permission-project','legacy-permission','pending_permission',$3,$3),
+		($1,$2,'input-project','legacy-input','pending_input',$3,$3)`, scope.OrgUUID, scope.WorkspaceUUID, createdAt); err != nil {
+		t.Fatalf("insert legacy runs: %v", err)
 	}
 	store, err := OpenPostgres(ctx, postgresDSNWithSearchPath(t, dsn, schemaName))
 	if err != nil {
 		t.Fatalf("OpenPostgres: %v", err)
 	}
 	defer store.Close()
-	legacy, err := store.GetAssistantRun(ctx, scope, "legacy-pending")
-	if err != nil {
-		t.Fatalf("GetAssistantRun legacy: %v", err)
+	for _, tt := range []struct {
+		id      string
+		project string
+		status  AssistantRunStatus
+	}{
+		{id: "legacy-running", project: "running-project", status: AssistantRunStatusInterrupted},
+		{id: "legacy-permission", project: "permission-project", status: AssistantRunStatusPendingPermission},
+		{id: "legacy-input", project: "input-project", status: AssistantRunStatusPendingInput},
+	} {
+		legacyScope := scope
+		legacyScope.ProjectName = tt.project
+		legacy, err := store.GetAssistantRun(ctx, legacyScope, tt.id)
+		if err != nil {
+			t.Fatalf("GetAssistantRun %s: %v", tt.id, err)
+		}
+		if legacy.Status != tt.status {
+			t.Fatalf("migrated %s status = %q, want %q", tt.id, legacy.Status, tt.status)
+		}
 	}
-	if legacy.Status != AssistantRunStatusInterrupted {
-		t.Fatalf("migrated legacy status = %q, want %q", legacy.Status, AssistantRunStatusInterrupted)
-	}
-	if _, err := store.CreateAssistantRun(ctx, scope,
-		Message{ID: "user-1", Role: "user", Content: "new", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
-		Message{ID: "assistant-1", Role: "assistant", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
-		testAssistantRun(t, "run-1", "request-1", "assistant-1", createdAt.Add(time.Minute)),
-	); err != nil {
-		t.Fatalf("CreateAssistantRun after migrating legacy pending run: %v", err)
+	for _, tt := range []struct {
+		id        string
+		project   string
+		requestID string
+	}{
+		{id: "legacy-permission", project: "permission-project", requestID: "permission-1"},
+		{id: "legacy-input", project: "input-project", requestID: "input-1"},
+	} {
+		if _, err := db.ExecContext(ctx, `UPDATE `+pq.QuoteIdentifier(schemaName)+`.app_studio_assistant_runs SET request_id = $1 WHERE run_id = $2`, tt.requestID, tt.id); err != nil {
+			t.Fatalf("set %s request id: %v", tt.id, err)
+		}
+		legacyScope := scope
+		legacyScope.ProjectName = tt.project
+		claimed, err := store.ClaimAssistantRun(ctx, legacyScope, tt.id, tt.requestID, createdAt.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("ClaimAssistantRun %s: %v", tt.id, err)
+		}
+		if claimed.Status != AssistantRunStatusRunning {
+			t.Fatalf("claimed %s status = %q, want running", tt.id, claimed.Status)
+		}
 	}
 }
 
