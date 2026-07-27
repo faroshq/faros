@@ -1336,10 +1336,9 @@ func TestProjectEinoAssistantPhaseWriteTodosProgressValidation(t *testing.T) {
 			arguments: `{"todos":[]}`,
 		},
 		{
-			name:       "empty sanitized content emits no plan",
-			phase:      projectEinoAssistantPhaseMutate,
-			arguments:  `{"todos":[{"content":" \n ","activeForm":"Inspecting","status":"in_progress"},{"content":"Verify","activeForm":"Verifying","status":"pending"}]}`,
-			wantStatus: "Inspecting · 0 of 2 steps",
+			name:      "empty sanitized required content is ignored",
+			phase:     projectEinoAssistantPhaseMutate,
+			arguments: `{"todos":[{"content":" \n ","activeForm":"Inspecting","status":"in_progress"},{"content":"Verify","activeForm":"Verifying","status":"pending"}]}`,
 		},
 		{
 			name:      "more than fifty todos emits no plan",

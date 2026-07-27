@@ -293,6 +293,9 @@ func projectEinoAssistantTodoProgress(argumentsInJSON string, includeLabels bool
 			})
 		}
 	}
+	if !planValid {
+		return projectAssistantPlanSnapshot{}, ""
+	}
 
 	total := len(input.Todos)
 	noun := "steps"
@@ -300,9 +303,6 @@ func projectEinoAssistantTodoProgress(argumentsInJSON string, includeLabels bool
 		noun = "step"
 	}
 	count := fmt.Sprintf("%d of %d %s", completed, total, noun)
-	if !planValid {
-		plan = projectAssistantPlanSnapshot{}
-	}
 	if includeLabels && active != "" {
 		return plan, active + " · " + count
 	}
