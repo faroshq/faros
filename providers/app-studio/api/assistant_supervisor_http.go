@@ -59,7 +59,7 @@ func projectAssistantDurableFinalContent(reply, streamed string) string {
 // atomically creates the user message, assistant placeholder and run, then
 // hands the run to a server-owned worker. It deliberately accepts no response
 // writer and never derives execution from the caller's request context.
-func (s *Server) startProjectAssistantRunDurably(ctx context.Context, scope store.Scope, content, clientRequestID string, start func(store.AssistantRun, store.Message) error) (projectAssistantDurableStartResult, error) {
+func (s *Server) startProjectAssistantRunDurably(ctx context.Context, scope store.Scope, content, clientRequestID string, start func(store.AssistantRun, store.Message, bool) error) (projectAssistantDurableStartResult, error) {
 	content = strings.TrimSpace(content)
 	clientRequestID = strings.TrimSpace(clientRequestID)
 	if content == "" || clientRequestID == "" {
@@ -79,6 +79,11 @@ func (s *Server) startProjectAssistantRunDurably(ctx context.Context, scope stor
 		return projectAssistantDurableStartResult{}, err
 	}
 	defer releaseReservation()
+	messages, err := s.store.ListMessages(ctx, scope, 1, "")
+	if err != nil {
+		return projectAssistantDurableStartResult{}, err
+	}
+	transcriptEmpty := len(messages.Items) == 0
 	now := time.Now().UTC()
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, Content: content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: now, UpdatedAt: now}
@@ -88,7 +93,7 @@ func (s *Server) startProjectAssistantRunDurably(ctx context.Context, scope stor
 	if err != nil {
 		return projectAssistantDurableStartResult{}, err
 	}
-	if err := start(created, assistant); err != nil {
+	if err := start(created, assistant, transcriptEmpty); err != nil {
 		return projectAssistantDurableStartResult{Run: created, User: user, Assistant: assistant}, err
 	}
 	return projectAssistantDurableStartResult{Run: created, User: user, Assistant: assistant, Started: true}, nil
@@ -281,20 +286,13 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
-	var start *projectAssistantStreamStart
-	if request.InitialProjectPrompt {
-		messages, err := s.store.ListMessages(r.Context(), scope, 1, "")
-		if err != nil {
-			writeProjectError(w, err)
-			return
-		}
-		if len(messages.Items) == 0 {
+	supervisor := s.projectAssistantSupervisor()
+	started, err := s.startProjectAssistantRunDurably(r.Context(), scope, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) error {
+		var start *projectAssistantStreamStart
+		if request.InitialProjectPrompt && transcriptEmpty {
 			plan := projectAssistantInitialCreationPlan()
 			start = &projectAssistantStreamStart{InitialApprovedPlan: cloneProjectAssistantApprovedPlan(&plan)}
 		}
-	}
-	supervisor := s.projectAssistantSupervisor()
-	started, err := s.startProjectAssistantRunDurably(r.Context(), scope, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message) error {
 		return supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 			s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, created, start)
 		})
@@ -428,7 +426,7 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 func (s *Server) startAndStreamLegacyProjectAssistant(w http.ResponseWriter, r *http.Request, c *asclient.Client, id identity, project *aiv1alpha1.Project, content, clientRequestID string, start *projectAssistantStreamStart) {
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	supervisor := s.projectAssistantSupervisor()
-	started, err := s.startProjectAssistantRunDurably(r.Context(), scope, content, clientRequestID, func(run store.AssistantRun, assistant store.Message) error {
+	started, err := s.startProjectAssistantRunDurably(r.Context(), scope, content, clientRequestID, func(run store.AssistantRun, assistant store.Message, _ bool) error {
 		return supervisor.Start(r.Context(), scope, run, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 			s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, run, start)
 		})

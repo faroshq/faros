@@ -164,7 +164,7 @@ func TestProjectAssistantApprovedPlanGrantDoesNotShadowOrphanedConversationRun(t
 		t.Fatalf("stale run status = %q, want interrupted", interrupted.Status)
 	}
 
-	started, err := server.startProjectAssistantRunDurably(context.Background(), scope, "new conversation", "request-new", func(store.AssistantRun, store.Message) error { return nil })
+	started, err := server.startProjectAssistantRunDurably(context.Background(), scope, "new conversation", "request-new", func(store.AssistantRun, store.Message, bool) error { return nil })
 	if err != nil {
 		t.Fatalf("startProjectAssistantRunDurably after reconciliation: %v", err)
 	}
@@ -1025,6 +1025,27 @@ func TestProjectAssistantRunStartInitialProjectPromptGrantsOnlyEmptyTranscript(t
 		}
 	case <-time.After(time.Second):
 		t.Fatal("later durable run did not reach assistant engine")
+	}
+}
+
+func TestProjectAssistantRunStartInitialProjectPromptSeesTranscriptAfterReservation(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	if err := messages.AppendMessage(context.Background(), scope, store.Message{ID: "prior-user", Role: "user", Content: "already started", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	var transcriptEmpty bool
+	_, err := server.startProjectAssistantRunDurably(context.Background(), scope, "continue", "request-after-prior", func(_ store.AssistantRun, _ store.Message, empty bool) error {
+		transcriptEmpty = empty
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("startProjectAssistantRunDurably: %v", err)
+	}
+	if transcriptEmpty {
+		t.Fatal("durable start retained a stale empty-transcript result after reserving the project")
 	}
 }
 
