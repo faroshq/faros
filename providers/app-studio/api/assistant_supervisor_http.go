@@ -367,8 +367,9 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		transitionErr := persistMetadata(ctx, &runStatus)
 		recordSnapshotErr(transitionErr)
 		if transitionErr == nil {
-			run.Status = runStatus
-			projectAssistantLifecycleLog("completed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+			if committed, ok := accumulator.CommittedRun(); ok {
+				accumulator.supervisor.log("completed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), committed)
+			}
 		}
 		return
 	}
@@ -392,8 +393,9 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		transitionErr := persistMetadata(context.Background(), &runStatus)
 		recordSnapshotErr(transitionErr)
 		if transitionErr == nil {
-			run.Status = runStatus
-			projectAssistantLifecycleLog("aborted", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+			if committed, ok := accumulator.CommittedRun(); ok {
+				accumulator.supervisor.log("aborted", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), committed)
+			}
 		}
 		return
 	}
@@ -402,8 +404,9 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	transitionErr := persistMetadata(context.Background(), &runStatus)
 	recordSnapshotErr(transitionErr)
 	if transitionErr == nil {
-		run.Status = runStatus
-		projectAssistantLifecycleLog("failed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), run)
+		if committed, ok := accumulator.CommittedRun(); ok {
+			accumulator.supervisor.log("failed", projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), committed)
+		}
 	}
 }
 
@@ -653,6 +656,6 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return err
 	}
-	projectAssistantLifecycleLog("orphan_interrupted", scope, run)
+	s.projectAssistantSupervisor().log("orphan_interrupted", scope, run)
 	return nil
 }

@@ -116,7 +116,14 @@ Useful checks from this module:
 ```sh
 go test ./...
 go test -race ./api ./store
-cd portal && npm test && npm run typecheck && npm run build
+cd portal \
+  && npm run test:workbench \
+  && npm run test:preview-state \
+  && npm run test:create-readiness \
+  && npm run test:assistant-progress \
+  && npm run test:conversation-resilience \
+  && npm run typecheck \
+  && npm run build
 ```
 
 ## Local project files

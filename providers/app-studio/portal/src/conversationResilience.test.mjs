@@ -37,6 +37,21 @@ test('first-project retry reuses the created project and durable request identit
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
 })
 
+test('first-project pending submission matches the project/message handoff into normal send', () => {
+  const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1'), 'demo')
+  assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'ship it'), true)
+  assert.equal(state.firstProjectSubmissionMatches(pending, 'other', 'ship it'), false)
+  assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'different'), false)
+})
+
+test('first-project generation rejects late replies after navigation and a new attempt has a fresh key', () => {
+  const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1'), 'demo')
+  assert.equal(state.firstProjectSubmissionIsCurrent(pending, 2, 2, 'demo', 'demo', 'draft-1'), true)
+  assert.equal(state.firstProjectSubmissionIsCurrent(pending, 2, 3, 'demo', 'demo', 'draft-1'), false)
+  assert.equal(state.firstProjectSubmissionIsCurrent(pending, 2, 2, 'demo', '', 'draft-1'), false)
+  assert.notEqual(state.newFirstProjectSubmission('ship it', 'request-2').clientRequestID, pending.clientRequestID)
+})
+
 test('equal revision rehydrates active controls but an older active snapshot cannot revive a terminal run', () => {
   const active = snapshot(4, 'waiting', 'pending_input')
   const terminal = snapshot(5, 'done', 'completed')

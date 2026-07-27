@@ -43,7 +43,16 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
 }
 
 export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {
-  return Boolean(user?.id && user.content === submission.content)
+	return Boolean(user?.id && user.content === submission.content)
+}
+
+export function firstProjectSubmissionMatches(submission: PendingFirstProjectSubmission | null | undefined, projectName: string, content: string): submission is PendingFirstProjectSubmission {
+	return Boolean(submission && submission.projectName === projectName && submission.content === content)
+}
+
+export function firstProjectSubmissionIsCurrent(submission: PendingFirstProjectSubmission, generation: number, currentGeneration: number, selectedProject: string, routeProject: string, draftProject: string): boolean {
+	return generation === currentGeneration && selectedProject === (submission.projectName || draftProject) &&
+		(routeProject === submission.projectName || (!submission.projectName && routeProject === ''))
 }
 
 export function assistantRunTerminal(status: AssistantRun['status']): boolean {

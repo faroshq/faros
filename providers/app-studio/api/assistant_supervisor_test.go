@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,10 +81,8 @@ func TestProjectAssistantSupervisorShutdownLogsOneInterruptedTerminalTransition(
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
 	}
-	oldLog := projectAssistantLifecycleLog
-	defer func() { projectAssistantLifecycleLog = oldLog }()
 	var interrupted int
-	projectAssistantLifecycleLog = func(event string, gotScope store.Scope, gotRun store.AssistantRun) {
+	supervisor.lifecycleLog = func(event string, gotScope store.Scope, gotRun store.AssistantRun) {
 		if event == "interrupted" {
 			interrupted++
 			if gotScope != scope || gotRun.Status != store.AssistantRunStatusInterrupted || gotRun.ID != run.ID {
@@ -905,6 +904,15 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	defer graphQL.Close()
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	var terminalLogsMu sync.Mutex
+	var terminalLogs []store.AssistantRun
+	server.projectAssistantSupervisor().lifecycleLog = func(event string, _ store.Scope, run store.AssistantRun) {
+		if event == "completed" || event == "failed" || event == "aborted" {
+			terminalLogsMu.Lock()
+			terminalLogs = append(terminalLogs, run)
+			terminalLogsMu.Unlock()
+		}
+	}
 	engine := &blockingStartRouteEngine{entered: make(chan struct{}), finished: make(chan struct{})}
 	server.assistantEngine = engine
 	router := mux.NewRouter()
@@ -1022,6 +1030,60 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	case <-time.After(time.Second):
 		t.Fatal("abort did not stop normal worker")
 	}
+	for _, tt := range []struct{ requestID, chunk, reply string }{
+		{requestID: "request-3", reply: "returned only"},
+		{requestID: "request-4", chunk: "partial", reply: "partial returned final"},
+	} {
+		server.assistantEngine = replyStartRouteEngine{chunk: tt.chunk, reply: tt.reply}
+		response := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"finish","clientRequestID":"`+tt.requestID+`"}`))
+		req.Header = request.Header.Clone()
+		router.ServeHTTP(response, req)
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("reply start status = %d: %s", response.Code, response.Body.String())
+		}
+		var durable store.AssistantRun
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			durable, err = memoryStore.LatestAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"})
+			if err == nil && durable.ClientRequestID == tt.requestID && durable.Status == store.AssistantRunStatusCompleted {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		message, messageErr := server.findProjectMessage(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}, durable.ActiveMessageID)
+		if durable.Status != store.AssistantRunStatusCompleted || messageErr != nil || message.Content != tt.reply {
+			t.Fatalf("durable reply %#v message %#v err %v, want completed %q", durable, message, messageErr, tt.reply)
+		}
+	}
+	server.assistantEngine = failingStartRouteEngine{}
+	failing := httptest.NewRecorder()
+	failingRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"fail","clientRequestID":"request-5"}`))
+	failingRequest.Header = request.Header.Clone()
+	router.ServeHTTP(failing, failingRequest)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		failed, getErr := memoryStore.LatestAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"})
+		if getErr == nil && failed.ClientRequestID == "request-5" && failed.Status == store.AssistantRunStatusFailed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	terminalLogsMu.Lock()
+	logs := append([]store.AssistantRun(nil), terminalLogs...)
+	terminalLogsMu.Unlock()
+	seen := map[store.AssistantRunStatus]bool{}
+	for _, logged := range logs {
+		if logged.Revision < 2 || !assistantRunTerminal(logged.Status) {
+			t.Fatalf("terminal lifecycle log = %#v, want committed terminal revision", logged)
+		}
+		seen[logged.Status] = true
+	}
+	for _, status := range []store.AssistantRunStatus{store.AssistantRunStatusCompleted, store.AssistantRunStatusFailed, store.AssistantRunStatusAborted} {
+		if !seen[status] {
+			t.Fatalf("terminal lifecycle logs = %#v, missing %q", logs, status)
+		}
+	}
 }
 
 func TestResumeProjectAssistantRouteDetachesRequestAndPublishesRunningSnapshot(t *testing.T) {
@@ -1126,6 +1188,29 @@ type blockingResumeRouteEngine struct {
 type blockingStartRouteEngine struct {
 	entered  chan struct{}
 	finished chan struct{}
+}
+
+type replyStartRouteEngine struct{ chunk, reply string }
+
+func (e replyStartRouteEngine) StreamProjectAssistant(_ context.Context, req projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	if e.chunk != "" {
+		req.StreamCallbacks.OnChunk(e.chunk)
+	}
+	return projectAssistantRunResult{Content: e.reply}, nil
+}
+
+func (replyStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected resume")
+}
+
+type failingStartRouteEngine struct{}
+
+func (failingStartRouteEngine) StreamProjectAssistant(context.Context, projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("expected failure")
+}
+
+func (failingStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected resume")
 }
 
 func (e *blockingStartRouteEngine) StreamProjectAssistant(ctx context.Context, _ projectAssistantRunRequest) (projectAssistantRunResult, error) {

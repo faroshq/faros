@@ -37,9 +37,10 @@ type projectAssistantRunSnapshot struct {
 }
 
 type projectAssistantSupervisor struct {
-	store  store.Store
-	ctx    context.Context
-	cancel context.CancelFunc
+	store        store.Store
+	ctx          context.Context
+	cancel       context.CancelFunc
+	lifecycleLog func(string, store.Scope, store.AssistantRun)
 
 	mu           sync.Mutex
 	runs         map[projectAssistantRunKey]*projectAssistantSupervisedRun
@@ -70,6 +71,22 @@ type projectAssistantSnapshotAccumulator struct {
 	runID      string
 }
 
+// CommittedRun returns the exact durable revision most recently persisted for
+// this accumulator. Lifecycle logs must use this rather than a stale starter
+// copy of the run.
+func (a *projectAssistantSnapshotAccumulator) CommittedRun() (store.AssistantRun, bool) {
+	if a == nil || a.supervisor == nil {
+		return store.AssistantRun{}, false
+	}
+	a.supervisor.mu.Lock()
+	defer a.supervisor.mu.Unlock()
+	active := a.supervisor.runs[a.key]
+	if active == nil || active.run.ID != a.runID {
+		return store.AssistantRun{}, false
+	}
+	return active.committedRun, true
+}
+
 // logProjectAssistantLifecycle deliberately records only durable routing and
 // state fields. Never add prompts, assistant content, tool arguments, or
 // credentials here.
@@ -78,10 +95,6 @@ func logProjectAssistantLifecycle(event string, scope store.Scope, run store.Ass
 		"org", scope.OrgUUID, "workspace", scope.WorkspaceUUID, "project", scope.ProjectName,
 		"run", run.ID, "revision", run.Revision, "status", run.Status)
 }
-
-// projectAssistantLifecycleLog is replaceable in focused lifecycle tests. Its
-// contract remains deliberately content-free.
-var projectAssistantLifecycleLog = logProjectAssistantLifecycle
 
 func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store) *projectAssistantSupervisor {
 	if parent == nil {
@@ -93,7 +106,7 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 	// the server-owned work "interrupted".
 	ctx, cancel := context.WithCancel(context.Background())
 	supervisor := &projectAssistantSupervisor{
-		store: msgStore, ctx: ctx, cancel: cancel, runs: map[projectAssistantRunKey]*projectAssistantSupervisedRun{}, reservations: map[projectAssistantRunKey]struct{}{},
+		store: msgStore, ctx: ctx, cancel: cancel, lifecycleLog: logProjectAssistantLifecycle, runs: map[projectAssistantRunKey]*projectAssistantSupervisedRun{}, reservations: map[projectAssistantRunKey]struct{}{},
 	}
 	go func() {
 		select {
@@ -103,6 +116,12 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 		}
 	}()
 	return supervisor
+}
+
+func (s *projectAssistantSupervisor) log(event string, scope store.Scope, run store.AssistantRun) {
+	if s != nil && s.lifecycleLog != nil {
+		s.lifecycleLog(event, scope, run)
+	}
 }
 
 // Reserve closes the narrow interval between atomically creating a durable run
@@ -173,7 +192,7 @@ func (s *projectAssistantSupervisor) Shutdown(ctx context.Context) {
 		if err := interrupted.accumulator.SetStatus(ctx, store.AssistantRunStatusInterrupted); err == nil {
 			interrupted.run.Status = store.AssistantRunStatusInterrupted
 			interrupted.run.Revision++
-			projectAssistantLifecycleLog("interrupted", interrupted.scope, interrupted.run)
+			s.log("interrupted", interrupted.scope, interrupted.run)
 		}
 	}
 	if s.cancel != nil {
@@ -248,7 +267,7 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 	// share it, rather than derive from the initiating request.
 	workerCtx, active.cancel = context.WithCancelCause(s.ctx)
 	s.mu.Unlock()
-	projectAssistantLifecycleLog("start", scope, run)
+	s.log("start", scope, run)
 	go func() {
 		defer s.finish(acc.key, run.ID)
 		worker(workerCtx, acc)
@@ -341,7 +360,7 @@ func (s *projectAssistantSupervisor) AbortWith(scope store.Scope, runID string, 
 		}
 	}
 	s.mu.Unlock()
-	projectAssistantLifecycleLog("abort", scope, run)
+	s.log("abort", scope, run)
 	return true, nil
 }
 
@@ -370,7 +389,7 @@ func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, 
 	ch := make(chan projectAssistantRunSnapshot, 1)
 	active.subscribers[id] = ch
 	snapshot := projectAssistantRunSnapshot{Run: active.committedRun, Message: active.committedMessage}
-	projectAssistantLifecycleLog("subscribe", scope, active.committedRun)
+	s.log("subscribe", scope, active.committedRun)
 	s.sendCoalesced(ch, snapshot)
 	s.mu.Unlock()
 	var once sync.Once
@@ -611,7 +630,7 @@ func (s *projectAssistantSupervisor) recordPersistenceFailure(key projectAssista
 	run, message, scope := active.run, active.message, active.scope
 	active.cancel(errors.New("assistant snapshot persistence failed"))
 	s.mu.Unlock()
-	projectAssistantLifecycleLog("persistence_failure", scope, run)
+	s.log("persistence_failure", scope, run)
 	ctx, cancel := context.WithTimeout(context.Background(), projectMessagePersistTimeout)
 	defer cancel()
 	if s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1) != nil {

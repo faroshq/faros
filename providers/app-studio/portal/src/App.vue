@@ -45,6 +45,8 @@ import {
   assistantRunTerminal,
   firstProjectStartPlan,
   firstProjectSubmissionAccepted,
+  firstProjectSubmissionIsCurrent,
+  firstProjectSubmissionMatches,
   firstProjectSubmissionWithProject,
   mergeConversationSnapshot,
   newFirstProjectSubmission,
@@ -397,6 +399,11 @@ let activeAssistantProject = ''
 let pendingMessageSubmission: { projectName: string; content: string; clientRequestID: string } | null = null
 let pendingFirstProjectSubmission: ReturnType<typeof newFirstProjectSubmission> | null = null
 let projectCreateGeneration = 0
+
+function clearPendingFirstProjectSubmission() {
+  projectCreateGeneration++
+  pendingFirstProjectSubmission = null
+}
 const assistantRunRevisions: Record<string, AssistantRun> = {}
 const assistantRunController = new ConversationRunController({
   connect: async (runID, afterRevision, setDisconnect) => {
@@ -876,6 +883,10 @@ watch(
   },
 )
 
+watch(selectedNameFromPath, (projectName) => {
+  if (pendingFirstProjectSubmission && projectName !== pendingFirstProjectSubmission.projectName) clearPendingFirstProjectSubmission()
+})
+
 watch(
   () => [
     selected.value?.name,
@@ -984,6 +995,7 @@ async function load() {
     projectsLoaded.value = true
     initializing.value = false
     if (isCreateRoute.value) {
+	  clearPendingFirstProjectSubmission()
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
@@ -1006,8 +1018,10 @@ async function load() {
     }
     const pathName = selectedNameFromPath.value
     if (pathName) {
+	  if (pendingFirstProjectSubmission && pathName !== pendingFirstProjectSubmission.projectName) clearPendingFirstProjectSubmission()
       await openProject(pathName, false)
     } else {
+	  clearPendingFirstProjectSubmission()
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
@@ -1645,8 +1659,14 @@ async function createProjectAndStartConversation(content: string) {
     messages.value = [{ id: `temp-${Date.now()}-user`, projectID: draftName, role: 'user', content, createdAt: now }]
   }
 
-  const current = () => generation === projectCreateGeneration && pendingFirstProjectSubmission === submission &&
-    (!selectedNameFromPath.value || selectedNameFromPath.value === projectName || selectedNameFromPath.value === draftName)
+  const current = () => pendingFirstProjectSubmission === submission && firstProjectSubmissionIsCurrent(
+    submission,
+    generation,
+    projectCreateGeneration,
+    selected.value?.name ?? '',
+    selectedNameFromPath.value,
+    draftName,
+  )
 
   try {
     await nextTick()
@@ -2237,11 +2257,18 @@ async function sendMessage() {
   busy.value = true
   messageStreaming.value = true
   error.value = null
-  const clientRequestID = pendingMessageSubmission?.projectName === projectName && pendingMessageSubmission.content === content
+  const firstProjectPending = firstProjectSubmissionMatches(pendingFirstProjectSubmission, projectName, content)
+    ? pendingFirstProjectSubmission
+    : null
+  const clientRequestID = firstProjectPending
+    ? firstProjectPending.clientRequestID
+    : pendingMessageSubmission?.projectName === projectName && pendingMessageSubmission.content === content
     ? pendingMessageSubmission.clientRequestID
     : crypto.randomUUID()
   pendingMessageSubmission = { projectName, content, clientRequestID }
-  const optimisticID = `optimistic-${clientRequestID}`
+  const optimisticID = firstProjectPending
+    ? messages.value.find((message) => message.projectID === projectName && message.role === 'user' && message.content === content)?.id ?? `optimistic-${clientRequestID}`
+    : `optimistic-${clientRequestID}`
   const optimisticUserMessage: ProjectMessage = {
     id: optimisticID,
     projectID: projectName,
@@ -2249,7 +2276,7 @@ async function sendMessage() {
     content,
     createdAt: new Date().toISOString(),
   }
-  messages.value = [...messages.value, optimisticUserMessage]
+  if (!messages.value.some((message) => message.id === optimisticID)) messages.value = [...messages.value, optimisticUserMessage]
   try {
     const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
@@ -2257,6 +2284,7 @@ async function sendMessage() {
       messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
       if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
       pendingMessageSubmission = null
+      if (firstProjectPending && firstProjectSubmissionAccepted(firstProjectPending, started.user)) pendingFirstProjectSubmission = null
     }
   } catch (e) {
     messages.value = messages.value.filter((message) => message.id !== optimisticID)
@@ -2269,6 +2297,7 @@ async function sendMessage() {
           : undefined
         if (persistedPrompt?.content === content) {
           pendingMessageSubmission = null
+          if (firstProjectPending && firstProjectSubmissionAccepted(firstProjectPending, persistedPrompt)) pendingFirstProjectSubmission = null
         } else {
           prompt.value = content
         }
