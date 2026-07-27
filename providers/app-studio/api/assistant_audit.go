@@ -208,7 +208,8 @@ func projectAssistantAuditOffsetMS(started, at time.Time) int64 {
 
 func projectAssistantAuditToolPath(name, arguments string) string {
 	switch projectToolBaseName(name) {
-	case projectToolReadProjectFile, projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep,
+		projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
 	default:
 		return ""
 	}

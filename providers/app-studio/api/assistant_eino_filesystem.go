@@ -18,7 +18,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -185,74 +184,9 @@ func projectEinoAssistantFilesystemArgumentSummary(name string, args map[string]
 	if args == nil {
 		return "unparseable arguments"
 	}
-	switch name {
-	case projectToolLS:
-		return summarizeProjectToolArgumentsMap(projectToolMkdir, args)
-	case projectToolReadFile:
-		summaryArgs := map[string]any{"path": args["file_path"]}
-		parts := []string{summarizeProjectToolArgumentsMap(projectToolReadProjectFile, summaryArgs)}
-		for _, key := range []string{"offset", "limit"} {
-			if value, ok := projectToolNumber(args[key]); ok {
-				parts = append(parts, fmt.Sprintf("%s %d", key, value))
-			}
-		}
-		return truncateProjectToolInfo(strings.Join(compactProjectEinoFilesystemSummaryParts(parts), "; "))
-	case projectToolGlob:
-		parts := []string{
-			summarizeProjectToolKeyValues(args, []string{"pattern"}),
-			summarizeProjectToolArgumentsMap(projectToolMkdir, args),
-		}
-		return truncateProjectToolInfo(strings.Join(compactProjectEinoFilesystemSummaryParts(parts), "; "))
-	case projectToolGrep:
-		summaryArgs := map[string]any{
-			"query":      args["pattern"],
-			"maxResults": args["head_limit"],
-		}
-		parts := []string{
-			summarizeProjectToolArgumentsMap(projectToolSearchProjectFiles, summaryArgs),
-			summarizeProjectToolKeyValues(args, []string{"path", "glob", "type"}),
-		}
-		return truncateProjectToolInfo(strings.Join(compactProjectEinoFilesystemSummaryParts(parts), "; "))
-	default:
-		return ""
-	}
+	return summarizeProjectToolArgumentsMap(name, args)
 }
 
-func projectEinoAssistantFilesystemResultSummary(name string, args map[string]any, result string) string {
-	switch name {
-	case projectToolReadFile:
-		payload, _ := json.Marshal(map[string]any{
-			"path": projectToolString(args["file_path"]),
-			"size": len([]byte(result)),
-		})
-		return summarizeProjectToolResult(projectToolReadProjectFile, string(payload))
-	case projectToolLS, projectToolGlob:
-		paths := make([]map[string]string, 0)
-		for _, line := range strings.Split(strings.TrimSpace(result), "\n") {
-			if path := strings.TrimSpace(line); path != "" {
-				paths = append(paths, map[string]string{"path": path})
-			}
-		}
-		payload, _ := json.Marshal(map[string]any{"files": paths})
-		return summarizeProjectToolResult(projectToolListProjectFiles, string(payload))
-	case projectToolGrep:
-		count := 0
-		if strings.TrimSpace(result) != "" {
-			count = len(strings.Split(strings.TrimSpace(result), "\n"))
-		}
-		payload, _ := json.Marshal(map[string]any{"totalCount": count})
-		return summarizeProjectToolResult(projectToolSearchProjectFiles, string(payload))
-	default:
-		return ""
-	}
-}
-
-func compactProjectEinoFilesystemSummaryParts(parts []string) []string {
-	out := parts[:0]
-	for _, part := range parts {
-		if strings.TrimSpace(part) != "" {
-			out = append(out, part)
-		}
-	}
-	return out
+func projectEinoAssistantFilesystemResultSummary(name string, _ map[string]any, result string) string {
+	return summarizeProjectToolResult(name, result)
 }

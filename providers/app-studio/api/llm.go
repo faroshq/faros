@@ -67,9 +67,6 @@ const (
 )
 
 const (
-	projectToolListProjectFiles               = "list_project_files"
-	projectToolReadProjectFile                = "read_project_file"
-	projectToolSearchProjectFiles             = "search_project_files"
 	projectToolPlanProjectChanges             = "plan_project_changes"
 	projectToolCheckProjectReadiness          = "check_project_readiness"
 	projectToolPrepareProjectDeployment       = "prepare_project_deployment"
@@ -401,9 +398,9 @@ func projectToolLoopFallback(toolMessages []chatMessage, reason string) string {
 
 	var b strings.Builder
 	if len(summaries) > 0 {
-		if len(summaries) == 1 && strings.HasPrefix(summaries[0], projectToolReadProjectFile+": ") {
+		if len(summaries) == 1 && strings.HasPrefix(summaries[0], projectToolReadFile+": ") {
 			b.WriteString("I inspected ")
-			b.WriteString(strings.TrimPrefix(summaries[0], projectToolReadProjectFile+": "))
+			b.WriteString(strings.TrimPrefix(summaries[0], projectToolReadFile+": "))
 		} else if len(summaries) == 1 {
 			b.WriteString("I used the latest project tool result: ")
 			b.WriteString(summaries[0])
@@ -738,12 +735,18 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 			parts = append(parts, fmt.Sprintf("%d file(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
 		}
 		return truncateProjectToolInfo(strings.Join(parts, "; "))
-	case projectToolListProjectFiles:
-		return summarizeProjectToolKeyValues(args, []string{"limit"})
-	case projectToolReadProjectFile:
-		return summarizeProjectToolKeyValues(args, []string{"path", "maxBytes"})
-	case projectToolSearchProjectFiles:
-		return summarizeProjectToolKeyValues(args, []string{"query", "maxResults"})
+	case projectToolLS:
+		return summarizeProjectToolKeyValues(args, []string{"path"})
+	case projectToolReadFile:
+		return summarizeProjectToolKeyValues(map[string]any{
+			"path":   args["file_path"],
+			"offset": args["offset"],
+			"limit":  args["limit"],
+		}, []string{"path", "offset", "limit"})
+	case projectToolGlob:
+		return summarizeProjectToolKeyValues(args, []string{"pattern", "path"})
+	case projectToolGrep:
+		return summarizeProjectToolKeyValues(args, []string{"pattern", "path", "glob", "type", "output_mode", "head_limit", "offset"})
 	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment:
 		return summarizeProjectPlanningWorkflowArgs(args)
 	case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolRestartRuntime:
@@ -793,6 +796,14 @@ func summarizeProjectToolResult(name, result string) string {
 	if result == "" {
 		return ""
 	}
+	switch projectToolBaseName(name) {
+	case projectToolReadFile:
+		return "file read"
+	case projectToolLS, projectToolGlob:
+		return fmt.Sprintf("%d path(s)", projectAssistantNonEmptyLineCount(result))
+	case projectToolGrep:
+		return fmt.Sprintf("%d result line(s)", projectAssistantNonEmptyLineCount(result))
+	}
 	decoded := map[string]any{}
 	if err := json.Unmarshal([]byte(result), &decoded); err == nil {
 		switch projectToolBaseName(name) {
@@ -818,12 +829,6 @@ func summarizeProjectToolResult(name, result string) string {
 			if len(parts) > 0 {
 				return truncateProjectToolInfo(strings.Join(parts, "; "))
 			}
-		case projectToolListProjectFiles:
-			return summarizeWorkspaceListResult(decoded)
-		case projectToolReadProjectFile:
-			return summarizeWorkspaceReadResult(decoded)
-		case projectToolSearchProjectFiles:
-			return summarizeWorkspaceSearchResult(decoded)
 		case projectToolPlanProjectChanges:
 			return summarizeProjectPlanningWorkflowResult(decoded)
 		case projectToolRequestProjectPlanApproval:
@@ -886,7 +891,7 @@ func summarizeProjectToolKeyValues(args map[string]any, keys []string) string {
 	parts := []string{}
 	for _, key := range keys {
 		switch key {
-		case "maxBytes", "maxResults", "limit":
+		case "maxBytes", "maxResults", "limit", "offset", "head_limit":
 			if n, ok := projectToolNumber(args[key]); ok {
 				parts = append(parts, fmt.Sprintf("%s %d", key, n))
 			}
@@ -897,6 +902,20 @@ func summarizeProjectToolKeyValues(args map[string]any, keys []string) string {
 		}
 	}
 	return truncateProjectToolInfo(strings.Join(parts, "; "))
+}
+
+func projectAssistantNonEmptyLineCount(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "No files found" || value == "No matches found" {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(value, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func summarizeProjectPlanningWorkflowArgs(args map[string]any) string {
@@ -1801,11 +1820,11 @@ func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile 
 	case projectAssistantTurnProfileGuidance:
 		b.WriteString("Give practical guidance, recommendations, and tradeoffs. Do not claim to know current file or runtime state unless tool evidence is available; ask the user for missing context in plain language when needed.\n")
 	case projectAssistantTurnProfileExploration:
-		b.WriteString("Use read-only App Studio workflow, workspace-read, and aggregate MCP infrastructure discovery tools when current project state or available infrastructure templates are needed. Prefer plan_project_changes, check_project_readiness, list_project_files, read_project_file, search_project_files, infrastructure__list_templates, infrastructure__describe_template, infrastructure__list_instances, and infrastructure__get_instance for bounded inspection. Treat infrastructure templates as capability evidence, not as a menu the user must operate. Before deciding whether a template fits, describe the template and consult the template's agent.usage guidance when that field is available. ")
+		b.WriteString("Use read-only App Studio workflow, workspace-read, and aggregate MCP infrastructure discovery tools when current project state or available infrastructure templates are needed. Prefer plan_project_changes, check_project_readiness, ls, read_file, glob, grep, infrastructure__list_templates, infrastructure__describe_template, infrastructure__list_instances, and infrastructure__get_instance for bounded inspection. Treat infrastructure templates as capability evidence, not as a menu the user must operate. Before deciding whether a template fits, describe the template and consult the template's agent.usage guidance when that field is available. ")
 		appendProjectAssistantTemplateFitPrompt(b)
 		b.WriteString("Do not edit, deploy, provision, or commit.\n")
 	case projectAssistantTurnProfileDebugging:
-		b.WriteString("Diagnose in read-only mode. Use check_project_readiness, list_project_files, read_project_file, search_project_files, get_runtime_status, and get_preview_url as needed. Do not mutate files, deploy runtime resources, or commit unless the user explicitly asks you to fix the issue.\n")
+		b.WriteString("Diagnose in read-only mode. Use check_project_readiness, ls, read_file, glob, grep, get_runtime_status, and get_preview_url as needed. Do not mutate files, deploy runtime resources, or commit unless the user explicitly asks you to fix the issue.\n")
 	case projectAssistantTurnProfileDebugFix:
 		b.WriteString("First diagnose the issue with read-only workflow, workspace, and runtime status tools. ")
 		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, initialPlan)
@@ -1829,7 +1848,7 @@ func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoR
 	appendProjectAssistantTemplateFitPrompt(b)
 	b.WriteString("When the user asks for a supporting capability such as persistent data, first decide whether the current sandbox app can satisfy the development need before provisioning infrastructure. ")
 	b.WriteString("Do not recommend a full application or runtime template just to satisfy a smaller need like persistent data, and do not duplicate App Studio's sandbox runtime unless the user is explicitly moving toward a production launch. ")
-	b.WriteString("For existing projects, inspect relevant files in the App Studio workspace before editing: use list_project_files to discover paths, read_project_file for targeted files, and search_project_files when you need to locate code. ")
+	b.WriteString("Use ls and glob to discover project-relative paths, read_file for bounded targeted reads, and grep to locate code. Inspect relevant existing files before editing. ")
 	b.WriteString("When requirements are unclear during implementation, call ask_follow_up with at most three concise questions instead of guessing. ")
 	if initialPlan {
 		b.WriteString("The user explicitly authorized this fresh project's initial source build. Do not call request_project_plan_approval before write_file, apply_patch, or mkdir in this run. This authorization does not cover template selection, runtime actions, infrastructure provisioning, repository changes, or commit_project_files; commit_project_files still requires explicit user approval. ")

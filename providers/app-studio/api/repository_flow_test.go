@@ -96,10 +96,12 @@ func TestProjectToolAllowlistSeparatesWorkspaceAndGitTools(t *testing.T) {
 			t.Fatalf("%s should not be allowed; project file inspection belongs to App Studio workspace tools", name)
 		}
 	}
+	for _, legacy := range []string{"list_project_files", "read_project_file", "search_project_files"} {
+		if projectLocalToolAllowed(legacy) {
+			t.Fatalf("legacy read tool %q remains in App Studio registry", legacy)
+		}
+	}
 	for _, name := range []string{
-		"list_project_files",
-		"read_project_file",
-		"search_project_files",
 		"plan_project_changes",
 		"check_project_readiness",
 		"prepare_project_deployment",
@@ -148,23 +150,24 @@ func TestProjectToolAllowlistSeparatesWorkspaceAndGitTools(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantCanonicalWorkspaceReadSurface(t *testing.T) {
+	registry := projectAssistantLocalToolRegistry(nil)
+	for _, legacy := range []string{"list_project_files", "read_project_file", "search_project_files"} {
+		if registry.Has(legacy) {
+			t.Fatalf("legacy read tool %q remains in App Studio registry", legacy)
+		}
+	}
+	for _, mutation := range []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir} {
+		if !registry.Has(mutation) {
+			t.Fatalf("App Studio mutation tool %q is missing", mutation)
+		}
+	}
+}
+
 func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 	registry := projectAssistantLocalToolRegistry(nil)
 	got := projectChatToolNames(registry.ChatTools(false))
 	want := []string{
-		"list_project_files",
-		"read_project_file",
-		"search_project_files",
-		"plan_project_changes",
-		"check_project_readiness",
-		"prepare_project_deployment",
-		"inspect_development_templates",
-		"get_runtime_status",
-		"get_preview_url",
-		"get_runtime_logs",
-		"verify_development_runtime",
-		"restart_runtime",
-		"set_runtime_env",
 		"ask_follow_up",
 		"request_project_plan_approval",
 		"write_file",
@@ -177,14 +180,27 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 		"get_build_logs",
 		"rebuild_project",
 		"promote_project",
+		"plan_project_changes",
+		"check_project_readiness",
+		"prepare_project_deployment",
+		"inspect_development_templates",
+		"get_runtime_status",
+		"get_preview_url",
+		"get_runtime_logs",
+		"verify_development_runtime",
+		"restart_runtime",
+		"set_runtime_env",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
 	}
 
 	all := projectChatToolNames(registry.ChatTools(true))
-	if len(all) != len(want)+1 || all[len(all)-1] != "commit_project_files" {
-		t.Fatalf("tool names with commit bridge = %v, want commit_project_files last", all)
+	wantAll := append([]string(nil), want[:12]...)
+	wantAll = append(wantAll, "commit_project_files")
+	wantAll = append(wantAll, want[12:]...)
+	if strings.Join(all, ",") != strings.Join(wantAll, ",") {
+		t.Fatalf("tool names with commit bridge = %v, want %v", all, wantAll)
 	}
 	if !registry.Has(" COMMIT_PROJECT_FILES ") {
 		t.Fatal("registry should match tool names case-insensitively")
@@ -316,7 +332,7 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	if strings.Contains(joined, "Available tools in this workspace") {
 		t.Fatalf("prompt duplicates the Eino tool catalog: %q", joined)
 	}
-	if strings.Contains(joined, projectToolReadProjectFile+":") {
+	if strings.Contains(joined, projectToolReadFile+":") {
 		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
 	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
@@ -394,7 +410,7 @@ func TestGenerateProjectAssistantStreamDiscoversDatabricksToolsForDataTableQuest
 	if strings.Contains(joined, "Available tools in this workspace") {
 		t.Fatalf("prompt duplicates the Eino tool catalog: %q", joined)
 	}
-	if strings.Contains(joined, projectToolReadProjectFile+":") {
+	if strings.Contains(joined, projectToolReadFile+":") {
 		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
 	for _, want := range []string{
@@ -688,7 +704,7 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 	}
 }
 
-func TestProjectSystemPromptRequiresWorkspaceInspectBeforeEdit(t *testing.T) {
+func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
 	project.Spec.DisplayName = "Demo Project"
@@ -700,9 +716,14 @@ func TestProjectSystemPromptRequiresWorkspaceInspectBeforeEdit(t *testing.T) {
 	}
 
 	prompt := projectSystemPrompt(project, repository, projectAssistantTurnProfileImplementation)
-	for _, want := range []string{"check_project_readiness", "prepare_project_deployment", "inspect_development_templates", "verify_development_runtime", "list_project_files", "read_project_file", "search_project_files", "write_file", "apply_patch", "mkdir", "commit_project_files"} {
+	for _, want := range []string{"check_project_readiness", "prepare_project_deployment", "inspect_development_templates", "verify_development_runtime", projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep, "write_file", "apply_patch", "mkdir", "commit_project_files"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, legacy := range []string{"list_project_files", "read_project_file", "search_project_files"} {
+		if strings.Contains(prompt, legacy) {
+			t.Fatalf("prompt contains legacy workspace read tool %q:\n%s", legacy, prompt)
 		}
 	}
 	for _, unwanted := range []string{"list_repository_files", "read_repository_file", "search_repository_files", "code__write_file", "code__apply_patch"} {
@@ -718,6 +739,9 @@ func TestProjectSystemPromptRequiresWorkspaceInspectBeforeEdit(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(prompt), "before") || !strings.Contains(strings.ToLower(prompt), "inspect") {
 		t.Fatalf("prompt does not require inspect-before-edit guidance:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Use ls and glob to discover project-relative paths, read_file for bounded targeted reads, and grep to locate code. Inspect relevant existing files before editing.") {
+		t.Fatalf("prompt missing canonical inspect-before-edit workflow:\n%s", prompt)
 	}
 }
 
@@ -788,19 +812,24 @@ func TestSummarizeProjectToolArgumentsWorkspaceReadTools(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "list_project_files",
-			args: `{"limit":25}`,
-			want: []string{"limit 25"},
+			name: projectToolLS,
+			args: `{"path":"src"}`,
+			want: []string{"path src"},
 		},
 		{
-			name: "read_project_file",
-			args: `{"path":"src/App.tsx","maxBytes":4096}`,
-			want: []string{"path src/App.tsx", "maxBytes 4096"},
+			name: projectToolReadFile,
+			args: `{"file_path":"src/App.tsx","offset":1,"limit":200}`,
+			want: []string{"path src/App.tsx", "offset 1", "limit 200"},
 		},
 		{
-			name: "search_project_files",
-			args: `{"query":"secret-ish user query","maxResults":10}`,
-			want: []string{"query secret-ish user query", "maxResults 10"},
+			name: projectToolGlob,
+			args: `{"pattern":"**/*.tsx","path":"src"}`,
+			want: []string{"pattern **/*.tsx", "path src"},
+		},
+		{
+			name: projectToolGrep,
+			args: `{"pattern":"secret-ish user query","path":"src","glob":"**/*.tsx","type":"tsx","output_mode":"content","head_limit":10,"offset":2}`,
+			want: []string{"pattern secret-ish user query", "path src", "glob **/*.tsx", "type tsx", "output_mode content", "head_limit 10", "offset 2"},
 		},
 		{
 			name: "plan_project_changes",
@@ -849,27 +878,33 @@ func TestSummarizeProjectToolArgumentsWorkspaceReadTools(t *testing.T) {
 }
 
 func TestSummarizeProjectToolResultWorkspaceReadTools(t *testing.T) {
-	readResult := `{"path":"src/App.tsx","size":2048,"content":"secret-ish file body","truncated":true,"binary":false}`
-	got := summarizeProjectToolResult("read_project_file", readResult)
-	for _, want := range []string{"file src/App.tsx", "2048 bytes", "truncated"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("summary = %q, want %q", got, want)
-		}
+	tests := []struct {
+		name      string
+		result    string
+		want      string
+		forbidden string
+	}{
+		{name: projectToolReadFile, result: "1\tsecret-ish file body\n2\tmore source", want: "file read", forbidden: "secret-ish"},
+		{name: projectToolLS, result: "src\nREADME.md", want: "2 path(s)", forbidden: "README.md"},
+		{name: projectToolGlob, result: "src/App.tsx\nsrc/main.ts", want: "2 path(s)", forbidden: "src/App.tsx"},
+		{name: projectToolGrep, result: "src/App.tsx:4:secret-ish matching source\nsrc/main.ts:9:another line", want: "2 result line(s)", forbidden: "secret-ish"},
+		{name: projectToolLS, result: "No files found", want: "0 path(s)"},
+		{name: projectToolGrep, result: "No matches found", want: "0 result line(s)"},
 	}
-	if strings.Contains(got, "secret-ish") {
-		t.Fatalf("summary leaked file contents: %q", got)
-	}
-
-	searchResult := `{"totalCount":12,"truncated":true,"results":[{"path":"src/App.tsx"},{"path":"src/main.ts"},{"path":"README.md"}]}`
-	got = summarizeProjectToolResult("search_project_files", searchResult)
-	for _, want := range []string{"12 match(es)", "src/App.tsx, src/main.ts, README.md", "truncated"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("summary = %q, want %q", got, want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name+"_"+tt.want, func(t *testing.T) {
+			got := summarizeProjectToolResult(tt.name, tt.result)
+			if got != tt.want {
+				t.Fatalf("summary = %q, want %q", got, tt.want)
+			}
+			if tt.forbidden != "" && strings.Contains(got, tt.forbidden) {
+				t.Fatalf("summary leaked Eino output %q: %q", tt.forbidden, got)
+			}
+		})
 	}
 
 	mutationResult := `{"operation":"apply_patch","path":"src/App.tsx","size":128,"replacements":2,"content":"secret-ish body"}`
-	got = summarizeProjectToolResult("apply_patch", mutationResult)
+	got := summarizeProjectToolResult("apply_patch", mutationResult)
 	for _, want := range []string{"apply_patch", "src/App.tsx", "128 bytes", "2 replacement(s)"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary = %q, want %q", got, want)
@@ -965,33 +1000,6 @@ func TestCallProjectMCPToolTreatsIsErrorAsFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "create RepositoryCommit") {
 		t.Fatalf("error = %q, want RepositoryCommit failure text", err.Error())
-	}
-}
-
-func TestProjectLocalToolRunsWorkspaceReadTool(t *testing.T) {
-	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
-	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{
-		{Path: "README.md", Content: "hello from App Studio workspace\n"},
-	}); err != nil {
-		t.Fatalf("ApplyFiles returned error: %v", err)
-	}
-	server := NewWithWorkspace(nil, nil, workspaces, "", false)
-
-	tool, ok := server.projectAssistantToolRegistry().Get(projectToolReadProjectFile)
-	if !ok {
-		t.Fatal("read_project_file missing from registry")
-	}
-	resp, err := tool.Call(context.Background(), projectAssistantToolCallRequest{
-		WorkspaceScope: scope,
-		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
-		Arguments:      map[string]any{"path": "README.md"},
-	})
-	if err != nil {
-		t.Fatalf("read_project_file returned error: %v", err)
-	}
-	if !strings.Contains(resp, "hello from App Studio workspace") {
-		t.Fatalf("tool response = %q, want workspace file content", resp)
 	}
 }
 
@@ -3227,8 +3235,8 @@ func runRepeatedReadFileAssistantStream(t *testing.T, finalAnswer string) (strin
 			ID:   fmt.Sprintf("call-%d", i),
 			Type: "function",
 			Function: einoschema.FunctionCall{
-				Name:      projectToolReadProjectFile,
-				Arguments: `{"path":"src/App.tsx"}`,
+				Name:      projectToolReadFile,
+				Arguments: `{"file_path":"src/App.tsx","offset":1,"limit":200}`,
 			},
 		}})})
 	}
@@ -3245,8 +3253,8 @@ func runUniqueReadFileAssistantStream(t *testing.T, finalAnswer string) (string,
 			ID:   fmt.Sprintf("call-%d", i),
 			Type: "function",
 			Function: einoschema.FunctionCall{
-				Name:      projectToolReadProjectFile,
-				Arguments: fmt.Sprintf(`{"path":"src/file-%d.tsx"}`, i),
+				Name:      projectToolReadFile,
+				Arguments: fmt.Sprintf(`{"file_path":"src/file-%d.tsx","offset":1,"limit":200}`, i),
 			},
 		}})})
 	}

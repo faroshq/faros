@@ -556,9 +556,6 @@ func TestEinoAssistantToolSearchKeepsAppStudioToolsStatic(t *testing.T) {
 		projectToolPlanProjectChanges,
 		projectToolCheckProjectReadiness,
 		projectToolPrepareProjectDeployment,
-		projectToolListProjectFiles,
-		projectToolReadProjectFile,
-		projectToolSearchProjectFiles,
 		projectToolWriteFile,
 		projectToolApplyPatch,
 		projectToolMkdir,
@@ -645,7 +642,7 @@ func TestEinoAssistantEngineDiscussionAndGuidanceExposeNoTools(t *testing.T) {
 func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPlan(t *testing.T) {
 	readTool := &recordingProjectAssistantTool{
 		spec: projectAssistantToolSpec{
-			Name:        projectToolReadProjectFile,
+			Name:        projectToolReadFile,
 			Description: "Read a project file.",
 			Parameters:  json.RawMessage(`{"type":"object"}`),
 			Risk:        projectAssistantToolRiskRead,
@@ -999,13 +996,13 @@ func TestEinoAssistantEngineProfileFiltersReadOnlyAndRuntimeTools(t *testing.T) 
 		{
 			name:       "exploration",
 			profile:    projectAssistantTurnProfileExploration,
-			wantAllow:  []string{projectToolCheckProjectReadiness, projectToolReadProjectFile},
+			wantAllow:  []string{projectToolCheckProjectReadiness},
 			wantReject: []string{projectToolGetRuntimeStatus, projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles},
 		},
 		{
 			name:       "debugging",
 			profile:    projectAssistantTurnProfileDebugging,
-			wantAllow:  []string{projectToolCheckProjectReadiness, projectToolReadProjectFile, projectToolGetRuntimeStatus, projectToolGetPreviewURL},
+			wantAllow:  []string{projectToolCheckProjectReadiness, projectToolGetRuntimeStatus, projectToolGetPreviewURL},
 			wantReject: []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles},
 		},
 		{
@@ -1015,7 +1012,7 @@ func TestEinoAssistantEngineProfileFiltersReadOnlyAndRuntimeTools(t *testing.T) 
 				profile:              projectAssistantTurnProfileExploration,
 				requiresRuntimeState: true,
 			},
-			wantAllow:  []string{projectToolCheckProjectReadiness, projectToolReadProjectFile, projectToolGetRuntimeStatus, projectToolGetPreviewURL},
+			wantAllow:  []string{projectToolCheckProjectReadiness, projectToolGetRuntimeStatus, projectToolGetPreviewURL},
 			wantReject: []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles},
 		},
 	}
@@ -1795,7 +1792,7 @@ func TestProjectEinoAssistantToolInfoClassifiesProductWorkflowBundles(t *testing
 		},
 		{
 			name: "workspace read",
-			spec: projectAssistantToolSpec{Name: projectToolReadProjectFile, Risk: projectAssistantToolRiskRead},
+			spec: projectAssistantToolSpec{Name: projectToolReadFile, Risk: projectAssistantToolRiskRead},
 			want: projectAssistantToolBundleWorkspaceRead,
 		},
 		{
