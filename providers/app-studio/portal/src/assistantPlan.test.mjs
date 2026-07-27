@@ -12,7 +12,7 @@ const { outputText } = ts.transpileModule(source, {
   },
 })
 const moduleURL = `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
-const { assistantPlanProgress, parseAssistantPlan } = await import(moduleURL)
+const { assistantPlanProgress, assistantPlanStepStatusLabel, assistantPlanSummary, parseAssistantPlan } = await import(moduleURL)
 
 test('parses an ordered three-step assistant plan', () => {
   assert.deepEqual(
@@ -96,4 +96,36 @@ test('derives compact progress using active form before content', () => {
     assistantPlanProgress({ steps: [{ content: 'Verify the preview', status: 'in_progress' }] }).activeLabel,
     'Verify the preview',
   )
+})
+
+test('summarizes progress with the active form', () => {
+  assert.equal(
+    assistantPlanSummary({
+      steps: [
+        { content: 'Inspect the quote form', status: 'completed' },
+        { content: 'Update the quote form', activeForm: 'Updating the quote form', status: 'in_progress' },
+        { content: 'Verify the preview', status: 'pending' },
+      ],
+    }),
+    '1 of 3 steps · Updating the quote form',
+  )
+})
+
+test('summarizes completed progress without a trailing separator', () => {
+  assert.equal(
+    assistantPlanSummary({
+      steps: [
+        { content: 'Inspect the quote form', status: 'completed' },
+        { content: 'Update the quote form', status: 'completed' },
+        { content: 'Verify the preview', status: 'completed' },
+      ],
+    }),
+    '3 of 3 steps',
+  )
+})
+
+test('labels every plan step status for nonvisual presentation', () => {
+  assert.equal(assistantPlanStepStatusLabel('completed'), 'Completed')
+  assert.equal(assistantPlanStepStatusLabel('in_progress'), 'In progress')
+  assert.equal(assistantPlanStepStatusLabel('pending'), 'Pending')
 })

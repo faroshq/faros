@@ -73,3 +73,20 @@ export function assistantPlanProgress(plan: AssistantPlan): AssistantPlanProgres
     activeLabel: activeStep?.activeForm || activeStep?.content || '',
   }
 }
+
+export function assistantPlanSummary(plan: AssistantPlan): string {
+  const { completed, total, activeLabel } = assistantPlanProgress(plan)
+  const progress = `${completed} of ${total} steps`
+  return activeLabel ? `${progress} · ${activeLabel}` : progress
+}
+
+export function assistantPlanStepStatusLabel(status: AssistantPlanStepStatus): string {
+  switch (status) {
+    case 'completed':
+      return 'Completed'
+    case 'in_progress':
+      return 'In progress'
+    default:
+      return 'Pending'
+  }
+}

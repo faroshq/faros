@@ -8,6 +8,7 @@ import {
   BarChart3,
   Braces,
   Check,
+  ChevronRight,
   ClipboardList,
   ExternalLink,
   Folder,
@@ -38,6 +39,7 @@ import {
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantTraceHeader, summarizeAssistantTrace } from './assistantProgress'
+import { assistantPlanStepStatusLabel, assistantPlanSummary, parseAssistantPlan, type AssistantPlan } from './assistantPlan'
 import {
   ConversationRunController,
   abortedConversationSnapshot,
@@ -147,6 +149,7 @@ interface AssistantTraceItem {
 }
 type ProjectMessageView = ProjectMessage & {
   viewStatus?: ProjectMessageViewStatus
+  plan?: AssistantPlan
   actions?: ProjectAssistantActionView[]
   surface?: ProjectAssistantSurface
   interrupt?: ProjectAssistantUIInterruptRequest
@@ -380,6 +383,7 @@ const llmSaving = ref(false)
 const llmStatus = ref<string | null>(null)
 const messagesRef = ref<HTMLDivElement | null>(null)
 const expandedMessageTimestampID = ref<string | null>(null)
+const expandedAssistantPlanMessageID = ref<string | null>(null)
 const expandedAssistantTraceMessageID = ref<string | null>(null)
 const promptRef = ref<HTMLTextAreaElement | null>(null)
 const workspaceRef = ref<HTMLDivElement | null>(null)
@@ -468,9 +472,10 @@ const settingsDescription = computed(() =>
     : 'Configure the model credentials App Studio uses when creating and chatting in projects.',
 )
 const conversationWorkingLabel = computed(() => {
+  const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
+  if (lastAssistant?.plan) return ''
   if (conversationStatus.value) return conversationStatus.value
   if (!messageStreaming.value) return ''
-  const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
   if (lastAssistant?.content.trim()) return 'Working'
   return 'Working'
 })
@@ -2481,15 +2486,21 @@ function projectMessagesForConversation(source: ProjectMessageView[]): ProjectMe
 
 function toProjectMessageView(message: ProjectMessage): ProjectMessageView {
   const viewStatus = projectMessageViewStatus(message)
+  const plan = projectMessagePlan(message)
   const actions = projectMessageActions(message)
   const interrupt = projectMessageInterrupt(message)
-  if (!viewStatus && actions.length === 0 && !interrupt) return message
+  if (!viewStatus && !plan && actions.length === 0 && !interrupt) return message
   return {
     ...message,
     ...(viewStatus ? { viewStatus } : {}),
+    ...(plan ? { plan } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(interrupt ? { interrupt } : {}),
   }
+}
+
+function projectMessagePlan(message: ProjectMessage): AssistantPlan | undefined {
+  return parseAssistantPlan(message.metadata?.assistantPlan)
 }
 
 function projectMessageViewStatus(message: ProjectMessage): ProjectMessageViewStatus | undefined {
@@ -2673,8 +2684,16 @@ function toggleMessageTimestamp(messageID: string) {
   expandedMessageTimestampID.value = expandedMessageTimestampID.value === messageID ? null : messageID
 }
 
+function toggleAssistantPlan(messageID: string) {
+  expandedAssistantPlanMessageID.value = expandedAssistantPlanMessageID.value === messageID ? null : messageID
+}
+
 function toggleAssistantTrace(messageID: string) {
   expandedAssistantTraceMessageID.value = expandedAssistantTraceMessageID.value === messageID ? null : messageID
+}
+
+function assistantPlanPanelID(messageID: string): string {
+  return `app-studio-assistant-plan-${messageID.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 }
 
 function formatRelativeTime(value?: string | null, numeric: Intl.RelativeTimeFormatNumeric = 'auto'): string {
@@ -3502,6 +3521,48 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 v-else
                 class="w-full min-w-0 py-1 text-[13px] leading-6 text-text-secondary"
               >
+                <div
+                  v-if="message.plan"
+                  class="mb-3"
+                  aria-live="polite"
+                >
+                  <button
+                    type="button"
+                    class="group inline-flex max-w-full items-center gap-2 rounded-md py-1 text-left text-[12px] text-text-secondary transition hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                    :aria-expanded="expandedAssistantPlanMessageID === message.id"
+                    :aria-controls="assistantPlanPanelID(message.id)"
+                    @click="toggleAssistantPlan(message.id)"
+                  >
+                    <ChevronRight
+                      class="h-3.5 w-3.5 shrink-0 transition-transform"
+                      :class="expandedAssistantPlanMessageID === message.id ? 'rotate-90' : ''"
+                      :stroke-width="1.75"
+                    />
+                    <span class="min-w-0 truncate font-medium text-text-primary">{{ assistantPlanSummary(message.plan) }}</span>
+                  </button>
+                  <ol
+                    v-show="expandedAssistantPlanMessageID === message.id"
+                    :id="assistantPlanPanelID(message.id)"
+                    class="mt-2 grid gap-1.5 rounded-lg border border-border-subtle bg-surface/80 p-2"
+                  >
+                    <li
+                      v-for="(step, index) in message.plan.steps"
+                      :key="`${message.id}-plan-${index}`"
+                      class="flex min-w-0 items-center gap-2 rounded-md border px-2.5 py-2 text-[12px] leading-5"
+                      :class="step.status === 'completed'
+                        ? 'border-success/30 bg-success-subtle text-success'
+                        : step.status === 'in_progress'
+                          ? 'border-accent/30 bg-accent-subtle text-accent'
+                          : 'border-border-subtle bg-surface-raised text-text-muted'"
+                    >
+                      <Check v-if="step.status === 'completed'" class="h-3.5 w-3.5 shrink-0" :stroke-width="2" />
+                      <Loader2 v-else-if="step.status === 'in_progress'" class="h-3.5 w-3.5 shrink-0 animate-spin" :stroke-width="1.75" />
+                      <Square v-else class="h-3 w-3 shrink-0" :stroke-width="1.75" />
+                      <span class="sr-only">{{ assistantPlanStepStatusLabel(step.status) }}</span>
+                      <span class="min-w-0 text-text-primary">{{ step.content }}</span>
+                    </li>
+                  </ol>
+                </div>
                 <div
                   v-if="assistantTraceItems(message).length"
                   class="mb-3"
