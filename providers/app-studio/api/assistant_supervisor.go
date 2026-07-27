@@ -144,7 +144,7 @@ func (s *projectAssistantSupervisor) Shutdown(ctx context.Context) {
 	s.mu.Lock()
 	accumulators := make([]*projectAssistantSnapshotAccumulator, 0, len(s.runs))
 	for key, active := range s.runs {
-		if !assistantRunTerminal(active.run.Status) {
+		if active.run.Status == store.AssistantRunStatusRunning {
 			accumulators = append(accumulators, &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: active.run.ID})
 		}
 	}

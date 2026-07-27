@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -624,9 +625,26 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	assistantContent := &strings.Builder{}
 	accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, run.ID)
 	metadataState := &projectAssistantDurableMetadataState{status: "Working"}
+	var snapshotErr error
+	var snapshotErrMu sync.Mutex
+	recordSnapshotErr := func(err error) {
+		if err == nil {
+			return
+		}
+		snapshotErrMu.Lock()
+		if snapshotErr == nil {
+			snapshotErr = err
+		}
+		snapshotErrMu.Unlock()
+	}
+	getSnapshotErr := func() error {
+		snapshotErrMu.Lock()
+		defer snapshotErrMu.Unlock()
+		return snapshotErr
+	}
 	persistMetadata := func(ctx context.Context, runStatus *store.AssistantRunStatus) {
 		if accumulator != nil {
-			_ = s.persistProjectAssistantDurableMetadata(ctx, accumulator, projectWorkspaceScope(id, p.Name), metadataState, runStatus)
+			recordSnapshotErr(s.persistProjectAssistantDurableMetadata(ctx, accumulator, projectWorkspaceScope(id, p.Name), metadataState, runStatus))
 		}
 	}
 	var pendingPermissionToolCallID string
@@ -705,7 +723,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 			OnChunk: func(chunk string) {
 				assistantContent.WriteString(chunk)
 				if accumulator != nil {
-					_ = accumulator.UpdateText(ctx, assistantContent.String(), false)
+					recordSnapshotErr(accumulator.UpdateText(ctx, assistantContent.String(), false))
 				}
 			},
 			OnProvisionalText:  func(string) { metadataState.provisional = true; persistMetadata(ctx, nil) },
@@ -741,6 +759,9 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	currentRequestID := run.RequestID
 	currentToolCallID := strings.TrimSpace(state.Eino.ToolCallID)
 	result, err := s.projectAssistantEngine().ResumeProjectAssistant(ctx, engineReq, resumeReq, state)
+	if persistErr := getSnapshotErr(); persistErr != nil {
+		return projectAssistantResumeResponse{}, fmt.Errorf("persist resumed assistant snapshot: %w", persistErr)
+	}
 	run.Audit = append([]byte(nil), resumeRun.Audit...)
 	currentToolCall := projectAssistantResumeToolCall(metadataState.toolCalls, currentToolCallID)
 	out.ToolCall = currentToolCall

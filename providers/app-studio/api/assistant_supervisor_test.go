@@ -395,6 +395,30 @@ func TestProjectAssistantSupervisorShutdownInterruptsWorker(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantSupervisorShutdownLeavesPendingCheckpointResumable(t *testing.T) {
+	msgStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), msgStore)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingInput, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, projectMessageStatusPendingInput, false, false, nil), CreatedAt: now, UpdatedAt: now}
+	if _, err := msgStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Attach(scope, run, assistant); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.Shutdown(context.Background())
+	got, err := msgStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.AssistantRunStatusPendingInput || got.Revision != 1 {
+		t.Fatalf("pending run changed during shutdown: %#v", got)
+	}
+}
+
 func TestProjectAssistantSupervisorParentCancellationPersistsInterrupted(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	supervisor := newProjectAssistantSupervisor(parent, store.NewMemoryStore())

@@ -51,6 +51,22 @@ test('a delayed different run cannot replace the accepted run for the same proje
   assert.equal(result.current.id, 'run-1')
 })
 
+test('a start response may replace a terminal prior run even when its revision resets to one', () => {
+  const prior = snapshot(9, 'done', 'completed')
+  const next = { ...snapshot(1, 'new'), run: { ...snapshot(1, 'new').run, id: 'run-2' } }
+  const result = state.acceptScopedConversationSnapshot('project-a', 'project-a', prior.run, 'project-a', next.run, 'start')
+  assert.equal(result.accepted, true)
+  assert.equal(result.current.id, 'run-2')
+})
+
+test('a delayed latest response for an old run cannot replace a newer start', () => {
+  const current = { ...snapshot(1, 'new'), run: { ...snapshot(1, 'new').run, id: 'run-2' } }
+  const old = snapshot(9, 'old', 'completed')
+  const result = state.acceptScopedConversationSnapshot('project-a', 'project-a', current.run, 'project-a', old.run, 'latest', 'run-1')
+  assert.equal(result.accepted, false)
+  assert.equal(result.current.id, 'run-2')
+})
+
 test('a successful abort snapshot immediately makes the run terminal and non-provisional', () => {
   const stopped = state.abortedConversationSnapshot(snapshot(4, 'working'))
   assert.equal(stopped.run.status, 'aborted')

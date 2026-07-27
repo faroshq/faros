@@ -45,9 +45,14 @@ export function acceptScopedConversationSnapshot(
   current: AssistantRun | undefined,
   incomingProject: string,
   incoming: AssistantRun,
+  source: 'stream' | 'start' | 'latest' = 'stream',
+  expectedRunID = '',
 ): { accepted: boolean; current: AssistantRun | undefined } {
   if (!selectedProject || selectedProject !== incomingProject) return { accepted: false, current }
-  if (current && currentProject === incomingProject && current.id !== incoming.id && !assistantRunTerminal(current.status)) return { accepted: false, current }
+  if (current && currentProject === incomingProject && current.id !== incoming.id) {
+    if (source !== 'start' && !(source === 'latest' && current.id === expectedRunID)) return { accepted: false, current }
+	return acceptConversationSnapshot(undefined, incoming)
+  }
   return acceptConversationSnapshot(current, incoming)
 }
 

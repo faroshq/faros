@@ -404,7 +404,7 @@ const assistantRunController = new ConversationRunController({
     setDisconnect(() => controller.abort())
     await api.streamAssistantRun(props.ctx, projectName, runID, afterRevision, (snapshot) => {
       if (selected.value?.name !== projectName || snapshot.run.id !== runID) return
-      applyAssistantSnapshot(snapshot)
+      applyAssistantSnapshot(snapshot, projectName, 'stream')
     }, controller.signal)
   },
   abort: async (runID) => {
@@ -1806,10 +1806,10 @@ async function refreshSelectedProjectConversation(projectName: string) {
   await recoverAssistantConversation(projectName)
 }
 
-function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? ''): { accepted: boolean; current: AssistantRun | undefined } {
+function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? '', source: 'stream' | 'start' | 'latest' = 'stream', expectedRunID = ''): { accepted: boolean; current: AssistantRun | undefined } {
   const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
   const previousRun = assistantRunRevisions[normalized.run.id]
-  const accepted = acceptScopedConversationSnapshot(projectName, activeAssistantProject, activeAssistantRun ?? previousRun, projectName, normalized.run)
+  const accepted = acceptScopedConversationSnapshot(projectName, activeAssistantProject, activeAssistantRun ?? previousRun, projectName, normalized.run, source, expectedRunID)
   if (!accepted.accepted) return accepted
   const current = mergeConversationSnapshot(
     { messages: messages.value, runs: assistantRunRevisions },
@@ -1836,9 +1836,10 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
 
 async function recoverAssistantConversation(projectName: string): Promise<{ accepted: boolean; current: AssistantRun | undefined } | undefined> {
   if (selected.value?.name !== projectName) return undefined
+  const expectedRunID = activeAssistantProject === projectName ? activeAssistantRun?.id ?? '' : ''
   const snapshot = await api.getLatestAssistantRun(props.ctx, projectName)
   if (!snapshot || selected.value?.name !== projectName) return undefined
-  const applied = applyAssistantSnapshot(snapshot, projectName)
+  const applied = applyAssistantSnapshot(snapshot, projectName, 'latest', expectedRunID)
   if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) {
     assistantRunController.start(applied.current.id, applied.current.revision)
   }
@@ -2247,8 +2248,8 @@ async function sendMessage() {
   try {
     const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
     messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
-    applyAssistantSnapshot({ run: started.run, message: started.assistant })
-    if (!assistantRunTerminal(started.run.status)) assistantRunController.start(started.run.id, started.run.revision)
+    const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
+    if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
     pendingMessageSubmission = null
   } catch (e) {
     messages.value = messages.value.filter((message) => message.id !== optimisticID)
