@@ -800,7 +800,7 @@ export const api = {
     )
   },
 
-  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string }): Promise<ProjectAssistantRunStart> {
+  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; initialProjectPrompt?: boolean }): Promise<ProjectAssistantRunStart> {
     return request<ProjectAssistantRunStart>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/messages`, body)
   },
 

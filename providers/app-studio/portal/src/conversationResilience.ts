@@ -39,7 +39,14 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
     projectName: submission.projectName,
     content: submission.content,
     clientRequestID: submission.clientRequestID,
+    ...(submission.projectName ? { initialProjectPrompt: true } : {}),
   }
+}
+
+export function assistantRunStartPayload(content: string, clientRequestID: string, initialProjectPrompt = false) {
+  return initialProjectPrompt
+    ? { content, clientRequestID, initialProjectPrompt: true }
+    : { content, clientRequestID }
 }
 
 export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {

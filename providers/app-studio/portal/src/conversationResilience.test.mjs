@@ -32,7 +32,15 @@ test('first-project retry reuses the created project and durable request identit
   const pending = state.newFirstProjectSubmission('ship it', 'request-1')
   assert.deepEqual(state.firstProjectStartPlan(pending), { createProject: true, projectName: '', content: 'ship it', clientRequestID: 'request-1' })
   const created = state.firstProjectSubmissionWithProject(pending, 'demo')
-  assert.deepEqual(state.firstProjectStartPlan(created), { createProject: false, projectName: 'demo', content: 'ship it', clientRequestID: 'request-1' })
+  const firstRun = state.firstProjectStartPlan(created)
+  assert.deepEqual(
+    state.assistantRunStartPayload(firstRun.content, firstRun.clientRequestID, firstRun.initialProjectPrompt),
+    { content: 'ship it', clientRequestID: 'request-1', initialProjectPrompt: true },
+  )
+  assert.deepEqual(
+    state.assistantRunStartPayload('continue', 'request-2'),
+    { content: 'continue', clientRequestID: 'request-2' },
+  )
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-1', content: 'ship it' }), true)
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
 })

@@ -66,9 +66,10 @@ type PatchProjectMemoryRequest struct {
 }
 
 type CreateProjectMessageRequest struct {
-	Role            string `json:"role,omitempty"`
-	Content         string `json:"content"`
-	ClientRequestID string `json:"clientRequestID,omitempty"`
+	Role                 string `json:"role,omitempty"`
+	Content              string `json:"content"`
+	ClientRequestID      string `json:"clientRequestID,omitempty"`
+	InitialProjectPrompt bool   `json:"initialProjectPrompt,omitempty"`
 }
 
 type ProjectView struct {

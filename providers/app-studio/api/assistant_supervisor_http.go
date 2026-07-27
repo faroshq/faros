@@ -281,10 +281,22 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	var start *projectAssistantStreamStart
+	if request.InitialProjectPrompt {
+		messages, err := s.store.ListMessages(r.Context(), scope, 1, "")
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		if len(messages.Items) == 0 {
+			plan := projectAssistantInitialCreationPlan()
+			start = &projectAssistantStreamStart{InitialApprovedPlan: cloneProjectAssistantApprovedPlan(&plan)}
+		}
+	}
 	supervisor := s.projectAssistantSupervisor()
 	started, err := s.startProjectAssistantRunDurably(r.Context(), scope, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message) error {
 		return supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
-			s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, created, nil)
+			s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, created, start)
 		})
 	})
 	if err != nil {

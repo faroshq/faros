@@ -42,6 +42,7 @@ import {
   ConversationRunController,
   abortedConversationSnapshot,
   acceptScopedConversationSnapshot,
+  assistantRunStartPayload,
   assistantRunTerminal,
   firstProjectStartPlan,
   firstProjectSubmissionAccepted,
@@ -1684,7 +1685,12 @@ async function createProjectAndStartConversation(content: string) {
       props.navigate(encodeURIComponent(projectName))
     }
 
-    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID: submission.clientRequestID })
+    const startPlan = firstProjectStartPlan(submission)
+    const started = await api.startAssistantRun(props.ctx, projectName, assistantRunStartPayload(
+      startPlan.content,
+      startPlan.clientRequestID,
+      startPlan.initialProjectPrompt,
+    ))
     if (!current()) return
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
     if (applied.accepted && applied.current) {
@@ -2278,7 +2284,7 @@ async function sendMessage() {
   }
   if (!messages.value.some((message) => message.id === optimisticID)) messages.value = [...messages.value, optimisticUserMessage]
   try {
-    const started = await api.startAssistantRun(props.ctx, projectName, { content, clientRequestID })
+    const started = await api.startAssistantRun(props.ctx, projectName, assistantRunStartPayload(content, clientRequestID, Boolean(firstProjectPending)))
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
     if (applied.accepted && applied.current) {
       messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)

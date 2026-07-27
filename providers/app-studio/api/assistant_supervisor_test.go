@@ -961,6 +961,73 @@ func TestProjectAssistantRunStartIdempotentLegacyRunOmitsUnknownUser(t *testing.
 	}
 }
 
+func TestProjectAssistantRunStartInitialProjectPromptGrantsOnlyEmptyTranscript(t *testing.T) {
+	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
+	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.Contains(request.Query, "ProjectYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\nspec: {}\n"}}}})
+		case strings.Contains(request.Query, "SecretYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"v1": map[string]any{"SecretYaml": string(secret)}}})
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+	}))
+	defer graphQL.Close()
+
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), store.NewMemoryStore(), nil, "", false)
+	engine := &initialProjectPromptCaptureEngine{requests: make(chan projectAssistantRunRequest, 2)}
+	server.assistantEngine = engine
+	router := mux.NewRouter()
+	server.Register(router)
+
+	post := func(body string) {
+		request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer caller-token")
+		request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+		request.Header.Set("X-Kedge-Cluster", "cluster-a")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusAccepted {
+			t.Fatalf("start status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+		}
+	}
+
+	post(`{"content":"build a todo app","clientRequestID":"request-1","initialProjectPrompt":true}`)
+	select {
+	case request := <-engine.requests:
+		if request.InitialApprovedPlan == nil {
+			t.Fatal("first initial-project durable run did not receive its run-local approval grant")
+		}
+		if !request.InitialApprovedPlan.RunLocal {
+			t.Fatalf("first initial-project grant = %#v, want run-local", request.InitialApprovedPlan)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first durable run did not reach assistant engine")
+	}
+
+	post(`{"content":"continue","clientRequestID":"request-2","initialProjectPrompt":true}`)
+	select {
+	case request := <-engine.requests:
+		if request.InitialApprovedPlan != nil {
+			t.Fatalf("later durable run received initial-project grant: %#v", request.InitialApprovedPlan)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("later durable run did not reach assistant engine")
+	}
+}
+
 func TestProjectAssistantSnapshotStreamReconcilesRestartedRunningRun(t *testing.T) {
 	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -1420,6 +1487,19 @@ type blockingStartRouteEngine struct {
 }
 
 type replyStartRouteEngine struct{ chunk, reply string }
+
+type initialProjectPromptCaptureEngine struct {
+	requests chan projectAssistantRunRequest
+}
+
+func (e *initialProjectPromptCaptureEngine) StreamProjectAssistant(_ context.Context, request projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	e.requests <- request
+	return projectAssistantRunResult{}, nil
+}
+
+func (*initialProjectPromptCaptureEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected resume")
+}
 
 func (e replyStartRouteEngine) StreamProjectAssistant(_ context.Context, req projectAssistantRunRequest) (projectAssistantRunResult, error) {
 	if e.chunk != "" {
