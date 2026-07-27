@@ -105,6 +105,21 @@ func TestEinoReadOnlyBackendRejectsSymlinkedStoreRoot(t *testing.T) {
 	}
 }
 
+func TestEinoReadOnlyBackendRejectsSymlinkedStoreRootWithTrailingSeparators(t *testing.T) {
+	for _, suffix := range []string{"/", "/."} {
+		t.Run(suffix, func(t *testing.T) {
+			outside := t.TempDir()
+			root := filepath.Join(t.TempDir(), "workspace-root")
+			if err := os.Symlink(outside, root); err != nil {
+				t.Fatalf("Symlink returned error: %v", err)
+			}
+			if backend, err := NewEinoReadOnlyBackend(NewFileStore(root+suffix), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "alpha"}); err == nil || backend != nil {
+				t.Fatalf("NewEinoReadOnlyBackend = (%#v, %v), want canonicalized store root symlink rejection", backend, err)
+			}
+		})
+	}
+}
+
 func TestEinoReadOnlyBackendAllowsNonexistentStoreRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace-root")
 	backend, err := NewEinoReadOnlyBackend(NewFileStore(root), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "new-project"})
@@ -145,6 +160,38 @@ func TestEinoReadOnlyBackendRejectsStoreRootReplacedBySymlink(t *testing.T) {
 		t.Fatalf("Symlink returned error: %v", err)
 	}
 	assertEinoReadOperationsRejectSymlink(t, ctx, backend)
+}
+
+func TestEinoReadOnlyBackendRejectsCanonicalizedStoreRootReplacement(t *testing.T) {
+	ctx := context.Background()
+	for _, suffix := range []string{"/", "/."} {
+		t.Run(suffix, func(t *testing.T) {
+			root := t.TempDir()
+			store := NewFileStore(root + suffix)
+			scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "alpha"}
+			if err := store.ApplyFiles(ctx, scope, []File{{Path: "inside.txt", Content: "inside\n"}}); err != nil {
+				t.Fatalf("ApplyFiles returned error: %v", err)
+			}
+			backend, err := NewEinoReadOnlyBackend(store, scope)
+			if err != nil {
+				t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+			}
+			outside := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(outside, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName), 0o755); err != nil {
+				t.Fatalf("MkdirAll outside scope returned error: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, "secret.txt"), []byte("outside secret\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile outside secret returned error: %v", err)
+			}
+			if err := os.RemoveAll(root); err != nil {
+				t.Fatalf("RemoveAll store root returned error: %v", err)
+			}
+			if err := os.Symlink(outside, root); err != nil {
+				t.Fatalf("Symlink returned error: %v", err)
+			}
+			assertEinoReadOperationsRejectSymlink(t, ctx, backend)
+		})
+	}
 }
 
 func TestEinoReadOnlyBackendRejectsScopeReplacedBySymlink(t *testing.T) {
@@ -594,6 +641,19 @@ func TestEinoReadOnlyBackendGrepScansPastDenseMultilineContextMatches(t *testing
 	}
 }
 
+func TestEinoReadOnlyBackendGrepRejectsExcessRawMultilineMatches(t *testing.T) {
+	content := strings.Repeat("x", 10001) + "\nneedle\n"
+	_, err := boundedEinoGrepFile(context.Background(), "dense.txt", content, &einofs.GrepRequest{
+		Pattern:         "x|needle",
+		EnableMultiline: true,
+		BeforeLines:     1,
+		AfterLines:      1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "narrow request") {
+		t.Fatalf("boundedEinoGrepFile raw match cap error = %v, want narrow request error", err)
+	}
+}
+
 func TestEinoReadOnlyBackendGrepPreservesZeroWidthMultilineMatches(t *testing.T) {
 	ctx := context.Background()
 	content := "aa\nb\n"
@@ -616,6 +676,130 @@ func TestEinoReadOnlyBackendGrepPreservesZeroWidthMultilineMatches(t *testing.T)
 	if !slices.Equal(got, want) {
 		t.Fatalf("zero-width matches = %#v, want Eino %#v", got, want)
 	}
+}
+
+func TestEinoReadOnlyBackendGrepMatchesEinoMultilineRegexParity(t *testing.T) {
+	ctx := context.Background()
+	content := "alpha\nβeta\n\nΩmega\n"
+	for _, pattern := range []string{"^", "(?m)^", "$", "(?m)$", `\b`, `\B`, "β|Ω"} {
+		t.Run(pattern, func(t *testing.T) {
+			request := &einofs.GrepRequest{Pattern: pattern, EnableMultiline: true}
+			reference := einofs.NewInMemoryBackend()
+			if err := reference.Write(ctx, &einofs.WriteRequest{FilePath: "/parity.txt", Content: content}); err != nil {
+				t.Fatalf("Write reference content returned error: %v", err)
+			}
+			want, err := reference.GrepRaw(ctx, request)
+			if err != nil {
+				t.Fatalf("reference GrepRaw returned error: %v", err)
+			}
+			for index := range want {
+				want[index].Path = strings.TrimPrefix(want[index].Path, "/")
+			}
+			got, err := boundedEinoGrepFile(ctx, "parity.txt", content, request)
+			if err != nil {
+				t.Fatalf("boundedEinoGrepFile returned error: %v", err)
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("multiline matches = %#v, want Eino %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestEinoReadOnlyBackendGrepValidatesGlobBeforeFiltering(t *testing.T) {
+	ctx := context.Background()
+	for name, setup := range map[string]func(t *testing.T) *EinoReadOnlyBackend{
+		"empty project": func(t *testing.T) *EinoReadOnlyBackend {
+			backend, err := NewEinoReadOnlyBackend(NewFileStore(t.TempDir()), Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "empty"})
+			if err != nil {
+				t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+			}
+			return backend
+		},
+		"zero path candidates": func(t *testing.T) *EinoReadOnlyBackend {
+			store := NewFileStore(t.TempDir())
+			scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+			if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/app.go", Content: "package app\n"}}); err != nil {
+				t.Fatalf("ApplyFiles returned error: %v", err)
+			}
+			backend, err := NewEinoReadOnlyBackend(store, scope)
+			if err != nil {
+				t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+			}
+			return backend
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := setup(t)
+			if _, err := backend.GrepRaw(ctx, &einofs.GrepRequest{Pattern: "needle", Path: "missing", Glob: "["}); err == nil {
+				t.Fatal("GrepRaw invalid glob returned nil error")
+			}
+		})
+	}
+}
+
+func TestEinoReadOnlyBackendGrepEnforcesFinalCapAcrossFiles(t *testing.T) {
+	ctx := context.Background()
+	newBackend := func(t *testing.T, secondCount int) *EinoReadOnlyBackend {
+		t.Helper()
+		store := NewFileStore(t.TempDir())
+		scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "cap"}
+		if err := store.ApplyFiles(ctx, scope, []File{
+			{Path: "a.txt", Content: strings.Repeat("needle\n", 500)},
+			{Path: "b.txt", Content: strings.Repeat("needle\n", secondCount)},
+		}); err != nil {
+			t.Fatalf("ApplyFiles returned error: %v", err)
+		}
+		backend, err := NewEinoReadOnlyBackend(store, scope)
+		if err != nil {
+			t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+		}
+		return backend
+	}
+	t.Run("exactly 1000", func(t *testing.T) {
+		matches, err := newBackend(t, 500).GrepRaw(ctx, &einofs.GrepRequest{Pattern: "needle"})
+		if err != nil {
+			t.Fatalf("GrepRaw returned error: %v", err)
+		}
+		if len(matches) != maxEinoBackendMatches || matches[0].Path != "a.txt" || matches[0].Line != 1 || matches[len(matches)-1].Path != "b.txt" || matches[len(matches)-1].Line != 500 {
+			t.Fatalf("exact cap matches = first %#v last %#v len %d", matches[0], matches[len(matches)-1], len(matches))
+		}
+	})
+	t.Run("1001", func(t *testing.T) {
+		if _, err := newBackend(t, 501).GrepRaw(ctx, &einofs.GrepRequest{Pattern: "needle"}); err == nil || !strings.Contains(err.Error(), "narrow request") {
+			t.Fatalf("GrepRaw 1001 error = %v, want narrow request error", err)
+		}
+	})
+	t.Run("context overlap is deduplicated and ordered", func(t *testing.T) {
+		store := NewFileStore(t.TempDir())
+		scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "context"}
+		if err := store.ApplyFiles(ctx, scope, []File{
+			{Path: "a.txt", Content: "zero\nneedle one\nneedle two\nthree\n"},
+			{Path: "b.txt", Content: "first\nneedle three\nlast\n"},
+		}); err != nil {
+			t.Fatalf("ApplyFiles returned error: %v", err)
+		}
+		backend, err := NewEinoReadOnlyBackend(store, scope)
+		if err != nil {
+			t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+		}
+		matches, err := backend.GrepRaw(ctx, &einofs.GrepRequest{Pattern: "needle", BeforeLines: 1, AfterLines: 1})
+		if err != nil {
+			t.Fatalf("GrepRaw returned error: %v", err)
+		}
+		want := []einofs.GrepMatch{
+			{Path: "a.txt", Line: 1, Content: "zero"},
+			{Path: "a.txt", Line: 2, Content: "needle one"},
+			{Path: "a.txt", Line: 3, Content: "needle two"},
+			{Path: "a.txt", Line: 4, Content: "three"},
+			{Path: "b.txt", Line: 1, Content: "first"},
+			{Path: "b.txt", Line: 2, Content: "needle three"},
+			{Path: "b.txt", Line: 3, Content: "last"},
+		}
+		if !slices.Equal(matches, want) {
+			t.Fatalf("context matches = %#v, want %#v", matches, want)
+		}
+	})
 }
 
 func TestEinoReadOnlyBackendGrepValidatesPatternBeforeFiltering(t *testing.T) {

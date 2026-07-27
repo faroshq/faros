@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	einofs "github.com/cloudwego/eino/adk/filesystem"
 )
@@ -33,6 +32,7 @@ import (
 const (
 	maxEinoBackendAggregateBytes = 16 << 20
 	maxEinoBackendMatches        = 1000
+	maxEinoBackendRawMatches     = 10000
 	einoBackendCandidateMarker   = "__app_studio_eino_candidate__"
 )
 
@@ -75,7 +75,7 @@ func (b *EinoReadOnlyBackend) projectFiles(ctx context.Context) ([]FileInfo, err
 }
 
 func validateEinoScopeDirectories(store *FileStore, scope Scope) error {
-	current := store.Root()
+	current := filepath.Clean(store.Root())
 	info, err := os.Lstat(current)
 	if os.IsNotExist(err) {
 		return nil
@@ -146,6 +146,26 @@ func einoMetadataSnapshot(ctx context.Context, files []FileInfo) (*einofs.InMemo
 		}
 	}
 	return snapshot, nil
+}
+
+// validateEinoGrepGlob delegates glob syntax validation to Eino even when the
+// project has no files (or none below the requested path).
+func validateEinoGrepGlob(ctx context.Context, glob string) error {
+	if glob == "" {
+		return nil
+	}
+	snapshot := einofs.NewInMemoryBackend()
+	if err := snapshot.Write(ctx, &einofs.WriteRequest{
+		FilePath: "/" + einoBackendCandidateMarker,
+		Content:  einoBackendCandidateMarker,
+	}); err != nil {
+		return err
+	}
+	_, err := snapshot.GrepRaw(ctx, &einofs.GrepRequest{
+		Pattern: regexp.QuoteMeta(einoBackendCandidateMarker),
+		Glob:    glob,
+	})
+	return err
 }
 
 func (b *EinoReadOnlyBackend) GlobInfo(ctx context.Context, req *einofs.GlobInfoRequest) ([]einofs.FileInfo, error) {
@@ -268,6 +288,9 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 	if _, err := compileEinoGrepPattern(req); err != nil {
 		return nil, err
 	}
+	if err := validateEinoGrepGlob(ctx, req.Glob); err != nil {
+		return nil, err
+	}
 	files, err := b.projectFiles(ctx)
 	if err != nil {
 		return nil, err
@@ -367,7 +390,6 @@ func compileEinoGrepPattern(req *einofs.GrepRequest) (*regexp.Regexp, error) {
 
 func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, req *einofs.GrepRequest, re *regexp.Regexp, limit int) ([]einofs.GrepMatch, error) {
 	lines := strings.Split(content, "\n")
-	lineStarts := einoLineStarts(content)
 	results := make([]einofs.GrepMatch, 0)
 	seenLines := make(map[int]struct{})
 	appendMatchLine := func(line int) error {
@@ -407,16 +429,23 @@ func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, re
 		return nil
 	}
 	if req.EnableMultiline {
-		return results, forEachEinoRegexpMatch(ctx, re, content, func(start, end int) error {
-			startLine := einoLineNumber(lineStarts, start)
-			endLine := einoLineNumber(lineStarts, end)
+		indices := re.FindAllStringIndex(content, maxEinoBackendRawMatches+1)
+		if len(indices) > maxEinoBackendRawMatches {
+			return nil, fmt.Errorf("search produced more than %d raw matches; narrow request", maxEinoBackendRawMatches)
+		}
+		for _, index := range indices {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			startLine := strings.Count(content[:index[0]], "\n") + 1
+			endLine := strings.Count(content[:index[1]], "\n") + 1
 			for line := startLine; line <= endLine && line <= len(lines); line++ {
 				if err := appendMatchLine(line); err != nil {
-					return err
+					return nil, err
 				}
 			}
-			return nil
-		})
+		}
+		return results, nil
 	}
 	for line, value := range lines {
 		if err := ctx.Err(); err != nil {
@@ -429,54 +458,6 @@ func boundedEinoGrepFileWithRegexp(ctx context.Context, path, content string, re
 		}
 	}
 	return results, nil
-}
-
-func einoLineStarts(content string) []int {
-	starts := []int{0}
-	for index := 0; index < len(content); index++ {
-		if content[index] == '\n' {
-			starts = append(starts, index+1)
-		}
-	}
-	return starts
-}
-
-func einoLineNumber(starts []int, offset int) int {
-	return sort.Search(len(starts), func(index int) bool { return starts[index] > offset })
-}
-
-func forEachEinoRegexpMatch(ctx context.Context, re *regexp.Regexp, content string, visit func(start, end int) error) error {
-	for position, previousEnd := 0, -1; position <= len(content); {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		match := re.FindStringIndex(content[position:])
-		if match == nil {
-			return nil
-		}
-		start, end := position+match[0], position+match[1]
-		accept := true
-		if end == position {
-			if start == previousEnd {
-				accept = false
-			}
-			_, width := utf8.DecodeRuneInString(content[position:])
-			if width > 0 {
-				position += width
-			} else {
-				position = len(content) + 1
-			}
-		} else {
-			position = end
-		}
-		previousEnd = end
-		if accept {
-			if err := visit(start, end); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (b *EinoReadOnlyBackend) Write(context.Context, *einofs.WriteRequest) error {
