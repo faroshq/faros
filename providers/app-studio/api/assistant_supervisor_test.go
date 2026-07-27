@@ -1029,9 +1029,11 @@ func TestProjectAssistantRunStartInitialProjectPromptGrantsOnlyEmptyTranscript(t
 }
 
 func TestProjectAssistantRunStartInitialProjectPromptSeesTranscriptAfterReservation(t *testing.T) {
-	messages := store.NewMemoryStore()
-	server := NewWithWorkspace(nil, messages, nil, "", false)
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	messages := store.NewMemoryStore()
+	observingStore := &reservationObservingStore{Store: messages, scope: scope}
+	server := NewWithWorkspace(nil, observingStore, nil, "", false)
+	observingStore.supervisor = server.projectAssistantSupervisor()
 	now := time.Now().UTC()
 	if err := messages.AppendMessage(context.Background(), scope, store.Message{ID: "prior-user", Role: "user", Content: "already started", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
@@ -1046,6 +1048,9 @@ func TestProjectAssistantRunStartInitialProjectPromptSeesTranscriptAfterReservat
 	}
 	if transcriptEmpty {
 		t.Fatal("durable start retained a stale empty-transcript result after reserving the project")
+	}
+	if !observingStore.observedReservation {
+		t.Fatal("durable start did not read the transcript through the reservation-observing store")
 	}
 }
 
@@ -1511,6 +1516,23 @@ type replyStartRouteEngine struct{ chunk, reply string }
 
 type initialProjectPromptCaptureEngine struct {
 	requests chan projectAssistantRunRequest
+}
+
+type reservationObservingStore struct {
+	store.Store
+	supervisor          *projectAssistantSupervisor
+	scope               store.Scope
+	observedReservation bool
+}
+
+func (s *reservationObservingStore) ListMessages(ctx context.Context, scope store.Scope, limit int, cursor string) (store.Page, error) {
+	if scope == s.scope {
+		if s.supervisor == nil || !s.supervisor.reserved(scope) {
+			return store.Page{}, errors.New("transcript read occurred before project reservation")
+		}
+		s.observedReservation = true
+	}
+	return s.Store.ListMessages(ctx, scope, limit, cursor)
 }
 
 func (e *initialProjectPromptCaptureEngine) StreamProjectAssistant(_ context.Context, request projectAssistantRunRequest) (projectAssistantRunResult, error) {
