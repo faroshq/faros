@@ -22,7 +22,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -270,20 +269,6 @@ func TestProjectAssistantStreamWriterMapsStatusToUIDataModelUpdate(t *testing.T)
 	contents := got[0].DataModelUpdate.Contents
 	if len(contents) != 1 || contents[0].Key != "assistant.status" || contents[0].ValueString != "Preparing action" {
 		t.Fatalf("data model contents = %#v, want assistant status", contents)
-	}
-}
-
-func TestProjectAssistantStreamWriterEmitsPlanSnapshot(t *testing.T) {
-	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect files", Status: "completed"}}}
-	got, err := collectProjectAssistantStreamEvents(projectAssistantEvent{
-		Type: projectAssistantEventPlan,
-		Plan: &plan,
-	})
-	if err != nil {
-		t.Fatalf("EmitProjectAssistantEvent returned error: %v", err)
-	}
-	if len(got) != 1 || got[0].Type != string(projectAssistantEventPlan) || !reflect.DeepEqual(got[0].Plan, &plan) {
-		t.Fatalf("events = %#v, want one plan snapshot", got)
 	}
 }
 

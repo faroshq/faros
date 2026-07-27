@@ -1336,9 +1336,9 @@ func TestProjectEinoAssistantPhaseWriteTodosProgressValidation(t *testing.T) {
 			arguments: `{"todos":[]}`,
 		},
 		{
-			name:      "empty sanitized content emits no plan",
-			phase:     projectEinoAssistantPhaseMutate,
-			arguments: `{"todos":[{"content":" \n ","activeForm":"Inspecting","status":"in_progress"},{"content":"Verify","activeForm":"Verifying","status":"pending"}]}`,
+			name:       "empty sanitized content emits no plan",
+			phase:      projectEinoAssistantPhaseMutate,
+			arguments:  `{"todos":[{"content":" \n ","activeForm":"Inspecting","status":"in_progress"},{"content":"Verify","activeForm":"Verifying","status":"pending"}]}`,
 			wantStatus: "Inspecting · 0 of 2 steps",
 		},
 		{
@@ -1418,6 +1418,9 @@ func TestProjectEinoAssistantTodoProgressLabelBoundsUnicodeSafely(t *testing.T) 
 		t.Fatalf("status is not valid UTF-8: %q", status)
 	}
 	label := strings.Split(status, " · ")[0]
+	if len(label) > projectEinoAssistantTodoProgressMaxLabelBytes {
+		t.Fatalf("label bytes = %d, want at most %d", len(label), projectEinoAssistantTodoProgressMaxLabelBytes)
+	}
 	if got := utf8.RuneCountInString(label); got > projectEinoAssistantTodoProgressMaxLabelBytes {
 		t.Fatalf("label rune count = %d, want at most %d", got, projectEinoAssistantTodoProgressMaxLabelBytes)
 	}
