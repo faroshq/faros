@@ -1374,11 +1374,14 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
-	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+	firstPlan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "in_progress"},
+	}}
+	latestPlan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
 		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
 		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
 	}}
-	engine := &planStartRouteEngine{plan: plan, published: make(chan struct{}), release: make(chan struct{})}
+	engine := &planStartRouteEngine{plans: []projectAssistantPlanSnapshot{firstPlan, latestPlan}, published: make(chan struct{}), release: make(chan struct{})}
 	server.assistantEngine = engine
 	router := mux.NewRouter()
 	server.Register(router)
@@ -1413,8 +1416,8 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("missing live plan snapshot")
 	}
-	if got := live.Message.Metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, plan) {
-		t.Fatalf("live plan = %#v, want %#v", got, plan)
+	if got := live.Message.Metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, latestPlan) {
+		t.Fatalf("live plan = %#v, want latest %#v", got, latestPlan)
 	}
 	if live.Run.Revision <= started.Run.Revision {
 		t.Fatalf("live revision = %d, want greater than start revision %d", live.Run.Revision, started.Run.Revision)
@@ -1434,8 +1437,112 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if terminal.Status != store.AssistantRunStatusCompleted || !reflect.DeepEqual(message.Metadata[projectAssistantMetadataPlan], plan) {
-		t.Fatalf("terminal run = %#v, message = %#v, want completed plan", terminal, message)
+	if terminal.Status != store.AssistantRunStatusCompleted || !reflect.DeepEqual(message.Metadata[projectAssistantMetadataPlan], latestPlan) {
+		t.Fatalf("terminal run = %#v, message = %#v, want completed latest plan", terminal, message)
+	}
+	if terminal.Revision <= live.Run.Revision {
+		t.Fatalf("terminal revision = %d, want greater than live revision %d", terminal.Revision, live.Run.Revision)
+	}
+}
+
+func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *testing.T) {
+	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
+	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct{ Query string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.Contains(request.Query, "ProjectYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\nspec: {}\n"}}}})
+		case strings.Contains(request.Query, "SecretYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"v1": map[string]any{"SecretYaml": string(secret)}}})
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+	}))
+	defer graphQL.Close()
+
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	latestPlan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
+		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
+	}}
+	engine := &planResumeRouteEngine{plans: []projectAssistantPlanSnapshot{
+		{Steps: []projectAssistantPlanStep{{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "in_progress"}}},
+		latestPlan,
+	}, published: make(chan struct{}), release: make(chan struct{})}
+	server.assistantEngine = engine
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	checkpoint, err := json.Marshal(projectAssistantCheckpointState{Eino: &projectAssistantEinoCheckpointState{
+		CheckpointID: "run-1", Checkpoint: []byte("checkpoint"), InterruptID: "interrupt-1", InterruptType: projectAssistantInterruptTypePermission, ToolCallID: "tool-1", ToolName: projectToolWriteFile,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	router := mux.NewRouter()
+	server.Register(router)
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/run-1/resume", strings.NewReader(`{"requestID":"permission-1","decision":"allow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+	request.Header.Set("X-Kedge-Cluster", "cluster-a")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("resume status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	select {
+	case <-engine.published:
+	case <-time.After(time.Second):
+		t.Fatal("resumed worker did not publish plans")
+	}
+	updates, unsubscribe, err := server.projectAssistantSupervisor().Subscribe(scope, run.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unsubscribe()
+	var live projectAssistantRunSnapshot
+	select {
+	case live = <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("missing resumed live plan snapshot")
+	}
+	if !reflect.DeepEqual(live.Message.Metadata[projectAssistantMetadataPlan], latestPlan) {
+		t.Fatalf("live plan = %#v, want latest %#v", live.Message.Metadata[projectAssistantMetadataPlan], latestPlan)
+	}
+	if live.Run.Revision <= run.Revision {
+		t.Fatalf("live revision = %d, want greater than initial revision %d", live.Run.Revision, run.Revision)
+	}
+
+	close(engine.release)
+	var terminal store.AssistantRun
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		terminal, err = memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+		if err == nil && terminal.Status == store.AssistantRunStatusCompleted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	message, err := server.findProjectMessage(context.Background(), scope, terminal.ActiveMessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Status != store.AssistantRunStatusCompleted || !reflect.DeepEqual(message.Metadata[projectAssistantMetadataPlan], latestPlan) {
+		t.Fatalf("terminal run = %#v, message = %#v, want completed latest plan", terminal, message)
 	}
 	if terminal.Revision <= live.Run.Revision {
 		t.Fatalf("terminal revision = %d, want greater than live revision %d", terminal.Revision, live.Run.Revision)
@@ -1644,7 +1751,13 @@ type blockingStartRouteEngine struct {
 type replyStartRouteEngine struct{ chunk, reply string }
 
 type planStartRouteEngine struct {
-	plan      projectAssistantPlanSnapshot
+	plans     []projectAssistantPlanSnapshot
+	published chan struct{}
+	release   chan struct{}
+}
+
+type planResumeRouteEngine struct {
+	plans     []projectAssistantPlanSnapshot
 	published chan struct{}
 	release   chan struct{}
 }
@@ -1687,7 +1800,9 @@ func (e replyStartRouteEngine) StreamProjectAssistant(_ context.Context, req pro
 }
 
 func (e *planStartRouteEngine) StreamProjectAssistant(_ context.Context, req projectAssistantRunRequest) (projectAssistantRunResult, error) {
-	req.StreamCallbacks.OnPlan(e.plan)
+	for _, plan := range e.plans {
+		req.StreamCallbacks.OnPlan(plan)
+	}
 	close(e.published)
 	<-e.release
 	return projectAssistantRunResult{Content: "plan complete"}, nil
@@ -1695,6 +1810,19 @@ func (e *planStartRouteEngine) StreamProjectAssistant(_ context.Context, req pro
 
 func (*planStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
 	return projectAssistantRunResult{}, errors.New("unexpected resume")
+}
+
+func (*planResumeRouteEngine) StreamProjectAssistant(context.Context, projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected stream")
+}
+
+func (e *planResumeRouteEngine) ResumeProjectAssistant(_ context.Context, req projectAssistantRunRequest, _ projectAssistantResumeRequest, _ projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	for _, plan := range e.plans {
+		req.StreamCallbacks.OnPlan(plan)
+	}
+	close(e.published)
+	<-e.release
+	return projectAssistantRunResult{Content: "plan complete"}, nil
 }
 
 func (replyStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {

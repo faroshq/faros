@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,51 @@ func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitio
 			metadata := projectAssistantDurableMetadataFromExisting(store.AssistantRun{ID: "run-1", Status: tt.status, Revision: 3}, tt.name, false, existing)
 			if got := metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, plan) {
 				t.Fatalf("assistant plan = %#v, want %#v", got, plan)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantDurableMetadataFromExistingDecodesOnlyValidPlanSnapshots(t *testing.T) {
+	valid := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "in_progress"}}}
+	tooMany := projectAssistantPlanSnapshot{Steps: make([]projectAssistantPlanStep, projectEinoAssistantTodoProgressMaxItems+1)}
+	for i := range tooMany.Steps {
+		tooMany.Steps[i] = projectAssistantPlanStep{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "pending"}
+	}
+	for _, tt := range []struct {
+		name string
+		plan any
+		want *projectAssistantPlanSnapshot
+	}{
+		{
+			name: "generic postgres metadata map",
+			plan: map[string]any{"steps": []any{map[string]any{"content": "Inspect project", "activeForm": "Inspecting project", "status": "in_progress"}}},
+			want: &valid,
+		},
+		{name: "unknown value", plan: "not a plan"},
+		{name: "empty plan", plan: projectAssistantPlanSnapshot{}},
+		{name: "too many steps", plan: tooMany},
+		{name: "long label", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: strings.Repeat("x", projectEinoAssistantTodoProgressMaxLabelBytes+1), Status: "pending"}}}},
+		{name: "uncanonical whitespace", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect\nproject", Status: "pending"}}}},
+		{name: "unredacted secret", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect token=raw-secret", Status: "pending"}}}},
+		{name: "invalid status", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect project", Status: "running"}}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := projectAssistantDurableMetadataFromExisting(
+				store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, Revision: 3},
+				"Working",
+				false,
+				map[string]any{projectAssistantMetadataPlan: tt.plan},
+			)
+			got, found := metadata[projectAssistantMetadataPlan]
+			if tt.want == nil {
+				if found {
+					t.Fatalf("assistant plan = %#v, want dropped invalid plan", got)
+				}
+				return
+			}
+			if !found || !reflect.DeepEqual(got, *tt.want) {
+				t.Fatalf("assistant plan = %#v, want %#v", got, *tt.want)
 			}
 		})
 	}

@@ -15,6 +15,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -191,7 +193,7 @@ func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status
 	metadata[projectAssistantMetadataWorkingStatus] = status
 	metadata[projectAssistantMetadataProvisional] = provisional
 	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
-	if plan != nil && len(plan.Steps) > 0 {
+	if plan, ok := projectAssistantPlanSnapshotFromMetadata(plan); ok {
 		metadata[projectAssistantMetadataPlan] = *plan
 	}
 	return metadata
@@ -205,8 +207,8 @@ func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status 
 	if interrupt := projectAssistantUIInterruptFromMetadata(existing[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
 		metadata[projectMessageMetadataAssistantInterrupt] = interrupt
 	}
-	if plan, ok := existing[projectAssistantMetadataPlan]; ok {
-		metadata[projectAssistantMetadataPlan] = plan
+	if plan, ok := projectAssistantPlanSnapshotFromMetadata(existing[projectAssistantMetadataPlan]); ok {
+		metadata[projectAssistantMetadataPlan] = *plan
 	}
 	preview, _ := existing[projectAssistantMetadataPreviewRefreshNeeded].(bool)
 	metadata[projectAssistantMetadataRunID] = run.ID
@@ -215,6 +217,62 @@ func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status 
 	metadata[projectAssistantMetadataProvisional] = provisional
 	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
 	return metadata
+}
+
+// projectAssistantPlanSnapshotFromMetadata is the durable metadata boundary
+// for plans. Postgres rehydrates JSON values as generic maps, so decode them
+// back into the public snapshot shape and retain only values the write_todos
+// producer could have emitted. Validation deliberately does not sanitize or
+// redact labels again: a retained plan must preserve its already-sanitized
+// user-facing wording exactly.
+func projectAssistantPlanSnapshotFromMetadata(value any) (*projectAssistantPlanSnapshot, bool) {
+	if value == nil {
+		return nil, false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var plan projectAssistantPlanSnapshot
+	if err := decoder.Decode(&plan); err != nil || !projectAssistantPlanSnapshotValid(plan) {
+		return nil, false
+	}
+	return &plan, true
+}
+
+func projectAssistantPlanSnapshotValid(plan projectAssistantPlanSnapshot) bool {
+	if len(plan.Steps) == 0 || len(plan.Steps) > projectEinoAssistantTodoProgressMaxItems {
+		return false
+	}
+	inProgress := 0
+	for _, step := range plan.Steps {
+		if !projectAssistantPlanLabelValid(step.Content, true) || !projectAssistantPlanLabelValid(step.ActiveForm, false) {
+			return false
+		}
+		switch step.Status {
+		case "pending", "completed":
+		case "in_progress":
+			inProgress++
+			if inProgress > 1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func projectAssistantPlanLabelValid(label string, required bool) bool {
+	if !utf8.ValidString(label) || len(label) > projectEinoAssistantTodoProgressMaxLabelBytes {
+		return false
+	}
+	if projectEinoAssistantTodoProgressLabel(label) != label {
+		return false
+	}
+	return !required || strings.TrimSpace(label) != ""
 }
 
 type projectAssistantDurableMetadataState struct {
@@ -276,8 +334,8 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 			metadata[projectAssistantMetadataPreviewRefreshNeeded] = true
 		}
 		if _, ok := metadata[projectAssistantMetadataPlan]; !ok {
-			if plan, ok := message.Metadata[projectAssistantMetadataPlan]; ok {
-				metadata[projectAssistantMetadataPlan] = plan
+			if plan, ok := projectAssistantPlanSnapshotFromMetadata(message.Metadata[projectAssistantMetadataPlan]); ok {
+				metadata[projectAssistantMetadataPlan] = *plan
 			}
 		}
 		message.Metadata = metadata
