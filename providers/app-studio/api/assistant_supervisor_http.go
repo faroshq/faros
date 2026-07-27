@@ -230,7 +230,7 @@ func projectAssistantPlanSnapshotFromMetadata(value any) (*projectAssistantPlanS
 		return nil, false
 	}
 	raw, err := json.Marshal(value)
-	if err != nil {
+	if err != nil || !projectAssistantPlanMetadataKeysValid(raw) {
 		return nil, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -240,6 +240,37 @@ func projectAssistantPlanSnapshotFromMetadata(value any) (*projectAssistantPlanS
 		return nil, false
 	}
 	return &plan, true
+}
+
+func projectAssistantPlanMetadataKeysValid(raw []byte) bool {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) != 1 {
+		return false
+	}
+	rawSteps, ok := object["steps"]
+	if !ok {
+		return false
+	}
+	var steps []map[string]json.RawMessage
+	if err := json.Unmarshal(rawSteps, &steps); err != nil {
+		return false
+	}
+	for _, step := range steps {
+		if _, ok := step["content"]; !ok {
+			return false
+		}
+		if _, ok := step["status"]; !ok {
+			return false
+		}
+		for key := range step {
+			switch key {
+			case "content", "activeForm", "status":
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func projectAssistantPlanSnapshotValid(plan projectAssistantPlanSnapshot) bool {
