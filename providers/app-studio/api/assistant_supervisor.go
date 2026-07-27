@@ -39,8 +39,9 @@ type projectAssistantSupervisor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu   sync.Mutex
-	runs map[projectAssistantRunKey]*projectAssistantSupervisedRun
+	mu           sync.Mutex
+	runs         map[projectAssistantRunKey]*projectAssistantSupervisedRun
+	reservations map[projectAssistantRunKey]struct{}
 }
 
 type projectAssistantSupervisedRun struct {
@@ -77,7 +78,7 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 	// the server-owned work "interrupted".
 	ctx, cancel := context.WithCancel(context.Background())
 	supervisor := &projectAssistantSupervisor{
-		store: msgStore, ctx: ctx, cancel: cancel, runs: map[projectAssistantRunKey]*projectAssistantSupervisedRun{},
+		store: msgStore, ctx: ctx, cancel: cancel, runs: map[projectAssistantRunKey]*projectAssistantSupervisedRun{}, reservations: map[projectAssistantRunKey]struct{}{},
 	}
 	go func() {
 		select {
@@ -87,6 +88,53 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 		}
 	}()
 	return supervisor
+}
+
+// Reserve closes the narrow interval between atomically creating a durable run
+// and attaching it to this process. Reconciliation must treat that interval as
+// owned, otherwise a concurrent latest/stream request can incorrectly mark a
+// freshly-created run interrupted.
+func (s *projectAssistantSupervisor) Reserve(scope store.Scope) (func(), error) {
+	if s == nil {
+		return nil, errors.New("assistant supervisor not configured")
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	if !key.valid() {
+		return nil, errors.New("assistant supervisor scope is required")
+	}
+	s.mu.Lock()
+	if s.runs[key] != nil {
+		s.mu.Unlock()
+		return nil, store.ErrAssistantRunConflict
+	}
+	if s.reservations == nil {
+		s.reservations = map[projectAssistantRunKey]struct{}{}
+	}
+	if _, exists := s.reservations[key]; exists {
+		s.mu.Unlock()
+		return nil, store.ErrAssistantRunConflict
+	}
+	s.reservations[key] = struct{}{}
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			delete(s.reservations, key)
+			s.mu.Unlock()
+		})
+	}, nil
+}
+
+func (s *projectAssistantSupervisor) reserved(scope store.Scope) bool {
+	if s == nil {
+		return false
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	s.mu.Lock()
+	_, reserved := s.reservations[key]
+	s.mu.Unlock()
+	return reserved
 }
 
 func (s *projectAssistantSupervisor) Shutdown(ctx context.Context) {
@@ -125,6 +173,7 @@ func (s *projectAssistantSupervisor) Attach(scope store.Scope, run store.Assista
 		}
 		return nil, store.ErrAssistantRunConflict
 	}
+	delete(s.reservations, key)
 	_, cancel := context.WithCancelCause(s.ctx)
 	s.runs[key] = &projectAssistantSupervisedRun{scope: scope, run: run, message: message, committedRun: run, committedMessage: message, cancel: cancel, subscribers: map[uint64]chan projectAssistantRunSnapshot{}}
 	return &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: run.ID}, nil

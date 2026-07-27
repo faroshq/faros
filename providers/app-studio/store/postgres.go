@@ -133,6 +133,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	}
 	durableRunStmts := []string{
 		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS client_request_id text NOT NULL DEFAULT ''`,
+		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS user_message_id text NOT NULL DEFAULT ''`,
 		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS active_message_id text NOT NULL DEFAULT ''`,
 		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0`,
 		`UPDATE app_studio_assistant_runs
@@ -365,12 +366,13 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
 			org_uuid, workspace_uuid, project_name, run_id,
-			status, client_request_id, active_message_id, revision, request_id,
+			status, client_request_id, user_message_id, active_message_id, revision, request_id,
 			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, run_id)
 		DO UPDATE SET
 			status = EXCLUDED.status,
+			user_message_id = EXCLUDED.user_message_id,
 			active_message_id = EXCLUDED.active_message_id,
 			request_id = EXCLUDED.request_id,
 			checkpoint = EXCLUDED.checkpoint,
@@ -378,7 +380,7 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 			updated_at = EXCLUDED.updated_at
 	`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, run.ID,
-		run.Status, run.ClientRequestID, run.ActiveMessageID, run.Revision, run.RequestID,
+		run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 		string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 	)
 	if err != nil {
@@ -417,14 +419,14 @@ func (s *PostgresStore) CreateAssistantRun(ctx context.Context, scope Scope, use
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
 			org_uuid, workspace_uuid, project_name, run_id, status,
-			client_request_id, active_message_id, revision, request_id,
+			client_request_id, user_message_id, active_message_id, revision, request_id,
 			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT DO NOTHING
-		RETURNING run_id, status, client_request_id, active_message_id, revision,
+		RETURNING run_id, status, client_request_id, user_message_id, active_message_id, revision,
 		          request_id, checkpoint, audit, created_at, updated_at
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, run.ID, run.Status,
-		run.ClientRequestID, run.ActiveMessageID, run.Revision, run.RequestID,
+		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 		string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
 	inserted, err := scanAssistantRun(row, scope.ProjectName)
 	if err == sql.ErrNoRows {
@@ -561,12 +563,13 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 		result, err = s.db.ExecContext(ctx, `
 			INSERT INTO app_studio_assistant_runs (
 				org_uuid, workspace_uuid, project_name, run_id,
-				status, client_request_id, active_message_id, revision, request_id,
+				status, client_request_id, user_message_id, active_message_id, revision, request_id,
 				checkpoint, audit, created_at, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			ON CONFLICT (org_uuid, workspace_uuid, project_name, run_id)
 			DO UPDATE SET
 				status = EXCLUDED.status,
+				user_message_id = EXCLUDED.user_message_id,
 				active_message_id = EXCLUDED.active_message_id,
 				request_id = EXCLUDED.request_id,
 				checkpoint = EXCLUDED.checkpoint,
@@ -575,7 +578,7 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 			WHERE app_studio_assistant_runs.request_id = ''
 		`,
 			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, run.ID,
-			run.Status, run.ClientRequestID, run.ActiveMessageID, run.Revision, run.RequestID,
+			run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 			string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 		)
 	} else {
@@ -673,7 +676,7 @@ func (s *PostgresStore) ClaimAssistantRun(ctx context.Context, scope Scope, id s
 		  AND run_id = $6
 		  AND request_id = $7
 		  AND status IN ($8, $9)
-		RETURNING run_id, status, client_request_id, active_message_id, revision,
+		RETURNING run_id, status, client_request_id, user_message_id, active_message_id, revision,
 		          request_id, checkpoint, audit, created_at, updated_at
 	`,
 		AssistantRunStatusRunning, now.UTC(),
@@ -702,7 +705,7 @@ func (s *PostgresStore) GetAssistantRun(ctx context.Context, scope Scope, id str
 		return AssistantRun{}, fmt.Errorf("assistant run id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT run_id, status, client_request_id, active_message_id, revision,
+		SELECT run_id, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND run_id = $4
@@ -739,7 +742,7 @@ func (s *PostgresStore) LatestAssistantRun(ctx context.Context, scope Scope) (As
 		return AssistantRun{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT run_id, status, client_request_id, active_message_id, revision,
+		SELECT run_id, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3
@@ -889,7 +892,7 @@ func getAssistantRunByClientRequestID(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, scope Scope, clientRequestID string) (AssistantRun, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT run_id, status, client_request_id, active_message_id, revision,
+		SELECT run_id, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND client_request_id = $4
@@ -918,6 +921,7 @@ func scanAssistantRun(row interface {
 		&run.ID,
 		&status,
 		&run.ClientRequestID,
+		&run.UserMessageID,
 		&run.ActiveMessageID,
 		&run.Revision,
 		&run.RequestID,

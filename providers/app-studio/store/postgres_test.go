@@ -199,6 +199,9 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
 	}
+	if created.UserMessageID != "user-1" {
+		t.Fatalf("created user message id = %q, want user-1", created.UserMessageID)
+	}
 	recovered, err := durable.CreateAssistantRun(ctx, scope,
 		Message{ID: "user-retry", Role: "user", Content: "retry", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
 		Message{ID: "assistant-retry", Role: "assistant", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
@@ -209,6 +212,9 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 	}
 	if recovered.ID != created.ID {
 		t.Fatalf("duplicate create recovered %q, want %q", recovered.ID, created.ID)
+	}
+	if recovered.UserMessageID != created.UserMessageID {
+		t.Fatalf("duplicate create user message id = %q, want %q", recovered.UserMessageID, created.UserMessageID)
 	}
 	if err := store.SaveAssistantRun(ctx, scope, AssistantRun{
 		ID:        "legacy-2",

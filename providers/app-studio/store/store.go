@@ -76,6 +76,7 @@ type AssistantRun struct {
 	ProjectName     string             `json:"projectName,omitempty"`
 	Status          AssistantRunStatus `json:"status"`
 	ClientRequestID string             `json:"clientRequestID,omitempty"`
+	UserMessageID   string             `json:"userMessageID,omitempty"`
 	ActiveMessageID string             `json:"activeMessageID,omitempty"`
 	Revision        int64              `json:"revision,omitempty"`
 	RequestID       string             `json:"requestID,omitempty"`

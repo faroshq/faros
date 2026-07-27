@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
@@ -65,10 +66,25 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		writeProjectError(w, err)
 		return
 	}
+	supervisor := s.projectAssistantSupervisor()
+	releaseReservation, err := supervisor.Reserve(scope)
+	if err != nil {
+		if errors.Is(err, store.ErrAssistantRunConflict) {
+			if _, latestErr := s.store.LatestAssistantRun(r.Context(), scope); latestErr == nil {
+				s.writeProjectAssistantRunConflict(w, scope)
+			} else {
+				writeStatus(w, http.StatusConflict, "Conflict", "assistant run start is already in progress")
+			}
+			return
+		}
+		writeProjectError(w, err)
+		return
+	}
+	defer releaseReservation()
 	now := time.Now().UTC()
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, Content: request.Content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, Content: "", CreatedAt: now, UpdatedAt: now}
-	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Status: store.AssistantRunStatusRunning, ClientRequestID: request.ClientRequestID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Status: store.AssistantRunStatusRunning, ClientRequestID: request.ClientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	created, err := s.store.CreateAssistantRun(r.Context(), scope, user, assistant, run)
 	if err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
@@ -78,20 +94,36 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		writeProjectError(w, err)
 		return
 	}
-	supervisor := s.projectAssistantSupervisor()
 	if err := supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 		content := &strings.Builder{}
 		var toolCalls []projectToolCallStreamEvent
+		var snapshotErr error
+		var snapshotErrMu sync.Mutex
+		recordSnapshotErr := func(err error) {
+			if err == nil {
+				return
+			}
+			snapshotErrMu.Lock()
+			if snapshotErr == nil {
+				snapshotErr = err
+			}
+			snapshotErrMu.Unlock()
+		}
+		getSnapshotErr := func() error {
+			snapshotErrMu.Lock()
+			defer snapshotErrMu.Unlock()
+			return snapshotErr
+		}
 		req := r.Clone(context.WithValue(ctx, projectAssistantSupervisorRunContextKey{}, created))
 		_, err := s.generateProjectAssistantStream(req, id, c, project, projectAssistantStreamCallbacks{
 			OnChunk: func(chunk string) {
 				content.WriteString(chunk)
-				_ = accumulator.UpdateText(ctx, content.String(), false)
+				recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), false))
 			},
 			OnStatus: func(status string) { _ = status },
 			OnToolCall: func(event projectToolCallStreamEvent) {
 				toolCalls = upsertProjectToolCallStreamEvent(toolCalls, event)
-				_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls)))
+				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))))
 			},
 			OnAssistantEvent: func(event projectAssistantEvent) {
 				if event.Permission != nil && event.Permission.ToolCallID != "" {
@@ -107,29 +139,32 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 						}
 					}
 				}
-				_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls)))
+				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))))
 			},
 		})
-		_ = accumulator.UpdateText(ctx, content.String(), true)
+		recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), true))
+		if getSnapshotErr() != nil {
+			return
+		}
 		if err == nil {
-			_ = accumulator.SetStatus(ctx, store.AssistantRunStatusCompleted)
+			recordSnapshotErr(accumulator.SetStatus(ctx, store.AssistantRunStatusCompleted))
 			return
 		}
 		var permissionErr *projectAssistantPermissionRequiredError
 		if errors.As(err, &permissionErr) {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingPermission)
+			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingPermission))
 			return
 		}
 		var inputErr *projectAssistantInputRequiredError
 		if errors.As(err, &inputErr) {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingInput)
+			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusPendingInput))
 			return
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusAborted)
+			recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusAborted))
 			return
 		}
-		_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusFailed)
+		recordSnapshotErr(accumulator.SetStatus(context.Background(), store.AssistantRunStatusFailed))
 	}); err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
 			s.writeProjectAssistantRunStart(w, http.StatusAccepted, scope, created)
@@ -147,23 +182,10 @@ func (s *Server) writeProjectAssistantRunStart(w http.ResponseWriter, status int
 		writeProjectError(w, err)
 		return
 	}
-	page, err := s.store.ListMessages(context.Background(), scope, 500, "")
+	user, err := s.findProjectMessage(context.Background(), scope, run.UserMessageID)
 	if err != nil {
 		writeProjectError(w, err)
 		return
-	}
-	var user store.Message
-	for i, candidate := range page.Items {
-		if candidate.ID != run.ActiveMessageID {
-			continue
-		}
-		for preceding := i - 1; preceding >= 0; preceding-- {
-			if page.Items[preceding].Role == aiv1alpha1.ProjectMessageRoleUser {
-				user = page.Items[preceding]
-				break
-			}
-		}
-		break
 	}
 	writeJSON(w, status, projectAssistantRunStartResponse{Run: run, User: projectMessageToAPI(user), Assistant: projectMessageToAPI(message)})
 }
@@ -292,14 +314,20 @@ func writeProjectAssistantSnapshotSSE(w http.ResponseWriter, flusher http.Flushe
 
 func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope store.Scope) error {
 	run, err := s.store.LatestAssistantRun(ctx, scope)
-	if errors.Is(err, store.ErrAssistantRunNotFound) || run.Status != store.AssistantRunStatusRunning {
-		return nil
-	}
 	if err != nil {
+		if errors.Is(err, store.ErrAssistantRunNotFound) {
+			return nil
+		}
 		return err
+	}
+	if run.Status != store.AssistantRunStatusRunning {
+		return nil
 	}
 	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
 	supervisor := s.projectAssistantSupervisor()
+	if supervisor.reserved(scope) {
+		return nil
+	}
 	supervisor.mu.Lock()
 	active := supervisor.runs[key]
 	supervisor.mu.Unlock()

@@ -163,6 +163,7 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 	if existing, exists := s.assistantRuns[scope][run.ID]; exists {
 		run.CreatedAt = existing.CreatedAt
 		run.ClientRequestID = existing.ClientRequestID
+		run.UserMessageID = existing.UserMessageID
 		run.Revision = existing.Revision
 	}
 	if run.ClientRequestID != "" {
@@ -248,6 +249,7 @@ func (s *MemoryStore) SaveAssistantRunSnapshot(_ context.Context, scope Scope, r
 	}
 	run.CreatedAt = current.CreatedAt
 	run.ClientRequestID = current.ClientRequestID
+	run.UserMessageID = current.UserMessageID
 	if s.messages[scope] == nil {
 		s.messages[scope] = map[string]Message{}
 	}
@@ -291,6 +293,7 @@ func (s *MemoryStore) CompareAndSwapAssistantRun(_ context.Context, scope Scope,
 	if exists {
 		run.CreatedAt = current.CreatedAt
 		run.ClientRequestID = current.ClientRequestID
+		run.UserMessageID = current.UserMessageID
 		run.Revision = current.Revision
 	}
 	if !assistantRunStatusTerminal(run.Status) {
@@ -503,6 +506,11 @@ func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) 
 	}
 	if run.ID == "" || run.Status == "" || run.ClientRequestID == "" || run.ActiveMessageID == "" {
 		return fmt.Errorf("assistant run id, status, client request id, and active message id are required")
+	}
+	// Empty is accepted for pre-durable-run callers and rows created before the
+	// originating-message field existed. New HTTP starts always set it.
+	if run.UserMessageID != "" && run.UserMessageID != user.ID {
+		return fmt.Errorf("assistant run user message id must match user message")
 	}
 	if run.ActiveMessageID != assistant.ID {
 		return fmt.Errorf("assistant run active message id must match assistant message")

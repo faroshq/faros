@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,7 +67,7 @@ func TestMemoryStoreCreateAssistantRunIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
 	}
-	if created.ID != first.ID || assistantRunRevision(t, created) != 1 || assistantRunString(t, created, "ActiveMessageID") != "assistant-1" {
+	if created.ID != first.ID || assistantRunRevision(t, created) != 1 || assistantRunString(t, created, "ActiveMessageID") != "assistant-1" || assistantRunString(t, created, "UserMessageID") != "user-1" {
 		t.Fatalf("created run = %#v, want durable initial snapshot", created)
 	}
 
@@ -96,6 +97,45 @@ func TestMemoryStoreCreateAssistantRunIsAtomicAndIdempotent(t *testing.T) {
 	}
 	if len(page.Items) != 2 {
 		t.Fatalf("duplicate request created messages: %#v", page.Items)
+	}
+}
+
+func TestMemoryAndEncryptedAssistantRunPreserveOriginatingUserMessageIDOnRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			durable := mustDurableAssistantRunStore(t, tt.new(t))
+			scope := testAssistantRunScope()
+			now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+			run := testAssistantRun(t, "run-1", "request-1", "assistant-1", now)
+			created, err := durable.CreateAssistantRun(context.Background(), scope,
+				Message{ID: "user-1", Role: "user", Content: "origin", CreatedAt: now, UpdatedAt: now},
+				Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}, run)
+			if err != nil {
+				t.Fatalf("CreateAssistantRun: %v", err)
+			}
+			retry := testAssistantRun(t, "run-retry", "request-1", "assistant-retry", now.Add(time.Minute))
+			recovered, err := durable.CreateAssistantRun(context.Background(), scope,
+				Message{ID: "user-retry", Role: "user", Content: "retry", CreatedAt: now, UpdatedAt: now},
+				Message{ID: "assistant-retry", Role: "assistant", CreatedAt: now, UpdatedAt: now}, retry)
+			if err != nil {
+				t.Fatalf("retry CreateAssistantRun: %v", err)
+			}
+			if created.UserMessageID != "user-1" || recovered.UserMessageID != "user-1" {
+				t.Fatalf("originating user ID was not preserved: created=%#v recovered=%#v", created, recovered)
+			}
+		})
 	}
 }
 
@@ -532,6 +572,7 @@ func testAssistantRun(t *testing.T, id, clientRequestID, activeMessageID string,
 	}, map[string]any{
 		"ClientRequestID": clientRequestID,
 		"ActiveMessageID": activeMessageID,
+		"UserMessageID":   strings.Replace(activeMessageID, "assistant", "user", 1),
 		"Revision":        int64(1),
 	})
 }

@@ -68,6 +68,57 @@ func TestProjectAssistantSupervisorOwnsExecutionAfterStarterCancellation(t *test
 	}
 }
 
+func TestProjectAssistantSupervisorReservationProtectsFreshDurableRunUntilAttach(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
+	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
+	server.assistantSupervisor = supervisor
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	release, err := supervisor.Reserve(scope)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	defer release()
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatalf("CreateAssistantRun: %v", err)
+	}
+	if err := server.reconcileOrphanedProjectAssistantRun(context.Background(), scope); err != nil {
+		t.Fatalf("reconcile while reserved: %v", err)
+	}
+	persisted, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != store.AssistantRunStatusRunning {
+		t.Fatalf("reserved fresh run was orphaned as %q", persisted.Status)
+	}
+	if _, err := supervisor.Attach(scope, persisted, assistant); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+}
+
+func TestProjectAssistantSupervisorReservationReleaseAllowsRetryAfterStartFailure(t *testing.T) {
+	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	release, err := supervisor.Reserve(scope)
+	if err != nil {
+		t.Fatalf("first Reserve: %v", err)
+	}
+	// The HTTP start handler defers this release when durable creation or
+	// attachment fails, so a subsequent caller is not wedged behind a stale
+	// in-memory reservation.
+	release()
+	retryRelease, err := supervisor.Reserve(scope)
+	if err != nil {
+		t.Fatalf("Reserve after failed start release: %v", err)
+	}
+	retryRelease()
+}
+
 func TestProjectAssistantSupervisorCoalescesSlowSubscriberSnapshots(t *testing.T) {
 	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
@@ -464,11 +515,14 @@ func TestWriteProjectAssistantRunStartReturnsRunUserMessage(t *testing.T) {
 	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
 	now := time.Now().UTC()
-	user := store.Message{ID: "user-1", Role: "user", Content: "build a todo app", CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now.Add(time.Nanosecond), UpdatedAt: now.Add(time.Nanosecond)}
-	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-z", Role: "user", Content: "build a todo app", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := memoryStore.AppendMessage(context.Background(), scope, store.Message{ID: "user-a", Role: "user", Content: "an unrelated earlier-looking message", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
@@ -532,6 +586,89 @@ func TestProjectAssistantSnapshotStreamReconcilesRestartedRunningRun(t *testing.
 	}
 	if snapshot.Run.Status != store.AssistantRunStatusInterrupted {
 		t.Fatalf("streamed status = %q, want interrupted", snapshot.Run.Status)
+	}
+}
+
+func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *testing.T) {
+	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
+	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		switch {
+		case strings.Contains(request.Query, "ProjectYaml"):
+			response = map[string]any{"data": map[string]any{"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\nspec: {}\n"}}}}
+		case strings.Contains(request.Query, "SecretYaml"):
+			response = map[string]any{"data": map[string]any{"v1": map[string]any{"SecretYaml": string(secret)}}}
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer graphQL.Close()
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	engine := &blockingStartRouteEngine{entered: make(chan struct{}), finished: make(chan struct{})}
+	server.assistantEngine = engine
+	router := mux.NewRouter()
+	server.Register(router)
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"build a todo app","clientRequestID":"request-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+	request.Header.Set("X-Kedge-Cluster", "cluster-a")
+	started := httptest.NewRecorder()
+	router.ServeHTTP(started, request)
+	if started.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d, want %d: %s", started.Code, http.StatusAccepted, started.Body.String())
+	}
+	var start projectAssistantRunStartResponse
+	if err := json.NewDecoder(started.Body).Decode(&start); err != nil {
+		t.Fatal(err)
+	}
+	if start.Run.UserMessageID != start.User.ID || start.Assistant.ID != start.Run.ActiveMessageID {
+		t.Fatalf("start response has unstable message identity: %#v", start)
+	}
+	select {
+	case <-engine.entered:
+	case <-time.After(time.Second):
+		t.Fatal("start worker did not enter")
+	}
+	latest := httptest.NewRecorder()
+	latestRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/runs/latest", nil)
+	latestRequest.Header = request.Header.Clone()
+	router.ServeHTTP(latest, latestRequest)
+	if latest.Code != http.StatusOK {
+		t.Fatalf("latest status = %d, want %d: %s", latest.Code, http.StatusOK, latest.Body.String())
+	}
+	otherTenant := httptest.NewRecorder()
+	otherTenantRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/"+start.Run.ID+"/stream", nil)
+	otherTenantRequest.Header = request.Header.Clone()
+	otherTenantRequest.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-b:workspace-b")
+	otherTenantRequest.Header.Set("X-Kedge-Cluster", "cluster-b")
+	router.ServeHTTP(otherTenant, otherTenantRequest)
+	if otherTenant.Code == http.StatusOK {
+		t.Fatalf("cross-tenant stream unexpectedly succeeded: %s", otherTenant.Body.String())
+	}
+	abort := httptest.NewRecorder()
+	abortRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/"+start.Run.ID+"/abort", nil)
+	abortRequest.Header = request.Header.Clone()
+	router.ServeHTTP(abort, abortRequest)
+	if abort.Code != http.StatusAccepted {
+		t.Fatalf("abort status = %d, want %d: %s", abort.Code, http.StatusAccepted, abort.Body.String())
+	}
+	select {
+	case <-engine.finished:
+	case <-time.After(time.Second):
+		t.Fatal("explicit abort did not stop started worker")
 	}
 }
 
@@ -632,6 +769,22 @@ func TestResumeProjectAssistantRouteDetachesRequestAndPublishesRunningSnapshot(t
 type blockingResumeRouteEngine struct {
 	entered  chan struct{}
 	finished chan struct{}
+}
+
+type blockingStartRouteEngine struct {
+	entered  chan struct{}
+	finished chan struct{}
+}
+
+func (e *blockingStartRouteEngine) StreamProjectAssistant(ctx context.Context, _ projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	close(e.entered)
+	<-ctx.Done()
+	close(e.finished)
+	return projectAssistantRunResult{}, context.Cause(ctx)
+}
+
+func (*blockingStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected resume")
 }
 
 func (*blockingResumeRouteEngine) StreamProjectAssistant(context.Context, projectAssistantRunRequest) (projectAssistantRunResult, error) {
