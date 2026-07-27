@@ -104,3 +104,50 @@ an `httptest` GraphQL endpoint must return both `ProjectYaml` and the settings
 secret response consumed by `readProjectLLMSettings`, with a blocking fake
 assistant engine and a valid Eino checkpoint. No test-only production seam was
 introduced while tracing that contract.
+
+## Fix round 2
+
+This round closes the remaining supervisor and HTTP lifecycle findings. Parent
+signal cancellation now invokes durable supervisor shutdown before workers are
+cancelled, so active runs become `interrupted`, not `aborted`. Resume claims
+are serialized and published as a committed `running` revision, and
+supervisor-owned resume message/audit/checkpoint updates use the accumulator.
+
+Reconnect cursors at an already-terminal committed revision now return a
+closed channel rather than a nil channel (which kept HTTP SSE handlers alive),
+and the SSE route reconciles a true post-restart orphan before emitting it.
+Attached-run abort now writes terminal audit state and removes the active
+pending interrupt in its same snapshot transition. The text flush saves the
+latest working content at persist time rather than a stale captured string.
+Start responses now find the user immediately preceding their active assistant
+message in the store's ascending message order.
+
+RED/GREEN coverage added:
+
+- terminal cursor subscriptions close immediately;
+- serialized resume claim emits a durable `running` revision;
+- parent cancellation persists `interrupted`;
+- attached abort persists aborted audit and clears its interrupt metadata;
+- a deterministic timer/chunk interleave retains newer trailing text;
+- start response returns its matching user message;
+- restarted SSE reconciles `running` to `interrupted`;
+- a real HTTP GraphQL fixture (`ProjectYaml` plus `SecretYaml`) proves route
+  resume detaches from the initiating request, emits `running`, and responds
+  to explicit abort.
+
+Verification:
+
+- `go test ./api -count=1` — pass.
+- `go test -race ./api -run TestProjectAssistantSupervisor -count=1` — pass.
+- `go test ./...` from `providers/app-studio` — pass.
+- `git diff --check` — pass.
+
+Residual concern: legacy non-supervisor callers retain their existing direct
+store fallback for compatibility; all HTTP-supervised execution takes the
+serialized transition path.
+
+Fresh review then found two ordering/lifecycle defects and they were amended:
+final resumed assistant message cleanup now happens before the terminal
+snapshot, and an aborted paused run is removed from the supervisor map so a
+new turn can start without a process restart. Focused supervisor/resume and
+full API tests passed after that amendment.

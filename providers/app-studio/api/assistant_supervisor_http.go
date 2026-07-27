@@ -157,9 +157,9 @@ func (s *Server) writeProjectAssistantRunStart(w http.ResponseWriter, status int
 		if candidate.ID != run.ActiveMessageID {
 			continue
 		}
-		for _, preceding := range page.Items[i+1:] {
-			if preceding.Role == aiv1alpha1.ProjectMessageRoleUser {
-				user = preceding
+		for preceding := i - 1; preceding >= 0; preceding-- {
+			if page.Items[preceding].Role == aiv1alpha1.ProjectMessageRoleUser {
+				user = page.Items[preceding]
 				break
 			}
 		}
@@ -211,6 +211,10 @@ func (s *Server) streamProjectAssistantSnapshots(w http.ResponseWriter, r *http.
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	runID := mux.Vars(r)["run"]
+	if err := s.reconcileOrphanedProjectAssistantRun(r.Context(), scope); err != nil {
+		writeProjectError(w, err)
+		return
+	}
 	after := projectAssistantAfterRevision(r)
 	updates, unsubscribe, err := s.projectAssistantSupervisor().Subscribe(scope, runID, after)
 	if errors.Is(err, store.ErrAssistantRunNotFound) {

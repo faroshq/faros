@@ -464,7 +464,15 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 			return projectAssistantResumeResponse{}, err
 		}
 	}
-	run, err := s.store.ClaimAssistantRun(ctx, messageScope, runID, strings.TrimSpace(req.RequestID), time.Now().UTC())
+	var run store.AssistantRun
+	if accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, runID); accumulator != nil {
+		run, err = accumulator.ClaimPending(ctx, strings.TrimSpace(req.RequestID))
+	} else {
+		// Legacy direct callers do not have a server-owned worker. HTTP resume
+		// always starts through the supervisor and therefore takes the serialized
+		// branch above.
+		run, err = s.store.ClaimAssistantRun(ctx, messageScope, runID, strings.TrimSpace(req.RequestID), time.Now().UTC())
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not waiting") || strings.Contains(err.Error(), "request id is required") {
 			if clearErr := s.clearProjectAssistantPendingMessageForNonWaitingRun(ctx, messageScope, preflightRun, req); clearErr != nil {
@@ -609,7 +617,10 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		return s.completeClaimedProjectAssistantRunAfterResumeError(ctx, messageScope, run, state, resumeReq, decision, id.user, out, nil, errProjectLLMNotConfigured)
 	}
 
-	assistantID := newMessageID()
+	assistantID := strings.TrimSpace(run.ActiveMessageID)
+	if assistantID == "" {
+		assistantID = newMessageID()
+	}
 	assistantContent := &strings.Builder{}
 	accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, run.ID)
 	var streamedToolCalls []projectToolCallStreamEvent
@@ -833,6 +844,17 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 
 	persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
 	defer cancelPersist()
+	out.Status = store.AssistantRunStatusCompleted
+	appendProjectAssistantResumeResolvedUI(&out, strings.TrimSpace(resumeReq.AssistantMessageID), currentRequestID, currentToolCall)
+	appendProjectAssistantResumeDevelopmentPreviewRefreshUI(&out, previewRefreshNeeded)
+	if err := s.updateProjectAssistantPermissionMessage(persistCtx, messageScope, strings.TrimSpace(resumeReq.AssistantMessageID), out); err != nil {
+		return projectAssistantResumeResponse{}, err
+	}
+	if assistantMessage, err := s.appendResumedProjectAssistantMessageFromContent(persistCtx, messageScope, assistantID, result.Content, assistantContent.String(), projectAssistantMessageMetadata("", streamedToolCalls)); err != nil {
+		return projectAssistantResumeResponse{}, err
+	} else if assistantMessage != nil {
+		out.AssistantMessage = assistantMessage
+	}
 	run.Status = store.AssistantRunStatusCompleted
 	run.UpdatedAt = time.Now().UTC()
 	run, err = appendProjectAssistantRunAudit(run, projectAssistantPermissionAudit{
@@ -853,16 +875,6 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		return projectAssistantResumeResponse{}, err
 	}
 	out.Status = run.Status
-	appendProjectAssistantResumeResolvedUI(&out, strings.TrimSpace(resumeReq.AssistantMessageID), currentRequestID, currentToolCall)
-	appendProjectAssistantResumeDevelopmentPreviewRefreshUI(&out, previewRefreshNeeded)
-	if err := s.updateProjectAssistantPermissionMessage(persistCtx, messageScope, strings.TrimSpace(resumeReq.AssistantMessageID), out); err != nil {
-		return projectAssistantResumeResponse{}, err
-	}
-	if assistantMessage, err := s.appendResumedProjectAssistantMessageFromContent(persistCtx, messageScope, assistantID, result.Content, assistantContent.String(), projectAssistantMessageMetadata("", streamedToolCalls)); err != nil {
-		return projectAssistantResumeResponse{}, err
-	} else if assistantMessage != nil {
-		out.AssistantMessage = assistantMessage
-	}
 	return out, nil
 }
 
@@ -1086,6 +1098,17 @@ func (s *Server) appendResumedProjectAssistantMessage(
 	content string,
 	metadata map[string]any,
 ) (*aiv1alpha1.ProjectMessage, error) {
+	if accumulator := s.projectAssistantSupervisor().accumulatorForActiveMessage(scope, id); accumulator != nil {
+		if err := accumulator.UpdateMessage(ctx, content, metadata); err != nil {
+			return nil, err
+		}
+		msg, err := s.findProjectMessage(ctx, scope, id)
+		if err != nil {
+			return nil, err
+		}
+		apiMessage := projectMessageToAPI(msg)
+		return &apiMessage, nil
+	}
 	if err := appendProjectAssistantMessage(ctx, s.store, scope, id, content, metadata); err != nil {
 		return nil, err
 	}

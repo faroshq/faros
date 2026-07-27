@@ -55,7 +55,10 @@ type projectAssistantSupervisedRun struct {
 	nextSubID        uint64
 	lastText         time.Time
 	textFlush        *time.Timer
-	workerStarted    bool
+	// beforeTextFlushPersist makes the timer/chunk ordering test deterministic.
+	// Production leaves it nil.
+	beforeTextFlushPersist func()
+	workerStarted          bool
 }
 
 type projectAssistantSnapshotAccumulator struct {
@@ -68,10 +71,22 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithCancel(parent)
-	return &projectAssistantSupervisor{
+	// Do not derive worker contexts directly from parent. On process shutdown
+	// the signal context is cancelled before main can call Shutdown; deriving
+	// from it lets workers record "aborted" before Shutdown can durably mark
+	// the server-owned work "interrupted".
+	ctx, cancel := context.WithCancel(context.Background())
+	supervisor := &projectAssistantSupervisor{
 		store: msgStore, ctx: ctx, cancel: cancel, runs: map[projectAssistantRunKey]*projectAssistantSupervisedRun{},
 	}
+	go func() {
+		select {
+		case <-parent.Done():
+			supervisor.Shutdown(context.Background())
+		case <-ctx.Done():
+		}
+	}()
+	return supervisor
 }
 
 func (s *projectAssistantSupervisor) Shutdown(ctx context.Context) {
@@ -128,6 +143,19 @@ func (s *projectAssistantSupervisor) accumulatorFor(scope store.Scope, runID str
 	return nil
 }
 
+func (s *projectAssistantSupervisor) accumulatorForActiveMessage(scope store.Scope, messageID string) *projectAssistantSnapshotAccumulator {
+	if s == nil {
+		return nil
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.runs[key]; active != nil && active.message.ID == messageID {
+		return &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: active.run.ID}
+	}
+	return nil
+}
+
 // Start deliberately ignores starterCtx. The worker is derived from the
 // provider lifecycle so an HTTP disconnect can only detach a subscriber.
 func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope, run store.AssistantRun, message store.Message, worker func(context.Context, *projectAssistantSnapshotAccumulator)) error {
@@ -176,15 +204,23 @@ func assistantRunTerminal(status store.AssistantRunStatus) bool {
 }
 
 func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool {
+	ok, _ := s.AbortWith(scope, runID, nil)
+	return ok
+}
+
+// AbortWith applies the caller's synchronous terminal bookkeeping (audit and
+// pending-action sanitization) inside the same serialized transition that
+// persists the aborted snapshot.
+func (s *projectAssistantSupervisor) AbortWith(scope store.Scope, runID string, mutate func(*store.AssistantRun, *store.Message) error) (bool, error) {
 	if s == nil {
-		return false
+		return false, nil
 	}
 	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
 	s.mu.Lock()
 	active := s.runs[key]
 	if active == nil || active.run.ID != runID {
 		s.mu.Unlock()
-		return false
+		return false, nil
 	}
 	s.mu.Unlock()
 	active.transitionMu.Lock()
@@ -192,13 +228,20 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 	s.mu.Lock()
 	if current := s.runs[key]; current != active || active.run.ID != runID {
 		s.mu.Unlock()
-		return false
+		return false, nil
 	}
 	// A worker may have finished between the initial lookup and transition
 	// ownership. Terminal state is immutable: Abort never revives it.
 	if assistantRunTerminal(active.run.Status) {
 		s.mu.Unlock()
-		return active.run.Status == store.AssistantRunStatusAborted
+		return active.run.Status == store.AssistantRunStatusAborted, nil
+	}
+	wasPaused := active.run.Status == store.AssistantRunStatusPendingPermission || active.run.Status == store.AssistantRunStatusPendingInput
+	if mutate != nil {
+		if err := mutate(&active.run, &active.message); err != nil {
+			s.mu.Unlock()
+			return false, err
+		}
 	}
 	active.run.Status = store.AssistantRunStatusAborted
 	active.run.Revision++
@@ -210,7 +253,7 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 	ctx, cancel := context.WithTimeout(context.Background(), projectMessagePersistTimeout)
 	defer cancel()
 	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
-		return false
+		return false, err
 	}
 	s.mu.Lock()
 	if current := s.runs[key]; current != nil && current.run.ID == runID && current.run.Revision == run.Revision {
@@ -218,9 +261,12 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 		for _, subscriber := range current.subscribers {
 			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
 		}
+		if wasPaused && !current.workerStarted {
+			delete(s.runs, key)
+		}
 	}
 	s.mu.Unlock()
-	return true
+	return true, nil
 }
 
 func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, afterRevision int64) (<-chan projectAssistantRunSnapshot, func(), error) {
@@ -234,9 +280,14 @@ func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, 
 		s.mu.Unlock()
 		return nil, nil, store.ErrAssistantRunNotFound
 	}
-	if afterRevision >= active.run.Revision && assistantRunTerminal(active.run.Status) {
+	// A reconnect at the terminal cursor has no future revision to receive.
+	// Return a closed (not nil) channel so the HTTP stream exits immediately;
+	// a nil channel would disable its receive case and leak keepalives forever.
+	if afterRevision >= active.committedRun.Revision && assistantRunTerminal(active.committedRun.Status) {
+		closed := make(chan projectAssistantRunSnapshot)
+		close(closed)
 		s.mu.Unlock()
-		return nil, func() {}, nil
+		return closed, func() {}, nil
 	}
 	id := active.nextSubID
 	active.nextSubID++
@@ -285,8 +336,80 @@ func (a *projectAssistantSnapshotAccumulator) SetMessageMetadata(ctx context.Con
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { active.message.Metadata = metadata }, true)
 }
 
+func (a *projectAssistantSnapshotAccumulator) UpdateMessage(ctx context.Context, content string, metadata map[string]any) error {
+	return a.update(ctx, func(active *projectAssistantSupervisedRun) {
+		active.message.Content = content
+		active.message.Metadata = metadata
+	}, true)
+}
+
 func (a *projectAssistantSnapshotAccumulator) UpdateRun(ctx context.Context, mutate func(*store.AssistantRun)) error {
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { mutate(&active.run) }, true)
+}
+
+// ClaimPending serializes the resume compare-and-swap with the rest of this
+// run's durable transitions. ClaimAssistantRun alone changes status without a
+// new snapshot revision, so publish a committed running revision only after
+// the active assistant message and run have been saved together.
+func (a *projectAssistantSnapshotAccumulator) ClaimPending(ctx context.Context, requestID string) (store.AssistantRun, error) {
+	if a == nil || a.supervisor == nil {
+		return store.AssistantRun{}, errors.New("assistant snapshot accumulator not configured")
+	}
+	s := a.supervisor
+	s.mu.Lock()
+	active := s.runs[a.key]
+	if active == nil || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.AssistantRun{}, store.ErrAssistantRunNotFound
+	}
+	active.transitionMu.Lock()
+	s.mu.Unlock()
+	defer active.transitionMu.Unlock()
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != active || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.AssistantRun{}, store.ErrAssistantRunNotFound
+	}
+	scope, runID := active.scope, active.run.ID
+	s.mu.Unlock()
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), projectMessagePersistTimeout)
+	claimed, err := s.store.ClaimAssistantRun(persistCtx, scope, runID, requestID, time.Now().UTC())
+	if err != nil {
+		cancel()
+		return store.AssistantRun{}, err
+	}
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != active || active.run.ID != a.runID {
+		s.mu.Unlock()
+		cancel()
+		return store.AssistantRun{}, store.ErrAssistantRunNotFound
+	}
+	// ClaimAssistantRun intentionally preserves its revision. The following
+	// snapshot is the observable state transition from pending to running.
+	claimed.Revision++
+	claimed.UpdatedAt = time.Now().UTC()
+	active.run = claimed
+	active.message.UpdatedAt = claimed.UpdatedAt
+	run, message := active.run, active.message
+	s.mu.Unlock()
+	err = s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1)
+	cancel()
+	if err != nil {
+		s.recordPersistenceFailure(a.key, a.runID, err)
+		return store.AssistantRun{}, fmt.Errorf("persist claimed assistant snapshot: %w", err)
+	}
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != nil && current.run.ID == a.runID && current.run.Revision == run.Revision {
+		current.committedRun, current.committedMessage = run, message
+		for _, subscriber := range current.subscribers {
+			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
+		}
+	}
+	s.mu.Unlock()
+	return run, nil
 }
 
 func (a *projectAssistantSnapshotAccumulator) update(ctx context.Context, mutate func(*projectAssistantSupervisedRun), immediate bool) error {
@@ -361,10 +484,16 @@ func (a *projectAssistantSnapshotAccumulator) flushText() {
 		a.supervisor.mu.Unlock()
 		return
 	}
-	content := active.message.Content
 	active.textFlush = nil
+	beforePersist := active.beforeTextFlushPersist
 	a.supervisor.mu.Unlock()
-	_ = a.UpdateText(context.Background(), content, true)
+	if beforePersist != nil {
+		beforePersist()
+	}
+	// Do not capture content before releasing the lock: a chunk can arrive
+	// between this timer firing and the durable save. The transition below
+	// snapshots whatever text is current when it takes transition ownership.
+	_ = a.update(context.Background(), func(*projectAssistantSupervisedRun) {}, true)
 }
 
 // recordPersistenceFailure makes a best effort to leave an explicit terminal

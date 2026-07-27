@@ -721,8 +721,31 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if s.projectAssistantSupervisor().Abort(projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), mux.Vars(r)["run"]) {
-		run, err := s.store.GetAssistantRun(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), mux.Vars(r)["run"])
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	if aborted, err := s.projectAssistantSupervisor().AbortWith(scope, mux.Vars(r)["run"], func(run *store.AssistantRun, message *store.Message) error {
+		now := time.Now().UTC()
+		updated, auditErr := finalizeProjectAssistantRunAudit(*run, projectAssistantAuditOutcomeAborted, now)
+		if auditErr != nil {
+			return auditErr
+		}
+		updated, auditErr = appendProjectAssistantRunAudit(updated, projectAssistantPermissionAudit{
+			RequestID:  updated.RequestID,
+			Decision:   projectAssistantPermissionDeny,
+			Actor:      id.user,
+			Error:      "aborted by user",
+			ResolvedAt: now,
+		})
+		if auditErr != nil {
+			return auditErr
+		}
+		*run = updated
+		projectAssistantClearPendingInterruptMetadata(message, run.ID)
+		return nil
+	}); err != nil {
+		writeProjectError(w, err)
+		return
+	} else if aborted {
+		run, err := s.store.GetAssistantRun(r.Context(), scope, mux.Vars(r)["run"])
 		if err != nil {
 			writeProjectError(w, err)
 			return
@@ -736,6 +759,20 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func projectAssistantClearPendingInterruptMetadata(message *store.Message, runID string) {
+	if message == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	interrupt := projectAssistantUIInterruptFromMetadata(message.Metadata[projectMessageMetadataAssistantInterrupt])
+	if interrupt == nil || interrupt.Action == nil || interrupt.Action.RunID != runID {
+		return
+	}
+	metadata := cloneAnyMap(message.Metadata)
+	delete(metadata, projectMessageMetadataStatus)
+	delete(metadata, projectMessageMetadataAssistantInterrupt)
+	message.Metadata = metadata
 }
 
 func startProjectMessageStream(w http.ResponseWriter) (http.Flusher, bool) {
@@ -1200,6 +1237,9 @@ func (s *Server) updateProjectAssistantPermissionMessage(
 		metadata[projectMessageMetadataAssistantActions] = actions
 	} else {
 		delete(metadata, projectMessageMetadataAssistantActions)
+	}
+	if accumulator := s.projectAssistantSupervisor().accumulatorForActiveMessage(scope, msg.ID); accumulator != nil {
+		return accumulator.UpdateMessage(ctx, content, metadata)
 	}
 	now := time.Now().UTC()
 	return s.store.AppendMessage(ctx, scope, store.Message{
