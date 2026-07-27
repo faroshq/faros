@@ -149,7 +149,11 @@ func TestProjectAssistantApprovedPlanGrantDoesNotShadowOrphanedConversationRun(t
 	); err != nil {
 		t.Fatalf("CreateAssistantRun stale: %v", err)
 	}
-	if err := server.saveProjectAssistantApprovedPlan(context.Background(), scope, &projectAssistantApprovedPlan{Operations: []string{projectToolWriteFile}}); err != nil {
+	if err := server.saveProjectAssistantApprovedPlan(context.Background(), scope, &projectAssistantApprovedPlan{
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+		TargetPaths:  []string{"src/"},
+	}); err != nil {
 		t.Fatalf("saveProjectAssistantApprovedPlan: %v", err)
 	}
 

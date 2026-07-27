@@ -714,6 +714,9 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
 	if aborted, err := s.projectAssistantSupervisor().AbortWith(scope, mux.Vars(r)["run"], func(run *store.AssistantRun, message *store.Message) error {
+		if err := s.clearProjectAssistantApprovedPlan(r.Context(), scope); err != nil {
+			return fmt.Errorf("revoke App Studio workspace grant before abort: %w", err)
+		}
 		now := time.Now().UTC()
 		updated, auditErr := finalizeProjectAssistantRunAudit(*run, projectAssistantAuditOutcomeAborted, now)
 		if auditErr != nil {

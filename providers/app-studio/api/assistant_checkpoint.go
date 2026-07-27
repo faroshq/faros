@@ -503,8 +503,26 @@ func projectAssistantPermissionReasonForArguments(spec projectAssistantToolSpec,
 	}
 	switch spec.Risk {
 	case projectAssistantToolRiskWrite:
+		if projectAssistantDirectApprovalGrantsWritePlan(spec.Name) {
+			if target, err := projectAssistantWriteTargetPath(spec.Name, args); err == nil {
+				return fmt.Sprintf(
+					"Allow App Studio to create or modify %q using workspace edit tools until the next commit request.",
+					target,
+				)
+			}
+		}
 		return "This action will modify files in the App Studio workspace."
 	case projectAssistantToolRiskPlan:
+		if targets := projectAssistantApprovalTargetPaths(projectToolStringList(args["targetPaths"])); len(targets) > 0 {
+			quoted := make([]string, 0, len(targets))
+			for _, target := range targets {
+				quoted = append(quoted, fmt.Sprintf("%q", target))
+			}
+			return fmt.Sprintf(
+				"Allow App Studio to create or modify files in %s using workspace edit tools until the next commit request.",
+				strings.Join(quoted, ", "),
+			)
+		}
 		return "This plan will allow App Studio to modify the approved workspace paths until the next commit request."
 	case projectAssistantToolRiskCommit:
 		return "This action will commit App Studio workspace changes to the linked repository."
@@ -513,6 +531,24 @@ func projectAssistantPermissionReasonForArguments(spec projectAssistantToolSpec,
 	default:
 		return "This action requires approval."
 	}
+}
+
+func projectAssistantApprovalTargetPaths(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if target := projectAssistantApprovalTargetPath(value); target != "" {
+			out = append(out, target)
+		}
+	}
+	return normalizeProjectAssistantStringList(out)
+}
+
+func projectAssistantApprovalTargetPath(value string) string {
+	value, err := projectAssistantCanonicalGrantTarget(value, false)
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 func projectAssistantPermissionForCall(requestID string, tc chatToolCall, spec projectAssistantToolSpec) projectAssistantPermission {
@@ -1176,6 +1212,9 @@ func (s *Server) abortProjectAssistantRun(
 	case store.AssistantRunStatusPendingPermission, store.AssistantRunStatusPendingInput:
 	default:
 		return projectAssistantResumeResponse{}, newValidationError("assistant run is not waiting for input")
+	}
+	if err := s.clearProjectAssistantApprovedPlan(ctx, messageScope); err != nil {
+		return projectAssistantResumeResponse{}, fmt.Errorf("revoke App Studio workspace grant before abort: %w", err)
 	}
 	now := time.Now().UTC()
 	run, err = s.store.ClaimAssistantRun(ctx, messageScope, run.ID, run.RequestID, now)

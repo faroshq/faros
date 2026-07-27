@@ -1696,11 +1696,12 @@ func startEinoPermissionForTest(
 
 func projectAssistantPermissionCheckpointStartForTest() *projectAssistantStreamStart {
 	grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
-		Summary:     "Test permission checkpoint.",
-		Steps:       []string{"exercise the permission checkpoint"},
-		TargetPaths: []string{"src/"},
-		Operations:  []string{projectToolApplyPatch},
-		RunLocal:    true,
+		Summary:      "Test permission checkpoint.",
+		Steps:        []string{"exercise the permission checkpoint"},
+		TargetPaths:  []string{"already-approved/"},
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+		RunLocal:     true,
 	})
 	return &projectAssistantStreamStart{InitialApprovedPlan: &grant}
 }
@@ -1733,10 +1734,11 @@ func startVerifiedEinoCommitPermissionForTest(
 	}}
 	setProjectAssistantModelWithReachableVerificationForTest(server, model)
 	grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
-		Summary:     "Apply and verify the approved project change.",
-		Steps:       []string{"write the project change", "verify the development runtime"},
-		TargetPaths: []string{"src/"},
-		Operations:  []string{projectToolWriteFile},
+		Summary:      "Apply and verify the approved project change.",
+		Steps:        []string{"write the project change", "verify the development runtime"},
+		TargetPaths:  []string{"src/"},
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
 	})
 	if err := server.saveProjectAssistantApprovedPlan(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), &grant); err != nil {
 		t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
@@ -2193,7 +2195,7 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 			Type: "function",
 			Function: einoschema.FunctionCall{
 				Name:      projectToolRequestProjectPlanApproval,
-				Arguments: `{"summary":"Build for solo founders","steps":["Create the app"],"targetPaths":["src/"],"allowedOperations":["write_file"],"acceptanceCriteria":["The app supports the requested audience"]}`,
+				Arguments: `{"summary":"Build for solo founders","steps":["Create the app"],"targetPaths":["src/"],"acceptanceCriteria":["The app supports the requested audience"]}`,
 			},
 		}})},
 	}}
@@ -2541,6 +2543,14 @@ func TestAbortProjectAssistantRunMarksPendingRunAborted(t *testing.T) {
 			if err := messages.SaveAssistantRun(context.Background(), messageScope, run); err != nil {
 				t.Fatalf("SaveAssistantRun returned error: %v", err)
 			}
+			grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+				TargetPaths:  []string{"src/"},
+				Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+				Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+			})
+			if err := server.saveProjectAssistantApprovedPlan(context.Background(), messageScope, &grant); err != nil {
+				t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
+			}
 
 			resp, err := server.abortProjectAssistantRun(context.Background(), id, project, "run-1")
 			if err != nil {
@@ -2560,7 +2570,34 @@ func TestAbortProjectAssistantRunMarksPendingRunAborted(t *testing.T) {
 			if len(audit.Decisions) != 1 || audit.Decisions[0].Decision != projectAssistantPermissionDeny || audit.Decisions[0].Reason != "user_aborted" || audit.Outcome != projectAssistantAuditOutcomeAborted {
 				t.Fatalf("audit = %#v, want abort decision", audit)
 			}
+			if grant := server.loadProjectAssistantApprovedPlan(context.Background(), messageScope); grant != nil {
+				t.Fatalf("durable grant after abort = %#v, want revoked", grant)
+			}
 		})
+	}
+}
+
+func TestAbortProjectAssistantRunUnknownRunPreservesWorkspaceGrant(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	project := projectWithRepository("demo-repo", "demo", "github")
+	project.Name = "demo"
+	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		TargetPaths:  []string{"src/"},
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+	})
+	if err := server.saveProjectAssistantApprovedPlan(context.Background(), scope, &grant); err != nil {
+		t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
+	}
+
+	if _, err := server.abortProjectAssistantRun(context.Background(), id, project, "missing-run"); err == nil {
+		t.Fatal("abortProjectAssistantRun returned nil error for an unknown run")
+	}
+	if got := server.loadProjectAssistantApprovedPlan(context.Background(), scope); got == nil {
+		t.Fatal("unknown abort revoked the active workspace grant")
 	}
 }
 
@@ -2846,7 +2883,7 @@ func TestResumeProjectAssistantRunPersistsAssistantTextBeforeNextPause(t *testin
 	}
 }
 
-func TestResumeProjectAssistantRunAllowingWriteDoesNotRePromptLaterWrites(t *testing.T) {
+func TestResumeProjectAssistantRunDirectWriteApprovalRepromptsForDifferentPath(t *testing.T) {
 	messages := store.NewMemoryStore()
 	workspaces := workspace.NewFileStore(t.TempDir())
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
@@ -2911,8 +2948,8 @@ func TestResumeProjectAssistantRunAllowingWriteDoesNotRePromptLaterWrites(t *tes
 	if err != nil {
 		t.Fatalf("resumeProjectAssistantRun returned error: %v", err)
 	}
-	if resp.Status != store.AssistantRunStatusCompleted {
-		t.Fatalf("resume status = %q, want %q (second write should auto-approve)", resp.Status, store.AssistantRunStatusCompleted)
+	if resp.Status != store.AssistantRunStatusPendingPermission {
+		t.Fatalf("resume status = %q, want %q for a different write path", resp.Status, store.AssistantRunStatusPendingPermission)
 	}
 
 	files, err := workspaces.ListFiles(context.Background(), workspaceScope, workspace.ListOptions{})
@@ -2923,8 +2960,8 @@ func TestResumeProjectAssistantRunAllowingWriteDoesNotRePromptLaterWrites(t *tes
 	for _, f := range files.Files {
 		written[f.Path] = true
 	}
-	if !written["src/App.tsx"] || !written["src/Other.tsx"] {
-		t.Fatalf("written files = %v, want both src/App.tsx and src/Other.tsx", written)
+	if !written["src/App.tsx"] || written["src/Other.tsx"] {
+		t.Fatalf("written files = %v, want only the directly approved src/App.tsx", written)
 	}
 }
 
