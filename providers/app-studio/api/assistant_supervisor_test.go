@@ -1314,6 +1314,101 @@ func TestResumeProjectAssistantRouteDetachesRequestAndPublishesRunningSnapshot(t
 	}
 }
 
+func TestResumeProjectAssistantRouteRepairsPrePatchMessageIdentity(t *testing.T) {
+	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
+	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		var response map[string]any
+		switch {
+		case strings.Contains(request.Query, "ProjectYaml"):
+			response = map[string]any{"data": map[string]any{
+				"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\nspec: {}\n"}},
+			}}
+		case strings.Contains(request.Query, "SecretYaml"):
+			response = map[string]any{"data": map[string]any{"v1": map[string]any{"SecretYaml": string(secret)}}}
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer graphQL.Close()
+
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	engine := &blockingResumeRouteEngine{entered: make(chan struct{}), finished: make(chan struct{})}
+	server.assistantEngine = engine
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	checkpoint, err := json.Marshal(projectAssistantCheckpointState{Eino: &projectAssistantEinoCheckpointState{
+		CheckpointID: "run-legacy", Checkpoint: []byte("checkpoint"), InterruptID: "interrupt-legacy", InterruptType: projectAssistantInterruptTypePermission, ToolCallID: "tool-legacy", ToolName: projectToolWriteFile,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := store.AssistantRun{ID: "run-legacy", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-legacy", RequestID: "permission-legacy", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{
+		ID:   "assistant-legacy",
+		Role: "assistant",
+		Metadata: map[string]any{
+			projectMessageMetadataStatus: projectMessageStatusPendingPermission,
+			projectMessageMetadataAssistantInterrupt: projectAssistantUIInterruptRequest{
+				Status: "pending",
+				Action: &projectAssistantUIInterruptAction{RunID: run.ID, RequestID: run.RequestID, AssistantMessageID: "assistant-legacy"},
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := memoryStore.SaveAssistantRun(context.Background(), scope, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := memoryStore.AppendMessage(context.Background(), scope, assistant); err != nil {
+		t.Fatal(err)
+	}
+
+	router := mux.NewRouter()
+	server.Register(router)
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/run-legacy/resume", strings.NewReader(`{"requestID":"permission-legacy","decision":"allow","assistantMessageID":"assistant-legacy"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+	request.Header.Set("X-Kedge-Cluster", "cluster-a")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("resume status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	var snapshot projectAssistantRunSnapshot
+	if err := json.NewDecoder(recorder.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Run.ActiveMessageID != assistant.ID || snapshot.Message.ID != assistant.ID {
+		t.Fatalf("resume snapshot = %#v, want recovered active message %q", snapshot, assistant.ID)
+	}
+	select {
+	case <-engine.entered:
+	case <-time.After(time.Second):
+		t.Fatal("resume engine did not start")
+	}
+	if !server.projectAssistantSupervisor().Abort(scope, run.ID) {
+		t.Fatal("Abort did not find resumed worker")
+	}
+	select {
+	case <-engine.finished:
+	case <-time.After(time.Second):
+		t.Fatal("Abort did not cancel resumed worker")
+	}
+}
+
 type blockingResumeRouteEngine struct {
 	entered  chan struct{}
 	finished chan struct{}

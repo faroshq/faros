@@ -672,6 +672,11 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		writeProjectError(w, newValidationError("assistant run is not waiting for input"))
 		return
 	}
+	run, err = s.normalizeProjectAssistantPausedRun(r.Context(), scope, run, req.AssistantMessageID)
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
 	message, err := s.findProjectMessage(r.Context(), scope, run.ActiveMessageID)
 	if err != nil {
 		writeProjectError(w, err)
