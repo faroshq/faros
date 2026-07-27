@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -51,10 +53,16 @@ func NewEinoReadOnlyBackend(store *FileStore, scope Scope) (*EinoReadOnlyBackend
 	if _, err := store.scopeDir(scope); err != nil {
 		return nil, err
 	}
+	if err := validateEinoScopeDirectories(store, scope); err != nil {
+		return nil, err
+	}
 	return &EinoReadOnlyBackend{store: store, scope: scope}, nil
 }
 
 func (b *EinoReadOnlyBackend) projectFiles(ctx context.Context) ([]FileInfo, error) {
+	if err := validateEinoScopeDirectories(b.store, b.scope); err != nil {
+		return nil, err
+	}
 	list, err := b.store.ListFiles(ctx, b.scope, ListOptions{Limit: MaxListLimit})
 	if err != nil {
 		return nil, err
@@ -63,6 +71,27 @@ func (b *EinoReadOnlyBackend) projectFiles(ctx context.Context) ([]FileInfo, err
 		return nil, fmt.Errorf("project has more than %d files; narrow path or glob", MaxListLimit)
 	}
 	return list.Files, nil
+}
+
+func validateEinoScopeDirectories(store *FileStore, scope Scope) error {
+	current := store.Root()
+	for _, component := range []string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName} {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("stat workspace scope %q: %w", component, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace scope component %q is a symlink", component)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("workspace scope component %q is not a directory", component)
+		}
+	}
+	return nil
 }
 
 func cleanEinoDirectoryPath(raw string) (string, error) {
@@ -139,6 +168,7 @@ func (b *EinoReadOnlyBackend) GlobInfo(ctx context.Context, req *einofs.GlobInfo
 		}
 		infos[i].Path = strings.TrimPrefix(infos[i].Path, "/")
 		infos[i].Size = sizes[infos[i].Path]
+		infos[i].ModifiedAt = ""
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Path < infos[j].Path })
 	return infos, nil
@@ -188,6 +218,9 @@ func (b *EinoReadOnlyBackend) Read(ctx context.Context, req *einofs.ReadRequest)
 	}
 	clean, err := cleanProjectPath(req.FilePath)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateEinoScopeDirectories(b.store, b.scope); err != nil {
 		return nil, err
 	}
 	file, err := b.store.ReadFile(ctx, b.scope, ReadOptions{Path: clean, MaxBytes: MaxReadMaxBytes})
@@ -247,8 +280,8 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 	}
 	sort.Strings(paths)
 
-	content := einofs.NewInMemoryBackend()
 	totalBytes := 0
+	matches := make([]einofs.GrepMatch, 0)
 	for _, candidatePath := range paths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -267,21 +300,14 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 		if totalBytes > maxEinoBackendAggregateBytes {
 			return nil, fmt.Errorf("search exceeds %d bytes; narrow request", maxEinoBackendAggregateBytes)
 		}
-		if err := content.Write(ctx, &einofs.WriteRequest{FilePath: "/" + file.Path, Content: file.Content}); err != nil {
+		fileMatches, err := boundedEinoGrepFileLimit(ctx, file.Path, file.Content, req, maxEinoBackendMatches-len(matches))
+		if err != nil {
 			return nil, err
 		}
+		matches = append(matches, fileMatches...)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	searchReq := *req
-	searchReq.Path = basePath
-	matches, err := content.GrepRaw(ctx, &searchReq)
-	if err != nil {
-		return nil, err
-	}
-	for i := range matches {
-		matches[i].Path = strings.TrimPrefix(matches[i].Path, "/")
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		if matches[i].Path != matches[j].Path {
@@ -292,10 +318,91 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 		}
 		return matches[i].Content < matches[j].Content
 	})
-	if len(matches) > maxEinoBackendMatches {
-		return nil, fmt.Errorf("search produced more than %d matches; narrow request", maxEinoBackendMatches)
-	}
 	return matches, nil
+}
+
+func boundedEinoGrepFile(ctx context.Context, path, content string, req *einofs.GrepRequest) ([]einofs.GrepMatch, error) {
+	return boundedEinoGrepFileLimit(ctx, path, content, req, maxEinoBackendMatches)
+}
+
+func boundedEinoGrepFileLimit(ctx context.Context, path, content string, req *einofs.GrepRequest, limit int) ([]einofs.GrepMatch, error) {
+	if req.Pattern == "" {
+		return nil, errors.New("pattern cannot be empty")
+	}
+	pattern := req.Pattern
+	if req.CaseInsensitive {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern: %w", err)
+	}
+	lines := strings.Split(content, "\n")
+	results := make([]einofs.GrepMatch, 0)
+	seenLines := make(map[int]struct{})
+	appendMatchLine := func(line int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		before, after := 0, 0
+		if req.BeforeLines > 0 {
+			before = req.BeforeLines
+		}
+		if req.AfterLines > 0 {
+			after = req.AfterLines
+		}
+		start, end := line, line
+		if before > 0 || after > 0 {
+			start -= before
+			if start < 1 {
+				start = 1
+			}
+			end += after
+			if end > len(lines) {
+				end = len(lines)
+			}
+		}
+		for lineNumber := start; lineNumber <= end; lineNumber++ {
+			if before > 0 || after > 0 {
+				if _, ok := seenLines[lineNumber]; ok {
+					continue
+				}
+				seenLines[lineNumber] = struct{}{}
+			}
+			if len(results) >= limit {
+				return fmt.Errorf("search produced more than %d matches; narrow request", maxEinoBackendMatches)
+			}
+			results = append(results, einofs.GrepMatch{Path: path, Line: lineNumber, Content: lines[lineNumber-1]})
+		}
+		return nil
+	}
+	if req.EnableMultiline {
+		indices := re.FindAllStringIndex(content, limit+1)
+		for _, index := range indices {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			startLine := 1 + strings.Count(content[:index[0]], "\n")
+			endLine := 1 + strings.Count(content[:index[1]], "\n")
+			for line := startLine; line <= endLine && line <= len(lines); line++ {
+				if err := appendMatchLine(line); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return results, nil
+	}
+	for line, value := range lines {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if re.MatchString(value) {
+			if err := appendMatchLine(line + 1); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return results, nil
 }
 
 func (b *EinoReadOnlyBackend) Write(context.Context, *einofs.WriteRequest) error {
