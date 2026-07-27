@@ -895,6 +895,18 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
+	if accumulator != nil {
+		if err := accumulator.UpdateRun(persistCtx, func(current *store.AssistantRun) {
+			current.Audit = append([]byte(nil), run.Audit...)
+		}); err != nil {
+			return projectAssistantResumeResponse{}, err
+		}
+		// The HTTP supervisor publishes the completed status with the same
+		// accumulator after this helper returns. Do not save a terminal run here:
+		// that would expose completion before the message metadata transition.
+		out.Status = store.AssistantRunStatusCompleted
+		return out, nil
+	}
 	if err := s.saveProjectAssistantRun(persistCtx, messageScope, run); err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
