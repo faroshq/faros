@@ -64,3 +64,16 @@ Self-review: terminal statuses remain immutable in the accumulator, so Eino
 completion cannot overwrite an abort. Checkpoint and audit payloads remain on
 the existing encrypted store boundary; the supervisor changes only which store
 write operation owns their durable revision transition.
+
+## Fix round 1
+
+Pending worker ownership is released after a segment returns, so resume may
+claim the persisted pending run exactly once instead of being rejected by an
+old in-memory worker flag. Resume no longer writes `running` before the legacy
+claim operation. The supervisor now maintains committed and working snapshots:
+new subscribers receive only a successfully persisted revision, and a failed
+write reconstructs `failed` from the last committed revision before attempting
+its terminal save.
+
+Fresh verification: `go test ./api -count=1`, `go test -race ./api -run
+TestProjectAssistantSupervisor -count=1`, and `go test ./...` all passed.

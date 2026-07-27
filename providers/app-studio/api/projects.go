@@ -695,9 +695,6 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	}
 	supervisor := s.projectAssistantSupervisor()
 	if err := supervisor.Start(r.Context(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
-		if err := accumulator.SetStatus(ctx, store.AssistantRunStatusRunning); err != nil {
-			return
-		}
 		resp, resumeErr := s.resumeProjectAssistantRunWithRepositoryAndClient(ctx, r.Clone(ctx), id, c, p, projectRepositoryView(ctx, c, p), runID, req)
 		if resumeErr == nil && resp.Status == store.AssistantRunStatusCompleted {
 			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted)

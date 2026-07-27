@@ -44,15 +44,17 @@ type projectAssistantSupervisor struct {
 }
 
 type projectAssistantSupervisedRun struct {
-	transitionMu  sync.Mutex
-	scope         store.Scope
-	run           store.AssistantRun
-	message       store.Message
-	cancel        context.CancelCauseFunc
-	subscribers   map[uint64]chan projectAssistantRunSnapshot
-	nextSubID     uint64
-	lastText      time.Time
-	workerStarted bool
+	transitionMu     sync.Mutex
+	scope            store.Scope
+	run              store.AssistantRun
+	message          store.Message
+	committedRun     store.AssistantRun
+	committedMessage store.Message
+	cancel           context.CancelCauseFunc
+	subscribers      map[uint64]chan projectAssistantRunSnapshot
+	nextSubID        uint64
+	lastText         time.Time
+	workerStarted    bool
 }
 
 type projectAssistantSnapshotAccumulator struct {
@@ -94,7 +96,7 @@ func (s *projectAssistantSupervisor) Attach(scope store.Scope, run store.Assista
 		return nil, store.ErrAssistantRunConflict
 	}
 	_, cancel := context.WithCancelCause(s.ctx)
-	s.runs[key] = &projectAssistantSupervisedRun{scope: scope, run: run, message: message, cancel: cancel, subscribers: map[uint64]chan projectAssistantRunSnapshot{}}
+	s.runs[key] = &projectAssistantSupervisedRun{scope: scope, run: run, message: message, committedRun: run, committedMessage: message, cancel: cancel, subscribers: map[uint64]chan projectAssistantRunSnapshot{}}
 	return &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: run.ID}, nil
 }
 
@@ -140,8 +142,13 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 func (s *projectAssistantSupervisor) finish(key projectAssistantRunKey, runID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if active := s.runs[key]; active != nil && active.run.ID == runID && assistantRunTerminal(active.run.Status) {
-		delete(s.runs, key)
+	if active := s.runs[key]; active != nil && active.run.ID == runID {
+		// Permission/input checkpoints deliberately retain the in-memory
+		// snapshot, but no worker owns them once the Eino segment returns.
+		active.workerStarted = false
+		if assistantRunTerminal(active.run.Status) {
+			delete(s.runs, key)
+		}
 	}
 }
 
@@ -192,6 +199,7 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 	}
 	s.mu.Lock()
 	if current := s.runs[key]; current != nil && current.run.ID == runID && current.run.Revision == run.Revision {
+		current.committedRun, current.committedMessage = run, message
 		for _, subscriber := range current.subscribers {
 			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
 		}
@@ -219,7 +227,7 @@ func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, 
 	active.nextSubID++
 	ch := make(chan projectAssistantRunSnapshot, 1)
 	active.subscribers[id] = ch
-	snapshot := projectAssistantRunSnapshot{Run: active.run, Message: active.message}
+	snapshot := projectAssistantRunSnapshot{Run: active.committedRun, Message: active.committedMessage}
 	s.sendCoalesced(ch, snapshot)
 	s.mu.Unlock()
 	var once sync.Once
@@ -312,6 +320,7 @@ func (a *projectAssistantSnapshotAccumulator) update(ctx context.Context, mutate
 	}
 	s.mu.Lock()
 	if current := s.runs[a.key]; current != nil && current.run.ID == a.runID && current.run.Revision == run.Revision {
+		current.committedRun, current.committedMessage = run, message
 		for _, subscriber := range current.subscribers {
 			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
 		}
@@ -331,6 +340,7 @@ func (s *projectAssistantSupervisor) recordPersistenceFailure(key projectAssista
 		s.mu.Unlock()
 		return
 	}
+	active.run, active.message = active.committedRun, active.committedMessage
 	active.run.Status = store.AssistantRunStatusFailed
 	active.run.Revision++
 	active.run.UpdatedAt = time.Now().UTC()
@@ -345,6 +355,7 @@ func (s *projectAssistantSupervisor) recordPersistenceFailure(key projectAssista
 	}
 	s.mu.Lock()
 	if current := s.runs[key]; current != nil && current.run.ID == runID && current.run.Revision == run.Revision {
+		current.committedRun, current.committedMessage = run, message
 		for _, subscriber := range current.subscribers {
 			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
 		}
