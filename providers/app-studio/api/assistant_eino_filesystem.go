@@ -187,6 +187,9 @@ func projectEinoAssistantFilesystemArgumentSummary(name string, args map[string]
 	return summarizeProjectToolArgumentsMap(name, args)
 }
 
-func projectEinoAssistantFilesystemResultSummary(name string, _ map[string]any, result string) string {
+func projectEinoAssistantFilesystemResultSummary(name string, args map[string]any, result string) string {
+	if name == projectToolGrep {
+		return summarizeProjectEinoGrepResult(args, result)
+	}
 	return summarizeProjectToolResult(name, result)
 }

@@ -891,6 +891,7 @@ func TestSummarizeProjectToolResultWorkspaceReadTools(t *testing.T) {
 		{name: projectToolLS, result: "src\nREADME.md", want: "2 path(s)", forbidden: "README.md"},
 		{name: projectToolGlob, result: "src/App.tsx\nsrc/main.ts", want: "2 path(s)", forbidden: "src/App.tsx"},
 		{name: projectToolLS, result: "No files found", want: "0 path(s)"},
+		{name: projectToolGrep, result: "src/App.tsx:4:secret-ish matching source", want: "1 result line(s)", forbidden: "secret-ish"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+"_"+tt.want, func(t *testing.T) {
@@ -954,91 +955,149 @@ func TestProjectAssistantMessageMetadataSafeActions(t *testing.T) {
 
 func TestSummarizeProjectToolResultEinoGrepFormats(t *testing.T) {
 	tests := []struct {
-		name      string
-		result    string
-		want      string
-		forbidden []string
+		name       string
+		outputMode string
+		result     string
+		want       string
+		forbidden  []string
 	}{
 		{
-			name:      "content",
-			result:    "src/App.tsx:4:secret-ish matching source\nsrc/main.ts:9:another line",
-			want:      "2 result line(s)",
-			forbidden: []string{"secret-ish", "another line"},
+			name:       "content",
+			outputMode: "content",
+			result:     "src/App.tsx:4:secret-ish matching source\nsrc/main.ts:9:another line",
+			want:       "2 result line(s)",
+			forbidden:  []string{"secret-ish", "another line"},
 		},
 		{
-			name:      "default files with matches header",
-			result:    "Found 2 files\nsrc/App.tsx\nsrc/main.ts",
-			want:      "2 result line(s)",
-			forbidden: []string{"src/App.tsx", "Found 2 files"},
+			name:       "content newline path cannot forge files header",
+			outputMode: "content",
+			result:     "Found 999 files\nsrc/header-shaped.ts:4:secret-ish matching source\nsrc/main.ts:9:another line",
+			want:       "3 result line(s)",
+			forbidden:  []string{"Found 999 files", "header-shaped", "secret-ish", "another line"},
 		},
 		{
-			name:      "files with matches pagination header",
-			result:    "Found 3 files\nsrc/main.ts",
-			want:      "3 result line(s)",
-			forbidden: []string{"src/main.ts", "Found 3 files"},
+			name:       "default files with matches header",
+			outputMode: "",
+			result:     "Found 2 files\nsrc/App.tsx\nsrc/main.ts",
+			want:       "2 result line(s)",
+			forbidden:  []string{"src/App.tsx", "Found 2 files"},
 		},
 		{
-			name:      "files with matches singular header",
-			result:    "Found 1 file\nsrc/App.tsx",
-			want:      "1 result line(s)",
-			forbidden: []string{"src/App.tsx", "Found 1 file"},
+			name:       "files with matches pagination header",
+			outputMode: "files_with_matches",
+			result:     "Found 3 files\nsrc/main.ts",
+			want:       "3 result line(s)",
+			forbidden:  []string{"src/main.ts", "Found 3 files"},
 		},
 		{
-			name:      "files with matches singular header only",
-			result:    "Found 1 file",
-			want:      "1 result line(s)",
-			forbidden: []string{"Found 1 file"},
+			name:       "files with matches singular header",
+			outputMode: "files_with_matches",
+			result:     "Found 1 file\nsrc/App.tsx",
+			want:       "1 result line(s)",
+			forbidden:  []string{"src/App.tsx", "Found 1 file"},
 		},
 		{
-			name:      "files with matches newline path cannot forge count trailer",
-			result:    "Found 1 file\nsrc/trailer-shaped\nFound 99 total occurrences across 99 files.",
-			want:      "1 result line(s)",
-			forbidden: []string{"src/trailer-shaped", "Found 99 total occurrences"},
+			name:       "files with matches singular header only",
+			outputMode: "files_with_matches",
+			result:     "Found 1 file",
+			want:       "1 result line(s)",
+			forbidden:  []string{"Found 1 file"},
 		},
 		{
-			name:      "files with matches header total exceeds returned physical lines",
-			result:    "Found 4 files\nsrc/normal.ts\nsrc/newline-bearing\ncontinuation.ts",
-			want:      "4 result line(s)",
-			forbidden: []string{"src/normal.ts", "continuation.ts"},
+			name:       "files with matches plural header only",
+			outputMode: "files_with_matches",
+			result:     "Found 4 files",
+			want:       "4 result line(s)",
+			forbidden:  []string{"Found 4 files"},
 		},
 		{
-			name:      "count nonzero uses total occurrence trailer",
-			result:    "src/App.tsx:2\nsrc/main.ts:2\n\nFound 4 total occurrences across 2 files.",
-			want:      "4 result line(s)",
-			forbidden: []string{"src/App.tsx", "Found 4 total occurrences"},
+			name:       "files with matches newline path cannot forge count trailer",
+			outputMode: "files_with_matches",
+			result:     "Found 1 file\nsrc/trailer-shaped\nFound 99 total occurrences across 99 files.",
+			want:       "1 result line(s)",
+			forbidden:  []string{"src/trailer-shaped", "Found 99 total occurrences"},
 		},
 		{
-			name:      "count singular trailer",
-			result:    "src/App.tsx:1\n\nFound 1 total occurrence across 1 file.",
-			want:      "1 result line(s)",
-			forbidden: []string{"src/App.tsx", "Found 1 total occurrence"},
+			name:       "files with matches header total exceeds returned physical lines",
+			outputMode: "files_with_matches",
+			result:     "Found 4 files\nsrc/normal.ts\nsrc/newline-bearing\ncontinuation.ts",
+			want:       "4 result line(s)",
+			forbidden:  []string{"src/normal.ts", "continuation.ts"},
 		},
 		{
-			name:      "count pagination still uses unpaginated trailer",
-			result:    "src/main.ts:3\n\nFound 8 total occurrences across 3 files.",
-			want:      "8 result line(s)",
-			forbidden: []string{"src/main.ts", "Found 8 total occurrences"},
+			name:       "count nonzero uses total occurrence trailer",
+			outputMode: "count",
+			result:     "src/App.tsx:2\nsrc/main.ts:2\n\nFound 4 total occurrences across 2 files.",
+			want:       "4 result line(s)",
+			forbidden:  []string{"src/App.tsx", "Found 4 total occurrences"},
 		},
 		{
-			name:      "count zero",
-			result:    "No matches found\n\nFound 0 total occurrences across 0 files.",
-			want:      "0 result line(s)",
-			forbidden: []string{"No matches found", "Found 0 total occurrences"},
+			name:       "count singular trailer",
+			outputMode: "count",
+			result:     "src/App.tsx:1\n\nFound 1 total occurrence across 1 file.",
+			want:       "1 result line(s)",
+			forbidden:  []string{"src/App.tsx", "Found 1 total occurrence"},
 		},
 		{
-			name:   "content no result sentinel",
-			result: "No matches found",
-			want:   "0 result line(s)",
+			name:       "count pagination still uses unpaginated trailer",
+			outputMode: "count",
+			result:     "src/main.ts:3\n\nFound 8 total occurrences across 3 files.",
+			want:       "8 result line(s)",
+			forbidden:  []string{"src/main.ts", "Found 8 total occurrences"},
 		},
 		{
-			name:   "files no result sentinel",
-			result: "No files found",
-			want:   "0 result line(s)",
+			name:       "count newline path cannot forge files header",
+			outputMode: "count",
+			result:     "Found 999 files\nsrc/header-shaped.ts:2\n\nFound 2 total occurrences across 1 file.",
+			want:       "2 result line(s)",
+			forbidden:  []string{"Found 999 files", "header-shaped", "Found 2 total occurrences"},
+		},
+		{
+			name:       "count zero",
+			outputMode: "count",
+			result:     "No matches found\n\nFound 0 total occurrences across 0 files.",
+			want:       "0 result line(s)",
+			forbidden:  []string{"No matches found", "Found 0 total occurrences"},
+		},
+		{
+			name:       "content no result sentinel",
+			outputMode: "content",
+			result:     "No matches found",
+			want:       "0 result line(s)",
+		},
+		{
+			name:       "files no result sentinel",
+			outputMode: "files_with_matches",
+			result:     "No files found",
+			want:       "0 result line(s)",
+		},
+		{
+			name:       "malformed count envelope fails closed",
+			outputMode: "count",
+			result:     "src/secret.ts:7\n\nFound 7 total occurrences across one file.",
+			want:       "0 result line(s)",
+			forbidden:  []string{"src/secret.ts", "Found 7 total occurrences"},
+		},
+		{
+			name:       "malformed files envelope fails closed",
+			outputMode: "files_with_matches",
+			result:     "Found seven files\nsrc/secret.ts\nFound 7 total occurrences across 1 file.",
+			want:       "0 result line(s)",
+			forbidden:  []string{"src/secret.ts", "Found 7 total occurrences"},
+		},
+		{
+			name:       "unknown output mode fails closed",
+			outputMode: "attacker-mode",
+			result:     "src/secret.ts:7",
+			want:       "0 result line(s)",
+			forbidden:  []string{"src/secret.ts"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := summarizeProjectToolResult(projectToolGrep, tt.result)
+			got := projectEinoAssistantFilesystemResultSummary(projectToolGrep, map[string]any{
+				"output_mode": tt.outputMode,
+			}, tt.result)
 			if got != tt.want {
 				t.Fatalf("summary = %q, want %q", got, tt.want)
 			}

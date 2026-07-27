@@ -1044,6 +1044,32 @@ func projectAssistantGrepResultLineCount(value string) int {
 	return projectAssistantNonEmptyLineCount(value)
 }
 
+func summarizeProjectEinoGrepResult(args map[string]any, result string) string {
+	mode, _ := args["output_mode"].(string)
+	count := 0
+	switch strings.TrimSpace(mode) {
+	case "content":
+		count = projectAssistantNonEmptyLineCount(result)
+	case "count":
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if line == "" {
+				continue
+			}
+			count, _ = projectAssistantGrepCountTrailer(line)
+			break
+		}
+	case "", "files_with_matches":
+		result = strings.TrimSpace(result)
+		if result != "" && result != "No files found" {
+			lines := strings.Split(result, "\n")
+			count, _ = projectAssistantGrepFilesHeader(strings.TrimSpace(lines[0]))
+		}
+	}
+	return fmt.Sprintf("%d result line(s)", count)
+}
+
 func projectAssistantGrepCountTrailer(line string) (int, bool) {
 	fields := strings.Fields(line)
 	if len(fields) != 7 ||

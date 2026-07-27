@@ -198,6 +198,39 @@ func TestProjectEinoAssistantFilesystemTelemetryRecordsSuccessfulRead(t *testing
 	}
 }
 
+func TestProjectEinoAssistantFilesystemTelemetrySummarizesGrepUsingRequestedOutputMode(t *testing.T) {
+	var events []projectToolCallStreamEvent
+	middleware := projectEinoAssistantFilesystemTelemetryMiddleware(projectAssistantRunRequest{
+		StreamCallbacks: projectAssistantStreamCallbacks{
+			OnToolCall: func(event projectToolCallStreamEvent) {
+				events = append(events, event)
+			},
+		},
+	}, newProjectEinoAssistantRunState())
+	wrapped, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			return "Found 999 files\nsrc/header-shaped.ts:4:secret-ish matching source", nil
+		},
+		&adk.ToolContext{Name: projectToolGrep},
+	)
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+	if _, err := wrapped(context.Background(), `{"pattern":"secret-ish","output_mode":"content"}`); err != nil {
+		t.Fatalf("wrapped grep returned error: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want requested/running/succeeded", events)
+	}
+	if got := events[2].Summary; got != "2 result line(s)" {
+		t.Fatalf("success summary = %q, want content line count", got)
+	}
+	if strings.Contains(events[2].Summary, "secret-ish") || strings.Contains(events[2].Summary, "header-shaped") {
+		t.Fatalf("success summary leaked grep output: %q", events[2].Summary)
+	}
+}
+
 func TestProjectEinoAssistantFilesystemTelemetryRecordsSafeFailure(t *testing.T) {
 	var events []projectToolCallStreamEvent
 	req := projectAssistantRunRequest{
