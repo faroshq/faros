@@ -22,6 +22,35 @@ import (
 	"github.com/faroshq/provider-app-studio/store"
 )
 
+func projectMessageStreamEventsHaveAppendedContent(events []projectMessageStreamEvent) bool {
+	for _, event := range events {
+		if event.DataModelUpdate == nil {
+			continue
+		}
+		for _, content := range event.DataModelUpdate.Contents {
+			if content.Append {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func countProjectAssistantToolCards(events []projectMessageStreamEvent) int {
+	count := 0
+	for _, event := range events {
+		if event.SurfaceUpdate == nil {
+			continue
+		}
+		for _, component := range event.SurfaceUpdate.Components {
+			if component.Component.Card != nil {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, Revision: 2, CreatedAt: now, UpdatedAt: now}
@@ -75,6 +104,38 @@ func TestLegacyAssistantStreamEventsTranslateDurableTerminalSnapshots(t *testing
 	terminal := events[len(events)-1]
 	if terminal.Type != string(projectAssistantEventRunFinished) || terminal.AssistantMessageID != message.ID {
 		t.Fatalf("terminal event = %#v, want run_finished for assistant", terminal)
+	}
+}
+
+func TestLegacyAssistantStreamAdapterReplacesDurableRevisionsWithoutDuplicatingContentOrActions(t *testing.T) {
+	adapter := newProjectAssistantLegacyStreamAdapter()
+	action := projectAssistantUIAction{ID: "tool-1", Kind: projectAssistantUIActionEdit, Status: "running", Label: "Editing", Tool: projectToolWriteFile}
+	first := projectAssistantRunSnapshot{
+		Run: store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, Revision: 1},
+		Message: store.Message{ID: "assistant-1", Role: "assistant", Content: "one", Metadata: map[string]any{
+			projectAssistantMetadataWorkingStatus:  "Writing files",
+			projectMessageMetadataAssistantActions: []projectAssistantUIAction{action},
+		}},
+	}
+	second := first
+	second.Run.Revision = 2
+	second.Message.Content = "one two"
+	second.Message.Metadata = cloneAnyMap(first.Message.Metadata)
+	second.Message.Metadata[projectMessageMetadataAssistantActions] = []projectAssistantUIAction{{ID: action.ID, Kind: action.Kind, Status: "succeeded", Label: action.Label, Tool: action.Tool}}
+
+	firstEvents := adapter.Events(first)
+	secondEvents := adapter.Events(second)
+	if len(firstEvents) == 0 || len(secondEvents) == 0 {
+		t.Fatalf("adapter events = %#v / %#v, want both revisions", firstEvents, secondEvents)
+	}
+	if projectMessageStreamEventsHaveAppendedContent(secondEvents) {
+		t.Fatalf("second durable revision appended content instead of replacing it: %#v", secondEvents)
+	}
+	if got := countProjectAssistantToolCards(secondEvents); got != 1 {
+		t.Fatalf("second durable revision tool cards = %d, want one stable replacement", got)
+	}
+	if replay := adapter.Events(second); len(replay) != 0 {
+		t.Fatalf("same durable revision replayed legacy events: %#v", replay)
 	}
 }
 

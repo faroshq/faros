@@ -101,10 +101,11 @@ reconnects without adding another prompt.
 This remains a single-replica design: execution cannot continue across a
 provider restart. On the next read, an orphaned running run is surfaced as
 `interrupted`; permission and input checkpoints stay resumable. The legacy
-`POST /messages/stream` endpoint is retained for older portals as a
-compatibility adapter while consumers migrate to start/latest/stream. New
-clients must not depend on token replay: streams provide complete revisioned
-snapshots and a reconnect receives the latest one.
+`POST /messages/stream` and `POST /projects/stream` endpoints are retained for
+older portals as compatibility adapters: after their historical project setup
+events, they start the same durable run and subscribe to it. New clients must
+not depend on token replay: streams provide complete revisioned snapshots and a
+reconnect receives the latest one.
 
 Lifecycle logs contain only organization, workspace, project, run, revision,
 and status fields. They intentionally omit prompt text, assistant content,

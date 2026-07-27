@@ -574,10 +574,6 @@ func (s *Server) createProjectStartStream(w http.ResponseWriter, r *http.Request
 		writeProjectError(w, newValidationError("prompt is required"))
 		return
 	}
-	msgStore, ok := s.requireStore(w)
-	if !ok {
-		return
-	}
 	flusher, ok := startProjectMessageStream(w)
 	if !ok {
 		return
@@ -611,11 +607,6 @@ func (s *Server) createProjectStartStream(w http.ResponseWriter, r *http.Request
 		writeStreamError(err)
 		return
 	}
-	if err := appendProjectUserMessage(r.Context(), msgStore, projectMessageScope(id.orgUUID, id.workspaceUUID, created.Name), req.Prompt); err != nil {
-		s.cleanupCreatedProjectSetup(r.Context(), c, id, created)
-		writeStreamError(err)
-		return
-	}
 	view := projectView(r.Context(), c, created, id)
 	if err := writeProjectMessageStreamEvent(w, flusher, projectMessageStreamEvent{
 		Type:    "project",
@@ -623,10 +614,11 @@ func (s *Server) createProjectStartStream(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		return
 	}
-	if err := writeStatus("Working"); err != nil {
-		return
-	}
-	s.streamProjectAssistantWithStart(w, flusher, r, c, id, created, msgStore, assistantID, projectAssistantStreamStartForCreatePreflight(preflight))
+	// The initial project event is legacy wire compatibility only. Once the
+	// Project exists, its first prompt enters the same durable start boundary as
+	// every later turn, so closing this SSE cannot cancel execution or create a
+	// second user message.
+	s.startAndStreamLegacyProjectAssistant(w, r, c, id, created, req.Prompt, "legacy-create-"+uuid.NewString(), projectAssistantStreamStartForCreatePreflight(preflight))
 }
 
 func (s *Server) createProjectMessageStream(w http.ResponseWriter, r *http.Request) {
@@ -652,20 +644,12 @@ func (s *Server) createProjectMessageStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	msgStore, ok := s.requireStore(w)
-	if !ok {
-		return
+	if strings.TrimSpace(req.ClientRequestID) == "" {
+		// Older embedded portals did not send an idempotency key. Give their
+		// one POST a durable identity without changing their wire contract.
+		req.ClientRequestID = "legacy-" + uuid.NewString()
 	}
-	if err := appendProjectUserMessage(r.Context(), msgStore, projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), req.Content); err != nil {
-		writeProjectError(w, err)
-		return
-	}
-
-	flusher, ok := startProjectMessageStream(w)
-	if !ok {
-		return
-	}
-	s.streamProjectAssistant(w, flusher, r, c, id, p, msgStore, "")
+	s.startAndStreamLegacyProjectAssistant(w, r, c, id, p, req.Content, req.ClientRequestID, nil)
 }
 
 func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) {
@@ -713,6 +697,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		writeProjectError(w, err)
 		return
 	}
+	logProjectAssistantLifecycle("resume", scope, run)
 	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshot{Run: run, Message: message})
 }
 

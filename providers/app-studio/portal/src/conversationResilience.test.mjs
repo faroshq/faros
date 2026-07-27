@@ -21,7 +21,7 @@ test('mergeConversationSnapshot keeps the stable assistant message ID and reject
   assert.strictEqual(duplicate, current)
 })
 
-test('replaceOptimisticUserMessage replaces a local user message without duplicating it', () => {
+test('first-project durable start replaces its optimistic user message without duplicating it', () => {
   const optimistic = message('optimistic-client-1', 'ship it')
   const persisted = { ...optimistic, id: 'user-1' }
   const result = state.replaceOptimisticUserMessage([message('prior', 'earlier'), optimistic], optimistic.id, persisted)

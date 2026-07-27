@@ -74,13 +74,11 @@ import type {
   ProjectAssistantSnapshot,
   ProjectAssistantUIAction,
   ProjectAssistantUIComponent,
-  ProjectAssistantUIEvent,
   ProjectAssistantUIInterruptRequest,
   ProjectProviderBinding,
   ProjectLLMSettings,
   ProjectMessage,
   ProjectRepositoryCommit,
-  ProjectMessageStreamEvent,
   ProjectPromotionReadiness,
   ProjectCheckpoint,
   ProviderItem,
@@ -1840,24 +1838,31 @@ function reloadActiveAssistantConversation() {
   if (projectName) void recoverAssistantConversation(projectName)
 }
 
-async function refreshProjectConversationAfterAssistantRun(projectName: string): Promise<boolean> {
-	try {
-		await refreshSelectedProjectConversation(projectName)
-		return true
-	} catch (e) {
-		const detail = e instanceof Error ? e.message : String(e)
-		error.value = detail ? `Assistant finished, but the conversation did not refresh: ${detail}` : 'Assistant finished, but the conversation did not refresh.'
-		return false
-	}
+function ensureAssistantMessage(projectName: string, assistantMessageID: string): number {
+  const idx = messages.value.findIndex((message) => message.id === assistantMessageID && message.role === 'assistant')
+  if (idx !== -1) return idx
+  messages.value = [...messages.value, {
+    id: assistantMessageID,
+    projectID: projectName,
+    role: 'assistant',
+    content: '',
+    createdAt: new Date().toISOString(),
+  }]
+  return messages.value.length - 1
 }
 
-// Retained while older embedded portals can still render the legacy UI event
-// protocol. New project creation consumes durable snapshots instead.
-void refreshProjectConversationAfterAssistantRun
-void applyAssistantUIEvent
-void projectAssistantUIEventRequestsPreviewRefresh
-void isProjectAssistantUIStreamEvent
-void markAssistantMessageInterrupted
+function applyAssistantInterrupt(projectName: string, assistantMessageID: string, interrupt: ProjectAssistantUIInterruptRequest) {
+  const idx = ensureAssistantMessage(projectName, assistantMessageID)
+  const message = messages.value[idx]
+  const next: ProjectMessageView = { ...message }
+  if (interrupt.status === 'resolved') {
+    if (next.interrupt?.interruptId === interrupt.interruptId) delete next.interrupt
+  } else {
+    next.interrupt = interrupt
+  }
+  messages.value[idx] = next
+  messages.value = [...messages.value]
+}
 
 async function syncDevelopmentPreview() {
 	const projectName = selected.value?.name
@@ -2287,199 +2292,6 @@ async function sendMessage() {
 function cancelMessageStream() {
   if (!activeAssistantRun || assistantRunTerminal(activeAssistantRun.status)) return
   void assistantRunController.stop().catch((e) => { error.value = e instanceof Error ? e.message : String(e) })
-}
-
-function ensureAssistantMessage(projectName: string, assistantMessageID: string): number {
-  const idx = messages.value.findIndex((message) => message.id === assistantMessageID && message.role === 'assistant')
-  if (idx !== -1) return idx
-
-  messages.value = [
-    ...messages.value,
-    {
-      id: assistantMessageID,
-      projectID: projectName,
-      role: 'assistant',
-      content: '',
-      createdAt: new Date().toISOString(),
-    },
-  ]
-  return messages.value.length - 1
-}
-
-function applyAssistantUIEvent(projectName: string, ui: ProjectAssistantUIEvent): string | undefined {
-  const assistantMessageID = projectAssistantUIEventSurfaceID(ui)
-  let touchedAssistantMessageID: string | undefined
-
-  if (ui.beginRendering && projectName && assistantMessageID) {
-    touchedAssistantMessageID = assistantMessageID
-    ensureAssistantSurface(projectName, assistantMessageID, ui.beginRendering.root)
-  }
-
-  if (ui.surfaceUpdate?.components?.length && projectName && assistantMessageID) {
-    conversationStatus.value = ''
-    touchedAssistantMessageID = assistantMessageID
-    upsertAssistantSurfaceComponents(projectName, assistantMessageID, ui.surfaceUpdate.components)
-  }
-
-  if (ui.dataModelUpdate?.contents?.length) {
-    for (const content of ui.dataModelUpdate.contents) {
-      if (content.key === 'assistant.status') {
-        conversationStatus.value = content.valueString || 'Working'
-        continue
-      }
-      if (content.key === 'builder.event') {
-        conversationStatus.value = builderEventStatus(content.valueString)
-        continue
-      }
-      if (content.key === 'development.previewRefreshNeeded') {
-        continue
-      }
-      if (!projectName || !assistantMessageID) continue
-      conversationStatus.value = ''
-      touchedAssistantMessageID = assistantMessageID
-      updateAssistantSurfaceData(projectName, assistantMessageID, content.key, content.valueString || '', content.append === true)
-    }
-  }
-
-  if (ui.interruptRequest && projectName && assistantMessageID) {
-    conversationStatus.value = ''
-    touchedAssistantMessageID = assistantMessageID
-    applyAssistantInterrupt(projectName, assistantMessageID, ui.interruptRequest)
-  }
-
-  return touchedAssistantMessageID
-}
-
-function projectAssistantUIEventRequestsPreviewRefresh(ui: ProjectAssistantUIEvent): boolean {
-  return ui.dataModelUpdate?.contents?.some((content) =>
-    content.key === 'development.previewRefreshNeeded' && content.valueString !== 'false',
-  ) ?? false
-}
-
-function isProjectAssistantUIStreamEvent(event: ProjectMessageStreamEvent): event is ProjectAssistantUIEvent {
-  return ('beginRendering' in event && Boolean(event.beginRendering)) ||
-    ('surfaceUpdate' in event && Boolean(event.surfaceUpdate)) ||
-    ('dataModelUpdate' in event && Boolean(event.dataModelUpdate)) ||
-    ('interruptRequest' in event && Boolean(event.interruptRequest))
-}
-
-function projectAssistantUIEventSurfaceID(ui: ProjectAssistantUIEvent): string {
-  return ui.beginRendering?.surfaceId ||
-    ui.surfaceUpdate?.surfaceId ||
-    ui.dataModelUpdate?.surfaceId ||
-    ui.interruptRequest?.surfaceId ||
-    ''
-}
-
-function ensureAssistantSurface(projectName: string, assistantMessageID: string, rootId: string): number {
-  const idx = ensureAssistantMessage(projectName, assistantMessageID)
-  const message = messages.value[idx]
-  if (message.surface?.rootId === rootId) return idx
-  messages.value[idx] = {
-    ...message,
-    surface: {
-      rootId,
-      components: {},
-      dataModel: {},
-    },
-  }
-  messages.value = [...messages.value]
-  return idx
-}
-
-function upsertAssistantSurfaceComponents(projectName: string, assistantMessageID: string, components: ProjectAssistantUIComponent[]) {
-  const idx = ensureAssistantSurface(projectName, assistantMessageID, messages.value.find((message) => message.id === assistantMessageID)?.surface?.rootId || 'root-col')
-  const message = messages.value[idx]
-  const surface = message.surface ?? { rootId: 'root-col', components: {}, dataModel: {} }
-  const nextComponents = { ...surface.components }
-  for (const component of components) {
-    nextComponents[component.id] = component.component
-  }
-  messages.value[idx] = {
-    ...message,
-    surface: {
-      ...surface,
-      components: nextComponents,
-    },
-  }
-  messages.value = [...messages.value]
-}
-
-function updateAssistantSurfaceData(projectName: string, assistantMessageID: string, key: string, value: string, appendValue = false) {
-  const idx = ensureAssistantSurface(projectName, assistantMessageID, messages.value.find((message) => message.id === assistantMessageID)?.surface?.rootId || 'root-col')
-  const message = messages.value[idx]
-  const surface = message.surface ?? { rootId: 'root-col', components: {}, dataModel: {} }
-  const nextValue = appendValue ? `${surface.dataModel[key] || ''}${value}` : value
-  messages.value[idx] = {
-    ...message,
-    content: assistantSurfaceHasAssistantBinding(surface, key) ? nextValue : message.content,
-    surface: {
-      ...surface,
-      dataModel: {
-        ...surface.dataModel,
-        [key]: nextValue,
-      },
-    },
-  }
-  messages.value = [...messages.value]
-}
-
-function assistantSurfaceHasAssistantBinding(surface: ProjectAssistantSurface, key: string): boolean {
-  return Object.values(surface.components).some((component) => component.Text?.dataKey === key)
-}
-
-function builderEventStatus(eventType?: string): string {
-  switch ((eventType || '').trim()) {
-    case 'plan_ready':
-      return 'Plan ready'
-    case 'plan_approved':
-      return 'Applying plan'
-    case 'workspace_changed':
-      return 'Updating workspace'
-    default:
-      return 'Working'
-  }
-}
-
-function applyAssistantInterrupt(projectName: string, assistantMessageID: string, interrupt: ProjectAssistantUIInterruptRequest) {
-  const idx = ensureAssistantMessage(projectName, assistantMessageID)
-  const message = messages.value[idx]
-  const next: ProjectMessageView = { ...message }
-  if (interrupt.status === 'resolved') {
-    if (next.interrupt?.interruptId === interrupt.interruptId) {
-      delete next.interrupt
-    }
-  } else {
-    next.interrupt = interrupt
-  }
-  messages.value[idx] = next
-  messages.value = [...messages.value]
-}
-
-function markAssistantMessageInterrupted(projectName: string, assistantMessageID: string) {
-  if (assistantMessageID) {
-    const idx = messages.value.findIndex((message) => message.id === assistantMessageID && message.role === 'assistant')
-    if (idx !== -1) {
-      messages.value[idx] = {
-        ...messages.value[idx],
-        viewStatus: 'interrupted',
-      }
-      messages.value = [...messages.value]
-      return
-    }
-  }
-
-  messages.value = [
-    ...messages.value,
-    {
-      id: `interrupted-${Date.now()}`,
-      projectID: projectName,
-      role: 'assistant',
-      content: '',
-      viewStatus: 'interrupted',
-      createdAt: new Date().toISOString(),
-    },
-  ]
 }
 
 async function resolveToolPermission(message: ProjectMessageView, interrupt: ProjectAssistantUIInterruptRequest, decision: 'allow' | 'deny') {

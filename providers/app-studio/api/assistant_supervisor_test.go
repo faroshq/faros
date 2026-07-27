@@ -873,27 +873,43 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	server.assistantEngine = engine
 	router := mux.NewRouter()
 	server.Register(router)
-	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"build a todo app","clientRequestID":"request-1"}`))
+	starter, cancelStarter := context.WithCancel(context.Background())
+	defer cancelStarter()
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages/stream", strings.NewReader(`{"content":"build a todo app","clientRequestID":"request-1"}`)).WithContext(starter)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer caller-token")
 	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
 	request.Header.Set("X-Kedge-Cluster", "cluster-a")
 	started := httptest.NewRecorder()
-	router.ServeHTTP(started, request)
-	if started.Code != http.StatusAccepted {
-		t.Fatalf("start status = %d, want %d: %s", started.Code, http.StatusAccepted, started.Body.String())
-	}
-	var start projectAssistantRunStartResponse
-	if err := json.NewDecoder(started.Body).Decode(&start); err != nil {
-		t.Fatal(err)
-	}
-	if start.User == nil || start.Run.UserMessageID != start.User.ID || start.Assistant.ID != start.Run.ActiveMessageID {
-		t.Fatalf("start response has unstable message identity: %#v", start)
-	}
+	streamDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(started, request)
+		close(streamDone)
+	}()
 	select {
 	case <-engine.entered:
 	case <-time.After(time.Second):
-		t.Fatal("start worker did not enter")
+		t.Fatal("legacy start worker did not enter")
+	}
+	cancelStarter()
+	select {
+	case <-streamDone:
+	case <-time.After(time.Second):
+		t.Fatal("legacy stream did not detach after request cancellation")
+	}
+	if started.Code != http.StatusOK {
+		t.Fatalf("legacy start status = %d, want %d: %s", started.Code, http.StatusOK, started.Body.String())
+	}
+	run, err := memoryStore.LatestAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := memoryStore.ListMessages(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || run.UserMessageID == "" || run.ActiveMessageID == "" {
+		t.Fatalf("legacy start persisted %#v with run %#v, want exactly one user and one assistant", page.Items, run)
 	}
 	latest := httptest.NewRecorder()
 	latestRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/runs/latest", nil)
@@ -906,11 +922,11 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	if err := json.NewDecoder(latest.Body).Decode(&latestSnapshot); err != nil {
 		t.Fatal(err)
 	}
-	if latestSnapshot.Run.ID != start.Run.ID || latestSnapshot.Run.Status != start.Run.Status || latestSnapshot.Run.Revision != start.Run.Revision || latestSnapshot.Message.ID != start.Run.ActiveMessageID {
+	if latestSnapshot.Run.ID != run.ID || latestSnapshot.Run.Status != run.Status || latestSnapshot.Run.Revision != run.Revision || latestSnapshot.Message.ID != run.ActiveMessageID {
 		t.Fatalf("latest snapshot = %#v, want started run and active assistant message", latestSnapshot)
 	}
 	otherWorkspace := httptest.NewRecorder()
-	otherWorkspaceRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/"+start.Run.ID+"/stream", nil)
+	otherWorkspaceRequest := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/"+run.ID+"/stream", nil)
 	otherWorkspaceRequest.Header = request.Header.Clone()
 	otherWorkspaceRequest.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-b")
 	otherWorkspaceRequest.Header.Set("X-Kedge-Cluster", "cluster-a")
@@ -919,7 +935,7 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 		t.Fatalf("cross-workspace stream unexpectedly succeeded: %s", otherWorkspace.Body.String())
 	}
 	abort := httptest.NewRecorder()
-	abortRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/"+start.Run.ID+"/abort", nil)
+	abortRequest := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/"+run.ID+"/abort", nil)
 	abortRequest.Header = request.Header.Clone()
 	router.ServeHTTP(abort, abortRequest)
 	if abort.Code != http.StatusAccepted {
@@ -929,6 +945,10 @@ func TestProjectAssistantRunRoutesStartLatestAbortAndIsolateTenantStreams(t *tes
 	case <-engine.finished:
 	case <-time.After(time.Second):
 		t.Fatal("explicit abort did not stop started worker")
+	}
+	terminal, err := memoryStore.GetAssistantRun(context.Background(), store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}, run.ID)
+	if err != nil || terminal.Status != store.AssistantRunStatusAborted {
+		t.Fatalf("latest durable run after legacy disconnect/abort = %#v, %v; want recoverable aborted run", terminal, err)
 	}
 }
 
