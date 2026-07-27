@@ -60,18 +60,42 @@ func NewEinoReadOnlyBackend(store *FileStore, scope Scope) (*EinoReadOnlyBackend
 	return &EinoReadOnlyBackend{store: store, scope: scope}, nil
 }
 
-func (b *EinoReadOnlyBackend) projectFiles(ctx context.Context) ([]FileInfo, error) {
+func (b *EinoReadOnlyBackend) projectFilesMatching(
+	ctx context.Context,
+	match func(context.Context, FileInfo) (bool, error),
+) ([]FileInfo, error) {
 	if err := validateEinoScopeDirectories(b.store, b.scope); err != nil {
 		return nil, err
 	}
-	list, err := b.store.ListFiles(ctx, b.scope, ListOptions{Limit: MaxListLimit})
+	dir, err := b.store.scopeDir(b.scope)
 	if err != nil {
 		return nil, err
 	}
-	if list.Truncated {
-		return nil, fmt.Errorf("project has more than %d files; narrow path or glob", MaxListLimit)
+	files := make([]FileInfo, 0)
+	err = b.store.walkFiles(ctx, dir, func(file FileInfo) error {
+		matched, err := match(ctx, file)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return nil
+		}
+		if len(files) >= MaxListLimit {
+			return fmt.Errorf(
+				"request matches more than %d files; narrow path or glob (or file type for grep)",
+				MaxListLimit,
+			)
+		}
+		files = append(files, file)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return list.Files, nil
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+	return files, nil
 }
 
 func validateEinoScopeDirectories(store *FileStore, scope Scope) error {
@@ -148,6 +172,61 @@ func einoMetadataSnapshot(ctx context.Context, files []FileInfo) (*einofs.InMemo
 	return snapshot, nil
 }
 
+func einoPathContainsFile(basePath, filePath string) bool {
+	absoluteFilePath := "/" + filePath
+	return basePath == "/" ||
+		absoluteFilePath == basePath ||
+		strings.HasPrefix(absoluteFilePath, basePath+"/")
+}
+
+func validateEinoGlobPattern(ctx context.Context, pattern string) error {
+	snapshot, err := einoMetadataSnapshot(ctx, []FileInfo{{Path: einoBackendCandidateMarker}})
+	if err != nil {
+		return err
+	}
+	_, err = snapshot.GlobInfo(ctx, &einofs.GlobInfoRequest{
+		Path:    "/",
+		Pattern: pattern,
+	})
+	return err
+}
+
+func einoGlobMatchesFile(
+	ctx context.Context,
+	file FileInfo,
+	basePath string,
+	pattern string,
+) (bool, error) {
+	snapshot, err := einoMetadataSnapshot(ctx, []FileInfo{file})
+	if err != nil {
+		return false, err
+	}
+	infos, err := snapshot.GlobInfo(ctx, &einofs.GlobInfoRequest{
+		Path:    basePath,
+		Pattern: pattern,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(infos) > 0, nil
+}
+
+func einoGrepMatchesFile(
+	ctx context.Context,
+	file FileInfo,
+	req *einofs.GrepRequest,
+) (bool, error) {
+	snapshot, err := einoMetadataSnapshot(ctx, []FileInfo{file})
+	if err != nil {
+		return false, err
+	}
+	matches, err := snapshot.GrepRaw(ctx, req)
+	if err != nil {
+		return false, err
+	}
+	return len(matches) > 0, nil
+}
+
 // validateEinoGrepGlob delegates glob syntax validation to Eino even when the
 // project has no files (or none below the requested path).
 func validateEinoGrepGlob(ctx context.Context, glob string) error {
@@ -180,7 +259,12 @@ func (b *EinoReadOnlyBackend) GlobInfo(ctx context.Context, req *einofs.GlobInfo
 	if err != nil {
 		return nil, err
 	}
-	files, err := b.projectFiles(ctx)
+	if err := validateEinoGlobPattern(ctx, pattern); err != nil {
+		return nil, err
+	}
+	files, err := b.projectFilesMatching(ctx, func(ctx context.Context, file FileInfo) (bool, error) {
+		return einoGlobMatchesFile(ctx, file, basePath, pattern)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +300,9 @@ func (b *EinoReadOnlyBackend) LsInfo(ctx context.Context, req *einofs.LsInfoRequ
 	if err != nil {
 		return nil, err
 	}
-	files, err := b.projectFiles(ctx)
+	files, err := b.projectFilesMatching(ctx, func(_ context.Context, file FileInfo) (bool, error) {
+		return einoPathContainsFile(basePath, file.Path), nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -291,14 +377,6 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 	if err := validateEinoGrepGlob(ctx, req.Glob); err != nil {
 		return nil, err
 	}
-	files, err := b.projectFiles(ctx)
-	if err != nil {
-		return nil, err
-	}
-	metadata, err := einoMetadataSnapshot(ctx, files)
-	if err != nil {
-		return nil, err
-	}
 	candidateReq := *req
 	candidateReq.Path = basePath
 	candidateReq.Pattern = regexp.QuoteMeta(einoBackendCandidateMarker)
@@ -306,26 +384,20 @@ func (b *EinoReadOnlyBackend) GrepRaw(ctx context.Context, req *einofs.GrepReque
 	candidateReq.EnableMultiline = false
 	candidateReq.BeforeLines = 0
 	candidateReq.AfterLines = 0
-	candidates, err := metadata.GrepRaw(ctx, &candidateReq)
+	files, err := b.projectFilesMatching(ctx, func(ctx context.Context, file FileInfo) (bool, error) {
+		return einoGrepMatchesFile(ctx, file, &candidateReq)
+	})
 	if err != nil {
 		return nil, err
 	}
-	candidatePaths := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		candidatePaths[strings.TrimPrefix(candidate.Path, "/")] = struct{}{}
-	}
-	paths := make([]string, 0, len(candidatePaths))
-	for candidatePath := range candidatePaths {
-		paths = append(paths, candidatePath)
-	}
-	sort.Strings(paths)
 
 	totalBytes := 0
 	matches := make([]einofs.GrepMatch, 0)
-	for _, candidatePath := range paths {
+	for _, candidate := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		candidatePath := candidate.Path
 		file, err := b.store.ReadFile(ctx, b.scope, ReadOptions{Path: candidatePath, MaxBytes: MaxReadMaxBytes})
 		if err != nil {
 			return nil, err

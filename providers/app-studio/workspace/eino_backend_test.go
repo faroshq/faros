@@ -470,6 +470,76 @@ func TestEinoReadOnlyBackendEnforcesBoundsAndBinaryRules(t *testing.T) {
 	}
 }
 
+func TestEinoReadOnlyBackendNarrowsCandidatesInLargeProjects(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "large-narrowed"}
+	files := make([]File, 0, MaxListLimit+5)
+	for i := 0; i <= MaxListLimit; i++ {
+		files = append(files, File{
+			Path:    fmt.Sprintf("unrelated/file-%03d.txt", i),
+			Content: "needle unrelated\n",
+		})
+	}
+	files = append(files,
+		File{Path: "target/App.tsx", Content: "needle app\n"},
+		File{Path: "target/components/Card.tsx", Content: "card\n"},
+		File{Path: "target/skip.txt", Content: "needle skip\n"},
+		File{Path: "target/view.jsx", Content: "needle view\n"},
+	)
+	if err := store.ApplyFiles(ctx, scope, files); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+	backend, err := NewEinoReadOnlyBackend(store, scope)
+	if err != nil {
+		t.Fatalf("NewEinoReadOnlyBackend returned error: %v", err)
+	}
+
+	t.Run("ls", func(t *testing.T) {
+		infos, err := backend.LsInfo(ctx, &einofs.LsInfoRequest{Path: "target"})
+		if err != nil {
+			t.Fatalf("narrowed LsInfo returned error: %v", err)
+		}
+		if got := einoFileInfoPaths(infos); !slices.Equal(got, []string{"App.tsx", "components", "skip.txt", "view.jsx"}) {
+			t.Fatalf("narrowed ls paths = %v", got)
+		}
+		if _, err := backend.LsInfo(ctx, &einofs.LsInfoRequest{}); err == nil || !strings.Contains(err.Error(), "narrow") {
+			t.Fatalf("broad LsInfo error = %v, want actionable narrowing error", err)
+		}
+	})
+
+	t.Run("glob", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &einofs.GlobInfoRequest{Path: "target", Pattern: "**/*.tsx"})
+		if err != nil {
+			t.Fatalf("narrowed GlobInfo returned error: %v", err)
+		}
+		if got := einoFileInfoPaths(infos); !slices.Equal(got, []string{"target/App.tsx", "target/components/Card.tsx"}) {
+			t.Fatalf("narrowed glob paths = %v", got)
+		}
+		if _, err := backend.GlobInfo(ctx, &einofs.GlobInfoRequest{Pattern: "**/*"}); err == nil || !strings.Contains(err.Error(), "narrow") {
+			t.Fatalf("broad GlobInfo error = %v, want actionable narrowing error", err)
+		}
+	})
+
+	t.Run("grep", func(t *testing.T) {
+		matches, err := backend.GrepRaw(ctx, &einofs.GrepRequest{
+			Pattern:  "needle",
+			Path:     "target",
+			Glob:     "*.jsx",
+			FileType: "js",
+		})
+		if err != nil {
+			t.Fatalf("narrowed GrepRaw returned error: %v", err)
+		}
+		if !slices.Equal(matches, []einofs.GrepMatch{{Path: "target/view.jsx", Line: 1, Content: "needle view"}}) {
+			t.Fatalf("narrowed grep matches = %#v", matches)
+		}
+		if _, err := backend.GrepRaw(ctx, &einofs.GrepRequest{Pattern: "needle"}); err == nil || !strings.Contains(err.Error(), "narrow") {
+			t.Fatalf("broad GrepRaw error = %v, want actionable narrowing error", err)
+		}
+	})
+}
+
 func TestEinoReadOnlyBackendGrep(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(t.TempDir())

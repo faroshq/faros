@@ -4,7 +4,7 @@
 
 **Goal:** Replace App Studio's three bespoke workspace-read tools with Eino v0.9.9's canonical `ls`, `read_file`, `glob`, and `grep` tools while retaining App Studio's mutation, approval, audit, phase, and development-sync boundaries.
 
-**Architecture:** Add a per-run `filesystem.Backend` adapter that captures one `workspace.FileStore` and `workspace.Scope`. It reads through the existing safe store and delegates Eino-compatible listing, glob, file-type, regex, multiline, and context behavior to Eino's own in-memory backend. Install Eino's filesystem middleware only for workspace-read turn policies, disable its write/edit tools and result offloading, and add narrow phase/telemetry bridges for the four exact canonical names.
+**Architecture:** Add a per-run `filesystem.Backend` adapter that captures one `workspace.FileStore` and `workspace.Scope`. It reads through the existing safe store and delegates Eino-compatible listing, glob, file-type, regex, multiline, and context behavior to Eino's own in-memory backend. Install Eino's typed filesystem middleware only for workspace-read turn policies, disable its write/edit tools, and add narrow phase/telemetry bridges for the four exact canonical names. The pinned typed `MiddlewareConfig` path does not install the legacy large-result offloading wrapper.
 
 **Tech Stack:** Go 1.26.3, `github.com/cloudwego/eino v0.9.9`, Eino ADK DeepAgent/filesystem middleware, App Studio `workspace.FileStore`, Go tests.
 
@@ -14,7 +14,7 @@
 - Remove `list_project_files`, `read_project_file`, and `search_project_files` from the advertised App Studio registry and prompts.
 - Keep App Studio `write_file`, `apply_patch`, and `mkdir` unchanged and registry-backed.
 - Do not set `deep.Config.Backend`; construct `filesystem.New` explicitly.
-- Set `WriteFileToolConfig.Disable`, `EditFileToolConfig.Disable`, and `WithoutLargeToolResultOffloading` to `true`.
+- Set `WriteFileToolConfig.Disable` and `EditFileToolConfig.Disable` to `true`. Do not reference `WithoutLargeToolResultOffloading`: that field exists on the legacy `Config`, not the typed `MiddlewareConfig` used by `filesystem.New`.
 - Do not configure `Shell`, `StreamingShell`, multimodal reads, general subagents, or any new artifact store.
 - All model paths are project-relative and fixed to the request's organization, workspace, and project scope.
 - Unknown metadata-free tools remain denied; only the four exact un-namespaced canonical read names receive fallback `read` / `workspace_read` metadata.
@@ -421,7 +421,6 @@ middleware, err := einofilesystem.New(ctx, &einofilesystem.MiddlewareConfig{
 	GrepToolConfig:     &einofilesystem.ToolConfig{Desc: &projectEinoFilesystemGrepDescription},
 	WriteFileToolConfig: &einofilesystem.ToolConfig{Disable: true},
 	EditFileToolConfig:  &einofilesystem.ToolConfig{Disable: true},
-	WithoutLargeToolResultOffloading: true,
 	CustomSystemPrompt: &projectEinoFilesystemInstruction,
 })
 ```
@@ -745,7 +744,7 @@ rg -n 'Backend:|Shell:|StreamingShell:|WithoutLargeToolResultOffloading|WriteFil
 Expected:
 
 - the first command returns only the explicit negative compatibility assertions;
-- the second shows the scoped middleware configuration, no shell configuration, disabled Eino writes/edits, and disabled offloading.
+- the second shows the scoped typed middleware configuration, no shell configuration, disabled Eino writes/edits, and no nonexistent typed offloading field.
 
 - [ ] **Step 9: Format and run the standalone provider gates**
 
