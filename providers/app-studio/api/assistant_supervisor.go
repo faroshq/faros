@@ -54,6 +54,7 @@ type projectAssistantSupervisedRun struct {
 	subscribers      map[uint64]chan projectAssistantRunSnapshot
 	nextSubID        uint64
 	lastText         time.Time
+	textFlush        *time.Timer
 	workerStarted    bool
 }
 
@@ -73,8 +74,22 @@ func newProjectAssistantSupervisor(parent context.Context, msgStore store.Store)
 	}
 }
 
-func (s *projectAssistantSupervisor) Shutdown() {
-	if s != nil && s.cancel != nil {
+func (s *projectAssistantSupervisor) Shutdown(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	accumulators := make([]*projectAssistantSnapshotAccumulator, 0, len(s.runs))
+	for key, active := range s.runs {
+		if !assistantRunTerminal(active.run.Status) {
+			accumulators = append(accumulators, &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: active.run.ID})
+		}
+	}
+	s.mu.Unlock()
+	for _, accumulator := range accumulators {
+		_ = accumulator.SetStatus(ctx, store.AssistantRunStatusInterrupted)
+	}
+	if s.cancel != nil {
 		s.cancel()
 	}
 }
@@ -299,8 +314,15 @@ func (a *projectAssistantSnapshotAccumulator) update(ctx context.Context, mutate
 	}
 	if !immediate && !active.lastText.IsZero() && time.Since(active.lastText) < projectAssistantTextSnapshotInterval {
 		mutate(active)
+		if active.textFlush == nil {
+			active.textFlush = time.AfterFunc(projectAssistantTextSnapshotInterval-time.Since(active.lastText), a.flushText)
+		}
 		s.mu.Unlock()
 		return nil
+	}
+	if active.textFlush != nil {
+		active.textFlush.Stop()
+		active.textFlush = nil
 	}
 	mutate(active)
 	active.run.Revision++
@@ -327,6 +349,22 @@ func (a *projectAssistantSnapshotAccumulator) update(ctx context.Context, mutate
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+func (a *projectAssistantSnapshotAccumulator) flushText() {
+	if a == nil || a.supervisor == nil {
+		return
+	}
+	a.supervisor.mu.Lock()
+	active := a.supervisor.runs[a.key]
+	if active == nil || active.run.ID != a.runID {
+		a.supervisor.mu.Unlock()
+		return
+	}
+	content := active.message.Content
+	active.textFlush = nil
+	a.supervisor.mu.Unlock()
+	_ = a.UpdateText(context.Background(), content, true)
 }
 
 // recordPersistenceFailure makes a best effort to leave an explicit terminal

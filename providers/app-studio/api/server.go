@@ -70,6 +70,11 @@ func New(gql *tenant.GraphQLClient, msgStore store.Store, hubBase string, mcpIns
 
 // NewWithWorkspace constructs a Server with an explicit project workspace store.
 func NewWithWorkspace(gql *tenant.GraphQLClient, msgStore store.Store, workspaces *workspace.FileStore, hubBase string, mcpInsecureSkipTLSVerify bool) *Server {
+	return NewWithWorkspaceContext(context.Background(), gql, msgStore, workspaces, hubBase, mcpInsecureSkipTLSVerify)
+}
+
+// NewWithWorkspaceContext binds assistant workers to the provider lifecycle.
+func NewWithWorkspaceContext(parent context.Context, gql *tenant.GraphQLClient, msgStore store.Store, workspaces *workspace.FileStore, hubBase string, mcpInsecureSkipTLSVerify bool) *Server {
 	s := &Server{
 		gql:                      gql,
 		store:                    msgStore,
@@ -79,9 +84,11 @@ func NewWithWorkspace(gql *tenant.GraphQLClient, msgStore store.Store, workspace
 	}
 	s.assistantEngine = NewEinoAssistantEngine(s)
 	s.assistantRunManager = newProjectAssistantRunManager()
-	s.assistantSupervisor = newProjectAssistantSupervisor(context.Background(), msgStore)
+	s.assistantSupervisor = newProjectAssistantSupervisor(parent, msgStore)
 	return s
 }
+
+func (s *Server) Shutdown(ctx context.Context) { s.projectAssistantSupervisor().Shutdown(ctx) }
 
 func (s *Server) projectAssistantSupervisor() *projectAssistantSupervisor {
 	s.mu.Lock()

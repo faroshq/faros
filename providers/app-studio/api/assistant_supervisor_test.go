@@ -150,3 +150,86 @@ func TestProjectAssistantSupervisorAbortCannotBeOverwrittenByLateCompletion(t *t
 		t.Fatalf("status = %q, want aborted", got.Status)
 	}
 }
+
+func TestProjectAssistantSupervisorShutdownInterruptsWorker(t *testing.T) {
+	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := supervisor.store.CreateAssistantRun(context.Background(), scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(ctx context.Context, _ *projectAssistantSnapshotAccumulator) { <-ctx.Done(); close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.Shutdown(context.Background())
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker not canceled")
+	}
+	got, err := supervisor.store.GetAssistantRun(context.Background(), scope, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("status = %q, want interrupted", got.Status)
+	}
+}
+
+func TestProjectAssistantSupervisorReleasesPendingWorkerOwnership(t *testing.T) {
+	supervisor := newProjectAssistantSupervisor(context.Background(), store.NewMemoryStore())
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := supervisor.store.CreateAssistantRun(context.Background(), scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(context.Context, *projectAssistantSnapshotAccumulator) { close(firstDone) }); err != nil {
+		t.Fatal(err)
+	}
+	<-firstDone
+	// finish runs after worker return; wait briefly for the ownership release.
+	time.Sleep(10 * time.Millisecond)
+	secondDone := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(context.Context, *projectAssistantSnapshotAccumulator) { close(secondDone) }); err != nil {
+		t.Fatalf("resume Start: %v", err)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("resumed worker did not start")
+	}
+}
+
+func TestProjectAssistantSupervisorRestartAttachesPendingRunWithoutMutation(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingInput, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
+	if _, err := supervisor.Attach(scope, created, assistant); err != nil {
+		t.Fatal(err)
+	}
+	got, err := memoryStore.GetAssistantRun(context.Background(), scope, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.AssistantRunStatusPendingInput || got.Revision != 1 {
+		t.Fatalf("restart attach mutated durable run: %#v", got)
+	}
+}

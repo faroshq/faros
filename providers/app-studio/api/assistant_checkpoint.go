@@ -87,6 +87,18 @@ type projectAssistantResumeResponse struct {
 	Result           string                             `json:"-"`
 }
 
+func (s *Server) saveProjectAssistantRun(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
+	if accumulator := s.projectAssistantSupervisor().accumulatorFor(scope, run.ID); accumulator != nil {
+		return accumulator.UpdateRun(ctx, func(current *store.AssistantRun) {
+			current.Status = run.Status
+			current.RequestID = run.RequestID
+			current.Checkpoint = run.Checkpoint
+			current.Audit = run.Audit
+		})
+	}
+	return s.store.SaveAssistantRun(ctx, scope, run)
+}
+
 type projectAssistantRunAudit struct {
 	Version          int                               `json:"version,omitempty"`
 	Provider         string                            `json:"provider,omitempty"`
@@ -216,7 +228,7 @@ func (s *Server) saveProjectAssistantEinoPermissionCheckpoint(
 		}); err != nil {
 			return nil, projectAssistantPermission{}, projectAssistantCheckpoint{}, err
 		}
-	} else if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
+	} else if err := s.saveProjectAssistantRun(ctx, req.MessageScope, run); err != nil {
 		return nil, projectAssistantPermission{}, projectAssistantCheckpoint{}, err
 	}
 	req.AssistantRun = &run
@@ -287,7 +299,7 @@ func (s *Server) saveProjectAssistantEinoFollowUpCheckpoint(
 		}); err != nil {
 			return nil, projectAssistantFollowUp{}, projectAssistantCheckpoint{}, err
 		}
-	} else if err := s.store.SaveAssistantRun(ctx, req.MessageScope, run); err != nil {
+	} else if err := s.saveProjectAssistantRun(ctx, req.MessageScope, run); err != nil {
 		return nil, projectAssistantFollowUp{}, projectAssistantCheckpoint{}, err
 	}
 	req.AssistantRun = &run
@@ -493,7 +505,7 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 		if err != nil {
 			return projectAssistantResumeResponse{}, err
 		}
-		if saveErr := s.store.SaveAssistantRun(ctx, messageScope, run); saveErr != nil {
+		if saveErr := s.saveProjectAssistantRun(ctx, messageScope, run); saveErr != nil {
 			return projectAssistantResumeResponse{}, saveErr
 		}
 		out.Status = run.Status
@@ -599,6 +611,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 
 	assistantID := newMessageID()
 	assistantContent := &strings.Builder{}
+	accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, run.ID)
 	var streamedToolCalls []projectToolCallStreamEvent
 	var pendingPermissionToolCallID string
 	var pendingFollowUpToolCallID string
@@ -647,6 +660,9 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				})
 			}
 		}
+		if accumulator != nil {
+			_ = accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(streamedToolCalls)))
+		}
 	}
 	streamToolCall := func(toolCall projectToolCallStreamEvent) {
 		if toolCall.ID == "" || toolCall.Status == "" {
@@ -655,7 +671,6 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		streamedToolCalls = upsertProjectToolCallStreamEvent(streamedToolCalls, toolCall)
 	}
 	resumeRun := run
-	accumulator := s.projectAssistantSupervisor().accumulatorFor(messageScope, run.ID)
 	engineReq := projectAssistantRunRequest{
 		Identity:                 id,
 		HTTPRequest:              r,
@@ -741,7 +756,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if err != nil {
 					return projectAssistantResumeResponse{}, err
 				}
-				if err := s.store.SaveAssistantRun(persistCtx, messageScope, pendingRun); err != nil {
+				if err := s.saveProjectAssistantRun(persistCtx, messageScope, pendingRun); err != nil {
 					return projectAssistantResumeResponse{}, err
 				}
 				out.RunID = pendingRun.ID
@@ -789,7 +804,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		if err != nil {
 			return projectAssistantResumeResponse{}, err
 		}
-		if err := s.store.SaveAssistantRun(persistCtx, messageScope, pendingRun); err != nil {
+		if err := s.saveProjectAssistantRun(persistCtx, messageScope, pendingRun); err != nil {
 			return projectAssistantResumeResponse{}, err
 		}
 		out.RunID = pendingRun.ID
@@ -834,7 +849,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
-	if err := s.store.SaveAssistantRun(persistCtx, messageScope, run); err != nil {
+	if err := s.saveProjectAssistantRun(persistCtx, messageScope, run); err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
 	out.Status = run.Status
@@ -959,7 +974,7 @@ func (s *Server) completeClaimedProjectAssistantRunAfterResumeError(
 	if auditErr != nil {
 		return projectAssistantResumeResponse{}, auditErr
 	}
-	if err := s.store.SaveAssistantRun(persistCtx, messageScope, run); err != nil {
+	if err := s.saveProjectAssistantRun(persistCtx, messageScope, run); err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
 	out.Status = run.Status
@@ -1015,7 +1030,7 @@ func (s *Server) abortProjectAssistantRun(
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
-	if err := s.store.SaveAssistantRun(ctx, messageScope, run); err != nil {
+	if err := s.saveProjectAssistantRun(ctx, messageScope, run); err != nil {
 		return projectAssistantResumeResponse{}, err
 	}
 	if err := s.clearProjectAssistantPendingMessagesForRun(ctx, messageScope, run.ID); err != nil {

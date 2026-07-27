@@ -77,3 +77,30 @@ its terminal save.
 
 Fresh verification: `go test ./api -count=1`, `go test -race ./api -run
 TestProjectAssistantSupervisor -count=1`, and `go test ./...` all passed.
+
+## Partial fix-round checkpoint
+
+This checkpoint adds a real trailing text flush (rather than dropping a quiet
+coalesced update), binds production worker ownership to the provider signal
+context through `NewWithWorkspaceContext`, and persists `interrupted` before
+HTTP shutdown/store teardown. It also adds a supervisor-aware resume/checkpoint
+write gate, immediate sanitized resume action/permission/input metadata
+snapshots, committed-vs-working snapshots for subscriber visibility, and
+ownership tests for pending segment release and restart attach.
+
+RED/GREEN: the new supervisor ownership and lifecycle tests initially required
+the missing lifecycle/ownership behavior; after the changes the focused
+`TestProjectAssistantSupervisor|TestResumeProjectAssistant` suite passes.
+Full verification for this checkpoint passed:
+
+- `go test ./api -run 'TestProjectAssistantSupervisor|TestResumeProjectAssistant' -count=1`
+- `go test ./api -count=1`
+- `go test -race ./api -run TestProjectAssistantSupervisor -count=1`
+- `go test ./...`
+
+Remaining: route-level resume and broader HTTP lifecycle coverage is not yet
+implemented. The attempted fixture route is the real GraphQL client pattern:
+an `httptest` GraphQL endpoint must return both `ProjectYaml` and the settings
+secret response consumed by `readProjectLLMSettings`, with a blocking fake
+assistant engine and a valid Eino checkpoint. No test-only production seam was
+introduced while tracing that contract.
