@@ -697,14 +697,22 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 			chatModel := &toolCapturingEinoChatModel{content: "concise report"}
 			engine := projectEinoAssistantEngine{
+				server: server,
 				newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
 					return chatModel, nil
 				},
 				newTools: func(_ context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
 					return []einotool.BaseTool{newProjectEinoAssistantTool(readTool, req, state)}, nil
 				},
+			}
+			if tt.req.WorkspaceScope == (workspace.Scope{}) {
+				tt.req.WorkspaceScope = workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+			}
+			if tt.req.MessageScope == (store.Scope{}) {
+				tt.req.MessageScope = store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
 			}
 
 			_, err := engine.StreamProjectAssistant(context.Background(), tt.req)
@@ -725,8 +733,10 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 }
 
 func TestEinoAssistantEngineDeepPhaseRejectsHiddenWriteTodos(t *testing.T) {
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	chatModel := &hiddenWriteTodosEinoChatModel{}
 	engine := projectEinoAssistantEngine{
+		server: server,
 		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
 			return chatModel, nil
 		},
@@ -1012,9 +1022,11 @@ func TestEinoAssistantEngineProfileFiltersReadOnlyAndRuntimeTools(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 			chatModel := &toolCapturingEinoChatModel{content: "read-only answer"}
 			var filteredNames []string
 			engine := projectEinoAssistantEngine{
+				server: server,
 				newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
 					return chatModel, nil
 				},
@@ -1046,6 +1058,147 @@ func TestEinoAssistantEngineProfileFiltersReadOnlyAndRuntimeTools(t *testing.T) 
 				}
 				if stringSliceContains(chatModel.toolNames[0], unwanted) {
 					t.Fatalf("%s model tools = %#v, should not expose %s", tt.profile, chatModel.toolNames[0], unwanted)
+				}
+			}
+		})
+	}
+}
+
+func TestEinoAssistantEngineUsesScopedCanonicalFilesystemReads(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	if _, err := workspaces.WriteFile(ctx, scope, workspace.WriteOptions{
+		Path:    "README.md",
+		Content: "# Project README\nCanonical filesystem integration.\n",
+	}); err != nil {
+		t.Fatalf("write README fixture returned error: %v", err)
+	}
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
+
+	var events []projectToolCallStreamEvent
+	var runState *projectEinoAssistantRunState
+	readModel := &canonicalFilesystemReadEinoChatModel{}
+	readEngine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return readModel, nil
+		},
+		newTools: func(ctx context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			runState = state
+			return newProjectEinoAssistantToolsFactory(server)(ctx, req, state)
+		},
+	}
+	readReq := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileExploration)
+	readReq.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileExploration)
+	readReq.StreamCallbacks.OnToolCall = func(event projectToolCallStreamEvent) {
+		events = append(events, event)
+	}
+	result, err := readEngine.StreamProjectAssistant(ctx, readReq)
+	if err != nil {
+		t.Fatalf("StreamProjectAssistant returned error: %v", err)
+	}
+	if result.Content != "README inspected" {
+		t.Fatalf("result content = %q, want completion", result.Content)
+	}
+	if len(readModel.toolInfos) < 1 {
+		t.Fatal("model captured no tool inventory")
+	}
+	firstNames := projectEinoAssistantPhaseToolNames(readModel.toolInfos[0])
+	for _, name := range []string{projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep} {
+		if !stringSliceContains(firstNames, name) {
+			t.Errorf("first model inventory = %#v, want %s", firstNames, name)
+		}
+	}
+	for _, name := range []string{"edit_file", "execute"} {
+		if stringSliceContains(firstNames, name) {
+			t.Errorf("first model inventory = %#v, must not expose %s", firstNames, name)
+		}
+	}
+	if len(readModel.inputs) < 2 ||
+		!einoMessagesContainToolResult(readModel.inputs[1], "call-read-readme", "     1\t# Project README") {
+		t.Fatalf("second model input = %#v, want line-numbered README result", readModel.inputs)
+	}
+	if len(events) != 3 {
+		t.Fatalf("read events = %#v, want requested/running/succeeded", events)
+	}
+	for i, status := range []string{"requested", "running", "succeeded"} {
+		if events[i].ID != "call-read-readme" || events[i].Name != projectToolReadFile || events[i].Status != status {
+			t.Errorf("read event %d = %#v, want call-read-readme %s", i, events[i], status)
+		}
+	}
+	if runState == nil {
+		t.Fatal("run state was not captured")
+	}
+	evidence := runState.CheckpointState().LastToolMessages
+	if len(evidence) != 1 || evidence[0].ToolCallID != "call-read-readme" ||
+		!strings.Contains(evidence[0].Content, "# Project README") {
+		t.Fatalf("run-state read evidence = %#v, want real tool-call ID and result", evidence)
+	}
+
+	implementationModel := &canonicalFilesystemReadEinoChatModel{requestFollowUp: true}
+	implementationEngine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return implementationModel, nil
+		},
+		newTools: newProjectEinoAssistantToolsFactory(server),
+	}
+	implementationReq := projectEinoRunRequestForProfileTest(projectAssistantTurnProfileImplementation)
+	implementationReq.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation)
+	implementationReq.InitialApprovedPlan = &projectAssistantApprovedPlan{
+		Summary:    "Inspect the implementation inventory.",
+		Steps:      []string{"Inspect", "Edit"},
+		Operations: []string{projectToolWriteFile},
+	}
+	_, err = implementationEngine.StreamProjectAssistant(ctx, implementationReq)
+	var inputErr *projectAssistantInputRequiredError
+	if !errors.As(err, &inputErr) {
+		t.Fatalf("implementation error = %v, want follow-up interrupt after inventory capture", err)
+	}
+	if len(implementationModel.toolInfos) != 1 {
+		t.Fatalf("implementation inventories = %d, want one before interrupt", len(implementationModel.toolInfos))
+	}
+	writeCount := 0
+	for _, info := range implementationModel.toolInfos[0] {
+		if info == nil || info.Name != projectToolWriteFile {
+			continue
+		}
+		writeCount++
+		if info.Extra["risk"] != string(projectAssistantToolRiskWrite) ||
+			info.Extra["bundle"] != string(projectAssistantToolBundleEdit) {
+			t.Fatalf("write_file metadata = %#v, want App Studio write/edit metadata", info.Extra)
+		}
+	}
+	if writeCount != 1 {
+		t.Fatalf("implementation write_file count = %d, want only App Studio registry tool", writeCount)
+	}
+
+	for _, profile := range []projectAssistantTurnProfile{
+		projectAssistantTurnProfileDiscussion,
+		projectAssistantTurnProfileGuidance,
+	} {
+		t.Run(string(profile), func(t *testing.T) {
+			model := &canonicalFilesystemReadEinoChatModel{directAnswer: true}
+			engine := projectEinoAssistantEngine{
+				server: server,
+				newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+					return model, nil
+				},
+				newTools: newProjectEinoAssistantToolsFactory(server),
+			}
+			req := projectEinoRunRequestForProfileTest(profile)
+			req.TurnPolicy = projectAssistantTurnPolicyForProfile(profile)
+			if _, err := engine.StreamProjectAssistant(ctx, req); err != nil {
+				t.Fatalf("StreamProjectAssistant returned error: %v", err)
+			}
+			if len(model.toolInfos) != 1 {
+				t.Fatalf("model inventories = %d, want one", len(model.toolInfos))
+			}
+			names := projectEinoAssistantPhaseToolNames(model.toolInfos[0])
+			for _, name := range []string{projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep} {
+				if stringSliceContains(names, name) {
+					t.Errorf("%s inventory = %#v, must not expose %s", profile, names, name)
 				}
 			}
 		})
@@ -2554,6 +2707,14 @@ type toolCapturingEinoChatModel struct {
 	contents  []string
 }
 
+type canonicalFilesystemReadEinoChatModel struct {
+	inputs          [][]*schema.Message
+	toolInfos       [][]*schema.ToolInfo
+	requestPlan     bool
+	requestFollowUp bool
+	directAnswer    bool
+}
+
 type planThenReportToolCapturingEinoChatModel struct {
 	toolNames [][]string
 }
@@ -3069,6 +3230,79 @@ func (m *toolCapturingEinoChatModel) Generate(ctx context.Context, input []*sche
 }
 
 func (m *toolCapturingEinoChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *canonicalFilesystemReadEinoChatModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.inputs = append(m.inputs, cloneEinoMessagesForTest(input))
+	common := einomodel.GetCommonOptions(nil, opts...)
+	infos := make([]*schema.ToolInfo, 0, len(common.Tools))
+	for _, info := range common.Tools {
+		if info == nil {
+			continue
+		}
+		clone := *info
+		if info.Extra != nil {
+			clone.Extra = make(map[string]any, len(info.Extra))
+			for key, value := range info.Extra {
+				clone.Extra[key] = value
+			}
+		}
+		infos = append(infos, &clone)
+	}
+	m.toolInfos = append(m.toolInfos, infos)
+	if m.directAnswer {
+		return schema.AssistantMessage("direct answer", nil), nil
+	}
+	if m.requestPlan {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "call-plan",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      projectToolRequestProjectPlanApproval,
+				Arguments: `{"summary":"Update the project","steps":["Inspect","Edit"],"targetPaths":["src/"],"allowedOperations":["write_file"],"acceptanceCriteria":["Project updated"]}`,
+			},
+		}}), nil
+	}
+	if m.requestFollowUp {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "call-follow-up",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      projectToolAskFollowUp,
+				Arguments: `{"questions":["Continue?"]}`,
+			},
+		}}), nil
+	}
+	if len(m.inputs) == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "call-read-readme",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      projectToolReadFile,
+				Arguments: `{"file_path":"README.md","offset":1,"limit":20}`,
+			},
+		}}), nil
+	}
+	return schema.AssistantMessage("README inspected", nil), nil
+}
+
+func (m *canonicalFilesystemReadEinoChatModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.StreamReader[*schema.Message], error) {
 	msg, err := m.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err

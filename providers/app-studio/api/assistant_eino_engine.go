@@ -36,6 +36,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/faroshq/provider-app-studio/store"
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 const (
@@ -318,6 +319,21 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 			return nil, fmt.Errorf("create eino tool search middleware: %w", err)
 		}
 		handlers = append(handlers, searchMiddleware)
+	}
+	var workspaceStore *workspace.FileStore
+	if e.server != nil {
+		workspaceStore = e.server.workspaces
+	}
+	filesystemMiddleware, err := projectEinoAssistantFilesystemMiddleware(ctx, workspaceStore, req)
+	if err != nil {
+		return nil, fmt.Errorf("create App Studio Eino filesystem middleware: %w", err)
+	}
+	if filesystemMiddleware != nil {
+		handlers = append(
+			handlers,
+			filesystemMiddleware,
+			projectEinoAssistantFilesystemTelemetryMiddleware(req, runState),
+		)
 	}
 	handlers = append(handlers, &projectEinoAssistantSafeToolErrorMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},

@@ -1535,6 +1535,102 @@ func TestProjectEinoAssistantPhaseAllowsToolSearchOnlyWhileDiscoveryCanAdvanceWo
 	}
 }
 
+func TestProjectEinoAssistantPhaseFilesystemMetadataUsesCanonicalExactNames(t *testing.T) {
+	for _, name := range []string{
+		projectToolLS,
+		projectToolReadFile,
+		projectToolGlob,
+		projectToolGrep,
+		" " + projectToolReadFile + " ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(&schema.ToolInfo{Name: name})
+			if !ok || risk != projectAssistantToolRiskRead || bundle != projectAssistantToolBundleWorkspaceRead {
+				t.Fatalf("metadata for %q = (%q, %q, %t), want read/workspace_read/true", name, risk, bundle, ok)
+			}
+		})
+	}
+
+	for _, name := range []string{"provider__read_file", "edit_file", "execute", "metadata_free"} {
+		t.Run(name, func(t *testing.T) {
+			if risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(&schema.ToolInfo{Name: name}); ok {
+				t.Fatalf("metadata for %q = (%q, %q, true), want unclassified", name, risk, bundle)
+			}
+		})
+	}
+
+	explicit := &schema.ToolInfo{
+		Name: projectToolReadFile,
+		Extra: map[string]any{
+			"risk":   string(projectAssistantToolRiskWrite),
+			"bundle": string(projectAssistantToolBundleEdit),
+		},
+	}
+	risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(explicit)
+	if !ok || risk != projectAssistantToolRiskWrite || bundle != projectAssistantToolBundleEdit {
+		t.Fatalf("explicit metadata = (%q, %q, %t), want authoritative write/edit/true", risk, bundle, ok)
+	}
+}
+
+func TestProjectEinoAssistantPhaseCanonicalReadsSurviveMutationVerificationRepair(t *testing.T) {
+	tools := []*schema.ToolInfo{
+		{Name: projectToolLS},
+		{Name: projectToolReadFile},
+		{Name: projectToolGlob},
+		{Name: projectToolGrep},
+		{Name: "provider__read_file"},
+		{Name: "edit_file"},
+		{Name: "execute"},
+		{Name: "metadata_free"},
+	}
+	want := []string{projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep}
+	for _, phase := range []projectEinoAssistantPhase{
+		projectEinoAssistantPhaseMutate,
+		projectEinoAssistantPhaseVerify,
+		projectEinoAssistantPhaseRepair,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			got := projectEinoAssistantPhaseToolNames(projectEinoAssistantPhaseFilterTools(
+				phase,
+				&projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
+				false,
+				tools,
+			))
+			if !projectEinoAssistantPhaseStringSlicesEqual(got, want) {
+				t.Fatalf("%s filesystem tools = %#v, want %#v", phase, got, want)
+			}
+		})
+	}
+}
+
+func TestProjectEinoAssistantPhaseHiddenToolInvocationDoesNotReachEndpoint(t *testing.T) {
+	middleware := &projectEinoAssistantPhaseFilterMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		phase:                        projectEinoAssistantPhaseMutate,
+		approvedPlan:                 &projectAssistantApprovedPlan{Steps: []string{"inspect", "edit"}},
+		toolInfos:                    []*schema.ToolInfo{{Name: "provider__read_file"}},
+	}
+	calls := 0
+	wrapped, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			calls++
+			return "hidden content", nil
+		},
+		&adk.ToolContext{Name: "provider__read_file"},
+	)
+	if err != nil {
+		t.Fatalf("WrapInvokableToolCall returned error: %v", err)
+	}
+	result, err := wrapped(context.Background(), `{"file_path":"README.md"}`)
+	if err != nil {
+		t.Fatalf("wrapped invocation returned error: %v", err)
+	}
+	if calls != 0 || result != "Tool call denied: read_file is unavailable in the current assistant phase" {
+		t.Fatalf("hidden invocation result = %q calls = %d, want denied without endpoint call", result, calls)
+	}
+}
+
 func TestProjectEinoAssistantPhaseVisibleToolsKeepsOnlySelectedSearchableTools(t *testing.T) {
 	static := projectEinoAssistantPhaseToolInfo(projectToolReadProjectFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead)
 	selected := projectEinoAssistantPhaseSearchableToolInfo("provider__selected")
