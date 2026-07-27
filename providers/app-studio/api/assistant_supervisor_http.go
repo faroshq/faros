@@ -39,6 +39,24 @@ type projectAssistantRunStartResponse struct {
 
 type projectAssistantSupervisorRunContextKey struct{}
 
+const (
+	projectAssistantMetadataRunID                = "assistantRunID"
+	projectAssistantMetadataRevision             = "assistantRevision"
+	projectAssistantMetadataWorkingStatus        = "assistantStatus"
+	projectAssistantMetadataProvisional          = "assistantProvisional"
+	projectAssistantMetadataPreviewRefreshNeeded = "previewRefreshNeeded"
+)
+
+func projectAssistantDurableMetadata(run store.AssistantRun, status string, preview bool, toolCalls []projectToolCallStreamEvent) map[string]any {
+	metadata := projectAssistantMessageMetadata(status, sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))
+	metadata[projectAssistantMetadataRunID] = run.ID
+	metadata[projectAssistantMetadataRevision] = run.Revision
+	metadata[projectAssistantMetadataWorkingStatus] = status
+	metadata[projectAssistantMetadataProvisional] = !assistantRunTerminal(run.Status)
+	metadata[projectAssistantMetadataPreviewRefreshNeeded] = preview
+	return metadata
+}
+
 func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request) {
 	c, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
@@ -85,6 +103,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, Content: request.Content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, Content: "", CreatedAt: now, UpdatedAt: now}
 	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Status: store.AssistantRunStatusRunning, ClientRequestID: request.ClientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	assistant.Metadata = projectAssistantDurableMetadata(run, "Working", false, nil)
 	created, err := s.store.CreateAssistantRun(r.Context(), scope, user, assistant, run)
 	if err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
@@ -120,7 +139,9 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 				content.WriteString(chunk)
 				recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), false))
 			},
-			OnStatus: func(status string) { _ = status },
+			OnStatus: func(status string) {
+				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantDurableMetadata(created, status, false, toolCalls)))
+			},
 			OnToolCall: func(event projectToolCallStreamEvent) {
 				toolCalls = upsertProjectToolCallStreamEvent(toolCalls, event)
 				recordSnapshotErr(accumulator.SetMessageMetadata(ctx, projectAssistantMessageMetadata("", sanitizeProjectToolCallStreamEventsForMetadata(toolCalls))))

@@ -1800,14 +1800,18 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot) {
   if (current.messages !== messages.value) messages.value = current.messages.map(toProjectMessageView)
   Object.assign(assistantRunRevisions, current.runs)
   if (!canHydrateConversationRun(previousRun, normalized.run)) return
+  const acceptedTerminal = assistantRunTerminal(normalized.run.status) && (!previousRun || !assistantRunTerminal(previousRun.status) || normalized.run.revision > previousRun.revision)
   activeAssistantRun = normalized.run
   assistantRunController.markHealthySnapshot(normalized.run.revision)
   messageStreaming.value = !assistantRunTerminal(normalized.run.status)
-  if (assistantRunTerminal(normalized.run.status)) {
+  if (assistantRunTerminal(normalized.run.status) && acceptedTerminal) {
     conversationStatus.value = ''
     assistantRunController.disconnect()
     void loadCheckpoints()
-    void refreshDevelopmentPreviewFrame('Preview refreshed')
+    if (normalized.message.metadata?.previewRefreshNeeded === true) void refreshDevelopmentPreviewFrame('Preview refreshed')
+  } else if (!assistantRunTerminal(normalized.run.status)) {
+    const status = normalized.message.metadata?.assistantStatus
+    conversationStatus.value = typeof status === 'string' ? status : 'Working'
   }
 }
 

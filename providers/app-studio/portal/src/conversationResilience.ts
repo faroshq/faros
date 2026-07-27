@@ -108,14 +108,19 @@ export class ConversationRunController {
 
   async stop() {
     if (!this.runID) return
-    await this.transport.abort(this.runID)
-    this.disconnect()
+    try {
+      await this.transport.abort(this.runID)
+    } finally {
+      this.disconnect()
+    }
   }
 
   private async connect(generation: number) {
-    if (this.disconnected || !this.runID) return
+    if (this.disconnected || generation !== this.generation || !this.runID) return
+    const runID = this.runID
+    const revision = this.revision
     try {
-      await this.transport.connect(this.runID, this.revision)
+      await this.transport.connect(runID, revision)
       if (this.disconnected || generation !== this.generation) return
       this.scheduleReconnect(generation)
     } catch {
