@@ -49,6 +49,13 @@ export interface ProjectAssistantRunStart {
   assistant: ProjectMessage
 }
 
+export interface ProjectAssistantAbortResponse {
+  runID: string
+  requestID: string
+  status: ProjectAssistantRunStatus
+  decision?: 'allow' | 'deny'
+}
+
 export type ProjectAssistantActionStatus = 'requested' | 'running' | 'awaiting_approval' | 'awaiting_input' | 'succeeded' | 'failed' | 'rejected'
 
 export interface ProjectAssistantUIAction {

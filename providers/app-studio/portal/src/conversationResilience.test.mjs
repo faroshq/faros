@@ -28,6 +28,18 @@ test('replaceOptimisticUserMessage replaces a local user message without duplica
   assert.deepEqual(result.map((item) => item.id), ['prior', 'user-1'])
 })
 
+test('equal revision rehydrates active controls but an older active snapshot cannot revive a terminal run', () => {
+  const active = snapshot(4, 'waiting', 'pending_input')
+  const terminal = snapshot(5, 'done', 'completed')
+  assert.equal(state.canHydrateConversationRun(active.run, active.run), true)
+  assert.equal(state.canHydrateConversationRun(terminal.run, active.run), false)
+})
+
+test('normalizes supervisor snapshot projectName into the portal projectID contract', () => {
+  const normalized = state.normalizeSnapshotMessage({ id: 'a-1', projectName: 'project-a', role: 'assistant', content: 'hello', createdAt: '2026-01-01T00:00:00Z' })
+  assert.equal(normalized.projectID, 'project-a')
+})
+
 test('conversation run controller reconnects from the accepted revision with capped exponential backoff', async () => {
   const calls = []
   const scheduled = []
@@ -48,6 +60,26 @@ test('conversation run controller reconnects from the accepted revision with cap
   await Promise.resolve()
   assert.deepEqual(calls, [3, 3, 3, 3, 3])
   assert.deepEqual(delays, [1_000, 2_000, 4_000, 8_000, 10_000])
+  controller.disconnect()
+})
+
+test('a healthy snapshot resets reconnect backoff and stale callbacks are ignored after a new run starts', async () => {
+  const scheduled = []
+  const controller = new state.ConversationRunController({
+    connect: async () => { throw new Error('network') }, abort: async () => {},
+    setTimeout: (fn, delay) => { scheduled.push({ fn, delay }); return scheduled.length }, clearTimeout: () => {},
+  })
+  controller.start('run-1', 1)
+  await Promise.resolve()
+  controller.markHealthySnapshot(2)
+  scheduled.shift().fn()
+  await Promise.resolve()
+  assert.equal(scheduled.at(-1).delay, 1_000)
+  controller.start('run-2', 1)
+  const stale = scheduled.shift()
+  stale.fn()
+  await Promise.resolve()
+  assert.equal(scheduled.at(-1).delay, 1_000)
   controller.disconnect()
 })
 

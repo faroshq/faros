@@ -23,6 +23,18 @@ export function assistantRunTerminal(status: AssistantRun['status']): boolean {
   return status === 'completed' || status === 'aborted' || status === 'failed' || status === 'interrupted'
 }
 
+// Control hydration is deliberately separate from message merge: a reload may
+// receive the same durable revision after local UI state was discarded.
+export function canHydrateConversationRun(current: AssistantRun | undefined, incoming: AssistantRun): boolean {
+  if (!current) return true
+  if (incoming.revision < current.revision) return false
+  return !(assistantRunTerminal(current.status) && !assistantRunTerminal(incoming.status) && incoming.revision === current.revision)
+}
+
+export function normalizeSnapshotMessage(message: ProjectMessage & { projectName?: string }): ProjectMessage {
+  return { ...message, projectID: message.projectID || message.projectName || '' }
+}
+
 // Snapshot messages are authoritative and keyed by their durable IDs. Revisions
 // make reconnects and simultaneous browser tabs safe: stale snapshots are ignored.
 export function mergeConversationSnapshot<TMessage extends ProjectMessage>(
@@ -80,6 +92,10 @@ export class ConversationRunController {
   }
 
   setRevision(revision: number) { this.revision = Math.max(this.revision, revision) }
+  markHealthySnapshot(revision: number) {
+    this.setRevision(revision)
+    this.retry = 0
+  }
   setDisconnect(disconnect: () => void) { this.disconnectStream = disconnect }
 
   disconnect() {

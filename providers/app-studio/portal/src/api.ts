@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectHydrateResult,
   ProjectAssistantRunStart,
+  ProjectAssistantAbortResponse,
   ProjectAssistantSnapshot,
   ProjectAssistantUIComponent,
   ProjectAssistantUIEvent,
@@ -32,6 +33,13 @@ export class ProjectAPIInitializingError extends Error {
   constructor(message = 'App Studio is still initializing for this workspace. Try again shortly.') {
     super(message)
     this.name = 'ProjectAPIInitializingError'
+  }
+}
+
+export class ProjectAPIRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ProjectAPIRequestError'
   }
 }
 
@@ -90,7 +98,7 @@ async function request<T>(ctx: KedgeContext | null, method: string, path: string
     if (isProjectAPIInitializingResponse(res.status, reason, detail)) {
       throw new ProjectAPIInitializingError(detail)
     }
-    throw new Error(detail)
+    throw new ProjectAPIRequestError(detail, res.status)
   }
   return (text ? JSON.parse(text) : null) as T
 }
@@ -822,8 +830,8 @@ export const api = {
     )
   },
 
-  async abortAssistantRun(ctx: KedgeContext | null, name: string, runID: string): Promise<ProjectAssistantSnapshot> {
-    return request<ProjectAssistantSnapshot>(
+  async abortAssistantRun(ctx: KedgeContext | null, name: string, runID: string): Promise<ProjectAssistantAbortResponse> {
+    return request<ProjectAssistantAbortResponse>(
       ctx,
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/abort`,

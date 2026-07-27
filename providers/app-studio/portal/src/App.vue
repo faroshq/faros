@@ -28,7 +28,7 @@ import {
   Wrench,
   X,
 } from 'lucide-vue-next'
-import { api, isProjectAPIInitializingError } from './api'
+import { api, isProjectAPIInitializingError, ProjectAPIRequestError } from './api'
 import PkConfirmDialog from './portalkit/ConfirmDialog.vue'
 import { confirmDialog } from './portalkit/confirm'
 import {
@@ -41,7 +41,9 @@ import { parseAssistantTraceHeader, summarizeAssistantTrace } from './assistantP
 import {
   ConversationRunController,
   assistantRunTerminal,
+  canHydrateConversationRun,
   mergeConversationSnapshot,
+  normalizeSnapshotMessage,
   replaceOptimisticUserMessage,
   type AssistantRun,
 } from './conversationResilience'
@@ -389,6 +391,7 @@ let developmentPreviewAuthorizationRenewalTimer: number | undefined
 let activeMessageStreamController: AbortController | null = null
 let activeAssistantSubscription: AbortController | null = null
 let activeAssistantRun: AssistantRun | null = null
+let pendingMessageSubmission: { projectName: string; content: string; clientRequestID: string } | null = null
 const assistantRunRevisions: Record<string, AssistantRun> = {}
 const assistantRunController = new ConversationRunController({
   connect: async (runID, afterRevision) => {
@@ -397,13 +400,16 @@ const assistantRunController = new ConversationRunController({
     const controller = new AbortController()
     activeAssistantSubscription = controller
     assistantRunController.setDisconnect(() => controller.abort())
-    await api.streamAssistantRun(props.ctx, projectName, runID, afterRevision, applyAssistantSnapshot, controller.signal)
+    await api.streamAssistantRun(props.ctx, projectName, runID, afterRevision, (snapshot) => {
+      if (selected.value?.name !== projectName || snapshot.run.id !== runID) return
+      applyAssistantSnapshot(snapshot)
+    }, controller.signal)
   },
   abort: async (runID) => {
     const projectName = selected.value?.name
     if (!projectName) return
-    const response = await api.abortAssistantRun(props.ctx, projectName, runID)
-    applyAssistantSnapshot(response)
+    await api.abortAssistantRun(props.ctx, projectName, runID)
+    await recoverAssistantConversation(projectName)
   },
   setTimeout: (fn, delay) => window.setTimeout(fn, delay),
   clearTimeout: (timer) => window.clearTimeout(timer),
@@ -960,12 +966,20 @@ async function load() {
     projectsLoaded.value = true
     initializing.value = false
     if (isCreateRoute.value) {
+      assistantRunController.disconnect()
+      activeAssistantSubscription?.abort()
+      activeAssistantRun = null
+      messageStreaming.value = false
       selected.value = null
       messages.value = []
       resetWorkbench()
       return
     }
     if (projects.value.length === 0) {
+      assistantRunController.disconnect()
+      activeAssistantSubscription?.abort()
+      activeAssistantRun = null
+      messageStreaming.value = false
       selected.value = null
       messages.value = []
       resetWorkbench()
@@ -976,6 +990,10 @@ async function load() {
     if (pathName) {
       await openProject(pathName, false)
     } else {
+      assistantRunController.disconnect()
+      activeAssistantSubscription?.abort()
+      activeAssistantRun = null
+      messageStreaming.value = false
       selected.value = null
       messages.value = []
       resetWorkbench()
@@ -1773,19 +1791,23 @@ async function refreshSelectedProjectConversation(projectName: string) {
 }
 
 function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot) {
+  const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
+  const previousRun = assistantRunRevisions[normalized.run.id]
   const current = mergeConversationSnapshot(
     { messages: messages.value, runs: assistantRunRevisions },
-    snapshot,
+    normalized,
   )
-  if (current.messages === messages.value) return
-  messages.value = current.messages.map(toProjectMessageView)
+  if (current.messages !== messages.value) messages.value = current.messages.map(toProjectMessageView)
   Object.assign(assistantRunRevisions, current.runs)
-  activeAssistantRun = snapshot.run
-  assistantRunController.setRevision(snapshot.run.revision)
-  messageStreaming.value = !assistantRunTerminal(snapshot.run.status)
-  if (assistantRunTerminal(snapshot.run.status)) {
+  if (!canHydrateConversationRun(previousRun, normalized.run)) return
+  activeAssistantRun = normalized.run
+  assistantRunController.markHealthySnapshot(normalized.run.revision)
+  messageStreaming.value = !assistantRunTerminal(normalized.run.status)
+  if (assistantRunTerminal(normalized.run.status)) {
     conversationStatus.value = ''
     assistantRunController.disconnect()
+    void loadCheckpoints()
+    void refreshDevelopmentPreviewFrame('Preview refreshed')
   }
 }
 
@@ -2183,7 +2205,10 @@ async function sendMessage() {
   busy.value = true
   messageStreaming.value = true
   error.value = null
-  const clientRequestID = crypto.randomUUID()
+  const clientRequestID = pendingMessageSubmission?.projectName === projectName && pendingMessageSubmission.content === content
+    ? pendingMessageSubmission.clientRequestID
+    : crypto.randomUUID()
+  pendingMessageSubmission = { projectName, content, clientRequestID }
   const optimisticID = `optimistic-${clientRequestID}`
   const optimisticUserMessage: ProjectMessage = {
     id: optimisticID,
@@ -2198,8 +2223,13 @@ async function sendMessage() {
     messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
     applyAssistantSnapshot({ run: started.run, message: started.assistant })
     if (!assistantRunTerminal(started.run.status)) assistantRunController.start(started.run.id, started.run.revision)
+    pendingMessageSubmission = null
   } catch (e) {
     messages.value = messages.value.filter((message) => message.id !== optimisticID)
+    if (e instanceof ProjectAPIRequestError && e.status === 409) {
+      await recoverAssistantConversation(projectName)
+      return
+    }
     error.value = e instanceof Error ? e.message : String(e)
     prompt.value = content
   } finally {
