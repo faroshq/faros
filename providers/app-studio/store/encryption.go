@@ -243,6 +243,162 @@ func (s *encryptedStore) CreateAssistantRun(ctx context.Context, scope Scope, us
 	return created, nil
 }
 
+func (s *encryptedStore) CreateWorkItemAndAssistantRun(ctx context.Context, scope Scope, item AssistantWorkItem, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
+	// A Start action may claim the just-submitted, unassigned root message.
+	// Preserve its existing ciphertext so the inner store can compare its exact
+	// immutable content while this wrapper verifies the plaintext identity.
+	if persisted, found, err := s.findRawMessage(ctx, scope, user.ID); err != nil {
+		return AssistantWorkItem{}, err
+	} else if found {
+		plaintext := persisted
+		if err := s.decryptMessage(scope, &plaintext); err != nil {
+			return AssistantWorkItem{}, err
+		}
+		if persisted.WorkItemID != "" || plaintext.Role != user.Role || plaintext.ActorID != user.ActorID || plaintext.Content != user.Content {
+			return AssistantWorkItem{}, fmt.Errorf("%w: root message %q cannot be attached", ErrAssistantWorkItemConflict, user.ID)
+		}
+		user = persisted
+	} else {
+		var err error
+		user, err = s.encryptMessage(scope, user)
+		if err != nil {
+			return AssistantWorkItem{}, err
+		}
+	}
+	assistant, err := s.encryptMessage(scope, assistant)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	item.PlanGrant, err = s.encryptAssistantWorkItemGrant(scope, item, item.PlanGrant)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	run.Checkpoint, err = s.encryptAssistantRunBlob(scope, run, "checkpoint", run.Checkpoint)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	run.Audit, err = s.encryptAssistantRunBlob(scope, run, "audit", run.Audit)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	created, err := s.inner.CreateWorkItemAndAssistantRun(ctx, scope, item, user, assistant, run)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItemGrant(scope, &created); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return created, nil
+}
+
+func (s *encryptedStore) findRawMessage(ctx context.Context, scope Scope, id string) (Message, bool, error) {
+	cursor := ""
+	for {
+		page, err := s.inner.ListMessages(ctx, scope, 500, cursor)
+		if err != nil {
+			return Message{}, false, err
+		}
+		for _, message := range page.Items {
+			if message.ID == id {
+				return message, true, nil
+			}
+		}
+		if page.NextCursor == "" {
+			return Message{}, false, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func (s *encryptedStore) GetAssistantWorkItem(ctx context.Context, scope Scope, id string) (AssistantWorkItem, error) {
+	item, err := s.inner.GetAssistantWorkItem(ctx, scope, id)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return item, nil
+}
+
+func (s *encryptedStore) ListAssistantWorkItems(ctx context.Context, scope Scope) ([]AssistantWorkItem, error) {
+	items, err := s.inner.ListAssistantWorkItems(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if err := s.decryptAssistantWorkItemGrant(scope, &items[i]); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func (s *encryptedStore) CompareAndSwapAssistantWorkItem(ctx context.Context, scope Scope, item AssistantWorkItem, expectedRevision int64) error {
+	grant, err := s.encryptAssistantWorkItemGrant(scope, item, item.PlanGrant)
+	if err != nil {
+		return err
+	}
+	item.PlanGrant = grant
+	return s.inner.CompareAndSwapAssistantWorkItem(ctx, scope, item, expectedRevision)
+}
+
+func (s *encryptedStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error) {
+	item := AssistantWorkItem{ID: workItemID}
+	grant, err := s.encryptAssistantWorkItemGrant(scope, item, planGrant)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	approved, err := s.inner.ApproveWorkItemPlan(ctx, scope, workItemID, runID, expectedRevision, grantRevision, grant, now)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItemGrant(scope, &approved); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return approved, nil
+}
+
+func (s *encryptedStore) TransitionWorkItemAndRun(ctx context.Context, scope Scope, workItemID string, expectedWorkItemRevision int64, run AssistantRun, status AssistantWorkItemStatus, reason string, now time.Time) error {
+	// Terminal transitions deliberately delete the resumable checkpoint. Do not
+	// encrypt an old plaintext blob only for the inner store to retain it.
+	run.Checkpoint = nil
+	checkpoint, err := s.encryptAssistantRunBlob(scope, run, "checkpoint", run.Checkpoint)
+	if err != nil {
+		return err
+	}
+	audit, err := s.encryptAssistantRunBlob(scope, run, "audit", run.Audit)
+	if err != nil {
+		return err
+	}
+	run.Checkpoint, run.Audit = checkpoint, audit
+	return s.inner.TransitionWorkItemAndRun(ctx, scope, workItemID, expectedWorkItemRevision, run, status, reason, now)
+}
+
+func (s *encryptedStore) LoadMessagesForWorkItem(ctx context.Context, scope Scope, workItemID string, limit int) ([]Message, error) {
+	items, err := s.inner.LoadMessagesForWorkItem(ctx, scope, workItemID, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if err := s.decryptMessage(scope, &items[i]); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func (s *encryptedStore) LatestAssistantRunForWorkItem(ctx context.Context, scope Scope, workItemID string) (AssistantRun, error) {
+	run, err := s.inner.LatestAssistantRunForWorkItem(ctx, scope, workItemID)
+	if err != nil {
+		return AssistantRun{}, err
+	}
+	if err := s.decryptAssistantRunBlobs(scope, &run); err != nil {
+		return AssistantRun{}, err
+	}
+	return run, nil
+}
+
 func (s *encryptedStore) SaveAssistantRunSnapshot(ctx context.Context, scope Scope, run AssistantRun, messages []Message, expectedRevision int64) error {
 	if err := scope.validate(); err != nil {
 		return err
@@ -374,6 +530,7 @@ func messageAAD(scope Scope, msg Message) []byte {
 		scope.OrgUUID,
 		scope.WorkspaceUUID,
 		scope.ProjectName,
+		scope.ProjectUID,
 		msg.ID,
 		msg.Role,
 	}, "\x00"))
@@ -453,9 +610,58 @@ func assistantRunAAD(scope Scope, run AssistantRun, label string) []byte {
 		scope.OrgUUID,
 		scope.WorkspaceUUID,
 		scope.ProjectName,
+		scope.ProjectUID,
 		run.ID,
 		label,
 	}, "\x00"))
+}
+
+func (s *encryptedStore) encryptAssistantWorkItemGrant(scope Scope, item AssistantWorkItem, plaintext []byte) ([]byte, error) {
+	if len(plaintext) == 0 {
+		return nil, nil
+	}
+	var existing encryptedAssistantRunCheckpoint
+	if json.Unmarshal(plaintext, &existing) == nil && existing.Encrypted && existing.KeyID != "" && existing.Payload != "" {
+		return cloneRawMessage(plaintext), nil
+	}
+	aead := s.keys[s.active]
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(cryptoRand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate work item grant nonce: %w", err)
+	}
+	payload := append(nonce, aead.Seal(nil, nonce, plaintext, assistantWorkItemAAD(scope, item))...)
+	return json.Marshal(encryptedAssistantRunCheckpoint{Encrypted: true, KeyID: s.active, Payload: base64.RawStdEncoding.EncodeToString(payload)})
+}
+
+func (s *encryptedStore) decryptAssistantWorkItemGrant(scope Scope, item *AssistantWorkItem) error {
+	if item == nil || len(item.PlanGrant) == 0 {
+		return nil
+	}
+	var envelope encryptedAssistantRunCheckpoint
+	if err := json.Unmarshal(item.PlanGrant, &envelope); err != nil || !envelope.Encrypted {
+		return nil
+	}
+	aead := s.keys[envelope.KeyID]
+	if aead == nil {
+		return fmt.Errorf("work item %q uses unknown encryption key %q", item.ID, envelope.KeyID)
+	}
+	payload, err := base64.RawStdEncoding.DecodeString(envelope.Payload)
+	if err != nil {
+		return fmt.Errorf("decode encrypted work item grant %q: %w", item.ID, err)
+	}
+	if len(payload) < aead.NonceSize() {
+		return fmt.Errorf("encrypted work item grant %q is too short", item.ID)
+	}
+	plaintext, err := aead.Open(nil, payload[:aead.NonceSize()], payload[aead.NonceSize():], assistantWorkItemAAD(scope, *item))
+	if err != nil {
+		return fmt.Errorf("decrypt work item grant %q: %w", item.ID, err)
+	}
+	item.PlanGrant = plaintext
+	return nil
+}
+
+func assistantWorkItemAAD(scope Scope, item AssistantWorkItem) []byte {
+	return []byte(strings.Join([]string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, "plan_grant"}, "\x00"))
 }
 
 var _ Store = (*encryptedStore)(nil)

@@ -377,7 +377,7 @@ func TestMemoryStoreFindsLatestRunAndClientRequest(t *testing.T) {
 	}
 }
 
-func TestMemoryAndEncryptedStoresExcludeInternalAssistantRunFromConversationSemantics(t *testing.T) {
+func TestMemoryAndEncryptedStoresDoNotReserveAssistantRunIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		new  func(*testing.T) Store
@@ -396,7 +396,7 @@ func TestMemoryAndEncryptedStoresExcludeInternalAssistantRunFromConversationSema
 			store := mustDurableAssistantRunStore(t, tt.new(t))
 			scope := testAssistantRunScope()
 			createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
-			run := createTestAssistantRun(t, store, scope, createdAt)
+			active := createTestAssistantRun(t, store, scope, createdAt)
 
 			grant := AssistantRun{
 				ID:              AssistantRunIDApprovedPlanGrant,
@@ -408,32 +408,29 @@ func TestMemoryAndEncryptedStoresExcludeInternalAssistantRunFromConversationSema
 				UpdatedAt:       createdAt.Add(time.Minute),
 			}
 			if err := store.CompareAndSwapAssistantRun(ctx, scope, grant, ""); err != nil {
-				t.Fatalf("persist internal grant: %v", err)
+				t.Fatalf("persist ordinary run: %v", err)
 			}
 
 			latest, err := store.LatestAssistantRun(ctx, scope)
 			if err != nil {
 				t.Fatalf("LatestAssistantRun: %v", err)
 			}
-			if latest.ID != run.ID {
-				t.Fatalf("latest run = %q, want conversation run %q", latest.ID, run.ID)
+			if latest.ID != grant.ID {
+				t.Fatalf("latest run = %q, want ordinary run %q", latest.ID, grant.ID)
 			}
-			if _, err := store.FindAssistantRunByClientRequestID(ctx, scope, grant.ClientRequestID); !errors.Is(err, ErrAssistantRunNotFound) {
-				t.Fatalf("internal grant client request lookup error = %v, want not found", err)
+			if found, err := store.FindAssistantRunByClientRequestID(ctx, scope, grant.ClientRequestID); err != nil || found.ID != grant.ID {
+				t.Fatalf("ordinary run lookup = %#v, %v", found, err)
 			}
 
-			deleted, err := store.DeleteMessagesOlderThan(ctx, createdAt.Add(30*time.Second))
+			deleted, err := store.DeleteMessagesOlderThan(ctx, createdAt.Add(2*time.Minute))
 			if err != nil {
 				t.Fatalf("DeleteMessagesOlderThan: %v", err)
 			}
-			if deleted != 3 { // user, assistant, and the real conversation run
-				t.Fatalf("deleted = %d, want 3 conversation records", deleted)
+			if deleted != 3 { // user, assistant, and the old terminal ordinary run
+				t.Fatalf("deleted = %d, want 3 records", deleted)
 			}
-			if _, err := store.GetAssistantRun(ctx, scope, grant.ID); err != nil {
-				t.Fatalf("GetAssistantRun internal grant after retention: %v", err)
-			}
-			if _, err := store.LatestAssistantRun(ctx, scope); !errors.Is(err, ErrAssistantRunNotFound) {
-				t.Fatalf("LatestAssistantRun after retaining only internal grant error = %v, want not found", err)
+			if latest, err := store.LatestAssistantRun(ctx, scope); err != nil || latest.ID != active.ID {
+				t.Fatalf("LatestAssistantRun after retention = %#v, %v; want active run %q", latest, err, active.ID)
 			}
 		})
 	}
@@ -717,7 +714,7 @@ func assistantRunRevision(t *testing.T, run AssistantRun) int64 {
 }
 
 func testAssistantRunScope() Scope {
-	return Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo"}
+	return Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
 }
 
 func testEncryptionKeys(t *testing.T) []EncryptionKey {
