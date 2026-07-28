@@ -10,6 +10,12 @@ export interface AssistantPlan {
   steps: AssistantPlanStep[]
 }
 
+export interface AssistantPlanMessage {
+  id: string
+  role: string
+  plan?: AssistantPlan
+}
+
 export interface AssistantPlanProgress {
   completed: number
   total: number
@@ -89,4 +95,15 @@ export function assistantPlanStepStatusLabel(status: AssistantPlanStepStatus): s
     default:
       return 'Pending'
   }
+}
+
+export function activeAssistantPlanMessage<T extends AssistantPlanMessage>(
+  messages: T[],
+  activeMessageID: string | undefined,
+  streaming: boolean,
+): (T & { plan: AssistantPlan }) | undefined {
+  if (!streaming || !activeMessageID) return undefined
+  const message = messages.find((item) => item.id === activeMessageID && item.role === 'assistant')
+  if (!message?.plan) return undefined
+  return { ...message, plan: message.plan }
 }

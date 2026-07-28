@@ -12,7 +12,13 @@ const { outputText } = ts.transpileModule(source, {
   },
 })
 const moduleURL = `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
-const { assistantPlanProgress, assistantPlanStepStatusLabel, assistantPlanSummary, parseAssistantPlan } = await import(moduleURL)
+const {
+  activeAssistantPlanMessage,
+  assistantPlanProgress,
+  assistantPlanStepStatusLabel,
+  assistantPlanSummary,
+  parseAssistantPlan,
+} = await import(moduleURL)
 
 test('parses an ordered three-step assistant plan', () => {
   assert.deepEqual(
@@ -128,4 +134,29 @@ test('labels every plan step status for nonvisual presentation', () => {
   assert.equal(assistantPlanStepStatusLabel('completed'), 'Completed')
   assert.equal(assistantPlanStepStatusLabel('in_progress'), 'In progress')
   assert.equal(assistantPlanStepStatusLabel('pending'), 'Pending')
+})
+
+test('selects only the streaming active assistant message plan', () => {
+  const oldPlan = {
+    steps: [{ content: 'Inspect the quote form', status: 'completed' }],
+  }
+  const activePlan = {
+    steps: [{ content: 'Update the quote form', status: 'in_progress' }],
+  }
+  const messages = [
+    { id: 'assistant-old', role: 'assistant', plan: oldPlan },
+    { id: 'assistant-active', role: 'assistant', plan: activePlan },
+  ]
+
+  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', true)?.id, 'assistant-active')
+  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', false), undefined)
+  assert.equal(activeAssistantPlanMessage(messages, 'missing', true), undefined)
+  assert.equal(
+    activeAssistantPlanMessage(
+      [{ id: 'assistant-active', role: 'assistant' }],
+      'assistant-active',
+      true,
+    ),
+    undefined,
+  )
 })
