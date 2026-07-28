@@ -148,15 +148,30 @@ test('selects only the streaming active assistant message plan', () => {
     { id: 'assistant-active', role: 'assistant', plan: activePlan },
   ]
 
-  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', true)?.id, 'assistant-active')
-  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', false), undefined)
-  assert.equal(activeAssistantPlanMessage(messages, 'missing', true), undefined)
+  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', true, false)?.id, 'assistant-active')
+  assert.equal(activeAssistantPlanMessage(messages, 'assistant-active', false, false), undefined)
+  assert.equal(activeAssistantPlanMessage(messages, 'missing', true, false), undefined)
   assert.equal(
     activeAssistantPlanMessage(
       [{ id: 'assistant-active', role: 'assistant' }],
       'assistant-active',
       true,
+      false,
     ),
+    undefined,
+  )
+})
+
+test('does not select the prior terminal run plan while a new run start is pending', () => {
+  const previousPlan = {
+    steps: [{ content: 'Verify the previous change', status: 'completed' }],
+  }
+  const messages = [
+    { id: 'assistant-previous', role: 'assistant', plan: previousPlan },
+  ]
+
+  assert.equal(
+    activeAssistantPlanMessage(messages, 'assistant-previous', true, true),
     undefined,
   )
 })

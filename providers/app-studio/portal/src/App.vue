@@ -475,6 +475,7 @@ const activePlanMessage = computed(() =>
     messages.value,
     activeAssistantRun?.activeMessageID,
     messageStreaming.value,
+    Boolean(activeAssistantRun && assistantRunTerminal(activeAssistantRun.status)),
   ),
 )
 const conversationWorkingLabel = computed(() => {

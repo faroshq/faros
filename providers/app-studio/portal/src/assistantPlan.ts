@@ -101,8 +101,9 @@ export function activeAssistantPlanMessage<T extends AssistantPlanMessage>(
   messages: T[],
   activeMessageID: string | undefined,
   streaming: boolean,
+  activeRunTerminal: boolean,
 ): (T & { plan: AssistantPlan }) | undefined {
-  if (!streaming || !activeMessageID) return undefined
+  if (!streaming || activeRunTerminal || !activeMessageID) return undefined
   const message = messages.find((item) => item.id === activeMessageID && item.role === 'assistant')
   if (!message?.plan) return undefined
   return { ...message, plan: message.plan }
