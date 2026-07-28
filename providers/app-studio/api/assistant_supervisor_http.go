@@ -345,8 +345,8 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		// Resumed segments begin with durable actions from the previous segment.
 		// Keep that history and only upsert new action updates.
 		actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
-		for _, action := range projectAssistantActionFeedFromMetadata(metadata[projectMessageMetadataAssistantActionFeed]) {
-			actions = upsertProjectAssistantActionFeedItem(actions, action)
+		for _, action := range projectAssistantActionFeedUpdatesFromToolCalls(state.toolCalls) {
+			actions = applyProjectAssistantActionFeedUpdate(actions, action)
 		}
 		if len(actions) > 0 {
 			metadata[projectMessageMetadataAssistantActionFeed] = actions

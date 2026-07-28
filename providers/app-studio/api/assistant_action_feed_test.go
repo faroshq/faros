@@ -48,16 +48,37 @@ func TestProjectAssistantActionFeedSuppressesTodosAndFailsClosed(t *testing.T) {
 	feed := projectAssistantActionFeedFromToolCalls([]projectToolCallStreamEvent{
 		{ID: "todo-1", Name: projectEinoAssistantWriteTodosTool, Status: "succeeded", Arguments: `{"todos":[{"content":"secret"}]}`},
 		{ID: "unknown-1", Name: "provider__internal_tool", Status: "succeeded", Arguments: `{"token":"secret"}`, Summary: "secret result"},
+		{ID: "unknown-2", Name: "provider__failing_tool", Status: "failed", Error: "secret provider failure"},
 	})
-	if len(feed) != 1 || feed[0].Title != "Completed action" || feed[0].Target != "" || feed[0].Outcome != "" {
-		t.Fatalf("feed = %#v, want only one opaque unknown action", feed)
+	if len(feed) != 1 || feed[0].Status != projectAssistantActionFeedStatusFailed ||
+		feed[0].Title != "Action failed" || feed[0].Diagnostic == nil {
+		t.Fatalf("feed = %#v, want only the failed unknown action", feed)
 	}
 	data, err := json.Marshal(feed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "secret") || strings.Contains(string(data), "internal_tool") || strings.Contains(string(data), "write_todos") {
+	if strings.Contains(string(data), "secret") || strings.Contains(string(data), "internal_tool") ||
+		strings.Contains(string(data), "failing_tool") || strings.Contains(string(data), "write_todos") {
 		t.Fatalf("feed JSON leaked internal data: %s", data)
+	}
+}
+
+func TestApplyProjectAssistantActionFeedUpdateRemovesInvisibleTerminalAction(t *testing.T) {
+	actions := []projectAssistantActionFeedItem{{
+		ID:     "unknown-1",
+		Kind:   projectAssistantActionFeedItemOther,
+		Status: projectAssistantActionFeedStatusWaiting,
+		Title:  "Waiting for action",
+	}}
+	actions = applyProjectAssistantActionFeedUpdate(actions, projectAssistantActionFeedItem{
+		ID:     "unknown-1",
+		Kind:   projectAssistantActionFeedItemOther,
+		Status: projectAssistantActionFeedStatusSucceeded,
+		Title:  "Completed action",
+	})
+	if len(actions) != 0 {
+		t.Fatalf("actions = %#v, want terminal unknown action removed", actions)
 	}
 }
 

@@ -1896,6 +1896,53 @@ func TestResumeProjectAssistantRunApprovesPendingTool(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectAssistantPermissionMessageRemovesCompletedUnknownAction(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	scope := projectMessageScope("org-a", "ws-1", "demo")
+	messageID := "msg-assistant"
+	runID := "run-1"
+	requestID := "request-1"
+	toolCallID := "unknown-1"
+	if err := appendProjectAssistantMessage(context.Background(), messages, scope, messageID, "", map[string]any{
+		projectMessageMetadataStatus: projectMessageStatusPendingPermission,
+		projectMessageMetadataAssistantActionFeed: []projectAssistantActionFeedItem{{
+			ID:       projectAssistantActionPublicID(toolCallID),
+			Kind:     projectAssistantActionFeedItemOther,
+			Status:   projectAssistantActionFeedStatusWaiting,
+			Title:    "Waiting for action",
+			Severity: projectAssistantActionFeedSeverityAttention,
+		}},
+		projectMessageMetadataAssistantInterrupt: projectAssistantUIInterruptRequest{
+			Action: &projectAssistantUIInterruptAction{RunID: runID, RequestID: requestID},
+		},
+	}); err != nil {
+		t.Fatalf("appendProjectAssistantMessage returned error: %v", err)
+	}
+
+	toolCall := projectToolCallStreamEvent{
+		ID:     toolCallID,
+		Name:   "provider__internal_tool",
+		Status: "succeeded",
+	}
+	if err := server.updateProjectAssistantPermissionMessage(context.Background(), scope, messageID, projectAssistantResumeResponse{
+		RunID:     runID,
+		RequestID: requestID,
+		Status:    store.AssistantRunStatusCompleted,
+		ToolCall:  &toolCall,
+	}); err != nil {
+		t.Fatalf("updateProjectAssistantPermissionMessage returned error: %v", err)
+	}
+
+	updated, err := server.findProjectMessage(context.Background(), scope, messageID)
+	if err != nil {
+		t.Fatalf("findProjectMessage returned error: %v", err)
+	}
+	if _, ok := updated.Metadata[projectMessageMetadataAssistantActionFeed]; ok {
+		t.Fatalf("assistant metadata = %#v, want completed unknown action removed", updated.Metadata)
+	}
+}
+
 func TestResumeProjectAssistantRunRepairsPrePatchCheckpointMessageIdentity(t *testing.T) {
 	for _, tt := range []struct {
 		name string

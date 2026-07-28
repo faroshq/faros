@@ -80,7 +80,11 @@ export function parseAssistantActionFeed(value: unknown): ProjectAssistantAction
   if (!Array.isArray(value) || value.length > 1_000) return []
   return value.flatMap((item) => {
     const parsed = parseFeedItem(item)
-    return parsed && parsed.kind !== 'plan' ? [parsed] : []
+    const visibleOther = parsed?.kind !== 'other'
+      || parsed.status === 'waiting'
+      || parsed.status === 'failed'
+      || parsed.status === 'rejected'
+    return parsed && parsed.kind !== 'plan' && visibleOther ? [parsed] : []
   })
 }
 
@@ -96,6 +100,23 @@ function canGroup(item: ProjectAssistantActionFeedItem): boolean {
 export function groupAssistantActions(items: ProjectAssistantActionFeedItem[]): AssistantActionLogItem[] {
   const grouped: AssistantActionLogItem[] = []
   for (const item of items) {
+    const targetGroup = canGroup(item)
+      && (item.groupKey === 'inspect:files' || item.groupKey === 'edit:files')
+      && Boolean(item.target)
+    if (targetGroup) {
+      const previous = grouped[grouped.length - 1]
+      if (previous && canGroup(previous) && previous.groupKey === item.groupKey && previous.target === item.target) {
+        previous.count = (previous.count ?? 1) + (item.count ?? 1)
+        previous.sourceIDs.push(item.id)
+        const repetitions = previous.sourceIDs.length
+        previous.outcome = item.groupKey === 'inspect:files'
+          ? `${repetitions} reads`
+          : `${repetitions} updates`
+        continue
+      }
+      grouped.push({ ...item, count: item.count ?? 1, sourceIDs: [item.id] })
+      continue
+    }
     const previous = grouped[grouped.length - 1]
     if (previous && canGroup(previous) && canGroup(item) && previous.groupKey === item.groupKey) {
       previous.count = (previous.count ?? 1) + (item.count ?? 1)
@@ -111,7 +132,7 @@ export function groupAssistantActions(items: ProjectAssistantActionFeedItem[]): 
 }
 
 export function assistantActionCount(items: AssistantActionLogItem[]): number {
-  return items.reduce((total, item) => total + item.sourceIDs.length, 0)
+  return items.length
 }
 
 export function summarizeAssistantActions(items: AssistantActionLogItem[]): string {

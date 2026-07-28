@@ -1195,13 +1195,13 @@ func (s *Server) updateProjectAssistantPermissionMessage(
 		return nil
 	}
 	if response.ToolCall != nil {
-		actions = upsertProjectAssistantActionFeedItem(actions, projectAssistantActionFeedItemFromToolCall(*response.ToolCall))
+		actions = applyProjectAssistantActionFeedUpdate(actions, projectAssistantActionFeedItemFromToolCall(*response.ToolCall))
 	}
 	if response.Permission != nil {
-		actions = upsertProjectAssistantActionFeedItem(actions, projectAssistantActionFeedItemFromPermission(*response.Permission))
+		actions = applyProjectAssistantActionFeedUpdate(actions, projectAssistantActionFeedItemFromPermission(*response.Permission))
 	}
 	if response.FollowUp != nil {
-		actions = upsertProjectAssistantActionFeedItem(actions, projectAssistantActionFeedItemFromFollowUp(*response.FollowUp))
+		actions = applyProjectAssistantActionFeedUpdate(actions, projectAssistantActionFeedItemFromFollowUp(*response.FollowUp))
 	}
 	if response.Checkpoint != nil && response.Permission != nil {
 		interrupt = projectAssistantUIInterruptRequestFromPermissionCheckpoint("", *response.Permission, *response.Checkpoint)
@@ -1301,6 +1301,10 @@ func projectAssistantMessageMetadata(status string, toolCalls []projectToolCallS
 }
 
 func projectAssistantActionFeedFromToolCalls(events []projectToolCallStreamEvent) []projectAssistantActionFeedItem {
+	return filterProjectAssistantActionFeedItems(projectAssistantActionFeedUpdatesFromToolCalls(events))
+}
+
+func projectAssistantActionFeedUpdatesFromToolCalls(events []projectToolCallStreamEvent) []projectAssistantActionFeedItem {
 	if len(events) == 0 {
 		return nil
 	}
@@ -1336,7 +1340,7 @@ func projectAssistantActionFeedFromMetadata(raw any) []projectAssistantActionFee
 		return nil
 	}
 	if typed, ok := raw.([]projectAssistantActionFeedItem); ok {
-		return append([]projectAssistantActionFeedItem(nil), typed...)
+		return filterProjectAssistantActionFeedItems(typed)
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -1346,7 +1350,26 @@ func projectAssistantActionFeedFromMetadata(raw any) []projectAssistantActionFee
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil
 	}
-	return out
+	return filterProjectAssistantActionFeedItems(out)
+}
+
+func filterProjectAssistantActionFeedItems(items []projectAssistantActionFeedItem) []projectAssistantActionFeedItem {
+	filtered := make([]projectAssistantActionFeedItem, 0, len(items))
+	for _, item := range items {
+		if projectAssistantActionFeedItemVisible(item) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func projectAssistantActionFeedItemVisible(item projectAssistantActionFeedItem) bool {
+	if item.Kind != projectAssistantActionFeedItemOther {
+		return true
+	}
+	return item.Status == projectAssistantActionFeedStatusWaiting ||
+		item.Status == projectAssistantActionFeedStatusFailed ||
+		item.Status == projectAssistantActionFeedStatusRejected
 }
 
 func projectAssistantUIInterruptFromMetadata(raw any) *projectAssistantUIInterruptRequest {
@@ -1388,6 +1411,19 @@ func upsertProjectAssistantActionFeedItem(actions []projectAssistantActionFeedIt
 		}
 	}
 	return append(actions, action)
+}
+
+func applyProjectAssistantActionFeedUpdate(actions []projectAssistantActionFeedItem, action projectAssistantActionFeedItem) []projectAssistantActionFeedItem {
+	if projectAssistantActionFeedItemVisible(action) {
+		return upsertProjectAssistantActionFeedItem(actions, action)
+	}
+	filtered := actions[:0]
+	for _, existing := range actions {
+		if existing.ID != action.ID {
+			filtered = append(filtered, existing)
+		}
+	}
+	return filtered
 }
 
 func mergeProjectAssistantActionFeedItem(existing, next projectAssistantActionFeedItem) projectAssistantActionFeedItem {
