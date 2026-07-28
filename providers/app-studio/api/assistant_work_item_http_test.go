@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/faroshq/provider-app-studio/store"
 )
@@ -51,6 +52,93 @@ func TestDurableAskIsActorBoundDiscussionWithoutWorkItem(t *testing.T) {
 	}
 }
 
+func TestAskContextExcludesEarlierWorkItemTodos(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := testProjectMessageScope("org-a", "workspace-a", "demo")
+
+	quote, err := server.startProjectAssistantBuildRunDurably(
+		context.Background(), scope, "alice", "Add quote submission", "build-quote",
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeWorkItemRunForTest(t, messages, scope, quote.Run)
+	theme, err := server.startProjectAssistantBuildRunDurably(
+		context.Background(), scope, "alice", "Switch the application theme", "build-theme",
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeWorkItemRunForTest(t, messages, scope, theme.Run)
+	ask, err := server.startProjectAssistantRunDurably(
+		context.Background(), scope, "alice", "What theme is active?", "ask-theme",
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	history, err := server.loadProjectAssistantTurnMessages(context.Background(), scope, ask.Run, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].ID != ask.User.ID || history[0].Content != "What theme is active?" {
+		t.Fatalf("Ask history = %#v, want only current question", history)
+	}
+}
+
+func completeWorkItemRunForTest(t *testing.T, messages store.Store, scope store.Scope, run store.AssistantRun) {
+	t.Helper()
+	item, err := messages.GetAssistantWorkItem(context.Background(), scope, run.WorkItemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = store.AssistantRunStatusCompleted
+	run.Revision++
+	if err := messages.TransitionWorkItemAndRun(
+		context.Background(), scope, item.ID, item.Revision, run,
+		store.AssistantWorkItemStatusCompleted, "completed", time.Now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDurableContinueResumesSelectedActorWorkItem(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := testProjectMessageScope("org-a", "workspace-a", "demo")
+	built, err := server.startProjectAssistantBuildRunDurably(context.Background(), scope, "alice", "Implement dark mode", "build-1", func(store.AssistantRun, store.Message, bool) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := messages.GetAssistantWorkItem(context.Background(), scope, built.Run.WorkItemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	built.Run.Status = store.AssistantRunStatusInterrupted
+	built.Run.Revision++
+	if err := messages.TransitionWorkItemAndRun(context.Background(), scope, item.ID, item.Revision, built.Run, store.AssistantWorkItemStatusSuspended, "interrupted", time.Now().UTC()); err != nil {
+		t.Fatalf("suspend WorkItem: %v", err)
+	}
+	item, err = messages.GetAssistantWorkItem(context.Background(), scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continued, err := server.startProjectAssistantContinueRunDurably(context.Background(), scope, item.ID, "alice", item.Revision, "Continue", "continue-1", func(store.AssistantRun, store.Message, bool) error { return nil })
+	if err != nil {
+		t.Fatalf("start Continue: %v", err)
+	}
+	if continued.Run.Mode != store.AssistantRunModeContinue || continued.Run.WorkItemID != item.ID || continued.User.ActorID != "alice" {
+		t.Fatalf("continue = %#v / %#v", continued.Run, continued.User)
+	}
+	if _, err := server.startProjectAssistantContinueRunDurably(context.Background(), scope, item.ID, "bob", item.Revision, "Continue", "continue-2", func(store.AssistantRun, store.Message, bool) error { return nil }); !errors.Is(err, store.ErrAssistantWorkItemConflict) {
+		t.Fatalf("wrong actor continuation error = %v, want work item conflict", err)
+	}
+}
+
 func TestDurableBuildCreatesRootedActorBoundWorkItem(t *testing.T) {
 	messages := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, messages, nil, "", false)
@@ -75,6 +163,25 @@ func TestDurableBuildCreatesRootedActorBoundWorkItem(t *testing.T) {
 	}
 	if started.User.WorkItemID != item.ID || started.Assistant.WorkItemID != item.ID {
 		t.Fatalf("messages are not linked to WorkItem %q: user=%#v assistant=%#v", item.ID, started.User, started.Assistant)
+	}
+}
+
+func TestWorkItemRunControlRejectsDifferentActor(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := testProjectMessageScope("org-a", "workspace-a", "demo")
+	started, err := server.startProjectAssistantBuildRunDurably(
+		context.Background(), scope, "alice", "Implement dark mode", "build-1",
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.authorizeProjectAssistantRunActor(context.Background(), scope, started.Run, "bob", false); !errors.Is(err, store.ErrAssistantRunNotFound) {
+		t.Fatalf("different actor authorization = %v, want not found", err)
+	}
+	if err := server.authorizeProjectAssistantRunActor(context.Background(), scope, started.Run, "alice", false); err != nil {
+		t.Fatalf("creator authorization = %v", err)
 	}
 }
 

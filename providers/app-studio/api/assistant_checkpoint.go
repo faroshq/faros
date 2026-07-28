@@ -737,6 +737,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 ) (projectAssistantResumeResponse, error) {
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	turn := newProjectAssistantTurnItem(projectAssistantTurnResume, id, p.Name)
+	turn.ProjectUID = messageScope.ProjectUID
 	turn.RunID = run.ID
 	turn.RequestID = run.RequestID
 	turn.AssistantMessageID = strings.TrimSpace(resumeReq.AssistantMessageID)

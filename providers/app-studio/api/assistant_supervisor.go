@@ -28,6 +28,8 @@ import (
 
 const projectAssistantTextSnapshotInterval = 250 * time.Millisecond
 
+var errProjectAssistantUserStop = fmt.Errorf("assistant stopped by user: %w", context.Canceled)
+
 // projectAssistantRunSnapshot is the complete durable view sent to a
 // subscriber. A consumer replaces its current view; it never needs event
 // replay to reconstruct assistant state.
@@ -132,7 +134,7 @@ func (s *projectAssistantSupervisor) Reserve(scope store.Scope) (func(), error) 
 	if s == nil {
 		return nil, errors.New("assistant supervisor not configured")
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	if !key.valid() {
 		return nil, errors.New("assistant supervisor scope is required")
 	}
@@ -164,7 +166,7 @@ func (s *projectAssistantSupervisor) reserved(scope store.Scope) bool {
 	if s == nil {
 		return false
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	_, reserved := s.reservations[key]
 	s.mu.Unlock()
@@ -204,7 +206,7 @@ func (s *projectAssistantSupervisor) Attach(scope store.Scope, run store.Assista
 	if s == nil || s.store == nil {
 		return nil, errors.New("assistant supervisor store not configured")
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	if !key.valid() || run.ID == "" {
 		return nil, errors.New("assistant supervisor scope and run id are required")
 	}
@@ -228,7 +230,7 @@ func (s *projectAssistantSupervisor) accumulatorFor(scope store.Scope, runID str
 	if s == nil {
 		return nil
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if active := s.runs[key]; active != nil && active.run.ID == runID {
@@ -241,7 +243,7 @@ func (s *projectAssistantSupervisor) accumulatorForActiveMessage(scope store.Sco
 	if s == nil {
 		return nil
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if active := s.runs[key]; active != nil && active.message.ID == messageID {
@@ -264,10 +266,10 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 		return store.ErrAssistantRunConflict
 	}
 	active.workerStarted = true
-	workerCtx, _ := context.WithCancelCause(s.ctx)
 	// Use the active cancellation function created by Attach; the context must
 	// share it, rather than derive from the initiating request.
-	workerCtx, active.cancel = context.WithCancelCause(s.ctx)
+	workerCtx, cancel := context.WithCancelCause(s.ctx)
+	active.cancel = cancel
 	s.mu.Unlock()
 	s.log("start", scope, run)
 	go func() {
@@ -303,6 +305,172 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 	return ok
 }
 
+// Stop makes cancellation observable before asking Eino to unwind. Pending
+// runs have no active loop, so they use the existing synchronous terminal path.
+func (s *projectAssistantSupervisor) Stop(scope store.Scope, runID string) (store.AssistantRun, bool, error) {
+	if s == nil {
+		return store.AssistantRun{}, false, nil
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
+	s.mu.Lock()
+	active := s.runs[key]
+	if active == nil || active.run.ID != runID {
+		s.mu.Unlock()
+		return store.AssistantRun{}, false, nil
+	}
+	if assistantRunTerminal(active.run.Status) || active.run.Status == store.AssistantRunStatusStopping {
+		run := active.run
+		s.mu.Unlock()
+		return run, true, nil
+	}
+	if active.run.Status == store.AssistantRunStatusPendingPermission || active.run.Status == store.AssistantRunStatusPendingInput {
+		workItemID := active.run.WorkItemID
+		s.mu.Unlock()
+		if workItemID != "" {
+			accumulator := &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: runID}
+			err := accumulator.TransitionWorkItemTerminal(
+				context.Background(),
+				store.AssistantRunStatusAborted,
+				store.AssistantWorkItemStatusSuspended,
+				"stopped by user",
+				func(run *store.AssistantRun, message *store.Message) {
+					message.Metadata = projectAssistantDurableMetadataFromExisting(*run, "Aborted", false, message.Metadata)
+					projectAssistantClearPendingInterruptMetadata(message, run.ID)
+				},
+			)
+			if err != nil {
+				return store.AssistantRun{}, false, err
+			}
+			s.mu.Lock()
+			if current := s.runs[key]; current != nil && current.run.ID == runID && assistantRunTerminal(current.run.Status) && !current.workerStarted {
+				delete(s.runs, key)
+			}
+			s.mu.Unlock()
+			run, getErr := s.store.GetAssistantRun(context.Background(), scope, runID)
+			return run, true, getErr
+		}
+		ok, err := s.AbortWith(scope, runID, nil)
+		if !ok || err != nil {
+			return store.AssistantRun{}, ok, err
+		}
+		run, getErr := s.store.GetAssistantRun(context.Background(), scope, runID)
+		return run, true, getErr
+	}
+	active.transitionMu.Lock()
+	s.mu.Unlock()
+	defer active.transitionMu.Unlock()
+
+	s.mu.Lock()
+	if current := s.runs[key]; current != active || active.run.ID != runID {
+		s.mu.Unlock()
+		return store.AssistantRun{}, false, store.ErrAssistantRunNotFound
+	}
+	if assistantRunTerminal(active.run.Status) || active.run.Status == store.AssistantRunStatusStopping {
+		run := active.run
+		s.mu.Unlock()
+		return run, true, nil
+	}
+	if active.run.Status != store.AssistantRunStatusRunning {
+		s.mu.Unlock()
+		return store.AssistantRun{}, false, store.ErrAssistantRunConflict
+	}
+	currentRun := active.run
+	s.mu.Unlock()
+
+	var itemRevision int64
+	if currentRun.WorkItemID != "" {
+		item, err := s.store.GetAssistantWorkItem(context.Background(), scope, currentRun.WorkItemID)
+		if err != nil {
+			return store.AssistantRun{}, false, err
+		}
+		if item.ActiveRunID != runID || item.Status != store.AssistantWorkItemStatusActive {
+			return store.AssistantRun{}, false, store.ErrAssistantWorkItemConflict
+		}
+		itemRevision = item.Revision
+	}
+	now := time.Now().UTC()
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), projectMessagePersistTimeout)
+	stoppingRun, err := s.store.RequestAssistantRunStop(
+		persistCtx, scope, currentRun.WorkItemID, runID, itemRevision, currentRun.Revision, now,
+	)
+	cancelPersist()
+	if err != nil {
+		return store.AssistantRun{}, false, err
+	}
+
+	s.mu.Lock()
+	if current := s.runs[key]; current != active || active.run.ID != runID {
+		s.mu.Unlock()
+		return store.AssistantRun{}, false, store.ErrAssistantRunNotFound
+	}
+	active.run = stoppingRun
+	active.message.UpdatedAt = now
+	provisional, _ := active.message.Metadata[projectAssistantMetadataProvisional].(bool)
+	active.message.Metadata = projectAssistantDurableMetadataFromExisting(stoppingRun, projectAssistantRunDisplayStatus(stoppingRun.Status, "Working"), provisional, active.message.Metadata)
+	message := active.message
+	active.committedRun, active.committedMessage = stoppingRun, message
+	active.cancel(errProjectAssistantUserStop)
+	for _, subscriber := range active.subscribers {
+		s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: stoppingRun, Message: message})
+	}
+	s.mu.Unlock()
+	messageCtx, cancelMessage := context.WithTimeout(context.Background(), projectMessagePersistTimeout)
+	messageErr := s.store.AppendMessage(messageCtx, scope, message)
+	cancelMessage()
+	if messageErr != nil {
+		s.log("stopping_message_persistence_failure", scope, stoppingRun)
+	}
+	s.log("stopping", scope, stoppingRun)
+	return stoppingRun, true, nil
+}
+
+// AdmitMutation serializes the final durable authorization check with Stop.
+// Releasing transitionMu is the admission point of no return: a call admitted
+// before Stop may execute, while Stop closes the durable run before any later
+// caller can pass this check.
+func (s *projectAssistantSupervisor) AdmitMutation(ctx context.Context, scope store.Scope, runID, actor string) error {
+	if s == nil || s.store == nil {
+		return store.ErrAssistantRunConflict
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
+	s.mu.Lock()
+	active := s.runs[key]
+	if active == nil || active.run.ID != runID {
+		s.mu.Unlock()
+		return store.ErrAssistantRunConflict
+	}
+	active.transitionMu.Lock()
+	s.mu.Unlock()
+	defer active.transitionMu.Unlock()
+
+	s.mu.Lock()
+	if current := s.runs[key]; current != active || active.run.ID != runID || active.run.Status != store.AssistantRunStatusRunning {
+		s.mu.Unlock()
+		return store.ErrAssistantRunConflict
+	}
+	workItemID := active.run.WorkItemID
+	s.mu.Unlock()
+	if workItemID == "" {
+		return store.ErrAssistantWorkItemConflict
+	}
+	run, err := s.store.GetAssistantRun(ctx, scope, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != store.AssistantRunStatusRunning || run.WorkItemID != workItemID {
+		return store.ErrAssistantRunConflict
+	}
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, workItemID)
+	if err != nil {
+		return err
+	}
+	if item.CreatedBy != actor || item.Status != store.AssistantWorkItemStatusActive ||
+		item.ActiveRunID != run.ID || item.GrantRevision != run.ExpectedGrantRevision {
+		return store.ErrAssistantWorkItemConflict
+	}
+	return nil
+}
+
 // AbortWith applies the caller's synchronous terminal bookkeeping (audit and
 // pending-action sanitization) inside the same serialized transition that
 // persists the aborted snapshot.
@@ -310,7 +478,7 @@ func (s *projectAssistantSupervisor) AbortWith(scope store.Scope, runID string, 
 	if s == nil {
 		return false, nil
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	active := s.runs[key]
 	if active == nil || active.run.ID != runID {
@@ -370,7 +538,7 @@ func (s *projectAssistantSupervisor) Subscribe(scope store.Scope, runID string, 
 	if s == nil {
 		return nil, nil, errors.New("assistant supervisor not configured")
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	active := s.runs[key]
 	if active == nil || active.run.ID != runID {

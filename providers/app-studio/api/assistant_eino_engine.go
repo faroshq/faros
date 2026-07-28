@@ -47,6 +47,8 @@ const (
 	projectEinoAssistantNoOutputFallback       = "I couldn't produce a response for that turn. Please try again or rephrase the request, and I can continue from the current project context."
 )
 
+const projectAssistantGracefulStopTimeout = 5 * time.Second
+
 type projectEinoAssistantEngine struct {
 	server   *Server
 	newModel projectEinoAssistantModelFactory
@@ -136,6 +138,7 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 	}
 	checkpointStore := newProjectEinoAssistantCheckpointStore()
 	turn := newProjectAssistantTurnItem(projectAssistantTurnMessage, req.Identity, req.Project.Name)
+	turn.ProjectUID = req.MessageScope.ProjectUID
 	result, runErr := e.runProjectAssistantTurnLoop(ctx, req, runState, checkpointStore, checkpointID, []projectAssistantTurnItem{turn})
 	return result, e.finishProjectAssistantRunAudit(ctx, req, auditRecorder, runErr)
 }
@@ -162,12 +165,25 @@ func (e projectEinoAssistantEngine) ResumeProjectAssistant(
 	if e.server == nil {
 		return projectAssistantRunResult{}, errors.New("server is required to validate resumed assistant plan grant")
 	}
-	approvedPlan, revision, err := e.server.projectAssistantApprovedPlanForCheckpointResume(
-		ctx,
-		req.MessageScope,
-		state.ApprovedPlan,
-		state.ApprovedPlanGrantRevision,
-	)
+	var approvedPlan *projectAssistantApprovedPlan
+	var revision string
+	var err error
+	if req.AssistantRun != nil && req.AssistantRun.WorkItemID != "" {
+		approvedPlan, revision, err = e.server.loadProjectAssistantWorkItemApprovedPlan(ctx, req.MessageScope, req.Identity.user, *req.AssistantRun)
+		if err == nil && strings.TrimSpace(state.ApprovedPlanGrantRevision) != revision {
+			err = fmt.Errorf("%w: checkpoint revision %q does not match WorkItem revision %q", errProjectAssistantCheckpointGrantStale, state.ApprovedPlanGrantRevision, revision)
+		}
+		if err == nil && state.ApprovedPlan != nil && state.ApprovedPlan.RunLocal {
+			approvedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
+		}
+	} else {
+		approvedPlan, revision, err = e.server.projectAssistantApprovedPlanForCheckpointResume(
+			ctx,
+			req.MessageScope,
+			state.ApprovedPlan,
+			state.ApprovedPlanGrantRevision,
+		)
+	}
 	if err != nil {
 		return projectAssistantRunResult{}, fmt.Errorf("validate resumed assistant plan grant: %w", err)
 	}
@@ -193,6 +209,7 @@ func (e projectEinoAssistantEngine) ResumeProjectAssistant(
 	runState.SetTurnPolicy(resumeRunReq.TurnPolicy)
 	checkpointStore := newProjectEinoAssistantCheckpointStoreWithCheckpoint(state.Eino.CheckpointID, state.Eino.Checkpoint)
 	turn := newProjectAssistantTurnItem(projectAssistantTurnResume, req.Identity, req.Project.Name)
+	turn.ProjectUID = req.MessageScope.ProjectUID
 	turn.RequestID = strings.TrimSpace(resumeReq.RequestID)
 	turn.Decision = strings.TrimSpace(resumeReq.Decision)
 	turn.Answer = strings.TrimSpace(resumeReq.Answer)
@@ -568,8 +585,24 @@ func (e projectEinoAssistantEngine) runProjectAssistantTurnLoop(
 	for _, item := range items {
 		loop.Push(item)
 	}
-	loop.Run(ctx)
+	// Let Eino own cancellation and safe-point unwinding. The outer context is
+	// observed separately so a user Stop can request graceful cancellation,
+	// suppress a stale checkpoint, and attach a durable cause.
+	loop.Run(context.WithoutCancel(ctx))
+	stopWatcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			options := []adk.StopOption{adk.WithGracefulTimeout(projectAssistantGracefulStopTimeout)}
+			if errors.Is(context.Cause(ctx), errProjectAssistantUserStop) {
+				options = append(options, adk.WithSkipCheckpoint(), adk.WithStopCause("user_stop"))
+			}
+			loop.Stop(options...)
+		case <-stopWatcherDone:
+		}
+	}()
 	exit := loop.Wait()
+	close(stopWatcherDone)
 	if exit.CheckpointErr != nil {
 		return projectAssistantRunResult{}, exit.CheckpointErr
 	}

@@ -160,10 +160,12 @@ type Store interface {
 	SaveAssistantRun(ctx context.Context, scope Scope, run AssistantRun) error
 	CreateAssistantRun(ctx context.Context, scope Scope, user Message, assistant Message, run AssistantRun) (AssistantRun, error)
 	CreateWorkItemAndAssistantRun(ctx context.Context, scope Scope, item AssistantWorkItem, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error)
+	ResumeWorkItemAndCreateAssistantRun(ctx context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error)
 	GetAssistantWorkItem(ctx context.Context, scope Scope, id string) (AssistantWorkItem, error)
 	ListAssistantWorkItems(ctx context.Context, scope Scope) ([]AssistantWorkItem, error)
 	CompareAndSwapAssistantWorkItem(ctx context.Context, scope Scope, item AssistantWorkItem, expectedRevision int64) error
 	ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error)
+	RequestAssistantRunStop(ctx context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error)
 	TransitionWorkItemAndRun(ctx context.Context, scope Scope, workItemID string, expectedWorkItemRevision int64, run AssistantRun, status AssistantWorkItemStatus, reason string, now time.Time) error
 	LoadMessagesForWorkItem(ctx context.Context, scope Scope, workItemID string, limit int) ([]Message, error)
 	LatestAssistantRunForWorkItem(ctx context.Context, scope Scope, workItemID string) (AssistantRun, error)

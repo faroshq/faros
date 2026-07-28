@@ -256,6 +256,9 @@ func (t projectEinoAssistantTool) Info(context.Context) (*schema.ToolInfo, error
 }
 
 func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return "", cause
+	}
 	if t.tool == nil {
 		return "", errors.New("project assistant tool is not configured")
 	}
@@ -318,6 +321,12 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 }
 
 func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID string, spec projectAssistantToolSpec, args map[string]any) (string, error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return "", cause
+	}
+	if err := t.admitMutation(ctx, spec); err != nil {
+		return "", err
+	}
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
 		Name:      spec.Name,
@@ -535,6 +544,22 @@ func (t projectEinoAssistantTool) persistApprovedPlan(ctx context.Context, plan 
 		plan,
 		t.runState.ApprovedPlanGrantRevision(),
 	)
+}
+
+func (t projectEinoAssistantTool) admitMutation(ctx context.Context, spec projectAssistantToolSpec) error {
+	switch spec.Risk {
+	case projectAssistantToolRiskPlan, projectAssistantToolRiskWrite, projectAssistantToolRiskCommit, projectAssistantToolRiskRuntime:
+	default:
+		return nil
+	}
+	if t.req.AssistantRun == nil || t.req.AssistantRun.WorkItemID == "" {
+		// Unit-level tool harnesses may invoke tools without durable execution.
+		return nil
+	}
+	if t.server == nil || t.server.store == nil {
+		return store.ErrAssistantWorkItemConflict
+	}
+	return t.server.projectAssistantSupervisor().AdmitMutation(ctx, t.req.MessageScope, t.req.AssistantRun.ID, t.req.Identity.user)
 }
 
 func (t projectEinoAssistantTool) appendBuilderEvent(eventType string) {

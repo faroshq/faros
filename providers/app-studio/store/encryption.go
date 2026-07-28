@@ -291,6 +291,34 @@ func (s *encryptedStore) CreateWorkItemAndAssistantRun(ctx context.Context, scop
 	return created, nil
 }
 
+func (s *encryptedStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
+	var err error
+	user, err = s.encryptMessage(scope, user)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	assistant, err = s.encryptMessage(scope, assistant)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	run.Checkpoint, err = s.encryptAssistantRunBlob(scope, run, "checkpoint", run.Checkpoint)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	run.Audit, err = s.encryptAssistantRunBlob(scope, run, "audit", run.Audit)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	item, err := s.inner.ResumeWorkItemAndCreateAssistantRun(ctx, scope, workItemID, actor, expectedRevision, user, assistant, run)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return item, nil
+}
+
 func (s *encryptedStore) findRawMessage(ctx context.Context, scope Scope, id string) (Message, bool, error) {
 	cursor := ""
 	for {
@@ -373,6 +401,17 @@ func (s *encryptedStore) TransitionWorkItemAndRun(ctx context.Context, scope Sco
 	}
 	run.Checkpoint, run.Audit = checkpoint, audit
 	return s.inner.TransitionWorkItemAndRun(ctx, scope, workItemID, expectedWorkItemRevision, run, status, reason, now)
+}
+
+func (s *encryptedStore) RequestAssistantRunStop(ctx context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error) {
+	run, err := s.inner.RequestAssistantRunStop(ctx, scope, workItemID, runID, expectedWorkItemRevision, expectedRunRevision, now)
+	if err != nil {
+		return AssistantRun{}, err
+	}
+	if err := s.decryptAssistantRunBlobs(scope, &run); err != nil {
+		return AssistantRun{}, err
+	}
+	return run, nil
 }
 
 func (s *encryptedStore) LoadMessagesForWorkItem(ctx context.Context, scope Scope, workItemID string, limit int) ([]Message, error) {

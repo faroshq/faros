@@ -2,7 +2,9 @@ import type { ProjectMessage } from './types'
 
 export interface AssistantRun {
   id: string
-  status: 'pending_permission' | 'pending_input' | 'running' | 'completed' | 'aborted' | 'failed' | 'interrupted'
+  status: 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
+  mode?: 'discussion' | 'new' | 'continue'
+  workItemID?: string
   revision: number
   activeMessageID: string
   clientRequestID?: string
@@ -43,10 +45,11 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
   }
 }
 
-export function assistantRunStartPayload(content: string, clientRequestID: string, initialProjectPrompt = false) {
+export function assistantRunStartPayload(content: string, clientRequestID: string, initialProjectPrompt = false, assistantAction: 'ask' | 'build' = 'ask') {
+  const action = initialProjectPrompt ? 'build' : assistantAction
   return initialProjectPrompt
-    ? { content, clientRequestID, initialProjectPrompt: true }
-    : { content, clientRequestID }
+    ? { content, clientRequestID, assistantAction: action, initialProjectPrompt: true }
+    : { content, clientRequestID, assistantAction: action }
 }
 
 export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {

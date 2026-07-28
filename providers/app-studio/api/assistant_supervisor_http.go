@@ -147,6 +147,46 @@ func (s *Server) startProjectAssistantBuildRunDurably(ctx context.Context, scope
 	return projectAssistantDurableStartResult{Run: run, User: user, Assistant: assistant, Started: true}, nil
 }
 
+// startProjectAssistantContinueRunDurably is the only HTTP-to-store boundary
+// that may reactivate a suspended WorkItem. The store repeats all selection
+// checks while atomically creating the next messages and run.
+func (s *Server) startProjectAssistantContinueRunDurably(ctx context.Context, scope store.Scope, workItemID, actor string, expectedRevision int64, content, clientRequestID string, start func(store.AssistantRun, store.Message, bool) error) (projectAssistantDurableStartResult, error) {
+	content, clientRequestID, actor, workItemID = strings.TrimSpace(content), strings.TrimSpace(clientRequestID), strings.TrimSpace(actor), strings.TrimSpace(workItemID)
+	if content == "" || clientRequestID == "" || actor == "" || workItemID == "" || expectedRevision < 1 {
+		return projectAssistantDurableStartResult{}, newValidationError("content, clientRequestID, actor, workItemID, and workItemRevision are required")
+	}
+	if err := s.reconcileOrphanedProjectAssistantRun(ctx, scope); err != nil {
+		return projectAssistantDurableStartResult{}, err
+	}
+	if prior, err := s.store.FindAssistantRunByClientRequestID(ctx, scope, clientRequestID); err == nil {
+		return projectAssistantDurableStartResult{Run: prior}, nil
+	} else if !errors.Is(err, store.ErrAssistantRunNotFound) {
+		return projectAssistantDurableStartResult{}, err
+	}
+	supervisor := s.projectAssistantSupervisor()
+	releaseReservation, err := supervisor.Reserve(scope)
+	if err != nil {
+		return projectAssistantDurableStartResult{}, err
+	}
+	defer releaseReservation()
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, workItemID)
+	if err != nil {
+		return projectAssistantDurableStartResult{}, err
+	}
+	now := time.Now().UTC()
+	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, ActorID: actor, WorkItemID: workItemID, Content: content, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, WorkItemID: workItemID, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-" + uuid.NewString(), WorkItemID: workItemID, Mode: store.AssistantRunModeContinue, ExpectedGrantRevision: item.GrantRevision, Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	assistant.Metadata = projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil)
+	if _, err := s.store.ResumeWorkItemAndCreateAssistantRun(ctx, scope, workItemID, actor, expectedRevision, user, assistant, run); err != nil {
+		return projectAssistantDurableStartResult{}, err
+	}
+	if err := start(run, assistant, false); err != nil {
+		return projectAssistantDurableStartResult{Run: run, User: user, Assistant: assistant}, err
+	}
+	return projectAssistantDurableStartResult{Run: run, User: user, Assistant: assistant, Started: true}, nil
+}
+
 // projectAssistantLegacyStreamEvents adapts a complete durable snapshot to the
 // historic UI event protocol.  It deliberately emits a replacement of the
 // assistant body (rather than a token delta) because durable subscriptions are
@@ -465,16 +505,9 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 			return startWorker(created, assistant, start)
 		})
 	case projectAssistantActionContinue:
-		item, getErr := s.store.GetAssistantWorkItem(r.Context(), scope, request.WorkItemID)
-		if getErr != nil {
-			err = getErr
-			break
-		}
-		if item.CreatedBy != id.user || item.Revision != request.WorkItemRevision || item.Status != store.AssistantWorkItemStatusSuspended {
-			err = newValidationError("continue requires your current suspended work item revision")
-			break
-		}
-		err = newValidationError("continue is not available until the atomic WorkItem resume boundary is enabled")
+		started, err = s.startProjectAssistantContinueRunDurably(r.Context(), scope, request.WorkItemID, id.user, request.WorkItemRevision, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message, _ bool) error {
+			return startWorker(created, assistant, nil)
+		})
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
@@ -483,6 +516,10 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 			} else {
 				writeStatus(w, http.StatusConflict, "Conflict", "assistant run start is already in progress")
 			}
+			return
+		}
+		if errors.Is(err, store.ErrAssistantWorkItemConflict) {
+			writeStatus(w, http.StatusConflict, "Conflict", err.Error())
 			return
 		}
 		writeProjectError(w, err)
@@ -851,10 +888,10 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 		}
 		return err
 	}
-	if run.Status != store.AssistantRunStatusRunning {
+	if run.Status != store.AssistantRunStatusRunning && run.Status != store.AssistantRunStatusStopping {
 		return nil
 	}
-	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	supervisor := s.projectAssistantSupervisor()
 	if supervisor.reserved(scope) {
 		return nil
@@ -874,7 +911,18 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 	}
 	message.UpdatedAt = run.UpdatedAt
 	message.Metadata = projectAssistantDurableMetadataFromExisting(run, "Interrupted", false, message.Metadata)
-	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
+	if run.WorkItemID != "" {
+		item, itemErr := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
+		if itemErr != nil {
+			return itemErr
+		}
+		if err := s.store.TransitionWorkItemAndRun(ctx, scope, item.ID, item.Revision, run, store.AssistantWorkItemStatusSuspended, "provider restarted", run.UpdatedAt); err != nil {
+			return err
+		}
+		if err := s.store.AppendMessage(ctx, scope, message); err != nil {
+			return err
+		}
+	} else if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return err
 	}
 	s.projectAssistantSupervisor().log("orphan_interrupted", scope, run)

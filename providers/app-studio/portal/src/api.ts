@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectHydrateResult,
   ProjectAssistantRunStart,
+  ProjectAssistantWorkItem,
   ProjectAssistantAbortResponse,
   ProjectAssistantSnapshot,
   ProjectAssistantUIComponent,
@@ -800,7 +801,7 @@ export const api = {
     )
   },
 
-  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; initialProjectPrompt?: boolean }): Promise<ProjectAssistantRunStart> {
+  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; assistantAction?: 'ask' | 'build' | 'continue'; workItemID?: string; workItemRevision?: number; initialProjectPrompt?: boolean }): Promise<ProjectAssistantRunStart> {
     return request<ProjectAssistantRunStart>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/messages`, body)
   },
 
@@ -835,6 +836,27 @@ export const api = {
       ctx,
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/abort`,
+    )
+  },
+
+  async stopAssistantRun(ctx: KedgeContext | null, name: string, runID: string): Promise<ProjectAssistantAbortResponse> {
+    return request<ProjectAssistantAbortResponse>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/stop`,
+    )
+  },
+
+  async listAssistantWorkItems(ctx: KedgeContext | null, name: string): Promise<ProjectAssistantWorkItem[]> {
+    return request<ProjectAssistantWorkItem[]>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items`)
+  },
+
+  async cancelAssistantWorkItem(ctx: KedgeContext | null, name: string, workItemID: string, revision: number): Promise<ProjectAssistantWorkItem> {
+    return request<ProjectAssistantWorkItem>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items/${encodeURIComponent(workItemID)}/cancel`,
+      { revision },
     )
   },
 

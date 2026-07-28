@@ -106,6 +106,81 @@ func (s *PostgresStore) CreateWorkItemAndAssistantRun(ctx context.Context, scope
 	return item, nil
 }
 
+// ResumeWorkItemAndCreateAssistantRun is the sole durable boundary for
+// continuing a suspended mutation task. It locks the selected item, checks
+// actor and revision, activates it, and inserts the next messages/run in one
+// transaction.
+func (s *PostgresStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if workItemID == "" || actor == "" || expectedRevision < 1 || user.ActorID != actor || user.WorkItemID != workItemID || assistant.WorkItemID != workItemID || run.WorkItemID != workItemID || run.Mode != AssistantRunModeContinue {
+		return AssistantWorkItem{}, fmt.Errorf("%w: invalid work item continuation", ErrAssistantWorkItemConflict)
+	}
+	if err := validateNewAssistantRun(user, assistant, run); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	user, assistant, run = prepareMessage(scope, user), prepareMessage(scope, assistant), prepareAssistantRun(scope, run)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("begin resume work item: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	row := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+		FROM app_studio_assistant_work_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 FOR UPDATE`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
+	item, err := scanAssistantWorkItem(row, scope)
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("%w: %v", ErrAssistantWorkItemConflict, err)
+	}
+	if item.CreatedBy != actor || item.Status != AssistantWorkItemStatusSuspended || item.ActiveRunID != "" || item.Revision != expectedRevision || run.ExpectedGrantRevision != item.GrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q is not resumable", ErrAssistantWorkItemConflict, workItemID)
+	}
+	var activeWorkItem string
+	err = tx.QueryRowContext(ctx, `SELECT work_item_id FROM app_studio_assistant_work_items WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND status=$5 AND work_item_id<>$6 LIMIT 1`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, AssistantWorkItemStatusActive, workItemID).Scan(&activeWorkItem)
+	if err == nil {
+		return AssistantWorkItem{}, fmt.Errorf("%w: project already has active work item %q", ErrAssistantWorkItemConflict, activeWorkItem)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, fmt.Errorf("check active work item: %w", err)
+	}
+	var activeRun string
+	err = tx.QueryRowContext(ctx, `SELECT run_id FROM app_studio_assistant_runs WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND status IN ('pending_permission','pending_input','running','stopping') LIMIT 1`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID).Scan(&activeRun)
+	if err == nil {
+		return AssistantWorkItem{}, fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, activeRun)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, fmt.Errorf("check active assistant run: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE app_studio_assistant_work_items SET status=$6, status_reason='', active_run_id=$7, revision=revision+1, updated_at=$8
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 AND revision=$9 AND status=$10 AND created_by=$11 AND active_run_id=''`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID, AssistantWorkItemStatusActive, run.ID, run.UpdatedAt.UTC(), expectedRevision, AssistantWorkItemStatusSuspended, actor)
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("activate work item: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q changed", ErrAssistantWorkItemConflict, workItemID)
+	}
+	checkpoint, audit, err := normalizeAssistantRunJSON(run)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision, run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC()); err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("%w: create continuation run: %v", ErrAssistantRunConflict, err)
+	}
+	if err := appendMessageTx(ctx, tx, scope, user); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := appendMessageTx(ctx, tx, scope, assistant); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("commit resume work item: %w", err)
+	}
+	item.Status, item.StatusReason, item.ActiveRunID, item.Revision, item.UpdatedAt = AssistantWorkItemStatusActive, "", run.ID, item.Revision+1, run.UpdatedAt
+	return item, nil
+}
+
 func (s *PostgresStore) GetAssistantWorkItem(ctx context.Context, scope Scope, id string) (AssistantWorkItem, error) {
 	if err := scope.validate(); err != nil {
 		return AssistantWorkItem{}, err
@@ -262,6 +337,55 @@ func (s *PostgresStore) TransitionWorkItemAndRun(ctx context.Context, scope Scop
 		return fmt.Errorf("commit transition work item and run: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) RequestAssistantRunStop(ctx context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantRun{}, err
+	}
+	if runID == "" || expectedRunRevision < 1 {
+		return AssistantRun{}, fmt.Errorf("assistant run and revision are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantRun{}, fmt.Errorf("begin request assistant stop: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if workItemID != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE app_studio_assistant_work_items
+			SET plan_grant='{}'::jsonb, grant_revision='', revision=revision+1, updated_at=$8
+			WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+				AND work_item_id=$5 AND revision=$6 AND active_run_id=$7 AND status=$9`,
+			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+			workItemID, expectedWorkItemRevision, runID, now.UTC(), AssistantWorkItemStatusActive)
+		if err != nil {
+			return AssistantRun{}, fmt.Errorf("revoke work item grant for stop: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return AssistantRun{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+		}
+	}
+	row := tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_runs
+		SET status=$8, revision=revision+1, updated_at=$9
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+			AND run_id=$5 AND work_item_id=$6 AND revision=$7 AND status=$10
+		RETURNING run_id,work_item_id,mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		runID, workItemID, expectedRunRevision, AssistantRunStatusStopping, now.UTC(), AssistantRunStatusRunning)
+	run, err := scanAssistantRun(row, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if err != nil {
+		return AssistantRun{}, fmt.Errorf("request assistant run stop: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantRun{}, fmt.Errorf("commit request assistant stop: %w", err)
+	}
+	return run, nil
 }
 
 func (s *PostgresStore) LoadMessagesForWorkItem(ctx context.Context, scope Scope, workItemID string, limit int) ([]Message, error) {

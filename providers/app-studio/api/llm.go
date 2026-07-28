@@ -299,6 +299,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		return "", errors.New("tenant context missing")
 	}
 	turn := newProjectAssistantTurnItem(projectAssistantTurnMessage, id, p.Name)
+	turn.ProjectUID = string(p.UID)
 	ctx, finishTurn := s.projectAssistantRunManager().Begin(ctx, turn)
 	defer finishTurn()
 	if cause := context.Cause(ctx); cause != nil {
@@ -307,19 +308,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	r = r.WithContext(ctx)
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	durable, hasDurableRun := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun)
-	var recent []store.Message
-	switch {
-	case hasDurableRun && durable.WorkItemID != "":
-		recent, err = s.store.LoadMessagesForWorkItem(ctx, messageScope, durable.WorkItemID, 24)
-	case hasDurableRun && durable.UserMessageID != "":
-		current, findErr := s.findProjectMessage(ctx, messageScope, durable.UserMessageID)
-		if findErr != nil {
-			return "", findErr
-		}
-		recent = []store.Message{current}
-	default:
-		recent, err = s.store.LoadRecentMessages(ctx, messageScope, 24)
-	}
+	recent, err := s.loadProjectAssistantTurnMessages(ctx, messageScope, durable, hasDurableRun)
 	if err != nil {
 		return "", err
 	}
@@ -377,6 +366,21 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		return "", err
 	}
 	return result.Content, nil
+}
+
+func (s *Server) loadProjectAssistantTurnMessages(ctx context.Context, scope store.Scope, run store.AssistantRun, hasDurableRun bool) ([]store.Message, error) {
+	switch {
+	case hasDurableRun && run.WorkItemID != "":
+		return s.store.LoadMessagesForWorkItem(ctx, scope, run.WorkItemID, 24)
+	case hasDurableRun && run.UserMessageID != "":
+		current, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
+		if err != nil {
+			return nil, err
+		}
+		return []store.Message{current}, nil
+	default:
+		return s.store.LoadRecentMessages(ctx, scope, 24)
+	}
 }
 
 func projectRepeatedToolLoopFallback(toolMessages []chatMessage) string {

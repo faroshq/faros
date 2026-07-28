@@ -375,7 +375,7 @@ func TestProjectAssistantSupervisorTrailingFlushKeepsNewerText(t *testing.T) {
 		t.Fatal(err)
 	}
 	supervisor.mu.Lock()
-	active := supervisor.runs[projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName}]
+	active := supervisor.runs[projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}]
 	active.beforeTextFlushPersist = func() {
 		if updateErr := accumulator.UpdateText(context.Background(), "new", false); updateErr != nil {
 			t.Errorf("UpdateText(new): %v", updateErr)
@@ -1484,8 +1484,8 @@ func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "hello", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
@@ -1587,8 +1587,8 @@ func TestResumeProjectAssistantRouteDetachesRequestAndPublishesRunningSnapshot(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
-	user := store.Message{ID: "user-1", Role: "user", Content: "hello", CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "hello", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
@@ -1683,7 +1683,8 @@ func TestResumeProjectAssistantRouteRepairsPrePatchMessageIdentity(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := store.AssistantRun{ID: "run-legacy", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-legacy", RequestID: "permission-legacy", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-legacy", Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-legacy", UserMessageID: "user-legacy", RequestID: "permission-legacy", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "hello", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{
 		ID:   "assistant-legacy",
 		Role: "assistant",
@@ -1698,6 +1699,9 @@ func TestResumeProjectAssistantRouteRepairsPrePatchMessageIdentity(t *testing.T)
 		UpdatedAt: now,
 	}
 	if err := memoryStore.SaveAssistantRun(context.Background(), scope, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := memoryStore.AppendMessage(context.Background(), scope, user); err != nil {
 		t.Fatal(err)
 	}
 	if err := memoryStore.AppendMessage(context.Background(), scope, assistant); err != nil {

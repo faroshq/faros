@@ -81,6 +81,7 @@ import type {
   KedgeContext,
   Project,
   ProjectAssistantSnapshot,
+  ProjectAssistantWorkItem,
   ProjectAssistantUIAction,
   ProjectAssistantUIComponent,
   ProjectAssistantUIInterruptRequest,
@@ -327,6 +328,9 @@ const projectSettingsError = ref<string | null>(null)
 const deleteProjectTarget = ref<Project | null>(null)
 const deletingProject = ref(false)
 const prompt = ref('')
+const assistantIntent = ref<'ask' | 'build'>('ask')
+const assistantWorkItems = ref<ProjectAssistantWorkItem[]>([])
+const selectedAssistantWorkItem = ref<ProjectAssistantWorkItem | null>(null)
 const projectQuery = ref('')
 const providerQuery = ref('')
 const workbenchLauncherQuery = ref('')
@@ -424,7 +428,12 @@ const assistantRunController = new ConversationRunController({
   abort: async (runID) => {
     const projectName = selected.value?.name
     if (!projectName) return
-    const response = await api.abortAssistantRun(props.ctx, projectName, runID)
+    const response = await api.stopAssistantRun(props.ctx, projectName, runID)
+    if (response.status === 'stopping' && activeAssistantRun?.id === runID) {
+      activeAssistantRun = { ...activeAssistantRun, status: 'stopping' }
+      messageStreaming.value = true
+      return
+    }
     if (response.status === 'aborted' && activeAssistantRun?.id === runID) {
       const message = messages.value.find((item) => item.id === activeAssistantRun?.activeMessageID)
       if (message) applyAssistantSnapshot(abortedConversationSnapshot({ run: activeAssistantRun, message }), projectName)
@@ -480,6 +489,7 @@ const activePlanMessage = computed(() =>
 )
 const conversationWorkingLabel = computed(() => {
   const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
+  if (activeAssistantRun?.status === 'stopping') return 'Stopping'
   if (activePlanMessage.value) return ''
   if (conversationStatus.value) return conversationStatus.value
   if (!messageStreaming.value) return ''
@@ -1811,6 +1821,8 @@ async function openProject(name: string, updateURL = true) {
   try {
     selected.value = await api.getProject(props.ctx, name)
     messages.value = (await api.listAllMessages(props.ctx, name)).map(toProjectMessageView)
+    assistantWorkItems.value = await api.listAssistantWorkItems(props.ctx, name)
+    selectedAssistantWorkItem.value = null
     await recoverAssistantConversation(name)
     if (updateURL) props.navigate(encodeURIComponent(name))
   } catch (e) {
@@ -1831,6 +1843,34 @@ async function refreshSelectedProjectConversation(projectName: string) {
   messages.value = loadedMessages.map(toProjectMessageView)
   projects.value = projectList
   await recoverAssistantConversation(projectName)
+}
+
+async function refreshAssistantWorkItems(projectName: string) {
+  const items = await api.listAssistantWorkItems(props.ctx, projectName)
+  if (selected.value?.name !== projectName) return
+  assistantWorkItems.value = items
+  if (selectedAssistantWorkItem.value) {
+    selectedAssistantWorkItem.value = items.find((item) => item.id === selectedAssistantWorkItem.value?.id && item.status === 'suspended') ?? null
+  }
+}
+
+async function discardAssistantWorkItem(item: ProjectAssistantWorkItem) {
+  const projectName = selected.value?.name
+  if (!projectName) return
+  const confirmed = await confirmDialog({
+    title: 'Discard suspended task?',
+    message: 'This removes its continuation authority. The conversation remains visible.',
+    confirmLabel: 'Discard task',
+    danger: true,
+  })
+  if (!confirmed) return
+  try {
+    await api.cancelAssistantWorkItem(props.ctx, projectName, item.id, item.revision)
+    if (selectedAssistantWorkItem.value?.id === item.id) selectedAssistantWorkItem.value = null
+    await refreshAssistantWorkItems(projectName)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? '', source: 'stream' | 'start' | 'latest' = 'stream', expectedRunID = ''): { accepted: boolean; current: AssistantRun | undefined } {
@@ -1854,6 +1894,7 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
     conversationStatus.value = ''
     assistantRunController.disconnect()
     void loadCheckpoints()
+    void refreshAssistantWorkItems(projectName)
     if (normalized.message.metadata?.previewRefreshNeeded === true) void refreshDevelopmentPreviewFrame('Preview refreshed')
   } else if (!assistantRunTerminal(normalized.run.status)) {
     const status = normalized.message.metadata?.assistantStatus
@@ -2296,12 +2337,22 @@ async function sendMessage() {
   }
   if (!messages.value.some((message) => message.id === optimisticID)) messages.value = [...messages.value, optimisticUserMessage]
   try {
-    const started = await api.startAssistantRun(props.ctx, projectName, assistantRunStartPayload(content, clientRequestID, Boolean(firstProjectPending)))
+    const payload = selectedAssistantWorkItem.value
+      ? {
+          content,
+          clientRequestID,
+          assistantAction: 'continue' as const,
+          workItemID: selectedAssistantWorkItem.value.id,
+          workItemRevision: selectedAssistantWorkItem.value.revision,
+        }
+      : assistantRunStartPayload(content, clientRequestID, Boolean(firstProjectPending), assistantIntent.value)
+    const started = await api.startAssistantRun(props.ctx, projectName, payload)
     const applied = applyAssistantSnapshot({ run: started.run, message: started.assistant }, projectName, 'start')
     if (applied.accepted && applied.current) {
       messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
       if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
       pendingMessageSubmission = null
+      selectedAssistantWorkItem.value = null
       if (firstProjectPending && firstProjectSubmissionAccepted(firstProjectPending, started.user)) pendingFirstProjectSubmission = null
     }
   } catch (e) {
@@ -3714,6 +3765,56 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               </div>
             </div>
           </div>
+          <div v-if="!messageStreaming && !pendingApproval && !pendingFollowUp" class="mb-2 flex items-center gap-1" aria-label="Assistant action">
+            <button
+              type="button"
+              class="rounded-md px-2.5 py-1 text-[11px] font-medium transition"
+              :class="assistantIntent === 'ask' ? 'bg-accent-subtle text-accent' : 'text-text-muted hover:bg-surface-hover hover:text-text-secondary'"
+              :aria-pressed="assistantIntent === 'ask'"
+              @click="assistantIntent = 'ask'"
+            >
+              Ask
+            </button>
+            <button
+              type="button"
+              class="rounded-md px-2.5 py-1 text-[11px] font-medium transition"
+              :class="assistantIntent === 'build' ? 'bg-accent-subtle text-accent' : 'text-text-muted hover:bg-surface-hover hover:text-text-secondary'"
+              :aria-pressed="assistantIntent === 'build'"
+              @click="assistantIntent = 'build'"
+            >
+              Build
+            </button>
+            <span class="ml-1 text-[11px] text-text-muted">
+              {{ assistantIntent === 'ask' ? 'Discuss without changing files' : 'Start a new implementation task' }}
+            </span>
+          </div>
+          <div
+            v-if="!messageStreaming && assistantWorkItems.some((item) => item.status === 'suspended')"
+            class="mb-2 flex flex-wrap items-center gap-2"
+          >
+            <span class="text-[11px] font-medium text-text-muted">Suspended tasks</span>
+            <div
+              v-for="item in assistantWorkItems.filter((candidate) => candidate.status === 'suspended')"
+              :key="item.id"
+              class="flex items-center gap-1"
+            >
+              <button
+                type="button"
+                class="rounded-md border px-2.5 py-1 text-[11px] font-medium transition"
+                :class="selectedAssistantWorkItem?.id === item.id ? 'border-accent/40 bg-accent-subtle text-accent' : 'border-border-subtle text-text-secondary hover:bg-surface-hover'"
+                @click="selectedAssistantWorkItem = selectedAssistantWorkItem?.id === item.id ? null : item"
+              >
+                {{ selectedAssistantWorkItem?.id === item.id ? 'Continuing task' : 'Continue task' }}
+              </button>
+              <button
+                type="button"
+                class="rounded-md px-2 py-1 text-[11px] text-text-muted transition hover:bg-danger-subtle hover:text-danger"
+                @click="discardAssistantWorkItem(item)"
+              >
+                Discard
+              </button>
+            </div>
+          </div>
           <div class="relative min-h-[58px] rounded-md border border-border-subtle bg-surface shadow-sm transition focus-within:border-accent/50">
             <textarea
               ref="promptRef"
@@ -3725,7 +3826,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               @keydown.enter.exact.prevent="sendMessage"
             />
             <button
-              v-if="messageStreaming"
+              v-if="messageStreaming && activeAssistantRun?.status !== 'stopping'"
               type="button"
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-danger/30 bg-danger-subtle text-danger transition hover:bg-danger-subtle/80"
               title="Stop generating"
@@ -3733,6 +3834,16 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               @click="cancelMessageStream"
             >
               <Square class="h-4 w-4 fill-current" :stroke-width="2" />
+            </button>
+            <button
+              v-else-if="activeAssistantRun?.status === 'stopping'"
+              type="button"
+              disabled
+              class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-hover text-text-muted"
+              title="Stopping"
+              aria-label="Stopping"
+            >
+              <Loader2 class="h-4 w-4 animate-spin" :stroke-width="2" />
             </button>
             <button
               v-else

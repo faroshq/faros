@@ -441,6 +441,57 @@ func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreStopAndGrantRevocationAreAtomicExternalDSN(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("APP_STUDIO_TEST_POSTGRES_DSN is not set")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schemaName := "app_studio_stop_" + time.Now().UTC().Format("20060102150405")
+	if _, err := db.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schemaName)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schemaName)+" CASCADE")
+	})
+	s, err := OpenPostgres(ctx, postgresDSNWithSearchPath(t, dsn, schemaName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "project-1"}
+	item := testWorkItem("item-1", "user-1")
+	run := testWorkItemRun("run-1", item.ID, "user-1", "assistant-1")
+	created, err := s.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser("user-1"), testWorkItemAssistant("assistant-1"), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := s.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, created.Revision, "grant-1", json.RawMessage(`{"capabilities":["workspace_mutate"]}`), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping, err := s.RequestAssistantRunStop(ctx, scope, item.ID, run.ID, approved.Revision, run.Revision, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := s.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopping.Status != AssistantRunStatusStopping || revoked.GrantRevision != "" || !jsonSemanticallyEqual(revoked.PlanGrant, json.RawMessage(`{}`)) {
+		t.Fatalf("stop = %#v, WorkItem = %#v", stopping, revoked)
+	}
+}
+
 func TestPostgresStoreMigratesOnlyLegacyRunningRunsExternalDSN(t *testing.T) {
 	t.Skip("work-item persistence is a net-new deployment and does not migrate legacy run schemas")
 	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))

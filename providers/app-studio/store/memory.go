@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -250,6 +251,55 @@ func (s *MemoryStore) CreateWorkItemAndAssistantRun(_ context.Context, scope Sco
 	return cloneAssistantWorkItem(item), nil
 }
 
+func (s *MemoryStore) ResumeWorkItemAndCreateAssistantRun(_ context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	actor, workItemID = strings.TrimSpace(actor), strings.TrimSpace(workItemID)
+	if actor == "" || workItemID == "" || expectedRevision < 1 || user.ActorID != actor || user.WorkItemID != workItemID || assistant.WorkItemID != workItemID || run.WorkItemID != workItemID || run.Mode != AssistantRunModeContinue {
+		return AssistantWorkItem{}, fmt.Errorf("%w: invalid work item continuation", ErrAssistantWorkItemConflict)
+	}
+	if err := validateNewAssistantRun(user, assistant, run); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	user, assistant, run = prepareMessage(scope, user), prepareMessage(scope, assistant), prepareAssistantRun(scope, run)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.workItems[scope][workItemID]
+	if !ok || item.CreatedBy != actor || item.Status != AssistantWorkItemStatusSuspended || item.ActiveRunID != "" || item.Revision != expectedRevision || run.ExpectedGrantRevision != item.GrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q is not resumable", ErrAssistantWorkItemConflict, workItemID)
+	}
+	for _, other := range s.workItems[scope] {
+		if other.ID != item.ID && other.Status == AssistantWorkItemStatusActive {
+			return AssistantWorkItem{}, fmt.Errorf("%w: project already has active work item %q", ErrAssistantWorkItemConflict, other.ID)
+		}
+	}
+	for _, existing := range s.assistantRuns[scope] {
+		if !assistantRunStatusTerminal(existing.Status) {
+			return AssistantWorkItem{}, fmt.Errorf("%w: project already has active assistant run %q", ErrAssistantRunConflict, existing.ID)
+		}
+	}
+	if _, exists := s.messages[scope][user.ID]; exists {
+		return AssistantWorkItem{}, fmt.Errorf("%w: message %q already exists", ErrAssistantWorkItemConflict, user.ID)
+	}
+	if _, exists := s.messages[scope][assistant.ID]; exists {
+		return AssistantWorkItem{}, fmt.Errorf("%w: message %q already exists", ErrAssistantWorkItemConflict, assistant.ID)
+	}
+	if _, exists := s.assistantRuns[scope][run.ID]; exists {
+		return AssistantWorkItem{}, fmt.Errorf("%w: assistant run %q already exists", ErrAssistantRunConflict, run.ID)
+	}
+	item.Status = AssistantWorkItemStatusActive
+	item.StatusReason = ""
+	item.ActiveRunID = run.ID
+	item.Revision++
+	item.UpdatedAt = run.UpdatedAt
+	s.messages[scope][user.ID] = user
+	s.messages[scope][assistant.ID] = assistant
+	s.assistantRuns[scope][run.ID] = run
+	s.workItems[scope][item.ID] = item
+	return cloneAssistantWorkItem(item), nil
+}
+
 func (s *MemoryStore) GetAssistantWorkItem(_ context.Context, scope Scope, id string) (AssistantWorkItem, error) {
 	if err := scope.validate(); err != nil {
 		return AssistantWorkItem{}, err
@@ -385,6 +435,40 @@ func (s *MemoryStore) TransitionWorkItemAndRun(_ context.Context, scope Scope, w
 	s.workItems[scope][workItemID] = item
 	s.assistantRuns[scope][run.ID] = run
 	return nil
+}
+
+func (s *MemoryStore) RequestAssistantRunStop(_ context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantRun{}, err
+	}
+	if runID == "" || expectedRunRevision < 1 {
+		return AssistantRun{}, fmt.Errorf("assistant run and revision are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, ok := s.assistantRuns[scope][runID]
+	if !ok || run.Revision != expectedRunRevision || run.Status != AssistantRunStatusRunning || run.WorkItemID != workItemID {
+		return AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if workItemID != "" {
+		item, ok := s.workItems[scope][workItemID]
+		if !ok || item.Revision != expectedWorkItemRevision || item.Status != AssistantWorkItemStatusActive || item.ActiveRunID != runID {
+			return AssistantRun{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+		}
+		item.PlanGrant = nil
+		item.GrantRevision = ""
+		item.Revision++
+		item.UpdatedAt = now.UTC()
+		s.workItems[scope][workItemID] = item
+	}
+	run.Status = AssistantRunStatusStopping
+	run.Revision++
+	run.UpdatedAt = now.UTC()
+	s.assistantRuns[scope][runID] = run
+	return cloneAssistantRun(run), nil
 }
 
 func (s *MemoryStore) LoadMessagesForWorkItem(_ context.Context, scope Scope, workItemID string, limit int) ([]Message, error) {

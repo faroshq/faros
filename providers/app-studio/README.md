@@ -98,9 +98,20 @@ subscriber; it never cancels the worker. The portal uses this contract for the
 first project turn as well as later messages, so a refresh during generation
 reconnects without adding another prompt.
 
+Every request carries an explicit assistant action. Omitted actions are `ask`
+and run in read-only discussion mode with only the current message. `build`
+atomically creates a durable, actor-bound WorkItem; `continue` requires the
+selected suspended WorkItem ID and exact revision. Mutation history, plan
+grants, runs, and messages are scoped by the immutable Kubernetes Project UID
+and WorkItem rather than by the reusable project name. The portal exposes
+Ask/Build and suspended-task Continue controls instead of inferring mutation
+intent from conversation history.
+
 This remains a single-replica design: execution cannot continue across a
 provider restart. On the next read, an orphaned running run is surfaced as
-`interrupted`; permission and input checkpoints stay resumable. The legacy
+`interrupted`; its WorkItem becomes suspended, while permission and input
+checkpoints stay resumable. Stop first persists `stopping`, then asks Eino to
+cancel gracefully without retaining a terminal checkpoint. The legacy
 `POST /messages/stream` and `POST /projects/stream` endpoints are retained for
 older portals as compatibility adapters: after their historical project setup
 events, they start the same durable run and subscribe to it. New clients must

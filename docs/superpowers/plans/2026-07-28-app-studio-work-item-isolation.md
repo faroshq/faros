@@ -31,17 +31,17 @@
 - Modify: `providers/app-studio/store/assistant_run_contract_test.go`
 - Create: `providers/app-studio/store/assistant_work_item_test.go`
 
-- [ ] Add failing contract tests proving Project UID isolation, one active WorkItem per Project UID, immutable message WorkItem membership, immutable run mode, and no grant use across WorkItems.
-- [ ] Add failing tests for atomic Build creation, WorkItem CAS, scoped message loading, WorkItem plan approval, and terminal transition clearing `active_run_id`, checkpoint, and grant.
-- [ ] Run `go test ./store -run 'Test.*(WorkItem|ProjectUID|RunMode)'` and confirm failures reflect missing behavior.
-- [ ] Add `ProjectUID` to `Scope`; add `ProjectUID`, `ActorID`, and `WorkItemID` to messages; add WorkItem ID, mode, expected grant revision, and `stopping` to runs.
-- [ ] Define `AssistantWorkItem`, lifecycle statuses, grant fields, revisions, and the minimum atomic Store operations from the design.
-- [ ] Implement the contract in `MemoryStore`, keeping all compound transitions under its mutex.
-- [ ] Replace the embedded PostgreSQL schema with the final net-new messages, WorkItems, and runs schema. Include Project UID in keys/indexes, a unique scoped root message, one active WorkItem, and one nonterminal run.
-- [ ] Implement PostgreSQL scans and operations transactionally; remove the reserved `approved-plan-grant` run convention.
-- [ ] Extend `EncryptedStore` so WorkItem grant blobs use AAD containing full scope, Project UID, and WorkItem ID.
-- [ ] Run `go test ./store` and confirm the store suite passes.
-- [ ] Commit: `feat(app-studio): add durable assistant work items`
+- [x] Add failing contract tests proving Project UID isolation, one active WorkItem per Project UID, immutable message WorkItem membership, immutable run mode, and no grant use across WorkItems.
+- [x] Add failing tests for atomic Build creation, WorkItem CAS, scoped message loading, WorkItem plan approval, and terminal transition clearing `active_run_id`, checkpoint, and grant.
+- [x] Run `go test ./store -run 'Test.*(WorkItem|ProjectUID|RunMode)'` and confirm failures reflect missing behavior.
+- [x] Add `ProjectUID` to `Scope`; add `ProjectUID`, `ActorID`, and `WorkItemID` to messages; add WorkItem ID, mode, expected grant revision, and `stopping` to runs.
+- [x] Define `AssistantWorkItem`, lifecycle statuses, grant fields, revisions, and the minimum atomic Store operations from the design.
+- [x] Implement the contract in `MemoryStore`, keeping all compound transitions under its mutex.
+- [x] Replace the embedded PostgreSQL schema with the final net-new messages, WorkItems, and runs schema. Include Project UID in keys/indexes, a unique scoped root message, one active WorkItem, and one nonterminal run.
+- [x] Implement PostgreSQL scans and operations transactionally; remove the reserved `approved-plan-grant` run convention.
+- [x] Extend `EncryptedStore` so WorkItem grant blobs use AAD containing full scope, Project UID, and WorkItem ID.
+- [x] Run `go test ./store` and confirm the store suite passes.
+- [x] Commit: `feat(app-studio): add durable assistant work items`
 
 ## Task 2: Derive server scope and actor identity, then add explicit actions
 

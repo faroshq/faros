@@ -710,6 +710,10 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		writeProjectError(w, newValidationError("assistant run is not waiting for input"))
 		return
 	}
+	if err := s.authorizeProjectAssistantRunActor(r.Context(), scope, run, id.user, true); err != nil {
+		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
+		return
+	}
 	run, err = s.normalizeProjectAssistantPausedRun(r.Context(), scope, run, req.AssistantMessageID)
 	if err != nil {
 		writeProjectError(w, err)
@@ -722,17 +726,30 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	}
 	supervisor := s.projectAssistantSupervisor()
 	if err := supervisor.Start(r.Context(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
+		transitionTerminal := func(status store.AssistantRunStatus) {
+			if run.WorkItemID == "" {
+				_ = accumulator.SetStatus(context.Background(), status)
+				return
+			}
+			itemStatus := store.AssistantWorkItemStatusSuspended
+			if status == store.AssistantRunStatusCompleted {
+				itemStatus = store.AssistantWorkItemStatusCompleted
+			}
+			_ = accumulator.TransitionWorkItemTerminal(context.Background(), status, itemStatus, string(status), func(committed *store.AssistantRun, current *store.Message) {
+				current.Metadata = projectAssistantDurableMetadataFromExisting(*committed, projectAssistantRunDisplayStatus(status, "Working"), false, current.Metadata)
+			})
+		}
 		resp, resumeErr := s.resumeProjectAssistantRunWithRepositoryAndClient(ctx, r.Clone(ctx), id, c, p, projectRepositoryView(ctx, c, p), runID, req)
 		if resumeErr == nil && resp.Status == store.AssistantRunStatusCompleted {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusCompleted)
+			transitionTerminal(store.AssistantRunStatusCompleted)
 			return
 		}
 		if errors.Is(resumeErr, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusAborted)
+			transitionTerminal(store.AssistantRunStatusAborted)
 			return
 		}
 		if resumeErr != nil {
-			_ = accumulator.SetStatus(context.Background(), store.AssistantRunStatusFailed)
+			transitionTerminal(store.AssistantRunStatusFailed)
 			return
 		}
 		_ = accumulator.SetStatus(context.Background(), resp.Status)
@@ -750,6 +767,29 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	runID := mux.Vars(r)["run"]
+	existingRun, getErr := s.store.GetAssistantRun(r.Context(), scope, runID)
+	if getErr != nil {
+		writeProjectError(w, getErr)
+		return
+	}
+	if s.authorizeProjectAssistantRunActor(r.Context(), scope, existingRun, id.user, false) != nil {
+		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
+		return
+	}
+	if existingRun.WorkItemID != "" {
+		stopped, found, stopErr := s.projectAssistantSupervisor().Stop(scope, runID)
+		if stopErr != nil {
+			writeProjectError(w, stopErr)
+			return
+		}
+		if !found {
+			writeStatus(w, http.StatusConflict, "Conflict", "assistant run is not active on this provider")
+			return
+		}
+		writeJSON(w, http.StatusAccepted, projectAssistantResumeResponse{RunID: stopped.ID, RequestID: stopped.RequestID, Status: stopped.Status, Decision: projectAssistantPermissionDeny})
+		return
+	}
 	if aborted, err := s.projectAssistantSupervisor().AbortWith(scope, mux.Vars(r)["run"], func(run *store.AssistantRun, message *store.Message) error {
 		if err := s.clearProjectAssistantApprovedPlan(r.Context(), scope); err != nil {
 			return fmt.Errorf("revoke App Studio workspace grant before abort: %w", err)
@@ -790,6 +830,137 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) stopProjectAssistant(w http.ResponseWriter, r *http.Request) {
+	_, id, p, ok := s.requireProjectWithClient(w, r)
+	if !ok {
+		return
+	}
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	runID := mux.Vars(r)["run"]
+	existingRun, err := s.store.GetAssistantRun(r.Context(), scope, runID)
+	if err != nil || s.authorizeProjectAssistantRunActor(r.Context(), scope, existingRun, id.user, false) != nil {
+		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
+		return
+	}
+	run, found, err := s.projectAssistantSupervisor().Stop(scope, runID)
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	if !found {
+		run, err = s.store.GetAssistantRun(r.Context(), scope, runID)
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		if !assistantRunTerminal(run.Status) {
+			writeStatus(w, http.StatusConflict, "Conflict", "assistant run is not active on this provider")
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, projectAssistantResumeResponse{
+		RunID:     run.ID,
+		RequestID: run.RequestID,
+		Status:    run.Status,
+	})
+}
+
+func (s *Server) authorizeProjectAssistantRunActor(ctx context.Context, scope store.Scope, run store.AssistantRun, actor string, requireActiveGrant bool) error {
+	origin, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
+	if err != nil || origin.ActorID != actor {
+		return store.ErrAssistantRunNotFound
+	}
+	if run.WorkItemID == "" {
+		return nil
+	}
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
+	if err != nil || item.CreatedBy != actor {
+		return store.ErrAssistantWorkItemNotFound
+	}
+	if requireActiveGrant && (item.ActiveRunID != run.ID || item.Status != store.AssistantWorkItemStatusActive || item.GrantRevision != run.ExpectedGrantRevision) {
+		return store.ErrAssistantWorkItemConflict
+	}
+	return nil
+}
+
+func (s *Server) listProjectAssistantWorkItems(w http.ResponseWriter, r *http.Request) {
+	_, id, p, ok := s.requireProjectWithClient(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.store.ListAssistantWorkItems(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p))
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	owned := make([]store.AssistantWorkItem, 0, len(items))
+	for _, item := range items {
+		if item.CreatedBy == id.user {
+			owned = append(owned, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, owned)
+}
+
+func (s *Server) getProjectAssistantWorkItem(w http.ResponseWriter, r *http.Request) {
+	_, id, p, ok := s.requireProjectWithClient(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.store.GetAssistantWorkItem(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p), mux.Vars(r)["workItem"])
+	if errors.Is(err, store.ErrAssistantWorkItemNotFound) || (err == nil && item.CreatedBy != id.user) {
+		writeStatus(w, http.StatusNotFound, "NotFound", "assistant work item not found")
+		return
+	}
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) cancelProjectAssistantWorkItem(w http.ResponseWriter, r *http.Request) {
+	_, id, p, ok := s.requireProjectWithClient(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Revision int64 `json:"revision"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	item, err := s.store.GetAssistantWorkItem(r.Context(), scope, mux.Vars(r)["workItem"])
+	if errors.Is(err, store.ErrAssistantWorkItemNotFound) || (err == nil && item.CreatedBy != id.user) {
+		writeStatus(w, http.StatusNotFound, "NotFound", "assistant work item not found")
+		return
+	}
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	if request.Revision != item.Revision || item.Status != store.AssistantWorkItemStatusSuspended || item.ActiveRunID != "" {
+		writeStatus(w, http.StatusConflict, "Conflict", "assistant work item is not cancellable at that revision")
+		return
+	}
+	item.Status = store.AssistantWorkItemStatusCancelled
+	item.StatusReason = "cancelled by user"
+	item.PlanGrant = nil
+	item.GrantRevision = ""
+	item.Revision = request.Revision + 1
+	item.UpdatedAt = time.Now().UTC()
+	if err := s.store.CompareAndSwapAssistantWorkItem(r.Context(), scope, item, request.Revision); err != nil {
+		if errors.Is(err, store.ErrAssistantWorkItemConflict) {
+			writeStatus(w, http.StatusConflict, "Conflict", "assistant work item changed")
+			return
+		}
+		writeProjectError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func projectAssistantClearPendingInterruptMetadata(message *store.Message, runID string) {

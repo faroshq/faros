@@ -102,6 +102,73 @@ func TestMemoryStoreWorkItemLifecycleAndGrantAreAtomic(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreStopAndGrantRevocationAreAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	item := testWorkItem("item-1", "user-1")
+	run := testWorkItemRun("run-1", item.ID, "user-1", "assistant-1")
+	created, err := s.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser("user-1"), testWorkItemAssistant("assistant-1"), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := s.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, created.Revision, "grant-1", json.RawMessage(`{"capabilities":["workspace_mutate"]}`), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopping, err := s.RequestAssistantRunStop(ctx, scope, item.ID, run.ID, approved.Revision, run.Revision, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopping.Status != AssistantRunStatusStopping || stopping.Revision != run.Revision+1 {
+		t.Fatalf("stopping run = %#v", stopping)
+	}
+	revoked, err := s.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked.GrantRevision != "" || len(revoked.PlanGrant) != 0 || revoked.Revision != approved.Revision+1 {
+		t.Fatalf("stopped WorkItem = %#v, want atomically revoked grant", revoked)
+	}
+}
+
+func TestMemoryStoreResumeWorkItemAndCreateAssistantRunIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	item := testWorkItem("item-1", "user-1")
+	first := testWorkItemRun("run-1", item.ID, "user-1", "assistant-1")
+	if _, err := s.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser("user-1"), testWorkItemAssistant("assistant-1"), first); err != nil {
+		t.Fatal(err)
+	}
+	first.Status = AssistantRunStatusInterrupted
+	first.Revision++
+	if err := s.TransitionWorkItemAndRun(ctx, scope, item.ID, 1, first, AssistantWorkItemStatusSuspended, "interrupted", time.Now().UTC()); err != nil {
+		t.Fatalf("suspend work item: %v", err)
+	}
+
+	nextUser := Message{ID: "user-2", Role: "user", ActorID: "actor-1", WorkItemID: item.ID, Content: "continue", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	nextAssistant := Message{ID: "assistant-2", Role: "assistant", WorkItemID: item.ID, CreatedAt: nextUser.CreatedAt, UpdatedAt: nextUser.UpdatedAt}
+	nextRun := AssistantRun{ID: "run-2", WorkItemID: item.ID, Mode: AssistantRunModeContinue, Status: AssistantRunStatusRunning, ClientRequestID: "request-2", UserMessageID: nextUser.ID, ActiveMessageID: nextAssistant.ID, Revision: 1, CreatedAt: nextUser.CreatedAt, UpdatedAt: nextUser.UpdatedAt}
+	resumed, err := s.ResumeWorkItemAndCreateAssistantRun(ctx, scope, item.ID, "actor-1", 2, nextUser, nextAssistant, nextRun)
+	if err != nil {
+		t.Fatalf("ResumeWorkItemAndCreateAssistantRun: %v", err)
+	}
+	if resumed.Status != AssistantWorkItemStatusActive || resumed.ActiveRunID != nextRun.ID || resumed.Revision != 3 {
+		t.Fatalf("resumed work item = %#v", resumed)
+	}
+	if _, err := s.GetAssistantRun(ctx, scope, nextRun.ID); err != nil {
+		t.Fatalf("continued run was not created: %v", err)
+	}
+	if _, err := s.ResumeWorkItemAndCreateAssistantRun(ctx, scope, item.ID, "other", resumed.Revision, nextUser, nextAssistant, nextRun); !errors.Is(err, ErrAssistantWorkItemConflict) {
+		t.Fatalf("wrong actor error = %v, want work item conflict", err)
+	}
+}
+
 func TestMemoryStoreRejectsImmutableWorkItemMembershipAndRunMode(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
