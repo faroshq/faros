@@ -126,15 +126,13 @@ session values, and checkpoint existence are never sufficient.
 - Reuse the durable server-owned `AssistantRun` and snapshot supervisor.
 - Make routing, continuation, grant use, suspension, and failure auditable.
 - Fail closed when the project, plan, actor, or work identity is stale.
-- Keep the first implementation compatible with the single-active-run project
-  contract.
+- Preserve the single-active-run project contract.
 
 ## Non-goals
 
 - Replacing Eino, DeepAgent, TurnLoop, or Eino checkpoint serialization.
 - Building a general workflow scheduler or background retry system.
 - Running multiple mutating WorkItems concurrently in one project.
-- Automatically inferring historical WorkItems from old transcripts.
 - Treating todos as authoritative workflow state.
 - Changing which development operations are automatically authorized by the
   existing goal-achieving transaction policy.
@@ -216,21 +214,28 @@ Add `app_studio_assistant_turns` with:
 - the normalized route/profile selected for the run; and
 - creation timestamp.
 
+The store enforces these relationships with check constraints and scoped
+foreign keys:
+
+- `new` and `continue` require `work_item_id` and forbid the resume tuple;
+- `resume` requires `work_item_id`, `run_id`, `request_id`, and `interrupt_id`;
+- `discussion` forbids the resume tuple and may reference a WorkItem only for
+  bounded read-only context; and
+- every referenced WorkItem and run must have the same tenant scope and Project
+  UID as the Turn.
+
 `Turn.kind` is durable audit data. A model may recommend a route, but it cannot
 change the Turn's relationship to a WorkItem, prove that the latest message
 explicitly requests mutation, or grant itself continuation.
 
 ### AssistantRun
 
-Add nullable `turn_id` and `work_item_id` to `AssistantRun`.
+Every AssistantRun requires `turn_id`. Its `work_item_id` is nullable only for
+discussion runs. Store validation requires the run's WorkItem ID to equal its
+Turn's WorkItem ID, including both being null for an unbound discussion.
 
-Add immutable `project_uid` to new message, Turn, and AssistantRun records.
-During migration, a legacy record is backfilled only when it can be proven to
-belong to the current Project incarnation, including a record timestamp no
-earlier than the Project creation time. Ambiguous records keep a null UID and
-are excluded from current Project endpoints. They may remain available through
-a read-only legacy archive, but they cannot be attached to new work, resumed,
-or used for authorization.
+Message, Turn, and AssistantRun records require immutable `project_uid` from
+their first write. The field is non-null and has no project-name-only fallback.
 
 `AssistantRun` remains the execution-attempt and snapshot record described by
 the conversation-resilience design. A WorkItem may have multiple runs over its
@@ -239,8 +244,9 @@ supervisor and database invariant.
 
 ### ApprovalGrant
 
-Replace the reserved project-wide `approved-plan-grant` AssistantRun with
-`app_studio_assistant_approval_grants`.
+Store grants in `app_studio_assistant_approval_grants`. The schema and runtime
+do not represent a grant as an AssistantRun or reserve an AssistantRun ID for
+grant state.
 
 Each grant records:
 
@@ -633,8 +639,8 @@ an ID with different content or a different WorkItem/Turn returns conflict; it
 cannot relink an earlier request to new authority.
 
 Every run snapshot includes `turnID`, nullable `workItemID`, WorkItem status,
-and safe failure reason. Legacy streaming adapters create the same durable Turn
-and WorkItem records before execution.
+and safe failure reason. Every streaming transport creates the same durable
+Turn and, when applicable, WorkItem records before execution.
 
 ## Current Implementation Seams
 
@@ -699,39 +705,21 @@ No new service, external broker, or second agent runtime is introduced.
 - Idempotency keys are bound to actor, Project UID, operation, and canonical
   request digest and cannot be replayed across WorkItems or Turns.
 
-## Migration and Compatibility
+## Deployment and Initialization
 
-The grant cutover uses two releases because a pre-migration binary will
-automatically load the reserved project-wide grant:
+This design targets net-new deployments with no pre-existing App Studio
+conversation, run, checkpoint, grant, or workspace data.
 
-1. **Compatibility release A:** add WorkItem, Turn, ApprovalGrant, and
-   WorkspaceState tables; nullable Project UID and WorkItem/Turn references on
-   legacy message/run rows; dual-read support; and a durable
-   `assistant_work_items_v1` capability marker. Release A understands both
-   marker states and gates every legacy reserved-grant read and write. When the
-   marker is enabled it refuses to load, create, or update
-   `approved-plan-grant` and uses the WorkItem grant path instead.
-2. Wait until every provider replica is on release A and verify that no older
-   writer remains.
-3. **Cutover release B:** initialize WorkspaceState for each current Project
-   UID, enable the durable marker, stop all legacy grant writes, retire reserved
-   `approved-plan-grant` rows, and switch new runs to WorkItem-scoped context
-   and grants.
-4. Do not infer WorkItems from historical transcript text, old todos, or
-   Project names. Leave completed/failed historical runs unassigned and
-   readable.
-5. Surface legacy pending checkpoints as **Legacy interrupted work**.
-   Continuing creates a reviewed WorkItem and requires fresh authorization
-   rather than guessing the old intent boundary.
-6. Remove historical escalation fallback and legacy grant code only after
-   cutover telemetry shows no legacy writer or reader.
-
-Release B may roll back to release A because A understands the enabled marker
-and will not recreate project-global authority. Rollback to a binary older than
-release A after the marker is enabled is unsupported; recovery requires a
-database restore taken before cutover or a forward fix. Deployment automation
-must enforce that minimum compatible version. The provider and portal deploy
-together.
+- The initial schema creates WorkItem, Turn, ApprovalGrant, WorkspaceState,
+  message, and AssistantRun storage in their final form.
+- Project UID is non-null on every project-scoped record from its first write.
+- Project creation calls `EnsureWorkspaceState`, and every assistant entry point
+  calls it under the per-Project execution fence before persisting a message,
+  Turn, grant, or run. The operation fast-paths a valid existing row or creates
+  it idempotently for the current Project UID, computes its initial
+  fingerprint, and fails closed if initialization or fingerprinting fails.
+- Grants exist only as WorkItem-scoped ApprovalGrant records.
+- Provider and portal versions deploy together against the same schema.
 
 ## Alternatives Considered
 
@@ -770,32 +758,25 @@ authorization, suspension, and stale-state recovery.
 
 ## Delivery Phases
 
-### Phase 0: Immediate containment
-
-- Make the latest message authoritative; history cannot escalate a route.
-- Default omitted turn operations to discussion and require explicit task
-  activation before mutation.
-- Do not load the legacy project-wide grant into an unrelated fresh run.
-- Revoke legacy grants on failed, aborted, stopped, provider-interrupted, and
-  completed runs; preserve only exact pending-interrupt resume scope.
-- Persist safe failure reasons.
-- Add the mutation-phase no-progress circuit breaker.
-
-### Phase 1: WorkItem and Turn persistence
+### Phase 1: Isolation foundation
 
 - Add WorkItem, Turn, immutable Project UID, WorkspaceState, store parity,
   encryption, CAS, and indexes.
+- Make the latest message authoritative; history cannot escalate a route.
+- Default omitted turn operations to discussion and require explicit task
+  activation before mutation.
 - Link new messages and runs to durable Turns and WorkItems.
 - Put every mutating tool behind the per-Project execution fence; add
   WorkspaceState advance, fingerprint, and target-digest checks to
   source-changing paths.
 - Assemble mutation context from the selected WorkItem instead of all recent
   project messages.
-- Migrate legacy state without semantic inference.
+- Persist safe failure reasons and add the mutation-phase no-progress circuit
+  breaker.
 
 ### Phase 2: WorkItem-scoped grants and portal controls
 
-- Replace the reserved grant row.
+- Add WorkItem-scoped grants with no project-global grant path.
 - Enforce actor, plan revision, path/capability, and project preconditions at
   the tool boundary.
 - Add proposed/active/suspended WorkItem UI, explicit Start/Continue/Resume,
@@ -855,10 +836,12 @@ Phase 3 is optional and must not delay the isolation boundary.
   returns conflict and cannot transfer authority.
 - Empty actor identity and cross-user continue/resume/cancel operations are
   rejected.
-- Legacy grants are retired and historical conversations are never converted
-  into guessed WorkItems.
-- After cutover and rollback from release B to release A, approving work cannot
-  read or recreate the reserved project-wide grant.
+- A clean deployment stores grants only as WorkItem-scoped ApprovalGrant
+  records and rejects any project-scoped write without Project UID.
+- A crash after Kubernetes Project creation but before SQL WorkspaceState
+  insertion is recovered by the next fenced `EnsureWorkspaceState`; fault
+  injection proves that no assistant record or run starts if initialization
+  fails.
 - Tenant isolation tests prove that WorkItems, Turns, grants, runs, and
   checkpoints cannot be read or resumed across organization/workspace/project
   scope.
@@ -869,13 +852,13 @@ Phase 3 is optional and must not delay the isolation boundary.
 
 | Layer | Required coverage |
 | --- | --- |
-| Store | WorkItem/Turn/grant/WorkspaceState CRUD, atomic CAS transitions, one-active-item index, immutable Project UID, encryption, retention, tenant scope |
+| Store | WorkItem/Turn/grant/WorkspaceState CRUD, Turn-kind presence constraints, Run/Turn WorkItem equality, atomic CAS transitions, one-active-item index, immutable Project UID, encryption, retention, tenant scope |
 | Router | Latest-message authority, proposal without authority, explicit activation/continuation, discussion cannot escalate |
 | Context | Only selected WorkItem messages enter mutation runs |
 | Authorization | Actor, revision, capability, path, Project UID, WorkspaceState/fingerprint, target digest, consumption, revocation, request idempotency |
 | Eino | Exact checkpoint resume, fresh continuation run, todos remain non-authoritative, session-value tampering cannot change authorization |
 | Supervisor | Every run terminal outcome updates WorkItem and grants atomically; pending runs block new starts; Stop versus file/commit/runtime/provider mutation orderings are fenced; fault injection proves no partial published transition |
 | Recovery | No-progress, iteration exhaustion, stale/recreated Project, workspace-write/CAS crash, unknown external outcome blocks activation until reconciliation |
-| Compatibility | Marker gates legacy grant reads and writes; B-to-A rollback approval cannot recreate `approved-plan-grant` |
+| Bootstrap | Clean schema requires Project UID, fenced `EnsureWorkspaceState` survives Project/SQL crash boundaries, and grants exist only as WorkItem-scoped ApprovalGrant records |
 | Portal | Proposed/active/suspended states, explicit Start/Resume/Stop/Discard, pending conflict, revision conflicts, multi-tab refresh |
 | Integration | Reproduce the incident sequence and prove the old quote task cannot enter the theme turn |
