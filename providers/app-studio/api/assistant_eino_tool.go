@@ -450,12 +450,7 @@ func (t projectEinoAssistantTool) invokeApprovedPlanTool(ctx context.Context, ca
 	if stored := t.runState.ApprovedPlan(); stored != nil {
 		persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
 		defer cancelPersist()
-		revision, err := t.server.persistProjectAssistantApprovedPlan(
-			persistCtx,
-			t.req.MessageScope,
-			stored,
-			t.runState.ApprovedPlanGrantRevision(),
-		)
+		revision, err := t.persistApprovedPlan(persistCtx, stored)
 		if err != nil {
 			t.runState.ClearApprovedPlan()
 			return "", fmt.Errorf("%w: persist approved App Studio plan: %v", errProjectAssistantPlanGrantPersistence, err)
@@ -511,12 +506,7 @@ func (t projectEinoAssistantTool) grantWriteUntilCommit(ctx context.Context, too
 	}
 	persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
 	defer cancelPersist()
-	revision, err := t.server.persistProjectAssistantApprovedPlan(
-		persistCtx,
-		t.req.MessageScope,
-		stored,
-		t.runState.ApprovedPlanGrantRevision(),
-	)
+	revision, err := t.persistApprovedPlan(persistCtx, stored)
 	if err != nil {
 		t.runState.ClearApprovedPlan()
 		return fmt.Errorf("%w: persist direct App Studio write approval: %v", errProjectAssistantPlanGrantPersistence, err)
@@ -524,6 +514,27 @@ func (t projectEinoAssistantTool) grantWriteUntilCommit(ctx context.Context, too
 		t.runState.SetApprovedPlanGrantRevision(revision)
 	}
 	return nil
+}
+
+func (t projectEinoAssistantTool) persistApprovedPlan(ctx context.Context, plan *projectAssistantApprovedPlan) (string, error) {
+	if t.req.AssistantRun != nil && t.req.AssistantRun.WorkItemID != "" {
+		return t.server.persistProjectAssistantWorkItemApprovedPlan(
+			ctx,
+			t.req.MessageScope,
+			t.req.Identity.user,
+			*t.req.AssistantRun,
+			plan,
+			t.runState.ApprovedPlanGrantRevision(),
+		)
+	}
+	// Direct unit-level engine callers predate durable WorkItems. Production
+	// mutation runs always take the WorkItem branch above.
+	return t.server.persistProjectAssistantApprovedPlan(
+		ctx,
+		t.req.MessageScope,
+		plan,
+		t.runState.ApprovedPlanGrantRevision(),
+	)
 }
 
 func (t projectEinoAssistantTool) appendBuilderEvent(eventType string) {

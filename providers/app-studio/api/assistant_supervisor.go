@@ -461,6 +461,84 @@ func (a *projectAssistantSnapshotAccumulator) UpdateRun(ctx context.Context, mut
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { mutate(&active.run) }, true)
 }
 
+// TransitionWorkItemTerminal commits the terminal run and its WorkItem
+// lifecycle change through the store's atomic boundary.
+func (a *projectAssistantSnapshotAccumulator) TransitionWorkItemTerminal(
+	ctx context.Context,
+	runStatus store.AssistantRunStatus,
+	itemStatus store.AssistantWorkItemStatus,
+	reason string,
+	mutateMessage func(*store.AssistantRun, *store.Message),
+) error {
+	if a == nil || a.supervisor == nil {
+		return errors.New("assistant snapshot accumulator not configured")
+	}
+	s := a.supervisor
+	s.mu.Lock()
+	active := s.runs[a.key]
+	if active == nil || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.ErrAssistantRunNotFound
+	}
+	active.transitionMu.Lock()
+	s.mu.Unlock()
+	defer active.transitionMu.Unlock()
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != active || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.ErrAssistantRunNotFound
+	}
+	if assistantRunTerminal(active.run.Status) {
+		s.mu.Unlock()
+		return nil
+	}
+	scope, workItemID := active.scope, active.run.WorkItemID
+	s.mu.Unlock()
+	if workItemID == "" {
+		return errors.New("terminal WorkItem transition requires a WorkItem run")
+	}
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, workItemID)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != active || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.ErrAssistantRunNotFound
+	}
+	active.run.Status = runStatus
+	active.run.Revision++
+	active.run.UpdatedAt = time.Now().UTC()
+	active.message.UpdatedAt = active.run.UpdatedAt
+	if mutateMessage != nil {
+		mutateMessage(&active.run, &active.message)
+	}
+	run, message := active.run, active.message
+	s.mu.Unlock()
+
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), projectMessagePersistTimeout)
+	err = s.store.TransitionWorkItemAndRun(persistCtx, scope, workItemID, item.Revision, run, itemStatus, reason, run.UpdatedAt)
+	if err == nil {
+		err = s.store.AppendMessage(persistCtx, scope, message)
+	}
+	cancel()
+	if err != nil {
+		s.recordPersistenceFailure(a.key, a.runID, err)
+		return fmt.Errorf("persist terminal WorkItem snapshot: %w", err)
+	}
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != nil && current.run.ID == a.runID && current.run.Revision == run.Revision {
+		current.committedRun, current.committedMessage = run, message
+		for _, subscriber := range current.subscribers {
+			s.sendCoalesced(subscriber, projectAssistantRunSnapshot{Run: run, Message: message})
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 // ClaimPending serializes the resume compare-and-swap with the rest of this
 // run's durable transitions. ClaimAssistantRun alone changes status without a
 // new snapshot revision, so publish a committed running revision only after

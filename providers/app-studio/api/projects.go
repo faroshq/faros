@@ -70,6 +70,43 @@ type CreateProjectMessageRequest struct {
 	Content              string `json:"content"`
 	ClientRequestID      string `json:"clientRequestID,omitempty"`
 	InitialProjectPrompt bool   `json:"initialProjectPrompt,omitempty"`
+	AssistantAction      string `json:"assistantAction,omitempty"`
+	WorkItemID           string `json:"workItemID,omitempty"`
+	WorkItemRevision     int64  `json:"workItemRevision,omitempty"`
+}
+
+type projectAssistantAction string
+
+const (
+	projectAssistantActionAsk      projectAssistantAction = "ask"
+	projectAssistantActionBuild    projectAssistantAction = "build"
+	projectAssistantActionContinue projectAssistantAction = "continue"
+)
+
+// assistantAction validates the explicit execution intent at the HTTP
+// boundary.  Omitting it preserves the safe, non-mutating discussion mode.
+func (r CreateProjectMessageRequest) assistantAction() (projectAssistantAction, error) {
+	action := projectAssistantAction(strings.ToLower(strings.TrimSpace(r.AssistantAction)))
+	if action == "" {
+		action = projectAssistantActionAsk
+	}
+	switch action {
+	case projectAssistantActionAsk:
+		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
+			return "", newValidationError("ask does not accept a work item")
+		}
+	case projectAssistantActionBuild:
+		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
+			return "", newValidationError("build creates a new work item")
+		}
+	case projectAssistantActionContinue:
+		if strings.TrimSpace(r.WorkItemID) == "" || r.WorkItemRevision <= 0 {
+			return "", newValidationError("continue requires workItemID and workItemRevision")
+		}
+	default:
+		return "", newValidationError("assistantAction must be ask, build, or continue")
+	}
+	return action, nil
 }
 
 type ProjectView struct {
@@ -532,7 +569,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.store != nil {
-		if err := s.store.DeleteProjectMessages(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, name)); err != nil {
+		if err := s.store.DeleteProjectMessages(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p)); err != nil {
 			klog.FromContext(r.Context()).Error(err, "delete project messages", "project", name)
 		}
 	}
@@ -550,7 +587,7 @@ func (s *Server) listProjectMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := listLimitFromRequest(r)
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-	page, err := msgStore.ListMessages(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), limit, cursor)
+	page, err := msgStore.ListMessages(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p), limit, cursor)
 	if err != nil {
 		writeProjectError(w, err)
 		return
@@ -662,7 +699,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	runID := mux.Vars(r)["run"]
 	run, err := s.store.GetAssistantRun(r.Context(), scope, runID)
 	if err != nil {
@@ -712,7 +749,7 @@ func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	if aborted, err := s.projectAssistantSupervisor().AbortWith(scope, mux.Vars(r)["run"], func(run *store.AssistantRun, message *store.Message) error {
 		if err := s.clearProjectAssistantApprovedPlan(r.Context(), scope); err != nil {
 			return fmt.Errorf("revoke App Studio workspace grant before abort: %w", err)
@@ -851,7 +888,7 @@ func (s *Server) streamProjectAssistantWithStart(
 	var streamedToolCalls []projectToolCallStreamEvent
 	var pendingPermissionToolCallID string
 	var pendingFollowUpToolCallID string
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	workspaceScope := projectWorkspaceScope(id, p.Name)
 	streamWriter := projectAssistantStreamWriter{
 		assistantID: assistantID,

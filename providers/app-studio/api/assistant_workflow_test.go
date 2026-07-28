@@ -78,6 +78,7 @@ func TestProjectAssistantInspectDevelopmentTemplatesGraphToolFiltersAndBoundsCat
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       identity{orgUUID: "org-a", workspaceUUID: "ws-1"},
 		Client:         asclient.NewFromDynamic(templateCatalogDynamicClient{items: []unstructured.Unstructured{*broken, *prodOnly, *withDev}}),
@@ -129,6 +130,7 @@ func TestProjectAssistantInspectDevelopmentTemplatesGraphToolReturnsEveryEligibl
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       identity{orgUUID: "org-a", workspaceUUID: "ws-1"},
 		Client:         asclient.NewFromDynamic(templateCatalogDynamicClient{items: templates}),
@@ -233,6 +235,7 @@ func TestProjectAssistantVerifyRuntimeGraphToolReturnsReadinessAndNoLogsWithoutB
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo"
 	project.Spec.Memory.Requirements = []string{"Show a working page"}
 	repo := &ProjectRepositoryView{Ref: "demo", Name: "demo", Status: projectRepositoryStatusReady}
@@ -360,6 +363,7 @@ func TestProjectAssistantWorkflowPlansFromMemoryRepositoryAndWorkspace(t *testin
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo App"
 	project.Spec.Memory = aiv1alpha1.ProjectMemory{
 		Goals:        []string{"ship a task tracker"},
@@ -405,6 +409,7 @@ func TestProjectAssistantReadinessWorkflowReportsContextWithoutTrace(t *testing.
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo App"
 	project.Spec.Memory.Requirements = []string{"ship a tested build"}
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
@@ -446,6 +451,7 @@ func TestProjectAssistantPrepareDeploymentWorkflowReportsBuildAndRuntimeReadines
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo App"
 	project.Spec.Memory.Requirements = []string{"ship a tested build"}
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
@@ -491,6 +497,7 @@ func TestProjectAssistantPrepareDeploymentWorkflowReportsBlockers(t *testing.T) 
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
 	raw := invokeProjectAssistantWorkflowGraphTool(t, server, id, projectToolPrepareProjectDeployment, project, nil, projectWorkspaceScope(id, project.Name), map[string]any{"includeFiles": false})
 	var prepared projectAssistantDeploymentPreparationResult
@@ -510,6 +517,7 @@ func TestProjectAssistantWorkflowDoesNotMutateWorkspace(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
 	scope := projectWorkspaceScope(id, project.Name)
 	if _, err := workspaces.WriteFile(context.Background(), scope, workspace.WriteOptions{Path: "README.md", Content: "# Demo\n"}); err != nil {
@@ -534,6 +542,7 @@ func TestProjectAssistantPrepareDeploymentWorkflowDoesNotMutateWorkspace(t *test
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
 	scope := projectWorkspaceScope(id, project.Name)
 	if _, err := workspaces.WriteFile(context.Background(), scope, workspace.WriteOptions{Path: "README.md", Content: "# Demo\n"}); err != nil {
@@ -580,6 +589,7 @@ func TestProjectAssistantRuntimeStatusAndPreviewWorkflowsReportNotConfiguredWith
 func TestProjectAssistantPreviewURLWorkflowIgnoresInternalAppStudioPreviewPath(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Status.Environments = []aiv1alpha1.ProjectEnvironmentStatus{{
 		Name: "development",
 		Bindings: []aiv1alpha1.ProjectProviderBindingStatus{{
@@ -618,6 +628,7 @@ func TestProjectAssistantPreviewURLWorkflowIgnoresInternalAppStudioPreviewPath(t
 func TestProjectAssistantPreviewURLWorkflowReturnsExternalPreviewURL(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Status.Environments = []aiv1alpha1.ProjectEnvironmentStatus{{
 		Name: "development",
 		Bindings: []aiv1alpha1.ProjectProviderBindingStatus{{
@@ -642,6 +653,7 @@ func TestProjectAssistantWorkflowBoundsLargeResultAsJSON(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = strings.Repeat("Demo App ", 80)
 	for i := 0; i < 80; i++ {
 		project.Spec.Memory.Goals = append(project.Spec.Memory.Goals, strings.Repeat("goal ", 80))

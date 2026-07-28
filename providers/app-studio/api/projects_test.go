@@ -58,7 +58,8 @@ func TestGenerateProjectAssistantStreamWithStartBypassesRouter(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
-	if err := appendProjectUserMessage(context.Background(), messages, projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), "Build a todo app"); err != nil {
+	project.UID = "test-project-uid-demo"
+	if err := appendProjectUserMessage(context.Background(), messages, testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), "Build a todo app"); err != nil {
 		t.Fatalf("append user message: %v", err)
 	}
 	server.assistantTurnRouter = func(context.Context, projectAssistantTurnRouteRequest) (projectAssistantTurnDecision, error) {

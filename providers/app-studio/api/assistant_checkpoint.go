@@ -584,7 +584,7 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 	if p == nil || strings.TrimSpace(p.Name) == "" {
 		return projectAssistantResumeResponse{}, fmt.Errorf("project is required")
 	}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	preflightRun, err := s.store.GetAssistantRun(ctx, messageScope, runID)
 	if err != nil {
 		return projectAssistantResumeResponse{}, err
@@ -735,7 +735,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	decision projectAssistantPermissionDecision,
 	out projectAssistantResumeResponse,
 ) (projectAssistantResumeResponse, error) {
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	turn := newProjectAssistantTurnItem(projectAssistantTurnResume, id, p.Name)
 	turn.RunID = run.ID
 	turn.RequestID = run.RequestID
@@ -1203,7 +1203,7 @@ func (s *Server) abortProjectAssistantRun(
 	if p == nil || strings.TrimSpace(p.Name) == "" {
 		return projectAssistantResumeResponse{}, fmt.Errorf("project is required")
 	}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name)
+	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	run, err := s.store.GetAssistantRun(ctx, messageScope, runID)
 	if err != nil {
 		return projectAssistantResumeResponse{}, err

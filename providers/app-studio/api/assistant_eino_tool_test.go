@@ -202,7 +202,7 @@ func TestEinoApprovePlanToolDerivesWorkspaceMutationCapability(t *testing.T) {
 	tool := projectEinoAssistantTool{
 		server: server,
 		req: projectAssistantRunRequest{
-			MessageScope: store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"},
+			MessageScope: store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"},
 		},
 		runState: runState,
 	}
@@ -242,7 +242,7 @@ func TestEinoApprovePlanToolDerivesWorkspaceMutationCapability(t *testing.T) {
 
 func TestEinoApprovePlanReplacesExpandedScopeInsteadOfUnioning(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	runState := newProjectEinoAssistantRunState()
 	runState.ApprovePlan(projectAssistantApprovedPlan{
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
@@ -282,7 +282,7 @@ func TestEinoApprovePlanReplacesExpandedScopeInsteadOfUnioning(t *testing.T) {
 
 func TestEinoApprovePlanToolFailsClosedOnGrantRevisionConflict(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	if err := server.clearProjectAssistantApprovedPlan(context.Background(), scope); err != nil {
 		t.Fatalf("clearProjectAssistantApprovedPlan returned error: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestEinoPendingLegacyPlanApprovalCannotBecomeCapabilityGrant(t *testing.T) 
 
 func TestEinoDirectWriteGrantFailsClosedOnGrantRevisionConflict(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	if err := server.clearProjectAssistantApprovedPlan(context.Background(), scope); err != nil {
 		t.Fatalf("clearProjectAssistantApprovedPlan returned error: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestEinoDirectWriteGrantFailsClosedOnGrantRevisionConflict(t *testing.T) {
 
 func TestEinoDirectWriteGrantAuthorizesCanonicalEditsOnlyOnApprovedPath(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	runState := newProjectEinoAssistantRunState()
 	tool := projectEinoAssistantTool{
 		server:   server,
@@ -389,7 +389,7 @@ func TestEinoDirectWriteGrantAuthorizesCanonicalEditsOnlyOnApprovedPath(t *testi
 
 func TestEinoDirectMkdirGrantAuthorizesChildEdits(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	runState := newProjectEinoAssistantRunState()
 	tool := projectEinoAssistantTool{
 		server:   server,
@@ -414,7 +414,7 @@ func TestEinoDirectMkdirGrantAuthorizesChildEdits(t *testing.T) {
 
 func TestEinoDirectWriteGrantDoesNotMergeObsoleteAuthority(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	runState := newProjectEinoAssistantRunState()
 	runState.ApprovePlan(projectAssistantApprovedPlan{
 		TargetPaths:    []string{"secrets/"},
@@ -444,10 +444,11 @@ func TestEinoToolReplansWhenPersistedGrantDoesNotCoverAutoApprovedWrite(t *testi
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:           id,
 		Project:            project,
-		MessageScope:       projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:       testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		AutoApproveActions: true,
 	}
 	stalePlan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
@@ -583,10 +584,11 @@ func TestEinoToolFailsClosedWhenPersistedGrantCannotBeRetired(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:           id,
 		Project:            project,
-		MessageScope:       projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:       testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		AutoApproveActions: true,
 	}
 	stalePlan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
@@ -646,10 +648,11 @@ func TestEinoCommitRetiresPersistedGrantBeforeRepositoryMutation(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:     id,
 		Project:      project,
-		MessageScope: projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope: testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 	}
 	plan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
 		Summary:      "Update the application.",
@@ -807,6 +810,7 @@ func TestEinoToolSchedulesDevelopmentSyncAfterMutatingTool(t *testing.T) {
 	}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	tool := projectEinoAssistantTool{
 		server: server,
 		tool:   localTool,

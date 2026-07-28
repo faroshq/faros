@@ -79,6 +79,73 @@ func (s *Server) loadProjectAssistantApprovedPlan(ctx context.Context, scope sto
 	return plan
 }
 
+// loadProjectAssistantWorkItemApprovedPlan is the mutation-run authority
+// boundary. A run may only recover the grant owned by its exact WorkItem,
+// creator, and expected grant revision.
+func (s *Server) loadProjectAssistantWorkItemApprovedPlan(
+	ctx context.Context,
+	scope store.Scope,
+	actor string,
+	run store.AssistantRun,
+) (*projectAssistantApprovedPlan, string, error) {
+	if s == nil || s.store == nil || strings.TrimSpace(run.WorkItemID) == "" {
+		return nil, "", nil
+	}
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(actor) == "" || item.CreatedBy != actor || item.ActiveRunID != run.ID ||
+		item.Status != store.AssistantWorkItemStatusActive {
+		return nil, "", store.ErrAssistantWorkItemConflict
+	}
+	if run.ExpectedGrantRevision != item.GrantRevision {
+		return nil, item.GrantRevision, errProjectAssistantCheckpointGrantStale
+	}
+	if len(item.PlanGrant) == 0 {
+		return nil, item.GrantRevision, nil
+	}
+	var plan projectAssistantApprovedPlan
+	if err := json.Unmarshal(item.PlanGrant, &plan); err != nil {
+		return nil, item.GrantRevision, fmt.Errorf("decode WorkItem plan grant: %w", err)
+	}
+	normalized := normalizeProjectAssistantApprovedPlan(plan)
+	if !projectAssistantApprovedPlanActive(&normalized) {
+		return nil, item.GrantRevision, nil
+	}
+	return &normalized, item.GrantRevision, nil
+}
+
+func (s *Server) persistProjectAssistantWorkItemApprovedPlan(
+	ctx context.Context,
+	scope store.Scope,
+	actor string,
+	run store.AssistantRun,
+	plan *projectAssistantApprovedPlan,
+	expectedRevision string,
+) (string, error) {
+	if s == nil || s.store == nil || plan == nil || plan.RunLocal || run.WorkItemID == "" {
+		return "", nil
+	}
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
+	if err != nil {
+		return "", err
+	}
+	if actor == "" || item.CreatedBy != actor || item.ActiveRunID != run.ID ||
+		item.Status != store.AssistantWorkItemStatusActive || item.GrantRevision != strings.TrimSpace(expectedRevision) {
+		return "", store.ErrAssistantWorkItemConflict
+	}
+	raw, err := json.Marshal(normalizeProjectAssistantApprovedPlan(*plan))
+	if err != nil {
+		return "", err
+	}
+	revision := uuid.NewString()
+	if _, err := s.store.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, item.Revision, revision, raw, time.Now().UTC()); err != nil {
+		return "", err
+	}
+	return revision, nil
+}
+
 func (s *Server) loadProjectAssistantApprovedPlanGrant(
 	ctx context.Context,
 	scope store.Scope,

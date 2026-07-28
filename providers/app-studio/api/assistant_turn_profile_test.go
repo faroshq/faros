@@ -250,6 +250,7 @@ func TestProjectAssistantTurnProfileClassifierKeepsStandingIntent(t *testing.T) 
 func TestProjectAssistantModePromptsKeepDiscussionAndGuidanceToolFree(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 
@@ -285,6 +286,7 @@ func TestProjectAssistantModePromptsKeepDiscussionAndGuidanceToolFree(t *testing
 func TestProjectAssistantModePromptsPutBuilderGuidanceOnlyOnWriteProfiles(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 
@@ -332,6 +334,7 @@ func TestProjectAssistantModePromptsPutBuilderGuidanceOnlyOnWriteProfiles(t *tes
 func TestProjectAssistantPromptTreatsBoundTemplateAsEnvironmentContract(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.Template = &aiv1alpha1.ProjectTemplateSpec{Name: "application"}
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 
@@ -352,6 +355,7 @@ func TestProjectAssistantPromptTreatsBoundTemplateAsEnvironmentContract(t *testi
 func TestProjectAssistantPromptRequiresEvidenceForProductCapabilities(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 
@@ -383,6 +387,7 @@ func TestProjectAssistantPromptRequiresEvidenceForProductCapabilities(t *testing
 func TestProjectAssistantPromptFramesAppStudioAsBusinessUserEasyButton(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 
@@ -409,6 +414,7 @@ func TestProjectAssistantPromptFramesAppStudioAsBusinessUserEasyButton(t *testin
 func TestProjectAssistantPromptExplainsTemplateAgentUsageFitDecision(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true}
 

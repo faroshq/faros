@@ -709,7 +709,7 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 				tt.req.WorkspaceScope = workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
 			}
 			if tt.req.MessageScope == (store.Scope{}) {
-				tt.req.MessageScope = store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+				tt.req.MessageScope = store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 			}
 
 			_, err := engine.StreamProjectAssistant(context.Background(), tt.req)
@@ -1425,6 +1425,7 @@ func TestEinoAssistantEngineAddsProjectSnapshotToInput(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo App"
 	project.Spec.Memory.Requirements = []string{"ship a tested build"}
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
@@ -1679,13 +1680,14 @@ func TestEinoAssistantEngineAsksFollowUpThroughEinoInterrupt(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.Memory.Requirements = []string{"ship a tested build"}
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		Project:        project,
 		Repository:     &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true},
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
 	if _, err := workspaces.WriteFile(context.Background(), req.WorkspaceScope, workspace.WriteOptions{Path: "package.json", Content: `{"scripts":{"build":"vite build","test":"vitest"}}`}); err != nil {
@@ -1896,6 +1898,7 @@ func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	var assistantEvents []projectAssistantEvent
 	var toolEvents []projectToolCallStreamEvent
 	_, err := engine.StreamProjectAssistant(
@@ -1904,7 +1907,7 @@ func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
 			Identity:       id,
 			Project:        project,
 			WorkspaceScope: projectWorkspaceScope(id, project.Name),
-			MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+			MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 			StreamCallbacks: projectAssistantStreamCallbacks{
 				OnAssistantEvent: func(event projectAssistantEvent) {
 					assistantEvents = append(assistantEvents, event)
@@ -1928,7 +1931,7 @@ func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
 	if projectToolEventsWithStatus(toolEvents, "permission_required") != 1 {
 		t.Fatalf("tool events = %#v, want exactly one permission-required tool event", toolEvents)
 	}
-	run, err := messages.GetAssistantRun(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), permissionErr.RunID)
+	run, err := messages.GetAssistantRun(context.Background(), testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), permissionErr.RunID)
 	if err != nil {
 		t.Fatalf("GetAssistantRun returned error: %v", err)
 	}
@@ -1969,12 +1972,13 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	var assistantEvents []projectAssistantEvent
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		TurnProfile:    projectAssistantTurnProfileImplementation,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
 		StreamCallbacks: projectAssistantStreamCallbacks{
@@ -2050,13 +2054,14 @@ func TestEinoAssistantEngineRejectsHiddenDirectWriteToolBeforeInvocation(t *test
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	writeCompletions := 0
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 		TurnProfile:    projectAssistantTurnProfileImplementation,
 		StreamCallbacks: projectAssistantStreamCallbacks{OnToolCall: func(event projectToolCallStreamEvent) {
@@ -2128,6 +2133,7 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	var assistantEvents []projectAssistantEvent
 	var toolEvents []projectToolCallStreamEvent
 	result, err := engine.StreamProjectAssistant(
@@ -2137,7 +2143,7 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 			Project:            project,
 			Workspace:          workspaces,
 			WorkspaceScope:     projectWorkspaceScope(id, project.Name),
-			MessageScope:       projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+			MessageScope:       testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 			AutoApproveActions: true,
 			TurnProfile:        projectAssistantTurnProfileImplementation,
 			TurnPolicy:         projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
@@ -2206,7 +2212,8 @@ func TestEinoAssistantEngineInitialCreationPlanAllowsWriteWithoutPersistingGrant
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	project.UID = "test-project-uid-demo"
+	scope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	_, err := engine.StreamProjectAssistant(context.Background(), projectAssistantRunRequest{
 		Identity:            id,
 		Project:             project,
@@ -2259,12 +2266,13 @@ func TestEinoAssistantEnginePlanApprovalAllowsScopedWriteOnResume(t *testing.T) 
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
 
@@ -2320,7 +2328,7 @@ func TestEinoAssistantEnginePlanApprovalAllowsScopedWriteOnResume(t *testing.T) 
 
 func TestEinoAssistantEngineRejectsPendingApprovalAfterGrantRevisionChanges(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	if err := server.clearProjectAssistantApprovedPlan(context.Background(), scope); err != nil {
 		t.Fatalf("clearProjectAssistantApprovedPlan returned error: %v", err)
 	}
@@ -2386,12 +2394,13 @@ func TestEinoAssistantEnginePersistedPlanGrantSkipsApprovalOnNewTurn(t *testing.
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
 
@@ -2474,12 +2483,13 @@ func TestEinoAssistantEngineCommitRequestConsumesApprovedPlan(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
 
@@ -2601,20 +2611,21 @@ func TestEinoAssistantEngineCheckpointsDynamicJSONToolCallMetadata(t *testing.T)
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	_, err := engine.StreamProjectAssistant(
 		context.Background(),
 		projectAssistantRunRequest{
 			Identity:       id,
 			Project:        project,
 			WorkspaceScope: projectWorkspaceScope(id, project.Name),
-			MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+			MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		},
 	)
 	var permissionErr *projectAssistantPermissionRequiredError
 	if !errors.As(err, &permissionErr) {
 		t.Fatalf("StreamProjectAssistant error = %v, want permission required", err)
 	}
-	run, err := messages.GetAssistantRun(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), permissionErr.RunID)
+	run, err := messages.GetAssistantRun(context.Background(), testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), permissionErr.RunID)
 	if err != nil {
 		t.Fatalf("GetAssistantRun returned error: %v", err)
 	}
@@ -2652,12 +2663,13 @@ func TestEinoAssistantEngineResumesApprovedToolThroughTurnLoop(t *testing.T) {
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		HTTPRequest:    httptest.NewRequest(http.MethodPost, "/", nil),
 		Project:        project,
 		WorkspaceScope: projectWorkspaceScope(id, project.Name),
-		MessageScope:   projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
+		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
 	_, err := engine.StreamProjectAssistant(context.Background(), req)
@@ -2722,6 +2734,7 @@ func TestEinoAssistantEngineReturnsUnknownToolResultToModel(t *testing.T) {
 	}
 	project := &aiv1alpha1.Project{}
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	var toolEvents []projectToolCallStreamEvent
 	result, err := engine.StreamProjectAssistant(
 		context.Background(),
@@ -3698,13 +3711,14 @@ func stringSliceContains(values []string, target string) bool {
 func projectEinoRunRequestForProfileTest(profile projectAssistantTurnProfile) projectAssistantRunRequest {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo"
 	return projectAssistantRunRequest{
 		Identity:       identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
 		Project:        project,
 		Repository:     &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true},
 		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
-		MessageScope:   store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+		MessageScope:   store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"},
 		TurnProfile:    profile,
 	}
 }

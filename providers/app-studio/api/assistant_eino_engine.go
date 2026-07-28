@@ -98,7 +98,20 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 	// A new chat message starts a fresh run, so seed the plan-approval grant
 	// that a previous turn earned. Without this the model re-requests approval
 	// every turn even though the grant is meant to last until the next commit.
-	if e.server != nil {
+	if e.server != nil && req.AssistantRun != nil && req.AssistantRun.WorkItemID != "" &&
+		projectAssistantTurnProfileAllowsMutation(req.TurnProfile) {
+		grant, revision, err := e.server.loadProjectAssistantWorkItemApprovedPlan(ctx, req.MessageScope, req.Identity.user, *req.AssistantRun)
+		if err != nil {
+			return projectAssistantRunResult{}, fmt.Errorf("load assistant plan grant: %w", err)
+		}
+		runState.SetApprovedPlanGrantRevision(revision)
+		if grant != nil {
+			runState.ApprovePlan(*grant)
+		}
+	} else if e.server != nil && req.AssistantRun == nil {
+		// Unit-level engine callers without a durable run retain the legacy
+		// harness. HTTP execution always supplies a durable run and therefore
+		// can never enter this project-wide authority path.
 		grant, revision, err := e.server.loadProjectAssistantApprovedPlanGrant(ctx, req.MessageScope)
 		if err != nil {
 			return projectAssistantRunResult{}, fmt.Errorf("load assistant plan grant: %w", err)

@@ -295,10 +295,11 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "ship the demo"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -368,10 +369,11 @@ func TestGenerateProjectAssistantStreamDiscoversDatabricksToolsForDataTableQuest
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "Can you query the sales.orders table and show me its columns?"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -458,10 +460,11 @@ func TestGenerateProjectAssistantStreamFiltersDatabricksToolsOnUnrelatedImplemen
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "Fix the button styling and commit it."); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -523,10 +526,11 @@ func TestGenerateProjectAssistantStreamSkipsDatabricksDiscoveryForGenericTables(
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "Render a table of todos in the app."); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -582,10 +586,11 @@ func TestGenerateProjectAssistantStreamDiscoversInfrastructureTemplatesForInfraQ
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "What infrastructure templates can I deploy?"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -652,10 +657,11 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 	}
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "Show me the current preview URL"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -707,6 +713,7 @@ func TestGenerateProjectAssistantStreamHonorsRuntimeStateRouterDecision(t *testi
 func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) {
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	project.Spec.DisplayName = "Demo Project"
 	repository := &ProjectRepositoryView{
 		Ref:    "demo-repo",
@@ -750,6 +757,7 @@ func TestProjectAssistantDoesNotAdvertiseLegacyRuntimeCommandTools(t *testing.T)
 	toolNames := strings.Join(projectChatToolNames(registry.ChatTools(true)), "\n")
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo-project"
+	project.UID = "test-project-uid-demo-project"
 	prompt := projectSystemPrompt(project, &ProjectRepositoryView{
 		Ref:    "demo-repo",
 		Name:   "demo",
@@ -1237,7 +1245,7 @@ func TestGenerateProjectAssistantStreamRequestsPermissionForWriteTool(t *testing
 	}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
-	messageScope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	messageScope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write a file"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -1256,6 +1264,7 @@ func TestGenerateProjectAssistantStreamRequestsPermissionForWriteTool(t *testing
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
 
 	var events []projectAssistantEvent
@@ -1322,7 +1331,7 @@ func TestStreamProjectAssistantPersistsPermissionTimelineMessage(t *testing.T) {
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write a file"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -1339,6 +1348,7 @@ func TestStreamProjectAssistantPersistsPermissionTimelineMessage(t *testing.T) {
 	}}})
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	rr := httptest.NewRecorder()
 	flusher, ok := startProjectMessageStream(rr)
 	if !ok {
@@ -1402,7 +1412,7 @@ func TestStreamProjectAssistantPersistsPermissionTimelineAfterStreamWriteFailure
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write a file"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -1419,6 +1429,7 @@ func TestStreamProjectAssistantPersistsPermissionTimelineAfterStreamWriteFailure
 	}}})
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	stream := &failingProjectStreamResponseWriter{header: http.Header{}}
 
 	server.streamProjectAssistantWithStart(
@@ -1740,7 +1751,7 @@ func startVerifiedEinoCommitPermissionForTest(
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
 		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
 	})
-	if err := server.saveProjectAssistantApprovedPlan(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), &grant); err != nil {
+	if err := server.saveProjectAssistantApprovedPlan(context.Background(), testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), &grant); err != nil {
 		t.Fatalf("saveProjectAssistantApprovedPlan returned error: %v", err)
 	}
 	return startEinoPermissionWithConfiguredModelForTest(t, server, messages, id, project, prompt, model, nil)
@@ -1759,7 +1770,7 @@ func startEinoPermissionWithConfiguredModelForTest(
 	t.Helper()
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if strings.TrimSpace(prompt) == "" {
 		prompt = "approve tool"
 	}
@@ -1811,8 +1822,9 @@ func TestResumeProjectAssistantRunApprovesPendingTool(t *testing.T) {
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
 	call.Function.Name = projectToolWriteFile
@@ -1922,8 +1934,9 @@ func TestResumeProjectAssistantRunRepairsPrePatchCheckpointMessageIdentity(t *te
 			server := NewWithWorkspace(nil, messages, workspaces, "", false)
 			project := projectWithRepository("demo-repo", "demo", "github")
 			project.Name = "demo"
+			project.UID = "test-project-uid-demo"
 			id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-			messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+			messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 			call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
 			call.Function.Name = projectToolWriteFile
 			call.Function.Arguments = `{"path":"src/App.tsx","content":"approved\n"}`
@@ -2000,6 +2013,7 @@ func TestResumeProjectAssistantRunIgnoresStaleAssistantMessageID(t *testing.T) {
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
@@ -2043,8 +2057,9 @@ func TestResumeProjectAssistantRunIgnoresMismatchedAssistantMessageID(t *testing
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
 	call.Function.Name = projectToolWriteFile
@@ -2115,8 +2130,9 @@ func TestResumeProjectAssistantRunDeniesPendingToolAndUpdatesMessage(t *testing.
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
 	call.Function.Name = projectToolWriteFile
 	call.Function.Arguments = `{"path":"src/App.tsx","content":"denied\n"}`
@@ -2202,8 +2218,9 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "build an app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -2309,8 +2326,9 @@ func TestResumeProjectAssistantRunRejectsEmptyFollowUpBeforeClaimingRun(t *testi
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "build an app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -2358,8 +2376,9 @@ func TestResumeProjectAssistantRunClearsStaleFollowUpMessageWhenRunAlreadyClaime
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	runID := "run-stale-follow-up"
 	requestID := "input-stale-follow-up"
 	assistantMessageID := "msg-stale-follow-up"
@@ -2467,8 +2486,9 @@ func TestResumeProjectAssistantRunCompletesRunWhenContinuationLLMFailsAfterTool(
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write src/app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -2532,8 +2552,9 @@ func TestAbortProjectAssistantRunMarksPendingRunAborted(t *testing.T) {
 			server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 			project := projectWithRepository("demo-repo", "demo", "github")
 			project.Name = "demo"
+			project.UID = "test-project-uid-demo"
 			id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-			messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+			messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 			run := store.AssistantRun{
 				ID:         "run-1",
 				Status:     status,
@@ -2582,8 +2603,9 @@ func TestAbortProjectAssistantRunUnknownRunPreservesWorkspaceGrant(t *testing.T)
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	scope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	grant := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
 		TargetPaths:  []string{"src/"},
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
@@ -2606,8 +2628,9 @@ func TestAbortProjectAssistantRunClearsPendingAssistantMessageMetadata(t *testin
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	permission := projectAssistantPermission{
 		ID:       "req-1",
 		ToolName: projectToolWriteFile,
@@ -2704,6 +2727,7 @@ func TestResumeProjectAssistantRunClaimsBeforeCommitSideEffects(t *testing.T) {
 	server := NewWithWorkspace(nil, messages, workspaces, mcp.URL, false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	if err := workspaces.ApplyFiles(context.Background(), workspaceScope, []workspace.File{
@@ -2776,8 +2800,9 @@ func TestResumeProjectAssistantRunPersistsAssistantTextBeforeNextPause(t *testin
 			server := NewWithWorkspace(nil, messages, workspaces, "", false)
 			project := projectWithRepository("demo-repo", "demo", "github")
 			project.Name = "demo"
+			project.UID = "test-project-uid-demo"
 			id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-			messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+			messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 			firstCall := chatStreamingCall{Index: 0, ID: "call-first-write", Type: "function"}
 			firstCall.Function.Name = projectToolWriteFile
 			firstCall.Function.Arguments = `{"path":"src/App.tsx","content":"first\n"}`
@@ -2889,8 +2914,9 @@ func TestResumeProjectAssistantRunDirectWriteApprovalRepromptsForDifferentPath(t
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 
 	firstCall := chatStreamingCall{Index: 0, ID: "call-first-write", Type: "function"}
@@ -2991,8 +3017,9 @@ func TestResumeProjectAssistantRunRejectsStaleRepositoryBinding(t *testing.T) {
 	server := NewWithWorkspace(nil, messages, workspaces, mcp.URL, false)
 	project := projectWithRepository("old-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	if err := workspaces.ApplyFiles(context.Background(), workspaceScope, []workspace.File{{Path: "src/App.tsx", Content: "approved\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
@@ -3078,7 +3105,7 @@ func TestResumeProjectAssistantRunPreemptsToolBatchAfterApprovedPermission(t *te
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write files"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -3115,6 +3142,7 @@ func TestResumeProjectAssistantRunPreemptsToolBatchAfterApprovedPermission(t *te
 	}}
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	setProjectAssistantModelWithReachableVerificationForTest(server, model)
 
 	_, err := server.generateProjectAssistantStreamWithStart(
@@ -3166,7 +3194,7 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
+	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, "demo")
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "write src/app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -3211,6 +3239,7 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 	setProjectAssistantModelWithReachableVerificationForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 
 	_, err := server.generateProjectAssistantStreamWithStart(
 		httptest.NewRequest(http.MethodPost, "/", nil),
@@ -3605,7 +3634,7 @@ func runProjectAssistantStreamWithModel(t *testing.T, model *repositoryFlowEinoC
 	}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	if err := appendProjectUserMessage(context.Background(), messages, scope, "write a hello app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
@@ -3624,6 +3653,7 @@ func runProjectAssistantStreamWithModel(t *testing.T, model *repositoryFlowEinoC
 	setProjectAssistantModelForTest(server, model)
 	project := projectWithRepository("demo-repo", "demo", "github")
 	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
 	project.Spec.DisplayName = "Demo"
 
 	reply, err := server.generateProjectAssistantStream(

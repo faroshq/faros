@@ -305,17 +305,39 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		return "", cause
 	}
 	r = r.WithContext(ctx)
-	recent, err := s.store.LoadRecentMessages(ctx, projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name), 24)
+	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	durable, hasDurableRun := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun)
+	var recent []store.Message
+	switch {
+	case hasDurableRun && durable.WorkItemID != "":
+		recent, err = s.store.LoadMessagesForWorkItem(ctx, messageScope, durable.WorkItemID, 24)
+	case hasDurableRun && durable.UserMessageID != "":
+		current, findErr := s.findProjectMessage(ctx, messageScope, durable.UserMessageID)
+		if findErr != nil {
+			return "", findErr
+		}
+		recent = []store.Message{current}
+	default:
+		recent, err = s.store.LoadRecentMessages(ctx, messageScope, 24)
+	}
 	if err != nil {
 		return "", err
 	}
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
-	turnDecision, err := projectAssistantTurnDecisionForStreamStart(ctx, s.projectAssistantTurnRouter(), projectAssistantTurnRouteRequest{
-		LLM:     settings,
-		History: recent,
-	}, start)
-	if err != nil {
-		return "", err
+	var turnDecision projectAssistantTurnDecision
+	switch {
+	case hasDurableRun && durable.Mode == store.AssistantRunModeDiscussion:
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDiscussion)
+	case hasDurableRun && (durable.Mode == store.AssistantRunModeNew || durable.Mode == store.AssistantRunModeContinue):
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
+	default:
+		turnDecision, err = projectAssistantTurnDecisionForStreamStart(ctx, s.projectAssistantTurnRouter(), projectAssistantTurnRouteRequest{
+			LLM:     settings,
+			History: recent,
+		}, start)
+		if err != nil {
+			return "", err
+		}
 	}
 	turnPolicy := projectAssistantTurnPolicyForDecision(turnDecision)
 	// The router decides which tool bundles this turn gets; a silent
@@ -332,7 +354,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		Repository:               projectRepositoryView(ctx, c, p),
 		WorkspaceScope:           projectWorkspaceScope(id, p.Name),
 		Workspace:                s.workspaces,
-		MessageScope:             projectMessageScope(id.orgUUID, id.workspaceUUID, p.Name),
+		MessageScope:             messageScope,
 		LLM:                      settings,
 		History:                  recent,
 		MCPBaseURL:               s.hubBase,
@@ -342,7 +364,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
 	}
-	if durable, ok := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun); ok {
+	if hasDurableRun {
 		durableCopy := durable
 		req.AssistantRun = &durableCopy
 		req.snapshotAccumulator = s.projectAssistantSupervisor().accumulatorFor(req.MessageScope, durable.ID)
