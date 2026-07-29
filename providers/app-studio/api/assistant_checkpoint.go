@@ -48,8 +48,13 @@ type projectAssistantCheckpointState struct {
 	LastToolMessages          []chatMessage                        `json:"lastToolMessages,omitempty"`
 	ApprovedPlan              *projectAssistantApprovedPlan        `json:"approvedPlan,omitempty"`
 	ApprovedPlanGrantRevision string                               `json:"approvedPlanGrantRevision,omitempty"`
+	ExecutionPlan             *projectAssistantApprovedPlan        `json:"executionPlan,omitempty"`
+	ExecutionPlanRevision     string                               `json:"executionPlanRevision,omitempty"`
+	PlanProgress              projectAssistantPlanSnapshot         `json:"planProgress,omitempty"`
 	SourceMutationRevision    uint64                               `json:"sourceMutationRevision,omitempty"`
 	VerifiedMutationRevision  uint64                               `json:"verifiedMutationRevision,omitempty"`
+	VerificationAttempted     bool                                 `json:"verificationAttempted,omitempty"`
+	VerificationOutcome       string                               `json:"verificationOutcome,omitempty"`
 	SessionSnapshot           *projectEinoAssistantSessionSnapshot `json:"sessionSnapshot,omitempty"`
 	Eino                      *projectAssistantEinoCheckpointState `json:"eino,omitempty"`
 }

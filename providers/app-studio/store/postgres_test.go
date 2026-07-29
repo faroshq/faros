@@ -178,6 +178,24 @@ func TestPostgresStoreWorkItemContractExternalDSN(t *testing.T) {
 		t.Fatalf("cleared plan grant = %s, want empty JSON object", persistedCleared.PlanGrant)
 	}
 	created = cleared
+	executionPlan := json.RawMessage(`{"summary":"Build it","steps":[{"id":"one"}]}`)
+	planned, err := s.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, created.Revision, "execution-plan-1", executionPlan, now.Add(45*time.Second))
+	if err != nil {
+		t.Fatalf("SaveWorkItemExecutionPlan: %v", err)
+	}
+	var rawExecutionPlan []byte
+	var rawExecutionPlanRevision string
+	if err := s.db.QueryRowContext(ctx, `SELECT execution_plan, execution_plan_revision
+		FROM app_studio_assistant_work_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID,
+	).Scan(&rawExecutionPlan, &rawExecutionPlanRevision); err != nil {
+		t.Fatalf("read raw execution plan columns: %v", err)
+	}
+	if rawExecutionPlanRevision != "execution-plan-1" || !jsonSemanticallyEqual(rawExecutionPlan, executionPlan) {
+		t.Fatalf("raw execution plan = %s revision=%q", rawExecutionPlan, rawExecutionPlanRevision)
+	}
+	created = planned
 	approved, err := s.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, created.Revision, "grant-1", json.RawMessage(`{"capabilities":["workspace_mutate"]}`), now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ApproveWorkItemPlan: %v", err)
@@ -375,6 +393,11 @@ func TestWorkItemSchemaResetPrecedesFinalSchemaStatements(t *testing.T) {
 	if clientRequestUniqueSchemaVersion == messageSchemaVersion ||
 		!schemaStatementsContain(clientRequestUniqueSchemaStatements(), "CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx") {
 		t.Fatal("client request uniqueness must also have an independently applied migration for existing schemas")
+	}
+	if executionPlanSchemaVersion == messageSchemaVersion ||
+		!schemaStatementsContain(executionPlanSchemaStatements(), "ADD COLUMN IF NOT EXISTS execution_plan jsonb") ||
+		!schemaStatementsContain(executionPlanSchemaStatements(), "ADD COLUMN IF NOT EXISTS execution_plan_revision text") {
+		t.Fatal("execution-plan columns must have an independently applied additive migration")
 	}
 	steps := append(append([]string(nil), reset...), final...)
 	for i, stmt := range steps {

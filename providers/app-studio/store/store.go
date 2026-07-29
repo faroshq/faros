@@ -149,19 +149,21 @@ const (
 // AssistantWorkItem is the durable owner of a user-selected mutation task and
 // its cross-run plan grant.
 type AssistantWorkItem struct {
-	ID            string                  `json:"id"`
-	ProjectName   string                  `json:"projectName,omitempty"`
-	ProjectUID    string                  `json:"projectUID,omitempty"`
-	RootMessageID string                  `json:"rootMessageID"`
-	CreatedBy     string                  `json:"createdBy"`
-	Status        AssistantWorkItemStatus `json:"status"`
-	StatusReason  string                  `json:"statusReason,omitempty"`
-	Revision      int64                   `json:"revision"`
-	ActiveRunID   string                  `json:"activeRunID,omitempty"`
-	PlanGrant     json.RawMessage         `json:"planGrant,omitempty"`
-	GrantRevision string                  `json:"grantRevision,omitempty"`
-	CreatedAt     time.Time               `json:"createdAt"`
-	UpdatedAt     time.Time               `json:"updatedAt"`
+	ID                    string                  `json:"id"`
+	ProjectName           string                  `json:"projectName,omitempty"`
+	ProjectUID            string                  `json:"projectUID,omitempty"`
+	RootMessageID         string                  `json:"rootMessageID"`
+	CreatedBy             string                  `json:"createdBy"`
+	Status                AssistantWorkItemStatus `json:"status"`
+	StatusReason          string                  `json:"statusReason,omitempty"`
+	Revision              int64                   `json:"revision"`
+	ActiveRunID           string                  `json:"activeRunID,omitempty"`
+	PlanGrant             json.RawMessage         `json:"planGrant,omitempty"`
+	GrantRevision         string                  `json:"grantRevision,omitempty"`
+	ExecutionPlan         json.RawMessage         `json:"executionPlan,omitempty"`
+	ExecutionPlanRevision string                  `json:"executionPlanRevision,omitempty"`
+	CreatedAt             time.Time               `json:"createdAt"`
+	UpdatedAt             time.Time               `json:"updatedAt"`
 }
 
 // Page is an ordered slice of messages plus the next cursor for pagination.
@@ -186,6 +188,7 @@ type Store interface {
 	GetAssistantWorkItem(ctx context.Context, scope Scope, id string) (AssistantWorkItem, error)
 	ListAssistantWorkItems(ctx context.Context, scope Scope) ([]AssistantWorkItem, error)
 	CompareAndSwapAssistantWorkItem(ctx context.Context, scope Scope, item AssistantWorkItem, expectedRevision int64) error
+	SaveWorkItemExecutionPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, executionPlanRevision string, executionPlan json.RawMessage, now time.Time) (AssistantWorkItem, error)
 	ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error)
 	RetireWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID, actor string, expectedWorkItemRevision int64, expectedGrantRevision, tombstoneGrantRevision string, now time.Time) (AssistantWorkItem, error)
 	RequestAssistantRunStop(ctx context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error)

@@ -662,7 +662,7 @@ func (s *Server) createProjectStartStream(w http.ResponseWriter, r *http.Request
 	// Project exists, its first prompt enters the same durable start boundary as
 	// every later turn, so closing this SSE cannot cancel execution or create a
 	// second user message.
-	s.startAndStreamLegacyProjectAssistant(w, r, c, id, created, req.Prompt, "legacy-create-"+uuid.NewString(), projectAssistantStreamStartForCreatePreflight(preflight))
+	s.startAndStreamLegacyProjectAssistant(w, r, c, id, created, req.Prompt, "legacy-create-"+uuid.NewString(), projectAssistantStreamStartForCreatePreflight(preflight, req.Prompt))
 }
 
 func (s *Server) createProjectMessageStream(w http.ResponseWriter, r *http.Request) {
@@ -1106,11 +1106,11 @@ type projectAssistantStreamStart struct {
 	InitialApprovedPlan *projectAssistantApprovedPlan
 }
 
-func projectAssistantStreamStartForCreatePreflight(preflight projectCreatePreflight) *projectAssistantStreamStart {
+func projectAssistantStreamStartForCreatePreflight(preflight projectCreatePreflight, goal string) *projectAssistantStreamStart {
 	decision := preflight.TurnDecision
 	start := &projectAssistantStreamStart{TurnDecision: &decision}
 	if decision.RequestsMutation && projectAssistantTurnProfileAllowsMutation(decision.Profile) {
-		start.InitialApprovedPlan = ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan())
+		start.InitialApprovedPlan = ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan(goal))
 	}
 	return start
 }
@@ -2036,6 +2036,83 @@ func emptyProjectMemory() aiv1alpha1.ProjectMemory {
 		Requirements: []string{},
 		Constraints:  []string{},
 	}
+}
+
+const initialProjectMemoryUpdateAttempts = 3
+
+// persistInitialProjectMemory records the user's original creation goal and the
+// acceptance criteria from the auto-authorized initial execution plan. The
+// update is additive: users may edit project memory independently, so conflicts
+// are resolved by re-reading and merging rather than overwriting their values.
+func persistInitialProjectPlanMemory(
+	ctx context.Context,
+	c *asclient.Client,
+	project *aiv1alpha1.Project,
+	goal string,
+	requirements []string,
+) error {
+	if c == nil || project == nil {
+		return errors.New("project client and project are required")
+	}
+	goal = strings.TrimSpace(goal)
+	requirements = normalizeProjectMemoryEntries(requirements)
+	if goal == "" || len(requirements) == 0 {
+		return errors.New("initial project goal and requirements are required")
+	}
+
+	current := project.DeepCopy()
+	var lastErr error
+	for attempt := 0; attempt < initialProjectMemoryUpdateAttempts; attempt++ {
+		current.Spec.Memory.Goals = appendUniqueProjectMemoryEntries(current.Spec.Memory.Goals, []string{goal})
+		current.Spec.Memory.Requirements = appendUniqueProjectMemoryEntries(current.Spec.Memory.Requirements, requirements)
+		updated, err := c.Projects().Update(ctx, current, metav1.UpdateOptions{})
+		if err == nil {
+			*project = *updated
+			return nil
+		}
+		lastErr = err
+		if !apierrors.IsConflict(err) {
+			break
+		}
+		current, err = c.Projects().Get(ctx, project.Name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("reload project memory after conflict: %w", err)
+		}
+	}
+	return fmt.Errorf("persist initial project memory: %w", lastErr)
+}
+
+func appendUniqueProjectMemoryEntries(existing, additions []string) []string {
+	out := normalizeProjectMemoryEntries(existing)
+	seen := make(map[string]struct{}, len(out)+len(additions))
+	for _, entry := range out {
+		seen[entry] = struct{}{}
+	}
+	for _, entry := range normalizeProjectMemoryEntries(additions) {
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func normalizeProjectMemoryEntries(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func newMessageID() string {

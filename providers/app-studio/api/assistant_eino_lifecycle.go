@@ -75,7 +75,7 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 			}
 		case name == projectToolVerifyDevelopmentRuntime:
 			if m.runState != nil {
-				m.runState.RecordDevelopmentVerification(projectEinoAssistantVerificationReady(result))
+				m.runState.RecordDevelopmentVerificationResult(result)
 			}
 		}
 		return result, nil

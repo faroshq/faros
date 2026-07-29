@@ -48,8 +48,13 @@ type projectAssistantApprovedPlanGrantRecord struct {
 // Eino run/checkpoint only; unlike a user-approved plan it is never written to
 // the cross-turn grant store. Permission policy limits it to source edits and
 // always requires separate template-selection and commit approval.
-func projectAssistantInitialCreationPlan() projectAssistantApprovedPlan {
+func projectAssistantInitialCreationPlan(goal ...string) projectAssistantApprovedPlan {
+	initialGoal := ""
+	if len(goal) > 0 {
+		initialGoal = strings.TrimSpace(goal[0])
+	}
 	return normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Goal:         initialGoal,
 		Summary:      "Initial project creation prompt authorizes source edits for this run.",
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
 		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},

@@ -113,6 +113,49 @@ func TestProjectEinoAssistantLifecycleVerificationErrorInvalidatesPriorSuccess(t
 	}
 }
 
+func TestProjectEinoAssistantCompletionEvidenceRequiresPlanProgressAndLatestVerification(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	plan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Goal:               "Build the app.",
+		Steps:              []string{"Build", "Verify"},
+		TargetPaths:        []string{"src/"},
+		Version:            projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities:       []string{projectAssistantCapabilityWorkspaceMutate},
+		AcceptanceCriteria: []string{"Preview is ready"},
+		RunLocal:           true,
+	})
+	state.SetExecutionPlan(plan, "plan-1")
+	state.SetPlanProgress(projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Build", Status: "completed"},
+		{Content: "Verify", Status: "completed"},
+	}})
+	state.RecordSourceMutation()
+	state.RecordDevelopmentVerificationResult(`{"status":"provisioning"}`)
+
+	evidence := state.CompletionEvidence()
+	if !evidence.PlanDefined || !evidence.PlanComplete || evidence.LatestMutationVerified {
+		t.Fatalf("provisioning evidence = %#v", evidence)
+	}
+	if evidence.VerificationOutcome != "provisioning" || !stringSliceContains(evidence.Blockers, "runtime provisioning") {
+		t.Fatalf("provisioning outcome = %#v, want explicit blocker", evidence)
+	}
+
+	state.RecordDevelopmentVerificationResult(`{"status":"ready"}`)
+	evidence = state.CompletionEvidence()
+	if !evidence.PlanDefined || !evidence.PlanComplete || !evidence.LatestMutationVerified ||
+		evidence.VerificationOutcome != "ready" || len(evidence.Blockers) != 0 {
+		t.Fatalf("ready evidence = %#v", evidence)
+	}
+
+	state.SetPlanProgress(projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Something else", Status: "completed"},
+		{Content: "Verify", Status: "completed"},
+	}})
+	if evidence = state.CompletionEvidence(); evidence.PlanComplete || state.ExecutionPlanComplete() {
+		t.Fatalf("mismatched todo progress satisfied durable plan: %#v", evidence)
+	}
+}
+
 func wrapProjectEinoAssistantLifecycleTool(
 	t *testing.T,
 	middleware adk.ChatModelAgentMiddleware,

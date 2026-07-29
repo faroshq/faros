@@ -44,7 +44,7 @@ const (
 	projectEinoAssistantSummaryContextTokens    = 24000
 	projectEinoAssistantClosingEvidenceMaxItems = 64
 	projectEinoAssistantSummaryInstruction      = "Summarize this App Studio project session for the next builder turn. Preserve user requirements, accepted plans, files touched or inspected, unresolved questions, repository/runtime state, and any constraints. Keep it concise and operational."
-	projectEinoAssistantDeepInstruction         = "Use only the currently exposed App Studio tools; do not assume shell, browser, host filesystem, or subagent access. Source mutations require an approved target-path grant and successful development verification before commit. For multi-step approved source work, use write_todos to keep a concise user-facing progress plan current; keep exactly one step in progress, never include secrets or raw tool data, and remember that todos track progress but grant no authority. Runtime, infrastructure, and repository effects use their exact tools and approval boundaries. Keep changes minimal and focused on the user's request. Treat successful whole-file writes as authoritative; do not reread them unless a later result shows a conflict or failure. Batch independent reads, inspect existing content before editing, and report blockers honestly instead of calling unrelated tools. Finish with a concise evidence-based result."
+	projectEinoAssistantDeepInstruction         = "Use only the currently exposed App Studio tools; do not assume shell, browser, host filesystem, or subagent access. For a new project's initial build, first call define_initial_project_plan; this internal plan is auto-authorized and must include concrete acceptance criteria. Source mutations require an approved target-path grant and successful development verification before commit. For multi-step source work, use write_todos to keep the visible execution-plan progress current; keep exactly one step in progress, mark every step complete only when its outcome is satisfied, never include secrets or raw tool data, and remember that todos track progress but grant no authority. Runtime, infrastructure, and repository effects use their exact tools and approval boundaries. Never tell the user to approve or authorize a phase unless you have actually called a permission-bearing tool and App Studio created a pending permission request. Repair defects found by verification inside the same objective; do not invent a next phase for unfinished work. Keep changes minimal and focused on the user's request. Treat successful whole-file writes as authoritative; do not reread them unless a later result shows a conflict or failure. Batch independent reads, inspect existing content before editing, and report blockers honestly instead of calling unrelated tools. Finish with a concise evidence-based result."
 	projectEinoAssistantNoOutputFallback        = "I couldn't produce a response for that turn. Please try again or rephrase the request, and I can continue from the current project context."
 )
 
@@ -115,6 +115,29 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 		if grant != nil {
 			runState.ApprovePlan(*grant)
 		}
+		item, itemErr := e.server.store.GetAssistantWorkItem(ctx, req.MessageScope, req.AssistantRun.WorkItemID)
+		if itemErr != nil {
+			return projectAssistantRunResult{}, fmt.Errorf("load assistant execution plan: %w", itemErr)
+		}
+		if len(item.ExecutionPlan) > 0 {
+			var executionPlan projectAssistantApprovedPlan
+			if err := json.Unmarshal(item.ExecutionPlan, &executionPlan); err != nil {
+				return projectAssistantRunResult{}, fmt.Errorf("decode assistant execution plan: %w", err)
+			}
+			executionPlan = normalizeProjectAssistantApprovedPlan(executionPlan)
+			if executionPlan.RunLocal && strings.TrimSpace(executionPlan.Goal) != "" {
+				runState.SetExecutionPlan(executionPlan, item.ExecutionPlanRevision)
+				runState.ApprovePlan(executionPlan)
+				if progress, ok := projectEinoAssistantLatestPlanProgress(req.History); ok {
+					runState.SetPlanProgress(progress)
+				}
+				if projectEinoAssistantHistoryHasSourceMutation(req.History) {
+					runState.RecordSourceMutation()
+				}
+			}
+		} else if goal, ok := projectEinoAssistantInitialBuildGoal(req.History); ok {
+			runState.ApprovePlan(projectAssistantInitialCreationPlan(goal))
+		}
 	} else if e.server != nil && req.AssistantRun == nil {
 		// Unit-level engine callers without a durable run retain the legacy
 		// harness. HTTP execution always supplies a durable run and therefore
@@ -146,6 +169,58 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 	turn.ProjectUID = req.MessageScope.ProjectUID
 	result, runErr := e.runProjectAssistantTurnLoop(ctx, req, runState, checkpointStore, checkpointID, []projectAssistantTurnItem{turn})
 	return result, e.finishProjectAssistantRunAudit(ctx, req, auditRecorder, runErr)
+}
+
+func projectEinoAssistantLatestPlanProgress(history []store.Message) (projectAssistantPlanSnapshot, bool) {
+	for index := len(history) - 1; index >= 0; index-- {
+		message := history[index]
+		if message.Metadata == nil {
+			continue
+		}
+		plan, ok := projectAssistantPlanSnapshotFromMetadata(message.Metadata[projectAssistantMetadataPlan])
+		if ok && plan != nil && len(plan.Steps) > 0 {
+			return cloneProjectAssistantPlanSnapshot(*plan), true
+		}
+	}
+	return projectAssistantPlanSnapshot{}, false
+}
+
+func projectEinoAssistantHistoryHasSourceMutation(history []store.Message) bool {
+	for index := len(history) - 1; index >= 0; index-- {
+		message := history[index]
+		if message.Metadata == nil {
+			continue
+		}
+		actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
+		for _, action := range actions {
+			if action.Kind == projectAssistantActionFeedItemEdit &&
+				action.Status == projectAssistantActionFeedStatusSucceeded {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func projectEinoAssistantInitialBuildGoal(history []store.Message) (string, bool) {
+	initialBuild := false
+	for _, message := range history {
+		if marker, _ := message.Metadata[projectAssistantMetadataInitialBuild].(bool); marker {
+			initialBuild = true
+			break
+		}
+	}
+	if !initialBuild {
+		return "", false
+	}
+	for _, message := range history {
+		if message.Role == "user" {
+			if goal := strings.TrimSpace(message.Content); goal != "" {
+				return goal, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (e projectEinoAssistantEngine) ResumeProjectAssistant(
@@ -642,14 +717,34 @@ func (e projectEinoAssistantEngine) runProjectAssistantTurnLoop(
 		if ctx.Err() == nil && projectEinoAssistantBoundedExit(exit.ExitReason) {
 			outcome.result.Content = e.projectAssistantToolLoopFinalAnswer(ctx, req, runState)
 		}
-		return outcome.result, exit.ExitReason
+		return projectEinoAssistantResultWithCompletion(outcome.result, runState), exit.ExitReason
 	}
 	if !outcome.receivedOutput {
-		return projectAssistantRunResult{
+		return projectEinoAssistantResultWithCompletion(projectAssistantRunResult{
 			Content: projectEinoAssistantBoundedClosingFallback("No usable assistant response was produced for this turn."),
-		}, errProjectAssistantNoOutput
+		}, runState), errProjectAssistantNoOutput
 	}
-	return outcome.result, nil
+	return projectEinoAssistantResultWithCompletion(outcome.result, runState), nil
+}
+
+func projectEinoAssistantResultWithCompletion(
+	result projectAssistantRunResult,
+	runState *projectEinoAssistantRunState,
+) projectAssistantRunResult {
+	if runState == nil {
+		return result
+	}
+	result.InitialPlan, _ = runState.ExecutionPlan()
+	if result.InitialPlan != nil && strings.TrimSpace(result.InitialPlan.Goal) != "" {
+		result.InitialBuild = true
+	} else if authority := runState.ApprovedPlan(); authority != nil &&
+		authority.RunLocal &&
+		authority.ApprovalTool == "project_create_prompt" &&
+		strings.TrimSpace(authority.Goal) != "" {
+		result.InitialBuild = true
+	}
+	result.CompletionEvidence = runState.CompletionEvidence()
+	return result
 }
 
 func projectEinoAssistantResumeTurnItem(items []projectAssistantTurnItem) (projectAssistantTurnItem, []projectAssistantTurnItem, bool) {

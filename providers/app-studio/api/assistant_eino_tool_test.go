@@ -1361,6 +1361,37 @@ func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *test
 	}
 }
 
+func TestProjectAssistantInitialExecutionPlanRequiresAcceptanceCriteriaAndBoundsWrites(t *testing.T) {
+	_, err := projectAssistantInitialExecutionPlanFromArguments("Build Whisker Swipe.", map[string]any{
+		"summary":     "Build the app",
+		"steps":       []any{"Create the UI"},
+		"targetPaths": []any{"src/"},
+	})
+	if err == nil {
+		t.Fatal("initial execution plan without acceptance criteria succeeded")
+	}
+
+	plan, err := projectAssistantInitialExecutionPlanFromArguments("Build Whisker Swipe.", map[string]any{
+		"summary":            "Build the app",
+		"steps":              []any{"Create the UI", "Verify the preview"},
+		"targetPaths":        []any{"src/", "package.json"},
+		"acceptanceCriteria": []any{"The preview is ready"},
+	})
+	if err != nil {
+		t.Fatalf("projectAssistantInitialExecutionPlanFromArguments: %v", err)
+	}
+	if plan.Goal != "Build Whisker Swipe." || !plan.RunLocal || plan.AllowAllWrites ||
+		plan.ApprovalTool != projectToolDefineInitialProjectPlan {
+		t.Fatalf("initial execution plan = %#v", plan)
+	}
+	if !projectAssistantApprovedPlanAllowsWrite(&plan, projectToolWriteFile, map[string]any{"path": "src/App.tsx"}) {
+		t.Fatal("defined target path was not authorized")
+	}
+	if projectAssistantApprovedPlanAllowsWrite(&plan, projectToolWriteFile, map[string]any{"path": "api/index.js"}) {
+		t.Fatal("out-of-plan path was authorized")
+	}
+}
+
 func TestRefreshProjectToolSnapshotKeepsSelfAliasedProject(t *testing.T) {
 	project := &aiv1alpha1.Project{
 		ObjectMeta: metav1.ObjectMeta{

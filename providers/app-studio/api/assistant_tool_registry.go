@@ -133,6 +133,17 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 	return newProjectAssistantToolRegistry(
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
+				Name:        projectToolDefineInitialProjectPlan,
+				Description: "Define or revise the auto-authorized execution plan for a new project's initial build. Call this before source mutations and again only when a verification-driven repair requires additional target paths.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","minLength":1,"description":"Short summary of the initial build."},"steps":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":12,"description":"Concrete implementation and verification steps."},"targetPaths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":50,"description":"Project-relative files or directories the initial build may create or modify. Directories must end with /."},"acceptanceCriteria":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":12,"description":"Observable outcomes required before the initial build can complete."}},"required":["summary","steps","targetPaths","acceptanceCriteria"]}`),
+				Risk:        projectAssistantToolRiskPlan,
+			},
+			call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+				return "", errors.New("initial project planning is handled by the Eino assistant run state")
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
 				Name:        projectToolAskFollowUp,
 				Description: "Ask the user concise follow-up questions when App Studio needs missing product or implementation details before continuing.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"questions":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":3,"description":"Concise questions the user should answer before the assistant continues."}},"required":["questions"]}`),

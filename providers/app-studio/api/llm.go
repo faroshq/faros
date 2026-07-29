@@ -80,6 +80,7 @@ const (
 	projectToolSetRuntimeEnv                  = "set_runtime_env"
 	projectToolAskFollowUp                    = "ask_follow_up"
 	projectToolRequestProjectPlanApproval     = "request_project_plan_approval"
+	projectToolDefineInitialProjectPlan       = "define_initial_project_plan"
 	projectToolWriteFile                      = "write_file"
 	projectToolApplyPatch                     = "apply_patch"
 	projectToolMkdir                          = "mkdir"
@@ -281,36 +282,48 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	callbacks projectAssistantStreamCallbacks,
 	start *projectAssistantStreamStart,
 ) (string, error) {
+	result, err := s.generateProjectAssistantResultWithStart(r, id, c, p, callbacks, start)
+	return result.Content, err
+}
+
+func (s *Server) generateProjectAssistantResultWithStart(
+	r *http.Request,
+	id identity,
+	c *asclient.Client,
+	p *aiv1alpha1.Project,
+	callbacks projectAssistantStreamCallbacks,
+	start *projectAssistantStreamStart,
+) (projectAssistantRunResult, error) {
 	ctx := r.Context()
 	if s.store == nil {
-		return "", fmt.Errorf("project message store not configured")
+		return projectAssistantRunResult{}, fmt.Errorf("project message store not configured")
 	}
 	settings, err := readProjectLLMSettings(ctx, c)
 	if err != nil {
-		return "", err
+		return projectAssistantRunResult{}, err
 	}
 	if err := normalizeProjectLLMSettings(&settings); err != nil {
-		return "", err
+		return projectAssistantRunResult{}, err
 	}
 	if strings.TrimSpace(settings.APIKey) == "" {
-		return "", errProjectLLMNotConfigured
+		return projectAssistantRunResult{}, errProjectLLMNotConfigured
 	}
 	if id.orgUUID == "" || id.workspaceUUID == "" {
-		return "", errors.New("tenant context missing")
+		return projectAssistantRunResult{}, errors.New("tenant context missing")
 	}
 	turn := newProjectAssistantTurnItem(projectAssistantTurnMessage, id, p.Name)
 	turn.ProjectUID = string(p.UID)
 	ctx, finishTurn := s.projectAssistantRunManager().Begin(ctx, turn)
 	defer finishTurn()
 	if cause := context.Cause(ctx); cause != nil {
-		return "", cause
+		return projectAssistantRunResult{}, cause
 	}
 	r = r.WithContext(ctx)
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	durable, hasDurableRun := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun)
 	recent, err := s.loadProjectAssistantTurnMessages(ctx, messageScope, durable, hasDurableRun)
 	if err != nil {
-		return "", err
+		return projectAssistantRunResult{}, err
 	}
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
 	var turnDecision projectAssistantTurnDecision
@@ -325,7 +338,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 			History: recent,
 		}, start)
 		if routeErr != nil {
-			return "", routeErr
+			return projectAssistantRunResult{}, routeErr
 		}
 		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileAdaptive)
 		turnDecision.RequiresRuntimeState = advisory.RequiresRuntimeState
@@ -338,7 +351,7 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 			History: recent,
 		}, start)
 		if err != nil {
-			return "", err
+			return projectAssistantRunResult{}, err
 		}
 	}
 	turnPolicy := projectAssistantTurnPolicyForDecision(turnDecision)
@@ -384,11 +397,11 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	result, err := s.projectAssistantEngine().StreamProjectAssistant(ctx, req)
 	if err != nil {
 		if projectEinoAssistantBoundedExit(err) {
-			return result.Content, err
+			return result, err
 		}
-		return "", err
+		return projectAssistantRunResult{}, err
 	}
-	return result.Content, nil
+	return result, nil
 }
 
 func projectAssistantRoutingAudit(run store.AssistantRun, hasDurableRun bool, decision projectAssistantTurnDecision) (string, string, string, projectAssistantTurnConfidence) {

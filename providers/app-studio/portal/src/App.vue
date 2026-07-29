@@ -59,6 +59,7 @@ import {
   mergeConversationSnapshot,
   newFirstProjectSubmission,
   normalizeSnapshotMessage,
+  orderConversationMessages,
   replaceOptimisticUserMessage,
   type AssistantRun,
 } from './conversationResilience'
@@ -2646,7 +2647,7 @@ function applyPermissionResponse(projectName: string, interrupt: ProjectAssistan
 }
 
 function projectMessagesForConversation(source: ProjectMessageView[]): ProjectMessageView[] {
-  return source
+  return orderConversationMessages(source)
 }
 
 function toProjectMessageView(message: ProjectMessage): ProjectMessageView {

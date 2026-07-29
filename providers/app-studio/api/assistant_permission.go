@@ -50,6 +50,19 @@ func projectAssistantPermissionForToolWithRunState(spec projectAssistantToolSpec
 		return projectAssistantPermissionAllow
 	case projectAssistantToolRiskPlan:
 		var proposedPlan projectAssistantApprovedPlan
+		if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
+			if runState == nil {
+				return projectAssistantPermissionDeny
+			}
+			activePlan := runState.ApprovedPlan()
+			if activePlan == nil || !activePlan.RunLocal {
+				return projectAssistantPermissionDeny
+			}
+			if _, err := projectAssistantInitialExecutionPlanFromArguments(activePlan.Goal, args); err != nil {
+				return projectAssistantPermissionDeny
+			}
+			return projectAssistantPermissionAllow
+		}
 		if projectToolBaseName(spec.Name) == projectToolRequestProjectPlanApproval {
 			var err error
 			proposedPlan, err = projectAssistantApprovedPlanFromArguments(args)
@@ -72,6 +85,12 @@ func projectAssistantPermissionForToolWithRunState(spec projectAssistantToolSpec
 	case projectAssistantToolRiskWrite:
 		if projectAssistantApprovedPlanAllowsWrite(runState.ApprovedPlan(), spec.Name, args) {
 			return projectAssistantPermissionAllow
+		}
+		if activePlan := runState.ApprovedPlan(); activePlan != nil &&
+			activePlan.RunLocal &&
+			activePlan.ApprovalTool == projectToolDefineInitialProjectPlan &&
+			projectAssistantPlanCanAuthorizeWriteTool(spec.Name) {
+			return projectAssistantPermissionReplan
 		}
 		if autoApprove {
 			if strings.TrimSpace(spec.Name) == projectToolSelectTemplate {
@@ -114,6 +133,16 @@ func projectAssistantPermissionForApprovalMode(
 	case projectAssistantToolRiskRead, projectAssistantToolRiskInput:
 		return projectAssistantPermissionAllow
 	case projectAssistantToolRiskPlan:
+		if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
+			activePlan := runState.ApprovedPlan()
+			if activePlan == nil || !activePlan.RunLocal {
+				return projectAssistantPermissionDeny
+			}
+			if _, err := projectAssistantInitialExecutionPlanFromArguments(activePlan.Goal, args); err != nil {
+				return projectAssistantPermissionDeny
+			}
+			return projectAssistantPermissionAllow
+		}
 		if projectToolBaseName(spec.Name) == projectToolRequestProjectPlanApproval {
 			if _, err := projectAssistantApprovedPlanFromArguments(args); err != nil {
 				return projectAssistantPermissionDeny

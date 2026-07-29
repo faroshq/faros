@@ -500,6 +500,40 @@ func (s *MemoryStore) CompareAndSwapAssistantWorkItem(_ context.Context, scope S
 	return nil
 }
 
+func (s *MemoryStore) SaveWorkItemExecutionPlan(_ context.Context, scope Scope, workItemID, runID string, expectedRevision int64, executionPlanRevision string, executionPlan json.RawMessage, now time.Time) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	workItemID = strings.TrimSpace(workItemID)
+	runID = strings.TrimSpace(runID)
+	executionPlanRevision = strings.TrimSpace(executionPlanRevision)
+	if workItemID == "" || runID == "" || expectedRevision < 1 || executionPlanRevision == "" || len(executionPlan) == 0 {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item, run, revision, and execution plan are required", ErrAssistantWorkItemConflict)
+	}
+	if !json.Valid(executionPlan) {
+		return AssistantWorkItem{}, fmt.Errorf("work item execution plan is not valid json")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.workItems[scope][workItemID]
+	if !ok || item.Revision != expectedRevision || item.Status != AssistantWorkItemStatusActive || item.ActiveRunID != runID {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+	}
+	run, ok := s.assistantRuns[scope][runID]
+	if !ok || run.WorkItemID != workItemID || run.Status != AssistantRunStatusRunning {
+		return AssistantWorkItem{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	item.ExecutionPlan = cloneRawMessage(executionPlan)
+	item.ExecutionPlanRevision = executionPlanRevision
+	item.Revision++
+	item.UpdatedAt = now.UTC()
+	s.workItems[scope][workItemID] = item
+	return cloneAssistantWorkItem(item), nil
+}
+
 func (s *MemoryStore) ApproveWorkItemPlan(_ context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error) {
 	if err := scope.validate(); err != nil {
 		return AssistantWorkItem{}, err
@@ -998,6 +1032,7 @@ func cloneAssistantRun(run AssistantRun) AssistantRun {
 
 func cloneAssistantWorkItem(item AssistantWorkItem) AssistantWorkItem {
 	item.PlanGrant = cloneRawMessage(item.PlanGrant)
+	item.ExecutionPlan = cloneRawMessage(item.ExecutionPlan)
 	return item
 }
 
@@ -1042,6 +1077,7 @@ func prepareAssistantWorkItem(scope Scope, item AssistantWorkItem) AssistantWork
 	item.ProjectName = scope.ProjectName
 	item.ProjectUID = scope.ProjectUID
 	item.PlanGrant = cloneRawMessage(item.PlanGrant)
+	item.ExecutionPlan = cloneRawMessage(item.ExecutionPlan)
 	return item
 }
 
@@ -1049,8 +1085,8 @@ func validateWorkItemCreate(item AssistantWorkItem, user Message, assistant Mess
 	if item.ID == "" || item.RootMessageID == "" || item.CreatedBy == "" || item.Status != AssistantWorkItemStatusActive {
 		return fmt.Errorf("active work item id, root message, and creator are required")
 	}
-	if len(item.PlanGrant) != 0 || item.GrantRevision != "" || run.ExpectedGrantRevision != "" {
-		return fmt.Errorf("new work item cannot contain a plan grant")
+	if len(item.PlanGrant) != 0 || item.GrantRevision != "" || run.ExpectedGrantRevision != "" || len(item.ExecutionPlan) != 0 || item.ExecutionPlanRevision != "" {
+		return fmt.Errorf("new work item cannot contain a plan grant or execution plan")
 	}
 	if user.ID != item.RootMessageID || user.Role != "user" || user.ActorID != item.CreatedBy {
 		return fmt.Errorf("work item root message must be owned by its creator")

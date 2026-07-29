@@ -272,7 +272,7 @@ func promotedAssistantRunReplayTx(
 	if run.WorkItemID != workItemID || run.Mode != AssistantRunModeNew || expectedRunRevision != run.Revision-1 {
 		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q was promoted differently", ErrAssistantRunConflict, run.ID)
 	}
-	itemRow := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+	itemRow := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at
 		FROM app_studio_assistant_work_items
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
@@ -332,7 +332,7 @@ func (s *PostgresStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context,
 		return AssistantWorkItem{}, fmt.Errorf("begin resume work item: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	row := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+	row := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at
 		FROM app_studio_assistant_work_items
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 FOR UPDATE`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
 	item, err := scanAssistantWorkItem(row, scope)
@@ -391,7 +391,7 @@ func (s *PostgresStore) GetAssistantWorkItem(ctx context.Context, scope Scope, i
 	if err := scope.validate(); err != nil {
 		return AssistantWorkItem{}, err
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at
 		FROM app_studio_assistant_work_items WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id)
 	item, err := scanAssistantWorkItem(row, scope)
 	if err == sql.ErrNoRows {
@@ -407,7 +407,7 @@ func (s *PostgresStore) ListAssistantWorkItems(ctx context.Context, scope Scope)
 	if err := scope.validate(); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at
 		FROM app_studio_assistant_work_items WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 ORDER BY created_at, work_item_id`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID)
 	if err != nil {
 		return nil, fmt.Errorf("list assistant work items: %w", err)
@@ -436,10 +436,14 @@ func (s *PostgresStore) CompareAndSwapAssistantWorkItem(ctx context.Context, sco
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE app_studio_assistant_work_items SET status=$6,status_reason=$7,revision=$8,active_run_id=$9,plan_grant=$10,grant_revision=$11,updated_at=$12
-		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 AND revision=$13
-			AND root_message_id=$14 AND created_by=$15`,
-		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, item.Status, item.StatusReason, item.Revision, item.ActiveRunID, string(planGrant), item.GrantRevision, item.UpdatedAt, expectedRevision, item.RootMessageID, item.CreatedBy)
+	executionPlan, err := normalizeAssistantWorkItemExecutionPlan(item.ExecutionPlan)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE app_studio_assistant_work_items SET status=$6,status_reason=$7,revision=$8,active_run_id=$9,plan_grant=$10,grant_revision=$11,execution_plan=$12,execution_plan_revision=$13,updated_at=$14
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 AND revision=$15
+			AND root_message_id=$16 AND created_by=$17`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, item.Status, item.StatusReason, item.Revision, item.ActiveRunID, string(planGrant), item.GrantRevision, string(executionPlan), item.ExecutionPlanRevision, item.UpdatedAt, expectedRevision, item.RootMessageID, item.CreatedBy)
 	if err != nil {
 		return fmt.Errorf("update assistant work item: %w", err)
 	}
@@ -448,6 +452,47 @@ func (s *PostgresStore) CompareAndSwapAssistantWorkItem(ctx context.Context, sco
 		return fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, item.ID)
 	}
 	return nil
+}
+
+func (s *PostgresStore) SaveWorkItemExecutionPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, executionPlanRevision string, executionPlan json.RawMessage, now time.Time) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	workItemID = strings.TrimSpace(workItemID)
+	runID = strings.TrimSpace(runID)
+	executionPlanRevision = strings.TrimSpace(executionPlanRevision)
+	if workItemID == "" || runID == "" || expectedRevision < 1 || executionPlanRevision == "" || len(executionPlan) == 0 {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item, run, revision, and execution plan are required", ErrAssistantWorkItemConflict)
+	}
+	normalizedPlan, err := normalizeAssistantWorkItemExecutionPlan(executionPlan)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	row := s.db.QueryRowContext(ctx, `UPDATE app_studio_assistant_work_items AS item
+		SET execution_plan=$6, execution_plan_revision=$7, revision=item.revision+1, updated_at=$8
+		WHERE item.org_uuid=$1 AND item.workspace_uuid=$2 AND item.project_name=$3 AND item.project_uid=$4 AND item.work_item_id=$5
+			AND item.revision=$9 AND item.status=$10 AND item.active_run_id=$11
+			AND EXISTS (
+				SELECT 1 FROM app_studio_assistant_runs AS run
+				WHERE run.org_uuid=item.org_uuid AND run.workspace_uuid=item.workspace_uuid
+					AND run.project_name=item.project_name AND run.project_uid=item.project_uid
+					AND run.run_id=$11 AND run.work_item_id=item.work_item_id AND run.status=$12
+			)
+		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID,
+		string(normalizedPlan), executionPlanRevision, now.UTC(), expectedRevision,
+		AssistantWorkItemStatusActive, runID, AssistantRunStatusRunning)
+	item, err := scanAssistantWorkItem(row, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("save work item execution plan: %w", err)
+	}
+	return item, nil
 }
 
 func (s *PostgresStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error) {
@@ -473,7 +518,7 @@ func (s *PostgresStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, wo
 		SET plan_grant=$6, grant_revision=$7, revision=revision+1, updated_at=$8
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5
 			AND revision=$9 AND status=$10 AND active_run_id=$11
-		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at`,
+		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID, string(planGrant), grantRevision, updatedAt,
 		expectedRevision, AssistantWorkItemStatusActive, runID)
 	item, err := scanAssistantWorkItem(row, scope)
@@ -527,7 +572,7 @@ func (s *PostgresStore) RetireWorkItemPlan(ctx context.Context, scope Scope, wor
 		SET plan_grant='{}'::jsonb, grant_revision=$6, revision=revision+1, updated_at=$7
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5
 			AND created_by=$8 AND revision=$9 AND status=$10 AND active_run_id=$11 AND grant_revision=$12
-		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at`,
+		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, execution_plan, execution_plan_revision, created_at, updated_at`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID,
 		tombstoneGrantRevision, updatedAt, actor, expectedWorkItemRevision, AssistantWorkItemStatusActive, runID, expectedGrantRevision)
 	item, err := scanAssistantWorkItem(row, scope)
@@ -692,6 +737,16 @@ func normalizeAssistantWorkItemPlanGrant(planGrant json.RawMessage) (json.RawMes
 	return planGrant, nil
 }
 
+func normalizeAssistantWorkItemExecutionPlan(executionPlan json.RawMessage) (json.RawMessage, error) {
+	if len(executionPlan) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	if !json.Valid(executionPlan) {
+		return nil, fmt.Errorf("assistant work item execution plan is not valid json")
+	}
+	return executionPlan, nil
+}
+
 func (s *PostgresStore) LatestAssistantRunForWorkItem(ctx context.Context, scope Scope, workItemID string) (AssistantRun, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at FROM app_studio_assistant_runs
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 ORDER BY updated_at DESC, run_id DESC LIMIT 1`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
@@ -705,7 +760,7 @@ func (s *PostgresStore) LatestAssistantRunForWorkItem(ctx context.Context, scope
 func scanAssistantWorkItem(row interface{ Scan(...any) error }, scope Scope) (AssistantWorkItem, error) {
 	var item AssistantWorkItem
 	var status string
-	err := row.Scan(&item.ID, &item.RootMessageID, &item.CreatedBy, &status, &item.StatusReason, &item.Revision, &item.ActiveRunID, &item.PlanGrant, &item.GrantRevision, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.RootMessageID, &item.CreatedBy, &status, &item.StatusReason, &item.Revision, &item.ActiveRunID, &item.PlanGrant, &item.GrantRevision, &item.ExecutionPlan, &item.ExecutionPlanRevision, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}

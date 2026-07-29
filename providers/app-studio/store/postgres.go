@@ -29,6 +29,7 @@ import (
 const messageSchemaVersion = "work-item-v2"
 const approvalModeSchemaVersion = "approval-mode-v1"
 const clientRequestUniqueSchemaVersion = "client-request-unique-v1"
+const executionPlanSchemaVersion = "work-item-execution-plan-v1"
 
 const createMessageSchemaMigrationsTable = `CREATE TABLE IF NOT EXISTS app_studio_message_schema_migrations (
 	version text PRIMARY KEY,
@@ -115,6 +116,9 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := ensureSchemaVersion(ctx, tx, approvalModeSchemaVersion, approvalModeSchemaStatements()...); err != nil {
 		return err
 	}
+	if err := ensureSchemaVersion(ctx, tx, executionPlanSchemaVersion, executionPlanSchemaStatements()...); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
@@ -150,6 +154,15 @@ func approvalModeSchemaStatements() []string {
 		`ALTER TABLE app_studio_assistant_runs
 				ADD COLUMN IF NOT EXISTS approval_mode text NOT NULL DEFAULT 'always_ask'
 				CHECK (approval_mode IN ('always_ask', 'auto_approve'))`,
+	}
+}
+
+func executionPlanSchemaStatements() []string {
+	return []string{
+		`ALTER TABLE app_studio_assistant_work_items
+			ADD COLUMN IF NOT EXISTS execution_plan jsonb NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE app_studio_assistant_work_items
+			ADD COLUMN IF NOT EXISTS execution_plan_revision text NOT NULL DEFAULT ''`,
 	}
 }
 
@@ -208,7 +221,8 @@ func workItemSchemaStatements() []string {
 			work_item_id text NOT NULL, root_message_id text NOT NULL, created_by text NOT NULL,
 			status text NOT NULL, status_reason text NOT NULL DEFAULT '', revision bigint NOT NULL,
 			active_run_id text NOT NULL DEFAULT '', plan_grant jsonb NOT NULL DEFAULT '{}'::jsonb,
-			grant_revision text NOT NULL DEFAULT '', created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			grant_revision text NOT NULL DEFAULT '', execution_plan jsonb NOT NULL DEFAULT '{}'::jsonb,
+			execution_plan_revision text NOT NULL DEFAULT '', created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
 			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, work_item_id),
 			UNIQUE (org_uuid, workspace_uuid, project_name, project_uid, root_message_id)
 		)`,

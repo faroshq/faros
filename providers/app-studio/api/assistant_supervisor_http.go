@@ -163,8 +163,9 @@ func (s *Server) startProjectAssistantRunDurablyWithMode(ctx context.Context, sc
 	}
 	transcriptEmpty := len(messages.Items) == 0
 	now := time.Now().UTC()
+	assistantAt := now.Add(time.Microsecond)
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, ActorID: actor, Content: content, CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: assistantAt, UpdatedAt: assistantAt}
 	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Mode: mode, Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := s.captureProjectAssistantApprovalMode(ctx, scope, actor, &run); err != nil {
 		return projectAssistantDurableStartResult{}, err
@@ -228,8 +229,9 @@ func (s *Server) startProjectAssistantBuildRunDurablyWithInitialPrompt(ctx conte
 	}
 	transcriptEmpty := len(messages.Items) == 0
 	now := time.Now().UTC()
+	assistantAt := now.Add(time.Microsecond)
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, ActorID: actor, Content: content, CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: assistantAt, UpdatedAt: assistantAt}
 	item := store.AssistantWorkItem{ID: "work-item-" + uuid.NewString(), RootMessageID: user.ID, CreatedBy: actor, Status: store.AssistantWorkItemStatusActive, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user.WorkItemID = item.ID
 	assistant.WorkItemID = item.ID
@@ -241,6 +243,9 @@ func (s *Server) startProjectAssistantBuildRunDurablyWithInitialPrompt(ctx conte
 		return projectAssistantDurableStartResult{}, err
 	}
 	assistant.Metadata = projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil)
+	if initialProjectPrompt && transcriptEmpty {
+		assistant.Metadata[projectAssistantMetadataInitialBuild] = true
+	}
 	if _, err := s.store.CreateWorkItemAndAssistantRun(ctx, scope, item, user, assistant, run); err != nil {
 		if prior, ok := s.recoverProjectAssistantStartReplay(ctx, scope, err, clientRequestID, actor, content, store.AssistantRunModeNew, "", 0, initialProjectPrompt); ok {
 			return projectAssistantDurableStartResult{Run: prior}, nil
@@ -283,8 +288,9 @@ func (s *Server) startProjectAssistantContinueRunDurably(ctx context.Context, sc
 		return projectAssistantDurableStartResult{}, err
 	}
 	now := time.Now().UTC()
+	assistantAt := now.Add(time.Microsecond)
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, ActorID: actor, WorkItemID: workItemID, Content: content, CreatedAt: now, UpdatedAt: now}
-	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, WorkItemID: workItemID, CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, WorkItemID: workItemID, CreatedAt: assistantAt, UpdatedAt: assistantAt}
 	run := store.AssistantRun{ID: "run-" + uuid.NewString(), WorkItemID: workItemID, Mode: store.AssistantRunModeContinue, ExpectedGrantRevision: item.GrantRevision, Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := s.captureProjectAssistantApprovalMode(ctx, scope, actor, &run); err != nil {
 		return projectAssistantDurableStartResult{}, err
@@ -378,6 +384,7 @@ const (
 	projectAssistantMetadataProvisional          = "assistantProvisional"
 	projectAssistantMetadataPreviewRefreshNeeded = "previewRefreshNeeded"
 	projectAssistantMetadataPlan                 = "assistantPlan"
+	projectAssistantMetadataInitialBuild         = "assistantInitialBuild"
 )
 
 func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status string, provisional, preview bool, toolCalls []projectToolCallStreamEvent, plan *projectAssistantPlanSnapshot) map[string]any {
@@ -403,6 +410,9 @@ func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status 
 	}
 	if plan, ok := projectAssistantPlanSnapshotFromMetadata(existing[projectAssistantMetadataPlan]); ok {
 		metadata[projectAssistantMetadataPlan] = *plan
+	}
+	if initialBuild, _ := existing[projectAssistantMetadataInitialBuild].(bool); initialBuild {
+		metadata[projectAssistantMetadataInitialBuild] = true
 	}
 	preview, _ := existing[projectAssistantMetadataPreviewRefreshNeeded].(bool)
 	metadata[projectAssistantMetadataRunID] = run.ID
@@ -501,10 +511,11 @@ func projectAssistantPlanLabelValid(label string, required bool) bool {
 }
 
 type projectAssistantDurableMetadataState struct {
-	status      string
-	provisional bool
-	toolCalls   []projectToolCallStreamEvent
-	plan        *projectAssistantPlanSnapshot
+	status       string
+	provisional  bool
+	toolCalls    []projectToolCallStreamEvent
+	plan         *projectAssistantPlanSnapshot
+	initialBuild bool
 }
 
 func projectAssistantRunDisplayStatus(status store.AssistantRunStatus, fallback string) string {
@@ -563,6 +574,11 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 				metadata[projectAssistantMetadataPlan] = *plan
 			}
 		}
+		if state.initialBuild {
+			metadata[projectAssistantMetadataInitialBuild] = true
+		} else if initialBuild, _ := message.Metadata[projectAssistantMetadataInitialBuild].(bool); initialBuild {
+			metadata[projectAssistantMetadataInitialBuild] = true
+		}
 		message.Metadata = metadata
 	})
 }
@@ -611,7 +627,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		started, err = s.startProjectAssistantBuildRunDurablyWithInitialPrompt(r.Context(), scope, id.user, request.Content, request.ClientRequestID, request.InitialProjectPrompt, func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) error {
 			var start *projectAssistantStreamStart
 			if request.InitialProjectPrompt && transcriptEmpty {
-				plan := projectAssistantInitialCreationPlan()
+				plan := projectAssistantInitialCreationPlan(request.Content)
 				start = &projectAssistantStreamStart{InitialApprovedPlan: cloneProjectAssistantApprovedPlan(&plan)}
 			}
 			return startWorker(created, assistant, start)
@@ -642,7 +658,12 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 
 func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator, request *http.Request, id identity, c *asclient.Client, project *aiv1alpha1.Project, run store.AssistantRun, start *projectAssistantStreamStart) {
 	content := &strings.Builder{}
-	state := &projectAssistantDurableMetadataState{status: "Working"}
+	state := &projectAssistantDurableMetadataState{
+		status: "Working",
+		initialBuild: start != nil &&
+			start.InitialApprovedPlan != nil &&
+			strings.TrimSpace(start.InitialApprovedPlan.Goal) != "",
+	}
 	workspaceScope := projectWorkspaceScope(id, project.Name)
 	persistMetadata := func(ctx context.Context, runStatus *store.AssistantRunStatus) error {
 		return s.persistProjectAssistantDurableMetadata(ctx, accumulator, workspaceScope, state, runStatus)
@@ -650,6 +671,10 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	persistWorkItemTerminal := func(ctx context.Context, runStatus store.AssistantRunStatus, itemStatus store.AssistantWorkItemStatus, reason string) error {
 		return accumulator.TransitionWorkItemTerminal(ctx, runStatus, itemStatus, reason, func(committed *store.AssistantRun, message *store.Message) {
 			state.provisional = false
+			initialBuild := state.initialBuild
+			if persisted, _ := message.Metadata[projectAssistantMetadataInitialBuild].(bool); persisted {
+				initialBuild = true
+			}
 			message.Metadata = projectAssistantDurableMetadataForTransition(
 				*committed,
 				projectAssistantRunDisplayStatus(runStatus, state.status),
@@ -658,6 +683,9 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 				state.toolCalls,
 				state.plan,
 			)
+			if initialBuild {
+				message.Metadata[projectAssistantMetadataInitialBuild] = true
+			}
 		})
 	}
 	hasDurableWorkItem := func() bool {
@@ -684,7 +712,7 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		return snapshotErr
 	}
 	req := request.Clone(context.WithValue(ctx, projectAssistantSupervisorRunContextKey{}, run))
-	reply, err := s.generateProjectAssistantStreamWithStart(req, id, c, project, projectAssistantStreamCallbacks{
+	result, err := s.generateProjectAssistantResultWithStart(req, id, c, project, projectAssistantStreamCallbacks{
 		OnChunk: func(chunk string) {
 			content.WriteString(chunk)
 			recordSnapshotErr(accumulator.UpdateText(ctx, content.String(), false))
@@ -717,6 +745,8 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 			recordSnapshotErr(persistMetadata(ctx, nil))
 		},
 	}, start)
+	state.initialBuild = state.initialBuild || result.InitialBuild
+	reply := result.Content
 	finalContent := projectAssistantDurableTerminalContent(reply, content.String(), err)
 	recordSnapshotErr(accumulator.UpdateText(ctx, finalContent, true))
 	if getSnapshotErr() != nil {
@@ -740,6 +770,14 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 				accumulator.supervisor.log("aborted", projectMessageScope(id.orgUUID, id.workspaceUUID, project), committed)
 			}
 		}
+		return
+	}
+	initialBuildCompletionEnforced := state.initialBuild
+	if reason := projectAssistantInitialCompletionSuspensionReason(result, initialBuildCompletionEnforced); reason != "" &&
+		(err == nil || projectEinoAssistantBoundedExit(err)) {
+		state.status = "Suspended"
+		runStatus := store.AssistantRunStatusInterrupted
+		recordSnapshotErr(persistWorkItemTerminal(ctx, runStatus, store.AssistantWorkItemStatusSuspended, reason))
 		return
 	}
 	if err == nil {
@@ -809,6 +847,22 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 			accumulator.supervisor.log("failed", projectMessageScope(id.orgUUID, id.workspaceUUID, project), committed)
 		}
 	}
+}
+
+func projectAssistantInitialCompletionSuspensionReason(result projectAssistantRunResult, initialBuild bool) string {
+	evidence := result.CompletionEvidence
+	if !initialBuild && !evidence.PlanDefined && result.InitialPlan == nil {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(evidence.VerificationOutcome), "provisioning") {
+		return "runtime provisioning"
+	}
+	if !evidence.PlanComplete ||
+		!evidence.LatestMutationVerified ||
+		!strings.EqualFold(strings.TrimSpace(evidence.VerificationOutcome), "ready") {
+		return "objective incomplete"
+	}
+	return ""
 }
 
 func projectAssistantWorkItemFailureReason(err error) string {

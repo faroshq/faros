@@ -174,6 +174,21 @@ export function replaceOptimisticUserMessage<TMessage extends ProjectMessage>(
   return next
 }
 
+// Durable turns historically persisted the user message and assistant
+// placeholder with the same timestamp. The store's random-ID tie-break can
+// therefore return either role first after a reload. Keep chronological order,
+// but restore the turn order for those exact timestamp ties.
+export function orderConversationMessages<TMessage extends ProjectMessage>(messages: TMessage[]): TMessage[] {
+  return [...messages].sort((left, right) => {
+    const leftAt = Date.parse(left.createdAt)
+    const rightAt = Date.parse(right.createdAt)
+    if (Number.isFinite(leftAt) && Number.isFinite(rightAt) && leftAt !== rightAt) return leftAt - rightAt
+    if (left.createdAt !== right.createdAt) return 0
+    if (left.role === right.role) return 0
+    return left.role === 'user' ? -1 : 1
+  })
+}
+
 interface ConversationRunTransport {
   connect(runID: string, afterRevision: number, setDisconnect: (disconnect: () => void) => void): Promise<void>
   abort(runID: string): Promise<void>

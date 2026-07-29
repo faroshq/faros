@@ -19,6 +19,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ const (
 )
 
 type projectAssistantApprovedPlan struct {
+	Goal               string    `json:"goal,omitempty"`
 	Summary            string    `json:"summary,omitempty"`
 	Steps              []string  `json:"steps,omitempty"`
 	TargetPaths        []string  `json:"targetPaths,omitempty"`
@@ -64,8 +66,13 @@ type projectEinoAssistantRunState struct {
 	permissionBarrier         bool
 	approvedPlan              *projectAssistantApprovedPlan
 	approvedPlanGrantRevision string
+	executionPlan             *projectAssistantApprovedPlan
+	executionPlanRevision     string
+	planProgress              projectAssistantPlanSnapshot
 	sourceMutationRevision    uint64
 	verifiedMutationRevision  uint64
+	verificationAttempted     bool
+	verificationOutcome       string
 	completedReadCalls        map[string]uint64
 }
 
@@ -203,8 +210,13 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.projectRepositoryRef = strings.TrimSpace(state.ProjectRepositoryRef)
 	s.approvedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
 	s.approvedPlanGrantRevision = strings.TrimSpace(state.ApprovedPlanGrantRevision)
+	s.executionPlan = cloneProjectAssistantApprovedPlan(state.ExecutionPlan)
+	s.executionPlanRevision = strings.TrimSpace(state.ExecutionPlanRevision)
+	s.planProgress = cloneProjectAssistantPlanSnapshot(state.PlanProgress)
 	s.sourceMutationRevision = state.SourceMutationRevision
 	s.verifiedMutationRevision = state.VerifiedMutationRevision
+	s.verificationAttempted = state.VerificationAttempted
+	s.verificationOutcome = strings.TrimSpace(state.VerificationOutcome)
 	s.completedReadCalls = map[string]uint64{}
 	s.sessionSnapshot = cloneProjectEinoAssistantSessionSnapshot(state.SessionSnapshot)
 }
@@ -235,6 +247,64 @@ func (s *projectEinoAssistantRunState) ApprovedPlan() *projectAssistantApprovedP
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneProjectAssistantApprovedPlan(s.approvedPlan)
+}
+
+func (s *projectEinoAssistantRunState) SetExecutionPlan(plan projectAssistantApprovedPlan, revision string) {
+	if s == nil {
+		return
+	}
+	normalized := normalizeProjectAssistantApprovedPlan(plan)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executionPlan = &normalized
+	s.executionPlanRevision = strings.TrimSpace(revision)
+}
+
+func (s *projectEinoAssistantRunState) ExecutionPlan() (*projectAssistantApprovedPlan, string) {
+	if s == nil {
+		return nil, ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneProjectAssistantApprovedPlan(s.executionPlan), s.executionPlanRevision
+}
+
+func (s *projectEinoAssistantRunState) SetPlanProgress(plan projectAssistantPlanSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.planProgress = cloneProjectAssistantPlanSnapshot(plan)
+}
+
+func (s *projectEinoAssistantRunState) PlanProgress() projectAssistantPlanSnapshot {
+	if s == nil {
+		return projectAssistantPlanSnapshot{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneProjectAssistantPlanSnapshot(s.planProgress)
+}
+
+func (s *projectEinoAssistantRunState) ExecutionPlanComplete() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.executionPlan == nil ||
+		len(s.executionPlan.Steps) == 0 ||
+		len(s.planProgress.Steps) != len(s.executionPlan.Steps) {
+		return false
+	}
+	for index, step := range s.planProgress.Steps {
+		if step.Status != "completed" ||
+			strings.TrimSpace(step.Content) != strings.TrimSpace(s.executionPlan.Steps[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *projectEinoAssistantRunState) ClearApprovedPlan() {
@@ -280,11 +350,80 @@ func (s *projectEinoAssistantRunState) RecordDevelopmentVerification(ready bool)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.verificationAttempted = true
+	if ready {
+		s.verificationOutcome = "ready"
+	} else {
+		s.verificationOutcome = "not_ready"
+	}
 	if ready && s.sourceMutationRevision > 0 {
 		s.verifiedMutationRevision = s.sourceMutationRevision
 		return
 	}
 	s.verifiedMutationRevision = 0
+}
+
+func (s *projectEinoAssistantRunState) RecordDevelopmentVerificationResult(content string) {
+	status := ""
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(content)), &payload) == nil {
+		status = strings.ToLower(strings.TrimSpace(payload.Status))
+	}
+	ready := projectEinoAssistantPhaseVerificationReady(content)
+	s.RecordDevelopmentVerification(ready)
+	if ready {
+		status = "ready"
+	}
+	if status == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.verificationOutcome = status
+}
+
+func (s *projectEinoAssistantRunState) CompletionEvidence() projectAssistantCompletionEvidence {
+	if s == nil {
+		return projectAssistantCompletionEvidence{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	planDefined := s.executionPlan != nil
+	planComplete := planDefined &&
+		len(s.executionPlan.Steps) > 0 &&
+		len(s.planProgress.Steps) == len(s.executionPlan.Steps)
+	for index, step := range s.planProgress.Steps {
+		if !planComplete ||
+			step.Status != "completed" ||
+			strings.TrimSpace(step.Content) != strings.TrimSpace(s.executionPlan.Steps[index]) {
+			planComplete = false
+			break
+		}
+	}
+	latestVerified := s.sourceMutationRevision > 0 &&
+		s.verifiedMutationRevision == s.sourceMutationRevision
+	outcome := strings.TrimSpace(s.verificationOutcome)
+	if outcome == "" && s.verificationAttempted {
+		outcome = "not_ready"
+	}
+	if outcome == "" {
+		outcome = "not_run"
+	}
+	evidence := projectAssistantCompletionEvidence{
+		PlanDefined:            planDefined,
+		PlanComplete:           planComplete,
+		LatestMutationVerified: latestVerified,
+		VerificationOutcome:    outcome,
+	}
+	if planDefined && (!planComplete || !latestVerified) {
+		evidence.Blockers = append(evidence.Blockers, "initial project objective is incomplete")
+	}
+	if outcome == "provisioning" {
+		evidence.Blockers = append(evidence.Blockers, "runtime provisioning")
+	}
+	return evidence
 }
 
 func (s *projectEinoAssistantRunState) SourceMutationVerified() bool {
@@ -439,9 +578,20 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		TurnPolicy:                projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
 		ApprovedPlan:              cloneProjectAssistantApprovedPlan(s.approvedPlan),
 		ApprovedPlanGrantRevision: strings.TrimSpace(s.approvedPlanGrantRevision),
+		ExecutionPlan:             cloneProjectAssistantApprovedPlan(s.executionPlan),
+		ExecutionPlanRevision:     strings.TrimSpace(s.executionPlanRevision),
+		PlanProgress:              cloneProjectAssistantPlanSnapshot(s.planProgress),
 		SourceMutationRevision:    s.sourceMutationRevision,
 		VerifiedMutationRevision:  s.verifiedMutationRevision,
+		VerificationAttempted:     s.verificationAttempted,
+		VerificationOutcome:       strings.TrimSpace(s.verificationOutcome),
 		SessionSnapshot:           cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
+	}
+}
+
+func cloneProjectAssistantPlanSnapshot(plan projectAssistantPlanSnapshot) projectAssistantPlanSnapshot {
+	return projectAssistantPlanSnapshot{
+		Steps: append([]projectAssistantPlanStep(nil), plan.Steps...),
 	}
 }
 
@@ -529,6 +679,7 @@ func cloneProjectAssistantApprovedPlan(src *projectAssistantApprovedPlan) *proje
 }
 
 func normalizeProjectAssistantApprovedPlan(plan projectAssistantApprovedPlan) projectAssistantApprovedPlan {
+	plan.Goal = strings.TrimSpace(plan.Goal)
 	plan.Summary = strings.TrimSpace(plan.Summary)
 	plan.Steps = normalizeProjectAssistantStringList(plan.Steps)
 	plan.TargetPaths = normalizeProjectAssistantStringList(plan.TargetPaths)

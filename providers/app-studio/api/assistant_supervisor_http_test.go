@@ -158,6 +158,53 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantInitialCompletionSuspensionReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		evidence projectAssistantCompletionEvidence
+		want     string
+	}{
+		{name: "legacy result is unchanged"},
+		{
+			name: "complete initial build",
+			evidence: projectAssistantCompletionEvidence{
+				PlanDefined:            true,
+				PlanComplete:           true,
+				LatestMutationVerified: true,
+				VerificationOutcome:    "ready",
+			},
+		},
+		{
+			name: "early prose suspends",
+			evidence: projectAssistantCompletionEvidence{
+				PlanDefined:         true,
+				VerificationOutcome: "not_run",
+			},
+			want: "objective incomplete",
+		},
+		{
+			name: "provisioning suspends distinctly",
+			evidence: projectAssistantCompletionEvidence{
+				PlanDefined:         true,
+				PlanComplete:        true,
+				VerificationOutcome: "provisioning",
+			},
+			want: "runtime provisioning",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := projectAssistantRunResult{CompletionEvidence: tt.evidence}
+			if got := projectAssistantInitialCompletionSuspensionReason(result, false); got != tt.want {
+				t.Fatalf("reason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if got := projectAssistantInitialCompletionSuspensionReason(projectAssistantRunResult{}, true); got != "objective incomplete" {
+		t.Fatalf("fresh initial prose reason = %q, want objective incomplete", got)
+	}
+}
+
 func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitions(t *testing.T) {
 	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
 		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},

@@ -282,6 +282,10 @@ func (s *encryptedStore) CreateWorkItemAndAssistantRun(ctx context.Context, scop
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
+	item.ExecutionPlan, err = s.encryptAssistantWorkItemExecutionPlan(scope, item, item.ExecutionPlan)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
 	run.Checkpoint, err = s.encryptAssistantRunBlob(scope, run, "checkpoint", run.Checkpoint)
 	if err != nil {
 		return AssistantWorkItem{}, err
@@ -294,7 +298,7 @@ func (s *encryptedStore) CreateWorkItemAndAssistantRun(ctx context.Context, scop
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if err := s.decryptAssistantWorkItemGrant(scope, &created); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &created); err != nil {
 		return AssistantWorkItem{}, err
 	}
 	return created, nil
@@ -338,7 +342,7 @@ func (s *encryptedStore) PromoteAssistantRunToWorkItem(
 	// discover a ciphertext error after a mutation. On an idempotent replay
 	// the inner operation is read-only and returns the authoritative grant and
 	// revision together; decrypt that result to avoid racing plan changes.
-	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &item); err != nil {
 		return AssistantWorkItem{}, AssistantRun{}, err
 	}
 	return item, run, nil
@@ -366,7 +370,7 @@ func (s *encryptedStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &item); err != nil {
 		return AssistantWorkItem{}, err
 	}
 	return item, nil
@@ -396,7 +400,7 @@ func (s *encryptedStore) GetAssistantWorkItem(ctx context.Context, scope Scope, 
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &item); err != nil {
 		return AssistantWorkItem{}, err
 	}
 	return item, nil
@@ -408,7 +412,7 @@ func (s *encryptedStore) ListAssistantWorkItems(ctx context.Context, scope Scope
 		return nil, err
 	}
 	for i := range items {
-		if err := s.decryptAssistantWorkItemGrant(scope, &items[i]); err != nil {
+		if err := s.decryptAssistantWorkItem(scope, &items[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -416,12 +420,42 @@ func (s *encryptedStore) ListAssistantWorkItems(ctx context.Context, scope Scope
 }
 
 func (s *encryptedStore) CompareAndSwapAssistantWorkItem(ctx context.Context, scope Scope, item AssistantWorkItem, expectedRevision int64) error {
+	if len(item.ExecutionPlan) > 0 && !json.Valid(item.ExecutionPlan) {
+		return fmt.Errorf("assistant work item execution plan is not valid json")
+	}
 	grant, err := s.encryptAssistantWorkItemGrant(scope, item, item.PlanGrant)
 	if err != nil {
 		return err
 	}
 	item.PlanGrant = grant
+	executionPlan, err := s.encryptAssistantWorkItemExecutionPlan(scope, item, item.ExecutionPlan)
+	if err != nil {
+		return err
+	}
+	item.ExecutionPlan = executionPlan
 	return s.inner.CompareAndSwapAssistantWorkItem(ctx, scope, item, expectedRevision)
+}
+
+func (s *encryptedStore) SaveWorkItemExecutionPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, executionPlanRevision string, executionPlan json.RawMessage, now time.Time) (AssistantWorkItem, error) {
+	if strings.TrimSpace(workItemID) == "" || strings.TrimSpace(runID) == "" || expectedRevision < 1 || strings.TrimSpace(executionPlanRevision) == "" || len(executionPlan) == 0 {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item, run, revision, and execution plan are required", ErrAssistantWorkItemConflict)
+	}
+	if !json.Valid(executionPlan) {
+		return AssistantWorkItem{}, fmt.Errorf("work item execution plan is not valid json")
+	}
+	item := AssistantWorkItem{ID: workItemID}
+	encryptedPlan, err := s.encryptAssistantWorkItemExecutionPlan(scope, item, executionPlan)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	saved, err := s.inner.SaveWorkItemExecutionPlan(ctx, scope, workItemID, runID, expectedRevision, executionPlanRevision, encryptedPlan, now)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItem(scope, &saved); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return saved, nil
 }
 
 func (s *encryptedStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error) {
@@ -434,7 +468,7 @@ func (s *encryptedStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, w
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if err := s.decryptAssistantWorkItemGrant(scope, &approved); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &approved); err != nil {
 		return AssistantWorkItem{}, err
 	}
 	return approved, nil
@@ -445,7 +479,7 @@ func (s *encryptedStore) RetireWorkItemPlan(ctx context.Context, scope Scope, wo
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+	if err := s.decryptAssistantWorkItem(scope, &item); err != nil {
 		return AssistantWorkItem{}, err
 	}
 	return item, nil
@@ -763,8 +797,63 @@ func (s *encryptedStore) decryptAssistantWorkItemGrant(scope Scope, item *Assist
 	return nil
 }
 
+func (s *encryptedStore) encryptAssistantWorkItemExecutionPlan(scope Scope, item AssistantWorkItem, plaintext []byte) ([]byte, error) {
+	if len(plaintext) == 0 {
+		return nil, nil
+	}
+	var existing encryptedAssistantRunCheckpoint
+	if json.Unmarshal(plaintext, &existing) == nil && existing.Encrypted && existing.KeyID != "" && existing.Payload != "" {
+		return cloneRawMessage(plaintext), nil
+	}
+	aead := s.keys[s.active]
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(cryptoRand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate work item execution plan nonce: %w", err)
+	}
+	payload := append(nonce, aead.Seal(nil, nonce, plaintext, assistantWorkItemExecutionPlanAAD(scope, item))...)
+	return json.Marshal(encryptedAssistantRunCheckpoint{Encrypted: true, KeyID: s.active, Payload: base64.RawStdEncoding.EncodeToString(payload)})
+}
+
+func (s *encryptedStore) decryptAssistantWorkItemExecutionPlan(scope Scope, item *AssistantWorkItem) error {
+	if item == nil || len(item.ExecutionPlan) == 0 {
+		return nil
+	}
+	var envelope encryptedAssistantRunCheckpoint
+	if err := json.Unmarshal(item.ExecutionPlan, &envelope); err != nil || !envelope.Encrypted {
+		return nil
+	}
+	aead := s.keys[envelope.KeyID]
+	if aead == nil {
+		return fmt.Errorf("work item %q execution plan uses unknown encryption key %q", item.ID, envelope.KeyID)
+	}
+	payload, err := base64.RawStdEncoding.DecodeString(envelope.Payload)
+	if err != nil {
+		return fmt.Errorf("decode encrypted work item execution plan %q: %w", item.ID, err)
+	}
+	if len(payload) < aead.NonceSize() {
+		return fmt.Errorf("encrypted work item execution plan %q is too short", item.ID)
+	}
+	plaintext, err := aead.Open(nil, payload[:aead.NonceSize()], payload[aead.NonceSize():], assistantWorkItemExecutionPlanAAD(scope, *item))
+	if err != nil {
+		return fmt.Errorf("decrypt work item execution plan %q: %w", item.ID, err)
+	}
+	item.ExecutionPlan = plaintext
+	return nil
+}
+
+func (s *encryptedStore) decryptAssistantWorkItem(scope Scope, item *AssistantWorkItem) error {
+	if err := s.decryptAssistantWorkItemGrant(scope, item); err != nil {
+		return err
+	}
+	return s.decryptAssistantWorkItemExecutionPlan(scope, item)
+}
+
 func assistantWorkItemAAD(scope Scope, item AssistantWorkItem) []byte {
 	return []byte(strings.Join([]string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, "plan_grant"}, "\x00"))
+}
+
+func assistantWorkItemExecutionPlanAAD(scope Scope, item AssistantWorkItem) []byte {
+	return []byte(strings.Join([]string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, "execution_plan"}, "\x00"))
 }
 
 var _ Store = (*encryptedStore)(nil)

@@ -519,6 +519,9 @@ func TestEinoAssistantEngineUsesBoundedAppStudioSystemInstruction(t *testing.T) 
 		"bounded rereads":               "do not reread them unless",
 		"minimal changes":               "Keep changes minimal and focused",
 		"honest blockers":               "report blockers honestly",
+		"initial execution plan":        "define_initial_project_plan",
+		"real approval only":            "unless you have actually called a permission-bearing tool",
+		"same objective repairs":        "Repair defects found by verification inside the same objective",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !strings.Contains(strings.ToLower(instruction), strings.ToLower(required)) {
@@ -2276,6 +2279,29 @@ func TestEinoAssistantEngineAutoApprovesWriteTools(t *testing.T) {
 	}
 	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/two.tsx"}); err == nil {
 		t.Fatal("out-of-plan src/two.tsx write unexpectedly succeeded")
+	}
+}
+
+func TestProjectEinoAssistantInitialBuildHistoryRestoresGoalAndMutation(t *testing.T) {
+	history := []store.Message{
+		{Role: "user", Content: "Build Whisker Swipe"},
+		{
+			Role: "assistant",
+			Metadata: map[string]any{
+				projectAssistantMetadataInitialBuild: true,
+				projectMessageMetadataAssistantActionFeed: []projectAssistantActionFeedItem{{
+					Kind:   projectAssistantActionFeedItemEdit,
+					Status: projectAssistantActionFeedStatusSucceeded,
+				}},
+			},
+		},
+	}
+	goal, ok := projectEinoAssistantInitialBuildGoal(history)
+	if !ok || goal != "Build Whisker Swipe" {
+		t.Fatalf("initial goal = %q, %t", goal, ok)
+	}
+	if !projectEinoAssistantHistoryHasSourceMutation(history) {
+		t.Fatal("successful durable edit was not restored as a source mutation")
 	}
 }
 

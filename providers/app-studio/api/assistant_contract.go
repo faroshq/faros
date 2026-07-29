@@ -77,7 +77,18 @@ type projectAssistantRunRequest struct {
 }
 
 type projectAssistantRunResult struct {
-	Content string
+	Content            string
+	InitialPlan        *projectAssistantApprovedPlan
+	InitialBuild       bool
+	CompletionEvidence projectAssistantCompletionEvidence
+}
+
+type projectAssistantCompletionEvidence struct {
+	PlanDefined            bool     `json:"planDefined"`
+	PlanComplete           bool     `json:"planComplete"`
+	LatestMutationVerified bool     `json:"latestMutationVerified"`
+	VerificationOutcome    string   `json:"verificationOutcome,omitempty"`
+	Blockers               []string `json:"blockers,omitempty"`
 }
 
 type projectAssistantEvent struct {

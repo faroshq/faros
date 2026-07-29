@@ -33,6 +33,7 @@ import (
 type projectEinoAssistantPhase string
 
 const (
+	projectEinoAssistantPhasePlan     projectEinoAssistantPhase = "plan"
 	projectEinoAssistantPhaseApproval projectEinoAssistantPhase = "approval"
 	projectEinoAssistantPhaseMutate   projectEinoAssistantPhase = "mutate"
 	projectEinoAssistantPhaseVerify   projectEinoAssistantPhase = "verify"
@@ -53,6 +54,7 @@ const (
 )
 
 const (
+	projectEinoAssistantPlanModelCallLimit     = 4
 	projectEinoAssistantApprovalModelCallLimit = 8
 	projectEinoAssistantMutateModelCallLimit   = 4
 )
@@ -239,6 +241,8 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) resetSemanticProgress(
 
 func projectEinoAssistantPhaseModelCallLimit(phase projectEinoAssistantPhase) int {
 	switch phase {
+	case projectEinoAssistantPhasePlan:
+		return projectEinoAssistantPlanModelCallLimit
 	case projectEinoAssistantPhaseApproval:
 		return projectEinoAssistantApprovalModelCallLimit
 	case projectEinoAssistantPhaseMutate:
@@ -250,6 +254,8 @@ func projectEinoAssistantPhaseModelCallLimit(phase projectEinoAssistantPhase) in
 
 func projectEinoAssistantPhaseProgressInstruction(phase projectEinoAssistantPhase) string {
 	switch phase {
+	case projectEinoAssistantPhasePlan:
+		return "Define the initial execution plan now with define_initial_project_plan. This is an internal, auto-authorized planning step; do not ask the user to approve it."
 	case projectEinoAssistantPhaseApproval:
 		return "Finish bounded inspection now. Request one complete source-edit plan, ask the user for missing information, or report a concrete blocker. Do not repeat prior reads or searches."
 	case projectEinoAssistantPhaseMutate:
@@ -329,11 +335,15 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 				argumentsInJSON,
 				!projectAssistantToolDisclosureMinimal,
 			)
+			internalPlan, _ := projectEinoAssistantTodoProgress(argumentsInJSON, true)
 			if status != "" && m.req.StreamCallbacks.OnStatus != nil {
 				m.req.StreamCallbacks.OnStatus(status)
 			}
 			if len(plan.Steps) > 0 && m.req.StreamCallbacks.OnPlan != nil {
 				m.req.StreamCallbacks.OnPlan(plan)
+			}
+			if len(internalPlan.Steps) > 0 && m.runState != nil {
+				m.runState.SetPlanProgress(internalPlan)
 			}
 		}
 		return result, nil
@@ -429,6 +439,11 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) toolInfoForInvocation(rawNam
 
 	tool := &schema.ToolInfo{Name: rawName}
 	switch projectToolBaseName(rawName) {
+	case projectToolDefineInitialProjectPlan:
+		tool.Extra = map[string]any{
+			"bundle": string(projectAssistantToolBundleCollaboration),
+			"risk":   string(projectAssistantToolRiskPlan),
+		}
 	case projectToolRequestProjectPlanApproval:
 		tool.Extra = map[string]any{
 			"bundle": string(projectAssistantToolBundleCollaboration),
@@ -542,11 +557,24 @@ func projectEinoAssistantPhaseForState(
 	state *adk.ChatModelAgentState,
 ) projectEinoAssistantPhase {
 	approvedPlan := projectEinoAssistantPhaseApprovedPlan(req, runState)
-	return projectEinoAssistantPhaseForHistory(
+	initialCreation := req.InitialApprovedPlan != nil || (approvedPlan != nil && approvedPlan.RunLocal)
+	initialPlanningRequired := initialCreation && approvedPlan != nil &&
+		strings.TrimSpace(approvedPlan.Goal) != ""
+	if initialPlanningRequired {
+		executionPlan, _ := runState.ExecutionPlan()
+		if executionPlan == nil {
+			return projectEinoAssistantPhasePlan
+		}
+	}
+	phase := projectEinoAssistantPhaseForHistory(
 		projectEinoAssistantPhaseHistoryForState(state),
 		approvedPlan != nil,
-		req.InitialApprovedPlan != nil || (approvedPlan != nil && approvedPlan.RunLocal),
+		initialCreation,
 	)
+	if initialPlanningRequired && phase == projectEinoAssistantPhaseReport && !runState.ExecutionPlanComplete() {
+		return projectEinoAssistantPhaseMutate
+	}
+	return phase
 }
 
 func projectEinoAssistantPhaseForStateWithApproval(
@@ -798,11 +826,17 @@ func projectEinoAssistantPhaseAllowsTool(
 	if name == projectEinoAssistantToolSearchTool {
 		return phase == projectEinoAssistantPhaseApproval
 	}
+	if name == projectToolDefineInitialProjectPlan {
+		return phase == projectEinoAssistantPhasePlan ||
+			(phase == projectEinoAssistantPhaseRepair &&
+				approvedPlan != nil && approvedPlan.RunLocal)
+	}
 	if name == projectEinoAssistantWriteTodosTool {
 		return (phase == projectEinoAssistantPhaseMutate ||
 			phase == projectEinoAssistantPhaseVerify ||
 			phase == projectEinoAssistantPhaseRepair) &&
-			approvedPlan != nil && len(approvedPlan.Steps) > 1
+			approvedPlan != nil &&
+			(approvedPlan.RunLocal || len(approvedPlan.Steps) > 1)
 	}
 	risk, bundle, ok := projectEinoAssistantPhaseToolMetadata(tool)
 	if !ok {
@@ -841,6 +875,8 @@ func projectEinoAssistantPhaseAllowsTool(
 	}
 
 	switch phase {
+	case projectEinoAssistantPhasePlan:
+		return name == projectToolDefineInitialProjectPlan
 	case projectEinoAssistantPhaseApproval:
 		if operationalRead {
 			return true

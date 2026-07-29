@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -228,6 +229,112 @@ func TestProjectAssistantRuntimeVerificationCollectsLogsWhenPreviewEdgeIsReachab
 	}
 	if !runtimeVerificationShouldCollectLogs(nil, input) {
 		t.Fatal("reachable preview should collect runtime logs for application-level diagnostics")
+	}
+}
+
+func TestPollProjectAssistantRuntimeVerificationWaitsForReady(t *testing.T) {
+	calls := 0
+	input, result, err := pollProjectAssistantRuntimeVerification(
+		context.Background(),
+		time.Millisecond,
+		50*time.Millisecond,
+		func(context.Context) (projectAssistantRuntimeWorkflowInput, *projectAssistantRuntimeWorkflowResult, error) {
+			calls++
+			status := "provisioning"
+			if calls == 3 {
+				status = "ready"
+			}
+			return projectAssistantRuntimeWorkflowInput{}, &projectAssistantRuntimeWorkflowResult{Status: status}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("poll runtime verification returned error: %v", err)
+	}
+	if result == nil || result.Status != "ready" {
+		t.Fatalf("result = %#v, want ready", result)
+	}
+	if calls != 3 {
+		t.Fatalf("resolver calls = %d, want 3", calls)
+	}
+	if !reflect.DeepEqual(input, projectAssistantRuntimeWorkflowInput{}) {
+		t.Fatalf("input = %#v, want zero test input", input)
+	}
+}
+
+func TestPollProjectAssistantRuntimeVerificationReturnsProvisioningAtDeadline(t *testing.T) {
+	calls := 0
+	_, result, err := pollProjectAssistantRuntimeVerification(
+		context.Background(),
+		time.Millisecond,
+		4*time.Millisecond,
+		func(context.Context) (projectAssistantRuntimeWorkflowInput, *projectAssistantRuntimeWorkflowResult, error) {
+			calls++
+			return projectAssistantRuntimeWorkflowInput{}, &projectAssistantRuntimeWorkflowResult{Status: "provisioning"}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("poll runtime verification returned error: %v", err)
+	}
+	if result == nil || result.Status != "provisioning" {
+		t.Fatalf("result = %#v, want provisioning", result)
+	}
+	if calls < 2 {
+		t.Fatalf("resolver calls = %d, want at least 2", calls)
+	}
+}
+
+func TestFormatProjectAssistantRuntimeVerificationRejectsBrokenProcessLogs(t *testing.T) {
+	result, err := formatProjectAssistantRuntimeVerification(context.Background(), &projectAssistantRuntimeVerificationContext{
+		Runtime: &projectAssistantRuntimeWorkflowResult{
+			Status:     "reachable",
+			Summary:    "The preview edge is reachable.",
+			PreviewURL: "https://app.example.com",
+		},
+		Logs: &projectAssistantRuntimeLogsResult{
+			Status:   "failed",
+			Blockers: []string{"[api] npm error Missing script: start"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("format runtime verification returned error: %v", err)
+	}
+	if result.Status != "not_ready" {
+		t.Fatalf("status = %q, want not_ready", result.Status)
+	}
+	if len(result.Blockers) != 1 {
+		t.Fatalf("blockers = %#v, want process failure", result.Blockers)
+	}
+}
+
+func TestFormatInitialProjectRuntimeVerificationRequiresProcessEvidence(t *testing.T) {
+	result, err := formatProjectAssistantRuntimeVerification(context.Background(), &projectAssistantRuntimeVerificationContext{
+		RequireProcessEvidence: true,
+		Runtime: &projectAssistantRuntimeWorkflowResult{
+			Status:     "reachable",
+			Summary:    "The preview edge is reachable.",
+			PreviewURL: "https://app.example.com",
+		},
+		Logs: &projectAssistantRuntimeLogsResult{Status: "unavailable"},
+	})
+	if err != nil {
+		t.Fatalf("format runtime verification returned error: %v", err)
+	}
+	if result.Status != "not_ready" || len(result.Blockers) != 1 {
+		t.Fatalf("result = %#v, want unavailable process evidence blocker", result)
+	}
+}
+
+func TestProjectAssistantRuntimeLogBlockersDetectSyntaxAndMissingScript(t *testing.T) {
+	for _, line := range []string{
+		"SyntaxError: Unexpected token",
+		"npm error Missing script: start",
+	} {
+		if blockers := projectAssistantRuntimeLogBlockers([]string{line}); len(blockers) != 1 {
+			t.Fatalf("blockers for %q = %#v, want one", line, blockers)
+		}
+	}
+	if blockers := projectAssistantRuntimeLogBlockers([]string{"server listening on port 3000"}); len(blockers) != 0 {
+		t.Fatalf("healthy blockers = %#v, want none", blockers)
 	}
 }
 

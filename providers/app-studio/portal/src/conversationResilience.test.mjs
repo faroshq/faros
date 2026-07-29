@@ -54,6 +54,17 @@ test('first-project durable start replaces its optimistic user message without d
   assert.deepEqual(result.map((item) => item.id), ['prior', 'user-1'])
 })
 
+test('reload ordering keeps a tied user message before its assistant response', () => {
+  const tiedAt = '2026-07-28T19:42:00Z'
+  const assistant = { ...message('msg-0000', 'done'), createdAt: tiedAt }
+  const user = { ...message('msg-ffff', 'build it'), role: 'user', createdAt: tiedAt }
+  const later = { ...message('msg-later', 'next'), role: 'user', createdAt: '2026-07-28T19:50:00Z' }
+
+  const result = state.orderConversationMessages([assistant, user, later])
+
+  assert.deepEqual(result.map((item) => item.id), ['msg-ffff', 'msg-0000', 'msg-later'])
+})
+
 test('first-project retry reuses the created project and durable request identity', () => {
   const pending = state.newFirstProjectSubmission('ship it', 'request-1')
   assert.deepEqual(state.firstProjectStartPlan(pending), { createProject: true, projectName: '', content: 'ship it', clientRequestID: 'request-1' })

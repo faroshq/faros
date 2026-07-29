@@ -1262,6 +1262,7 @@ func TestProjectEinoAssistantPhaseMiddlewareGatesHiddenToolExecution(t *testing.
 func TestProjectEinoAssistantPhaseWriteTodosEmitsSanitizedProgressAfterSuccess(t *testing.T) {
 	var statuses []string
 	var plans []projectAssistantPlanSnapshot
+	runState := newProjectEinoAssistantRunState()
 	middleware := &projectEinoAssistantPhaseFilterMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		req: projectAssistantRunRequest{StreamCallbacks: projectAssistantStreamCallbacks{
@@ -1272,7 +1273,8 @@ func TestProjectEinoAssistantPhaseWriteTodosEmitsSanitizedProgressAfterSuccess(t
 				plans = append(plans, plan)
 			},
 		}},
-		phase: projectEinoAssistantPhaseMutate,
+		runState: runState,
+		phase:    projectEinoAssistantPhaseMutate,
 		approvedPlan: &projectAssistantApprovedPlan{
 			Steps: []string{"inspect", "edit", "verify"},
 		},
@@ -1326,6 +1328,7 @@ func TestProjectEinoAssistantPhaseWriteTodosProgressRespectsMinimalDisclosure(t 
 
 	var statuses []string
 	var plans []projectAssistantPlanSnapshot
+	runState := newProjectEinoAssistantRunState()
 	middleware := &projectEinoAssistantPhaseFilterMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		req: projectAssistantRunRequest{StreamCallbacks: projectAssistantStreamCallbacks{
@@ -1336,7 +1339,8 @@ func TestProjectEinoAssistantPhaseWriteTodosProgressRespectsMinimalDisclosure(t 
 				plans = append(plans, plan)
 			},
 		}},
-		phase: projectEinoAssistantPhaseMutate,
+		runState: runState,
+		phase:    projectEinoAssistantPhaseMutate,
 		approvedPlan: &projectAssistantApprovedPlan{
 			Steps: []string{"inspect", "edit"},
 		},
@@ -1368,6 +1372,11 @@ func TestProjectEinoAssistantPhaseWriteTodosProgressRespectsMinimalDisclosure(t 
 	}
 	if len(plans) != 0 {
 		t.Fatalf("minimal-disclosure plans = %#v, want none", plans)
+	}
+	if progress := runState.PlanProgress(); len(progress.Steps) != 2 ||
+		progress.Steps[0].Status != "completed" ||
+		progress.Steps[1].Status != "in_progress" {
+		t.Fatalf("minimal-disclosure internal progress = %#v, want durable full progress", progress)
 	}
 }
 
@@ -1968,4 +1977,69 @@ func projectEinoAssistantPhaseStringSlicesEqual(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestProjectEinoAssistantInitialBuildRequiresDefinedPlanAndCompletedProgress(t *testing.T) {
+	authority := projectAssistantInitialCreationPlan("Build a swipe app for cat profiles.")
+	req := projectAssistantRunRequest{InitialApprovedPlan: &authority}
+	runState := newProjectEinoAssistantRunState()
+	runState.ApprovePlan(authority)
+	state := &adk.ChatModelAgentState{}
+
+	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhasePlan {
+		t.Fatalf("initial phase = %q, want plan", got)
+	}
+
+	plan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Goal:               authority.Goal,
+		Summary:            "Build the app",
+		Steps:              []string{"Create the app", "Verify the app"},
+		TargetPaths:        []string{"src/"},
+		Version:            projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities:       []string{projectAssistantCapabilityWorkspaceMutate},
+		AcceptanceCriteria: []string{"Preview is ready"},
+		ApprovalTool:       projectToolDefineInitialProjectPlan,
+		RunLocal:           true,
+	})
+	runState.ApprovePlan(plan)
+	runState.SetExecutionPlan(plan, "plan-1")
+	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhaseMutate {
+		t.Fatalf("defined-plan phase = %q, want mutate", got)
+	}
+
+	state.Messages = []*schema.Message{
+		projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"path":"src/App.tsx"}`),
+		projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"ready"}`),
+	}
+	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhaseMutate {
+		t.Fatalf("verified but incomplete-plan phase = %q, want mutate", got)
+	}
+
+	runState.SetPlanProgress(projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Create the app", Status: "completed"},
+		{Content: "Verify the app", Status: "completed"},
+	}})
+	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhaseReport {
+		t.Fatalf("completed initial-build phase = %q, want report", got)
+	}
+}
+
+func TestProjectEinoAssistantPlanPhaseExposesOnlyInternalPlanTool(t *testing.T) {
+	tools := []*schema.ToolInfo{
+		projectEinoAssistantPhaseToolInfo(projectToolDefineInitialProjectPlan, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
+		projectEinoAssistantPhaseToolInfo(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
+		projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+	}
+	authority := projectAssistantInitialCreationPlan("Build a cat app.")
+	got := projectEinoAssistantPhaseFilterTools(
+		projectEinoAssistantPhasePlan,
+		&authority,
+		false,
+		tools,
+		false,
+		projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+	)
+	if names := projectEinoAssistantPhaseToolNames(got); !projectEinoAssistantPhaseStringSlicesEqual(names, []string{projectToolDefineInitialProjectPlan}) {
+		t.Fatalf("plan tools = %#v, want only internal plan definition", names)
+	}
 }

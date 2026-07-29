@@ -77,6 +77,7 @@ func TestDurableAskIsActorBoundDiscussionWithoutWorkItem(t *testing.T) {
 	if started.User.ActorID != "alice" || started.User.WorkItemID != "" {
 		t.Fatalf("Ask user = %#v, want actor-bound unlinked message", started.User)
 	}
+	assertProjectAssistantTurnOrder(t, started)
 	items, err := messages.ListAssistantWorkItems(context.Background(), scope)
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +169,7 @@ func TestDurableContinueResumesSelectedActorWorkItem(t *testing.T) {
 	if continued.Run.Mode != store.AssistantRunModeContinue || continued.Run.WorkItemID != item.ID || continued.User.ActorID != "alice" {
 		t.Fatalf("continue = %#v / %#v", continued.Run, continued.User)
 	}
+	assertProjectAssistantTurnOrder(t, continued)
 	if _, err := server.startProjectAssistantContinueRunDurably(context.Background(), scope, item.ID, "bob", item.Revision, "Continue", "continue-2", func(store.AssistantRun, store.Message, bool) error { return nil }); !errors.Is(err, store.ErrAssistantWorkItemConflict) {
 		t.Fatalf("wrong actor continuation error = %v, want work item conflict", err)
 	}
@@ -197,6 +199,14 @@ func TestDurableBuildCreatesRootedActorBoundWorkItem(t *testing.T) {
 	}
 	if started.User.WorkItemID != item.ID || started.Assistant.WorkItemID != item.ID {
 		t.Fatalf("messages are not linked to WorkItem %q: user=%#v assistant=%#v", item.ID, started.User, started.Assistant)
+	}
+	assertProjectAssistantTurnOrder(t, started)
+}
+
+func assertProjectAssistantTurnOrder(t *testing.T, started projectAssistantDurableStartResult) {
+	t.Helper()
+	if !started.User.CreatedAt.Before(started.Assistant.CreatedAt) {
+		t.Fatalf("turn timestamps = user %v, assistant %v; want user before assistant", started.User.CreatedAt, started.Assistant.CreatedAt)
 	}
 }
 

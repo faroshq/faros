@@ -15,6 +15,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -153,6 +154,116 @@ func TestMemoryAndEncryptedStoreRetireWorkItemPlanContract(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testRetireWorkItemPlanContract(t, tt.new(t))
 		})
+	}
+}
+
+func TestMemoryAndEncryptedStoreExecutionPlanContract(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testWorkItemExecutionPlanContract(t, tt.new(t))
+		})
+	}
+}
+
+func testWorkItemExecutionPlanContract(t *testing.T, s Store) {
+	t.Helper()
+	ctx := context.Background()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	item := testWorkItem("execution-item-1", "execution-user-1")
+	run := testWorkItemRun("execution-run-1", item.ID, "execution-user-1", "execution-assistant-1")
+	created, err := s.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser("execution-user-1"), testWorkItemAssistant("execution-assistant-1"), run)
+	if err != nil {
+		t.Fatalf("CreateWorkItemAndAssistantRun: %v", err)
+	}
+	if _, err := s.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, created.Revision, "execution-plan-invalid", json.RawMessage(`{"summary":`), now); err == nil {
+		t.Fatal("SaveWorkItemExecutionPlan accepted invalid JSON")
+	}
+	firstPlan := json.RawMessage(`{"summary":"Build it","steps":[{"id":"one"}]}`)
+	saved, err := s.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, created.Revision, "execution-plan-1", firstPlan, now)
+	if err != nil {
+		t.Fatalf("SaveWorkItemExecutionPlan: %v", err)
+	}
+	if saved.Revision != created.Revision+1 || saved.ExecutionPlanRevision != "execution-plan-1" || !jsonSemanticallyEqual(saved.ExecutionPlan, firstPlan) {
+		t.Fatalf("saved execution plan = %#v", saved)
+	}
+	persisted, err := s.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantWorkItem: %v", err)
+	}
+	if persisted.ExecutionPlanRevision != saved.ExecutionPlanRevision || !jsonSemanticallyEqual(persisted.ExecutionPlan, firstPlan) {
+		t.Fatalf("persisted execution plan = %#v", persisted)
+	}
+
+	secondPlan := json.RawMessage(`{"summary":"Build and repair it","steps":[{"id":"one"},{"id":"repair"}]}`)
+	if _, err := s.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, created.Revision, "execution-plan-stale", secondPlan, now.Add(time.Minute)); !errors.Is(err, ErrAssistantWorkItemConflict) {
+		t.Fatalf("stale execution plan save error = %v, want %v", err, ErrAssistantWorkItemConflict)
+	}
+	unchanged, err := s.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Revision != saved.Revision || unchanged.ExecutionPlanRevision != saved.ExecutionPlanRevision || !jsonSemanticallyEqual(unchanged.ExecutionPlan, firstPlan) {
+		t.Fatalf("stale save mutated execution plan: %#v", unchanged)
+	}
+
+	persistedRun, err := s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedRun.Status = AssistantRunStatusPendingPermission
+	persistedRun.Revision++
+	if err := s.SaveAssistantRunSnapshot(ctx, scope, persistedRun, nil, persistedRun.Revision-1); err != nil {
+		t.Fatalf("SaveAssistantRunSnapshot pending permission: %v", err)
+	}
+	if _, err := s.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, saved.Revision, "execution-plan-2", secondPlan, now.Add(2*time.Minute)); !errors.Is(err, ErrAssistantRunConflict) && !errors.Is(err, ErrAssistantWorkItemConflict) {
+		t.Fatalf("non-running execution plan save error = %v, want run/work item conflict", err)
+	}
+}
+
+func TestEncryptedStoreExecutionPlanIsEncryptedAtRest(t *testing.T) {
+	base := NewMemoryStore()
+	wrapped, err := NewEncryptedStore(base, testEncryptionKeys(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	item := testWorkItem("encrypted-execution-item", "encrypted-execution-user")
+	run := testWorkItemRun("encrypted-execution-run", item.ID, item.RootMessageID, "encrypted-execution-assistant")
+	created, err := wrapped.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser(item.RootMessageID), testWorkItemAssistant(run.ActiveMessageID), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := json.RawMessage(`{"summary":"secret objective","acceptanceCriteria":["secret result"]}`)
+	if _, err := wrapped.SaveWorkItemExecutionPlan(ctx, scope, item.ID, run.ID, created.Revision, "execution-plan-1", plan, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw.ExecutionPlan) == string(plan) || !bytes.Contains(raw.ExecutionPlan, []byte(`"encrypted":true`)) {
+		t.Fatalf("execution plan was not encrypted at rest: %s", raw.ExecutionPlan)
+	}
+	decrypted, err := wrapped.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonSemanticallyEqual(decrypted.ExecutionPlan, plan) {
+		t.Fatalf("decrypted execution plan = %s, want %s", decrypted.ExecutionPlan, plan)
 	}
 }
 

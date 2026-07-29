@@ -356,6 +356,29 @@ func TestProjectAssistantInitialCreationGrantAllowsSourceEditsButNotTemplateSele
 	}
 }
 
+func TestProjectAssistantInitialExecutionPlanRevisesOutOfScopeWritesWithoutUserPrompt(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.ApprovePlan(normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
+		Goal:         "Build the app",
+		Steps:        []string{"Build"},
+		TargetPaths:  []string{"src/"},
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+		ApprovalTool: projectToolDefineInitialProjectPlan,
+		RunLocal:     true,
+	}))
+	decision := projectAssistantPermissionForApprovalMode(
+		projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
+		store.AssistantApprovalModeAlwaysAsk,
+		false,
+		state,
+		map[string]any{"path": "package.json"},
+	)
+	if decision != projectAssistantPermissionReplan {
+		t.Fatalf("out-of-scope initial write permission = %q, want internal replan", decision)
+	}
+}
+
 func TestProjectAssistantDirectApprovalGrantsWritePlanOnlyForSourceEdits(t *testing.T) {
 	for _, tt := range []struct {
 		name string

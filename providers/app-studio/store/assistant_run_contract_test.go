@@ -61,7 +61,7 @@ func TestMemoryStoreCreateAssistantRunIsAtomicAndIdempotent(t *testing.T) {
 	created, err := store.CreateAssistantRun(
 		context.Background(), scope,
 		Message{ID: "user-1", Role: "user", Content: "Build a dashboard", CreatedAt: createdAt, UpdatedAt: createdAt},
-		Message{ID: "assistant-1", Role: "assistant", Content: "", CreatedAt: createdAt, UpdatedAt: createdAt},
+		Message{ID: "assistant-1", Role: "assistant", Content: "", CreatedAt: createdAt.Add(time.Microsecond), UpdatedAt: createdAt.Add(time.Microsecond)},
 		first,
 	)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestMemoryStoreCreateAssistantRunIsAtomicAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages after create: %v", err)
 	}
-	if len(page.Items) != 2 || page.Items[0].ID != "assistant-1" || page.Items[1].ID != "user-1" {
+	if len(page.Items) != 2 || page.Items[0].ID != "user-1" || page.Items[1].ID != "assistant-1" {
 		t.Fatalf("messages after create = %#v, want both placeholder and user message", page.Items)
 	}
 
