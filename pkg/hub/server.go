@@ -276,11 +276,39 @@ func (s *Server) Run(ctx context.Context) error {
 	// Defaults to the base kedgeClient; overridden to root:kedge:users when kcp is configured.
 	userClient := kedgeClient
 	if kcpConfig != nil {
-		bootstrapper = kcp.NewBootstrapper(kcpConfig).WithEnabledProviders(s.opts.Providers)
+		bootstrapper = kcp.NewBootstrapper(kcpConfig).
+			WithEnabledProviders(s.opts.Providers).
+			WithMetering(s.opts.EnableMetering)
 		if err := bootstrapper.Bootstrap(ctx); err != nil {
 			return fmt.Errorf("bootstrapping kcp: %w", err)
 		}
 		logger.Info("kcp bootstrap complete")
+
+		// Metering membership census: kedge is the platform, so it owns reporting
+		// which workspaces belong to which billing account. This is an event-driven
+		// multicluster controller: it watches tenancy.kcp.io/workspaces across every
+		// org that bound the census APIExport and, on each event, recomputes that one
+		// org's MembershipReport (writing it through the metering-platform VW). It
+		// runs as a LEAST-PRIVILEGED controller on the census ServiceAccount bearer
+		// (minted during metering bootstrap) — NOT the hub kcp admin credential.
+		if s.opts.EnableMetering {
+			token := bootstrapper.CensusToken()
+			platformClusterID := bootstrapper.PlatformClusterID()
+			if token == "" || platformClusterID == "" {
+				return fmt.Errorf("metering enabled but census identity not provisioned (token/platform-cluster missing)")
+			}
+			// Reuse the admin config's host + CA, swap in the census SA bearer and
+			// drop the client cert so requests authenticate as the census SA.
+			saConfig := bootstrapper.AdminConfig()
+			saConfig.BearerToken = token
+			saConfig.CertData = nil
+			saConfig.KeyData = nil
+			saConfig.CertFile = ""
+			saConfig.KeyFile = ""
+			if err := startMeteringCensus(ctx, saConfig, platformClusterID, "kedge-census", logger.WithName("metering-census")); err != nil {
+				return fmt.Errorf("starting metering census: %w", err)
+			}
+		}
 
 		// The legacy per-tenant BackfillDefaultMCPs walk (which iterated
 		// root:kedge:tenants) was removed when the new multi-org model

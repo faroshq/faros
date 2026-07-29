@@ -83,6 +83,13 @@ const (
 	// level so observers can see when it lands.
 	OrganizationConditionDefaultWorkspaceMCPServerReady = "DefaultWorkspaceMCPServerReady"
 
+	// OrganizationConditionCensusBound reports whether the metering census
+	// APIBinding (census.kedge.faros.sh) has been written inside the ORG
+	// workspace. Only set when the hub runs with --enable-metering; it makes
+	// the org's child workspaces visible to the least-privileged census
+	// controller. Absent (never emitted) when metering is disabled.
+	OrganizationConditionCensusBound = "CensusBound"
+
 	// ReasonAwaitingWorkspaceType marks an Organization whose kcp workspace
 	// has not been created yet because the organization WorkspaceType is
 	// not yet registered (lands in a follow-up PR).
