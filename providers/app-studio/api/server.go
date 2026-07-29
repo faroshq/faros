@@ -183,6 +183,8 @@ func (s *Server) Register(r *mux.Router) {
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/resume", s.resumeProjectAssistant).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/abort", s.abortProjectAssistant).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/stop", s.stopProjectAssistant).Methods(http.MethodPost)
+	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.getProjectAssistantApprovalMode).Methods(http.MethodGet)
+	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.patchProjectAssistantApprovalMode).Methods(http.MethodPatch)
 	r.HandleFunc("/api/projects/{project}/assistant/work-items", s.listProjectAssistantWorkItems).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/work-items/{workItem}", s.getProjectAssistantWorkItem).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/work-items/{workItem}/cancel", s.cancelProjectAssistantWorkItem).Methods(http.MethodPost)

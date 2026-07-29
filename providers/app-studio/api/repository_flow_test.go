@@ -317,14 +317,14 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 		project,
 		projectAssistantStreamCallbacks{},
 	)
-	if !errors.Is(err, adk.ErrExceedMaxRetries) {
-		t.Fatalf("generateProjectAssistantStream error = %v, want lifecycle retry exhaustion", err)
+	if err != nil {
+		t.Fatalf("generateProjectAssistantStream returned error: %v", err)
 	}
-	if reply != "" {
-		t.Fatalf("reply = %q, want no premature implementation report", reply)
+	if reply != "Ready." {
+		t.Fatalf("reply = %q, want model report", reply)
 	}
-	if len(model.Inputs) != 3 {
-		t.Fatalf("Eino model request count = %d, want bounded semantic retries", len(model.Inputs))
+	if len(model.Inputs) != 1 {
+		t.Fatalf("Eino model request count = %d, want one", len(model.Inputs))
 	}
 	var joined string
 	for _, msg := range model.Inputs[0].Messages {
@@ -337,7 +337,7 @@ func TestGenerateProjectAssistantStreamIncludesDiscoveredToolPromptOnFirstInput(
 		t.Fatalf("prompt duplicates local tool descriptions: %q", joined)
 	}
 	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
-		t.Fatalf("model tools = %#v, must not expose commit before a successful verification", model.Inputs[0].Tools)
+		t.Fatalf("model tools = %#v, must hide commit before mutation and verification", model.Inputs[0].Tools)
 	}
 	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolRequestProjectPlanApproval) {
 		t.Fatalf("model tools = %#v, want plan approval in the initial phase", model.Inputs[0].Tools)
@@ -486,8 +486,8 @@ func TestGenerateProjectAssistantStreamFiltersDatabricksToolsOnUnrelatedImplemen
 		client,
 		project,
 		projectAssistantStreamCallbacks{},
-	); !errors.Is(err, adk.ErrExceedMaxRetries) {
-		t.Fatalf("generateProjectAssistantStream error = %v, want lifecycle retry exhaustion", err)
+	); err != nil {
+		t.Fatalf("generateProjectAssistantStream returned error: %v", err)
 	}
 	if mcpCalls != 1 {
 		t.Fatalf("MCP tools/list calls = %d, want 1 for commit bridge discovery", mcpCalls)
@@ -497,7 +497,7 @@ func TestGenerateProjectAssistantStreamFiltersDatabricksToolsOnUnrelatedImplemen
 		joined += msg.Content + "\n"
 	}
 	if projectChatToolsInclude(model.Inputs[0].Tools, projectToolCommitProjectFiles) {
-		t.Fatalf("model tools = %#v, must not expose the commit bridge before verification", model.Inputs[0].Tools)
+		t.Fatalf("model tools = %#v, must hide commit before mutation and verification", model.Inputs[0].Tools)
 	}
 	if !projectChatToolsInclude(model.Inputs[0].Tools, projectToolRequestProjectPlanApproval) {
 		t.Fatalf("model tools = %#v, want plan approval in the initial phase", model.Inputs[0].Tools)
@@ -2229,7 +2229,7 @@ func TestResumeProjectAssistantRunDeniesPendingToolAndUpdatesMessage(t *testing.
 		t.Fatalf("assistant metadata = %#v, should not persist raw toolCalls", updatedMessage.Metadata)
 	}
 	updatedActions := projectAssistantActionFeedFromMetadata(updatedMessage.Metadata[projectMessageMetadataAssistantActionFeed])
-	if len(updatedActions) != 1 || updatedActions[0].Status != "rejected" {
+	if len(updatedActions) < 1 || updatedActions[0].Status != "rejected" {
 		t.Fatalf("updated actions = %#v, want persisted rejected action", updatedActions)
 	}
 	if interrupt := projectAssistantUIInterruptFromMetadata(updatedMessage.Metadata[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
@@ -3364,47 +3364,76 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 }
 
 func TestGenerateProjectAssistantStreamPropagatesRepeatedToolLoopLimit(t *testing.T) {
-	reply, requests, err := runRepeatedReadFileAssistantStream(t, "I inspected src/App.tsx and can continue from the profile page context.")
-	if !errors.Is(err, adk.ErrExceedMaxIterations) {
-		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want max iterations", err, len(requests))
+	closing := projectAssistantBoundedClosingAnswerForTest("I inspected src/App.tsx.")
+	reply, requests, err := runRepeatedReadFileAssistantStream(t, closing)
+	if !errors.Is(err, errProjectAssistantNoProgress) {
+		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want no-progress limit", err, len(requests))
 	}
-	if reply != "" {
-		t.Fatalf("reply = %q, want no synthetic success answer", reply)
+	if reply != closing {
+		t.Fatalf("reply = %q, want bounded closing answer", reply)
 	}
-	if got := projectAssistantToolBearingRequestCount(requests); got != 100 {
-		t.Fatalf("tool-bearing LLM request count = %d, want 100", got)
+	if got := projectAssistantToolBearingRequestCount(requests); got != projectEinoAssistantApprovalModelCallLimit {
+		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectEinoAssistantApprovalModelCallLimit)
+	}
+	if len(requests) != projectEinoAssistantApprovalModelCallLimit+1 {
+		t.Fatalf("LLM request count = %d, want tool-bearing calls plus one closing call", len(requests))
+	}
+	if last := requests[len(requests)-1]; len(last.Tools) != 0 || last.ToolChoice != "none" {
+		t.Fatalf("closing LLM request = %#v, want tools disabled", last)
 	}
 }
 
-func TestGenerateProjectAssistantStreamDoesNotSynthesizeEmptyToolLoopAnswer(t *testing.T) {
+func TestGenerateProjectAssistantStreamFallsBackWhenBoundedClosingAnswerIsEmpty(t *testing.T) {
 	reply, requests, err := runRepeatedReadFileAssistantStream(t, "")
-	if !errors.Is(err, adk.ErrExceedMaxIterations) {
-		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want max iterations", err, len(requests))
+	if !errors.Is(err, errProjectAssistantNoProgress) {
+		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want no-progress limit", err, len(requests))
 	}
-	if reply != "" {
-		t.Fatalf("reply = %q, want no synthetic fallback", reply)
+	if !projectEinoAssistantBoundedClosingAnswerValid(reply) ||
+		!strings.Contains(reply, "I inspected file read") {
+		t.Fatalf("reply = %q, want evidence-based fallback", reply)
 	}
-	if got := projectAssistantToolBearingRequestCount(requests); got != 100 {
-		t.Fatalf("tool-bearing LLM request count = %d, want 100", got)
+	if got := projectAssistantToolBearingRequestCount(requests); got != projectEinoAssistantApprovalModelCallLimit {
+		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectEinoAssistantApprovalModelCallLimit)
 	}
 }
 
-func TestGenerateProjectAssistantStreamDoesNotMakeFinalNoToolRequestAtLimit(t *testing.T) {
-	reply, requests, err := runUniqueReadFileAssistantStream(t, "I inspected the requested files and can continue from the latest one.")
+func TestGenerateProjectAssistantStreamMakesFinalNoToolRequestAtLimit(t *testing.T) {
+	closing := projectAssistantBoundedClosingAnswerForTest("I inspected the requested files.")
+	reply, requests, err := runUniqueReadFileAssistantStream(t, closing)
+	if !errors.Is(err, errProjectAssistantNoProgress) {
+		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want no-progress limit", err, len(requests))
+	}
+	if reply != closing {
+		t.Fatalf("reply = %q, want bounded closing answer", reply)
+	}
+	if got := projectAssistantToolBearingRequestCount(requests); got != projectEinoAssistantApprovalModelCallLimit {
+		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectEinoAssistantApprovalModelCallLimit)
+	}
+	if len(requests) != projectEinoAssistantApprovalModelCallLimit+1 {
+		t.Fatalf("LLM request count = %d, want tool-bearing calls plus one closing call", len(requests))
+	}
+	if last := requests[len(requests)-1]; len(last.Tools) != 0 || last.ToolChoice != "none" {
+		t.Fatalf("closing LLM request = %#v, want tools disabled", last)
+	}
+}
+
+func TestGenerateProjectAssistantStreamClosesMaxIterationWithToolsDisabled(t *testing.T) {
+	closing := projectAssistantBoundedClosingAnswerForTest("I inspected the project.")
+	reply, requests, err := runMaxIterationReadFileAssistantStream(t, closing)
 	if !errors.Is(err, adk.ErrExceedMaxIterations) {
-		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want max iterations", err, len(requests))
+		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want max-iteration limit", err, len(requests))
 	}
-	if reply != "" {
-		t.Fatalf("reply = %q, want no synthetic success answer", reply)
+	if reply != closing {
+		t.Fatalf("reply = %q, want bounded closing answer", reply)
 	}
-	if got := projectAssistantToolBearingRequestCount(requests); got != 100 {
-		t.Fatalf("tool-bearing LLM request count = %d, want 100", got)
+	if got := projectAssistantToolBearingRequestCount(requests); got != maxAssistantDeepIterations {
+		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, maxAssistantDeepIterations)
 	}
-	if len(requests) == 0 {
-		t.Fatal("LLM requests are empty, want the final allowed tool-bearing iteration")
+	if len(requests) != maxAssistantDeepIterations+1 {
+		t.Fatalf("LLM request count = %d, want tool-bearing calls plus one closing call", len(requests))
 	}
-	if last := requests[len(requests)-1]; len(last.Tools) == 0 {
-		t.Fatalf("last LLM request = %#v, want the final allowed tool-bearing iteration", last)
+	if last := requests[len(requests)-1]; len(last.Tools) != 0 || last.ToolChoice != "none" {
+		t.Fatalf("closing LLM request = %#v, want tools disabled", last)
 	}
 }
 
@@ -3489,14 +3518,14 @@ func TestGenerateProjectAssistantStreamRejectsUnverifiedCommitProjectFiles(t *te
 		Message: einoschema.AssistantMessage("Commit is unavailable until verification succeeds.", nil),
 	}}}
 	_, requests, err := runProjectAssistantStreamWithModel(t, model, mcp.URL)
-	if !errors.Is(err, adk.ErrExceedMaxRetries) && !strings.Contains(fmt.Sprint(err), "exceeds max retries") {
-		t.Fatalf("generateProjectAssistantStream error = %v, want retry exhaustion", err)
+	if err != nil {
+		t.Fatalf("generateProjectAssistantStream returned error: %v", err)
 	}
 	if commitCalls != 0 {
 		t.Fatalf("commit call count = %d, want unverified commit denied before execution", commitCalls)
 	}
-	if len(requests) != 4 {
-		t.Fatalf("LLM request count = %d, want denial result plus Eino retry exhaustion", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("LLM request count = %d, want denial result followed by a report", len(requests))
 	}
 }
 
@@ -3633,8 +3662,8 @@ func TestProjectAssistantUnstreamedContentAppendsDistinctFinalReply(t *testing.T
 
 func runRepeatedReadFileAssistantStream(t *testing.T, finalAnswer string) (string, []chatCompletionRequest, error) {
 	t.Helper()
-	steps := make([]repositoryFlowEinoModelStep, 0, maxAssistantDeepIterations+2)
-	for i := 1; i <= maxAssistantDeepIterations+1; i++ {
+	steps := make([]repositoryFlowEinoModelStep, 0, projectEinoAssistantApprovalModelCallLimit+1)
+	for i := 1; i <= projectEinoAssistantApprovalModelCallLimit; i++ {
 		steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
 			ID:   fmt.Sprintf("call-%d", i),
 			Type: "function",
@@ -3651,8 +3680,8 @@ func runRepeatedReadFileAssistantStream(t *testing.T, finalAnswer string) (strin
 
 func runUniqueReadFileAssistantStream(t *testing.T, finalAnswer string) (string, []chatCompletionRequest, error) {
 	t.Helper()
-	steps := make([]repositoryFlowEinoModelStep, 0, maxAssistantDeepIterations+2)
-	for i := 1; i <= maxAssistantDeepIterations+1; i++ {
+	steps := make([]repositoryFlowEinoModelStep, 0, projectEinoAssistantApprovalModelCallLimit+1)
+	for i := 1; i <= projectEinoAssistantApprovalModelCallLimit; i++ {
 		steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
 			ID:   fmt.Sprintf("call-%d", i),
 			Type: "function",
@@ -3667,7 +3696,30 @@ func runUniqueReadFileAssistantStream(t *testing.T, finalAnswer string) (string,
 	return runProjectAssistantStreamWithModel(t, model, "")
 }
 
+func runMaxIterationReadFileAssistantStream(t *testing.T, finalAnswer string) (string, []chatCompletionRequest, error) {
+	t.Helper()
+	steps := make([]repositoryFlowEinoModelStep, 0, maxAssistantDeepIterations+1)
+	for i := 1; i <= maxAssistantDeepIterations; i++ {
+		steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
+			ID:   fmt.Sprintf("call-%d", i),
+			Type: "function",
+			Function: einoschema.FunctionCall{
+				Name:      projectToolReadFile,
+				Arguments: fmt.Sprintf(`{"file_path":"src/file-%d.tsx","offset":1,"limit":200}`, i),
+			},
+		}})})
+	}
+	steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage(finalAnswer, nil)})
+	model := &repositoryFlowEinoChatModel{Steps: steps}
+	return runProjectAssistantStreamWithModelAndPrompt(t, model, "", "What files and components are in this project?")
+}
+
 func runProjectAssistantStreamWithModel(t *testing.T, model *repositoryFlowEinoChatModel, hubBase string) (string, []chatCompletionRequest, error) {
+	t.Helper()
+	return runProjectAssistantStreamWithModelAndPrompt(t, model, hubBase, "write a hello app")
+}
+
+func runProjectAssistantStreamWithModelAndPrompt(t *testing.T, model *repositoryFlowEinoChatModel, hubBase, prompt string) (string, []chatCompletionRequest, error) {
 	t.Helper()
 
 	settings := projectLLMSettings{
@@ -3679,7 +3731,7 @@ func runProjectAssistantStreamWithModel(t *testing.T, model *repositoryFlowEinoC
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
-	if err := appendProjectUserMessage(context.Background(), messages, scope, "write a hello app"); err != nil {
+	if err := appendProjectUserMessage(context.Background(), messages, scope, prompt); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
 	workspaces := workspace.NewFileStore(t.TempDir())

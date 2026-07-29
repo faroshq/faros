@@ -76,13 +76,14 @@ func TestPostgresStoreExternalDSN(t *testing.T) {
 	}
 
 	run := AssistantRun{
-		ID:         "run-1",
-		Status:     AssistantRunStatusPendingPermission,
-		RequestID:  "perm-1",
-		Checkpoint: json.RawMessage(`{"tool":"write_file"}`),
-		Audit:      json.RawMessage(`{"decisions":[{"decision":"allow"}]}`),
-		CreatedAt:  time.Date(2026, 6, 14, 12, 1, 0, 0, time.UTC),
-		UpdatedAt:  time.Date(2026, 6, 14, 12, 1, 0, 0, time.UTC),
+		ID:           "run-1",
+		ApprovalMode: AssistantApprovalModeAutoApprove,
+		Status:       AssistantRunStatusPendingPermission,
+		RequestID:    "perm-1",
+		Checkpoint:   json.RawMessage(`{"tool":"write_file"}`),
+		Audit:        json.RawMessage(`{"decisions":[{"decision":"allow"}]}`),
+		CreatedAt:    time.Date(2026, 6, 14, 12, 1, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 6, 14, 12, 1, 0, 0, time.UTC),
 	}
 	if err := s.SaveAssistantRun(ctx, scope, run); err != nil {
 		t.Fatalf("SaveAssistantRun: %v", err)
@@ -91,14 +92,14 @@ func TestPostgresStoreExternalDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAssistantRun: %v", err)
 	}
-	if gotRun.ID != run.ID || gotRun.Status != run.Status || gotRun.RequestID != run.RequestID || !jsonSemanticallyEqual(gotRun.Checkpoint, run.Checkpoint) || !jsonSemanticallyEqual(gotRun.Audit, run.Audit) {
+	if gotRun.ID != run.ID || gotRun.ApprovalMode != run.ApprovalMode || gotRun.Status != run.Status || gotRun.RequestID != run.RequestID || !jsonSemanticallyEqual(gotRun.Checkpoint, run.Checkpoint) || !jsonSemanticallyEqual(gotRun.Audit, run.Audit) {
 		t.Fatalf("assistant run = %#v, want %#v", gotRun, run)
 	}
 	claimed, err := s.ClaimAssistantRun(ctx, scope, run.ID, run.RequestID, run.UpdatedAt.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ClaimAssistantRun: %v", err)
 	}
-	if claimed.Status != AssistantRunStatusRunning || claimed.RequestID != run.RequestID {
+	if claimed.Status != AssistantRunStatusRunning || claimed.RequestID != run.RequestID || claimed.ApprovalMode != AssistantApprovalModeAutoApprove {
 		t.Fatalf("claimed assistant run = %#v, want running request", claimed)
 	}
 	if _, err := s.ClaimAssistantRun(ctx, scope, run.ID, run.RequestID, run.UpdatedAt.Add(2*time.Minute)); err == nil {
@@ -162,6 +163,21 @@ func TestPostgresStoreWorkItemContractExternalDSN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWorkItemAndAssistantRun: %v", err)
 	}
+	cleared := created
+	cleared.PlanGrant = nil
+	cleared.Revision++
+	cleared.UpdatedAt = now.Add(30 * time.Second)
+	if err := s.CompareAndSwapAssistantWorkItem(ctx, scope, cleared, created.Revision); err != nil {
+		t.Fatalf("CompareAndSwapAssistantWorkItem with nil plan grant: %v", err)
+	}
+	persistedCleared, err := s.GetAssistantWorkItem(ctx, scope, item.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantWorkItem after cleared plan grant: %v", err)
+	}
+	if !jsonSemanticallyEqual(persistedCleared.PlanGrant, json.RawMessage(`{}`)) {
+		t.Fatalf("cleared plan grant = %s, want empty JSON object", persistedCleared.PlanGrant)
+	}
+	created = cleared
 	approved, err := s.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, created.Revision, "grant-1", json.RawMessage(`{"capabilities":["workspace_mutate"]}`), now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ApproveWorkItemPlan: %v", err)
@@ -193,6 +209,41 @@ func TestPostgresStoreWorkItemContractExternalDSN(t *testing.T) {
 	if !jsonSemanticallyEqual(persistedRun.Checkpoint, json.RawMessage(`{}`)) {
 		t.Fatalf("terminal checkpoint = %s, want empty object", persistedRun.Checkpoint)
 	}
+	duplicate := persistedRun
+	duplicate.ID = "run-duplicate-request"
+	duplicate.Revision = 1
+	duplicate.CreatedAt = now.Add(3 * time.Minute)
+	duplicate.UpdatedAt = duplicate.CreatedAt
+	if err := s.SaveAssistantRun(ctx, scope, duplicate); !errors.Is(err, ErrAssistantRunConflict) {
+		t.Fatalf("duplicate scoped client request ID error = %v, want %v", err, ErrAssistantRunConflict)
+	}
+	for i := 0; i < 30; i++ {
+		messageTime := now.Add(time.Duration(10+i) * time.Minute)
+		if err := s.AppendMessage(ctx, scope, Message{
+			ID:         "history-" + time.Unix(int64(i), 0).UTC().Format("150405"),
+			WorkItemID: item.ID,
+			Role:       "assistant",
+			Content:    "history",
+			CreatedAt:  messageTime,
+			UpdatedAt:  messageTime,
+		}); err != nil {
+			t.Fatalf("AppendMessage history %d: %v", i, err)
+		}
+	}
+	recent, err := s.LoadMessagesForWorkItem(ctx, scope, item.ID, 5)
+	if err != nil {
+		t.Fatalf("LoadMessagesForWorkItem newest messages: %v", err)
+	}
+	wantRecent := []string{"history-000025", "history-000026", "history-000027", "history-000028", "history-000029"}
+	if len(recent) != len(wantRecent) {
+		t.Fatalf("recent messages = %#v, want %d", recent, len(wantRecent))
+	}
+	for i := range wantRecent {
+		if recent[i].ID != wantRecent[i] {
+			t.Fatalf("recent message %d = %q, want %q", i, recent[i].ID, wantRecent[i])
+		}
+	}
+	testRetireWorkItemPlanContract(t, s)
 }
 
 func TestPostgresStoreResetsLegacySchemaAtWorkItemBoundaryExternalDSN(t *testing.T) {
@@ -315,12 +366,44 @@ func TestWorkItemSchemaResetPrecedesFinalSchemaStatements(t *testing.T) {
 			t.Fatalf("final schema statement %q must not drop tables", stmt)
 		}
 	}
+	if messageSchemaVersion != "work-item-v2" {
+		t.Fatalf("message schema version = %q, want rebuilt work-item-v2 boundary", messageSchemaVersion)
+	}
+	if !schemaStatementsContain(final, "CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx") {
+		t.Fatal("work item schema does not enforce scoped client request ID uniqueness")
+	}
+	if clientRequestUniqueSchemaVersion == messageSchemaVersion ||
+		!schemaStatementsContain(clientRequestUniqueSchemaStatements(), "CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx") {
+		t.Fatal("client request uniqueness must also have an independently applied migration for existing schemas")
+	}
 	steps := append(append([]string(nil), reset...), final...)
 	for i, stmt := range steps {
 		if i < len(reset) && !strings.HasPrefix(strings.TrimSpace(stmt), "DROP TABLE IF EXISTS") {
 			t.Fatalf("schema step %d = %q, want reset before final DDL", i, stmt)
 		}
 	}
+}
+
+func TestNormalizeAssistantWorkItemPlanGrant(t *testing.T) {
+	normalized, err := normalizeAssistantWorkItemPlanGrant(nil)
+	if err != nil {
+		t.Fatalf("normalize nil plan grant: %v", err)
+	}
+	if string(normalized) != `{}` {
+		t.Fatalf("normalized nil plan grant = %q, want valid empty JSON object", normalized)
+	}
+	if _, err := normalizeAssistantWorkItemPlanGrant(json.RawMessage(`not-json`)); err == nil {
+		t.Fatal("invalid plan grant returned nil error")
+	}
+}
+
+func schemaStatementsContain(statements []string, fragment string) bool {
+	for _, statement := range statements {
+		if strings.Contains(statement, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPostgresStoreDurableAssistantRunContractExternalDSN(t *testing.T) {

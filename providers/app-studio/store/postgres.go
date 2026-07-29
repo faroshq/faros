@@ -26,7 +26,9 @@ import (
 	"github.com/lib/pq"
 )
 
-const messageSchemaVersion = "work-item-v1"
+const messageSchemaVersion = "work-item-v2"
+const approvalModeSchemaVersion = "approval-mode-v1"
+const clientRequestUniqueSchemaVersion = "client-request-unique-v1"
 
 const createMessageSchemaMigrationsTable = `CREATE TABLE IF NOT EXISTS app_studio_message_schema_migrations (
 	version text PRIMARY KEY,
@@ -107,10 +109,22 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := ensureSchemaVersion(ctx, tx, messageSchemaVersion, stmts...); err != nil {
 		return err
 	}
+	if err := ensureSchemaVersion(ctx, tx, clientRequestUniqueSchemaVersion, clientRequestUniqueSchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, approvalModeSchemaVersion, approvalModeSchemaStatements()...); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
 	return nil
+}
+
+func clientRequestUniqueSchemaStatements() []string {
+	return []string{`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
+		ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, client_request_id)
+		WHERE client_request_id <> ''`}
 }
 
 func workItemSchemaResetStatements() []string {
@@ -118,6 +132,24 @@ func workItemSchemaResetStatements() []string {
 		`DROP TABLE IF EXISTS app_studio_assistant_work_items`,
 		`DROP TABLE IF EXISTS app_studio_assistant_runs`,
 		`DROP TABLE IF EXISTS app_studio_messages`,
+	}
+}
+
+func approvalModeSchemaStatements() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences (
+			org_uuid text NOT NULL,
+			workspace_uuid text NOT NULL,
+			project_name text NOT NULL,
+			project_uid text NOT NULL,
+			actor_id text NOT NULL,
+				approval_mode text NOT NULL CHECK (approval_mode IN ('always_ask', 'auto_approve')),
+			updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
+			)`,
+		`ALTER TABLE app_studio_assistant_runs
+				ADD COLUMN IF NOT EXISTS approval_mode text NOT NULL DEFAULT 'always_ask'
+				CHECK (approval_mode IN ('always_ask', 'auto_approve'))`,
 	}
 }
 
@@ -150,9 +182,10 @@ func workItemSchemaStatements() []string {
 			project_name text NOT NULL,
 			project_uid text NOT NULL,
 			run_id text NOT NULL,
-			work_item_id text NOT NULL DEFAULT '',
-			mode text NOT NULL DEFAULT 'discussion',
-			expected_grant_revision text NOT NULL DEFAULT '',
+				work_item_id text NOT NULL DEFAULT '',
+				mode text NOT NULL DEFAULT 'discussion',
+				approval_mode text NOT NULL DEFAULT 'always_ask' CHECK (approval_mode IN ('always_ask', 'auto_approve')),
+				expected_grant_revision text NOT NULL DEFAULT '',
 			status text NOT NULL,
 			client_request_id text NOT NULL DEFAULT '',
 			user_message_id text NOT NULL DEFAULT '',
@@ -167,6 +200,9 @@ func workItemSchemaStatements() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_updated_idx
 			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, updated_at, run_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, client_request_id)
+			WHERE client_request_id <> ''`,
 		`CREATE TABLE IF NOT EXISTS app_studio_assistant_work_items (
 			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
 			work_item_id text NOT NULL, root_message_id text NOT NULL, created_by text NOT NULL,
@@ -371,6 +407,75 @@ func (s *PostgresStore) LoadRecentMessages(ctx context.Context, scope Scope, lim
 	return items, nil
 }
 
+func (s *PostgresStore) GetAssistantApprovalPreference(ctx context.Context, scope Scope, actor string) (AssistantApprovalPreference, error) {
+	if s == nil || s.db == nil {
+		return AssistantApprovalPreference{}, fmt.Errorf("postgres store is nil")
+	}
+	if err := scope.validate(); err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return AssistantApprovalPreference{}, fmt.Errorf("assistant approval preference actor is required")
+	}
+	var preference AssistantApprovalPreference
+	var mode string
+	err := s.db.QueryRowContext(ctx, `SELECT actor_id, approval_mode, updated_at
+		FROM app_studio_assistant_approval_preferences
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND actor_id=$5`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, actor,
+	).Scan(&preference.ActorID, &mode, &preference.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeAlwaysAsk}, nil
+	}
+	if err != nil {
+		return AssistantApprovalPreference{}, fmt.Errorf("get assistant approval preference: %w", err)
+	}
+	preference.Mode, err = NormalizeAssistantApprovalMode(AssistantApprovalMode(mode))
+	if err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	preference.UpdatedAt = preference.UpdatedAt.UTC()
+	return preference, nil
+}
+
+func (s *PostgresStore) SetAssistantApprovalPreference(ctx context.Context, scope Scope, preference AssistantApprovalPreference) (AssistantApprovalPreference, error) {
+	if s == nil || s.db == nil {
+		return AssistantApprovalPreference{}, fmt.Errorf("postgres store is nil")
+	}
+	if err := scope.validate(); err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	preference.ActorID = strings.TrimSpace(preference.ActorID)
+	if preference.ActorID == "" {
+		return AssistantApprovalPreference{}, fmt.Errorf("assistant approval preference actor is required")
+	}
+	mode, err := NormalizeAssistantApprovalMode(preference.Mode)
+	if err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	preference.Mode = mode
+	if preference.UpdatedAt.IsZero() {
+		preference.UpdatedAt = time.Now().UTC()
+	} else {
+		preference.UpdatedAt = preference.UpdatedAt.UTC()
+	}
+	err = s.db.QueryRowContext(ctx, `INSERT INTO app_studio_assistant_approval_preferences (
+			org_uuid, workspace_uuid, project_name, project_uid, actor_id, approval_mode, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
+		DO UPDATE SET approval_mode=EXCLUDED.approval_mode, updated_at=EXCLUDED.updated_at
+		RETURNING actor_id, approval_mode, updated_at`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		preference.ActorID, preference.Mode, preference.UpdatedAt,
+	).Scan(&preference.ActorID, &preference.Mode, &preference.UpdatedAt)
+	if err != nil {
+		return AssistantApprovalPreference{}, fmt.Errorf("set assistant approval preference: %w", err)
+	}
+	preference.UpdatedAt = preference.UpdatedAt.UTC()
+	return preference, nil
+}
+
 func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run AssistantRun) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store is nil")
@@ -384,6 +489,11 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 	if run.Status == "" {
 		return fmt.Errorf("assistant run status is required")
 	}
+	approvalMode, err := NormalizeAssistantApprovalMode(run.ApprovalMode)
+	if err != nil {
+		return err
+	}
+	run.ApprovalMode = approvalMode
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -410,10 +520,10 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
-			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision,
+			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision,
 			status, client_request_id, user_message_id, active_message_id, revision, request_id,
 			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 		DO UPDATE SET
 			status = EXCLUDED.status,
@@ -422,10 +532,11 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 			checkpoint = EXCLUDED.checkpoint,
 			audit = EXCLUDED.audit,
 			updated_at = EXCLUDED.updated_at
-		WHERE app_studio_assistant_runs.work_item_id = EXCLUDED.work_item_id
-			AND app_studio_assistant_runs.mode = EXCLUDED.mode
-	`,
-		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision,
+			WHERE app_studio_assistant_runs.work_item_id = EXCLUDED.work_item_id
+				AND app_studio_assistant_runs.mode = EXCLUDED.mode
+				AND app_studio_assistant_runs.approval_mode = EXCLUDED.approval_mode
+		`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision,
 		run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 		string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 	)
@@ -469,14 +580,14 @@ func (s *PostgresStore) CreateAssistantRun(ctx context.Context, scope Scope, use
 
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
-			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision, status,
+			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status,
 			client_request_id, user_message_id, active_message_id, revision, request_id,
 			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT DO NOTHING
-		RETURNING run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+		RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		          request_id, checkpoint, audit, created_at, updated_at
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision, run.Status,
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status,
 		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 		string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
 	inserted, err := scanAssistantRun(row, scope)
@@ -539,12 +650,13 @@ func (s *PostgresStore) SaveAssistantRunSnapshot(ctx context.Context, scope Scop
 			audit = $11,
 			updated_at = $12
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
-		  AND revision = $13
-		  AND work_item_id = $14
-		  AND mode = $15
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
+			  AND revision = $13
+			  AND work_item_id = $14
+			  AND mode = $15
+			  AND approval_mode = $16
+		`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
 		run.Status, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(checkpoint), string(audit), run.UpdatedAt.UTC(), expectedRevision, run.WorkItemID, run.Mode)
+		string(checkpoint), string(audit), run.UpdatedAt.UTC(), expectedRevision, run.WorkItemID, run.Mode, run.ApprovalMode)
 	if err != nil {
 		if isAssistantRunUniqueViolation(err) {
 			return fmt.Errorf("%w: project already has active assistant run", ErrAssistantRunConflict)
@@ -587,6 +699,11 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 	if run.Status == "" {
 		return fmt.Errorf("assistant run status is required")
 	}
+	approvalMode, err := NormalizeAssistantApprovalMode(run.ApprovalMode)
+	if err != nil {
+		return err
+	}
+	run.ApprovalMode = approvalMode
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -615,10 +732,10 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 	if expectedRequestID == "" {
 		result, err = s.db.ExecContext(ctx, `
 			INSERT INTO app_studio_assistant_runs (
-				org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision,
-				status, client_request_id, user_message_id, active_message_id, revision, request_id,
-				checkpoint, audit, created_at, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+					org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision,
+					status, client_request_id, user_message_id, active_message_id, revision, request_id,
+					checkpoint, audit, created_at, updated_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 			ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 			DO UPDATE SET
 				status = EXCLUDED.status,
@@ -628,10 +745,11 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 				audit = EXCLUDED.audit,
 				updated_at = EXCLUDED.updated_at
 			WHERE app_studio_assistant_runs.request_id = ''
-				AND app_studio_assistant_runs.work_item_id = EXCLUDED.work_item_id
-				AND app_studio_assistant_runs.mode = EXCLUDED.mode
-		`,
-			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision,
+					AND app_studio_assistant_runs.work_item_id = EXCLUDED.work_item_id
+					AND app_studio_assistant_runs.mode = EXCLUDED.mode
+					AND app_studio_assistant_runs.approval_mode = EXCLUDED.approval_mode
+			`,
+			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision,
 			run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
 			string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 		)
@@ -650,11 +768,12 @@ func (s *PostgresStore) CompareAndSwapAssistantRun(
 				AND project_uid = $4
 				AND run_id = $5
 				AND request_id = $12
-				AND work_item_id = $13
-				AND mode = $14
-		`,
+					AND work_item_id = $13
+					AND mode = $14
+					AND approval_mode = $15
+			`,
 			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
-			run.Status, run.ActiveMessageID, run.RequestID, string(normalizedCheckpoint), string(normalizedAudit), run.UpdatedAt.UTC(), expectedRequestID, run.WorkItemID, run.Mode,
+			run.Status, run.ActiveMessageID, run.RequestID, string(normalizedCheckpoint), string(normalizedAudit), run.UpdatedAt.UTC(), expectedRequestID, run.WorkItemID, run.Mode, run.ApprovalMode,
 		)
 	}
 	if err != nil {
@@ -734,7 +853,7 @@ func (s *PostgresStore) ClaimAssistantRun(ctx context.Context, scope Scope, id s
 		  AND run_id = $7
 		  AND request_id = $8
 		  AND status IN ($9, $10)
-		RETURNING run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+			RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		          request_id, checkpoint, audit, created_at, updated_at
 	`,
 		AssistantRunStatusRunning, now.UTC(),
@@ -763,7 +882,7 @@ func (s *PostgresStore) GetAssistantRun(ctx context.Context, scope Scope, id str
 		return AssistantRun{}, fmt.Errorf("assistant run id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
@@ -800,7 +919,7 @@ func (s *PostgresStore) LatestAssistantRun(ctx context.Context, scope Scope) (As
 		return AssistantRun{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
@@ -823,6 +942,12 @@ func (s *PostgresStore) DeleteProjectMessages(ctx context.Context, scope Scope) 
 	}
 	if err := scope.validate(); err != nil {
 		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_approval_preferences
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant approval preferences: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		DELETE FROM app_studio_messages
@@ -970,7 +1095,7 @@ func getAssistantRunByClientRequestID(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, scope Scope, clientRequestID string) (AssistantRun, error) {
 	row := queryer.QueryRowContext(ctx, `
-		SELECT run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND client_request_id = $5
@@ -999,6 +1124,7 @@ func scanAssistantRun(row interface {
 		&run.ID,
 		&run.WorkItemID,
 		&run.Mode,
+		&run.ApprovalMode,
 		&run.ExpectedGrantRevision,
 		&status,
 		&run.ClientRequestID,
@@ -1016,6 +1142,7 @@ func scanAssistantRun(row interface {
 	run.ProjectName = scope.ProjectName
 	run.ProjectUID = scope.ProjectUID
 	run.Status = AssistantRunStatus(status)
+	run.ApprovalMode, _ = NormalizeAssistantApprovalMode(run.ApprovalMode)
 	run.Checkpoint = cloneRawMessage(run.Checkpoint)
 	run.Audit = cloneRawMessage(run.Audit)
 	run.CreatedAt = run.CreatedAt.UTC()

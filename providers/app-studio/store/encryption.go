@@ -21,6 +21,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -194,6 +195,14 @@ func (s *encryptedStore) LoadRecentMessages(ctx context.Context, scope Scope, li
 	return items, nil
 }
 
+func (s *encryptedStore) GetAssistantApprovalPreference(ctx context.Context, scope Scope, actor string) (AssistantApprovalPreference, error) {
+	return s.inner.GetAssistantApprovalPreference(ctx, scope, actor)
+}
+
+func (s *encryptedStore) SetAssistantApprovalPreference(ctx context.Context, scope Scope, preference AssistantApprovalPreference) (AssistantApprovalPreference, error) {
+	return s.inner.SetAssistantApprovalPreference(ctx, scope, preference)
+}
+
 func (s *encryptedStore) SaveAssistantRun(ctx context.Context, scope Scope, run AssistantRun) error {
 	if err := scope.validate(); err != nil {
 		return err
@@ -291,6 +300,50 @@ func (s *encryptedStore) CreateWorkItemAndAssistantRun(ctx context.Context, scop
 	return created, nil
 }
 
+func (s *encryptedStore) PromoteAssistantRunToWorkItem(
+	ctx context.Context,
+	scope Scope,
+	runID, actor, workItemID string,
+	expectedRunRevision int64,
+	now time.Time,
+) (AssistantWorkItem, AssistantRun, error) {
+	// Promotion does not change checkpoint or audit content. Validate and
+	// decrypt those blobs before the inner atomic mutation so no missing-key
+	// or corrupt-ciphertext error can be discovered only after commit.
+	existing, err := s.inner.GetAssistantRun(ctx, scope, runID)
+	if err != nil {
+		if errors.Is(err, ErrAssistantRunNotFound) {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+		}
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	if err := s.decryptAssistantRunBlobs(scope, &existing); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	item, run, err := s.inner.PromoteAssistantRunToWorkItem(
+		ctx,
+		scope,
+		runID,
+		actor,
+		workItemID,
+		expectedRunRevision,
+		now,
+	)
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	run.Checkpoint = existing.Checkpoint
+	run.Audit = existing.Audit
+	// A first-time promotion always creates an empty grant, so this cannot
+	// discover a ciphertext error after a mutation. On an idempotent replay
+	// the inner operation is read-only and returns the authoritative grant and
+	// revision together; decrypt that result to avoid racing plan changes.
+	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	return item, run, nil
+}
+
 func (s *encryptedStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
 	var err error
 	user, err = s.encryptMessage(scope, user)
@@ -385,6 +438,17 @@ func (s *encryptedStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, w
 		return AssistantWorkItem{}, err
 	}
 	return approved, nil
+}
+
+func (s *encryptedStore) RetireWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID, actor string, expectedWorkItemRevision int64, expectedGrantRevision, tombstoneGrantRevision string, now time.Time) (AssistantWorkItem, error) {
+	item, err := s.inner.RetireWorkItemPlan(ctx, scope, workItemID, runID, actor, expectedWorkItemRevision, expectedGrantRevision, tombstoneGrantRevision, now)
+	if err != nil {
+		return AssistantWorkItem{}, err
+	}
+	if err := s.decryptAssistantWorkItemGrant(scope, &item); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	return item, nil
 }
 
 func (s *encryptedStore) TransitionWorkItemAndRun(ctx context.Context, scope Scope, workItemID string, expectedWorkItemRevision int64, run AssistantRun, status AssistantWorkItemStatus, reason string, now time.Time) error {

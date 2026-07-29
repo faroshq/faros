@@ -52,6 +52,11 @@ const (
 	projectEinoAssistantTodoProgressMaxLabelBytes = 120
 )
 
+const (
+	projectEinoAssistantApprovalModelCallLimit = 8
+	projectEinoAssistantMutateModelCallLimit   = 4
+)
+
 type projectEinoAssistantTodoProgressInput struct {
 	Todos []projectEinoAssistantTodoProgressItem `json:"todos"`
 }
@@ -71,6 +76,11 @@ type projectEinoAssistantPhaseFilterMiddleware struct {
 	deferredToolInfos []*schema.ToolInfo
 	phase             projectEinoAssistantPhase
 	approvedPlan      *projectAssistantApprovedPlan
+	progressPhase     projectEinoAssistantPhase
+	progressSource    uint64
+	progressVerified  uint64
+	progressCalls     int
+	progressWarned    bool
 }
 
 func projectEinoAssistantPhaseMiddleware(
@@ -82,10 +92,10 @@ func projectEinoAssistantPhaseMiddleware(
 		if messages, err := projectChatMessagesToEino(req.Continuation.Messages); err == nil {
 			state := &adk.ChatModelAgentState{Messages: messages}
 			phase = projectEinoAssistantPhaseForState(req, runState, state)
-			// Asking permission for a commit consumes the plan grant before
-			// checkpointing. Restore only the execution phase for that exact
-			// interrupted commit after re-validating write -> verification
-			// ordering from the persisted message history.
+			// Asking permission for a commit atomically replaces the WorkItem
+			// plan grant with a tombstone before checkpointing. Restore only the
+			// execution phase for that exact interrupted commit after re-validating
+			// write -> verification ordering from the persisted message history.
 			if phase == projectEinoAssistantPhaseApproval &&
 				req.Continuation.Eino != nil &&
 				projectEinoAssistantCommitTool(req.Continuation.Eino.ToolName) {
@@ -142,7 +152,7 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 	// filtering. They do not participate in the mutation lifecycle, but still
 	// need the canonical static inventory after resuming a legacy checkpoint
 	// whose persisted ToolInfos were phase-filtered.
-	if !projectEinoAssistantPhaseLifecycleApplies(m.req) {
+	if !projectEinoAssistantPhaseLifecycleApplies(m.req, m.runState) {
 		templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
 		state.ToolInfos = projectEinoAssistantPhaseFilterReadOnlyTools(
 			templateBootstrapAllowed,
@@ -155,6 +165,9 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 		return ctx, state, nil
 	}
 	phase := projectEinoAssistantPhaseForState(m.req, m.runState, state)
+	if err := m.enforceSemanticProgress(state, phase); err != nil {
+		return ctx, nil, err
+	}
 	approvedPlan := projectEinoAssistantPhaseApprovedPlan(m.req, m.runState)
 	templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
 	m.phase = phase
@@ -167,14 +180,87 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) BeforeModelRewriteState(
 		approvedPlan,
 		templateBootstrapAllowed,
 		projectEinoAssistantPhaseVisibleTools(m.toolInfos, state.ToolInfos),
+		projectAssistantInlinePromotionEnabled(m.req),
+		normalizeProjectAssistantTurnPolicy(m.req.TurnPolicy, m.req.TurnProfile),
 	)
 	state.DeferredToolInfos = projectEinoAssistantPhaseFilterTools(
 		phase,
 		approvedPlan,
 		templateBootstrapAllowed,
 		m.deferredToolInfos,
+		projectAssistantInlinePromotionEnabled(m.req),
+		normalizeProjectAssistantTurnPolicy(m.req.TurnPolicy, m.req.TurnProfile),
 	)
+	if projectAssistantInlinePromotionEnabled(m.req) &&
+		phase == projectEinoAssistantPhaseApproval {
+		state.ToolInfos = projectEinoAssistantPhaseWithoutToolSearch(state.ToolInfos)
+	}
 	return ctx, state, nil
+}
+
+func (m *projectEinoAssistantPhaseFilterMiddleware) enforceSemanticProgress(
+	state *adk.ChatModelAgentState,
+	phase projectEinoAssistantPhase,
+) error {
+	limit := projectEinoAssistantPhaseModelCallLimit(phase)
+	if limit == 0 {
+		m.resetSemanticProgress(phase, 0, 0)
+		return nil
+	}
+	source, verified := uint64(0), uint64(0)
+	if m.runState != nil {
+		source, verified = m.runState.SourceMutationRevisions()
+	}
+	if phase != m.progressPhase || source != m.progressSource || verified != m.progressVerified {
+		m.resetSemanticProgress(phase, source, verified)
+	}
+	m.progressCalls++
+	if m.progressCalls > limit {
+		return fmt.Errorf("%w: phase %s made no progress after %d model calls", errProjectAssistantNoProgress, phase, limit)
+	}
+	if !m.progressWarned && m.progressCalls >= limit-1 {
+		state.Messages = append(state.Messages, schema.SystemMessage(projectEinoAssistantPhaseProgressInstruction(phase)))
+		m.progressWarned = true
+	}
+	return nil
+}
+
+func (m *projectEinoAssistantPhaseFilterMiddleware) resetSemanticProgress(
+	phase projectEinoAssistantPhase,
+	source uint64,
+	verified uint64,
+) {
+	m.progressPhase = phase
+	m.progressSource = source
+	m.progressVerified = verified
+	m.progressCalls = 0
+	m.progressWarned = false
+}
+
+func projectEinoAssistantPhaseModelCallLimit(phase projectEinoAssistantPhase) int {
+	switch phase {
+	case projectEinoAssistantPhaseApproval:
+		return projectEinoAssistantApprovalModelCallLimit
+	case projectEinoAssistantPhaseMutate:
+		return projectEinoAssistantMutateModelCallLimit
+	default:
+		return 0
+	}
+}
+
+func projectEinoAssistantPhaseProgressInstruction(phase projectEinoAssistantPhase) string {
+	switch phase {
+	case projectEinoAssistantPhaseApproval:
+		return "Finish bounded inspection now. Request one complete source-edit plan, ask the user for missing information, or report a concrete blocker. Do not repeat prior reads or searches."
+	case projectEinoAssistantPhaseMutate:
+		return "A source-edit plan is already approved. Stop broad inspection and apply the approved workspace mutation now. Ask the user only if required information is missing; do not request another equivalent plan."
+	case projectEinoAssistantPhaseVerify:
+		return "The workspace changed. Verify the current development result now. Do not repeat source inspection unless a concrete verification failure identifies a repair target."
+	case projectEinoAssistantPhaseRepair:
+		return "Use the latest verification failure to make one targeted repair, then verify again. Do not restart broad project inspection."
+	default:
+		return "Complete the current task phase now or report a concrete blocker."
+	}
 }
 
 func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
@@ -187,7 +273,7 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 	}
 	rawName := toolCtx.Name
 	name := projectToolBaseName(rawName)
-	if !projectEinoAssistantPhaseLifecycleApplies(m.req) {
+	if !projectEinoAssistantPhaseLifecycleApplies(m.req, m.runState) {
 		templateBootstrapAllowed := projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project)
 		tool := m.toolInfoForInvocation(rawName)
 		risk, bundle, hasMetadata := projectEinoAssistantPhaseToolMetadata(tool)
@@ -219,11 +305,18 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) WrapInvokableToolCall(
 		if approvedPlan == nil {
 			approvedPlan = m.approvedPlan
 		}
+		if name == projectEinoAssistantToolSearchTool &&
+			projectAssistantInlinePromotionEnabled(m.req) &&
+			m.phase == projectEinoAssistantPhaseApproval {
+			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
+		}
 		if !projectEinoAssistantPhaseAllowsTool(
 			m.phase,
 			approvedPlan,
 			projectEinoAssistantPhaseTemplateBootstrapAllowed(m.req.Project),
 			tool,
+			projectAssistantInlinePromotionEnabled(m.req),
+			normalizeProjectAssistantTurnPolicy(m.req.TurnPolicy, m.req.TurnProfile),
 		) {
 			return fmt.Sprintf("Tool call denied: %s is unavailable in the current assistant phase", name), nil
 		}
@@ -355,7 +448,13 @@ func (m *projectEinoAssistantPhaseFilterMiddleware) toolInfoForInvocation(rawNam
 	return tool
 }
 
-func projectEinoAssistantPhaseLifecycleApplies(req projectAssistantRunRequest) bool {
+func projectEinoAssistantPhaseLifecycleApplies(req projectAssistantRunRequest, runState *projectEinoAssistantRunState) bool {
+	if projectAssistantInlinePromotionEnabled(req) {
+		return true
+	}
+	if runState != nil && projectAssistantTurnProfileAllowsMutation(runState.TurnPolicy().profile) {
+		return true
+	}
 	profile := req.TurnPolicy.profile
 	if strings.TrimSpace(string(profile)) == "" {
 		profile = req.TurnProfile
@@ -631,13 +730,15 @@ func projectEinoAssistantPhaseFilterTools(
 	approvedPlan *projectAssistantApprovedPlan,
 	templateBootstrapAllowed bool,
 	tools []*schema.ToolInfo,
+	inlinePromotion bool,
+	activePolicy projectAssistantTurnPolicy,
 ) []*schema.ToolInfo {
 	if tools == nil {
 		return nil
 	}
 	filtered := make([]*schema.ToolInfo, 0, len(tools))
 	for _, tool := range tools {
-		if projectEinoAssistantPhaseAllowsTool(phase, approvedPlan, templateBootstrapAllowed, tool) {
+		if projectEinoAssistantPhaseAllowsTool(phase, approvedPlan, templateBootstrapAllowed, tool, inlinePromotion, activePolicy) {
 			filtered = append(filtered, tool)
 		}
 	}
@@ -667,11 +768,24 @@ func projectEinoAssistantPhaseMergeTools(existing, current []*schema.ToolInfo) [
 	return merged
 }
 
+func projectEinoAssistantPhaseWithoutToolSearch(tools []*schema.ToolInfo) []*schema.ToolInfo {
+	filtered := make([]*schema.ToolInfo, 0, len(tools))
+	for _, tool := range tools {
+		if tool != nil && projectToolBaseName(tool.Name) == projectEinoAssistantToolSearchTool {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
 func projectEinoAssistantPhaseAllowsTool(
 	phase projectEinoAssistantPhase,
 	approvedPlan *projectAssistantApprovedPlan,
 	templateBootstrapAllowed bool,
 	tool *schema.ToolInfo,
+	inlinePromotion bool,
+	activePolicy projectAssistantTurnPolicy,
 ) bool {
 	if tool == nil {
 		return false
@@ -720,10 +834,18 @@ func projectEinoAssistantPhaseAllowsTool(
 	if projectEinoAssistantPhaseReservedOperationalReadName(tool.Name) && !operationalRead {
 		return false
 	}
+	if phase == projectEinoAssistantPhaseApproval &&
+		inlinePromotion &&
+		!activePolicy.AllowsTool(projectAssistantToolSpec{Name: tool.Name, Risk: risk}) {
+		return false
+	}
 
 	switch phase {
 	case projectEinoAssistantPhaseApproval:
-		if templateBootstrap || directAction || operationalRead {
+		if operationalRead {
+			return true
+		}
+		if !inlinePromotion && (templateBootstrap || directAction) {
 			return true
 		}
 		if bundle == projectAssistantToolBundleRuntime {
@@ -733,19 +855,16 @@ func projectEinoAssistantPhaseAllowsTool(
 			risk == projectAssistantToolRiskInput ||
 			risk == projectAssistantToolRiskPlan
 	case projectEinoAssistantPhaseMutate:
-		return (bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
-			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
-				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+		return (projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+			bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			templateBootstrap ||
 			templateInspection ||
 			directAction ||
 			operationalRead ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)
 	case projectEinoAssistantPhaseVerify:
-		return (name != projectToolVerifyDevelopmentRuntime &&
-			bundle == projectAssistantToolBundleWorkspaceRead && risk == projectAssistantToolRiskRead) ||
-			(projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
-				bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
+		return (projectEinoAssistantPhaseCanonicalEditTool(tool.Name) &&
+			bundle == projectAssistantToolBundleEdit && risk == projectAssistantToolRiskWrite) ||
 			(tool.Name == projectToolVerifyDevelopmentRuntime &&
 				bundle == projectAssistantToolBundleRuntime && risk == projectAssistantToolRiskRead) ||
 			(name == projectToolAskFollowUp && risk == projectAssistantToolRiskInput)

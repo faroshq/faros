@@ -229,7 +229,7 @@ Add:
 
 - non-null `project_uid`;
 - nullable `work_item_id`;
-- `mode`: `discussion`, `new`, or `continue`; and
+- `mode`: `adaptive`, `discussion`, `new`, or `continue`; and
 - nullable `expected_grant_revision`.
 
 Add nonterminal status `stopping`. Only the server-side Stop operation may set
@@ -238,13 +238,15 @@ it. A `stopping` run cannot be resumed and cannot begin another mutation.
 Store validation enforces:
 
 - `new` and `continue` require a WorkItem;
+- `adaptive` starts without a WorkItem and exposes only bounded reads plus the
+  plan-approval escalation control;
 - a discussion may omit a WorkItem or reference one as read-only context;
 - the run, initiating message, and WorkItem share tenant scope and Project UID;
-- mode is derived by the server from the validated user action and is immutable
-  after run creation;
+- mode is derived by the server from the validated user action; the only
+  allowed change is the atomic `adaptive` to `new` promotion;
 - the run's expected grant revision is written only by the server when
   authorization is installed; and
-- a run's WorkItem cannot change after creation.
+- a run's WorkItem cannot change after assignment.
 
 Resume does not create a new run mode. It claims and restores the exact existing
 run.
@@ -255,6 +257,8 @@ Add the minimum WorkItem operations:
 
 - `CreateWorkItemAndAssistantRun` — atomically creates or attaches the root
   message, WorkItem, assistant placeholder, and first run;
+- `PromoteAssistantRunToWorkItem` — atomically creates one WorkItem, attaches
+  the adaptive run's existing root messages, and advances its mode and revision;
 - `GetAssistantWorkItem`;
 - `ListAssistantWorkItems`;
 - `CompareAndSwapAssistantWorkItem`;
@@ -275,14 +279,16 @@ operations remain.
 
 The request contract carries a user-selected action:
 
-- **Ask** — discussion, the default when action is omitted;
+- **Auto** — the default; answer directly, inspect safely, or propose an action;
+- **Ask** — explicit read-only discussion;
 - **Build** — start new mutation work;
 - **Continue** — start a fresh attempt for a named WorkItem; and
 - **Resume** — resume an exact pending run/checkpoint.
 
-The classifier may choose a discussion or development profile within the
-declared action, but it cannot upgrade Ask to Build, select a WorkItem, or
-create authority.
+The classifier is advisory within Auto. It cannot create authority. Auto gains
+a WorkItem only when `request_project_plan_approval` atomically promotes the
+current adaptive run before the user-facing permission checkpoint is saved.
+Ask cannot upgrade to Build.
 
 ### Ask
 
@@ -422,10 +428,13 @@ The current grant is cleared by compare-and-swap when:
 - commit consumes the approved transaction; or
 - plan scope changes.
 
-Pending permission/input is nonterminal. The WorkItem plan grant remains stored
-because the resumed agent may need it after resolving the exact interrupt, but
-the one-nonterminal-run constraint permits only exact Resume of that run to use
-it. No separate run may consume the grant.
+Pending permission/input is nonterminal. The WorkItem plan grant normally
+remains stored because the resumed agent may need it after resolving the exact
+interrupt, but the one-nonterminal-run constraint permits only exact Resume of
+that run to use it. Commit permission is the deliberate exception: requesting
+the commit atomically replaces the grant with a fresh tombstone revision before
+checkpointing. Exact Resume may execute that commit, but any later source repair
+requires fresh plan approval. No separate run may consume either state.
 
 Continuing suspended work creates a fresh run and requires current
 authorization. It does not inherit a revoked grant.
@@ -527,9 +536,11 @@ Eino remains inside the App Studio WorkItem boundary:
   Studio owns `stopping`, response deadlines, and the eventual durable outcome.
 - WorkItem ID, grant revision, actor, and Project UID may be passed through
   session values for convenience.
+- Mutation-capable turns expose only the tools for the current
+  `approval -> mutate -> verify -> repair/commit -> report` phase. This guides
+  the model's next action; it does not replace invocation-time authorization.
 - Tools reload durable WorkItem state before mutation because Eino session
   values are mutable runtime context.
-- DeepAgent `write_todos` continues updating assistant-message plan metadata.
 - Todos and PlanTask subtasks never select a WorkItem or authorize a tool.
 
 No Eino Workflow, GraphTool, PlanTask backend, or custom task scheduler is
@@ -562,7 +573,7 @@ projection.
 | --- | --- | --- |
 | Requested task completed | `completed` | Cleared/consumed |
 | Discussion completed | Unchanged or none | Not loaded |
-| Pending permission/input | Remains `active` | Plan grant retained; exact Resume only |
+| Pending permission/input | Remains `active` | Plan grant retained, except commit permission stores a tombstone; exact Resume only |
 | Stop requested while loop is running | Remains `active` | Cleared on request |
 | Stop wins execution race | `suspended` | Cleared |
 | Model/tool/persistence failure | `suspended` | Cleared |
@@ -571,9 +582,15 @@ projection.
 | User discards task | `cancelled` | Cleared |
 
 Runs persist a bounded safe failure reason sufficient for the portal to explain
-why work stopped. Detailed workflow-specific failure taxonomies and custom
-no-progress heuristics are deferred; existing Eino iteration and repeated-tool
-limits remain.
+why work stopped. Mutation-capable turns also have pre-mutation semantic
+progress bounds. A model receives a final phase-specific instruction before the
+bound; if it still does not request plan approval or perform an approved source
+mutation, the run fails with reason `no_progress` and the WorkItem is suspended
+for a fresh Continue run. The guard does not suspend a run after source mutation
+because the mutation/verification marker is run-local; the strict verification
+catalog and Eino's global iteration limit remain the safety boundaries after
+edits. Read-only Ask turns are not subject to this implementation-progress
+bound.
 
 ## HTTP Contract
 
@@ -603,7 +620,7 @@ Continue names a WorkItem:
 }
 ```
 
-Omitting `assistantAction` means Ask. The server never interprets omission as
+Omitting `assistantAction` means Auto. The server never interprets omission as
 "continue current work."
 
 An ephemeral Start-task action resubmits the original Ask message as Build:

@@ -62,7 +62,7 @@ const (
 	// cycles Eino allows before terminating a DeepAgent run.
 	// Match Eino's reference DeepAgent headroom while retaining a finite guard
 	// against models that loop indefinitely.
-	maxAssistantDeepIterations       = 100
+	maxAssistantDeepIterations       = 32
 	projectToolInfoLimit             = 1000
 	projectMCPCallTimeout            = 2 * time.Minute
 	projectCommitProjectFilesMax     = 500
@@ -315,8 +315,21 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
 	var turnDecision projectAssistantTurnDecision
 	switch {
+	case hasDurableRun && durable.WorkItemID != "":
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
 	case hasDurableRun && durable.Mode == store.AssistantRunModeDiscussion:
 		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDiscussion)
+	case hasDurableRun && durable.Mode == store.AssistantRunModeAdaptive:
+		advisory, routeErr := projectAssistantTurnDecisionForStreamStart(ctx, s.projectAssistantTurnRouter(), projectAssistantTurnRouteRequest{
+			LLM:     settings,
+			History: recent,
+		}, start)
+		if routeErr != nil {
+			return "", routeErr
+		}
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileAdaptive)
+		turnDecision.RequiresRuntimeState = advisory.RequiresRuntimeState
+		turnDecision.Confidence = advisory.Confidence
 	case hasDurableRun && (durable.Mode == store.AssistantRunModeNew || durable.Mode == store.AssistantRunModeContinue):
 		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
 	default:
@@ -329,6 +342,8 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		}
 	}
 	turnPolicy := projectAssistantTurnPolicyForDecision(turnDecision)
+	requestedAction, resolvedAction, classificationReason, classificationConfidence :=
+		projectAssistantRoutingAudit(durable, hasDurableRun, turnDecision)
 	// The router decides which tool bundles this turn gets; a silent
 	// misclassification reads exactly like a model refusing to work, so keep
 	// the decision observable (V(2): per-turn, debugging signal).
@@ -348,10 +363,15 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 		History:                  recent,
 		MCPBaseURL:               s.hubBase,
 		MCPInsecureSkipTLSVerify: s.mcpInsecureSkipTLSVerify,
+		ApprovalMode:             projectAssistantApprovalModeFromRun(durable),
 		AutoApproveActions:       s.autoApproveAssistantActions(),
 		StreamCallbacks:          callbacks,
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
+		RequestedAction:          requestedAction,
+		ResolvedAction:           resolvedAction,
+		ClassificationReason:     classificationReason,
+		ClassificationConfidence: classificationConfidence,
 	}
 	if hasDurableRun {
 		durableCopy := durable
@@ -363,9 +383,28 @@ func (s *Server) generateProjectAssistantStreamWithStart(
 	}
 	result, err := s.projectAssistantEngine().StreamProjectAssistant(ctx, req)
 	if err != nil {
+		if projectEinoAssistantBoundedExit(err) {
+			return result.Content, err
+		}
 		return "", err
 	}
 	return result.Content, nil
+}
+
+func projectAssistantRoutingAudit(run store.AssistantRun, hasDurableRun bool, decision projectAssistantTurnDecision) (string, string, string, projectAssistantTurnConfidence) {
+	if hasDurableRun {
+		switch run.Mode {
+		case store.AssistantRunModeAdaptive:
+			return string(projectAssistantActionAuto), string(projectAssistantTurnProfileAdaptive), "adaptive_auto_policy", decision.Confidence
+		case store.AssistantRunModeDiscussion:
+			return string(projectAssistantActionAsk), string(projectAssistantActionAsk), "explicit_user_action", projectAssistantTurnConfidenceHigh
+		case store.AssistantRunModeNew:
+			return string(projectAssistantActionBuild), string(projectAssistantActionBuild), "explicit_user_action", projectAssistantTurnConfidenceHigh
+		case store.AssistantRunModeContinue:
+			return string(projectAssistantActionContinue), string(projectAssistantActionContinue), "explicit_user_action", projectAssistantTurnConfidenceHigh
+		}
+	}
+	return string(projectAssistantActionAuto), string(decision.Profile), "semantic_classifier", decision.Confidence
 }
 
 func (s *Server) loadProjectAssistantTurnMessages(ctx context.Context, scope store.Scope, run store.AssistantRun, hasDurableRun bool) ([]store.Message, error) {
@@ -2050,6 +2089,8 @@ func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile 
 	switch normalizeProjectAssistantTurnProfile(profile) {
 	case projectAssistantTurnProfileDiscussion:
 		b.WriteString("Answer exploratory or conceptual questions directly from the conversation and project memory. Do not inspect current workspace state unless the user asks a current-state question or asks to change/debug the app.\n")
+	case projectAssistantTurnProfileAdaptive:
+		b.WriteString("Answer directly when project inspection is unnecessary. When current project state matters, use the available bounded read-only tools. If source changes are needed, call request_project_plan_approval with a concise plan and project-relative target paths; App Studio will create a durable implementation task and resolve the plan according to the project's approval mode. When the plan result is approved, continue with the newly available editing tools. Do not claim a change was made without tool evidence, and do not give manual copy/paste replacement instructions.\n")
 	case projectAssistantTurnProfileGuidance:
 		b.WriteString("Give practical guidance, recommendations, and tradeoffs. Do not claim to know current file or runtime state unless tool evidence is available; ask the user for missing context in plain language when needed.\n")
 	case projectAssistantTurnProfileExploration:
@@ -2071,7 +2112,7 @@ func appendProjectAssistantBuilderPrompt(b *strings.Builder, repoRef string) {
 }
 
 func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoRef string, initialPlan bool) {
-	b.WriteString("Use check_project_readiness before mutating or verifying existing work so repository, memory, workspace context, and recommended checks come from the App Studio graph workflow. ")
+	b.WriteString("The supplied current project snapshot is the initial workspace manifest. Do not call ls or check_project_readiness merely to reproduce a complete snapshot; use them only when the snapshot is truncated, unavailable, or a later state-changing result makes it stale. ")
 	b.WriteString("For a fresh project, use inspect_development_templates to inspect every development-capable template in one workflow instead of separately searching and describing templates. ")
 	b.WriteString("Use prepare_project_deployment before discussing deployment handoff so build artifact readiness, blockers, and runtime handoff constraints come from the App Studio graph workflow. ")
 	b.WriteString("To take a project to production, use promote_project (see the build/promote guidance above). Use " + projectToolVerifyDevelopmentRuntime + " to verify development readiness, runtime state, preview URL, and logs in one bounded workflow. ")

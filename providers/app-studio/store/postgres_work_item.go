@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -68,12 +69,12 @@ func (s *PostgresStore) CreateWorkItemAndAssistantRun(ctx context.Context, scope
 		return AssistantWorkItem{}, err
 	}
 	row = tx.QueryRowContext(ctx, `INSERT INTO app_studio_assistant_runs (
-		org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision, status,
+		org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status,
 		client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-	RETURNING run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+	RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
 		request_id, checkpoint, audit, created_at, updated_at`,
-		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision, run.Status,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status,
 		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
 	if _, err := scanAssistantRun(row, scope); err != nil {
 		return AssistantWorkItem{}, fmt.Errorf("create work item run: %w", err)
@@ -104,6 +105,211 @@ func (s *PostgresStore) CreateWorkItemAndAssistantRun(ctx context.Context, scope
 	}
 	item.ActiveRunID = run.ID
 	return item, nil
+}
+
+// PromoteAssistantRunToWorkItem atomically turns a running adaptive run into
+// the first run of a new WorkItem. The existing user and assistant messages are
+// attached in the same transaction. Repeating the exact promotion target is an
+// idempotent read of the already-promoted state.
+func (s *PostgresStore) PromoteAssistantRunToWorkItem(
+	ctx context.Context,
+	scope Scope,
+	runID, actor, workItemID string,
+	expectedRunRevision int64,
+	now time.Time,
+) (AssistantWorkItem, AssistantRun, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	runID, actor, workItemID = strings.TrimSpace(runID), strings.TrimSpace(actor), strings.TrimSpace(workItemID)
+	if err := validateAssistantRunPromotionRequest(runID, actor, workItemID, expectedRunRevision); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("begin promote adaptive run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at
+		FROM app_studio_assistant_runs
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5
+		FOR UPDATE`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, runID)
+	run, err := scanAssistantRun(row, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("read adaptive run for promotion: %w", err)
+	}
+	if run.WorkItemID != "" || run.Mode != AssistantRunModeAdaptive {
+		item, replayRun, replayErr := promotedAssistantRunReplayTx(ctx, tx, scope, run, actor, workItemID, expectedRunRevision)
+		if replayErr != nil {
+			return AssistantWorkItem{}, AssistantRun{}, replayErr
+		}
+		if err := tx.Commit(); err != nil {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("commit adaptive run promotion replay: %w", err)
+		}
+		return item, replayRun, nil
+	}
+	if run.Status != AssistantRunStatusRunning || run.Revision != expectedRunRevision {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+
+	userRow := tx.QueryRowContext(ctx, `SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at
+		FROM app_studio_messages
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND message_id=$5
+		FOR UPDATE`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.UserMessageID)
+	user, err := scanMessage(userRow, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run user message cannot be attached", ErrAssistantWorkItemConflict)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("read adaptive run user message for promotion: %w", err)
+	}
+	if user.Role != "user" || user.ActorID != actor || user.WorkItemID != "" {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run user message cannot be attached", ErrAssistantWorkItemConflict)
+	}
+	assistantRow := tx.QueryRowContext(ctx, `SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at
+		FROM app_studio_messages
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND message_id=$5
+		FOR UPDATE`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ActiveMessageID)
+	assistant, err := scanMessage(assistantRow, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run assistant message cannot be attached", ErrAssistantWorkItemConflict)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("read adaptive run assistant message for promotion: %w", err)
+	}
+	if assistant.Role != "assistant" || assistant.WorkItemID != "" {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run assistant message cannot be attached", ErrAssistantWorkItemConflict)
+	}
+
+	var existingItemID string
+	err = tx.QueryRowContext(ctx, `SELECT work_item_id FROM app_studio_assistant_work_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+			AND (work_item_id=$5 OR root_message_id=$6 OR status=$7)
+		LIMIT 1`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		workItemID, run.UserMessageID, AssistantWorkItemStatusActive).Scan(&existingItemID)
+	if err == nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: project already has work item %q", ErrAssistantWorkItemConflict, existingItemID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("check adaptive run promotion work items: %w", err)
+	}
+
+	item := prepareAssistantWorkItem(scope, newPromotedAssistantWorkItem(run, actor, workItemID, now))
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_work_items (
+		org_uuid, workspace_uuid, project_name, project_uid, work_item_id, root_message_id, created_by,
+		status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'',$9,$10,'{}'::jsonb,'',$11,$12)`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		item.ID, item.RootMessageID, item.CreatedBy, item.Status, item.Revision, item.ActiveRunID,
+		item.CreatedAt.UTC(), item.UpdatedAt.UTC()); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: create promoted work item: %v", ErrAssistantWorkItemConflict, err)
+	}
+
+	result, err := tx.ExecContext(ctx, `UPDATE app_studio_messages SET work_item_id=$6
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+			AND message_id=$5 AND actor_id=$7 AND role='user' AND work_item_id=''`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		run.UserMessageID, item.ID, actor)
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("attach promoted work item user message: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run user message changed", ErrAssistantWorkItemConflict)
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE app_studio_messages SET work_item_id=$6
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+			AND message_id=$5 AND role='assistant' AND work_item_id=''`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		run.ActiveMessageID, item.ID)
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("attach promoted work item assistant message: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run assistant message changed", ErrAssistantWorkItemConflict)
+	}
+
+	row = tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_runs
+		SET work_item_id=$6, mode=$7, revision=revision+1, updated_at=$8
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+			AND run_id=$5 AND revision=$9 AND mode=$10 AND work_item_id='' AND status=$11
+		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		run.ID, item.ID, AssistantRunModeNew, now.UTC(), expectedRunRevision,
+		AssistantRunModeAdaptive, AssistantRunStatusRunning)
+	promoted, err := scanAssistantRun(row, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q changed", ErrAssistantRunConflict, run.ID)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("promote adaptive run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("commit adaptive run promotion: %w", err)
+	}
+	return item, promoted, nil
+}
+
+func promotedAssistantRunReplayTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	scope Scope,
+	run AssistantRun,
+	actor, workItemID string,
+	expectedRunRevision int64,
+) (AssistantWorkItem, AssistantRun, error) {
+	if run.WorkItemID != workItemID || run.Mode != AssistantRunModeNew || expectedRunRevision != run.Revision-1 {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q was promoted differently", ErrAssistantRunConflict, run.ID)
+	}
+	itemRow := tx.QueryRowContext(ctx, `SELECT work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at
+		FROM app_studio_assistant_work_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
+	item, err := scanAssistantWorkItem(itemRow, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: promoted work item %q does not match", ErrAssistantWorkItemConflict, workItemID)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("read promoted work item %q: %w", workItemID, err)
+	}
+	if item.RootMessageID != run.UserMessageID || item.CreatedBy != actor {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: promoted work item %q does not match", ErrAssistantWorkItemConflict, workItemID)
+	}
+	for _, message := range []struct {
+		id   string
+		role string
+	}{
+		{id: run.UserMessageID, role: "user"},
+		{id: run.ActiveMessageID, role: "assistant"},
+	} {
+		row := tx.QueryRowContext(ctx, `SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at
+			FROM app_studio_messages
+			WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND message_id=$5`,
+			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, message.id)
+		persisted, err := scanMessage(row, scope)
+		if errors.Is(err, sql.ErrNoRows) {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: promoted work item %q messages do not match", ErrAssistantWorkItemConflict, workItemID)
+		}
+		if err != nil {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("read promoted work item %q message %q: %w", workItemID, message.id, err)
+		}
+		if persisted.Role != message.role || persisted.WorkItemID != workItemID ||
+			(message.role == "user" && persisted.ActorID != actor) {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: promoted work item %q messages do not match", ErrAssistantWorkItemConflict, workItemID)
+		}
+	}
+	return item, run, nil
 }
 
 // ResumeWorkItemAndCreateAssistantRun is the sole durable boundary for
@@ -165,7 +371,7 @@ func (s *PostgresStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context,
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ExpectedGrantRevision, run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC()); err != nil {
 		return AssistantWorkItem{}, fmt.Errorf("%w: create continuation run: %v", ErrAssistantRunConflict, err)
 	}
 	if err := appendMessageTx(ctx, tx, scope, user); err != nil {
@@ -226,10 +432,14 @@ func (s *PostgresStore) CompareAndSwapAssistantWorkItem(ctx context.Context, sco
 		return fmt.Errorf("%w: work item revision", ErrAssistantWorkItemConflict)
 	}
 	item = prepareAssistantWorkItem(scope, item)
+	planGrant, err := normalizeAssistantWorkItemPlanGrant(item.PlanGrant)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE app_studio_assistant_work_items SET status=$6,status_reason=$7,revision=$8,active_run_id=$9,plan_grant=$10,grant_revision=$11,updated_at=$12
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 AND revision=$13
 			AND root_message_id=$14 AND created_by=$15`,
-		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, item.Status, item.StatusReason, item.Revision, item.ActiveRunID, string(item.PlanGrant), item.GrantRevision, item.UpdatedAt, expectedRevision, item.RootMessageID, item.CreatedBy)
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, item.ID, item.Status, item.StatusReason, item.Revision, item.ActiveRunID, string(planGrant), item.GrantRevision, item.UpdatedAt, expectedRevision, item.RootMessageID, item.CreatedBy)
 	if err != nil {
 		return fmt.Errorf("update assistant work item: %w", err)
 	}
@@ -285,6 +495,62 @@ func (s *PostgresStore) ApproveWorkItemPlan(ctx context.Context, scope Scope, wo
 	}
 	if err := tx.Commit(); err != nil {
 		return AssistantWorkItem{}, fmt.Errorf("commit approve work item plan: %w", err)
+	}
+	return item, nil
+}
+
+// RetireWorkItemPlan atomically consumes an active WorkItem's plan grant before
+// a separate permission checkpoint. The tombstone prevents the pre-checkpoint
+// grant from authorizing a later resumed mutation.
+func (s *PostgresStore) RetireWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID, actor string, expectedWorkItemRevision int64, expectedGrantRevision, tombstoneGrantRevision string, now time.Time) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	workItemID = strings.TrimSpace(workItemID)
+	runID = strings.TrimSpace(runID)
+	actor = strings.TrimSpace(actor)
+	expectedGrantRevision = strings.TrimSpace(expectedGrantRevision)
+	tombstoneGrantRevision = strings.TrimSpace(tombstoneGrantRevision)
+	if workItemID == "" || runID == "" || actor == "" || expectedWorkItemRevision < 1 || expectedGrantRevision == "" || tombstoneGrantRevision == "" || expectedGrantRevision == tombstoneGrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item, run, actor, revisions, and distinct grant revisions are required", ErrAssistantWorkItemConflict)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("begin retire work item plan: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	updatedAt := now.UTC()
+	row := tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_work_items
+		SET plan_grant='{}'::jsonb, grant_revision=$6, revision=revision+1, updated_at=$7
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5
+			AND created_by=$8 AND revision=$9 AND status=$10 AND active_run_id=$11 AND grant_revision=$12
+		RETURNING work_item_id, root_message_id, created_by, status, status_reason, revision, active_run_id, plan_grant, grant_revision, created_at, updated_at`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID,
+		tombstoneGrantRevision, updatedAt, actor, expectedWorkItemRevision, AssistantWorkItemStatusActive, runID, expectedGrantRevision)
+	item, err := scanAssistantWorkItem(row, scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+	}
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("retire work item plan: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE app_studio_assistant_runs
+		SET expected_grant_revision=$6, updated_at=$7
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5
+			AND work_item_id=$8 AND status=$9 AND expected_grant_revision=$10`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, runID,
+		tombstoneGrantRevision, updatedAt, workItemID, AssistantRunStatusRunning, expectedGrantRevision)
+	if err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("stamp work item grant tombstone on run: %w", err)
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return AssistantWorkItem{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantWorkItem{}, fmt.Errorf("commit retire work item plan: %w", err)
 	}
 	return item, nil
 }
@@ -372,7 +638,7 @@ func (s *PostgresStore) RequestAssistantRunStop(ctx context.Context, scope Scope
 		SET status=$8, revision=revision+1, updated_at=$9
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
 			AND run_id=$5 AND work_item_id=$6 AND revision=$7 AND status=$10
-		RETURNING run_id,work_item_id,mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
+		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
 		runID, workItemID, expectedRunRevision, AssistantRunStatusStopping, now.UTC(), AssistantRunStatusRunning)
 	run, err := scanAssistantRun(row, scope)
@@ -392,8 +658,15 @@ func (s *PostgresStore) LoadMessagesForWorkItem(ctx context.Context, scope Scope
 	if err := scope.validate(); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at FROM app_studio_messages
-		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 ORDER BY created_at, message_id LIMIT $6`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID, normalizeLimit(limit))
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at
+		FROM (
+			SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id, metadata, created_at, updated_at
+			FROM app_studio_messages
+			WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5
+			ORDER BY created_at DESC, message_id DESC
+			LIMIT $6
+		) recent
+		ORDER BY created_at, message_id`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID, normalizeLimit(limit))
 	if err != nil {
 		return nil, fmt.Errorf("load work item messages: %w", err)
 	}
@@ -409,8 +682,18 @@ func (s *PostgresStore) LoadMessagesForWorkItem(ctx context.Context, scope Scope
 	return messages, rows.Err()
 }
 
+func normalizeAssistantWorkItemPlanGrant(planGrant json.RawMessage) (json.RawMessage, error) {
+	if len(planGrant) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	if !json.Valid(planGrant) {
+		return nil, fmt.Errorf("assistant work item plan grant is not valid json")
+	}
+	return planGrant, nil
+}
+
 func (s *PostgresStore) LatestAssistantRunForWorkItem(ctx context.Context, scope Scope, workItemID string) (AssistantRun, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at FROM app_studio_assistant_runs
+	row := s.db.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at FROM app_studio_assistant_runs
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 ORDER BY updated_at DESC, run_id DESC LIMIT 1`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
 	run, err := scanAssistantRun(row, scope)
 	if err == sql.ErrNoRows {

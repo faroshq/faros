@@ -29,6 +29,7 @@ var ErrAssistantRunNotFound = errors.New("assistant run not found")
 var ErrAssistantRunConflict = errors.New("assistant run version conflict")
 var ErrAssistantWorkItemNotFound = errors.New("assistant work item not found")
 var ErrAssistantWorkItemConflict = errors.New("assistant work item conflict")
+var ErrAssistantApprovalModeInvalid = errors.New("assistant approval mode is invalid")
 
 // Scope identifies a tenant/project boundary. Every query must include all
 // three fields to keep App Studio data isolated per org/workspace/project.
@@ -67,6 +68,10 @@ type AssistantRunStatus string
 // AssistantRunMode is derived by the server from the user-selected action.
 type AssistantRunMode string
 
+// AssistantApprovalMode controls whether registered assistant actions stop for
+// an explicit user decision. It never bypasses tool validation or authorization.
+type AssistantApprovalMode string
+
 const (
 	// AssistantRunIDApprovedPlanGrant is retained only so API code can be moved
 	// to WorkItem grants in a later task. Store implementations no longer
@@ -75,9 +80,22 @@ const (
 	AssistantRunIDApprovedPlanGrant = "approved-plan-grant"
 
 	AssistantRunModeDiscussion AssistantRunMode = "discussion"
+	AssistantRunModeAdaptive   AssistantRunMode = "adaptive"
 	AssistantRunModeNew        AssistantRunMode = "new"
 	AssistantRunModeContinue   AssistantRunMode = "continue"
 )
+
+const (
+	AssistantApprovalModeAlwaysAsk   AssistantApprovalMode = "always_ask"
+	AssistantApprovalModeAutoApprove AssistantApprovalMode = "auto_approve"
+)
+
+// AssistantApprovalPreference is scoped to one authenticated actor and Project.
+type AssistantApprovalPreference struct {
+	ActorID   string                `json:"-"`
+	Mode      AssistantApprovalMode `json:"mode"`
+	UpdatedAt time.Time             `json:"updatedAt,omitempty"`
+}
 
 const (
 	AssistantRunStatusPendingPermission AssistantRunStatus = "pending_permission"
@@ -94,22 +112,23 @@ const (
 // App Studio API-owned JSON payload so store implementations do not need to
 // know private chat/tool types.
 type AssistantRun struct {
-	ID                    string             `json:"id"`
-	ProjectName           string             `json:"projectName,omitempty"`
-	ProjectUID            string             `json:"projectUID,omitempty"`
-	WorkItemID            string             `json:"workItemID,omitempty"`
-	Mode                  AssistantRunMode   `json:"mode,omitempty"`
-	ExpectedGrantRevision string             `json:"expectedGrantRevision,omitempty"`
-	Status                AssistantRunStatus `json:"status"`
-	ClientRequestID       string             `json:"clientRequestID,omitempty"`
-	UserMessageID         string             `json:"userMessageID,omitempty"`
-	ActiveMessageID       string             `json:"activeMessageID,omitempty"`
-	Revision              int64              `json:"revision,omitempty"`
-	RequestID             string             `json:"requestID,omitempty"`
-	Checkpoint            json.RawMessage    `json:"checkpoint,omitempty"`
-	Audit                 json.RawMessage    `json:"audit,omitempty"`
-	CreatedAt             time.Time          `json:"createdAt"`
-	UpdatedAt             time.Time          `json:"updatedAt"`
+	ID                    string                `json:"id"`
+	ProjectName           string                `json:"projectName,omitempty"`
+	ProjectUID            string                `json:"projectUID,omitempty"`
+	WorkItemID            string                `json:"workItemID,omitempty"`
+	Mode                  AssistantRunMode      `json:"mode,omitempty"`
+	ApprovalMode          AssistantApprovalMode `json:"approvalMode"`
+	ExpectedGrantRevision string                `json:"expectedGrantRevision,omitempty"`
+	Status                AssistantRunStatus    `json:"status"`
+	ClientRequestID       string                `json:"clientRequestID,omitempty"`
+	UserMessageID         string                `json:"userMessageID,omitempty"`
+	ActiveMessageID       string                `json:"activeMessageID,omitempty"`
+	Revision              int64                 `json:"revision,omitempty"`
+	RequestID             string                `json:"requestID,omitempty"`
+	Checkpoint            json.RawMessage       `json:"checkpoint,omitempty"`
+	Audit                 json.RawMessage       `json:"audit,omitempty"`
+	CreatedAt             time.Time             `json:"createdAt"`
+	UpdatedAt             time.Time             `json:"updatedAt"`
 }
 
 // AssistantRunIsConversation reports whether a run is user-visible. Every
@@ -157,14 +176,18 @@ type Store interface {
 	AppendMessage(ctx context.Context, scope Scope, msg Message) error
 	ListMessages(ctx context.Context, scope Scope, limit int, cursor string) (Page, error)
 	LoadRecentMessages(ctx context.Context, scope Scope, limit int) ([]Message, error)
+	GetAssistantApprovalPreference(ctx context.Context, scope Scope, actor string) (AssistantApprovalPreference, error)
+	SetAssistantApprovalPreference(ctx context.Context, scope Scope, preference AssistantApprovalPreference) (AssistantApprovalPreference, error)
 	SaveAssistantRun(ctx context.Context, scope Scope, run AssistantRun) error
 	CreateAssistantRun(ctx context.Context, scope Scope, user Message, assistant Message, run AssistantRun) (AssistantRun, error)
 	CreateWorkItemAndAssistantRun(ctx context.Context, scope Scope, item AssistantWorkItem, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error)
+	PromoteAssistantRunToWorkItem(ctx context.Context, scope Scope, runID, actor, workItemID string, expectedRunRevision int64, now time.Time) (AssistantWorkItem, AssistantRun, error)
 	ResumeWorkItemAndCreateAssistantRun(ctx context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error)
 	GetAssistantWorkItem(ctx context.Context, scope Scope, id string) (AssistantWorkItem, error)
 	ListAssistantWorkItems(ctx context.Context, scope Scope) ([]AssistantWorkItem, error)
 	CompareAndSwapAssistantWorkItem(ctx context.Context, scope Scope, item AssistantWorkItem, expectedRevision int64) error
 	ApproveWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID string, expectedRevision int64, grantRevision string, planGrant json.RawMessage, now time.Time) (AssistantWorkItem, error)
+	RetireWorkItemPlan(ctx context.Context, scope Scope, workItemID, runID, actor string, expectedWorkItemRevision int64, expectedGrantRevision, tombstoneGrantRevision string, now time.Time) (AssistantWorkItem, error)
 	RequestAssistantRunStop(ctx context.Context, scope Scope, workItemID, runID string, expectedWorkItemRevision, expectedRunRevision int64, now time.Time) (AssistantRun, error)
 	TransitionWorkItemAndRun(ctx context.Context, scope Scope, workItemID string, expectedWorkItemRevision int64, run AssistantRun, status AssistantWorkItemStatus, reason string, now time.Time) error
 	LoadMessagesForWorkItem(ctx context.Context, scope Scope, workItemID string, limit int) ([]Message, error)
@@ -177,6 +200,21 @@ type Store interface {
 	LatestAssistantRun(ctx context.Context, scope Scope) (AssistantRun, error)
 	DeleteProjectMessages(ctx context.Context, scope Scope) error
 	DeleteMessagesOlderThan(ctx context.Context, before time.Time) (int64, error)
+}
+
+// NormalizeAssistantApprovalMode validates a persisted or API-supplied mode.
+// Empty values safely fall back to Always ask.
+func NormalizeAssistantApprovalMode(mode AssistantApprovalMode) (AssistantApprovalMode, error) {
+	mode = AssistantApprovalMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	if mode == "" {
+		return AssistantApprovalModeAlwaysAsk, nil
+	}
+	switch mode {
+	case AssistantApprovalModeAlwaysAsk, AssistantApprovalModeAutoApprove:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrAssistantApprovalModeInvalid, mode)
+	}
 }
 
 func assistantRunStatusTerminal(status AssistantRunStatus) bool {
@@ -200,6 +238,33 @@ func assistantWorkItemTerminalTransitionValid(itemStatus AssistantWorkItemStatus
 		return runStatus == AssistantRunStatusAborted || runStatus == AssistantRunStatusFailed || runStatus == AssistantRunStatusInterrupted
 	default:
 		return false
+	}
+}
+
+func validateAssistantRunPromotionRequest(runID, actor, workItemID string, expectedRunRevision int64) error {
+	if strings.TrimSpace(runID) == "" || expectedRunRevision < 1 {
+		return fmt.Errorf("%w: assistant run and revision are required", ErrAssistantRunConflict)
+	}
+	if strings.TrimSpace(actor) == "" || strings.TrimSpace(workItemID) == "" {
+		return fmt.Errorf("%w: actor and work item are required", ErrAssistantWorkItemConflict)
+	}
+	return nil
+}
+
+func newPromotedAssistantWorkItem(run AssistantRun, actor, workItemID string, now time.Time) AssistantWorkItem {
+	createdAt := run.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	return AssistantWorkItem{
+		ID:            workItemID,
+		RootMessageID: run.UserMessageID,
+		CreatedBy:     actor,
+		Status:        AssistantWorkItemStatusActive,
+		Revision:      1,
+		ActiveRunID:   run.ID,
+		CreatedAt:     createdAt.UTC(),
+		UpdatedAt:     now.UTC(),
 	}
 }
 

@@ -136,6 +136,115 @@ func TestMemoryStoreStopAndGrantRevocationAreAtomic(t *testing.T) {
 	}
 }
 
+func TestMemoryAndEncryptedStoreRetireWorkItemPlanContract(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		new  func(*testing.T) Store
+	}{
+		{name: "memory", new: func(*testing.T) Store { return NewMemoryStore() }},
+		{name: "encrypted", new: func(t *testing.T) Store {
+			wrapped, err := NewEncryptedStore(NewMemoryStore(), testEncryptionKeys(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return wrapped
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testRetireWorkItemPlanContract(t, tt.new(t))
+		})
+	}
+}
+
+func testRetireWorkItemPlanContract(t *testing.T, s Store) {
+	t.Helper()
+	ctx := context.Background()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	item := testWorkItem("retire-item-1", "retire-user-1")
+	run := testWorkItemRun("retire-run-1", item.ID, "retire-user-1", "retire-assistant-1")
+	run.Checkpoint = json.RawMessage(`{"checkpoint":"preserve"}`)
+	run.Audit = json.RawMessage(`{"audit":"preserve"}`)
+	created, err := s.CreateWorkItemAndAssistantRun(ctx, scope, item, testWorkItemUser("retire-user-1"), testWorkItemAssistant("retire-assistant-1"), run)
+	if err != nil {
+		t.Fatalf("CreateWorkItemAndAssistantRun: %v", err)
+	}
+	approved, err := s.ApproveWorkItemPlan(ctx, scope, item.ID, run.ID, created.Revision, "grant-1", json.RawMessage(`{"capabilities":["workspace_mutate"]}`), now)
+	if err != nil {
+		t.Fatalf("ApproveWorkItemPlan: %v", err)
+	}
+	beforeRun, err := s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantRun before retirement: %v", err)
+	}
+	retired, err := s.RetireWorkItemPlan(ctx, scope, item.ID, run.ID, "actor-1", approved.Revision, "grant-1", "grant-tombstone-1", now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RetireWorkItemPlan: %v", err)
+	}
+	if retired.Revision != approved.Revision+1 || retired.GrantRevision != "grant-tombstone-1" || !workItemPlanGrantCleared(retired.PlanGrant) || retired.Status != AssistantWorkItemStatusActive || retired.ActiveRunID != run.ID {
+		t.Fatalf("retired WorkItem = %#v", retired)
+	}
+	afterRun, err := s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatalf("GetAssistantRun after retirement: %v", err)
+	}
+	if afterRun.ExpectedGrantRevision != "grant-tombstone-1" || afterRun.Status != beforeRun.Status || afterRun.Revision != beforeRun.Revision || !jsonSemanticallyEqual(afterRun.Checkpoint, beforeRun.Checkpoint) || !jsonSemanticallyEqual(afterRun.Audit, beforeRun.Audit) {
+		t.Fatalf("retired run = %#v; before = %#v", afterRun, beforeRun)
+	}
+
+	assertRetireConflictPreservesState(t, s, scope, item.ID, run.ID, "wrong-actor", retired.Revision, "grant-tombstone-1", "grant-tombstone-2", ErrAssistantWorkItemConflict)
+	assertRetireConflictPreservesState(t, s, scope, item.ID, run.ID, "actor-1", retired.Revision-1, "grant-tombstone-1", "grant-tombstone-2", ErrAssistantWorkItemConflict)
+	assertRetireConflictPreservesState(t, s, scope, item.ID, run.ID, "actor-1", retired.Revision, "stale-grant", "grant-tombstone-2", ErrAssistantWorkItemConflict)
+
+	currentRun, err := s.GetAssistantRun(ctx, scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRun.Status = AssistantRunStatusPendingPermission
+	currentRun.UpdatedAt = now.Add(2 * time.Minute)
+	if err := s.SaveAssistantRun(ctx, scope, currentRun); err != nil {
+		t.Fatalf("SaveAssistantRun non-running: %v", err)
+	}
+	assertRetireConflictPreservesState(t, s, scope, item.ID, run.ID, "actor-1", retired.Revision, "grant-tombstone-1", "grant-tombstone-2", ErrAssistantRunConflict)
+}
+
+func assertRetireConflictPreservesState(t *testing.T, s Store, scope Scope, workItemID, runID, actor string, revision int64, expectedGrantRevision, tombstoneGrantRevision string, want error) {
+	t.Helper()
+	beforeItem, err := s.GetAssistantWorkItem(context.Background(), scope, workItemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRun, err := s.GetAssistantRun(context.Background(), scope, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RetireWorkItemPlan(context.Background(), scope, workItemID, runID, actor, revision, expectedGrantRevision, tombstoneGrantRevision, time.Now().UTC()); !errors.Is(err, want) {
+		t.Fatalf("RetireWorkItemPlan error = %v, want %v", err, want)
+	}
+	afterItem, err := s.GetAssistantWorkItem(context.Background(), scope, workItemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRun, err := s.GetAssistantRun(context.Background(), scope, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterItem.Revision != beforeItem.Revision || afterItem.GrantRevision != beforeItem.GrantRevision || !rawMessagesEqual(afterItem.PlanGrant, beforeItem.PlanGrant) || afterRun.Revision != beforeRun.Revision || afterRun.Status != beforeRun.Status || afterRun.ExpectedGrantRevision != beforeRun.ExpectedGrantRevision || !rawMessagesEqual(afterRun.Checkpoint, beforeRun.Checkpoint) {
+		t.Fatalf("conflict partially changed state: before item=%#v after item=%#v before run=%#v after run=%#v", beforeItem, afterItem, beforeRun, afterRun)
+	}
+}
+
+func rawMessagesEqual(left, right json.RawMessage) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return len(left) == len(right)
+	}
+	return jsonSemanticallyEqual(left, right)
+}
+
+func workItemPlanGrantCleared(grant json.RawMessage) bool {
+	return len(grant) == 0 || jsonSemanticallyEqual(grant, json.RawMessage(`{}`))
+}
+
 func TestMemoryStoreResumeWorkItemAndCreateAssistantRunIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore()

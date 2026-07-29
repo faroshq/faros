@@ -8,6 +8,8 @@ import type {
   ProjectAssistantRunStart,
   ProjectAssistantWorkItem,
   ProjectAssistantAbortResponse,
+  ProjectAssistantApprovalMode,
+  ProjectAssistantApprovalPreference,
   ProjectAssistantSnapshot,
   ProjectAssistantUIComponent,
   ProjectAssistantUIEvent,
@@ -801,7 +803,7 @@ export const api = {
     )
   },
 
-  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; assistantAction?: 'ask' | 'build' | 'continue'; workItemID?: string; workItemRevision?: number; initialProjectPrompt?: boolean }): Promise<ProjectAssistantRunStart> {
+  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; assistantAction?: 'auto' | 'ask' | 'build' | 'continue'; workItemID?: string; workItemRevision?: number; initialProjectPrompt?: boolean }): Promise<ProjectAssistantRunStart> {
     return request<ProjectAssistantRunStart>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/messages`, body)
   },
 
@@ -839,11 +841,33 @@ export const api = {
     )
   },
 
-  async stopAssistantRun(ctx: KedgeContext | null, name: string, runID: string): Promise<ProjectAssistantAbortResponse> {
+  async stopAssistantRun(ctx: KedgeContext | null, name: string, runID: string, clientRequestID: string): Promise<ProjectAssistantAbortResponse> {
     return request<ProjectAssistantAbortResponse>(
       ctx,
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/stop`,
+      { clientRequestID },
+    )
+  },
+
+  async getAssistantApprovalMode(ctx: KedgeContext | null, name: string): Promise<ProjectAssistantApprovalPreference> {
+    return request<ProjectAssistantApprovalPreference>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/approval-mode`,
+    )
+  },
+
+  async patchAssistantApprovalMode(
+    ctx: KedgeContext | null,
+    name: string,
+    mode: ProjectAssistantApprovalMode,
+  ): Promise<ProjectAssistantApprovalPreference> {
+    return request<ProjectAssistantApprovalPreference>(
+      ctx,
+      'PATCH',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/approval-mode`,
+      { mode },
     )
   },
 
@@ -851,12 +875,12 @@ export const api = {
     return request<ProjectAssistantWorkItem[]>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items`)
   },
 
-  async cancelAssistantWorkItem(ctx: KedgeContext | null, name: string, workItemID: string, revision: number): Promise<ProjectAssistantWorkItem> {
+  async cancelAssistantWorkItem(ctx: KedgeContext | null, name: string, workItemID: string, revision: number, clientRequestID: string): Promise<ProjectAssistantWorkItem> {
     return request<ProjectAssistantWorkItem>(
       ctx,
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items/${encodeURIComponent(workItemID)}/cancel`,
-      { revision },
+      { revision, clientRequestID },
     )
   },
 

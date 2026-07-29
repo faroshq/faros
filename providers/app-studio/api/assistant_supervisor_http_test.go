@@ -16,6 +16,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,6 +25,67 @@ import (
 
 	"github.com/faroshq/provider-app-studio/store"
 )
+
+func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot := projectAssistantRunSnapshot{
+		Run: store.AssistantRun{
+			ID:                    "run-1",
+			ProjectName:           "internal-project",
+			ProjectUID:            "internal-project-uid",
+			WorkItemID:            "work-item-1",
+			Mode:                  store.AssistantRunModeContinue,
+			ApprovalMode:          store.AssistantApprovalModeAlwaysAsk,
+			ExpectedGrantRevision: "secret-grant-revision",
+			Status:                store.AssistantRunStatusRunning,
+			ClientRequestID:       "request-1",
+			UserMessageID:         "user-1",
+			ActiveMessageID:       "assistant-1",
+			Revision:              7,
+			RequestID:             "permission-1",
+			Checkpoint:            json.RawMessage(`{"prompt":"secret prompt"}`),
+			Audit:                 json.RawMessage(`{"result":"secret result"}`),
+			CreatedAt:             now,
+			UpdatedAt:             now,
+		},
+		Message: store.Message{
+			ID:        "assistant-1",
+			ActorID:   "internal-actor",
+			Role:      "assistant",
+			Content:   "Working",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	raw, err := json.Marshal(projectAssistantRunSnapshotToAPI(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"checkpoint", "audit", "expectedGrantRevision",
+		"projectName", "projectUID", "internal-actor",
+		"secret prompt", "secret result", "secret-grant-revision",
+	} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("public snapshot contains internal value %q: %s", forbidden, raw)
+		}
+	}
+	for _, required := range []string{`"id":"run-1"`, `"workItemID":"work-item-1"`, `"revision":7`, `"activeMessageID":"assistant-1"`} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("public snapshot is missing %s: %s", required, raw)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	if err := writeProjectAssistantSnapshotSSE(recorder, recorder, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"checkpoint", "audit", "expectedGrantRevision", "secret prompt", "secret result"} {
+		if strings.Contains(recorder.Body.String(), forbidden) {
+			t.Fatalf("SSE snapshot contains internal value %q: %s", forbidden, recorder.Body.String())
+		}
+	}
+}
 
 func projectMessageStreamEventsHaveAppendedContent(events []projectMessageStreamEvent) bool {
 	for _, event := range events {

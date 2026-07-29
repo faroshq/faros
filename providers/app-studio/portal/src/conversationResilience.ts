@@ -3,7 +3,7 @@ import type { ProjectMessage } from './types'
 export interface AssistantRun {
   id: string
   status: 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
-  mode?: 'discussion' | 'new' | 'continue'
+  mode?: 'adaptive' | 'discussion' | 'new' | 'continue'
   workItemID?: string
   revision: number
   activeMessageID: string
@@ -14,6 +14,15 @@ export interface AssistantRun {
 export interface AssistantSnapshot {
   run: AssistantRun
   message: ProjectMessage
+}
+
+export interface AssistantRunStartRequest {
+  content: string
+  clientRequestID: string
+  assistantAction: 'auto' | 'ask' | 'build' | 'continue'
+  initialProjectPrompt?: boolean
+  workItemID?: string
+  workItemRevision?: number
 }
 
 export interface ConversationState<TMessage extends ProjectMessage = ProjectMessage> {
@@ -45,11 +54,35 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
   }
 }
 
-export function assistantRunStartPayload(content: string, clientRequestID: string, initialProjectPrompt = false, assistantAction: 'ask' | 'build' = 'ask') {
+export function assistantRunStartPayload(content: string, clientRequestID: string, initialProjectPrompt = false, assistantAction: 'auto' | 'ask' | 'build' = 'auto') {
   const action = initialProjectPrompt ? 'build' : assistantAction
   return initialProjectPrompt
     ? { content, clientRequestID, assistantAction: action, initialProjectPrompt: true }
     : { content, clientRequestID, assistantAction: action }
+}
+
+export function assistantRunStartFingerprint(projectName: string, request: Omit<AssistantRunStartRequest, 'clientRequestID'>): string {
+  return JSON.stringify([
+    projectName,
+    request.content,
+    request.assistantAction,
+    Boolean(request.initialProjectPrompt),
+    request.workItemID ?? '',
+    request.workItemRevision ?? 0,
+  ])
+}
+
+export function assistantRunMatchesStartRequest(run: AssistantRun | undefined, request: AssistantRunStartRequest): boolean {
+  if (!run || run.clientRequestID !== request.clientRequestID) return false
+  if ((run.workItemID ?? '') !== (request.workItemID ?? '')) return false
+  const expectedMode = request.assistantAction === 'continue'
+    ? 'continue'
+    : request.assistantAction === 'build' || request.initialProjectPrompt
+    ? 'new'
+    : request.assistantAction === 'ask'
+    ? 'discussion'
+    : 'adaptive'
+  return run.mode === expectedMode
 }
 
 export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {

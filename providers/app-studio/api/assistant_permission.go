@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
@@ -87,6 +88,53 @@ func projectAssistantPermissionForToolWithRunState(spec projectAssistantToolSpec
 		return projectAssistantPermissionAsk
 	case projectAssistantToolRiskRuntime:
 		return projectAssistantPermissionAsk
+	default:
+		return projectAssistantPermissionDeny
+	}
+}
+
+// projectAssistantPermissionForApprovalMode applies the user-selected,
+// run-scoped approval policy. Auto-approve removes user approval interrupts,
+// while retaining plan scope, argument validation, and deny-by-default behavior
+// for unknown tool risks.
+func projectAssistantPermissionForApprovalMode(
+	spec projectAssistantToolSpec,
+	mode store.AssistantApprovalMode,
+	legacyAutoApprove bool,
+	runState *projectEinoAssistantRunState,
+	args map[string]any,
+) projectAssistantPermissionDecision {
+	if mode == store.AssistantApprovalModeAlwaysAsk {
+		return projectAssistantPermissionForToolWithRunState(spec, false, runState, args)
+	}
+	if mode != store.AssistantApprovalModeAutoApprove {
+		return projectAssistantPermissionForToolWithRunState(spec, legacyAutoApprove, runState, args)
+	}
+	switch spec.Risk {
+	case projectAssistantToolRiskRead, projectAssistantToolRiskInput:
+		return projectAssistantPermissionAllow
+	case projectAssistantToolRiskPlan:
+		if projectToolBaseName(spec.Name) == projectToolRequestProjectPlanApproval {
+			if _, err := projectAssistantApprovedPlanFromArguments(args); err != nil {
+				return projectAssistantPermissionDeny
+			}
+		}
+		return projectAssistantPermissionAllow
+	case projectAssistantToolRiskWrite:
+		if projectAssistantApprovedPlanAllowsWrite(runState.ApprovedPlan(), spec.Name, args) {
+			return projectAssistantPermissionAllow
+		}
+		switch strings.TrimSpace(spec.Name) {
+		case projectToolSelectTemplate, projectToolHydrateWorkspace:
+			return projectAssistantPermissionAllow
+		}
+		if projectAssistantApprovedPlanActive(runState.ApprovedPlan()) &&
+			projectAssistantPlanCanAuthorizeWriteTool(spec.Name) {
+			return projectAssistantPermissionReplan
+		}
+		return projectAssistantPermissionDeny
+	case projectAssistantToolRiskCommit, projectAssistantToolRiskRuntime:
+		return projectAssistantPermissionAllow
 	default:
 		return projectAssistantPermissionDeny
 	}

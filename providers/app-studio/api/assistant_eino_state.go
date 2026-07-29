@@ -47,10 +47,12 @@ type projectAssistantApprovedPlan struct {
 }
 
 type projectEinoAssistantRunState struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	callbackMu sync.Mutex
 
 	messages                  []chatMessage
 	lastToolMessages          []chatMessage
+	toolEvidence              []chatMessage
 	toolCalls                 []chatToolCall
 	seenToolCalls             map[string]int
 	turn                      int
@@ -62,12 +64,32 @@ type projectEinoAssistantRunState struct {
 	permissionBarrier         bool
 	approvedPlan              *projectAssistantApprovedPlan
 	approvedPlanGrantRevision string
+	sourceMutationRevision    uint64
+	verifiedMutationRevision  uint64
+	completedReadCalls        map[string]uint64
+}
+
+func (s *projectEinoAssistantRunState) EmitToolCall(
+	callback func(projectToolCallStreamEvent),
+	event projectToolCallStreamEvent,
+) {
+	if callback == nil {
+		return
+	}
+	if s == nil {
+		callback(event)
+		return
+	}
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	callback(event)
 }
 
 func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
 	return &projectEinoAssistantRunState{
-		seenToolCalls: map[string]int{},
-		turnPolicy:    projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion),
+		seenToolCalls:      map[string]int{},
+		completedReadCalls: map[string]uint64{},
+		turnPolicy:         projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion),
 	}
 }
 
@@ -173,6 +195,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	defer s.mu.Unlock()
 	s.messages = cloneChatMessages(state.Messages)
 	s.lastToolMessages = cloneChatMessages(state.LastToolMessages)
+	s.toolEvidence = projectEinoAssistantCollectToolEvidence(s.messages)
 	s.toolCalls = cloneProjectAssistantToolCalls(state.ToolCalls)
 	s.seenToolCalls = projectEinoAssistantSanitizeSeenToolCalls(state.SeenToolCalls)
 	s.turn = state.Turn
@@ -180,6 +203,9 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.projectRepositoryRef = strings.TrimSpace(state.ProjectRepositoryRef)
 	s.approvedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
 	s.approvedPlanGrantRevision = strings.TrimSpace(state.ApprovedPlanGrantRevision)
+	s.sourceMutationRevision = state.SourceMutationRevision
+	s.verifiedMutationRevision = state.VerifiedMutationRevision
+	s.completedReadCalls = map[string]uint64{}
 	s.sessionSnapshot = cloneProjectEinoAssistantSessionSnapshot(state.SessionSnapshot)
 }
 
@@ -238,6 +264,71 @@ func (s *projectEinoAssistantRunState) ApprovedPlanGrantRevision() string {
 	return s.approvedPlanGrantRevision
 }
 
+func (s *projectEinoAssistantRunState) RecordSourceMutation() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sourceMutationRevision++
+	s.verifiedMutationRevision = 0
+}
+
+func (s *projectEinoAssistantRunState) RecordDevelopmentVerification(ready bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ready && s.sourceMutationRevision > 0 {
+		s.verifiedMutationRevision = s.sourceMutationRevision
+		return
+	}
+	s.verifiedMutationRevision = 0
+}
+
+func (s *projectEinoAssistantRunState) SourceMutationVerified() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sourceMutationRevision > 0 &&
+		s.verifiedMutationRevision == s.sourceMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) SourceMutationRevisions() (uint64, uint64) {
+	if s == nil {
+		return 0, 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sourceMutationRevision, s.verifiedMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) RepeatedCompletedRead(name, arguments string) bool {
+	if s == nil {
+		return false
+	}
+	signature := projectEinoAssistantToolCallSignature(name, arguments)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.completedReadCalls[signature] == s.sourceMutationRevision+1
+}
+
+func (s *projectEinoAssistantRunState) RecordCompletedRead(name, arguments string) {
+	if s == nil {
+		return
+	}
+	signature := projectEinoAssistantToolCallSignature(name, arguments)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.completedReadCalls == nil {
+		s.completedReadCalls = map[string]uint64{}
+	}
+	s.completedReadCalls[signature] = s.sourceMutationRevision + 1
+}
+
 func (s *projectEinoAssistantRunState) RecordModelInput(messages []chatMessage) {
 	if s == nil {
 		return
@@ -285,6 +376,10 @@ func (s *projectEinoAssistantRunState) RecordToolMessage(msg chatMessage) {
 	cloned := cloneChatMessages([]chatMessage{msg})[0]
 	s.messages = append(s.messages, cloned)
 	s.lastToolMessages = []chatMessage{cloned}
+	s.toolEvidence = append(s.toolEvidence, cloned)
+	if len(s.toolEvidence) > projectEinoAssistantClosingEvidenceMaxItems {
+		s.toolEvidence = cloneChatMessages(s.toolEvidence[len(s.toolEvidence)-projectEinoAssistantClosingEvidenceMaxItems:])
+	}
 }
 
 func (s *projectEinoAssistantRunState) PermissionBarrierActive() bool {
@@ -344,6 +439,8 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		TurnPolicy:                projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
 		ApprovedPlan:              cloneProjectAssistantApprovedPlan(s.approvedPlan),
 		ApprovedPlanGrantRevision: strings.TrimSpace(s.approvedPlanGrantRevision),
+		SourceMutationRevision:    s.sourceMutationRevision,
+		VerifiedMutationRevision:  s.verifiedMutationRevision,
 		SessionSnapshot:           cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
 	}
 }
@@ -380,20 +477,31 @@ func (s *projectEinoAssistantRunState) ToolLoopFinalAnswerMessages() []chatMessa
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	messages := make([]chatMessage, 0, len(s.messages)+len(s.lastToolMessages)+1)
+	messages := make([]chatMessage, 0, len(s.messages)+2)
 	for _, msg := range s.messages {
 		if msg.Role == "tool" || len(msg.ToolCalls) > 0 {
 			break
 		}
 		messages = append(messages, cloneChatMessages([]chatMessage{msg})[0])
 	}
-	for _, msg := range s.lastToolMessages {
-		if context := projectEinoAssistantToolLoopFinalToolContext(msg); context != "" {
-			messages = append(messages, chatMessage{Role: "user", Content: context})
-		}
+	if evidence := projectEinoAssistantToolLoopEvidenceContext(s.toolEvidence); evidence != "" {
+		messages = append(messages, chatMessage{Role: "user", Content: evidence})
 	}
 	messages = append(messages, chatMessage{Role: "system", Content: projectEinoAssistantToolLoopFinalInstruction(s.toolLoopReasonLocked())})
 	return messages
+}
+
+func projectEinoAssistantCollectToolEvidence(messages []chatMessage) []chatMessage {
+	evidence := make([]chatMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "tool" {
+			evidence = append(evidence, cloneChatMessages([]chatMessage{msg})[0])
+		}
+	}
+	if len(evidence) > projectEinoAssistantClosingEvidenceMaxItems {
+		evidence = evidence[len(evidence)-projectEinoAssistantClosingEvidenceMaxItems:]
+	}
+	return evidence
 }
 
 func (s *projectEinoAssistantRunState) toolLoopReasonLocked() string {

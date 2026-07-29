@@ -78,19 +78,25 @@ type CreateProjectMessageRequest struct {
 type projectAssistantAction string
 
 const (
+	projectAssistantActionAuto     projectAssistantAction = "auto"
 	projectAssistantActionAsk      projectAssistantAction = "ask"
 	projectAssistantActionBuild    projectAssistantAction = "build"
 	projectAssistantActionContinue projectAssistantAction = "continue"
 )
 
 // assistantAction validates the explicit execution intent at the HTTP
-// boundary.  Omitting it preserves the safe, non-mutating discussion mode.
+// boundary. Omitting it lets the server route clear mutation requests into a
+// WorkItem while ordinary conversation remains non-mutating.
 func (r CreateProjectMessageRequest) assistantAction() (projectAssistantAction, error) {
 	action := projectAssistantAction(strings.ToLower(strings.TrimSpace(r.AssistantAction)))
 	if action == "" {
-		action = projectAssistantActionAsk
+		action = projectAssistantActionAuto
 	}
 	switch action {
+	case projectAssistantActionAuto:
+		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
+			return "", newValidationError("auto does not accept a work item")
+		}
 	case projectAssistantActionAsk:
 		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
 			return "", newValidationError("ask does not accept a work item")
@@ -104,7 +110,7 @@ func (r CreateProjectMessageRequest) assistantAction() (projectAssistantAction, 
 			return "", newValidationError("continue requires workItemID and workItemRevision")
 		}
 	default:
-		return "", newValidationError("assistantAction must be ask, build, or continue")
+		return "", newValidationError("assistantAction must be auto, ask, build, or continue")
 	}
 	return action, nil
 }
@@ -758,7 +764,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.projectAssistantSupervisor().log("resume", scope, run)
-	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshot{Run: run, Message: message})
+	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshotToAPI(projectAssistantRunSnapshot{Run: run, Message: message}))
 }
 
 func (s *Server) abortProjectAssistant(w http.ResponseWriter, r *http.Request) {
@@ -839,10 +845,37 @@ func (s *Server) stopProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	runID := mux.Vars(r)["run"]
+	var request struct {
+		ClientRequestID string `json:"clientRequestID"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.ClientRequestID = strings.TrimSpace(request.ClientRequestID)
+	if request.ClientRequestID == "" {
+		writeProjectError(w, newValidationError("clientRequestID is required"))
+		return
+	}
 	existingRun, err := s.store.GetAssistantRun(r.Context(), scope, runID)
 	if err != nil || s.authorizeProjectAssistantRunActor(r.Context(), scope, existingRun, id.user, false) != nil {
 		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
 		return
+	}
+	if found, bindErr := s.projectAssistantSupervisor().BindStopRequest(r.Context(), scope, runID, id.user, request.ClientRequestID); found {
+		if bindErr != nil {
+			writeProjectError(w, bindErr)
+			return
+		}
+	} else {
+		if err := bindProjectAssistantStopRequest(&existingRun, id.user, request.ClientRequestID); err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		existingRun.UpdatedAt = time.Now().UTC()
+		if err := s.store.SaveAssistantRun(r.Context(), scope, existingRun); err != nil {
+			writeProjectError(w, err)
+			return
+		}
 	}
 	run, found, err := s.projectAssistantSupervisor().Stop(scope, runID)
 	if err != nil {
@@ -895,10 +928,10 @@ func (s *Server) listProjectAssistantWorkItems(w http.ResponseWriter, r *http.Re
 		writeProjectError(w, err)
 		return
 	}
-	owned := make([]store.AssistantWorkItem, 0, len(items))
+	owned := make([]projectAssistantWorkItemView, 0, len(items))
 	for _, item := range items {
 		if item.CreatedBy == id.user {
-			owned = append(owned, item)
+			owned = append(owned, projectAssistantWorkItemToAPI(item))
 		}
 	}
 	writeJSON(w, http.StatusOK, owned)
@@ -918,7 +951,7 @@ func (s *Server) getProjectAssistantWorkItem(w http.ResponseWriter, r *http.Requ
 		writeProjectError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
 }
 
 func (s *Server) cancelProjectAssistantWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -927,9 +960,15 @@ func (s *Server) cancelProjectAssistantWorkItem(w http.ResponseWriter, r *http.R
 		return
 	}
 	var request struct {
-		Revision int64 `json:"revision"`
+		Revision        int64  `json:"revision"`
+		ClientRequestID string `json:"clientRequestID"`
 	}
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.ClientRequestID = strings.TrimSpace(request.ClientRequestID)
+	if request.ClientRequestID == "" {
+		writeProjectError(w, newValidationError("clientRequestID is required"))
 		return
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
@@ -942,25 +981,73 @@ func (s *Server) cancelProjectAssistantWorkItem(w http.ResponseWriter, r *http.R
 		writeProjectError(w, err)
 		return
 	}
+	if item.Status == store.AssistantWorkItemStatusCancelled && item.Revision == request.Revision+1 {
+		if err := validateProjectAssistantCancelReplay(item, id.user, request.ClientRequestID, request.Revision); err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
+		return
+	}
 	if request.Revision != item.Revision || item.Status != store.AssistantWorkItemStatusSuspended || item.ActiveRunID != "" {
 		writeStatus(w, http.StatusConflict, "Conflict", "assistant work item is not cancellable at that revision")
 		return
 	}
 	item.Status = store.AssistantWorkItemStatusCancelled
 	item.StatusReason = "cancelled by user"
-	item.PlanGrant = nil
+	receipt, err := encodeProjectAssistantCancelReceipt(projectAssistantCancelRequestReceipt(id.user, item.ID, request.ClientRequestID, request.Revision))
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	item.PlanGrant = receipt
 	item.GrantRevision = ""
 	item.Revision = request.Revision + 1
 	item.UpdatedAt = time.Now().UTC()
 	if err := s.store.CompareAndSwapAssistantWorkItem(r.Context(), scope, item, request.Revision); err != nil {
 		if errors.Is(err, store.ErrAssistantWorkItemConflict) {
+			current, getErr := s.store.GetAssistantWorkItem(r.Context(), scope, item.ID)
+			if getErr == nil && current.CreatedBy == id.user && current.Status == store.AssistantWorkItemStatusCancelled && current.Revision == request.Revision+1 &&
+				validateProjectAssistantCancelReplay(current, id.user, request.ClientRequestID, request.Revision) == nil {
+				writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(current))
+				return
+			}
 			writeStatus(w, http.StatusConflict, "Conflict", "assistant work item changed")
 			return
 		}
 		writeProjectError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
+}
+
+// projectAssistantWorkItemView deliberately excludes the encrypted plan grant
+// and its internal revision token. Clients select work by the public WorkItem
+// revision; grant authorization remains entirely server-side.
+type projectAssistantWorkItemView struct {
+	ID            string                        `json:"id"`
+	RootMessageID string                        `json:"rootMessageID"`
+	CreatedBy     string                        `json:"createdBy"`
+	Status        store.AssistantWorkItemStatus `json:"status"`
+	StatusReason  string                        `json:"statusReason,omitempty"`
+	Revision      int64                         `json:"revision"`
+	ActiveRunID   string                        `json:"activeRunID,omitempty"`
+	CreatedAt     time.Time                     `json:"createdAt"`
+	UpdatedAt     time.Time                     `json:"updatedAt"`
+}
+
+func projectAssistantWorkItemToAPI(item store.AssistantWorkItem) projectAssistantWorkItemView {
+	return projectAssistantWorkItemView{
+		ID:            item.ID,
+		RootMessageID: item.RootMessageID,
+		CreatedBy:     item.CreatedBy,
+		Status:        item.Status,
+		StatusReason:  item.StatusReason,
+		Revision:      item.Revision,
+		ActiveRunID:   item.ActiveRunID,
+		CreatedAt:     item.CreatedAt,
+		UpdatedAt:     item.UpdatedAt,
+	}
 }
 
 func projectAssistantClearPendingInterruptMetadata(message *store.Message, runID string) {

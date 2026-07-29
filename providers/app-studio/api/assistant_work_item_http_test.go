@@ -18,12 +18,46 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/faroshq/provider-app-studio/store"
 )
+
+func TestProjectAssistantPublicWorkItemOmitsPlanGrantState(t *testing.T) {
+	now := time.Now().UTC()
+	item := store.AssistantWorkItem{
+		ID:            "work-item-1",
+		ProjectName:   "internal-project",
+		ProjectUID:    "internal-project-uid",
+		RootMessageID: "user-1",
+		CreatedBy:     "alice",
+		Status:        store.AssistantWorkItemStatusSuspended,
+		StatusReason:  "interrupted",
+		Revision:      3,
+		PlanGrant:     json.RawMessage(`{"paths":["secret/path"]}`),
+		GrantRevision: "secret-grant-revision",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	raw, err := json.Marshal(projectAssistantWorkItemToAPI(item))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"planGrant", "grantRevision", "projectName", "projectUID", "secret/path", "secret-grant-revision"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("public WorkItem contains internal value %q: %s", forbidden, raw)
+		}
+	}
+	for _, required := range []string{`"id":"work-item-1"`, `"createdBy":"alice"`, `"revision":3`} {
+		if !strings.Contains(string(raw), required) {
+			t.Fatalf("public WorkItem is missing %s: %s", required, raw)
+		}
+	}
+}
 
 func TestDurableAskIsActorBoundDiscussionWithoutWorkItem(t *testing.T) {
 	messages := store.NewMemoryStore()

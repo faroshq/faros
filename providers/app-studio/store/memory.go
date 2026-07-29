@@ -31,6 +31,7 @@ type MemoryStore struct {
 	messages      map[Scope]map[string]Message
 	assistantRuns map[Scope]map[string]AssistantRun
 	workItems     map[Scope]map[string]AssistantWorkItem
+	approvalModes map[Scope]map[string]AssistantApprovalPreference
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -38,10 +39,54 @@ func NewMemoryStore() *MemoryStore {
 		messages:      map[Scope]map[string]Message{},
 		assistantRuns: map[Scope]map[string]AssistantRun{},
 		workItems:     map[Scope]map[string]AssistantWorkItem{},
+		approvalModes: map[Scope]map[string]AssistantApprovalPreference{},
 	}
 }
 
 func (s *MemoryStore) EnsureSchema(context.Context) error { return nil }
+
+func (s *MemoryStore) GetAssistantApprovalPreference(_ context.Context, scope Scope, actor string) (AssistantApprovalPreference, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return AssistantApprovalPreference{}, fmt.Errorf("assistant approval preference actor is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if preference, ok := s.approvalModes[scope][actor]; ok {
+		return preference, nil
+	}
+	return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeAlwaysAsk}, nil
+}
+
+func (s *MemoryStore) SetAssistantApprovalPreference(_ context.Context, scope Scope, preference AssistantApprovalPreference) (AssistantApprovalPreference, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	preference.ActorID = strings.TrimSpace(preference.ActorID)
+	if preference.ActorID == "" {
+		return AssistantApprovalPreference{}, fmt.Errorf("assistant approval preference actor is required")
+	}
+	mode, err := NormalizeAssistantApprovalMode(preference.Mode)
+	if err != nil {
+		return AssistantApprovalPreference{}, err
+	}
+	preference.Mode = mode
+	if preference.UpdatedAt.IsZero() {
+		preference.UpdatedAt = time.Now().UTC()
+	} else {
+		preference.UpdatedAt = preference.UpdatedAt.UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.approvalModes[scope] == nil {
+		s.approvalModes[scope] = map[string]AssistantApprovalPreference{}
+	}
+	s.approvalModes[scope][preference.ActorID] = preference
+	return preference, nil
+}
 
 func (s *MemoryStore) AppendMessage(_ context.Context, scope Scope, msg Message) error {
 	if err := scope.validate(); err != nil {
@@ -153,6 +198,11 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 	if run.Status == "" {
 		return fmt.Errorf("assistant run status is required")
 	}
+	approvalMode, err := NormalizeAssistantApprovalMode(run.ApprovalMode)
+	if err != nil {
+		return err
+	}
+	run.ApprovalMode = approvalMode
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -176,6 +226,7 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 		run.Revision = existing.Revision
 		run.WorkItemID = existing.WorkItemID
 		run.Mode = existing.Mode
+		run.ApprovalMode = existing.ApprovalMode
 		run.ExpectedGrantRevision = existing.ExpectedGrantRevision
 	}
 	if AssistantRunIsConversation(run) && run.ClientRequestID != "" {
@@ -249,6 +300,99 @@ func (s *MemoryStore) CreateWorkItemAndAssistantRun(_ context.Context, scope Sco
 	s.assistantRuns[scope][run.ID] = run
 	s.workItems[scope][item.ID] = item
 	return cloneAssistantWorkItem(item), nil
+}
+
+// PromoteAssistantRunToWorkItem is the only transition allowed to change a
+// run's WorkItem membership and mode. It atomically converts one running
+// adaptive run into the first run of a new WorkItem and attaches the run's
+// existing user and assistant messages to that item.
+func (s *MemoryStore) PromoteAssistantRunToWorkItem(
+	_ context.Context,
+	scope Scope,
+	runID, actor, workItemID string,
+	expectedRunRevision int64,
+	now time.Time,
+) (AssistantWorkItem, AssistantRun, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	runID, actor, workItemID = strings.TrimSpace(runID), strings.TrimSpace(actor), strings.TrimSpace(workItemID)
+	if err := validateAssistantRunPromotionRequest(runID, actor, workItemID, expectedRunRevision); err != nil {
+		return AssistantWorkItem{}, AssistantRun{}, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.assistantRuns[scope][runID]
+	if !ok {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if run.WorkItemID != "" || run.Mode != AssistantRunModeAdaptive {
+		return s.promotedAssistantRunReplay(scope, run, actor, workItemID, expectedRunRevision)
+	}
+	if run.Status != AssistantRunStatusRunning || run.Revision != expectedRunRevision {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+
+	user, userOK := s.messages[scope][run.UserMessageID]
+	assistant, assistantOK := s.messages[scope][run.ActiveMessageID]
+	if !userOK || !assistantOK ||
+		user.Role != "user" || user.ActorID != actor || user.WorkItemID != "" ||
+		assistant.Role != "assistant" || assistant.WorkItemID != "" {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: adaptive run messages cannot be attached", ErrAssistantWorkItemConflict)
+	}
+	if _, exists := s.workItems[scope][workItemID]; exists {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: work item %q already exists", ErrAssistantWorkItemConflict, workItemID)
+	}
+	for _, existing := range s.workItems[scope] {
+		if existing.RootMessageID == run.UserMessageID {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: root message %q already has a work item", ErrAssistantWorkItemConflict, run.UserMessageID)
+		}
+		if existing.Status == AssistantWorkItemStatusActive {
+			return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: project already has active work item %q", ErrAssistantWorkItemConflict, existing.ID)
+		}
+	}
+
+	item := prepareAssistantWorkItem(scope, newPromotedAssistantWorkItem(run, actor, workItemID, now))
+	user.WorkItemID = item.ID
+	assistant.WorkItemID = item.ID
+	run.WorkItemID = item.ID
+	run.Mode = AssistantRunModeNew
+	run.Revision++
+	run.UpdatedAt = now.UTC()
+	s.messages[scope][user.ID] = user
+	s.messages[scope][assistant.ID] = assistant
+	s.assistantRuns[scope][run.ID] = run
+	if s.workItems[scope] == nil {
+		s.workItems[scope] = map[string]AssistantWorkItem{}
+	}
+	s.workItems[scope][item.ID] = item
+	return cloneAssistantWorkItem(item), cloneAssistantRun(run), nil
+}
+
+func (s *MemoryStore) promotedAssistantRunReplay(
+	scope Scope,
+	run AssistantRun,
+	actor, workItemID string,
+	expectedRunRevision int64,
+) (AssistantWorkItem, AssistantRun, error) {
+	if run.WorkItemID != workItemID || run.Mode != AssistantRunModeNew || expectedRunRevision != run.Revision-1 {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: assistant run %q was promoted differently", ErrAssistantRunConflict, run.ID)
+	}
+	item, itemOK := s.workItems[scope][workItemID]
+	user, userOK := s.messages[scope][run.UserMessageID]
+	assistant, assistantOK := s.messages[scope][run.ActiveMessageID]
+	if !itemOK || !userOK || !assistantOK ||
+		item.RootMessageID != run.UserMessageID || item.CreatedBy != actor ||
+		user.WorkItemID != workItemID || user.ActorID != actor ||
+		assistant.WorkItemID != workItemID {
+		return AssistantWorkItem{}, AssistantRun{}, fmt.Errorf("%w: promoted work item %q does not match", ErrAssistantWorkItemConflict, workItemID)
+	}
+	return cloneAssistantWorkItem(item), cloneAssistantRun(run), nil
 }
 
 func (s *MemoryStore) ResumeWorkItemAndCreateAssistantRun(_ context.Context, scope Scope, workItemID, actor string, expectedRevision int64, user Message, assistant Message, run AssistantRun) (AssistantWorkItem, error) {
@@ -390,6 +534,45 @@ func (s *MemoryStore) ApproveWorkItemPlan(_ context.Context, scope Scope, workIt
 	return cloneAssistantWorkItem(item), nil
 }
 
+// RetireWorkItemPlan atomically consumes an active WorkItem's plan grant before
+// a separate permission checkpoint. The tombstone prevents the pre-checkpoint
+// grant from authorizing a later resumed mutation.
+func (s *MemoryStore) RetireWorkItemPlan(_ context.Context, scope Scope, workItemID, runID, actor string, expectedWorkItemRevision int64, expectedGrantRevision, tombstoneGrantRevision string, now time.Time) (AssistantWorkItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantWorkItem{}, err
+	}
+	workItemID = strings.TrimSpace(workItemID)
+	runID = strings.TrimSpace(runID)
+	actor = strings.TrimSpace(actor)
+	expectedGrantRevision = strings.TrimSpace(expectedGrantRevision)
+	tombstoneGrantRevision = strings.TrimSpace(tombstoneGrantRevision)
+	if workItemID == "" || runID == "" || actor == "" || expectedWorkItemRevision < 1 || expectedGrantRevision == "" || tombstoneGrantRevision == "" || expectedGrantRevision == tombstoneGrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item, run, actor, revisions, and distinct grant revisions are required", ErrAssistantWorkItemConflict)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.workItems[scope][workItemID]
+	if !ok || item.CreatedBy != actor || item.Status != AssistantWorkItemStatusActive || item.ActiveRunID != runID || item.Revision != expectedWorkItemRevision || item.GrantRevision != expectedGrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: work item %q", ErrAssistantWorkItemConflict, workItemID)
+	}
+	run, ok := s.assistantRuns[scope][runID]
+	if !ok || run.WorkItemID != workItemID || run.Status != AssistantRunStatusRunning || run.ExpectedGrantRevision != expectedGrantRevision {
+		return AssistantWorkItem{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	item.PlanGrant = nil
+	item.GrantRevision = tombstoneGrantRevision
+	item.Revision++
+	item.UpdatedAt = now.UTC()
+	run.ExpectedGrantRevision = tombstoneGrantRevision
+	run.UpdatedAt = now.UTC()
+	s.workItems[scope][workItemID] = item
+	s.assistantRuns[scope][runID] = run
+	return cloneAssistantWorkItem(item), nil
+}
+
 func (s *MemoryStore) TransitionWorkItemAndRun(_ context.Context, scope Scope, workItemID string, expectedWorkItemRevision int64, run AssistantRun, status AssistantWorkItemStatus, reason string, now time.Time) error {
 	if err := scope.validate(); err != nil {
 		return err
@@ -417,8 +600,8 @@ func (s *MemoryStore) TransitionWorkItemAndRun(_ context.Context, scope Scope, w
 	run.CreatedAt = current.CreatedAt
 	run.ClientRequestID = current.ClientRequestID
 	run.UserMessageID = current.UserMessageID
-	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode {
-		return fmt.Errorf("%w: immutable assistant run work item or mode", ErrAssistantRunConflict)
+	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.ApprovalMode != current.ApprovalMode {
+		return fmt.Errorf("%w: immutable assistant run work item, mode, or approval mode", ErrAssistantRunConflict)
 	}
 	run.ExpectedGrantRevision = current.ExpectedGrantRevision
 	run.WorkItemID = current.WorkItemID
@@ -576,8 +759,8 @@ func (s *MemoryStore) SaveAssistantRunSnapshot(_ context.Context, scope Scope, r
 	run.CreatedAt = current.CreatedAt
 	run.ClientRequestID = current.ClientRequestID
 	run.UserMessageID = current.UserMessageID
-	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode {
-		return fmt.Errorf("%w: immutable assistant run work item or mode", ErrAssistantRunConflict)
+	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.ApprovalMode != current.ApprovalMode {
+		return fmt.Errorf("%w: immutable assistant run work item, mode, or approval mode", ErrAssistantRunConflict)
 	}
 	run.ExpectedGrantRevision = current.ExpectedGrantRevision
 	if s.messages[scope] == nil {
@@ -603,6 +786,11 @@ func (s *MemoryStore) CompareAndSwapAssistantRun(_ context.Context, scope Scope,
 	if run.Status == "" {
 		return fmt.Errorf("assistant run status is required")
 	}
+	approvalMode, err := NormalizeAssistantApprovalMode(run.ApprovalMode)
+	if err != nil {
+		return err
+	}
+	run.ApprovalMode = approvalMode
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -626,8 +814,8 @@ func (s *MemoryStore) CompareAndSwapAssistantRun(_ context.Context, scope Scope,
 		run.ClientRequestID = current.ClientRequestID
 		run.UserMessageID = current.UserMessageID
 		run.Revision = current.Revision
-		if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode {
-			return fmt.Errorf("%w: immutable assistant run work item or mode", ErrAssistantRunConflict)
+		if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.ApprovalMode != current.ApprovalMode {
+			return fmt.Errorf("%w: immutable assistant run work item, mode, or approval mode", ErrAssistantRunConflict)
 		}
 		run.ExpectedGrantRevision = current.ExpectedGrantRevision
 	}
@@ -827,6 +1015,7 @@ func prepareMessage(scope Scope, msg Message) Message {
 }
 
 func prepareAssistantRun(scope Scope, run AssistantRun) AssistantRun {
+	run.ApprovalMode, _ = NormalizeAssistantApprovalMode(run.ApprovalMode)
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -873,6 +1062,9 @@ func validateWorkItemCreate(item AssistantWorkItem, user Message, assistant Mess
 }
 
 func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) error {
+	if _, err := NormalizeAssistantApprovalMode(run.ApprovalMode); err != nil {
+		return err
+	}
 	if user.ID == "" || assistant.ID == "" {
 		return fmt.Errorf("user and assistant message ids are required")
 	}
@@ -897,6 +1089,9 @@ func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) 
 }
 
 func validateAssistantRunSnapshot(run AssistantRun, messages []Message, expectedRevision int64) error {
+	if _, err := NormalizeAssistantApprovalMode(run.ApprovalMode); err != nil {
+		return err
+	}
 	if run.ID == "" || run.Status == "" {
 		return fmt.Errorf("assistant run id and status are required")
 	}
