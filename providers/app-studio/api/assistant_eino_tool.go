@@ -643,6 +643,25 @@ func (t projectEinoAssistantTool) persistInitialExecutionPlan(
 	if err != nil {
 		return "", err
 	}
+	revision := newProjectAssistantRunID()
+	accumulator := t.req.snapshotAccumulator
+	if accumulator == nil {
+		accumulator = t.server.projectAssistantSupervisor().accumulatorFor(
+			t.req.MessageScope,
+			t.req.AssistantRun.ID,
+		)
+	}
+	if accumulator != nil {
+		if err := accumulator.SaveWorkItemExecutionPlan(
+			ctx,
+			t.req.Identity.user,
+			revision,
+			raw,
+		); err != nil {
+			return "", err
+		}
+		return revision, nil
+	}
 	item, err := t.server.store.GetAssistantWorkItem(ctx, t.req.MessageScope, t.req.AssistantRun.WorkItemID)
 	if err != nil {
 		return "", err
@@ -652,7 +671,6 @@ func (t projectEinoAssistantTool) persistInitialExecutionPlan(
 		item.Status != store.AssistantWorkItemStatusActive {
 		return "", store.ErrAssistantWorkItemConflict
 	}
-	revision := newProjectAssistantRunID()
 	if _, err := t.server.store.SaveWorkItemExecutionPlan(
 		ctx,
 		t.req.MessageScope,

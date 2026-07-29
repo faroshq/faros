@@ -813,6 +813,64 @@ func (a *projectAssistantSnapshotAccumulator) UpdateRun(ctx context.Context, mut
 	return a.update(ctx, func(active *projectAssistantSupervisedRun) { mutate(&active.run) }, true)
 }
 
+// SaveWorkItemExecutionPlan serializes initial execution-plan persistence with
+// Stop and terminal WorkItem transitions. The plan update advances the
+// WorkItem revision, so it must share transitionMu with every read-then-CAS
+// lifecycle transition for the active run.
+func (a *projectAssistantSnapshotAccumulator) SaveWorkItemExecutionPlan(
+	ctx context.Context,
+	actor string,
+	executionPlanRevision string,
+	executionPlan []byte,
+) error {
+	if a == nil || a.supervisor == nil {
+		return errors.New("assistant snapshot accumulator not configured")
+	}
+	s := a.supervisor
+	s.mu.Lock()
+	active := s.runs[a.key]
+	if active == nil || active.run.ID != a.runID {
+		s.mu.Unlock()
+		return store.ErrAssistantRunNotFound
+	}
+	s.mu.Unlock()
+	active.transitionMu.Lock()
+	defer active.transitionMu.Unlock()
+
+	s.mu.Lock()
+	if current := s.runs[a.key]; current != active || active.run.ID != a.runID ||
+		active.run.Status != store.AssistantRunStatusRunning {
+		s.mu.Unlock()
+		return store.ErrAssistantRunConflict
+	}
+	run, scope := active.run, active.scope
+	if run.WorkItemID == "" {
+		s.mu.Unlock()
+		return store.ErrAssistantWorkItemConflict
+	}
+	s.mu.Unlock()
+
+	item, err := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
+	if err != nil {
+		return err
+	}
+	if actor == "" || item.CreatedBy != actor || item.ActiveRunID != run.ID ||
+		item.Status != store.AssistantWorkItemStatusActive {
+		return store.ErrAssistantWorkItemConflict
+	}
+	_, err = s.store.SaveWorkItemExecutionPlan(
+		ctx,
+		scope,
+		item.ID,
+		run.ID,
+		item.Revision,
+		executionPlanRevision,
+		executionPlan,
+		time.Now().UTC(),
+	)
+	return err
+}
+
 // RetireWorkItemPlan serializes plan-grant retirement with Stop and publishes
 // the tombstone into both the durable run and the accumulator's local committed
 // snapshot. A later checkpoint therefore cannot overwrite Stop or resurrect

@@ -1094,6 +1094,85 @@ func TestEinoToolWorkItemCommitRetirementYieldsToStopWithoutPermissionPrompt(t *
 	}
 }
 
+func TestEinoToolInitialExecutionPlanYieldsToStop(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	stopEntered := make(chan struct{})
+	allowStop := make(chan struct{})
+	blockingStore := blockProjectAssistantStopStore{Store: messages, entered: stopEntered, release: allowStop}
+	server := NewWithWorkspace(nil, blockingStore, workspace.NewFileStore(t.TempDir()), "", false)
+	server.assistantSupervisor = newProjectAssistantSupervisor(context.Background(), blockingStore)
+	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1", user: "alice"}
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
+	scope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	started, err := server.startProjectAssistantBuildRunDurably(
+		ctx,
+		scope,
+		id.user,
+		"Build the application",
+		"initial-plan-stop-race-1",
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("start durable build: %v", err)
+	}
+	accumulator, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant)
+	if err != nil {
+		t.Fatalf("attach durable run: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		_, _, stopErr := server.projectAssistantSupervisor().Stop(scope, started.Run.ID)
+		stopDone <- stopErr
+	}()
+	<-stopEntered // Stop owns transitionMu before execution-plan persistence starts.
+
+	adapter := projectEinoAssistantTool{
+		server: server,
+		req: projectAssistantRunRequest{
+			Identity:            id,
+			Project:             project,
+			MessageScope:        scope,
+			AssistantRun:        &started.Run,
+			snapshotAccumulator: accumulator,
+		},
+	}
+	planDone := make(chan error, 1)
+	go func() {
+		_, planErr := adapter.persistInitialExecutionPlan(ctx, &projectAssistantApprovedPlan{
+			Goal:         "Build the application",
+			Summary:      "Build the application.",
+			TargetPaths:  []string{"src/App.jsx"},
+			Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+			RunLocal:     true,
+		})
+		planDone <- planErr
+	}()
+
+	select {
+	case err := <-planDone:
+		t.Fatalf("execution-plan persistence completed before Stop released transition lock: %v", err)
+	default:
+	}
+	close(allowStop)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if err := <-planDone; !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("execution-plan persistence error = %v, want run conflict after Stop", err)
+	}
+	item, err := messages.GetAssistantWorkItem(ctx, scope, started.Run.WorkItemID)
+	if err != nil {
+		t.Fatalf("GetAssistantWorkItem: %v", err)
+	}
+	if len(item.ExecutionPlan) != 0 || item.ExecutionPlanRevision != "" {
+		t.Fatalf("WorkItem execution plan persisted after Stop: %#v", item)
+	}
+}
+
 func TestEinoToolPassesSessionSnapshotToLocalTool(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	runState.SetSessionSnapshot(projectEinoAssistantSessionSnapshot{
