@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -54,6 +55,7 @@ func TestAssistantMutationToolsFenceExistingFiles(t *testing.T) {
 	}
 	if _, err := write.Call(context.Background(), projectAssistantToolCallRequest{
 		WorkspaceScope: scope,
+		AssistantRunID: "run-write",
 		InitialBuild:   true,
 		Arguments: map[string]any{
 			"path":    "src/app.js",
@@ -61,6 +63,9 @@ func TestAssistantMutationToolsFenceExistingFiles(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("initial-build write returned error: %v", err)
+	}
+	if _, err := workspaces.RestoreSnapshot(context.Background(), scope, "run-write"); !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		t.Fatalf("assistant write snapshot error = %v, want ErrSnapshotNotFound", err)
 	}
 }
 
@@ -121,6 +126,9 @@ func TestAssistantApplyPatchRequiresSameTurnReadAndReturnsDiff(t *testing.T) {
 	})
 	if item.Outcome != "+1 -1" || strings.Contains(item.Outcome, "const theme") {
 		t.Fatalf("action outcome = %q, want counts only", item.Outcome)
+	}
+	if _, err := workspaces.RestoreSnapshot(context.Background(), scope, req.AssistantRunID); !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		t.Fatalf("assistant patch snapshot error = %v, want ErrSnapshotNotFound", err)
 	}
 }
 

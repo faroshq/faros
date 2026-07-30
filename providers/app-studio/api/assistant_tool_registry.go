@@ -181,7 +181,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					Path:       projectToolString(req.Arguments["path"]),
 					Content:    content,
 					CreateOnly: req.EnforceMutationSafety && !req.InitialBuild,
-					SnapshotID: req.AssistantRunID,
 				}))
 			},
 		},
@@ -204,7 +203,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					OldText:    oldText,
 					NewText:    newText,
 					ReplaceAll: projectToolBool(req.Arguments["replaceAll"]),
-					SnapshotID: req.AssistantRunID,
 				}
 				clean, err := workspace.CleanProjectPath(opts.Path)
 				if err != nil {
