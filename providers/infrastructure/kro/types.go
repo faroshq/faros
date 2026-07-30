@@ -160,10 +160,16 @@ type TemplateAgent struct {
 }
 
 // TemplateDevelopment is the MCP-facing projection of a Template's
-// spec.development block: just enough for an agent to drive the dev loop —
-// which components exist and which workspace directory each one syncs from.
-// Runtime details (dev images, start commands, reload rules) stay
-// provider-internal.
+// spec.development block: what an agent needs to drive the dev loop AND to
+// write source the sandbox can actually execute — which components exist,
+// which workspace directory each syncs from, and which toolchain runs it.
+//
+// The toolchain and start command are deliberately exposed. Withholding them
+// (they were once treated as provider-internal alongside the resolved image
+// references) left agents choosing a language with no evidence about the
+// runtime, which produced components the sandbox could not start. The resolved
+// dev image references and reload rules do stay internal — those are
+// deployment details an agent cannot act on.
 type TemplateDevelopment struct {
 	// Components maps each development component name to its contract.
 	Components map[string]TemplateDevelopmentComponent `json:"components"`
@@ -175,6 +181,22 @@ type TemplateDevelopmentComponent struct {
 	// component ("." = the whole workspace). Files outside every component's
 	// directory never reach the development sandbox.
 	WorkspacePath string `json:"workspacePath"`
+
+	// Toolchain is the ONLY runtime installed in this component's development
+	// sandbox image (e.g. "node"), from the template's
+	// ${kedge.devImage.<toolchain>} token. Source written in another language
+	// cannot run in the sandbox regardless of correctness. Empty when the
+	// template declares no parseable devImage.
+	Toolchain string `json:"toolchain,omitempty"`
+
+	// StartCommand is exactly what the sandbox executes for this component
+	// (e.g. "npm run dev || npm start") — the ground truth for what the source
+	// must provide, such as a package.json with a matching script.
+	StartCommand string `json:"startCommand,omitempty"`
+
+	// Port is the named container port the dev process serves on. Empty means
+	// the component serves no traffic (e.g. a worker).
+	Port string `json:"port,omitempty"`
 }
 
 // Instance is a portal-shaped view of a kro RGD instance CR in the

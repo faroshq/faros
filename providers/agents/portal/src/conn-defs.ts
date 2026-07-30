@@ -3,6 +3,7 @@
 // fields, each labelled with where to get the value.
 
 import type { IconName } from './portalkit/icons'
+import type { Connection, ConnectionWrite } from './types'
 
 export const PROVIDER_PRESETS: { id: string; label: string; baseURL: string; modelHint: string }[] = [
   { id: 'openai', label: 'OpenAI', baseURL: 'https://api.openai.com/v1', modelHint: 'gpt-4o' },
@@ -35,7 +36,7 @@ export interface ConnTypeDef {
   fields?: ConnField[]
   modes?: ConnMode[]
   advanced?: ConnField[]
-  build: (v: Record<string, string>, mode: string) => Record<string, unknown>
+  build: (v: Record<string, string>, mode: string) => ConnectionWrite
 }
 
 // Connections fall into three kinds so the UI can label what each one is FOR:
@@ -62,6 +63,48 @@ export const CATEGORY_META: Record<ConnCategory, { icon: IconName; label: string
 }
 export function connCategory(id: string): ConnCategory {
   return CONN_CATEGORY[id] || 'connection'
+}
+
+// Discord is ONE backend type with two shapes: a webhook (channel is an
+// https:// URL, no secret — outbound only) or a chat bot (channel is a numeric
+// id or blank, secret is the bot token). Every place that renders or edits a
+// Discord connection needs the distinction, so it is derived here once.
+export interface ConnShape {
+  discordWebhook: boolean
+  discordBot: boolean
+  // typeLabel is what the UI calls this connection ("discord chat" vs the bare
+  // spec.type for everything else).
+  typeLabel: string
+}
+
+export function connShape(c: Pick<Connection, 'spec'>): ConnShape {
+  const isDiscord = c.spec.type === 'discord'
+  const discordWebhook = isDiscord && (c.spec.channel || '').startsWith('https://')
+  const discordBot = isDiscord && !discordWebhook
+  return {
+    discordWebhook,
+    discordBot,
+    typeLabel: discordWebhook ? 'discord webhook' : discordBot ? 'discord chat' : c.spec.type,
+  }
+}
+
+export interface InboundState {
+  on: boolean
+  canEnable: boolean
+  note: string
+}
+
+// channelInbound reports whether a channel Connection can receive messages for
+// an agent. Chat-capable: telegram/slack (webhook inbound) and the Discord bot;
+// send-only otherwise. An agent receives on every channel it lists, so any
+// bound chat-capable channel is a receiver.
+export function channelInbound(c: Pick<Connection, 'spec' | 'status'>): InboundState {
+  const shape = connShape(c)
+  const canReceive = c.spec.type === 'telegram' || c.spec.type === 'slack' || shape.discordBot
+  if (!canReceive) return { on: false, canEnable: false, note: 'Send-only — this channel can notify you, but can’t receive chat.' }
+  if (shape.discordBot) return { on: true, canEnable: false, note: 'Inbound is automatic — the Discord bot delivers messages while linked.' }
+  if (c.status?.webhookPath) return { on: true, canEnable: false, note: 'Receiving — messages from this channel reach the agent.' }
+  return { on: false, canEnable: true, note: 'Not receiving yet — enable inbound to register the webhook.' }
 }
 
 // Map a tool-type connection to the built-in family the backend uses to resolve
@@ -102,7 +145,7 @@ export const CONN_DEFS: ConnTypeDef[] = [
     ],
     advanced: [{ key: 'baseURL', label: 'MCP endpoint (GitHub Enterprise only)', placeholder: 'https://api.githubcopilot.com/mcp' }],
     build: (v, mode) => {
-      const b: Record<string, unknown> = { type: 'github', name: v.name }
+      const b: ConnectionWrite = { type: 'github', name: v.name }
       if (v.baseURL) b.baseURL = v.baseURL
       if (mode === 'oauth') {
         b.auth = 'oauth'
@@ -176,7 +219,7 @@ export const CONN_DEFS: ConnTypeDef[] = [
       },
     ],
     build: (v, mode) => {
-      const b: Record<string, unknown> = { type: 'slack', name: v.name }
+      const b: ConnectionWrite = { type: 'slack', name: v.name }
       if (mode === 'webhook') b.channel = v.channel
       else if (mode === 'oauth') {
         b.auth = 'oauth'
