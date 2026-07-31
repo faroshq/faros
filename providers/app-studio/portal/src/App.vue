@@ -9,6 +9,7 @@ import {
   Braces,
   Check,
   ClipboardList,
+  ChevronRight,
   ExternalLink,
   Folder,
   GitBranch,
@@ -41,9 +42,11 @@ import {
 import { parseAssistantActionFeed } from './assistantActionFeed'
 import AssistantActionLog from './AssistantActionLog.vue'
 import { activeAssistantPlanMessage, assistantPlanProgress, parseAssistantPlan, type AssistantPlan } from './assistantPlan'
+import { formatAssistantWorkedDuration, parseAssistantProgress, type AssistantProgress } from './assistantProgress'
+import { buildAssistantTrace, type AssistantTraceBlock } from './assistantTrace'
 import AssistantPlanPopover from './AssistantPlanPopover.vue'
 import ApprovalModePicker from './ApprovalModePicker.vue'
-import ResponseModePicker, { type AssistantResponseMode, type SuspendedTaskOption } from './ResponseModePicker.vue'
+import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
 import {
   ConversationRunController,
   abortedConversationSnapshot,
@@ -82,6 +85,7 @@ import {
   type WorkbenchTabDescriptor,
 } from './workbench'
 import { developmentPreviewDisplayPhase, developmentPreviewSyncStatus } from './previewState'
+import { PreviewConsoleController } from './previewConsole'
 import type {
   DevelopmentTemplate,
   ImportRepository,
@@ -89,7 +93,6 @@ import type {
   Project,
   ProjectAssistantSnapshot,
   ProjectAssistantApprovalMode,
-  ProjectAssistantWorkItem,
   ProjectAssistantActionFeedItem,
   ProjectAssistantUIComponent,
   ProjectAssistantUIInterruptRequest,
@@ -147,6 +150,7 @@ type ProjectMessageView = ProjectMessage & {
   viewStatus?: ProjectMessageViewStatus
   plan?: AssistantPlan
   actionFeed?: ProjectAssistantActionFeedItem[]
+  progress?: AssistantProgress
   surface?: ProjectAssistantSurface
   interrupt?: ProjectAssistantUIInterruptRequest
 }
@@ -334,8 +338,6 @@ const approvalMode = ref<ProjectAssistantApprovalMode>('auto_approve')
 const approvalModeLoading = ref(false)
 const approvalModeSaving = ref(false)
 const approvalModeError = ref<string | null>(null)
-const assistantWorkItems = ref<ProjectAssistantWorkItem[]>([])
-const selectedAssistantWorkItem = ref<ProjectAssistantWorkItem | null>(null)
 const projectQuery = ref('')
 const providerQuery = ref('')
 const workbenchLauncherQuery = ref('')
@@ -349,6 +351,7 @@ const developmentPreviewOverrideURL = ref<string | null>(null)
 const developmentPreviewAuthorizationKey = ref('')
 const developmentPreviewTokenExpiresAt = ref('')
 const developmentPreviewFrameKey = ref(0)
+const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
 const publishingAccess = ref<'public' | 'members' | 'private'>('members')
 
 // Promote to Prod (the publishing tab's real action): read build readiness +
@@ -392,6 +395,7 @@ const llmSaving = ref(false)
 const llmStatus = ref<string | null>(null)
 const messagesRef = ref<HTMLDivElement | null>(null)
 const expandedMessageTimestampID = ref<string | null>(null)
+const expandedAssistantProgressIDs = ref<Set<string>>(new Set())
 const assistantPlanAnnouncement = ref('')
 const promptRef = ref<HTMLTextAreaElement | null>(null)
 const workspaceRef = ref<HTMLDivElement | null>(null)
@@ -406,12 +410,21 @@ let landingPlaceholderIndex = 0
 let developmentPreviewAuthorizationSerial = 0
 let developmentPreviewAuthorizationRetryTimer: number | undefined
 let developmentPreviewAuthorizationRenewalTimer: number | undefined
+const previewConsoleController = new PreviewConsoleController({
+  api: {
+    createSession: (project, generation) => api.createPreviewConsoleSession(props.ctx, project, generation),
+    uploadEvents: (project, sessionID, generation, events, droppedCount) =>
+      api.uploadPreviewConsoleEvents(props.ctx, project, sessionID, generation, events, droppedCount),
+    deleteSession: (project, sessionID) => api.deletePreviewConsoleSession(props.ctx, project, sessionID),
+  },
+  getFrame: () => developmentPreviewFrameRef.value,
+  onState: () => undefined,
+})
 let activeAssistantSubscription: AbortController | null = null
 let activeAssistantRun: AssistantRun | null = null
 let activeAssistantProject = ''
 let pendingMessageSubmission: { fingerprint: string; clientRequestID: string } | null = null
 const pendingAssistantStopRequestIDs: Record<string, string> = {}
-const pendingWorkItemCancelRequestIDs: Record<string, string> = {}
 let pendingFirstProjectSubmission: ReturnType<typeof newFirstProjectSubmission> | null = null
 let projectCreateGeneration = 0
 let approvalModeLoadSerial = 0
@@ -490,19 +503,6 @@ const canSendPrompt = computed(() =>
   !approvalModeLoading.value &&
   !approvalModeSaving.value,
 )
-const suspendedAssistantTasks = computed<SuspendedTaskOption[]>(() =>
-  assistantWorkItems.value
-    .filter((item) => item.status === 'suspended')
-    .map((item) => {
-      const rootMessage = messages.value.find((message) => message.id === item.rootMessageID)
-      const label = rootMessage?.content.replace(/\s+/g, ' ').trim() || 'Previous implementation task'
-      let reason = 'Stopped before completion'
-      if (item.statusReason === 'provider restarted') reason = 'Interrupted when App Studio restarted'
-      else if (item.statusReason === 'no_progress') reason = 'Needs another attempt'
-      else if (item.statusReason === 'failed') reason = 'The previous attempt failed'
-      return { id: item.id, label, reason }
-    }),
-)
 const settingsProject = computed(() => (isAppStudioLandingRoute.value ? null : selected.value))
 const settingsTitle = computed(() => (settingsProject.value ? 'Project settings' : 'LLM settings'))
 const settingsDescription = computed(() =>
@@ -540,7 +540,9 @@ watch(activePlanMessage, (current, previous) => {
 const conversationWorkingLabel = computed(() => {
   const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
   if (activeAssistantRun?.status === 'stopping') return 'Stopping'
-  if (activePlanMessage.value) return ''
+  if (activeAssistantRun?.status === 'pending_permission') return 'Waiting for approval'
+  if (activeAssistantRun?.status === 'pending_input') return 'Waiting for your answer'
+  if (activePlanMessage.value) return 'Working'
   if (conversationStatus.value) return conversationStatus.value
   if (!messageStreaming.value) return ''
   if (lastAssistant?.content.trim()) return 'Working'
@@ -942,6 +944,7 @@ watch(
 watch(
   () => selected.value?.name,
   () => {
+    void previewConsoleController.disconnect()
     developmentTemplateSelection.value = selected.value?.template ?? ''
     developmentSyncStatus.value = null
     developmentSyncError.value = null
@@ -953,6 +956,14 @@ watch(
     clearDevelopmentPreviewAuthorizationRetry()
     clearDevelopmentPreviewAuthorizationRenewal()
     developmentPreviewFrameKey.value += 1
+  },
+)
+
+watch(
+  () => activeWorkbenchTab.value?.kind,
+  (kind) => {
+    if (kind === 'preview') return
+    void previewConsoleController.disconnect()
   },
 )
 
@@ -1034,6 +1045,7 @@ useEscapeKey(() => {
 })
 
 onBeforeUnmount(() => {
+  previewConsoleController.destroy()
   clearInitializationRetry()
   clearDevelopmentPreviewAuthorizationRetry()
   clearDevelopmentPreviewAuthorizationRenewal()
@@ -1747,7 +1759,11 @@ async function createProjectAndStartConversation(content: string) {
     // naming setup. Once the Project exists, the first turn uses the same
     // server-owned start/subscribe contract as every later message.
     if (firstProjectStartPlan(submission).createProject) {
-      const created = await api.createProject(props.ctx, { description: description || undefined, prompt: content })
+      const created = await api.createProject(props.ctx, {
+        description: description || undefined,
+        prompt: content,
+        inferDevelopmentTemplate: true,
+      })
       if (!current()) return
       projectName = created.name
       submission = firstProjectSubmissionWithProject(submission, projectName)
@@ -1873,10 +1889,9 @@ async function openProject(name: string, updateURL = true) {
   }
   error.value = null
   try {
-    const [project, loadedMessages, workItems, preference] = await Promise.all([
+    const [project, loadedMessages, preference] = await Promise.all([
       api.getProject(props.ctx, name),
       api.listAllMessages(props.ctx, name),
-      api.listAssistantWorkItems(props.ctx, name),
       api.getAssistantApprovalMode(props.ctx, name).catch((preferenceError: unknown) => {
         if (approvalRequestSerial === approvalModeLoadSerial) {
           approvalModeError.value = preferenceError instanceof Error ? preferenceError.message : String(preferenceError)
@@ -1887,9 +1902,7 @@ async function openProject(name: string, updateURL = true) {
     if (approvalRequestSerial !== approvalModeLoadSerial) return
     selected.value = project
     messages.value = loadedMessages.map(toProjectMessageView)
-    assistantWorkItems.value = workItems
     approvalMode.value = preference?.mode ?? 'auto_approve'
-    selectedAssistantWorkItem.value = null
     await recoverAssistantConversation(name)
     if (updateURL) props.navigate(encodeURIComponent(name))
   } catch (e) {
@@ -1932,50 +1945,8 @@ async function refreshSelectedProjectConversation(projectName: string) {
   await recoverAssistantConversation(projectName)
 }
 
-async function refreshAssistantWorkItems(projectName: string) {
-  const items = await api.listAssistantWorkItems(props.ctx, projectName)
-  if (selected.value?.name !== projectName) return
-  assistantWorkItems.value = items
-  if (selectedAssistantWorkItem.value) {
-    selectedAssistantWorkItem.value = items.find((item) => item.id === selectedAssistantWorkItem.value?.id && item.status === 'suspended') ?? null
-  }
-}
-
-async function discardAssistantWorkItem(item: ProjectAssistantWorkItem) {
-  const projectName = selected.value?.name
-  if (!projectName) return
-  const confirmed = await confirmDialog({
-    title: 'Discard suspended task?',
-    message: 'This removes its continuation authority. The conversation remains visible.',
-    confirmLabel: 'Discard task',
-    danger: true,
-  })
-  if (!confirmed) return
-  try {
-    const key = `${item.id}:${item.revision}`
-    const clientRequestID = pendingWorkItemCancelRequestIDs[key] ?? crypto.randomUUID()
-    pendingWorkItemCancelRequestIDs[key] = clientRequestID
-    await api.cancelAssistantWorkItem(props.ctx, projectName, item.id, item.revision, clientRequestID)
-    delete pendingWorkItemCancelRequestIDs[key]
-    if (selectedAssistantWorkItem.value?.id === item.id) selectedAssistantWorkItem.value = null
-    await refreshAssistantWorkItems(projectName)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  }
-}
-
 function selectAssistantResponseMode(mode: AssistantResponseMode) {
-  selectedAssistantWorkItem.value = null
   assistantIntent.value = mode
-}
-
-function selectSuspendedAssistantTask(id: string) {
-  selectedAssistantWorkItem.value = assistantWorkItems.value.find((item) => item.id === id && item.status === 'suspended') ?? null
-}
-
-function discardSuspendedAssistantTask(id: string) {
-  const item = assistantWorkItems.value.find((candidate) => candidate.id === id && candidate.status === 'suspended')
-  if (item) void discardAssistantWorkItem(item)
 }
 
 function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? '', source: 'stream' | 'start' | 'latest' = 'stream', expectedRunID = ''): { accepted: boolean; current: AssistantRun | undefined } {
@@ -2002,7 +1973,6 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
     conversationStatus.value = ''
     assistantRunController.disconnect()
     void loadCheckpoints()
-    void refreshAssistantWorkItems(projectName)
     if (normalized.message.metadata?.previewRefreshNeeded === true) void refreshDevelopmentPreviewFrame('Preview refreshed')
   } else if (!assistantRunTerminal(normalized.run.status)) {
     const status = normalized.message.metadata?.assistantStatus
@@ -2253,6 +2223,8 @@ function projectDevelopmentPreviewString(result: unknown, key: 'message' | 'reas
 
 function handleDevelopmentPreviewFrameLoad() {
   refreshDevelopmentPreviewAuthorizationIfExpiring()
+  const projectName = selected.value?.name
+  if (projectName) void previewConsoleController.connect(projectName)
 }
 
 function handleDevelopmentPreviewVisibilityChange() {
@@ -2427,17 +2399,10 @@ async function sendMessage() {
   const firstProjectPending = firstProjectSubmissionMatches(pendingFirstProjectSubmission, projectName, content)
     ? pendingFirstProjectSubmission
     : null
-  const startOperation = selectedAssistantWorkItem.value
-    ? {
-        content,
-        assistantAction: 'continue' as const,
-        workItemID: selectedAssistantWorkItem.value.id,
-        workItemRevision: selectedAssistantWorkItem.value.revision,
-      }
-    : {
-        content,
-        assistantAction: (firstProjectPending ? 'auto' : assistantIntent.value) as 'auto' | 'ask' | 'build',
-      }
+  const startOperation = {
+    content,
+    assistantAction: firstProjectPending ? 'auto' as const : assistantIntent.value,
+  }
   const submissionFingerprint = assistantRunStartFingerprint(projectName, startOperation)
   const clientRequestID = firstProjectPending
     ? firstProjectPending.clientRequestID
@@ -2464,7 +2429,6 @@ async function sendMessage() {
       messages.value = replaceOptimisticUserMessage(messages.value, optimisticID, started.user ?? optimisticUserMessage).map(toProjectMessageView)
       if (!assistantRunTerminal(applied.current.status)) assistantRunController.start(applied.current.id, applied.current.revision)
       pendingMessageSubmission = null
-      selectedAssistantWorkItem.value = null
       if (firstProjectPending && firstProjectSubmissionAccepted(firstProjectPending, started.user)) pendingFirstProjectSubmission = null
     }
   } catch (e) {
@@ -2659,15 +2623,50 @@ function toProjectMessageView(message: ProjectMessage): ProjectMessageView {
   const viewStatus = projectMessageViewStatus(message)
   const plan = projectMessagePlan(message)
   const actionFeed = projectMessageActionFeed(message)
+  const progress = projectMessageProgress(message)
   const interrupt = projectMessageInterrupt(message)
-  if (!viewStatus && !plan && actionFeed.length === 0 && !interrupt) return message
+  if (!viewStatus && !plan && actionFeed.length === 0 && !progress && !interrupt) return message
   return {
     ...message,
     ...(viewStatus ? { viewStatus } : {}),
     ...(plan ? { plan } : {}),
     ...(actionFeed.length > 0 ? { actionFeed } : {}),
+    ...(progress ? { progress } : {}),
     ...(interrupt ? { interrupt } : {}),
   }
+}
+
+function projectMessageProgress(message: ProjectMessage): AssistantProgress | undefined {
+  if (message.role !== 'assistant') return undefined
+  return parseAssistantProgress(message.metadata?.assistantProgress)
+}
+
+function assistantProgressCompleted(message: ProjectMessageView): boolean {
+  return message.metadata?.assistantStatus === 'Completed'
+}
+
+function assistantProgressExpanded(message: ProjectMessageView): boolean {
+  return !assistantProgressCompleted(message) || expandedAssistantProgressIDs.value.has(message.id)
+}
+
+function toggleAssistantProgress(messageID: string): void {
+  const expanded = new Set(expandedAssistantProgressIDs.value)
+  if (expanded.has(messageID)) expanded.delete(messageID)
+  else expanded.add(messageID)
+  expandedAssistantProgressIDs.value = expanded
+}
+
+function assistantProgressRegionID(messageID: string): string {
+  return `assistant-progress-${messageID}`
+}
+
+function assistantWorkedLabel(message: ProjectMessageView): string {
+  return formatAssistantWorkedDuration(message.progress?.workedDurationMs ?? 0)
+}
+
+function assistantTraceBlocks(message: ProjectMessageView): AssistantTraceBlock[] {
+  if (!message.progress) return []
+  return buildAssistantTrace(message.progress, message.actionFeed ?? [])
 }
 
 function projectMessagePlan(message: ProjectMessage): AssistantPlan | undefined {
@@ -3576,10 +3575,55 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 class="w-full min-w-0 py-1 text-[13px] leading-6 text-text-secondary"
               >
                 <AssistantActionLog
-                  v-if="message.actionFeed?.length"
+                  v-if="message.actionFeed?.length && !message.progress"
                   :message-id="message.id"
                   :items="message.actionFeed"
                 />
+                <template v-if="message.progress">
+                  <div v-if="assistantProgressCompleted(message)" class="mb-3">
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1.5 rounded-md py-1 text-[12px] font-medium text-text-muted transition hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      :aria-expanded="assistantProgressExpanded(message)"
+                      :aria-controls="assistantProgressRegionID(message.id)"
+                      :aria-label="`Worked for ${assistantWorkedLabel(message)}. ${assistantProgressExpanded(message) ? 'Hide' : 'Show'} task details.`"
+                      @click="toggleAssistantProgress(message.id)"
+                    >
+                      <span>Worked for {{ assistantWorkedLabel(message) }}</span>
+                      <ChevronRight
+                        class="h-3.5 w-3.5 transition-transform"
+                        :class="assistantProgressExpanded(message) ? 'rotate-90' : ''"
+                        :stroke-width="1.75"
+                        aria-hidden="true"
+                      />
+                    </button>
+                  </div>
+                  <div
+                    v-show="assistantProgressExpanded(message)"
+                    :id="assistantProgressRegionID(message.id)"
+                    class="mb-3 space-y-3"
+                    :role="assistantProgressCompleted(message) ? undefined : 'log'"
+                    :aria-live="assistantProgressCompleted(message) ? undefined : 'polite'"
+                    :aria-relevant="assistantProgressCompleted(message) ? undefined : 'additions'"
+                    aria-atomic="false"
+                  >
+                    <template
+                      v-for="(traceBlock, traceIndex) in assistantTraceBlocks(message)"
+                      :key="traceBlock.key"
+                    >
+                      <AssistantActionLog
+                        v-if="traceBlock.kind === 'actions'"
+                        :message-id="`${message.id}-trace-${traceIndex}`"
+                        :items="traceBlock.items"
+                      />
+                      <div
+                        v-else
+                        :class="assistantMarkdownClass"
+                        v-html="renderMessageContent(traceBlock.message, 'assistant')"
+                      />
+                    </template>
+                  </div>
+                </template>
                 <div
                   v-if="assistantPlanCompletionLabel(message.plan)"
                   class="mb-2 inline-flex min-h-8 items-center gap-1.5 rounded-lg text-[11px] font-medium text-text-muted"
@@ -3590,6 +3634,9 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 <div
                   v-if="hasAssistantResponseContent(message)"
                   :class="assistantMarkdownClass"
+                  :role="messageStreaming && activeAssistantRun?.activeMessageID === message.id ? 'status' : undefined"
+                  :aria-live="messageStreaming && activeAssistantRun?.activeMessageID === message.id ? 'polite' : undefined"
+                  aria-atomic="false"
                   v-html="renderAssistantResponse(message)"
                 />
                 <div
@@ -3739,19 +3786,15 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               v-model="prompt"
               rows="2"
               class="min-h-[72px] w-full resize-none rounded-md border-0 bg-transparent px-3 py-2.5 pb-12 pr-14 text-[13px] leading-5 text-text-primary outline-none placeholder:text-text-muted"
-              :placeholder="selectedAssistantWorkItem ? 'Tell App Studio how to continue this task' : 'Message this project'"
+              placeholder="Message this project"
               :disabled="busy || assistantResumeBusy"
               @keydown.enter.exact.prevent="sendMessage"
             />
             <div class="absolute bottom-2 left-1.5 right-12 flex min-w-0 items-center gap-0.5">
               <ResponseModePicker
                 :mode="assistantIntent"
-                :suspended-tasks="suspendedAssistantTasks"
-                :selected-task-id="selectedAssistantWorkItem?.id"
                 :disabled="messageStreaming || loading"
                 @select-mode="selectAssistantResponseMode"
-                @select-task="selectSuspendedAssistantTask"
-                @discard-task="discardSuspendedAssistantTask"
               />
               <ApprovalModePicker
                 :mode="approvalMode"
@@ -4047,6 +4090,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
           </div>
           <div v-if="developmentPreviewURL" class="min-h-0 flex-1 overflow-hidden rounded-md border border-border-subtle bg-surface">
             <iframe
+              ref="developmentPreviewFrameRef"
               :key="developmentPreviewFrameKey"
               :src="developmentPreviewURL"
               title="Development preview"
