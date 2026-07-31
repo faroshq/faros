@@ -28,6 +28,7 @@ export function stubApi(overrides: StubApi = {}): ApiClient {
     listSessions: empty,
     listMessages: empty,
     oauthProviders: () => Promise.resolve({ providers: {} }),
+    capabilities: () => Promise.resolve({ providers: [] }),
     ...overrides,
   } as unknown as ApiClient
 }

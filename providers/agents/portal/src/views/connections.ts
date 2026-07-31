@@ -26,6 +26,14 @@ import {
 import type { Connection, ConnectionWrite } from '../types'
 
 import './toolsets'
+import './assisted-search'
+
+// needsInstanceURL flags a self-hosted search connection that has no instance
+// yet. The websearch tool errors at runtime in that state and nothing else in
+// the row shows it, so the table says so explicitly.
+function needsInstanceURL(c: Connection): boolean {
+  return c.spec.type === 'websearch' && c.spec.config?.provider === 'searxng' && !c.spec.baseURL
+}
 
 export class Connections extends StoreElement {
   @state() private connType: string | null = null
@@ -147,7 +155,20 @@ export class Connections extends StoreElement {
                 </td>
                 <td><span class="agents-badge agents-badge-cat agents-cat-${cat}">${icon(meta.icon)} ${meta.label}</span></td>
                 <td><span class="agents-badge">${connShape(c).typeLabel}</span></td>
-                <td class="agents-cell-task muted">${c.spec.baseURL || c.spec.channel || '—'}</td>
+                <td class="agents-cell-task muted">
+                  ${needsInstanceURL(c)
+                    ? html`<button
+                        class="agents-badge agents-badge-warn agents-badge-btn"
+                        title="Edit this connection and paste the instance's status.url"
+                        @click=${() => {
+                          this.editing = name
+                          this.connType = null
+                        }}
+                      >
+                        ${icon('pencil')} needs an instance URL
+                      </button>`
+                    : c.spec.baseURL || c.spec.channel || '—'}
+                </td>
                 <td class="agents-row-actions">
                   <button
                     class="agents-iconbtn"
@@ -226,6 +247,9 @@ export class Connections extends StoreElement {
         return html`<div class="agents-conn-group">
           <h5 class="agents-conn-grouphead">${icon(m.icon)} ${m.label}s <span class="muted">— ${m.blurb}</span></h5>
           <div class="agents-conn-types">${defs.map(tile)}</div>
+          ${cat === 'tool'
+            ? html`<agents-assisted-search .store=${this.store} .api=${this.api}></agents-assisted-search>`
+            : nothing}
         </div>`
       })}
     </div>`
@@ -247,7 +271,9 @@ export class Connections extends StoreElement {
 
   private createForm(def: ConnTypeDef): TemplateResult {
     const mode = this.connMode || def.modes?.[0].id || ''
-    let fields = def.modes ? def.modes.find((m) => m.id === mode)!.fields : def.fields || []
+    const activeMode = def.modes?.find((m) => m.id === mode)
+    let fields = def.modes ? activeMode!.fields : def.fields || []
+    const advanced = [...(def.advanced || []), ...(activeMode?.advanced || [])]
     // Platform OAuth app configured (operator env)? Then OAuth modes need no
     // client id/secret — drop those fields.
     const isOAuthMode = fields.some((f) => f.key === 'clientID')
@@ -294,8 +320,8 @@ export class Connections extends StoreElement {
           </div>`
         : nothing}
       ${fields.map((f) => this.field(f))}
-      ${def.advanced?.length
-        ? html`<details class="agents-adv"><summary>Advanced</summary>${def.advanced.map((f) => this.field(f))}</details>`
+      ${advanced.length
+        ? html`<details class="agents-adv"><summary>Advanced</summary>${advanced.map((f) => this.field(f))}</details>`
         : nothing}
       <div><button type="submit">Create connection</button></div>
     </form>`

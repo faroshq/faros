@@ -12,13 +12,19 @@
 // kuery provider's engagement controller uses).
 //
 // The kro fork materializes an instance's workloads on the runtime cluster
-// from the RGD, but two things the RGD can't produce itself need a controller:
+// from the RGD, but three things the RGD can't produce itself need a controller:
 //
 //   - spec.expose.fqdn — the public hostname, <prefix|name>-<tenantHash>.<base>.
 //     kro can't derive a tenant hash in-graph, so the controller stamps it onto
 //     spec; the RGD then reads ${schema.spec.expose.fqdn} for the HTTPRoute
 //     hostname (and, on Application, the oauth2-proxy redirect URL). Every
-//     exposed instance kind (Application, SimpleWebApp) needs this.
+//     exposed instance kind (Application, SimpleWebApp, Searxng, Browser)
+//     needs this.
+//   - the access token (self-gating kinds) — an instance whose own auth gate
+//     shares a bearer token with an off-cluster caller can't generate it: the
+//     caller could never read it back. The tenant authors the Secret instead
+//     and names it in spec.tokenSecretRef; the controller bridges it into the
+//     runtime namespace (see tokenbridge.go).
 //   - the OIDC client secret (Application only) — it must land as a Secret
 //     beside the oauth2-proxy pod on the runtime cluster WITHOUT sitting in
 //     the CR spec in clear text. The controller bridges it into
@@ -52,9 +58,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apiskcpv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apiskcpv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
-	"github.com/kcp-dev/multicluster-provider/apiexport"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -67,8 +73,10 @@ import (
 // on generated clients for the per-template CRDs (their schemas are authored
 // at runtime by the Template controller).
 var (
-	appGVK    = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "Application"}
-	webappGVK = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "SimpleWebApp"}
+	appGVK     = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "Application"}
+	webappGVK  = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "SimpleWebApp"}
+	searxngGVK = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "Searxng"}
+	browserGVK = schema.GroupVersionKind{Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Kind: "Browser"}
 )
 
 // instanceKind pairs an exposed instance GVK with the treatment it needs.
@@ -87,6 +95,11 @@ type instanceKind struct {
 var instanceKinds = []instanceKind{
 	{name: "infra-application", gvk: appGVK, oidc: true},
 	{name: "infra-simplewebapp", gvk: webappGVK, oidc: false},
+	// Agent-tool instances (searxng, browser). Exposure-only: both graphs gate
+	// themselves with a bearer-token sidecar rather than an OIDC gate — their
+	// callers are machines with a token, not humans with a browser session.
+	{name: "infra-searxng", gvk: searxngGVK, oidc: false},
+	{name: "infra-browser", gvk: browserGVK, oidc: false},
 }
 
 // secretGVK is used to Get/Create Secrets via the controller-runtime client
@@ -254,6 +267,9 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 			if err := c.cleanupRegistryPullSecret(ctx, tenant, app.GetNamespace(), app.GetName()); err != nil {
 				return ctrl.Result{}, fmt.Errorf("cleanup registry pull secret: %w", err)
 			}
+			if err := c.cleanupAccessToken(ctx, tenant, app.GetNamespace(), app.GetName()); err != nil {
+				return ctrl.Result{}, fmt.Errorf("cleanup access token secret: %w", err)
+			}
 			controllerutil.RemoveFinalizer(app, finalizer)
 			if err := tenantClient.Update(ctx, app); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
@@ -264,13 +280,15 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 
 	// A finalizer is needed only when the instance creates cross-cluster state:
 	// oidc kinds always do; any kind does once the tenant mints a registry pull
-	// Secret at promote. Dev/public instances stay finalizer-free so their
-	// frequent create/delete never depends on this controller.
+	// Secret at promote, or names a Secret in spec.tokenSecretRef for the access
+	// token bridge. Dev/public instances stay finalizer-free so their frequent
+	// create/delete never depends on this controller.
 	hasPull, err := c.tenantHasPullSecret(ctx, tenantClient, app.GetName())
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking registry pull secret: %w", err)
 	}
-	if (r.kind.oidc || hasPull) && !controllerutil.ContainsFinalizer(app, finalizer) {
+	hasToken := nestedString(app, "spec", tokenSpecField) != ""
+	if (r.kind.oidc || hasPull || hasToken) && !controllerutil.ContainsFinalizer(app, finalizer) {
 		controllerutil.AddFinalizer(app, finalizer)
 		if err := tenantClient.Update(ctx, app); err != nil {
 			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
@@ -285,6 +303,14 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 		if err := c.bridgeRegistryPullSecret(ctx, tenantClient, tenant, app.GetNamespace(), app.GetName()); err != nil {
 			return ctrl.Result{}, fmt.Errorf("bridging registry pull secret: %w", err)
 		}
+	}
+
+	// Bridge the access token into the runtime namespace, so a self-gating
+	// instance (searxng, browser) and the caller that drives it share ONE
+	// credential — the tenant's own Secret — instead of a copy in the spec.
+	// A no-op when the instance names none.
+	if err := c.bridgeAccessToken(ctx, tenantClient, tenant, app.GetNamespace(), app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("bridging access token: %w", err)
 	}
 
 	// Exposure-only kinds: stamp the fqdn and stop.
@@ -342,6 +368,11 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 // a no-op once everything is stamped. Exposure-only kinds don't declare
 // credentialsSecretName in their schema, so stamping it would be pruned —
 // they stamp only the fqdn.
+//
+// spec.tokenSecretName is stamped alongside, for kinds that named a
+// tokenSecretRef: the bridged Secret is keyed on the INSTANCE name, which the
+// RGD cannot derive (spec.name is an independent input), so the graph reads the
+// stamped field instead — the same indirection credentialsSecretName uses.
 func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, tenant string, app *unstructured.Unstructured, withCredentials bool) error {
 	prefix := nestedString(app, "spec", "expose", "hostnamePrefix")
 	curFQDN := nestedString(app, "spec", "expose", "fqdn")
@@ -351,9 +382,14 @@ func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, 
 		return fmt.Errorf("computing fqdn: %w", err)
 	}
 
+	withToken := nestedString(app, "spec", tokenSpecField) != ""
+
 	current := curFQDN == fqdn
 	if withCredentials {
 		current = current && nestedString(app, "spec", "credentialsSecretName") == kro.CredentialsSecretName(app.GetName())
+	}
+	if withToken {
+		current = current && nestedString(app, "spec", tokenSpecNameField) == bridgedTokenSecretName(app.GetName())
 	}
 	if current {
 		return nil
@@ -364,6 +400,11 @@ func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, 
 	if withCredentials {
 		if err := unstructured.SetNestedField(app.Object, kro.CredentialsSecretName(app.GetName()), "spec", "credentialsSecretName"); err != nil {
 			return fmt.Errorf("set spec.credentialsSecretName: %w", err)
+		}
+	}
+	if withToken {
+		if err := unstructured.SetNestedField(app.Object, bridgedTokenSecretName(app.GetName()), "spec", tokenSpecNameField); err != nil {
+			return fmt.Errorf("set spec.%s: %w", tokenSpecNameField, err)
 		}
 	}
 	if err := tenantClient.Update(ctx, app); err != nil {

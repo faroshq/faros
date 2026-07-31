@@ -11,6 +11,7 @@ import type {
   Agent,
   AgentCreate,
   AgentPatch,
+  Capabilities,
   Connection,
   ConnectionWrite,
   Credential,
@@ -187,6 +188,13 @@ export class ApiClient {
   oauthAuthorize = (name: string): Promise<{ authorizeURL: string }> =>
     this.send('POST', `/api/connections/${enc(name)}/oauth/authorize`, { publicBaseURL: location.origin })
   oauthProviders = (): Promise<{ providers?: Record<string, boolean> }> => this.get('/api/oauth/providers')
+
+  // Server-side cached (~60s), so calling it on a view load is cheap. Go
+  // marshals a nil slice as null, hence the array normalization.
+  capabilities = async (): Promise<Capabilities> => {
+    const c = await this.get<Capabilities>('/api/capabilities')
+    return { ...c, providers: c.providers ?? [] }
+  }
 
   listToolsets = (): Promise<Toolset[]> => this.list<Toolset>('/api/toolsets')
   createToolset = (body: ToolsetWrite): Promise<Toolset> => this.send('POST', '/api/toolsets', body)

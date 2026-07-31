@@ -24,6 +24,9 @@ export interface ConnMode {
   id: string
   label: string
   fields: ConnField[]
+  // Mode-specific advanced fields, merged with the type's own when this mode
+  // is selected (a self-hosted backend needs knobs the hosted one does not).
+  advanced?: ConnField[]
 }
 export interface ConnTypeDef {
   id: string
@@ -172,10 +175,61 @@ export const CONN_DEFS: ConnTypeDef[] = [
     id: 'websearch',
     label: 'Web search',
     glyph: 'search',
-    desc: 'Give agents web_search (Brave-compatible API)',
-    fields: [{ key: 'token', label: 'API key', password: true, required: true, hint: 'Brave Search API key — api.search.brave.com/app/keys (free tier available).' }],
-    advanced: [{ key: 'baseURL', label: 'Custom endpoint', placeholder: 'https://api.search.brave.com/res/v1/web/search' }],
-    build: (v) => ({ type: 'websearch', name: v.name, secret: v.token, baseURL: v.baseURL || undefined }),
+    desc: 'Give agents web_search — your own SearXNG instance, or a Brave API key',
+    setup: [
+      'Self-hosted is the default — no API key, no per-query bill. <strong>Create this connection first</strong> with a token you choose: the instance reads that same token from this connection’s Secret, so it has to exist before you provision.',
+      'Then provision the <strong>searxng</strong> template under Infrastructure, pointing its <code>tokenSecretRef</code> at <code>kedge-agents-conn-&lt;this connection’s name&gt;</code>, and come back to fill in the instance URL.',
+      'Brave is the alternative if you would rather not run anything — it needs a free-tier API key from <code>api.search.brave.com/app/keys</code>.',
+    ],
+    modes: [
+      {
+        id: 'searxng',
+        label: 'Self-hosted (SearXNG)',
+        fields: [
+          {
+            key: 'token',
+            label: 'Access token',
+            password: true,
+            required: true,
+            hint: 'Any strong string you choose. Stored in this connection’s Secret, which the instance references — so pick it here first, then point the template at that Secret.',
+          },
+          // Deliberately optional: the instance can't be provisioned until this
+          // connection's Secret exists, so on the first pass there is no URL to
+          // paste yet. Search reports a clear error until it is filled in.
+          {
+            key: 'baseURL',
+            label: 'Instance URL',
+            placeholder: 'https://searxng-abc123.apps.example.com',
+            hint: 'From the instance’s status.url — leave blank now and add it once the instance is running. /search is appended automatically.',
+          },
+        ],
+        // Local kind serves instances on a hostname that resolves to loopback,
+        // which the SSRF guard blocks by default — allow-listing the host is
+        // how a dev instance stays reachable without weakening the guard.
+        advanced: [
+          {
+            key: 'allowedHosts',
+            label: 'Allow private address for host',
+            placeholder: 'searxng.internal',
+            hint: 'Only needed when the instance resolves to a private or loopback address (local dev, or an in-cluster Service).',
+          },
+        ],
+      },
+      {
+        id: 'brave',
+        label: 'Brave API',
+        fields: [{ key: 'token', label: 'API key', password: true, required: true, hint: 'Brave Search API key — api.search.brave.com/app/keys (free tier available).' }],
+        advanced: [{ key: 'baseURL', label: 'Custom endpoint', placeholder: 'https://api.search.brave.com/res/v1/web/search' }],
+      },
+    ],
+    build: (v, mode) => ({
+      type: 'websearch',
+      name: v.name,
+      secret: v.token || undefined,
+      baseURL: v.baseURL || undefined,
+      config: { provider: mode === 'brave' ? 'brave' : 'searxng' },
+      allowedHosts: v.allowedHosts ? [v.allowedHosts] : undefined,
+    }),
   },
   {
     id: 'telegram',

@@ -97,8 +97,22 @@ export interface Trigger {
 
 export interface Connection {
   metadata: { name: string }
-  spec: { type: string; displayName?: string; baseURL?: string; channel?: string; auth?: string }
+  // config carries the type-specific non-secret settings the backend stores on
+  // spec.config — for websearch it is {provider: "searxng"|"brave"}, which is
+  // what tells the UI a connection is the self-hosted flavour.
+  spec: { type: string; displayName?: string; baseURL?: string; channel?: string; auth?: string; config?: Record<string, string> }
   status?: { phase?: string; webhookPath?: string; oauthConnected?: boolean }
+}
+
+// Capabilities is GET /api/capabilities: which providers the tenant's hub
+// aggregate MCP endpoint federates into every interactive run's tool surface.
+// `unavailable` means we could not probe the endpoint at all — distinct from
+// "probed, and the provider is not enabled", so optional UI can hide itself
+// quietly instead of claiming a capability is missing.
+export interface Capabilities {
+  providers: string[]
+  unavailable?: boolean
+  message?: string
 }
 
 export interface Toolset {
@@ -368,6 +382,9 @@ export interface ConnectionWrite {
   clientSecret?: string
   oauthScopes?: string[]
   config?: Record<string, string>
+  // Hosts this connection may reach even when they resolve to a private or
+  // loopback address (a self-hosted backend in local dev / in-cluster).
+  allowedHosts?: string[]
 }
 
 export interface CredentialWrite {

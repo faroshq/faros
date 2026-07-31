@@ -11,7 +11,7 @@
 // 'server' (a raw run/inbox push, for views that track their own run lists).
 
 import type { ApiClient } from './api'
-import type { Agent, Connection, Credential, InboxItem, Schedule, Toolset, Trigger } from './types'
+import type { Agent, Capabilities, Connection, Credential, InboxItem, Schedule, Toolset, Trigger } from './types'
 import { CONN_CATEGORY, familiesForConns } from './conn-defs'
 
 export interface Slice<T> {
@@ -56,6 +56,10 @@ export class AppStore extends EventTarget {
   triggers = slice<Trigger[]>([])
   credentials = slice<Credential[]>([])
   inbox = slice<InboxItem[]>([])
+  // capabilities is not in SliceKey/LOADERS because it is an object, not a
+  // collection — it gets its own loader below but the same {data, loading,
+  // error, loaded} contract so views can treat it like any other slice.
+  capabilities = slice<Capabilities>({ providers: [] })
   oauthApps = new Set<string>()
   // live is false while the event stream is down (the UI shows a "reconnecting"
   // hint and we fall back to polling).
@@ -95,6 +99,33 @@ export class AppStore extends EventTarget {
   pendingInbox(): InboxItem[] {
     return this.inbox.data.filter((i) => i.state === 'pending')
   }
+  // hasProvider answers "can an agent in this workspace reach <provider>'s
+  // tools?". A failed probe (unavailable) answers false: optional UI that keys
+  // off a capability should stay hidden rather than offer a flow that may not
+  // work — see the assisted-setup card in Connections.
+  hasProvider(name: string): boolean {
+    const c = this.capabilities.data
+    return !c.unavailable && c.providers.includes(name)
+  }
+
+  // ---- prompt handoff ------------------------------------------------------
+  //
+  // One view (Connections' assisted setup) can hand a chat prompt to another
+  // (the agent's chat pane) across a route change. takePendingPrompt CONSUMES
+  // it, which is what makes auto-send fire exactly once: a re-render, a tab
+  // switch back to Chat or a refresh all find nothing left to send.
+
+  private pendingPrompt: { agent: string; text: string } | null = null
+
+  setPendingPrompt(agent: string, text: string): void {
+    this.pendingPrompt = { agent, text }
+  }
+
+  takePendingPrompt(agent: string): string | null {
+    const p = this.pendingPrompt
+    if (!p || p.agent !== agent) return null
+    return p.text
+  }
 
   // ---- loading -------------------------------------------------------------
 
@@ -107,6 +138,28 @@ export class AppStore extends EventTarget {
     void this.load('triggers')
     void this.load('inbox')
     void this.loadOAuthApps()
+    void this.loadCapabilities()
+  }
+
+  // loadCapabilities probes what the tenant's providers federate into the agent
+  // tool surface. A transport failure is recorded as "unavailable" on the slice
+  // rather than an error, because every consumer of this is an optional
+  // enhancement — nothing should render an error state over it.
+  async loadCapabilities(): Promise<void> {
+    if (!this.api.hasWorkspace()) return
+    const s = this.capabilities
+    s.loading = true
+    this.changed()
+    try {
+      s.data = await this.api.capabilities()
+      s.error = null
+    } catch (e) {
+      s.data = { providers: [], unavailable: true, message: (e as Error).message }
+      s.error = null
+    }
+    s.loading = false
+    s.loaded = true
+    this.changed()
   }
 
   // load refreshes one slice. Errors land on the slice (never swallowed) and

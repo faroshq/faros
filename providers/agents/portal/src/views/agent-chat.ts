@@ -87,8 +87,30 @@ export class AgentChat extends StoreElement {
     super.willUpdate()
     if (this.name && this.loadedFor !== this.name) {
       this.loadedFor = this.name
-      void this.openAgent(this.name)
+      // The handoff check waits for openAgent: it resets the transcript and
+      // picks the session, which would wipe an already-sent turn.
+      void this.openAgent(this.name).then(() => this.maybeAutoSend())
+      return
     }
+    this.maybeAutoSend()
+  }
+
+  // maybeAutoSend claims a prompt another view handed off (Connections' assisted
+  // setup) and sends it as this agent's next turn. store.takePendingPrompt
+  // CONSUMES the handoff, so this fires exactly once: a re-render, a tab switch
+  // back to Chat, or a second element instance all find it already taken, and a
+  // page refresh drops it with the store.
+  private maybeAutoSend(): void {
+    if (!this.store || this.streaming) return
+    const text = this.store.takePendingPrompt(this.name)
+    if (!text) return
+    // A handed-off task gets its own thread rather than being appended to
+    // whatever conversation happened to be open.
+    this.sessionID = this.newSessionID()
+    this.remember(this.sessionID)
+    this.messages = []
+    this.draft = text
+    void this.send()
   }
 
   // A resumed run (approval granted server-side) finishes out of band, so

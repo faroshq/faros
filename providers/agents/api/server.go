@@ -74,7 +74,10 @@ type Server struct {
 	bg       *background
 	events   *eventBus
 	liveRuns *runRegistry
-	started  time.Time
+	// capabilities caches what the hub's aggregate tool endpoint federates for
+	// a workspace, so the portal can hide flows the tenant cannot perform.
+	capabilities *capabilityCache
+	started      time.Time
 }
 
 // New constructs the server and opens the durable store: Postgres when a
@@ -106,13 +109,14 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:      cfg,
-		store:    st,
-		gql:      gql,
-		engine:   engine.New(),
-		events:   newEventBus(),
-		liveRuns: newRunRegistry(),
-		started:  time.Now().UTC(),
+		cfg:          cfg,
+		store:        st,
+		gql:          gql,
+		engine:       engine.New(),
+		events:       newEventBus(),
+		liveRuns:     newRunRegistry(),
+		capabilities: newCapabilityCache(),
+		started:      time.Now().UTC(),
 	}, nil
 }
 
@@ -153,6 +157,10 @@ func (s *Server) Routes() http.Handler {
 	// Server-push events (SSE): run phases, inbox items — keeps the portal
 	// live without polling.
 	mux.HandleFunc("GET /api/events", s.streamEvents)
+
+	// What the tenant's enabled providers let an agent do — drives the portal's
+	// assisted setup flows.
+	mux.HandleFunc("GET /api/capabilities", s.listCapabilities)
 
 	// Named model credentials — created once, assigned to agents by name.
 	mux.HandleFunc("GET /api/credentials", s.listCredentials)

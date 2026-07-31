@@ -56,8 +56,16 @@ spec:
             properties:
               allowedHosts:
                 description: |-
-                  AllowedHosts restricts which hosts the web/http tools may reach when this
-                  connection is in scope. Empty means the provider default policy applies.
+                  AllowedHosts lists hosts this connection may reach even when they resolve
+                  to an otherwise-blocked private or loopback address — the escape hatch for
+                  a self-hosted backend (a searxng instance on a cluster-internal Service,
+                  or a local-development hostname that resolves to 127.0.0.1). Entries match
+                  the host exactly, or as a leading-dot suffix (".example.com" matches
+                  "searxng.example.com").
+
+                  Link-local addresses are refused regardless: that range carries cloud
+                  instance-metadata endpoints, which no tenant opt-in should expose.
+                  Empty (the default) means public destinations only.
                 items:
                   type: string
                 type: array
