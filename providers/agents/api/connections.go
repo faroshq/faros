@@ -41,10 +41,6 @@ type createConnectionRequest struct {
 	BaseURL     string            `json:"baseURL,omitempty"`
 	Channel     string            `json:"channel,omitempty"`
 	Config      map[string]string `json:"config,omitempty"`
-	// AllowedHosts permits this connection to reach hosts that resolve to
-	// otherwise-blocked private/loopback addresses — needed to point a
-	// websearch connection at a cluster-internal or local-dev backend.
-	AllowedHosts []string `json:"allowedHosts,omitempty"`
 	// Secret is the connection credential (PAT, API key, bot token). Written to
 	// a per-connection Secret; never returned on reads.
 	Secret string `json:"secret,omitempty"`
@@ -134,14 +130,13 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 	conn := &agentsv1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: req.Name},
 		Spec: agentsv1alpha1.ConnectionSpec{
-			Type:         req.Type,
-			DisplayName:  req.DisplayName,
-			Auth:         auth,
-			SecretRef:    secretRef,
-			BaseURL:      req.BaseURL,
-			Channel:      req.Channel,
-			Config:       req.Config,
-			AllowedHosts: trimmedList(req.AllowedHosts),
+			Type:        req.Type,
+			DisplayName: req.DisplayName,
+			Auth:        auth,
+			SecretRef:   secretRef,
+			BaseURL:     req.BaseURL,
+			Channel:     req.Channel,
+			Config:      req.Config,
 		},
 	}
 	if auth == "oauth" {
@@ -167,12 +162,11 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 // callers change only what they send (rename, update the webhook URL / target,
 // rotate the token). A non-empty Secret rotates the credential; empty keeps it.
 type updateConnectionRequest struct {
-	DisplayName  *string            `json:"displayName,omitempty"`
-	BaseURL      *string            `json:"baseURL,omitempty"`
-	Channel      *string            `json:"channel,omitempty"`
-	Config       *map[string]string `json:"config,omitempty"`
-	AllowedHosts *[]string          `json:"allowedHosts,omitempty"`
-	Secret       *string            `json:"secret,omitempty"`
+	DisplayName *string            `json:"displayName,omitempty"`
+	BaseURL     *string            `json:"baseURL,omitempty"`
+	Channel     *string            `json:"channel,omitempty"`
+	Config      *map[string]string `json:"config,omitempty"`
+	Secret      *string            `json:"secret,omitempty"`
 }
 
 func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
@@ -202,9 +196,6 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Config != nil {
 		conn.Spec.Config = *req.Config
-	}
-	if req.AllowedHosts != nil {
-		conn.Spec.AllowedHosts = trimmedList(*req.AllowedHosts)
 	}
 	out, err := c.Connections().Update(r.Context(), conn, metav1.UpdateOptions{})
 	if err != nil {

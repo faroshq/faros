@@ -124,6 +124,10 @@ export class AppStore extends EventTarget {
   takePendingPrompt(agent: string): string | null {
     const p = this.pendingPrompt
     if (!p || p.agent !== agent) return null
+    // Clearing before returning is what makes this a take rather than a peek:
+    // the chat pane checks on every update, so leaving it set re-sends the
+    // same turn on every render.
+    this.pendingPrompt = null
     return p.text
   }
 

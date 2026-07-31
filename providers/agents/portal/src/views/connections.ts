@@ -23,16 +23,48 @@ import {
   type ConnField,
   type ConnTypeDef,
 } from '../conn-defs'
-import type { Connection, ConnectionWrite } from '../types'
+import type { Agent, Connection, ConnectionWrite } from '../types'
 
 import './toolsets'
 import './assisted-search'
 
-// needsInstanceURL flags a self-hosted search connection that has no instance
-// yet. The websearch tool errors at runtime in that state and nothing else in
-// the row shows it, so the table says so explicitly.
-function needsInstanceURL(c: Connection): boolean {
-  return c.spec.type === 'websearch' && c.spec.config?.provider === 'searxng' && !c.spec.baseURL
+// needsInstance flags a self-hosted search connection that names no instance.
+// The websearch tool errors at runtime in that state and nothing else in the
+// row shows it, so the table says so explicitly.
+function needsInstance(c: Connection): boolean {
+  return selfHostedSearch(c) && !c.spec.config?.instance
+}
+
+// selfHostedSearch is the websearch mode with no credential and no URL: it
+// names an infrastructure instance and is reached over the data plane.
+function selfHostedSearch(c: Connection): boolean {
+  return c.spec.type === 'websearch' && c.spec.config?.provider === 'searxng'
+}
+
+// instanceBacked covers every connection addressed by instance name rather than
+// by URL — self-hosted search and any MCP workload in this workspace. Those
+// edit an instance name; everything else edits an endpoint and a secret.
+function instanceBacked(c: Connection): boolean {
+  return selfHostedSearch(c) || (c.spec.type === 'mcp' && !!c.spec.config?.instance)
+}
+
+// unwired flags a tool connection no agent has been granted. A tool family only
+// exists for an agent that was wired the connection backing it, so an unwired
+// search connection means every agent still answers "I can't make web
+// requests" — a failure that is otherwise completely invisible from here.
+function unwired(c: Connection, agents: Agent[]): boolean {
+  if (connCategory(c.spec.type) !== 'tool') return false
+  const name = c.metadata.name
+  return !agents.some((a) => {
+    const t = a.spec?.tools
+    return (
+      (t?.interactive?.connections || []).includes(name) ||
+      (t?.background?.connections || []).includes(name) ||
+      // A shared Toolset can carry the grant instead of the agent listing it.
+      (t?.interactive?.toolsets || []).length > 0 ||
+      (t?.background?.toolsets || []).length > 0
+    )
+  })
 }
 
 export class Connections extends StoreElement {
@@ -59,7 +91,11 @@ export class Connections extends StoreElement {
   private async saveEdit(c: Connection, form: HTMLFormElement, usesChannel: boolean): Promise<void> {
     const g = (n: string): string => (form.querySelector<HTMLInputElement>(`[name=${n}]`)?.value || '').trim()
     const patch: ConnectionWrite = { displayName: g('displayName') }
-    if (usesChannel) patch.channel = g('endpoint')
+    // A self-hosted search connection is addressed by instance name, not by
+    // URL — it is reached over the platform's internal data plane. config is
+    // replaced wholesale by the patch endpoint, so provider must be re-sent.
+    if (instanceBacked(c)) patch.config = { ...c.spec.config, instance: g('instance') }
+    else if (usesChannel) patch.channel = g('endpoint')
     else patch.baseURL = g('endpoint')
     const secret = g('secret')
     if (secret) patch.secret = secret
@@ -156,18 +192,23 @@ export class Connections extends StoreElement {
                 <td><span class="agents-badge agents-badge-cat agents-cat-${cat}">${icon(meta.icon)} ${meta.label}</span></td>
                 <td><span class="agents-badge">${connShape(c).typeLabel}</span></td>
                 <td class="agents-cell-task muted">
-                  ${needsInstanceURL(c)
+                  ${needsInstance(c)
                     ? html`<button
                         class="agents-badge agents-badge-warn agents-badge-btn"
-                        title="Edit this connection and paste the instance's status.url"
+                        title="Edit this connection and name the searxng instance it should search through"
                         @click=${() => {
                           this.editing = name
                           this.connType = null
                         }}
                       >
-                        ${icon('pencil')} needs an instance URL
+                        ${icon('pencil')} needs an instance
                       </button>`
-                    : c.spec.baseURL || c.spec.channel || '—'}
+                    : c.spec.config?.instance || c.spec.baseURL || c.spec.channel || '—'}
+                  ${unwired(c, this.store.agents.data)
+                    ? html`<span class="agents-badge agents-badge-warn" title="No agent has been granted this tool — add it under an agent's Config → Tools"
+                        >not wired to an agent</span
+                      >`
+                    : nothing}
                 </td>
                 <td class="agents-row-actions">
                   <button
@@ -354,8 +395,18 @@ export class Connections extends StoreElement {
         </h4>
       </div>
       <label>Display name<input name="displayName" .value=${c.spec.displayName || ''} placeholder=${c.metadata.name} /></label>
-      <label>${endpointLabel}<input name="endpoint" .value=${(usesChannel ? c.spec.channel : c.spec.baseURL) || ''} /></label>
-      ${shape.discordWebhook
+      ${instanceBacked(c)
+        ? html`<label>
+            Instance name *
+            <input name="instance" .value=${c.spec.config?.instance || ''} placeholder="search" required autocomplete="off" />
+            <span class="agents-hint">
+              The instance under Infrastructure. Agents reach it over the platform's internal path — there is no URL and no token.
+            </span>
+          </label>`
+        : html`<label>${endpointLabel}<input name="endpoint" .value=${(usesChannel ? c.spec.channel : c.spec.baseURL) || ''} /></label>`}
+      ${instanceBacked(c)
+        ? nothing
+        : shape.discordWebhook
         ? nothing
         : isOAuth
           ? html`<p class="agents-hint">

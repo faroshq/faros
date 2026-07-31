@@ -95,19 +95,6 @@ type ConnectionSpec struct {
 	// +kubebuilder:validation:MaxLength=2048
 	BaseURL string `json:"baseURL,omitempty"`
 
-	// AllowedHosts lists hosts this connection may reach even when they resolve
-	// to an otherwise-blocked private or loopback address — the escape hatch for
-	// a self-hosted backend (a searxng instance on a cluster-internal Service,
-	// or a local-development hostname that resolves to 127.0.0.1). Entries match
-	// the host exactly, or as a leading-dot suffix (".example.com" matches
-	// "searxng.example.com").
-	//
-	// Link-local addresses are refused regardless: that range carries cloud
-	// instance-metadata endpoints, which no tenant opt-in should expose.
-	// Empty (the default) means public destinations only.
-	// +optional
-	AllowedHosts []string `json:"allowedHosts,omitempty"`
-
 	// Channel identifies the destination for messaging connections: a Telegram
 	// chat ID, a Slack channel ID, or an email address for smtp.
 	// +optional

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 	"github.com/faroshq/provider-infrastructure/kro"
 )
 
@@ -77,6 +78,7 @@ func templateFromUnstructured(u *unstructured.Unstructured) kro.Template {
 	cloud, _, _ := unstructured.NestedString(u.Object, "spec", "cloud")
 	version, _, _ := unstructured.NestedString(u.Object, "spec", "version")
 	iconURL, _, _ := unstructured.NestedString(u.Object, "spec", "iconURL")
+	exposure, _, _ := unstructured.NestedString(u.Object, "spec", "exposure")
 	group, _, _ := unstructured.NestedString(u.Object, "spec", "instanceCRD", "group")
 	crdVersion, _, _ := unstructured.NestedString(u.Object, "spec", "instanceCRD", "version")
 	resource, _, _ := unstructured.NestedString(u.Object, "spec", "instanceCRD", "resource")
@@ -91,20 +93,26 @@ func templateFromUnstructured(u *unstructured.Unstructured) kro.Template {
 	if group == "" {
 		group = templateGroup
 	}
+	// Absent means internal: a template that never declared exposure is
+	// assumed not to publish. Mirrors TemplateSpec.ExposureClass().
+	if exposure == "" {
+		exposure = string(infrav1alpha1.ExposureInternal)
+	}
 	if crdVersion == "" {
 		crdVersion = "v1alpha1"
 	}
 	return kro.Template{
-		Name:         name,
-		DisplayName:  displayName,
-		Description:  description,
-		Category:     category,
-		Cloud:        cloud,
-		Version:      version,
-		IconURL:      iconURL,
-		Backend:      "kro",
-		InstanceKind: kind,
-		InstanceGVR:  schema.GroupVersionResource{Group: group, Version: crdVersion, Resource: resource},
+		Name:            name,
+		DisplayName:     displayName,
+		Description:     description,
+		Category:        category,
+		Cloud:           cloud,
+		Version:         version,
+		IconURL:         iconURL,
+		Exposure:        exposure,
+		Backend:         "kro",
+		InstanceKind:    kind,
+		InstanceGVR:     schema.GroupVersionResource{Group: group, Version: crdVersion, Resource: resource},
 		InputsSchema:    inputs,
 		SampleValues:    sample,
 		Agent:           agent,

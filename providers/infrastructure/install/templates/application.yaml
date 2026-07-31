@@ -11,6 +11,10 @@ spec:
   description: "A 3-tier app — frontend + backend + Postgres — exposed on a URL guarded by OIDC (oauth2-proxy). Authenticated users only; the backend and database are never exposed."
   category: Workloads
   version: 0.1.0
+  # exposure: what the platform tells callers about reaching an instance.
+  # Every instance gets an HTTPRoute. The template brings its own gate
+  # (oauth2-proxy, oidc.mode) — the platform adds none.
+  exposure: public
   backend: kro
   # Example payload the portal pre-fills the provision form with, so the 3-tier
   # demo is effectively one click. The frontend/backend images are the example

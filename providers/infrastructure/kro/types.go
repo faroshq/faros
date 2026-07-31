@@ -50,6 +50,12 @@ type Template struct {
 	// kedge.faros.sh/icon-url annotation. The portal falls back to a
 	// generic icon when empty.
 	IconURL string `json:"iconURL,omitempty"`
+	// Exposure says whether instances of this template are reachable from
+	// outside the platform: "internal" (never — reached through the data
+	// plane), "optional" (depends on the instance's own spec) or "public"
+	// (always). Read it before looking for a URL: an internal instance has
+	// none, and polling status.url for one is an infinite wait.
+	Exposure string `json:"exposure,omitempty"`
 	// Backend identifies which provisioning engine handles this
 	// template — currently always "kro" (this provider's only
 	// implementation) but exposed in the API now so a future
@@ -204,21 +210,21 @@ type TemplateDevelopmentComponent struct {
 // .metadata + .spec + a small set of well-known status fields kro
 // writes onto every instance (Conditions, Children).
 type Instance struct {
-	Name      string                 `json:"name"`
-	Namespace string                 `json:"namespace"`
-	Template  string                 `json:"template"`
-	Phase     string                 `json:"phase"`
-	Message   string                 `json:"message,omitempty"`
-	Conditions []InstanceCondition   `json:"conditions,omitempty"`
-	Children  []InstanceChild        `json:"children,omitempty"`
-	Values    map[string]any         `json:"values,omitempty"`
+	Name       string              `json:"name"`
+	Namespace  string              `json:"namespace"`
+	Template   string              `json:"template"`
+	Phase      string              `json:"phase"`
+	Message    string              `json:"message,omitempty"`
+	Conditions []InstanceCondition `json:"conditions,omitempty"`
+	Children   []InstanceChild     `json:"children,omitempty"`
+	Values     map[string]any      `json:"values,omitempty"`
 	// Status carries the instance's computed status fields (everything
 	// under .status except the conditions/children arrays already promoted
 	// above). Surfaces controller-computed outputs — a provisioned URL,
 	// FQDN, secret name — so a template's View can reference status.* the
 	// same way it references spec.* (the user's input values).
-	Status    map[string]any         `json:"status,omitempty"`
-	CreatedAt time.Time              `json:"createdAt"`
+	Status    map[string]any `json:"status,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
 }
 
 // InstanceCondition mirrors metav1.Condition with a JSON-shape the
@@ -294,9 +300,9 @@ const (
 	LabelTemplate = "kedge.faros.sh/template"
 	// LabelManagedBy is set on the per-tenant namespace and any
 	// helper resources the provider creates in central kro.
-	LabelManagedBy      = "kedge.faros.sh/managed-by"
-	ManagedByValue      = "infrastructure-provider"
-	ManagedByNamespace  = "kedge-tenants"
+	LabelManagedBy     = "kedge.faros.sh/managed-by"
+	ManagedByValue     = "infrastructure-provider"
+	ManagedByNamespace = "kedge-tenants"
 )
 
 // RGD is the kro upstream type expressed as a plain GVR. The provider

@@ -4,61 +4,50 @@ metadata:
   name: searxng
 spec:
   displayName: "SearXNG web search"
-  description: "A private SearXNG metasearch instance with the JSON API enabled, exposed on a public URL behind a bearer-token gate — the self-hosted web-search backend for kedge agents. No search-engine API key required."
+  description: "A private SearXNG metasearch instance with the JSON API enabled, reachable only from inside the platform over the infrastructure provider's data plane — the self-hosted web-search backend for kedge agents. No search-engine API key required, no public URL, no token to manage."
   category: Agent tools
   version: 0.1.0
+  # exposure: what the platform tells callers about reaching an instance.
+  # Internal by default, reachable through the dataPlane proxy verb.
+  # Setting expose.enabled publishes it behind oauth2-proxy — never ungated.
+  exposure: optional
   backend: kro
-  # tokenSecretRef must name a Secret that already exists in the tenant's
-  # default namespace — create the agents Connection first and the sample
-  # value is the Secret it minted.
   sampleValues:
     name: search
-    tokenSecretRef: kedge-agents-conn-search
     size: small
   # Operational guidance for AI agents discovering this template over MCP.
   agent:
     usage: |
       Provisions a PRIVATE web-search backend: a SearXNG metasearch instance
-      with its JSON API turned on, published on a public HTTPS URL and gated by
-      a bearer token minted in-graph. Choose this when an agent needs web search
+      with its JSON API turned on. Choose this when an agent needs web search
       and you do not want to buy a search-API key — SearXNG aggregates public
       engines and has no per-query cost. It is a search INDEX front-end only: it
       returns links and snippets, it does not fetch or render pages (use
       web_fetch for a page's text, or the "browser" template when a page needs
       JavaScript or a login).
 
-      CREATE THE CONNECTION FIRST — the token flows from it, not the other way
-      round. The instance's gate and its caller must share one bearer token, and
-      a token generated inside the cluster could never be read back out. So the
-      tenant owns it: an agents `websearch` Connection already stores its
-      credential as a Secret in the tenant workspace
-      (`kedge-agents-conn-<connection>`, key `token`), and this template's
-      `tokenSecretRef` input names that Secret. The platform copies it into the
-      instance's namespace; the token is never duplicated into a spec.
+      THERE IS NO PUBLIC URL AND NO INSTANCE TOKEN. This instance is not on the
+      internet. It is reachable only from inside the platform, through the
+      infrastructure provider's data plane:
 
-      ORDER OF OPERATIONS:
-        1. Create the `websearch` Connection in the agents provider with
-           config.provider = "searxng" and any token value you like, so its
-           Secret exists. Leave baseURL unset for now.
-        2. Provision this template with tokenSecretRef = that Secret's name.
-        3. Set the Connection's baseURL to status.url (the instance root; the
-           client appends /search itself, and also accepts a URL that already
-           ends in /search).
-      The agent then gets the built-in `web_search` tool backed by this
-      instance. Results are capped at 5 hits per query. Rotating the token is a
-      Secret update — the bridge re-copies it on the next reconcile.
+        GET {hub}/services/providers/infrastructure/dataplane/clusters/{clusterID}/searxngs/{name}/proxy/search?q=<url-encoded query>&format=json
 
-      CALLING IT DIRECTLY (what the connection does under the hood):
-        GET <status.url>/search?q=<url-encoded query>&format=json
-        Authorization: Bearer <the token key of the tokenSecretRef Secret>
+      The hop is hub → infrastructure provider → the runtime cluster's
+      kube-apiserver `services/proxy` subresource → the instance's Service. The
+      caller authenticates as ITSELF with its own kedge credential; the gate is
+      the caller's kcp RBAC on this instance — a caller that cannot GET the
+      Searxng object gets 403/404 and never reaches SearXNG. So there is
+      nothing to paste anywhere: no bearer token, no baseURL, no Connection
+      Secret to keep in step with the instance. Provision it and reference the
+      instance.
+
       Response:
         {"results": [{"title": ..., "url": ..., "content": ..., "engine": ...}],
          "number_of_results": <int>, "unresponsive_engines": [...]}
       `content` is the snippet. `number_of_results` is usually 0 — most engines
       do not report a total, so it is not a result count; use len(results).
-      Any request without the exact `Authorization: Bearer <token>` header gets
-      401 from the gate in front of SearXNG. A request for a format that is not
-      enabled gets 403 from SearXNG itself (html and json are enabled here).
+      A request for a format that is not enabled gets 403 from SearXNG itself
+      (html and json are enabled here).
 
       Useful extra query parameters: `categories` (general, news, images,
       videos, science, it, map, music, files, social+media), `language`,
@@ -76,95 +65,86 @@ spec:
       with different wording or a `!bang` for a specific engine before
       concluding the topic has no coverage.
 
-      INPUTS you set when provisioning: name and tokenSecretRef (both
-      required), size, expose.hostnamePrefix. The platform stamps
-      spec.expose.fqdn — do not set it. size picks the SearXNG container memory
-      bucket; a search fan-out to a dozen engines is short-lived but concurrent,
-      so a busy agent fleet wants medium or large.
+      INPUTS you set when provisioning: name (required) and size. size picks
+      the SearXNG container memory bucket; a search fan-out to a dozen engines
+      is short-lived but concurrent, so a busy agent fleet wants medium or
+      large.
     prerequisites:
-      - "A Secret in the tenant's default namespace with a 'token' key holding the bearer token the instance's gate will require — normally the agents Connection Secret 'kedge-agents-conn-<connection>', so one credential serves both sides. Name it in the tokenSecretRef input; provisioning fails loudly if it does not exist."
+      - "None. The caller needs read access to the provisioned Searxng instance in this workspace — that RBAC is the only access control on the search endpoint."
     outputs:
-      - "status.url — the public HTTPS base URL. Use it verbatim as a websearch Connection's baseURL; the search endpoint is <url>/search?q=…&format=json."
-      - "status.host — the bare public hostname (no scheme)."
+      - "Data-plane verb 'proxy' — {hub}/services/providers/infrastructure/dataplane/clusters/{clusterID}/searxngs/{name}/proxy/search?q=…&format=json. GET only, platform-internal, authorized by the caller's RBAC on the instance."
       - "status.ready — ready replica count for the SearXNG Deployment."
-      - "The bearer token is whatever the tokenSecretRef Secret holds under 'token' — the tenant already has it; no status field republishes it."
+      - "status.runtimeNamespace / status.serviceRef — where the instance's Service lives; the data plane resolves the proxy verb through them. Informational; callers address the verb, not the Service."
   # ── Portal presentation ───────────────────────────────────────────────
+  # No URL column: there is no address a human can open. The instance is
+  # operated through the data plane, by other platform components.
   view:
     columns:
-      - header: URL
-        value: "${status.url}"
-        type: link
       - header: Size
         path: spec.size
         type: badge
+      - header: Ready
+        path: status.ready
     detail:
-      - title: Access
-        fields:
-          - label: URL
-            value: "${status.url}"
-            type: link
-          - label: Hostname
-            path: status.host
-            type: code
       - title: Configuration
         fields:
           - label: Size
             path: spec.size
             type: badge
-          - label: Token secret
-            path: spec.tokenSecretRef
-            type: code
       - title: Readiness
         fields:
           - label: SearXNG
             path: status.ready
+      - title: Runtime
+        fields:
+          - label: Namespace
+            path: status.runtimeNamespace
+            type: code
   instanceCRD:
     group: infrastructure.kedge.faros.sh
     version: v1alpha1
     resource: searxngs
     kind: Searxng
   # ── Tenant-facing inputs ──────────────────────────────────────────────
-  # Two fields are populated by the instance controller, NOT the tenant:
-  #   - expose.fqdn       the public hostname, computed as
-  #                       <prefix|name>-<tenantHash>.<appBaseDomain>
-  #   - tokenSecretName   the runtime Secret the controller bridges the token
-  #                       named by tokenSecretRef into (key: token)
-  # The RGD below references both.
-  #
   # There is deliberately no `engines` input. SearXNG's engine list is a list of
   # maps in settings.yml, not a comma string, and a per-instance override would
   # freeze the engine set at provision time. Callers select engines PER QUERY
   # instead — `categories=`, `engines=`, or a `!bang` prefix — which is both
   # finer-grained and survives upstream engine churn.
+  #
+  # There is also no exposure input and no token input. This instance has one
+  # consumer — another part of the platform — and one path to it, the data plane
+  # below; a public hostname would only add an internet-facing surface that then
+  # has to be defended.
   schema:
     type: object
     properties:
       name:
         type: string
-        description: "Logical name; used as the resource-name prefix in the tenant namespace and the default hostname prefix."
-      # The gate's credential is a REFERENCE, never a value: the instance and its
-      # off-cluster caller must share one token, and a token minted in-graph
-      # could never be read back out (instance status deliberately surfaces no
-      # secret values). The tenant authors the Secret — normally the agents
-      # Connection Secret, which already holds exactly this — and the controller
-      # bridges it into the runtime namespace as <name>-access.
-      tokenSecretRef:
-        type: string
-        description: "Name of a Secret in your default namespace whose 'token' key is the bearer token this instance's gate will require. Point it at the agents Connection Secret ('kedge-agents-conn-<connection>') so the search backend and the Connection share one credential. Rotating that Secret rotates the gate."
-      tokenSecretName:
-        type: string
-        description: "Computed by the platform — do NOT set. The name the bridged token Secret takes in the runtime namespace."
+        description: "Logical name; used as the resource-name prefix in the tenant namespace."
       size:
         type: string
         enum: ["small", "medium", "large"]
         default: "small"
         description: "Memory bucket for the SearXNG container (small=256Mi, medium=512Mi, large=1Gi limit). Each query fans out to many engines concurrently, so this bounds concurrency more than it bounds a working set."
-      # default: {} so nested defaults apply and the controller can stamp fqdn
-      # onto an instance that omitted the expose object.
+
+      # ── Optional public exposure ──────────────────────────────────────
+      # Off by default: the platform reaches this instance over the data plane
+      # below, which needs no hostname. Turn it on only when a HUMAN needs to
+      # open it in a browser.
+      #
+      # There is deliberately no ungated option. This app has no authentication
+      # of its own, so publishing it without a gate would put an open metasearch proxy anyone could bill your egress against
+      # on the open internet. oidc.mode is therefore an enum of one: exposing
+      # means putting oauth2-proxy in front of it.
       expose:
         type: object
         default: {}
         properties:
+          enabled:
+            type: boolean
+            default: false
+            description: "Publish this instance on a public hostname, behind the OIDC gate. Default false — the platform reaches it internally and needs no hostname. Requires oidc.issuerURL + oidc.clientID and the client secret in your cloud-credentials Secret."
           hostnamePrefix:
             type: string
             pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
@@ -172,33 +152,83 @@ spec:
             description: "Left-most DNS label. Defaults to .name. Final host = <prefix>-<tenantHash>.<appBaseDomain>."
           fqdn:
             type: string
-            description: "Computed by the platform — do NOT set. The public hostname the instance is served on."
+            description: "Computed by the platform — do NOT set."
+
+      # ── OIDC (the gate, whenever exposed) ─────────────────────────────
+      # Only consulted when expose.enabled. "byo" is the only mode: platform
+      # SSO needs the hub Dex client-management API, which is not provisioned
+      # yet, and "none" is not offered on purpose (see above).
+      #
+      # issuerURL and clientID are not schema-required — kro cannot express
+      # "required when another field is true". Omitting them fails CLOSED:
+      # oauth2-proxy refuses to start, so the route serves 503 and the app is
+      # never reachable unauthenticated.
+      oidc:
+        type: object
+        default: {}
+        properties:
+          mode:
+            type: string
+            enum: ["byo"]
+            default: "byo"
+            description: "byo = your own IdP. Set issuerURL + clientID, and put the client secret in your cloud-credentials Secret under key oidc_client_secret."
+          issuerURL:
+            type: string
+            description: "Your IdP's OIDC issuer URL. Required when expose.enabled."
+          clientID:
+            type: string
+            description: "Your OAuth2 client ID. Required when expose.enabled."
+          scopes:
+            type: string
+            default: "openid email profile"
+
+      # Controller-injected; the runtime Secret the platform bridges the OIDC
+      # client secret into (key: oidc_client_secret).
+      credentialsSecretName:
+        type: string
+        description: "Computed by the platform — do NOT set."
     required:
       - name
-      - tokenSecretRef
+
+  # ── Data plane (the only way in) ──────────────────────────────────────
+  # Served as …/searxngs/<name>/proxy[/tail]; the provider resolves it to
+  # services/proxy on the runtime kube-apiserver and confines the target to
+  # status.runtimeNamespace. No upstreamPath: the caller supplies the tail, so
+  # `/proxy/search?q=…` reaches SearXNG's own `/search` and any other SearXNG
+  # path stays addressable. GET only — SearXNG's API is a GET API, and a
+  # narrower method set is one fewer thing to reason about.
+  dataPlane:
+    runtimeNamespacePath: status.runtimeNamespace
+    endpoints:
+      proxy:
+        servicePath: status.serviceRef
+        port: http
+        methods: ["GET"]
 
   # ── backendConfig: the kro resource graph ─────────────────────────────
   # Every resource sets namespace: default — the control-plane/data-plane split
   # materializes these on the runtime cluster and remaps that to the per-tenant
-  # namespace. ${kedge.gatewayName} / ${kedge.gatewayNamespace} are substituted
-  # for the platform's configured Gateway API parent before the RGD is authored.
+  # namespace.
   #
-  # Pod shape: TWO containers sharing the pod network namespace.
-  #   searxng — binds 127.0.0.1:8888 (SEARXNG_BIND_ADDRESS), so it is
-  #             unreachable from anywhere except the sidecar, including from
-  #             other pods on the runtime cluster that know the pod IP.
-  #   auth    — nginx on 0.0.0.0:8080, the only thing the Service and the
-  #             HTTPRoute point at. SearXNG has NO authentication of its own and
-  #             this instance is on the public internet, so the gate is not
-  #             optional: without it the URL is an open metasearch proxy anyone
-  #             can bill your egress against.
+  # Pod shape: ONE container. SearXNG binds 0.0.0.0 and the Service points
+  # straight at it.
+  #
+  # POSTURE, STATED PLAINLY: SearXNG has no authentication of its own and there
+  # is no longer a gate in front of it. Anything that can reach this Service
+  # inside the runtime cluster can search through it unauthenticated — there are
+  # no NetworkPolicies here, so that includes any other pod that knows the
+  # address. What the removal of the public HTTPRoute buys is that the set of
+  # things able to reach it is now "workloads on the runtime cluster" rather
+  # than "the internet", and that the platform-sanctioned path (the data plane
+  # above) is RBAC-gated per caller. Do not put anything on this instance that
+  # would be sensitive to a runtime-cluster neighbour.
   backendConfig:
     resources:
-      # SearXNG's own server.secret_key ONLY. Deliberately not the bearer token:
-      # that one is shared with an off-cluster caller and arrives via the
-      # controller's token bridge (<name>-access) instead. This key signs
-      # SearXNG's cookies, is read by nothing outside the pod, and so is safe to
-      # mint in-graph. Created empty; the pwgen Job fills it, once.
+      # SearXNG's own server.secret_key ONLY — it signs SearXNG's session
+      # cookies and CSRF tokens, is read by nothing outside the pod, and so is
+      # safe to mint in-graph and never publish. Created empty; the pwgen Job
+      # below fills it, once. (This is all the pwgen machinery is still for: the
+      # bearer token it used to generate for the public gate is gone.)
       - id: credentials
         template:
           apiVersion: v1
@@ -304,8 +334,8 @@ spec:
                 # profiles User-Agent/Accept headers and rate-limits anything
                 # that doesn't look like a browser — i.e. exactly an API client
                 # — and it needs a Valkey/Redis backend this template does not
-                # run. Our bearer gate sits in FRONT of SearXNG and is the real
-                # access control, so the limiter would only break the contract.
+                # run. This instance is not public and every caller is an API
+                # client, so the limiter would only break the contract.
                 limiter: false
                 public_instance: false
                 # Nothing here proxies images and the JSON API returns image
@@ -316,56 +346,6 @@ spec:
               # (SEARXNG_BIND_ADDRESS / SEARXNG_PORT / SEARXNG_SECRET) — env
               # wins over this file, and secret_key must come from the Secret
               # rather than sit in a world-readable ConfigMap.
-
-      # The bearer gate. nginx:alpine's entrypoint renders
-      # /etc/nginx/templates/*.template through envsubst into /etc/nginx/conf.d,
-      # which is how the token reaches the config: nginx cannot read a Secret
-      # into a directive, but it CAN be handed one as an environment variable.
-      # NGINX_ENVSUBST_FILTER restricts substitution to AUTH_TOKEN so nginx's
-      # own $host / $http_authorization variables survive untouched.
-      #
-      # $AUTH_TOKEN is written WITHOUT braces on purpose: ${...} is kro's
-      # expression syntax and kro would try to resolve it as CEL.
-      - id: nginxConfig
-        template:
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: ${schema.spec.name}-gate
-            namespace: default
-          data:
-            default.conf.template: |
-              server {
-                listen 8080;
-                server_tokens off;
-
-                # A metasearch query fans out to many engines and waits on the
-                # slowest of them; the nginx default 60s proxy_read_timeout is
-                # already generous, but be explicit about it.
-                proxy_read_timeout 60s;
-
-                # Unauthenticated liveness for kubelet and for a human checking
-                # the instance is up. Discloses nothing but "OK".
-                location = /healthz {
-                  access_log off;
-                  proxy_pass http://127.0.0.1:8888/healthz;
-                }
-
-                location / {
-                  # "if" inside a location is only well-defined when its body is
-                  # a rewrite-module directive; `return` is exactly that case,
-                  # and proxy_pass stays outside the if. envsubst substitutes
-                  # $AUTH_TOKEN at container start, so the comparison is against
-                  # a literal by the time nginx parses this.
-                  if ($http_authorization != "Bearer $AUTH_TOKEN") {
-                    return 401;
-                  }
-                  proxy_pass http://127.0.0.1:8888;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto https;
-                }
-              }
 
       - id: deployment
         template:
@@ -391,9 +371,11 @@ spec:
                   - name: searxng
                     image: docker.io/searxng/searxng:latest
                     env:
-                      # Loopback only — the sidecar is the sole path in.
+                      # 0.0.0.0, not loopback: the Service is the way in now,
+                      # and services/proxy resolves to the POD IP, so anything
+                      # bound to 127.0.0.1 would be unreachable.
                       - name: SEARXNG_BIND_ADDRESS
-                        value: "127.0.0.1"
+                        value: "0.0.0.0"
                       - name: SEARXNG_PORT
                         value: "8888"
                       - name: SEARXNG_SETTINGS_PATH
@@ -405,10 +387,18 @@ spec:
                           secretKeyRef:
                             name: ${credentials.metadata.name}
                             key: secret_key
+                    ports:
+                      - name: http
+                        containerPort: 8888
                     volumeMounts:
                       - name: settings
                         mountPath: /etc/searxng-config
                         readOnly: true
+                    readinessProbe:
+                      httpGet:
+                        path: /healthz
+                        port: 8888
+                      periodSeconds: 10
                     # Request sits under the limit: RSS climbs with the number
                     # of engine responses being parsed concurrently and falls
                     # back afterwards, so reserving the peak would waste the
@@ -420,49 +410,13 @@ spec:
                         memory: '${schema.spec.size == "small" ? "128Mi" : (schema.spec.size == "medium" ? "256Mi" : "512Mi")}'
                       limits:
                         memory: '${schema.spec.size == "small" ? "256Mi" : (schema.spec.size == "medium" ? "512Mi" : "1Gi")}'
-                  - name: auth
-                    image: nginx:alpine
-                    env:
-                      # The tenant's own token, bridged into this namespace by
-                      # the instance controller. If the bridge hasn't landed yet
-                      # the container simply won't start, and kubelet retries —
-                      # the gate can never come up open.
-                      - name: AUTH_TOKEN
-                        valueFrom:
-                          secretKeyRef:
-                            name: ${schema.spec.tokenSecretName}
-                            key: token
-                      - name: NGINX_ENVSUBST_FILTER
-                        value: "AUTH_TOKEN"
-                    ports:
-                      - containerPort: 8080
-                    volumeMounts:
-                      - name: gate
-                        mountPath: /etc/nginx/templates
-                        readOnly: true
-                    # Proxied through to SearXNG, so pod readiness means the
-                    # whole chain answers — not just that nginx started.
-                    readinessProbe:
-                      httpGet:
-                        path: /healthz
-                        port: 8080
-                      periodSeconds: 10
-                    resources:
-                      requests:
-                        cpu: 10m
-                        memory: 16Mi
-                      limits:
-                        memory: 64Mi
                 volumes:
                   - name: settings
                     configMap:
                       name: ${settings.metadata.name}
-                  - name: gate
-                    configMap:
-                      name: ${nginxConfig.metadata.name}
 
-      # Fronts the gate only. Nothing in the cluster is given a route to
-      # SearXNG's own port.
+      # The port is NAMED because the data-plane contract addresses it by name
+      # (services/proxy takes <service>:<port-name>), not by number.
       - id: service
         template:
           apiVersion: v1
@@ -475,15 +429,173 @@ spec:
             selector:
               app: ${schema.spec.name}
             ports:
-              - port: 8080
-                targetPort: 8080
+              - name: http
+                port: 8888
+                targetPort: 8888
 
-      # ──────────────── HTTPRoute (Gateway API exposure layer) ────────────────
-      # Public on purpose: the agents provider may run on a different cluster
-      # than this instance, so an in-cluster Service would be unreachable. TLS
-      # terminates at the Gateway edge, which programs the DNS record + tunnel
-      # route from this hostname.
+      # ─────────────── Optional public exposure (expose.enabled) ───────────────
+      # Every resource below is gated on the SAME condition, so an instance is
+      # either fully internal or fully published-behind-a-gate. There is no
+      # partial state where the route exists but the gate does not — that state
+      # would be an open an open metasearch proxy anyone could bill your egress against.
+      - id: oauthCookieSecret
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ${schema.spec.name}-oauth-cookie
+            namespace: default
+      - id: oauthPwgenAccount
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: ${schema.spec.name}-oauth-pwgen
+            namespace: default
+      - id: oauthPwgenRole
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: ${schema.spec.name}-oauth-pwgen
+            namespace: default
+          rules:
+            - apiGroups: [""]
+              resources: ["secrets"]
+              verbs: ["get", "patch"]
+      - id: oauthPwgenBinding
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: ${schema.spec.name}-oauth-pwgen
+            namespace: default
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: ${oauthPwgenRole.metadata.name}
+          subjects:
+            - kind: ServiceAccount
+              name: ${oauthPwgenAccount.metadata.name}
+              namespace: default
+      # oauth2-proxy's cookie secret, generated in-graph (32 random bytes).
+      # Rotating it would invalidate live sessions, so the Job no-ops when the
+      # key is already set.
+      - id: oauthPwgen
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${schema.spec.name}-oauth-pwgen
+            namespace: default
+          spec:
+            backoffLimit: 5
+            ttlSecondsAfterFinished: 600
+            template:
+              spec:
+                serviceAccountName: ${oauthPwgenAccount.metadata.name}
+                restartPolicy: OnFailure
+                containers:
+                  - name: pwgen
+                    image: bitnami/kubectl
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        set -eu
+                        SECRET="${oauthCookieSecret.metadata.name}"
+                        if [ -z "$(kubectl get secret "$SECRET" -o jsonpath='{.data.cookie-secret}' 2>/dev/null)" ]; then
+                          CS="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+                          kubectl patch secret "$SECRET" --type merge \
+                            -p "{\"stringData\":{\"cookie-secret\":\"$CS\"}}"
+                          echo "generated cookie secret for $SECRET"
+                        else
+                          echo "cookie secret already present for $SECRET"
+                        fi
+      - id: oauthDeployment
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${schema.spec.name}-oauth
+            namespace: default
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: ${schema.spec.name}-oauth
+            template:
+              metadata:
+                labels:
+                  app: ${schema.spec.name}-oauth
+              spec:
+                containers:
+                  - name: oauth2-proxy
+                    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+                    args:
+                      - --provider=oidc
+                      - --oidc-issuer-url=${schema.spec.oidc.issuerURL}
+                      - --client-id=${schema.spec.oidc.clientID}
+                      - --redirect-url=https://${schema.spec.expose.fqdn}/oauth2/callback
+                      # The one upstream is the app's own Service — the same
+                      # Service the data plane proxies to. Public callers go
+                      # through the gate; platform callers go through the data
+                      # plane. Neither path can reach the other's credential.
+                      - --upstream=http://${schema.spec.name}:8888
+                      - --http-address=0.0.0.0:4180
+                      - --scope=${schema.spec.oidc.scopes}
+                      # v1: any successfully-authenticated user of your IdP.
+                      - --email-domain=*
+                      - --cookie-secure=true
+                      # Behind the ingress/Cloudflare edge — trust XFF headers.
+                      - --reverse-proxy=true
+                      - --skip-provider-button=true
+                    env:
+                      - name: OAUTH2_PROXY_CLIENT_SECRET
+                        valueFrom:
+                          secretKeyRef:
+                            name: ${schema.spec.credentialsSecretName}
+                            key: oidc_client_secret
+                      - name: OAUTH2_PROXY_COOKIE_SECRET
+                        valueFrom:
+                          secretKeyRef:
+                            name: ${oauthCookieSecret.metadata.name}
+                            key: cookie-secret
+                    ports:
+                      - containerPort: 4180
+      - id: oauthService
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
+        template:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ${schema.spec.name}-oauth
+            namespace: default
+          spec:
+            type: ClusterIP
+            selector:
+              app: ${schema.spec.name}-oauth
+            ports:
+              - port: 4180
+                targetPort: 4180
+      # The route points at the gate, never at the app: there is no mode in
+      # which the public hostname reaches SearXNG directly.
       - id: httpRoute
+        includeWhen:
+          - '${schema.spec.expose.enabled}'
         template:
           apiVersion: gateway.networking.k8s.io/v1
           kind: HTTPRoute
@@ -504,13 +616,23 @@ spec:
                       type: PathPrefix
                       value: /
                 backendRefs:
-                  - name: ${schema.spec.name}
-                    port: 8080
-    # url/host are read from the HTTPRoute (this kro fork forbids ${schema.*} in
-    # status), same as the application/simple-webapp templates.
-    # ${kedge.appPublicPort} is substituted by the kro backend before kro sees
-    # this CEL.
+                  - name: ${oauthService.metadata.name}
+                    port: 4180
+    # The data plane resolves its target through these paths, so they are part
+    # of the contract, not decoration.
+    #
+    # runtimeNamespace cannot be computed: ${schema.*} is forbidden in status by
+    # this kro fork, and the namespace every resource declares ("default") is
+    # remapped to the per-tenant runtime namespace by the backend anyway. So it
+    # is read back off a resource that landed there — the same trick the
+    # synthesized dev overlay uses (backend/kro/devoverlay.go).
     status:
-      url: ${"https://" + httpRoute.spec.hostnames[0] + "${kedge.appPublicPort}"}
-      host: ${httpRoute.spec.hostnames[0]}
+      runtimeNamespace: ${service.metadata.namespace}
+      serviceRef:
+        name: ${service.metadata.name}
+        namespace: ${service.metadata.namespace}
       ready: ${deployment.status.readyReplicas}
+      # Empty unless this instance opted into exposure — a URL that is only
+      # sometimes real is worse than one that is honestly absent.
+      url: '${schema.spec.expose.enabled ? "https://" + schema.spec.expose.fqdn : ""}'
+

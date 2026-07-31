@@ -82,7 +82,8 @@ func (s *Server) resolveInboxItem(w http.ResponseWriter, r *http.Request) {
 	if item.Kind == store.InboxKindApproval && item.RunID != "" && state != store.InboxStateAnswered {
 		rd := resumeDeps{
 			Creds: c, CR: clientCR{c},
-			EdgesEndpoint: s.edgesEndpoint(id.clusterID), EdgesToken: id.token, EdgesInsecure: s.cfg.HubInsecure,
+			EdgesEndpoint: s.edgesEndpoint(id.clusterID), HubToken: id.token, EdgesInsecure: s.cfg.HubInsecure,
+			ClusterID: id.clusterID,
 		}
 		go s.resumeApprovedRun(wsScope, item, rd, state == store.InboxStateApproved, req.Response)
 	}

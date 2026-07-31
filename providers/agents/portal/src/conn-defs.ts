@@ -164,12 +164,46 @@ export const CONN_DEFS: ConnTypeDef[] = [
     id: 'mcp',
     label: 'MCP server',
     glyph: 'puzzle',
-    desc: 'Any Model Context Protocol server',
-    fields: [
-      { key: 'baseURL', label: 'Server endpoint', required: true, placeholder: 'https://example.com/mcp', hint: 'The server’s streamable-HTTP MCP URL.' },
-      { key: 'token', label: 'Bearer token', password: true, hint: 'Only if the server requires authentication.' },
+    desc: 'A workload in your workspace, or any external Model Context Protocol server',
+    setup: [
+      'A <strong>workload in this workspace</strong> — the <code>browser</code> template, say — is named, not addressed: agents reach it over the platform’s internal path, so it is never published and needs no token.',
+      'An <strong>external server</strong> takes its streamable-HTTP URL and, if it authenticates, a bearer token.',
     ],
-    build: (v) => ({ type: 'mcp', name: v.name, baseURL: v.baseURL, secret: v.token || undefined }),
+    modes: [
+      {
+        id: 'instance',
+        label: 'Workload in this workspace',
+        fields: [
+          {
+            key: 'instance',
+            label: 'Instance name',
+            required: true,
+            placeholder: 'browser',
+            hint: 'The instance under Infrastructure. No URL, no token — access is authorized by your own permission on it.',
+          },
+        ],
+        advanced: [
+          {
+            key: 'instanceResource',
+            label: 'Instance resource',
+            placeholder: 'browsers',
+            hint: 'Only if the instance comes from a fork of the template under a different CRD.',
+          },
+        ],
+      },
+      {
+        id: 'external',
+        label: 'External server',
+        fields: [
+          { key: 'baseURL', label: 'Server endpoint', required: true, placeholder: 'https://example.com/mcp', hint: 'The server’s streamable-HTTP MCP URL.' },
+          { key: 'token', label: 'Bearer token', password: true, hint: 'Only if the server requires authentication.' },
+        ],
+      },
+    ],
+    build: (v, mode): ConnectionWrite =>
+      mode === 'external'
+        ? { type: 'mcp', name: v.name, baseURL: v.baseURL, secret: v.token || undefined }
+        : { type: 'mcp', name: v.name, config: { instance: v.instance, ...(v.instanceResource ? { instanceResource: v.instanceResource } : {}) } },
   },
   {
     id: 'websearch',
@@ -177,8 +211,8 @@ export const CONN_DEFS: ConnTypeDef[] = [
     glyph: 'search',
     desc: 'Give agents web_search — your own SearXNG instance, or a Brave API key',
     setup: [
-      'Self-hosted is the default — no API key, no per-query bill. <strong>Create this connection first</strong> with a token you choose: the instance reads that same token from this connection’s Secret, so it has to exist before you provision.',
-      'Then provision the <strong>searxng</strong> template under Infrastructure, pointing its <code>tokenSecretRef</code> at <code>kedge-agents-conn-&lt;this connection’s name&gt;</code>, and come back to fill in the instance URL.',
+      'Self-hosted is the default — no API key, no per-query bill. Provision the <strong>searxng</strong> template under Infrastructure, then name that instance here.',
+      'Agents reach the instance over the platform’s internal path (the infrastructure provider’s data plane), so it is never published to the internet and there is no URL or token to copy around. Access is authorized by your own permission on the instance.',
       'Brave is the alternative if you would rather not run anything — it needs a free-tier API key from <code>api.search.brave.com/app/keys</code>.',
     ],
     modes: [
@@ -187,31 +221,11 @@ export const CONN_DEFS: ConnTypeDef[] = [
         label: 'Self-hosted (SearXNG)',
         fields: [
           {
-            key: 'token',
-            label: 'Access token',
-            password: true,
+            key: 'instance',
+            label: 'Instance name',
             required: true,
-            hint: 'Any strong string you choose. Stored in this connection’s Secret, which the instance references — so pick it here first, then point the template at that Secret.',
-          },
-          // Deliberately optional: the instance can't be provisioned until this
-          // connection's Secret exists, so on the first pass there is no URL to
-          // paste yet. Search reports a clear error until it is filled in.
-          {
-            key: 'baseURL',
-            label: 'Instance URL',
-            placeholder: 'https://searxng-abc123.apps.example.com',
-            hint: 'From the instance’s status.url — leave blank now and add it once the instance is running. /search is appended automatically.',
-          },
-        ],
-        // Local kind serves instances on a hostname that resolves to loopback,
-        // which the SSRF guard blocks by default — allow-listing the host is
-        // how a dev instance stays reachable without weakening the guard.
-        advanced: [
-          {
-            key: 'allowedHosts',
-            label: 'Allow private address for host',
-            placeholder: 'searxng.internal',
-            hint: 'Only needed when the instance resolves to a private or loopback address (local dev, or an in-cluster Service).',
+            placeholder: 'search',
+            hint: 'The name of your searxng instance under Infrastructure. Nothing else is needed — no URL, no token.',
           },
         ],
       },
@@ -222,13 +236,12 @@ export const CONN_DEFS: ConnTypeDef[] = [
         advanced: [{ key: 'baseURL', label: 'Custom endpoint', placeholder: 'https://api.search.brave.com/res/v1/web/search' }],
       },
     ],
-    build: (v, mode) => ({
+    build: (v, mode): ConnectionWrite => ({
       type: 'websearch',
       name: v.name,
-      secret: v.token || undefined,
-      baseURL: v.baseURL || undefined,
-      config: { provider: mode === 'brave' ? 'brave' : 'searxng' },
-      allowedHosts: v.allowedHosts ? [v.allowedHosts] : undefined,
+      secret: mode === 'brave' ? v.token : undefined,
+      baseURL: mode === 'brave' ? v.baseURL || undefined : undefined,
+      config: mode === 'brave' ? { provider: 'brave' } : { provider: 'searxng', instance: v.instance },
     }),
   },
   {

@@ -92,6 +92,10 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 		return nil, err
 	}
 
+	if err := checkExposure(tmpl, resources); err != nil {
+		return nil, err
+	}
+
 	// A development block extends the graph with the mechanically synthesized
 	// dev overlay (mode-gated dev workloads, workspace PVCs, control plane)
 	// and injects the kedgeMode field into the RGD schema. See devoverlay.go.
@@ -133,6 +137,45 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 		},
 	}}
 	return rgd, nil
+}
+
+// checkExposure holds spec.exposure to what the graph actually does. The
+// marker is what the portal and the MCP tools tell users ("this has no URL"),
+// so a template that declares `internal` and then publishes an HTTPRoute would
+// have every surface confidently saying the opposite of the truth. An
+// unconditional route in an `optional` template is the same lie in the other
+// direction: the caller is told to check the instance, but every instance is
+// published regardless.
+//
+// The reverse — public/optional with no route — is NOT an error. A route may
+// legitimately arrive from the dev overlay, and a template may declare its
+// intent before its graph catches up.
+func checkExposure(tmpl *infrav1alpha1.Template, resources []any) error {
+	class := tmpl.Spec.ExposureClass()
+	if class == infrav1alpha1.ExposurePublic {
+		return nil
+	}
+	for _, item := range resources {
+		res, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tpl, _ := res["template"].(map[string]any)
+		if kind, _ := tpl["kind"].(string); kind != "HTTPRoute" {
+			continue
+		}
+		id, _ := res["id"].(string)
+		if class == infrav1alpha1.ExposureInternal {
+			return fmt.Errorf("template %q declares exposure %q but its graph publishes an HTTPRoute (%s) — either drop the route or declare the exposure it really has",
+				tmpl.Name, class, id)
+		}
+		// optional: the route must be conditional, or it isn't optional.
+		if when, _ := res["includeWhen"].([]any); len(when) == 0 {
+			return fmt.Errorf("template %q declares exposure %q but its HTTPRoute (%s) has no includeWhen — every instance would be published, which is exposure %q",
+				tmpl.Name, class, id, infrav1alpha1.ExposurePublic)
+		}
+	}
+	return nil
 }
 
 // backendConfig decodes Template.spec.backendConfig and extracts the kro

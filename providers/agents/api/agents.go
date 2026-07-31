@@ -535,7 +535,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		Creds: c, CR: clientCR{c}, Scope: id.scope(name), Agent: agent,
 		RunID:     runID,
 		SessionID: req.SessionID, Task: req.Message, Trigger: agentsv1alpha1.RunTriggerChat,
-		EdgesEndpoint: s.edgesEndpoint(id.clusterID), EdgesToken: id.token, EdgesInsecure: s.cfg.HubInsecure,
+		EdgesEndpoint: s.edgesEndpoint(id.clusterID), HubToken: id.token, EdgesInsecure: s.cfg.HubInsecure,
+		// ClusterID addresses the tenant workspace on the data plane — without
+		// it an instance-backed tool (self-hosted search, a browser instance)
+		// has no way to compose its URL.
+		ClusterID: id.clusterID,
 		OnDelta: func(delta string) {
 			sse("delta", map[string]string{"text": delta})
 		},

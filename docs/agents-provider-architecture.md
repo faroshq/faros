@@ -94,8 +94,10 @@ and tools are edited inside the agent, next to a live chat playground.
     schedule *themselves*), `schedules_list`, `notify`, `ask` (posts a question
     to the inbox + channel).
   - `web`: `web_fetch` (SSRF-guarded at dial time — blocks private/loopback,
-    defeats DNS rebinding) and `web_search` (Brave-compatible `websearch`
-    connection).
+    defeats DNS rebinding) and `web_search`, backed by a `websearch`
+    Connection speaking either a **self-hosted SearXNG instance** (no API key —
+    the `searxng` infrastructure Template provisions one per tenant) or the
+    Brave API. See [`agent-web-access.md`](./agent-web-access.md).
   - `mcp`/`github`: any `mcp` connection is dialed via the official MCP Go SDK
     and its tools exposed as `<connection>__<tool>`; a `github` connection with
     a PAT gets the hosted GitHub MCP server's full toolset with zero config.
@@ -444,7 +446,7 @@ the hub MCP endpoint.
 | Family | Backing | Notes |
 |---|---|---|
 | `core` | store | `memory_write/list/read`, `schedule_create/list/cancel`, `wakeup`, `trigger_create/list/cancel` (register an event automation), `sessions_list/history`, **`notify`** (deliver a message to the agent's default channel connection), **`delegate`** (spawn a sub-agent run against a name in `spec.delegates`), **`ask`** (post a question to the approvals inbox and await the user) |
-| `web` | Go stdlib + readability extraction | `web_fetch` (SSRF-guarded: DNS pinning, deny private ranges, per-connection allowlist), `web_search` via a `websearch` Connection. No headless browser in v1; `chromedp` family is a later opt-in |
+| `web` | Go stdlib + readability extraction | `web_fetch` (SSRF-guarded: the URL comes from the model, so private ranges are refused), `web_search` via a `websearch` Connection (`config.provider`: `searxng` self-hosted, or `brave`) whose baseURL is user-authored configuration and so may be private/in-cluster. Link-local is refused on both paths — that range carries cloud instance-metadata. A real browser is not in this family: the `browser` infrastructure Template runs Playwright MCP and is wired as an ordinary `mcp` Connection |
 | `github` | `github` Connection | Remote GitHub MCP endpoint with the tenant's PAT, or a bundled `github-mcp-server` binary (Go/static) over stdio. Pre-wired instead of hand-configured MCP |
 | `mcp` | `mcp` Connection | Arbitrary remote MCP server (URL + auth header from the Secret), client via the official `modelcontextprotocol/go-sdk`. The extensibility escape hatch |
 | `files` | infrastructure `agent-workspace` | Optional (see above) |

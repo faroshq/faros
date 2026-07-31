@@ -1,11 +1,12 @@
-// Assisted setup: capability gating of the affordance, the token the flow
-// mints, the prompt it composes, and the one-shot handoff into chat.
+// Assisted setup: capability gating of the affordance, the prompt it composes,
+// and the one-shot handoff into chat.
 
 import { describe, expect, it, vi } from 'vitest'
-import { DNS_LABEL_RE, connectionSecretName, generateAccessToken, searxngSetupPrompt } from '../assisted-setup'
+import { DNS_LABEL_RE, searxngSetupPrompt } from '../assisted-setup'
 import type { AgentChat } from '../views/agent-chat'
 import type { Connections } from '../views/connections'
-import type { Capabilities, Connection, Route } from '../types'
+import type { Capabilities, Connection } from '../types'
+import type { Route } from '../router'
 import '../views/connections'
 import '../views/agent-chat'
 import { agentFixture, makeStore, mount, settle, stubApi, text } from './helpers'
@@ -60,51 +61,35 @@ describe('capability gating', () => {
   })
 })
 
-describe('generated access token', () => {
-  it('is long and strictly alphanumeric', () => {
-    // The instance's nginx gate compares the token inside a string literal, so
-    // quotes, backslashes and $ must never appear.
-    for (let i = 0; i < 20; i++) {
-      const t = generateAccessToken()
-      expect(t.length).toBeGreaterThanOrEqual(32)
-      expect(t).toMatch(/^[A-Za-z0-9]+$/)
-    }
-  })
-
-  it('does not repeat itself', () => {
-    const seen = new Set(Array.from({ length: 50 }, () => generateAccessToken()))
-    expect(seen.size).toBe(50)
-  })
-
-  it('honours an explicit length', () => {
-    expect(generateAccessToken(64)).toHaveLength(64)
-  })
-})
-
 describe('composed prompt', () => {
   const prompt = searxngSetupPrompt({ connection: 'search', instance: 'searxng-1', size: 'medium' })
-
-  it('points tokenSecretRef at the connection secret the backend writes', () => {
-    expect(connectionSecretName('search')).toBe('kedge-agents-conn-search')
-    expect(prompt).toContain('tokenSecretRef: `kedge-agents-conn-search`')
-  })
 
   it('carries the instance name and size, and demands the real schema first', () => {
     expect(prompt).toContain('name: `searxng-1`')
     expect(prompt).toContain('size: `medium`')
     expect(prompt).toContain('describe_template')
     expect(prompt).toContain('get_instance')
-    expect(prompt).toContain('status.url')
   })
 
-  it('forbids inventing the token and asking questions', () => {
-    expect(prompt).toContain('Do NOT generate a token')
+  // The whole point of the internal path: nothing to mint, nothing to paste
+  // back. A prompt that asks the agent to wire up a Secret or report a URL
+  // would send the user hunting for something that no longer exists. (The words
+  // "token" and "Secret" do appear — telling the agent there are none.)
+  it('asks for no credential input and no URL to copy back', () => {
+    expect(prompt).not.toContain('tokenSecretRef')
+    expect(prompt).not.toContain('kedge-agents-conn-')
+    expect(prompt).not.toContain('status.url')
+    expect(prompt).toContain('internal-only')
+  })
+
+  it('forbids asking questions and closes the loop with a real search', () => {
     expect(prompt).toContain('without asking me any questions')
+    expect(prompt).toContain('web_search')
   })
 })
 
 describe('assisted setup flow', () => {
-  it('creates the connection with no baseURL, hands off the prompt and navigates to the agent', async () => {
+  it('creates the connection naming the instance, hands off the prompt and navigates to the agent', async () => {
     const createConnection = vi.fn().mockResolvedValue({ metadata: { name: 'search' }, spec: { type: 'websearch' } })
     const { el, store } = await mountConnections({ providers: ['infrastructure'] }, [agentFixture('scout')], { createConnection })
     const routes: Route[] = []
@@ -124,14 +109,57 @@ describe('assisted setup flow', () => {
 
     expect(createConnection).toHaveBeenCalledTimes(1)
     const body = createConnection.mock.calls[0][0]
-    expect(body).toMatchObject({ type: 'websearch', name: 'search', config: { provider: 'searxng' } })
-    // Deliberate: the instance does not exist yet, so there is no URL to set.
+    expect(body).toMatchObject({ type: 'websearch', name: 'search', config: { provider: 'searxng', instance: 'search' } })
+    // The instance name is the whole binding: no URL to paste back later, and
+    // no credential for the portal to mint or the user to keep.
     expect(body.baseURL).toBeUndefined()
-    expect(body.secret).toMatch(/^[A-Za-z0-9]{32,}$/)
+    expect(body.secret).toBeUndefined()
 
     expect(routes).toEqual([{ kind: 'agent', name: 'scout', tab: 'config' }])
     const handed = store.takePendingPrompt('scout')
-    expect(handed).toContain('tokenSecretRef: `kedge-agents-conn-search`')
+    expect(handed).toContain('name: `search`')
+  })
+
+  // Without this the flow ends with a search backend the agent cannot use:
+  // web_search only exists for an agent that was granted a websearch connection.
+  it('wires the new connection into the driving agent so web_search exists', async () => {
+    const createConnection = vi.fn().mockResolvedValue({ metadata: { name: 'search' }, spec: { type: 'websearch' } })
+    const patchAgent = vi.fn().mockResolvedValue({ metadata: { name: 'scout' }, spec: {} })
+    const agent = agentFixture('scout')
+    agent.spec.tools = { interactive: { connections: ['gh'] } }
+    const { el } = await mountConnections({ providers: ['infrastructure'] }, [agent], { createConnection, patchAgent })
+
+    el.querySelector<HTMLButtonElement>('.agents-assist button')!.click()
+    await settle(el, 4)
+    el.querySelector<HTMLFormElement>('.agents-dialog')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    await settle(el, 6)
+
+    expect(patchAgent).toHaveBeenCalledTimes(1)
+    const [name, patch] = patchAgent.mock.calls[0]
+    expect(name).toBe('scout')
+    // The existing grant is preserved, not replaced.
+    expect(patch.interactiveConnections).toEqual(['gh', 'search'])
+    // Families are derived from the wired connections; websearch implies web.
+    expect(patch.interactiveFamilies).toContain('web')
+    expect(patch.interactiveFamilies).toContain('core')
+  })
+
+  // The connection and the instance are still worth having, so a failed grant
+  // must not abort the handoff.
+  it('still hands off when wiring the agent fails', async () => {
+    const createConnection = vi.fn().mockResolvedValue({ metadata: { name: 'search' }, spec: { type: 'websearch' } })
+    const patchAgent = vi.fn().mockRejectedValue(new Error('nope'))
+    const { el, store } = await mountConnections({ providers: ['infrastructure'] }, [agentFixture('scout')], {
+      createConnection,
+      patchAgent,
+    })
+
+    el.querySelector<HTMLButtonElement>('.agents-assist button')!.click()
+    await settle(el, 4)
+    el.querySelector<HTMLFormElement>('.agents-dialog')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    await settle(el, 6)
+
+    expect(store.takePendingPrompt('scout')).toContain('searxng')
   })
 
   it('rejects names that are not DNS labels before touching the API', async () => {
@@ -153,13 +181,41 @@ describe('assisted setup flow', () => {
   })
 })
 
-describe('connection needing an instance URL', () => {
-  it('flags a searxng connection with no baseURL, and not one that has it', async () => {
+describe('unwired tool connections', () => {
+  it('flags a tool connection no agent was granted, and clears once one is', async () => {
+    const conn = connFixture('search', { config: { provider: 'searxng' }, baseURL: 'https://s.example' })
+    const bare = agentFixture('scout')
+    const { el } = await mountConnections({ providers: [] }, [bare], { listConnections: () => Promise.resolve([conn]) })
+    await el.store.load('connections')
+    await settle(el, 4)
+    expect(text(el.querySelector('.agents-table'))).toContain('not wired to an agent')
+
+    const wired = agentFixture('scout')
+    wired.spec.tools = { interactive: { connections: ['search'] } }
+    const second = await mountConnections({ providers: [] }, [wired], { listConnections: () => Promise.resolve([conn]) })
+    await second.el.store.load('connections')
+    await settle(second.el, 4)
+    expect(text(second.el.querySelector('.agents-table'))).not.toContain('not wired to an agent')
+  })
+
+  it('does not flag channels — only tools need a grant', async () => {
+    const tg = connFixture('tg', { type: 'telegram', channel: '123' })
+    const { el } = await mountConnections({ providers: [] }, [agentFixture('scout')], {
+      listConnections: () => Promise.resolve([tg]),
+    })
+    await el.store.load('connections')
+    await settle(el, 4)
+    expect(text(el.querySelector('.agents-table'))).not.toContain('not wired to an agent')
+  })
+})
+
+describe('connection needing an instance', () => {
+  it('flags a searxng connection naming no instance, and not one that names it', async () => {
     const { el } = await mountConnections({ providers: [] }, [], {
       listConnections: () =>
         Promise.resolve([
           connFixture('search', { config: { provider: 'searxng' } }),
-          connFixture('wired', { config: { provider: 'searxng' }, baseURL: 'https://searxng.example.com' }),
+          connFixture('wired', { config: { provider: 'searxng', instance: 'searxng-1' } }),
           connFixture('brave', { config: { provider: 'brave' } }),
         ]),
     })
@@ -168,15 +224,28 @@ describe('connection needing an instance URL', () => {
 
     const rows = [...el.querySelectorAll('tbody tr')]
     expect(rows).toHaveLength(3)
-    expect(text(rows[0])).toContain('needs an instance URL')
-    expect(text(rows[1])).toContain('searxng.example.com')
-    expect(text(rows[2])).not.toContain('needs an instance URL')
+    expect(text(rows[0])).toContain('needs an instance')
+    expect(text(rows[1])).toContain('searxng-1')
+    expect(text(rows[2])).not.toContain('needs an instance')
+  })
+
+  // A URL left over from the old public path is not an instance: search cannot
+  // use it any more, so the row must still say something is missing.
+  it('is not satisfied by a leftover baseURL', async () => {
+    const { el } = await mountConnections({ providers: [] }, [], {
+      listConnections: () => Promise.resolve([connFixture('stale', { config: { provider: 'searxng' }, baseURL: 'https://old.example.com' })]),
+    })
+    await el.store.load('connections')
+    await settle(el, 4)
+    expect(text(el.querySelector('tbody tr'))).toContain('needs an instance')
   })
 })
 
 describe('auto-send on arrival', () => {
   async function mountChatWithHandoff(prompt: string | null) {
-    const chatStream = vi.fn(async function* () {
+    // Declare the real parameters so the mock's call tuple is typed — the
+    // assertion below reads the message argument.
+    const chatStream = vi.fn(async function* (_agent: string, _message: string) {
       yield { event: 'start', data: { runID: 'r1', sessionID: 's1' } }
       yield { event: 'done', data: { runID: 'r1', content: 'on it' } }
     })

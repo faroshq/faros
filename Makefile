@@ -1164,6 +1164,7 @@ run-provider-infrastructure: build-infrastructure-provider ## Run the infrastruc
 	KEDGE_APP_BASE_DOMAIN=$${KEDGE_APP_BASE_DOMAIN:-apps.127.0.0.1.sslip.io} \
 	KEDGE_GATEWAY_NAME=$${KEDGE_GATEWAY_NAME:-cloudflare-tunnel} \
 	KEDGE_GATEWAY_NAMESPACE=$${KEDGE_GATEWAY_NAMESPACE:-cfgate-system} \
+	KEDGE_APP_PUBLIC_PORT=$${KEDGE_APP_PUBLIC_PORT:-10443} \
 		$(BINDIR)/infrastructure-provider
 
 run-provider-infrastructure-operator: build-infrastructure-provider ## Run the infrastructure provider in OPERATOR mode (bootstrap reconcile + serve from a provider + runtime kubeconfig)

@@ -56,6 +56,17 @@ same wiring as editable, keyboard-accessible form state. Backend follow-ups
 this surfaced (patchable `description` + `limits`, `?since/until` on runs,
 `schedule`/`trigger` push events, `?limit=` on messages) were implemented.
 
+Also landed alongside (not part of the original plan): **keyless web search**.
+`web_search` became pluggable (`config.provider`: self-hosted `searxng` or
+`brave`), the SSRF guard was split by trust origin — a model-supplied
+`web_fetch` URL still refuses private ranges, while a user-configured search
+endpoint may be private/in-cluster (link-local refused on both) — and
+`GET /api/capabilities` reports which providers the tenant's aggregate MCP
+endpoint federates, so the portal can offer agent-assisted setup only where it
+would actually work. The `searxng` and `browser` infrastructure Templates and
+the tenant-Secret token bridge are covered in
+[`agent-web-access.md`](./agent-web-access.md).
+
 Verification: `go build ./...` + `go test ./...` green in `providers/agents`;
 `make codegen-agents-provider` produces a clean diff; portal `tsc --noEmit`
 clean and 34 vitest tests pass; `make build-agents-provider` produces a binary
@@ -548,7 +559,7 @@ apiresourceschemas + chart schemas; note the schema copy loop covers
 | `schedule.spec.retry.maxAttempts` | never used | **Wire** via 3.6 |
 | `trigger.spec.filter` | declared, unenforced (`background.go:572`) | **Wire** via 0.4 |
 | trigger sources beyond webhook/github | enum blocks them; `github` is just a webhook | Leave; app-event catalog is 3.8-adjacent |
-| `connection.spec.allowedHosts` | no reference outside the type | **Wire** into `tools/web.go` dial guard or delete |
+| `connection.spec.allowedHosts` | no reference outside the type | **Deleted.** Briefly wired as a per-connection SSRF opt-in, then removed: it made users hand-authorize their own configuration. The guard now keys on where the URL came from (model vs config) instead |
 | `toolset.status.usedBy`, `connection.status.phase`, `agent.status.*` | never written | Write from the background loop (cheap) or delete; agent budget-suspension status (`types_agent.go:125` promises it) should be **wired** — budget breach currently just errors every run |
 | Run CRD | registered (`client/client.go:44`), never created | **Delete the CRD**; runs are store-native and now have an API (1.1). Keeps schema/reality from drifting |
 | `defaultNotifyConnection` (deprecated) | `types_agent.go` + `EffectiveChannels` bridge (`types_agent.go:176-233`) | **Delete** field + bridge; migrate existing CRs once (no compat needed) |

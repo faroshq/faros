@@ -10,6 +10,7 @@ package tools
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,10 +39,16 @@ const (
 
 // dialGuard rejects non-public dial targets. Checking the resolved socket
 // address (not the pre-resolution hostname) is what defeats DNS rebinding.
-// allowPrivate relaxes the loopback/private rules for a host the tenant
-// explicitly allow-listed on a Connection — link-local stays blocked either
-// way, because that is where cloud instance-metadata endpoints live and no
-// tenant opt-in should expose those.
+//
+// allowPrivate distinguishes the two kinds of destination this package reaches:
+// a URL the MODEL chose (web_fetch) must never reach internal addresses, since
+// a prompt injection would otherwise turn the provider into a network probe;
+// a URL the USER configured (a websearch Connection's baseURL) is ordinary
+// configuration, at the same trust level as an mcp Connection's endpoint, and
+// blocking it only stops people running their own search backend.
+//
+// Link-local stays blocked either way: that range carries cloud
+// instance-metadata endpoints, which no configuration should be able to reach.
 func dialGuard(allowPrivate bool) func(string, string, syscall.RawConn) error {
 	return func(_, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)
@@ -77,29 +84,22 @@ func newHTTPClient(allowPrivate bool) *http.Client {
 // guardedHTTPClient is the default: public destinations only.
 var guardedHTTPClient = newHTTPClient(false)
 
-// relaxedHTTPClient serves allow-listed hosts (a self-hosted search backend on
-// a cluster-internal or loopback address in local development).
-var relaxedHTTPClient = newHTTPClient(true)
+// configuredHTTPClient serves endpoints the user configured on a Connection —
+// a self-hosted search backend, which is commonly an in-cluster Service or a
+// loopback address in local development.
+var configuredHTTPClient = newHTTPClient(true)
 
-// hostAllowed reports whether host matches one of a Connection's allowedHosts
-// entries. Entries match the host exactly or as a leading-dot suffix
-// (".example.com" matches "searxng.example.com"). Port is ignored.
-func hostAllowed(host string, allowed []string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	for _, a := range allowed {
-		a = strings.ToLower(strings.TrimSpace(a))
-		if a == "" {
-			continue
-		}
-		if a == host || (strings.HasPrefix(a, ".") && strings.HasSuffix(host, a)) {
-			return true
-		}
-	}
-	return false
-}
+// insecureConfiguredHTTPClient is the same, without TLS verification, for the
+// hub's own self-signed certificate in local development. Only ever selected
+// from the operator-set hub-insecure flag — never from anything a tenant or a
+// model can influence.
+var insecureConfiguredHTTPClient = func() *http.Client {
+	c := newHTTPClient(true)
+	t := c.Transport.(*http.Transport).Clone()
+	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // dev hubs use self-signed certs; opt-in
+	c.Transport = t
+	return c
+}()
 
 // Web returns the web family: SSRF-guarded fetch and search. Search needs a
 // websearch Connection, which speaks either a self-hosted SearXNG instance
@@ -204,13 +204,16 @@ func webSearch(ctx context.Context, d Deps, query string) (string, error) {
 		return "", fmt.Errorf("no websearch connection in this workspace — add one on the Connections tab (a self-hosted SearXNG instance, or a Brave API key)")
 	}
 	token := d.connToken(ctx, search.Name)
-	req, err := searchRequest(ctx, search, token, query)
+	req, err := searchRequest(ctx, search, d.DataPlane, token, query)
 	if err != nil {
 		return "", err
 	}
-	client := guardedHTTPClient
-	if hostAllowed(req.URL.Host, search.Spec.AllowedHosts) {
-		client = relaxedHTTPClient
+	// The endpoint came from the Connection (or from the platform's own data
+	// plane), not from the model, so private and loopback destinations are
+	// allowed here — see dialGuard.
+	client := configuredHTTPClient
+	if d.DataPlane.Insecure {
+		client = insecureConfiguredHTTPClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -245,17 +248,23 @@ func searchProvider(conn *agentsv1alpha1.Connection) string {
 	return searchProviderBrave
 }
 
-// searchRequest builds the backend-specific query. Brave authenticates with
-// its own header and is a fixed hosted endpoint; SearXNG is self-hosted, so it
-// takes the Connection's baseURL and an optional bearer token (the kedge
-// searxng Template fronts it with a token gate, but a bare instance needs no
-// credential at all).
-func searchRequest(ctx context.Context, conn *agentsv1alpha1.Connection, token, query string) (*http.Request, error) {
+// searchRequest builds the backend-specific query.
+//
+// A searxng connection addresses its backend one of two ways. Preferred is an
+// INSTANCE reference: a searxng Template provisioned in this workspace, reached
+// over the platform's internal data plane, with no public hostname and no
+// instance credential — kcp RBAC on the instance is the gate. A baseURL is the
+// fallback for a SearXNG the tenant runs somewhere else. Brave is a fixed
+// hosted endpoint authenticated with its own header.
+func searchRequest(ctx context.Context, conn *agentsv1alpha1.Connection, dp DataPlane, token, query string) (*http.Request, error) {
 	base := strings.TrimSpace(conn.Spec.BaseURL)
 	switch searchProvider(conn) {
 	case searchProviderSearXNG:
+		if instance := strings.TrimSpace(conn.Spec.Config["instance"]); instance != "" {
+			return dataPlaneSearchRequest(ctx, conn, dp, instance, query)
+		}
 		if base == "" {
-			return nil, fmt.Errorf("websearch connection %q is searxng but has no baseURL — set it to your instance URL", conn.Name)
+			return nil, fmt.Errorf("websearch connection %q is searxng but names neither an instance nor a baseURL — point it at a searxng instance in this workspace, or at an external instance's URL", conn.Name)
 		}
 		// Accept either the instance root or the /search endpoint: pointing a
 		// connection at the URL the template reports is the obvious thing to do.
@@ -294,6 +303,34 @@ func searchRequest(ctx context.Context, conn *agentsv1alpha1.Connection, token, 
 		return nil, fmt.Errorf("websearch connection %q has unknown provider %q (want %q or %q)",
 			conn.Name, searchProvider(conn), searchProviderBrave, searchProviderSearXNG)
 	}
+}
+
+// searxngResource is the plural the searxng Template publishes its instances
+// under. Overridable per connection for a differently-named template.
+const searxngResource = "searxngs"
+
+// dataPlaneSearchRequest addresses a searxng instance through the
+// infrastructure provider's data plane:
+//
+//	{hub}/services/providers/infrastructure/dataplane/clusters/{cluster}/{resource}/{name}/proxy/search?…
+//
+// The call is authenticated as the CALLER, and the data plane authorizes it by
+// re-reading the instance with that same token — so kcp RBAC on the instance is
+// the whole gate and the workload needs no credential of its own.
+func dataPlaneSearchRequest(ctx context.Context, conn *agentsv1alpha1.Connection, dp DataPlane, instance, query string) (*http.Request, error) {
+	_, resource := instanceRef(conn, searxngResource)
+	base, err := dp.ProxyURL("websearch", conn.Name, resource, instance)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		base+"/search?q="+url.QueryEscape(query)+"&format=json", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+dp.Token)
+	return req, nil
 }
 
 // searchResult is one hit, normalized across backends.

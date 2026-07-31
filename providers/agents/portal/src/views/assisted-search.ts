@@ -8,17 +8,18 @@
 // and this component is invisible — including when the capability probe itself
 // failed, because a broken assisted flow is worse than no assisted flow.
 //
-// What it does: create the Connection (with a client-side token, and NO baseURL
-// — the instance does not exist yet), then hand the agent a prompt and drop the
-// user into its chat to watch the work happen. There is no separate progress
-// surface on purpose: the chat already streams tool calls.
+// What it does: create the Connection naming the instance-to-be, then hand the
+// agent a prompt and drop the user into its chat to watch the work happen.
+// There is no separate progress surface on purpose: the chat already streams
+// tool calls.
 
 import { html, nothing, type TemplateResult } from 'lit'
 import { state } from 'lit/decorators.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
 import { mutate } from '../mutate'
-import { DNS_LABEL_RE, INSTANCE_SIZES, generateAccessToken, searxngSetupPrompt, type InstanceSize } from '../assisted-setup'
+import { DNS_LABEL_RE, INSTANCE_SIZES, searxngSetupPrompt, type InstanceSize } from '../assisted-setup'
+import { familiesForConns } from '../conn-defs'
 import type { ConnectionWrite } from '../types'
 
 export class AssistedSearch extends StoreElement {
@@ -73,15 +74,14 @@ export class AssistedSearch extends StoreElement {
     this.errors = errors
     if (Object.keys(errors).length) return
 
-    // Ordering is deliberate and matches the manual flow: the Connection (and
-    // therefore its Secret) must exist before the instance is provisioned,
-    // because the instance gates on the token stored in that Secret. baseURL is
-    // left empty — there is no URL to set until the agent reports status.url.
+    // The Connection carries no credential and no URL: it names the instance,
+    // and search reaches that instance over the platform's internal data plane.
+    // Creating it before the instance exists is fine — the name is the only
+    // binding, and search reports a clear error until the instance is ready.
     const body: ConnectionWrite = {
       type: 'websearch',
       name: conn,
-      secret: generateAccessToken(),
-      config: { provider: 'searxng' },
+      config: { provider: 'searxng', instance: inst },
     }
     this.busy = true
     const res = await mutate(this.store, {
@@ -90,6 +90,7 @@ export class AssistedSearch extends StoreElement {
       failure: 'Create failed',
       reload: ['connections'],
     })
+    if (res) await this.grantToAgent(conn)
     this.busy = false
     if (!res) return
 
@@ -98,6 +99,33 @@ export class AssistedSearch extends StoreElement {
     // The chat playground lives in the agent's Config pane (right-hand split),
     // so that is where "go to its chat" lands.
     this.navigate({ kind: 'agent', name: this.agent, tab: 'config' })
+  }
+
+  // grantToAgent wires the new connection into the driving agent's interactive
+  // tools. Without this the flow ends with a search backend the agent cannot
+  // actually use: `web_search` only exists when a websearch connection is
+  // granted, so the agent would provision its own backend and still answer
+  // "I can't make web requests". Failure is surfaced but not fatal — the
+  // connection and the instance are still worth having.
+  private async grantToAgent(conn: string): Promise<void> {
+    const agent = this.store.agents.data.find((a) => a.metadata.name === this.agent)
+    if (!agent) return
+    const current = agent.spec?.tools?.interactive?.connections || []
+    if (current.includes(conn)) return
+    const connections = [...current, conn]
+    // Families are derived from the wired connections, never hand-picked. The
+    // connection just created is resolved locally: the store slice may not have
+    // refreshed yet, and without its type the `web` family would be dropped —
+    // leaving the agent with a search backend but no web_search tool.
+    const families = familiesForConns(connections, (n) =>
+      n === conn ? 'websearch' : this.store.connections.data.find((c) => c.metadata.name === n)?.spec.type,
+    )
+    await mutate(this.store, {
+      run: () => this.api.patchAgent(this.agent, { interactiveConnections: connections, interactiveFamilies: families }),
+      success: `Wired “${conn}” into ${this.agent}'s tools.`,
+      failure: `Created the connection, but could not wire it into ${this.agent} — add it under the agent's Tools`,
+      reload: ['agents'],
+    })
   }
 
   render(): TemplateResult {
@@ -113,8 +141,7 @@ export class AssistedSearch extends StoreElement {
       <div class="agents-assist-body">
         <strong>Set up self-hosted search with an agent</strong>
         <span class="muted"
-          >One of your agents can provision the SearXNG instance for you and report its URL — instead of you hopping to Infrastructure
-          and back.</span
+          >One of your agents can provision the SearXNG instance for you — instead of you hopping to Infrastructure and back.</span
         >
       </div>
       <button type="button" class="secondary" @click=${() => this.start()}>Set it up</button>
@@ -134,8 +161,9 @@ export class AssistedSearch extends StoreElement {
           <h3>Self-hosted search, set up for you</h3>
         </header>
         <p class="muted">
-          We create the web-search connection with a strong token, then your agent provisions the <code>searxng</code> instance and
-          tells you the URL to paste back in.
+          We create the web-search connection pointing at an instance name, then your agent provisions the <code>searxng</code>
+          instance itself. Nothing to paste back: agents reach it over the platform's internal path, so it is never published and
+          has no token.
         </p>
 
         ${agents.length > 1

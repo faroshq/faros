@@ -100,7 +100,14 @@ export interface Connection {
   // config carries the type-specific non-secret settings the backend stores on
   // spec.config — for websearch it is {provider: "searxng"|"brave"}, which is
   // what tells the UI a connection is the self-hosted flavour.
-  spec: { type: string; displayName?: string; baseURL?: string; channel?: string; auth?: string; config?: Record<string, string> }
+  spec: {
+    type: string
+    displayName?: string
+    baseURL?: string
+    channel?: string
+    auth?: string
+    config?: Record<string, string>
+  }
   status?: { phase?: string; webhookPath?: string; oauthConnected?: boolean }
 }
 
@@ -382,9 +389,6 @@ export interface ConnectionWrite {
   clientSecret?: string
   oauthScopes?: string[]
   config?: Record<string, string>
-  // Hosts this connection may reach even when they resolve to a private or
-  // loopback address (a self-hosted backend in local dev / in-cluster).
-  allowedHosts?: string[]
 }
 
 export interface CredentialWrite {

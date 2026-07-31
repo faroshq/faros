@@ -18,13 +18,9 @@
 //     kro can't derive a tenant hash in-graph, so the controller stamps it onto
 //     spec; the RGD then reads ${schema.spec.expose.fqdn} for the HTTPRoute
 //     hostname (and, on Application, the oauth2-proxy redirect URL). Every
-//     exposed instance kind (Application, SimpleWebApp, Searxng, Browser)
-//     needs this.
-//   - the access token (self-gating kinds) — an instance whose own auth gate
-//     shares a bearer token with an off-cluster caller can't generate it: the
-//     caller could never read it back. The tenant authors the Secret instead
-//     and names it in spec.tokenSecretRef; the controller bridges it into the
-//     runtime namespace (see tokenbridge.go).
+//     exposed instance kind (Application, SimpleWebApp) needs this. Instances
+//     reached only over the platform-internal data plane are not exposed and
+//     are therefore not registered here at all.
 //   - the OIDC client secret (Application only) — it must land as a Secret
 //     beside the oauth2-proxy pod on the runtime cluster WITHOUT sitting in
 //     the CR spec in clear text. The controller bridges it into
@@ -87,6 +83,16 @@ type instanceKind struct {
 	name string // controller name, unique per kind
 	gvk  schema.GroupVersionKind
 	oidc bool
+	// optionalExposure marks a kind whose template declares exposure
+	// "optional": the instance is internal unless spec.expose.enabled, and the
+	// whole gate is skipped while it is not. Kinds without this are always
+	// published, so their gate is always evaluated.
+	optionalExposure bool
+	// gateRequired forbids the ungated oidc.mode=none. Set for workloads with
+	// no authentication of their own, where publishing without a gate is not a
+	// demo affordance but an open proxy. Their schema offers only "byo", so
+	// this is defence in depth against a hand-edited instance.
+	gateRequired bool
 }
 
 // instanceKinds is every template instance kind the controller reconciles.
@@ -95,11 +101,8 @@ type instanceKind struct {
 var instanceKinds = []instanceKind{
 	{name: "infra-application", gvk: appGVK, oidc: true},
 	{name: "infra-simplewebapp", gvk: webappGVK, oidc: false},
-	// Agent-tool instances (searxng, browser). Exposure-only: both graphs gate
-	// themselves with a bearer-token sidecar rather than an OIDC gate — their
-	// callers are machines with a token, not humans with a browser session.
-	{name: "infra-searxng", gvk: searxngGVK, oidc: false},
-	{name: "infra-browser", gvk: browserGVK, oidc: false},
+	{name: "infra-searxng", gvk: searxngGVK, oidc: true, optionalExposure: true, gateRequired: true},
+	{name: "infra-browser", gvk: browserGVK, oidc: true, optionalExposure: true, gateRequired: true},
 }
 
 // secretGVK is used to Get/Create Secrets via the controller-runtime client
@@ -267,9 +270,6 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 			if err := c.cleanupRegistryPullSecret(ctx, tenant, app.GetNamespace(), app.GetName()); err != nil {
 				return ctrl.Result{}, fmt.Errorf("cleanup registry pull secret: %w", err)
 			}
-			if err := c.cleanupAccessToken(ctx, tenant, app.GetNamespace(), app.GetName()); err != nil {
-				return ctrl.Result{}, fmt.Errorf("cleanup access token secret: %w", err)
-			}
 			controllerutil.RemoveFinalizer(app, finalizer)
 			if err := tenantClient.Update(ctx, app); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
@@ -279,16 +279,14 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 	}
 
 	// A finalizer is needed only when the instance creates cross-cluster state:
-	// oidc kinds always do; any kind does once the tenant mints a registry pull
-	// Secret at promote, or names a Secret in spec.tokenSecretRef for the access
-	// token bridge. Dev/public instances stay finalizer-free so their frequent
-	// create/delete never depends on this controller.
+	// oidc kinds always do, and any kind does once the tenant mints a registry
+	// pull Secret at promote. Dev/public instances stay finalizer-free so their
+	// frequent create/delete never depends on this controller.
 	hasPull, err := c.tenantHasPullSecret(ctx, tenantClient, app.GetName())
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking registry pull secret: %w", err)
 	}
-	hasToken := nestedString(app, "spec", tokenSpecField) != ""
-	if (r.kind.oidc || hasPull || hasToken) && !controllerutil.ContainsFinalizer(app, finalizer) {
+	if (r.kind.oidc || hasPull) && !controllerutil.ContainsFinalizer(app, finalizer) {
 		controllerutil.AddFinalizer(app, finalizer)
 		if err := tenantClient.Update(ctx, app); err != nil {
 			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
@@ -305,17 +303,15 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 		}
 	}
 
-	// Bridge the access token into the runtime namespace, so a self-gating
-	// instance (searxng, browser) and the caller that drives it share ONE
-	// credential — the tenant's own Secret — instead of a copy in the spec.
-	// A no-op when the instance names none.
-	if err := c.bridgeAccessToken(ctx, tenantClient, tenant, app.GetNamespace(), app); err != nil {
-		return ctrl.Result{}, fmt.Errorf("bridging access token: %w", err)
-	}
-
 	// Exposure-only kinds: stamp the fqdn and stop.
 	if !r.kind.oidc {
 		return ctrl.Result{}, c.stampSpec(ctx, tenantClient, tenant, app, false)
+	}
+
+	gate := gateFor(r.kind, nestedBool(app, "spec", "expose", "enabled"), nestedString(app, "spec", "oidc", "mode"))
+	if gate.condition != nil {
+		return ctrl.Result{}, c.setOIDCCondition(ctx, tenantClient, app,
+			gate.condition.status, gate.condition.reason, gate.condition.message)
 	}
 
 	// 1. Stamp spec.expose.fqdn + spec.credentialsSecretName (idempotent).
@@ -324,12 +320,8 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 	}
 
 	// 2. Bridge the OIDC client secret onto the runtime cluster.
-	mode := nestedString(app, "spec", "oidc", "mode")
-	if mode == "" {
-		// Matches the template schema default. An instance authored without an
-		// oidc block gets the no-gate demo behavior rather than a hard error.
-		mode = modeNone
-	}
+	mode := gate.mode
+
 	switch mode {
 	case modeNone:
 		// No auth gate: the HTTPRoute routes straight to the frontend and the
@@ -368,11 +360,6 @@ func (r *instanceReconciler) Reconcile(ctx context.Context, req mcreconcile.Requ
 // a no-op once everything is stamped. Exposure-only kinds don't declare
 // credentialsSecretName in their schema, so stamping it would be pruned —
 // they stamp only the fqdn.
-//
-// spec.tokenSecretName is stamped alongside, for kinds that named a
-// tokenSecretRef: the bridged Secret is keyed on the INSTANCE name, which the
-// RGD cannot derive (spec.name is an independent input), so the graph reads the
-// stamped field instead — the same indirection credentialsSecretName uses.
 func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, tenant string, app *unstructured.Unstructured, withCredentials bool) error {
 	prefix := nestedString(app, "spec", "expose", "hostnamePrefix")
 	curFQDN := nestedString(app, "spec", "expose", "fqdn")
@@ -382,14 +369,9 @@ func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, 
 		return fmt.Errorf("computing fqdn: %w", err)
 	}
 
-	withToken := nestedString(app, "spec", tokenSpecField) != ""
-
 	current := curFQDN == fqdn
 	if withCredentials {
 		current = current && nestedString(app, "spec", "credentialsSecretName") == kro.CredentialsSecretName(app.GetName())
-	}
-	if withToken {
-		current = current && nestedString(app, "spec", tokenSpecNameField) == bridgedTokenSecretName(app.GetName())
 	}
 	if current {
 		return nil
@@ -400,11 +382,6 @@ func (c *Controller) stampSpec(ctx context.Context, tenantClient client.Client, 
 	if withCredentials {
 		if err := unstructured.SetNestedField(app.Object, kro.CredentialsSecretName(app.GetName()), "spec", "credentialsSecretName"); err != nil {
 			return fmt.Errorf("set spec.credentialsSecretName: %w", err)
-		}
-	}
-	if withToken {
-		if err := unstructured.SetNestedField(app.Object, bridgedTokenSecretName(app.GetName()), "spec", tokenSpecNameField); err != nil {
-			return fmt.Errorf("set spec.%s: %w", tokenSpecNameField, err)
 		}
 	}
 	if err := tenantClient.Update(ctx, app); err != nil {
@@ -679,6 +656,58 @@ func (c *Controller) ensureDefaultSAImagePullSecret(ctx context.Context, ns, sec
 func nestedString(u *unstructured.Unstructured, fields ...string) string {
 	s, _, _ := unstructured.NestedString(u.Object, fields...)
 	return s
+}
+
+// nestedBool reads an optional boolean, treating absent/wrong-typed as false —
+// which for spec.expose.enabled is the safe default: not published.
+func nestedBool(u *unstructured.Unstructured, fields ...string) bool {
+	b, _, _ := unstructured.NestedBool(u.Object, fields...)
+	return b
+}
+
+// gateCondition is a terminal answer: report this on the instance and do no
+// further work this reconcile.
+type gateCondition struct {
+	status  string
+	reason  string
+	message string
+}
+
+// gateOutcome is what gateFor decided. Exactly one of condition (terminal) and
+// mode (proceed with this OIDC mode) is meaningful.
+type gateOutcome struct {
+	condition *gateCondition
+	mode      string
+}
+
+// gateFor decides what an oidc kind's auth gate should do, from the instance's
+// exposure opt-in and its requested OIDC mode. Pure so the matrix is testable
+// without a cluster — the rules here are the difference between "published
+// behind your IdP" and "published to everyone", which is not a thing to leave
+// to inspection.
+func gateFor(kind instanceKind, exposeEnabled bool, mode string) gateOutcome {
+	// An optional-exposure instance that has not opted in has no hostname, no
+	// route and no oauth2-proxy — nothing to gate and no client secret to
+	// bridge. It is reached over the data plane instead. Say so on the
+	// instance, because "no OIDC configured" would otherwise read as a
+	// half-finished setup rather than the default and recommended state.
+	if kind.optionalExposure && !exposeEnabled {
+		return gateOutcome{condition: &gateCondition{"True", "NotExposed",
+			"not published on a hostname — reachable only over the platform data plane, authorized per caller"}}
+	}
+	if mode == "" {
+		// Matches the template schema default. An instance authored without an
+		// oidc block gets the no-gate demo behavior rather than a hard error.
+		mode = modeNone
+	}
+	// A workload with no authentication of its own must not be published
+	// ungated. Its schema offers no such mode, so reaching here means a
+	// hand-edited instance — refuse rather than serve it.
+	if kind.gateRequired && mode == modeNone {
+		return gateOutcome{condition: &gateCondition{"False", "GateRequired",
+			"this instance has no authentication of its own, so it cannot be published without an OIDC gate — set oidc.mode=byo or unset expose.enabled"}}
+	}
+	return gateOutcome{mode: mode}
 }
 
 // oidcConditionType is the condition the controller owns on an Application to

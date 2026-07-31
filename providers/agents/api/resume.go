@@ -39,8 +39,9 @@ type resumeDeps struct {
 	Creds         llm.SecretGetter
 	CR            tools.CRAccess
 	EdgesEndpoint string
-	EdgesToken    string
+	HubToken      string
 	EdgesInsecure bool
+	ClusterID     string
 }
 
 // resumeApprovedRun continues a checkpointed run after the user's decision.
@@ -88,7 +89,8 @@ func (s *Server) resumeApprovedRun(scope store.Scope, item store.InboxItem, rd r
 		Creds: rd.Creds, CR: rd.CR, Scope: agentScope, Agent: agent,
 		RunID: run.ID, SessionID: run.SessionID, Trigger: run.Trigger,
 		SourceName: ck.SourceName, NotifyChannel: ck.NotifyChannel,
-		EdgesEndpoint: rd.EdgesEndpoint, EdgesToken: rd.EdgesToken, EdgesInsecure: rd.EdgesInsecure,
+		EdgesEndpoint: rd.EdgesEndpoint, HubToken: rd.HubToken, EdgesInsecure: rd.EdgesInsecure,
+		ClusterID: rd.ClusterID,
 	}
 	if approve {
 		tr.ApproveTool, tr.ApproveArgs, tr.approveUsed = ck.Tool, ck.Args, &used
@@ -99,6 +101,7 @@ func (s *Server) resumeApprovedRun(scope store.Scope, item store.InboxItem, rd r
 	toolset, _, closeTools := s.buildToolset(ctx, tools.Deps{
 		Store: s.store, Scope: agentScope, Agent: agent, CR: rd.CR,
 		Secrets: rd.Creds, ConnSecretName: connectionSecretName, RunID: run.ID,
+		DataPlane: s.dataPlaneFor(tr),
 	}, tr)
 	defer closeTools()
 

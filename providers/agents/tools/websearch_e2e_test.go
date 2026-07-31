@@ -12,7 +12,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -68,14 +67,13 @@ func searxngStub(t *testing.T, wantToken string) *httptest.Server {
 	}))
 }
 
-func searxngDeps(server *httptest.Server, token string, allowedHosts []string) Deps {
+func searxngDeps(server *httptest.Server, token string) Deps {
 	conn := agentsv1alpha1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: "searxng"},
 		Spec: agentsv1alpha1.ConnectionSpec{
-			Type:         agentsv1alpha1.ConnectionTypeWebSearch,
-			BaseURL:      server.URL,
-			Config:       map[string]string{"provider": searchProviderSearXNG},
-			AllowedHosts: allowedHosts,
+			Type:    agentsv1alpha1.ConnectionTypeWebSearch,
+			BaseURL: server.URL,
+			Config:  map[string]string{"provider": searchProviderSearXNG},
 		},
 	}
 	return Deps{
@@ -85,36 +83,17 @@ func searxngDeps(server *httptest.Server, token string, allowedHosts []string) D
 	}
 }
 
-func hostOf(t *testing.T, raw string) string {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.Hostname()
-}
-
-// A self-hosted instance in local development is served on a loopback address,
-// which the SSRF guard blocks by design. The connection's allowedHosts is the
-// explicit opt-in that makes it reachable — this test covers the whole path.
+// A self-hosted instance is commonly served on a loopback or in-cluster address
+// (local development, or a ClusterIP Service). Because the endpoint comes from
+// the Connection rather than from the model, it must work with no extra opt-in
+// — the user should never have to authorize their own configuration.
 func TestWebSearchAgainstSelfHostedSearXNG(t *testing.T) {
 	const token = "s3cret-token"
 	srv := searxngStub(t, token)
 	defer srv.Close()
-	host := hostOf(t, srv.URL)
 
-	t.Run("blocked without an allow-list entry", func(t *testing.T) {
-		out, err := webSearch(context.Background(), searxngDeps(srv, token, nil), "ada lovelace")
-		if err == nil {
-			t.Fatalf("want the guard to refuse a loopback backend, got %q", out)
-		}
-		if !strings.Contains(err.Error(), "non-public address") {
-			t.Fatalf("error should name the guard's reason, got %v", err)
-		}
-	})
-
-	t.Run("reachable once the host is allow-listed", func(t *testing.T) {
-		out, err := webSearch(context.Background(), searxngDeps(srv, token, []string{host}), "ada lovelace")
+	t.Run("a loopback endpoint works with no extra configuration", func(t *testing.T) {
+		out, err := webSearch(context.Background(), searxngDeps(srv, token), "ada lovelace")
 		if err != nil {
 			t.Fatalf("search failed: %v", err)
 		}
@@ -127,7 +106,7 @@ func TestWebSearchAgainstSelfHostedSearXNG(t *testing.T) {
 	})
 
 	t.Run("a wrong token surfaces the backend's rejection", func(t *testing.T) {
-		_, err := webSearch(context.Background(), searxngDeps(srv, "wrong", []string{host}), "x")
+		_, err := webSearch(context.Background(), searxngDeps(srv, "wrong"), "x")
 		if err == nil || !strings.Contains(err.Error(), "401") {
 			t.Fatalf("want the 401 surfaced, got %v", err)
 		}
@@ -138,7 +117,7 @@ func TestWebSearchAgainstSelfHostedSearXNG(t *testing.T) {
 func TestWebSearchAgainstUnauthenticatedSearXNG(t *testing.T) {
 	srv := searxngStub(t, "")
 	defer srv.Close()
-	deps := searxngDeps(srv, "", []string{hostOf(t, srv.URL)})
+	deps := searxngDeps(srv, "")
 	out, err := webSearch(context.Background(), deps, "ada")
 	if err != nil {
 		t.Fatalf("search failed: %v", err)

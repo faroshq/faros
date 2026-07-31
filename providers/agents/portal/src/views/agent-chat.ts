@@ -92,7 +92,10 @@ export class AgentChat extends StoreElement {
       void this.openAgent(this.name).then(() => this.maybeAutoSend())
       return
     }
-    this.maybeAutoSend()
+    // Off the update cycle: maybeAutoSend starts a turn, and mutating reactive
+    // state from inside willUpdate re-enters the cycle so updateComplete never
+    // resolves.
+    queueMicrotask(() => this.maybeAutoSend())
   }
 
   // maybeAutoSend claims a prompt another view handed off (Connections' assisted

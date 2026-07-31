@@ -136,8 +136,17 @@ type taskRun struct {
 	approveUsed *bool
 
 	EdgesEndpoint string // hub mcpserver MCP URL ("" → edges family absent)
-	EdgesToken    string
+	// HubToken is the CALLER's bearer token for the hub. It authenticates the
+	// edges MCP dial AND the infrastructure data plane, so anything reaching a
+	// tenant workload through the platform needs it. Empty on background runs,
+	// which have no user to act as.
+	HubToken      string
 	EdgesInsecure bool
+
+	// ClusterID is the tenant workspace's kcp logical-cluster ID, used with the
+	// caller's token to address instance-backed tools over the infrastructure
+	// provider's data plane.
+	ClusterID string
 
 	OnDelta     func(string)
 	OnToolStart func(id, name, args string)
@@ -187,7 +196,8 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 	toolset, mcpInstructions, closeTools := s.buildToolset(ctx, tools.Deps{
 		Store: s.store, Scope: scope, Agent: agent, CR: run.CR,
 		Secrets: run.Creds, ConnSecretName: connectionSecretName,
-		RunID: runID,
+		RunID:     runID,
+		DataPlane: s.dataPlaneFor(run),
 	}, run)
 	defer closeTools()
 
@@ -288,8 +298,9 @@ func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id id
 	tr.Scope = scope
 	tr.Agent = agent
 	tr.EdgesEndpoint = s.edgesEndpoint(id.clusterID)
-	tr.EdgesToken = id.token
+	tr.HubToken = id.token
 	tr.EdgesInsecure = s.cfg.HubInsecure
+	tr.ClusterID = id.clusterID
 
 	// Detach from the request context: the response returns immediately while
 	// the run continues (executeTask applies the agent's own timeout).
@@ -306,6 +317,18 @@ func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id id
 		s.deliverToNotifyChannel(ctx, c, agent, tr.NotifyChannel, tr.SourceName, res.Content)
 	}()
 	return runID
+}
+
+// dataPlaneFor describes how instance-backed tools reach tenant workloads for
+// this run. Background runs carry no user token, so the result is unusable by
+// design — the tool reports that precisely rather than failing at the hub.
+func (s *Server) dataPlaneFor(run taskRun) tools.DataPlane {
+	return tools.DataPlane{
+		HubBase:   s.cfg.HubURL,
+		ClusterID: run.ClusterID,
+		Token:     run.HubToken,
+		Insecure:  s.cfg.HubInsecure,
+	}
 }
 
 // runCallbacks chains the caller's streaming callbacks with tool-step

@@ -88,6 +88,12 @@ func (s *Server) buildToolset(ctx context.Context, deps tools.Deps, run taskRun)
 				Trigger:     agentsv1alpha1.RunTriggerDelegation,
 				SourceName:  parentDeps.Agent.Name,
 				ParentRunID: parentDeps.RunID,
+				// The child acts as the same caller, so it inherits the data
+				// plane. Edges is deliberately NOT inherited (no endpoint), so
+				// this widens nothing: it only lets a delegated sub-agent use
+				// the same instance-backed tools its parent could.
+				ClusterID: parentDeps.DataPlane.ClusterID,
+				HubToken:  parentDeps.DataPlane.Token,
 			})
 			if err != nil {
 				return "", err
@@ -169,10 +175,10 @@ func (s *Server) buildToolset(ctx context.Context, deps tools.Deps, run taskRun)
 	// dialed as the calling user. This is a base-layer capability provided by
 	// the hub, not a wired-in provider tool — it is always enabled, never opt-in.
 	// It is naturally interactive-only: it acts as the calling user, and only
-	// interactive runs carry a user token (background runs leave EdgesToken
+	// interactive runs carry a user token (background runs leave HubToken
 	// empty), so the token check scopes it without a family gate.
-	if run.EdgesEndpoint != "" && run.EdgesToken != "" {
-		sess, err := tools.ConnectMCPEndpoint(ctx, run.EdgesEndpoint, run.EdgesToken, "edges", run.EdgesInsecure)
+	if run.EdgesEndpoint != "" && run.HubToken != "" {
+		sess, err := tools.ConnectMCPEndpoint(ctx, run.EdgesEndpoint, run.HubToken, "edges", run.EdgesInsecure)
 		if err != nil {
 			log.Printf("toolset: edges MCP unavailable: %v", err)
 		} else {
