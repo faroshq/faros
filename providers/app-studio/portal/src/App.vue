@@ -40,6 +40,7 @@ import {
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantActionFeed } from './assistantActionFeed'
+import { validateLLMBaseURL } from './llmSettingsValidation'
 import AssistantActionLog from './AssistantActionLog.vue'
 import { activeAssistantPlanMessage, assistantPlanProgress, parseAssistantPlan, type AssistantPlan } from './assistantPlan'
 import { formatAssistantWorkedDuration, parseAssistantProgress, type AssistantProgress } from './assistantProgress'
@@ -601,6 +602,7 @@ const llmApiKeyHint = computed(() =>
       ? 'Paste a Gemini API key string, not an OAuth/JWT token.'
       : '',
 )
+const llmBaseURLError = computed(() => validateLLMBaseURL(llmProvider.value, llmBaseURL.value))
 const landingPlaceholderTexts = [
   'Make an app that...',
   'Make a dashboard that...',
@@ -1658,8 +1660,9 @@ function normalizeLLMModelInput(provider: string, model: string, credentialMode:
 }
 
 async function saveLLMSettings() {
-  llmSaving.value = true
   llmStatus.value = null
+  if (llmBaseURLError.value) return
+  llmSaving.value = true
   try {
     const body: { provider?: string; baseURL?: string; model?: string; apiKey?: string } = {
       provider: llmProvider.value.trim() || OPENAI_COMPATIBLE_PROVIDER,
@@ -4696,20 +4699,37 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
             </section>
 
             <section class="grid gap-2">
-              <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Model</div>
+              <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Model endpoint</div>
               <div class="grid gap-2 sm:grid-cols-2">
-                <input
-                  v-model="llmBaseURL"
-                  class="h-10 min-w-0 rounded-md border border-border-subtle bg-surface px-3 text-[13px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
-                  :placeholder="llmBaseURLPlaceholder"
-                  :disabled="llmSaving"
-                />
-                <input
-                  v-model="llmModel"
-                  class="h-10 min-w-0 rounded-md border border-border-subtle bg-surface px-3 text-[13px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
-                  placeholder="Model"
-                  :disabled="llmSaving"
-                />
+                <label class="grid min-w-0 gap-1.5 text-[11px] font-medium text-text-secondary">
+                  Base URL
+                  <input
+                    v-model="llmBaseURL"
+                    class="h-10 min-w-0 rounded-md border bg-surface px-3 text-[13px] text-text-primary outline-none transition placeholder:text-text-muted"
+                    :class="llmBaseURLError ? 'border-danger/50 focus:border-danger' : 'border-border-subtle focus:border-accent/50'"
+                    :placeholder="llmBaseURLPlaceholder"
+                    :disabled="llmSaving"
+                    :aria-invalid="Boolean(llmBaseURLError)"
+                    aria-describedby="llm-base-url-help"
+                    type="url"
+                  />
+                  <span
+                    id="llm-base-url-help"
+                    class="text-[11px] font-normal leading-4"
+                    :class="llmBaseURLError ? 'text-danger' : 'text-text-muted'"
+                  >
+                    {{ llmBaseURLError || (isGoogleGeminiProvider ? 'Provider API base URL.' : 'Base URL only. App Studio adds /chat/completions.') }}
+                  </span>
+                </label>
+                <label class="grid min-w-0 content-start gap-1.5 text-[11px] font-medium text-text-secondary">
+                  Model ID
+                  <input
+                    v-model="llmModel"
+                    class="h-10 min-w-0 rounded-md border border-border-subtle bg-surface px-3 text-[13px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
+                    placeholder="Model"
+                    :disabled="llmSaving"
+                  />
+                </label>
               </div>
             </section>
 
@@ -4762,7 +4782,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 <button
                   class="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-accent/30 bg-accent/10 px-3 text-[13px] font-medium text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
                   title="Save LLM settings"
-                  :disabled="llmSaving || !llmModel.trim()"
+                  :disabled="llmSaving || !llmModel.trim() || Boolean(llmBaseURLError)"
                 >
                   <Loader2 v-if="llmSaving" class="h-4 w-4 animate-spin" :stroke-width="1.75" />
                   <Check v-else class="h-4 w-4" :stroke-width="2" />

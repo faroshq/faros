@@ -165,6 +165,7 @@ cd portal \
   && npm run test:workbench \
   && npm run test:preview-state \
   && npm run test:create-readiness \
+  && npm run test:llm-settings \
   && npm run test:assistant-actions \
   && npm run test:assistant-plan \
   && npm run test:assistant-plan-popover \

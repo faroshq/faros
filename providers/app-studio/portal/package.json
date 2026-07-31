@@ -11,6 +11,7 @@
     "test:preview-state": "node --test src/previewState.test.mjs",
     "test:preview-console": "node --test src/previewConsole.test.mjs",
     "test:create-readiness": "node --test src/createReadiness.test.mjs",
+    "test:llm-settings": "node --test src/llmSettingsValidation.test.mjs",
     "test:assistant-actions": "node --test src/assistantActionFeed.test.mjs src/assistantActionLog.test.mjs",
     "test:assistant-plan": "node --test src/assistantPlan.test.mjs",
     "test:assistant-plan-popover": "node --test src/assistantPlanPopover.test.mjs",

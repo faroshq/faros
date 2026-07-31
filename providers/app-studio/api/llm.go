@@ -1936,6 +1936,9 @@ func normalizeProjectLLMSettings(settings *projectLLMSettings) error {
 		return err
 	}
 	settings.BaseURL = baseURL
+	if err := validateProjectLLMBaseURL(settings.Provider, settings.BaseURL); err != nil {
+		return err
+	}
 	if err := validateProjectLLMAPIKey(settings.Provider, settings.APIKey); err != nil {
 		return err
 	}
@@ -1943,6 +1946,25 @@ func normalizeProjectLLMSettings(settings *projectLLMSettings) error {
 		return newValidationError("model cannot be empty")
 	}
 	return nil
+}
+
+func validateProjectLLMBaseURL(provider, raw string) error {
+	if strings.EqualFold(strings.TrimSpace(provider), projectLLMProviderGoogle) {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	path := strings.ToLower(strings.TrimRight(u.Path, "/"))
+	switch {
+	case strings.HasSuffix(path, "/chat/completions"):
+		return newValidationError("baseURL must be the provider API base URL, not the /chat/completions operation URL; App Studio appends /chat/completions automatically")
+	case strings.HasSuffix(path, "/responses"), strings.HasSuffix(path, "/messages"):
+		return newValidationError("baseURL must be the provider API base URL, not a model operation URL; App Studio's OpenAI-compatible provider requires a /chat/completions model")
+	default:
+		return nil
+	}
 }
 
 func isGenericOpenAIBaseURL(raw string) bool {

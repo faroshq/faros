@@ -82,6 +82,75 @@ func TestNewProjectEinoAssistantModelFactoryUsesNativeGeminiModel(t *testing.T) 
 	}
 }
 
+func TestNormalizeProjectLLMSettingsRejectsOperationURLs(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{
+			name:    "chat completions endpoint",
+			baseURL: "https://opencode.ai/zen/v1/chat/completions",
+			want:    "App Studio appends /chat/completions automatically",
+		},
+		{
+			name:    "chat completions endpoint with trailing slash and mixed case",
+			baseURL: "https://opencode.ai/zen/v1/Chat/Completions/",
+			want:    "App Studio appends /chat/completions automatically",
+		},
+		{
+			name:    "responses endpoint",
+			baseURL: "https://opencode.ai/zen/v1/responses",
+			want:    "requires a /chat/completions model",
+		},
+		{
+			name:    "messages endpoint",
+			baseURL: "https://opencode.ai/zen/v1/messages",
+			want:    "requires a /chat/completions model",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := projectLLMSettings{
+				Provider: defaultProjectLLMProvider,
+				BaseURL:  tt.baseURL,
+				Model:    "test-model",
+			}
+			err := normalizeProjectLLMSettings(&settings)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("normalizeProjectLLMSettings error = %v, want message containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeProjectLLMSettingsAcceptsBaseURLs(t *testing.T) {
+	tests := []projectLLMSettings{
+		{
+			Provider: defaultProjectLLMProvider,
+			BaseURL:  "https://opencode.ai/zen/v1",
+			Model:    "deepseek-v4-flash",
+		},
+		{
+			Provider: defaultProjectLLMProvider,
+			BaseURL:  "https://gateway.example.test/chat/completions-proxy/v1",
+			Model:    "test-model",
+		},
+		{
+			Provider: projectLLMProviderGoogle,
+			BaseURL:  "https://gateway.example.test/v1/responses",
+			Model:    "gemini-test-model",
+		},
+	}
+	for _, settings := range tests {
+		t.Run(settings.BaseURL, func(t *testing.T) {
+			if err := normalizeProjectLLMSettings(&settings); err != nil {
+				t.Fatalf("normalizeProjectLLMSettings returned error: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseProjectCreatePreflight(t *testing.T) {
 	got, err := parseProjectCreatePreflight("```json\n{\"displayName\":\"Task Desk\",\"repositoryName\":\"task-desk\",\"templateName\":\"simple-webapp\",\"turn\":{\"profile\":\"implementation\",\"requires_current_state\":true,\"requires_runtime_state\":false,\"requests_mutation\":true,\"confidence\":\"high\"}}\n```")
 	if err != nil {
