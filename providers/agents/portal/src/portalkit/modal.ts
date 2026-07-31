@@ -11,10 +11,6 @@
 // Usage:
 //   if (await confirmModal({ title: 'Delete agent?', message: '…', danger: true })) { … }
 //   await alertModal('Done', 'The thing happened.')
-//
-// NOTE: this copy carries an accessibility fix (focus trap, dialog-scoped
-// keydown, no global Enter-confirms) that must be lifted back into
-// provider-sdk/portalkit and re-synced to the other portals.
 
 import { ic } from './icons'
 
