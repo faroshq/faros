@@ -1,7 +1,7 @@
 // Assisted setup: capability gating of the affordance, the prompt it composes,
 // and the one-shot handoff into chat.
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DNS_LABEL_RE, searxngSetupPrompt } from '../assisted-setup'
 import type { AgentChat } from '../views/agent-chat'
 import type { Connections } from '../views/connections'
@@ -22,9 +22,15 @@ async function mountConnections(caps: Capabilities, agents = [agentFixture('scou
   store.agents.loaded = true
   store.capabilities.data = caps
   store.capabilities.loaded = true
+  // The assist card waits for connections before deciding whether to show, so
+  // an unloaded slice means "not yet", not "none".
+  store.connections.loaded = true
   const el = await mount<Connections>('agents-connections', { store, api })
   return { el, store, api }
 }
+
+// localStorage carries the manual dismissal, and jsdom keeps it between tests.
+beforeEach(() => localStorage.clear())
 
 describe('capability gating', () => {
   it('offers assisted setup when infrastructure federates and an agent exists', async () => {
@@ -58,6 +64,70 @@ describe('capability gating', () => {
     expect(store.capabilities.error).toBeNull()
     expect(store.capabilities.data.unavailable).toBe(true)
     expect(store.hasProvider('infrastructure')).toBe(false)
+  })
+})
+
+describe('retiring the assist card', () => {
+  // The complaint that prompted this: the card showed on every visit forever,
+  // including long after search was set up.
+  it('disappears once a self-hosted search connection exists', async () => {
+    const { el } = await mountConnections({ providers: ['infrastructure'] }, [agentFixture('scout')], {
+      listConnections: () => Promise.resolve([connFixture('search', { config: { provider: 'searxng', instance: 'search' } })]),
+    })
+    await el.store.load('connections')
+    await settle(el, 4)
+    expect(el.querySelector('.agents-assist')).toBeNull()
+  })
+
+  // A Brave connection is search, but it is not SELF-HOSTED search — the thing
+  // this card offers. It stays, and can be dismissed by hand.
+  it('stays when the only search connection is a hosted API', async () => {
+    const { el } = await mountConnections({ providers: ['infrastructure'] }, [agentFixture('scout')], {
+      listConnections: () => Promise.resolve([connFixture('brave', { config: { provider: 'brave' } })]),
+    })
+    await el.store.load('connections')
+    await settle(el, 4)
+    expect(el.querySelector('.agents-assist')).not.toBeNull()
+  })
+
+  it('can be dismissed, and stays dismissed on the next visit', async () => {
+    const { el } = await mountConnections({ providers: ['infrastructure'] })
+    const dismiss = el.querySelector<HTMLButtonElement>('.agents-assist button[aria-label="Dismiss this suggestion"]')
+    expect(dismiss).not.toBeNull()
+    dismiss!.click()
+    await settle(el, 4)
+    expect(el.querySelector('.agents-assist')).toBeNull()
+
+    // A fresh mount is the next page load.
+    const again = await mountConnections({ providers: ['infrastructure'] })
+    expect(again.el.querySelector('.agents-assist')).toBeNull()
+  })
+
+  // Dismissal is per workspace: setting search up in one says nothing about
+  // another, and one dismissal must not hide the card everywhere.
+  it('does not leak the dismissal to another workspace', async () => {
+    localStorage.setItem('kedge:portal:tenant', JSON.stringify({ orgUUID: 'o1', workspaceUUID: 'w1' }))
+    const first = await mountConnections({ providers: ['infrastructure'] })
+    first.el.querySelector<HTMLButtonElement>('.agents-assist button[aria-label="Dismiss this suggestion"]')!.click()
+    await settle(first.el, 4)
+    expect(first.el.querySelector('.agents-assist')).toBeNull()
+
+    localStorage.setItem('kedge:portal:tenant', JSON.stringify({ orgUUID: 'o1', workspaceUUID: 'w2' }))
+    const second = await mountConnections({ providers: ['infrastructure'] })
+    expect(second.el.querySelector('.agents-assist')).not.toBeNull()
+  })
+
+  // Deciding before the answer is in would flash the card at everyone.
+  it('renders nothing until connections have loaded', async () => {
+    const api = stubApi()
+    const store = makeStore(api)
+    store.agents.data = [agentFixture('scout')]
+    store.agents.loaded = true
+    store.capabilities.data = { providers: ['infrastructure'] }
+    store.capabilities.loaded = true
+    store.connections.loaded = false
+    const el = await mount<Connections>('agents-connections', { store, api })
+    expect(el.querySelector('.agents-assist')).toBeNull()
   })
 })
 

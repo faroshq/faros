@@ -18,7 +18,16 @@ import { state } from 'lit/decorators.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
 import { mutate } from '../mutate'
-import { DNS_LABEL_RE, INSTANCE_SIZES, searxngSetupPrompt, type InstanceSize } from '../assisted-setup'
+import {
+  DNS_LABEL_RE,
+  INSTANCE_SIZES,
+  assistDismissed,
+  rememberAssistDismissed,
+  searxngSetupPrompt,
+  selfHostedSearchConfigured,
+  type InstanceSize,
+} from '../assisted-setup'
+import { readTenant } from '../portalkit/tenant'
 import { familiesForConns } from '../conn-defs'
 import type { ConnectionWrite } from '../types'
 
@@ -132,7 +141,22 @@ export class AssistedSearch extends StoreElement {
     // Both gates matter: no infrastructure tools means the agent cannot
     // provision anything, no agents means there is nobody to ask.
     if (!this.store.hasProvider('infrastructure') || !this.store.agents.data.length) return html`${nothing}`
+    // Wait for connections before deciding. Rendering first and hiding on the
+    // next tick would flash an onboarding card at users who finished
+    // onboarding long ago.
+    if (!this.store.connections.loaded) return html`${nothing}`
+    if (selfHostedSearchConfigured(this.store.connections.data)) return html`${nothing}`
+    if (this.dismissed) return html`${nothing}`
     return html`${this.card()}${this.open ? this.dialog() : nothing}`
+  }
+
+  // dismissed mirrors the stored flag. Held in @state so dismissing re-renders
+  // immediately rather than waiting for the next store update.
+  @state() private dismissed = assistDismissed(readTenant().workspaceUUID)
+
+  private dismiss(): void {
+    rememberAssistDismissed(readTenant().workspaceUUID)
+    this.dismissed = true
   }
 
   private card(): TemplateResult {
@@ -145,6 +169,15 @@ export class AssistedSearch extends StoreElement {
         >
       </div>
       <button type="button" class="secondary" @click=${() => this.start()}>Set it up</button>
+      <button
+        type="button"
+        class="agents-iconbtn"
+        aria-label="Dismiss this suggestion"
+        title="Dismiss — you can still add a web-search connection above"
+        @click=${() => this.dismiss()}
+      >
+        ${icon('x')}
+      </button>
     </div>`
   }
 
