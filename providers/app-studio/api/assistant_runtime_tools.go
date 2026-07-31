@@ -416,6 +416,16 @@ func projectAssistantBrowserConsoleVerificationSummary(result *projectAssistantB
 	)
 }
 
+// projectAssistantLastSyncFailure reports why the project's most recent
+// background workspace sync failed, or "" when the last one succeeded (or none
+// has run). Safe on a run context missing a server or project.
+func projectAssistantLastSyncFailure(runCtx projectAssistantWorkflowRunContext) string {
+	if runCtx.Server == nil || runCtx.Project == nil {
+		return ""
+	}
+	return runCtx.Server.lastDevelopmentSyncFailure(runCtx.Identity, runCtx.Project.Name)
+}
+
 func formatProjectAssistantRuntimeVerification(ctx context.Context, input *projectAssistantRuntimeVerificationContext) (*projectAssistantRuntimeVerificationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -432,6 +442,16 @@ func formatProjectAssistantRuntimeVerification(ctx context.Context, input *proje
 		PreviewURL:              input.Runtime.PreviewURL,
 		Logs:                    input.Logs,
 		BrowserConsole:          input.BrowserConsole,
+	}
+	// A background sync that failed is the single most misleading state to
+	// verify in: the sandbox is healthy and serving, just not the code that was
+	// written. Surface it before any status-derived verdict so the assistant
+	// re-syncs instead of debugging code that was never deployed.
+	if reason := projectAssistantLastSyncFailure(input.RunContext); reason != "" {
+		result.Status = "not_ready"
+		result.Summary = "The development sandbox is not running the latest workspace code: the last sync failed."
+		result.Blockers = append([]string{reason}, result.Blockers...)
+		return result, nil
 	}
 	switch result.Status {
 	case "not_configured":

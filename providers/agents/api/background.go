@@ -13,25 +13,37 @@ package api
 //
 // The provider's own service-account kubeconfig (from init) targets its kcp
 // workspace. From there we read the agents APIExportEndpointSlice to discover
-// the APIExport virtual-workspace URL, which serves every bound tenant
+// the APIExport virtual-workspace URLs, which serve every bound tenant
 // workspace (wildcard /clusters/* for lists, /clusters/<id> for writes) plus
 // the claimed core resources (Secrets — the model credentials). A small
 // polling loop derives due schedules from CR state, claims each fire with an
 // optimistic status update (conflict = another replica won), and submits a
 // serializable Job to the executor (in-process pool today; swappable for a
 // durable engine — see the executor package).
+//
+// The slice advertises ONE ENDPOINT PER KCP SHARD, and each endpoint only
+// serves the tenant workspaces bound on that shard. Binding to a single URL
+// therefore makes every tenant on the other shards invisible: no schedules, no
+// heartbeats, no trigger webhooks, no Discord gateway, no OAuth refresh — all
+// silently, since a wildcard list against the wrong shard returns an empty list
+// rather than an error. So we hold one wildcard client per shard, merge across
+// them on every list, and remember which shard serves each tenant cluster for
+// the single-cluster (write) path.
 
 import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -59,17 +71,34 @@ var sliceGVR = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alp
 // back-to-back failures reach it.
 const maxConsecutiveFailures = 5
 
+// vwShard is one APIExport virtual-workspace endpoint — one kcp shard — and
+// the wildcard client bound to it.
+type vwShard struct {
+	url      string
+	wildcard dynamic.Interface
+}
+
 // background owns the VW plumbing + scheduler policy.
 type background struct {
 	server *Server
 	base   *rest.Config
 	exec   executor.Executor
 
-	vwURL    string
-	wildcard dynamic.Interface
+	// mu guards shards + clusterShard: the poll loop rebuilds them while HTTP
+	// handlers (webhooks, OAuth callbacks) and Discord gateway callbacks read
+	// them.
+	mu     sync.RWMutex
+	shards []*vwShard
+	// clusterShard maps a tenant logical cluster to the URL of the shard that
+	// serves it, learned from wildcard lists and endpoint probes.
+	clusterShard map[string]string
 
 	interval time.Duration
 	key      []byte // webhook HMAC key ("" → webhooks disabled)
+
+	// identities memoises each agent's minted ServiceAccount token, so a busy
+	// scheduler does not re-provision on every run. See agentidentity.go.
+	identities *identityCache
 
 	discord *discordManager // Discord gateway bots (inbound chat)
 }
@@ -91,7 +120,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	if s.cfg.SchedulerInterval > 0 {
 		interval = s.cfg.SchedulerInterval
 	}
-	bg := &background{server: s, base: base, interval: interval, key: s.webhookKeyBytes()}
+	bg := &background{server: s, base: base, interval: interval, key: s.webhookKeyBytes(), identities: newIdentityCache()}
 	bg.exec = executor.NewInProcess(bg.handle, 4, 10*time.Minute)
 	bg.discord = newDiscordManager(bg)
 	_ = bg.exec.Start(ctx)
@@ -128,8 +157,9 @@ func (s *Server) webhookToken(clusterID, name string) string {
 
 // ---- virtual-workspace plumbing --------------------------------------------
 
-// ensureVW discovers (and re-discovers) the APIExport VW URL from the
-// endpoint slice in the provider workspace.
+// ensureVW discovers (and re-discovers) the APIExport VW endpoints from the
+// endpoint slice in the provider workspace — one per kcp shard. Existing shard
+// clients are preserved across calls; only new URLs build a client.
 func (b *background) ensureVW(ctx context.Context) error {
 	dyn, err := dynamic.NewForConfig(b.base)
 	if err != nil {
@@ -139,37 +169,205 @@ func (b *background) ensureVW(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading APIExportEndpointSlice %q: %w", apiExportNameForSlice, err)
 	}
-	endpoints, _, _ := unstructured.NestedSlice(u.Object, "status", "endpoints")
-	if len(endpoints) == 0 {
-		return fmt.Errorf("endpoint slice %q has no endpoints yet", apiExportNameForSlice)
-	}
-	first, _ := endpoints[0].(map[string]any)
-	url, _ := first["url"].(string)
-	if url == "" {
-		return fmt.Errorf("endpoint slice %q endpoint has no url", apiExportNameForSlice)
-	}
-	if url == b.vwURL && b.wildcard != nil {
-		return nil
-	}
-	wc := rest.CopyConfig(b.base)
-	wc.Host = strings.TrimRight(url, "/") + "/clusters/*"
-	wildcard, err := dynamic.NewForConfig(wc)
+	urls, err := sliceEndpointURLs(u)
 	if err != nil {
 		return err
 	}
-	b.vwURL = strings.TrimRight(url, "/")
-	b.wildcard = wildcard
-	log.Printf("background: using APIExport virtual workspace %s", b.vwURL)
+	seen := make(map[string]bool, len(urls))
+	for _, url := range urls {
+		seen[url] = true
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	existing := make(map[string]*vwShard, len(b.shards))
+	for _, s := range b.shards {
+		existing[s.url] = s
+	}
+	shards := make([]*vwShard, 0, len(urls))
+	var added []string
+	for _, url := range urls {
+		if s, ok := existing[url]; ok {
+			shards = append(shards, s)
+			continue
+		}
+		wc := rest.CopyConfig(b.base)
+		wc.Host = url + "/clusters/*"
+		wildcard, err := dynamic.NewForConfig(wc)
+		if err != nil {
+			return err
+		}
+		shards = append(shards, &vwShard{url: url, wildcard: wildcard})
+		added = append(added, url)
+	}
+	if len(added) > 0 || len(shards) != len(b.shards) {
+		log.Printf("background: using %d APIExport virtual workspace endpoint(s): %s", len(shards), strings.Join(urls, ", "))
+	}
+	b.shards = shards
+	// Forget cluster→shard bindings whose shard is gone, so they re-resolve
+	// against the current endpoint set instead of pinning a dead URL.
+	for cluster, url := range b.clusterShard {
+		if !seen[url] {
+			delete(b.clusterShard, cluster)
+		}
+	}
 	return nil
+}
+
+// sliceEndpointURLs reads EVERY endpoint URL off an APIExportEndpointSlice,
+// trimmed and de-duplicated in slice order. kcp publishes one endpoint per
+// shard, so taking only the first silently drops every tenant workspace bound
+// on the other shards.
+func sliceEndpointURLs(u *unstructured.Unstructured) ([]string, error) {
+	endpoints, _, _ := unstructured.NestedSlice(u.Object, "status", "endpoints")
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("endpoint slice %q has no endpoints yet", apiExportNameForSlice)
+	}
+	urls := make([]string, 0, len(endpoints))
+	seen := map[string]bool{}
+	for _, e := range endpoints {
+		m, _ := e.(map[string]any)
+		raw, _ := m["url"].(string)
+		url := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if url == "" || seen[url] {
+			continue
+		}
+		seen[url] = true
+		urls = append(urls, url)
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("endpoint slice %q has no endpoint with a url", apiExportNameForSlice)
+	}
+	return urls, nil
+}
+
+// ready reports whether at least one VW endpoint has been discovered.
+func (b *background) ready() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.shards) > 0
+}
+
+// snapshotShards returns the current shard set for lock-free iteration.
+func (b *background) snapshotShards() []*vwShard {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return append([]*vwShard(nil), b.shards...)
+}
+
+// rememberCluster records which shard serves a tenant cluster.
+func (b *background) rememberCluster(clusterID, shardURL string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.clusterShard == nil {
+		b.clusterShard = map[string]string{}
+	}
+	b.clusterShard[clusterID] = shardURL
+}
+
+// listAll lists a resource across EVERY shard's wildcard endpoint and merges
+// the results, recording each item's owning shard on the way. Listing a single
+// endpoint would silently return only the tenants bound on that one shard.
+//
+// A shard that errors is logged and skipped so its outage cannot stall the
+// tenants on the healthy shards; the call fails only when every shard failed.
+func (b *background) listAll(ctx context.Context, gvr schema.GroupVersionResource) ([]unstructured.Unstructured, error) {
+	shards := b.snapshotShards()
+	if len(shards) == 0 {
+		return nil, fmt.Errorf("no APIExport virtual workspace endpoint discovered yet")
+	}
+	var out []unstructured.Unstructured
+	var failures []string
+	for _, s := range shards {
+		l, err := s.wildcard.Resource(gvr).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", s.url, err))
+			continue
+		}
+		for i := range l.Items {
+			if c := l.Items[i].GetAnnotations()["kcp.io/cluster"]; c != "" {
+				b.rememberCluster(c, s.url)
+			}
+			out = append(out, l.Items[i])
+		}
+	}
+	if len(failures) == len(shards) {
+		return nil, errors.New(strings.Join(failures, "; "))
+	}
+	for _, f := range failures {
+		log.Printf("background: listing %s: %s", gvr.Resource, f)
+	}
+	return out, nil
+}
+
+// shardFor resolves which shard's VW serves a tenant cluster. It answers from
+// cache once any list has seen the cluster; otherwise it probes each endpoint,
+// because the inbound paths (trigger webhooks, channel webhooks, OAuth
+// callbacks) can name a cluster before a list has surfaced it.
+func (b *background) shardFor(ctx context.Context, clusterID string) (string, error) {
+	b.mu.RLock()
+	url, cached := b.clusterShard[clusterID]
+	b.mu.RUnlock()
+	if cached {
+		return url, nil
+	}
+	shards := b.snapshotShards()
+	switch len(shards) {
+	case 0:
+		return "", fmt.Errorf("no APIExport virtual workspace endpoint discovered yet")
+	case 1:
+		return shards[0].url, nil
+	}
+	for _, s := range shards {
+		c := rest.CopyConfig(b.base)
+		c.Host = s.url + "/clusters/" + clusterID
+		dyn, err := dynamic.NewForConfig(c)
+		if err != nil {
+			continue
+		}
+		// A shard that does not host this logical cluster rejects the read;
+		// the one that does answers (an empty list is still an answer).
+		if _, err := dyn.Resource(agentsclient.AgentGVR).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+			continue
+		}
+		b.rememberCluster(clusterID, s.url)
+		return s.url, nil
+	}
+	return "", fmt.Errorf("tenant workspace %q is not served by any of the %d APIExport virtual workspace endpoints", clusterID, len(shards))
+}
+
+// agentToken returns the agent's ServiceAccount token, provisioning the
+// identity on first use. Returns "" on failure — the caller degrades to a run
+// without instance-backed tools, which reports a clear message per tool, rather
+// than failing the whole run.
+func (b *background) agentToken(ctx context.Context, dyn dynamic.Interface, cluster, agent string) string {
+	if b.identities == nil {
+		return ""
+	}
+	if tok, ok := b.identities.get(cluster, agent); ok {
+		return tok
+	}
+	tok, err := ensureAgentIdentity(ctx, dyn, agent)
+	if err != nil {
+		log.Printf("background: agent %q identity unavailable, instance-backed tools disabled for this run: %v", agent, err)
+		return ""
+	}
+	b.identities.put(cluster, agent, tok)
+	return tok
 }
 
 // apiExportNameForSlice is the slice name (same as the export by convention).
 const apiExportNameForSlice = "agents.kedge.faros.sh"
 
-// scoped returns a dynamic client bound to one tenant logical cluster.
-func (b *background) scoped(clusterID string) (dynamic.Interface, error) {
+// scoped returns a dynamic client bound to one tenant logical cluster, on
+// whichever shard's VW actually serves it.
+func (b *background) scoped(ctx context.Context, clusterID string) (dynamic.Interface, error) {
+	url, err := b.shardFor(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
 	c := rest.CopyConfig(b.base)
-	c.Host = b.vwURL + "/clusters/" + clusterID
+	c.Host = url + "/clusters/" + clusterID
 	return dynamic.NewForConfig(c)
 }
 
@@ -200,11 +398,11 @@ func (b *background) loop(ctx context.Context) {
 	defer t.Stop()
 	// Discover the VW immediately so OAuth callbacks and inbound webhooks work
 	// right after startup instead of failing for a full interval (they depend
-	// on b.vwURL, which is otherwise only set on the first tick).
+	// on the shard set, which is otherwise only built on the first tick).
 	if err := b.ensureVW(ctx); err != nil {
 		log.Printf("background: virtual workspace not ready at startup: %v", err)
 	}
-	if b.vwURL != "" && b.discord != nil {
+	if b.ready() && b.discord != nil {
 		b.discord.reconcile(ctx)
 	}
 	for {
@@ -229,14 +427,14 @@ func (b *background) loop(ctx context.Context) {
 }
 
 func (b *background) tick(ctx context.Context) {
-	list, err := b.wildcard.Resource(agentsclient.ScheduleGVR).List(ctx, metav1.ListOptions{})
+	items, err := b.listAll(ctx, agentsclient.ScheduleGVR)
 	if err != nil {
 		log.Printf("background: listing schedules: %v", err)
 		return
 	}
 	now := time.Now().UTC()
-	for i := range list.Items {
-		item := &list.Items[i]
+	for i := range items {
+		item := &items[i]
 		if err := b.process(ctx, item, now); err != nil {
 			log.Printf("background: schedule %s/%s: %v", item.GetAnnotations()["kcp.io/cluster"], item.GetName(), err)
 		}
@@ -381,7 +579,7 @@ func scheduleDue(sched *agentsv1alpha1.Schedule, now time.Time) (fire bool, next
 // updateStatus merges fields into .status and PUTs the status subresource in
 // the object's cluster, using the object's resourceVersion (optimistic claim).
 func (b *background) updateStatus(ctx context.Context, clusterID string, u *unstructured.Unstructured, fields map[string]any) error {
-	dyn, err := b.scoped(clusterID)
+	dyn, err := b.scoped(ctx, clusterID)
 	if err != nil {
 		return err
 	}
@@ -405,7 +603,7 @@ func (b *background) updateStatus(ctx context.Context, clusterID string, u *unst
 // handle executes one background job: load the agent via the VW, run the task
 // through the shared executeTask path, update source status, notify.
 func (b *background) handle(ctx context.Context, job executor.Job) error {
-	dyn, err := b.scoped(job.ClusterID)
+	dyn, err := b.scoped(ctx, job.ClusterID)
 	if err != nil {
 		return err
 	}
@@ -423,9 +621,29 @@ func (b *background) handle(ctx context.Context, job executor.Job) error {
 	res, runErr := b.server.executeTask(ctx, taskRun{
 		Creds: vwSecrets{dyn}, CR: vwCR{dyn}, Scope: scope, Agent: agent,
 		SessionID: job.SessionID, Task: job.Task, Trigger: job.Trigger, SourceName: job.SourceName,
+		NotifyChannel: job.NotifyChannel,
+		// There is no user to act as here, so the run acts as the AGENT's own
+		// ServiceAccount. Failing to mint one is not fatal: the run proceeds
+		// without instance-backed tools, exactly as it did before, rather than
+		// losing a scheduled run over a search backend it may never touch.
+		ClusterID: job.ClusterID,
+		HubToken:  b.agentToken(ctx, dyn, job.ClusterID, agent.Name),
 	})
 
 	b.recordOutcome(ctx, job, res.RunID, runErr)
+
+	// Tell the portal the source's status moved (nextRun/lastFired/lastRunID)
+	// so schedule and trigger rows refresh without waiting for a poll.
+	b.server.events.publish(store.Scope{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID},
+		string(job.Kind), map[string]any{
+			"name": job.SourceName, "agent": agent.Name, "runID": res.RunID, "failed": runErr != nil,
+		})
+
+	// Paused on an approval gate: the request is already in the inbox and was
+	// pushed to the user's channel. Delivery happens when the run resumes.
+	if runErr == nil && res.Pending != nil {
+		return nil
+	}
 
 	// Channel conversations reply through the SOURCE connection — the chat
 	// the user is standing in — not the notify connection.
@@ -470,7 +688,7 @@ func (b *background) scopeFor(ctx context.Context, clusterID, agentName string) 
 // recordOutcome updates the firing schedule's status counters (lastRunID,
 // consecutiveFailures, disable-after-N). Triggers record lastFired instead.
 func (b *background) recordOutcome(ctx context.Context, job executor.Job, runID string, runErr error) {
-	dyn, err := b.scoped(job.ClusterID)
+	dyn, err := b.scoped(ctx, job.ClusterID)
 	if err != nil {
 		return
 	}
@@ -557,10 +775,66 @@ func (b *background) replyToChannelTarget(ctx context.Context, dyn dynamic.Inter
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+	return safeTruncate(s, n)
+}
+
+// triggerFilterAllows evaluates a Trigger's filter against an inbound webhook
+// delivery. Supported keys:
+//
+//	eventType      — exact match on the platform's event header
+//	                 (X-GitHub-Event / X-Event-Type) or a top-level "type"/
+//	                 "action" field in the JSON body
+//	match          — substring that must appear in the raw payload
+//	header.<name>  — exact match on a request header
+//
+// Unknown keys are ignored rather than failing closed, so a filter written for
+// a future source never silently blocks every event.
+func triggerFilterAllows(filter map[string]string, r *http.Request, body []byte) (string, bool) {
+	if len(filter) == 0 {
+		return "", true
 	}
-	return s[:n] + "…"
+	for key, want := range filter {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		switch {
+		case key == "eventType":
+			if !strings.EqualFold(want, webhookEventType(r, body)) {
+				return "eventType does not match " + want, false
+			}
+		case key == "match":
+			if !strings.Contains(string(body), want) {
+				return "payload does not contain " + want, false
+			}
+		case strings.HasPrefix(key, "header."):
+			if !strings.EqualFold(r.Header.Get(strings.TrimPrefix(key, "header.")), want) {
+				return key + " does not match", false
+			}
+		}
+	}
+	return "", true
+}
+
+// webhookEventType resolves the delivery's event type from the conventional
+// platform headers, falling back to a "type"/"action" field in the JSON body.
+func webhookEventType(r *http.Request, body []byte) string {
+	for _, h := range []string{"X-GitHub-Event", "X-Event-Type", "X-Event-Key"} {
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			return v
+		}
+	}
+	var probe struct {
+		Type   string `json:"type"`
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(body, &probe) == nil {
+		if probe.Type != "" {
+			return probe.Type
+		}
+		return probe.Action
+	}
+	return ""
 }
 
 // ---- inbound webhooks --------------------------------------------------------
@@ -572,7 +846,7 @@ func truncate(s string, n int) string {
 func (s *Server) webhookTrigger(w http.ResponseWriter, r *http.Request) {
 	cluster, name, token := r.PathValue("cluster"), r.PathValue("name"), r.PathValue("token")
 	expected := s.webhookToken(cluster, name)
-	if expected == "" || s.bg == nil || s.bg.wildcard == nil {
+	if expected == "" || s.bg == nil || !s.bg.ready() {
 		writeStatus(w, http.StatusServiceUnavailable, "Unavailable", "background executor is not running on this provider")
 		return
 	}
@@ -580,7 +854,7 @@ func (s *Server) webhookTrigger(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusForbidden, "Forbidden", "invalid webhook token")
 		return
 	}
-	dyn, err := s.bg.scoped(cluster)
+	dyn, err := s.bg.scoped(r.Context(), cluster)
 	if err != nil {
 		writeStatus(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -596,6 +870,12 @@ func (s *Server) webhookTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	// spec.filter narrows which deliveries actually fire a run. A filtered-out
+	// event is acked (202) so the sender does not retry.
+	if reason, ok := triggerFilterAllows(trig.Spec.Filter, r, body); !ok {
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "filtered", "reason": reason})
+		return
+	}
 	task := trig.Spec.Task
 	if len(strings.TrimSpace(string(body))) > 0 {
 		task += "\n\nEvent payload:\n" + string(body)

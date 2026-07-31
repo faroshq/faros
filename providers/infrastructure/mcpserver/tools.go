@@ -60,6 +60,8 @@ type templateSummary struct {
 	Cloud       string `json:"cloud,omitempty"`
 	Version     string `json:"version,omitempty"`
 	Kind        string `json:"kind"`
+	// Exposure: "internal" | "optional" | "public". See kro.Template.
+	Exposure string `json:"exposure,omitempty"`
 }
 
 type listTemplatesOutput struct {
@@ -100,6 +102,18 @@ type instanceNameInput struct {
 	Name string `json:"name" jsonschema:"Instance name"`
 }
 
+type updateInstanceInput struct {
+	Name   string         `json:"name" jsonschema:"Instance name"`
+	Values map[string]any `json:"values" jsonschema:"JSON merge patch for the instance's values: send only the fields to change (objects merge, null unsets, scalars/arrays replace). Immutable fields (name, kedgeMode, platform-stamped, template-declared) are rejected."`
+}
+
+type updateInstanceOutput struct {
+	Name     string   `json:"name"`
+	Template string   `json:"template"`
+	Phase    string   `json:"phase"`
+	Changed  []string `json:"changed"`
+}
+
 type deleteOutput struct {
 	Deleted bool `json:"deleted"`
 }
@@ -115,7 +129,7 @@ func registerTools(srv *mcp.Server, deps Deps, ident identity) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_templates",
 		Title:       "List provisioning templates",
-		Description: "List every template available in your workspace catalog, optionally filtered by category or cloud. Call this first when the user asks 'what can I deploy?'.",
+		Description: "List every template available in your workspace catalog, optionally filtered by category or cloud. Call this first when the user asks 'what can I deploy?'. Each entry's exposure says whether its instances get a public URL: \"internal\" means never (reached over the platform data plane instead), \"optional\" means only if the instance asks for it, \"public\" means always.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listTemplatesInput) (*mcp.CallToolResult, listTemplatesOutput, error) {
 		dyn, err := tenantClient(deps, ident)
@@ -137,6 +151,7 @@ func registerTools(srv *mcp.Server, deps Deps, ident identity) {
 			out.Templates = append(out.Templates, templateSummary{
 				Name: t.Name, DisplayName: t.DisplayName, Description: t.Description,
 				Category: t.Category, Cloud: t.Cloud, Version: t.Version, Kind: t.InstanceKind,
+				Exposure: t.Exposure,
 			})
 		}
 		return nil, out, nil
@@ -145,7 +160,7 @@ func registerTools(srv *mcp.Server, deps Deps, ident identity) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "describe_template",
 		Title:       "Inspect a template's inputs schema",
-		Description: "Return a template's metadata, JSON-schema for its inputs, agent guidance (usage/prerequisites/outputs), and — when present — its development contract (development.components maps each component to the workspace directory dev_sync routes from). Use this to learn what values provision will require before calling it.",
+		Description: "Return a template's metadata, JSON-schema for its inputs, agent guidance (usage/prerequisites/outputs), and — when present — its development contract (development.components maps each component to the workspace directory dev_sync routes from). Use this to learn what values provision will require before calling it. Check exposure before promising the user a URL: \"internal\" instances never get one, so do not poll status.url for them.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in describeTemplateInput) (*mcp.CallToolResult, kro.Template, error) {
 		dyn, err := tenantClient(deps, ident)
@@ -189,7 +204,7 @@ func registerTools(srv *mcp.Server, deps Deps, ident identity) {
 		inst, err := createInstance(ctx, dyn, t, in.Name, in.Values)
 		if err != nil {
 			if apierrors.IsAlreadyExists(err) {
-				return nil, provisionOutput{}, fmt.Errorf("instance %q already exists", in.Name)
+				return nil, provisionOutput{}, fmt.Errorf("instance %q already exists — use update_instance to change it in place, or pick another name", in.Name)
 			}
 			return nil, provisionOutput{}, fmt.Errorf("create instance: %w", err)
 		}
@@ -247,6 +262,37 @@ func registerTools(srv *mcp.Server, deps Deps, ident identity) {
 			return nil, kro.Instance{}, fmt.Errorf("get instance: %w", err)
 		}
 		return nil, *inst, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_instance",
+		Title:       "Update a live instance's values in place",
+		Description: "Merge-patch an instance's values (RFC 7386: send only what changes, null unsets) and let the backend reconcile the delta — an image bump becomes a rolling update with managed state (e.g. the database) untouched. Use this instead of delete+provision to roll a new image tag, scale replicas, change ports/env/schedule, or adjust oidc settings. Rejected for immutable fields: name, kedgeMode (dev↔production is a recreate), platform-stamped fields, and anything the template declares immutable (e.g. database.version).",
+		Annotations: &mcp.ToolAnnotations{
+			IdempotentHint:  true,
+			DestructiveHint: &no,
+			OpenWorldHint:   &yes,
+		},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in updateInstanceInput) (*mcp.CallToolResult, updateInstanceOutput, error) {
+		if len(in.Values) == 0 {
+			return nil, updateInstanceOutput{}, fmt.Errorf("values is required — send the fields to change as a merge patch")
+		}
+		dyn, err := tenantClient(deps, ident)
+		if err != nil {
+			return nil, updateInstanceOutput{}, err
+		}
+		ts, err := listTemplates(ctx, dyn)
+		if err != nil {
+			return nil, updateInstanceOutput{}, fmt.Errorf("list templates: %w", err)
+		}
+		inst, changed, err := updateInstance(ctx, dyn, ts, in.Name, in.Values)
+		if err != nil {
+			if errors.Is(err, kro.ErrInstanceNotFound) {
+				return nil, updateInstanceOutput{}, fmt.Errorf("instance %q not found", in.Name)
+			}
+			return nil, updateInstanceOutput{}, err
+		}
+		return nil, updateInstanceOutput{Name: inst.Name, Template: inst.Template, Phase: inst.Phase, Changed: changed}, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{

@@ -906,7 +906,7 @@ func TestEinoAssistantEngineDeepPhasePreservesTerminalPhaseAcrossReductionAfterS
 			Risk:        projectAssistantToolRiskCommit,
 		},
 	}
-	largeSource := strings.Repeat("source ", 9000)
+	largeSource := strings.Repeat("source ", 7000)
 	tests := []struct {
 		name            string
 		initialCreation bool
