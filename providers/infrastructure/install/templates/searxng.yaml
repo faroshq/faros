@@ -632,7 +632,10 @@ spec:
         name: ${service.metadata.name}
         namespace: ${service.metadata.namespace}
       ready: ${deployment.status.readyReplicas}
-      # Empty unless this instance opted into exposure — a URL that is only
-      # sometimes real is worse than one that is honestly absent.
-      url: '${schema.spec.expose.enabled ? "https://" + schema.spec.expose.fqdn : ""}'
+      # Read off the HTTPRoute, never off spec: ${schema.*} is forbidden in
+      # status by this kro fork (the RGD is rejected outright), and the route
+      # is includeWhen-gated — so this resolves only for an instance that
+      # opted into exposure and is simply absent otherwise. That is exactly
+      # the wanted semantics: no URL that is only sometimes real.
+      url: ${"https://" + httpRoute.spec.hostnames[0] + "${kedge.appPublicPort}"}
 

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
@@ -329,6 +330,59 @@ func TestSeedTemplatesInternalByDefaultServices(t *testing.T) {
 			}
 			if findResource(t, rgd, "gate") != nil {
 				t.Fatal("the nginx bearer sidecar is back — exposure is gated by OIDC now")
+			}
+		})
+	}
+}
+
+// This kro fork builds the instance status schema without the instance spec in
+// scope, so a ${schema.*} reference there does not degrade — kro rejects the
+// whole RGD with "references unknown identifiers: [schema]" and the template
+// never becomes ready. buildRGD refuses it up front so the author gets a
+// message that says what to do instead, rather than an opaque rejection eight
+// minutes into an E2E run. (It caught exactly that, once.)
+func TestBuildRGDRejectsSchemaRefsInStatus(t *testing.T) {
+	tmpl := func(status string) *infrav1alpha1.Template {
+		out := &infrav1alpha1.Template{}
+		out.Name = "t"
+		out.Spec.InstanceCRD = infrav1alpha1.TemplateInstanceCRD{
+			Group: "infrastructure.kedge.faros.sh", Version: "v1alpha1", Resource: "ts", Kind: "T",
+		}
+		out.Spec.Schema = &runtime.RawExtension{Raw: []byte(`{"type":"object","properties":{"name":{"type":"string"}}}`)}
+		out.Spec.BackendConfig = &runtime.RawExtension{Raw: []byte(
+			`{"resources":[{"id":"svc","template":{"apiVersion":"v1","kind":"Service","metadata":{"name":"x"}}}],"status":` + status + `}`)}
+		return out
+	}
+
+	for _, tc := range []struct {
+		name, status string
+		wantErr      bool
+	}{
+		{name: "top-level schema ref", status: `{"url":"https://${schema.spec.name}"}`, wantErr: true},
+		{name: "nested in an object", status: `{"ref":{"name":"${schema.spec.name}"}}`, wantErr: true},
+		{name: "nested in a list", status: `{"hosts":["${schema.spec.name}"]}`, wantErr: true},
+		// The ternary that actually shipped and broke the seed templates.
+		{name: "inside a conditional", status: `{"url":"${schema.spec.expose.enabled ? \"a\" : \"\"}"}`, wantErr: true},
+		// Resource-derived is the supported form, including a gated resource.
+		{name: "resource ref", status: `{"url":"${\"https://\" + httpRoute.spec.hostnames[0]}"}`},
+		// "schema." as literal text outside an expression is not a reference,
+		// and a resource whose name merely ends in "schema" is not either.
+		{name: "literal text", status: `{"note":"see schema.spec for details"}`},
+		{name: "lookalike resource name", status: `{"v":"${openapiSchema.metadata.name}"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildRGD(tmpl(tc.status), testTokens())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want a rejection naming the status field")
+				}
+				if !strings.Contains(err.Error(), "${schema.*}") {
+					t.Fatalf("error should explain the rule: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected rejection: %v", err)
 			}
 		})
 	}

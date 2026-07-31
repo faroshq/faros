@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"regexp"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -95,6 +96,9 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 	if err := checkExposure(tmpl, resources); err != nil {
 		return nil, err
 	}
+	if err := checkStatusExpressions(tmpl, status); err != nil {
+		return nil, err
+	}
 
 	// A development block extends the graph with the mechanically synthesized
 	// dev overlay (mode-gated dev workloads, workspace PVCs, control plane)
@@ -137,6 +141,60 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 		},
 	}}
 	return rgd, nil
+}
+
+// schemaRefRE finds a reference to the instance's own spec inside a status
+// expression. Word-boundary anchored so a resource legitimately named e.g.
+// "openapiSchema" is not mistaken for one.
+var schemaRefRE = regexp.MustCompile(`\bschema\.`)
+
+// exprRE spans one ${...} expression. Only their contents are checked: a
+// status value may contain the word "schema." as literal text.
+var exprRE = regexp.MustCompile(`\$\{[^}]*\}`)
+
+// checkStatusExpressions rejects ${schema.*} in a status mapping. This kro fork
+// builds the instance status schema without the spec in scope, so such an
+// expression does not degrade — it makes kro reject the whole RGD with
+// "references unknown identifiers: [schema]", which surfaces as a template
+// that silently never becomes ready.
+//
+// Catching it here turns an 8-minute E2E failure and an opaque kro message
+// into an immediate one that says what to do instead. Status is derived from
+// RESOURCES (which carry the resolved values anyway); a field that should only
+// exist sometimes gets there by referencing an includeWhen-gated resource,
+// which simply does not resolve when that resource is excluded.
+func checkStatusExpressions(tmpl *infrav1alpha1.Template, status map[string]any) error {
+	var walk func(path string, v any) error
+	walk = func(path string, v any) error {
+		switch t := v.(type) {
+		case string:
+			for _, expr := range exprRE.FindAllString(t, -1) {
+				if schemaRefRE.MatchString(expr) {
+					return fmt.Errorf("template %q: status field %s uses %s — ${schema.*} is not in scope when kro builds the status schema and the RGD is rejected outright; derive the value from a resource instead (an includeWhen-gated resource yields a field that is absent when that resource is excluded)",
+						tmpl.Name, path, expr)
+				}
+			}
+		case map[string]any:
+			for k, sub := range t {
+				if err := walk(path+"."+k, sub); err != nil {
+					return err
+				}
+			}
+		case []any:
+			for i, sub := range t {
+				if err := walk(fmt.Sprintf("%s[%d]", path, i), sub); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for k, v := range status {
+		if err := walk("status."+k, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkExposure holds spec.exposure to what the graph actually does. The
