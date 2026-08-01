@@ -18,8 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -120,6 +122,207 @@ func TestEinoV2MutationReplayDispatchesExactlyOnce(t *testing.T) {
 	}
 }
 
+type projectAssistantIncompleteThenCompleteModel struct {
+	calls            int
+	partialToolCall  bool
+	alwaysIncomplete bool
+	setupErrors      int
+}
+
+func (m *projectAssistantIncompleteThenCompleteModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...einomodel.Option,
+) (*schema.Message, error) {
+	return nil, errors.New("Generate should not be called")
+}
+
+func (m *projectAssistantIncompleteThenCompleteModel) Stream(
+	context.Context,
+	[]*schema.Message,
+	...einomodel.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	m.calls++
+	if m.calls <= m.setupErrors {
+		return nil, io.ErrUnexpectedEOF
+	}
+	message := schema.AssistantMessage("discarded partial", nil)
+	if m.partialToolCall {
+		message = schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   "partial-call",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      projectToolApplyPatch,
+				Arguments: `{"patch":`,
+			},
+		}})
+	}
+	if m.calls > 1 && !m.alwaysIncomplete {
+		message = schema.AssistantMessage("recovered response", nil)
+		message.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func TestEinoV2PublishesReconnectForPreStreamFailure(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-pre-stream-retry")
+	model := &projectAssistantIncompleteThenCompleteModel{setupErrors: 1}
+	h.req.LLM = projectLLMSettings{
+		Provider:          defaultProjectLLMProvider,
+		MaxRetries:        5,
+		RetryBackoff:      time.Millisecond,
+		StreamIdleTimeout: time.Second,
+	}
+	var statuses []string
+	h.req.StreamCallbacks.OnStatus = func(status string) { statuses = append(statuses, status) }
+	engine := projectEinoAssistantEngine{
+		server: h.server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return nil, nil
+		},
+	}
+
+	result, err := engine.StreamProjectAssistant(context.Background(), h.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "recovered response" || model.calls != 2 {
+		t.Fatalf("result = %q after %d calls, want recovered response after setup retry", result.Content, model.calls)
+	}
+	if len(statuses) != 1 || statuses[0] != "Model connection was interrupted; reconnecting 1/5" {
+		t.Fatalf("statuses = %#v, want one reconnect warning", statuses)
+	}
+}
+
+func TestEinoV2ExhaustionStopsAtConfiguredRetryCount(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-stream-exhaustion")
+	model := &projectAssistantIncompleteThenCompleteModel{alwaysIncomplete: true}
+	h.req.LLM = projectLLMSettings{
+		Provider:          defaultProjectLLMProvider,
+		MaxRetries:        5,
+		RetryBackoff:      time.Millisecond,
+		StreamIdleTimeout: time.Second,
+	}
+	var statuses []string
+	h.req.StreamCallbacks.OnStatus = func(status string) { statuses = append(statuses, status) }
+	engine := projectEinoAssistantEngine{
+		server: h.server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return nil, nil
+		},
+	}
+
+	_, err := engine.StreamProjectAssistant(context.Background(), h.req)
+	var incomplete *projectEinoAssistantIncompleteStreamError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("terminal error = %v, want original incomplete-stream error", err)
+	}
+	if model.calls != 6 {
+		t.Fatalf("model calls = %d, want initial call plus five retries", model.calls)
+	}
+	if len(statuses) != 5 || statuses[len(statuses)-1] != "Model connection was interrupted; reconnecting 5/5" {
+		t.Fatalf("statuses = %#v, want exactly 1/5 through 5/5", statuses)
+	}
+}
+
+func TestEinoV2DoesNotDispatchToolFromRejectedIncompleteResponse(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-incomplete-tool-stream")
+	model := &projectAssistantIncompleteThenCompleteModel{partialToolCall: true}
+	h.req.LLM = projectLLMSettings{
+		Provider:          defaultProjectLLMProvider,
+		MaxRetries:        5,
+		RetryBackoff:      time.Millisecond,
+		StreamIdleTimeout: time.Second,
+	}
+	backendCalls := 0
+	backend := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			backendCalls++
+			return `{"operation":"apply_patch","paths":["src/App.tsx"]}`, nil
+		},
+	}
+	engine := projectEinoAssistantEngine{
+		server: h.server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(_ context.Context, req projectAssistantRunRequest, state *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return []einotool.BaseTool{newProjectEinoAssistantServerTool(h.server, backend, req, state)}, nil
+		},
+	}
+
+	result, err := engine.StreamProjectAssistant(context.Background(), h.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "recovered response" || model.calls != 2 {
+		t.Fatalf("result = %q after %d calls, want recovered response after one retry", result.Content, model.calls)
+	}
+	if backendCalls != 0 {
+		t.Fatalf("backend calls = %d, want no dispatch from rejected incomplete response", backendCalls)
+	}
+	events, err := h.messages.ListAssistantRunEvents(context.Background(), h.scope, h.req.AssistantRun.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("durable tool events = %#v, want none from rejected incomplete response", events)
+	}
+}
+
+func TestEinoV2RecoversIncompleteChatCompletionLikeCodex(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-incomplete-stream")
+	model := &projectAssistantIncompleteThenCompleteModel{}
+	h.req.LLM = projectLLMSettings{
+		Provider:          defaultProjectLLMProvider,
+		MaxRetries:        5,
+		RetryBackoff:      time.Millisecond,
+		StreamIdleTimeout: time.Second,
+	}
+	var statuses []string
+	var accepted []string
+	h.req.StreamCallbacks = projectAssistantStreamCallbacks{
+		OnStatus: func(status string) { statuses = append(statuses, status) },
+		OnChunk:  func(content string) { accepted = append(accepted, content) },
+	}
+	engine := projectEinoAssistantEngine{
+		server: h.server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) ([]einotool.BaseTool, error) {
+			return nil, nil
+		},
+	}
+
+	result, err := engine.StreamProjectAssistant(context.Background(), h.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.calls != 2 {
+		t.Fatalf("model calls = %d, want one retry", model.calls)
+	}
+	if result.Content != "recovered response" || strings.Join(accepted, "") != "recovered response" {
+		t.Fatalf("accepted response = (%q, %#v), want only recovered response", result.Content, accepted)
+	}
+	foundReconnect := false
+	for _, status := range statuses {
+		if status == "Model connection was interrupted; reconnecting 1/5" {
+			foundReconnect = true
+		}
+	}
+	if !foundReconnect {
+		t.Fatalf("statuses = %#v, want reconnect 1/5", statuses)
+	}
+}
+
 func TestEinoV2PartialPatchRollbackTracksActualDeltaOnce(t *testing.T) {
 	h := newProjectAssistantV2ToolHarness(t, "v2-partial-patch")
 	actual := workspace.MutationResult{
@@ -173,6 +376,9 @@ func TestEinoV2CommitWorkspaceDigestRejectsPostApprovalChange(t *testing.T) {
 	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "before\n"}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
 	runState := newProjectEinoAssistantRunState()
 	runState.RecordSuccessfulMutationPath("src/App.tsx")
 	runState.RecordSourceMutation()
@@ -183,7 +389,7 @@ func TestEinoV2CommitWorkspaceDigestRejectsPostApprovalChange(t *testing.T) {
 	}
 	runState.RecordVerifiedWorkspaceDigest(digest)
 	tool := projectEinoAssistantTool{req: projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope}, runState: runState}
-	args, err := tool.v2CommitArguments(map[string]any{"paths": []any{"src/App.tsx"}, "message": "Update app"})
+	args, err := tool.v2CommitArguments(ctx, map[string]any{"paths": []any{"src/App.tsx"}, "message": "Update app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,15 +402,12 @@ func TestEinoV2CommitWorkspaceDigestRejectsPostApprovalChange(t *testing.T) {
 	if _, err := workspaces.WriteFile(ctx, scope, workspace.WriteOptions{Path: "src/App.tsx", Content: "after\n"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := tool.validateV2CommitWorkspace(ctx, args); err == nil || !strings.Contains(err.Error(), "changed after operational verification") {
+	if err := tool.validateV2CommitWorkspace(ctx, args); err == nil || !strings.Contains(err.Error(), "changed after commit approval") {
 		t.Fatalf("changed workspace error = %v", err)
-	}
-	if runState.VerifiedWorkspaceDigest() != "" {
-		t.Fatal("stale verified workspace digest survived content change")
 	}
 }
 
-func TestEinoV2RestoresPriorUncommittedPathsForCommit(t *testing.T) {
+func TestEinoV2UsesPriorUncommittedPathsWithoutRestoringMutationRevision(t *testing.T) {
 	ctx := context.Background()
 	workspaces := workspace.NewFileStore(t.TempDir())
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
@@ -216,22 +419,11 @@ func TestEinoV2RestoresPriorUncommittedPathsForCommit(t *testing.T) {
 	}
 	runState := newProjectEinoAssistantRunState()
 	req := projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope, CollaborationMode: projectAssistantCollaborationModeDefault}
-	if err := restoreProjectEinoAssistantUncommittedPaths(ctx, req, runState); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(runState.SuccessfulMutationPaths(), ","); got != "package.json" {
-		t.Fatalf("restored paths = %q, want package.json", got)
-	}
-	if revision, _ := runState.SourceMutationRevisions(); revision != 1 {
-		t.Fatalf("restored mutation revision = %d, want 1", revision)
-	}
-	runState.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
 	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, []string{"package.json"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runState.RecordVerifiedWorkspaceDigest(digest)
-	args, err := (projectEinoAssistantTool{req: req, runState: runState}).v2CommitArguments(map[string]any{
+	args, err := (projectEinoAssistantTool{req: req, runState: runState}).v2CommitArguments(ctx, map[string]any{
 		"paths": []any{"package.json"}, "message": "Commit pending source",
 	})
 	if err != nil {
@@ -242,6 +434,9 @@ func TestEinoV2RestoresPriorUncommittedPathsForCommit(t *testing.T) {
 	}
 	if got := projectToolString(args["workspaceDigest"]); got != digest {
 		t.Fatalf("workspace digest = %q, want %q", got, digest)
+	}
+	if revision, _ := runState.SourceMutationRevisions(); revision != 0 {
+		t.Fatalf("durable dirty paths manufactured mutation revision %d", revision)
 	}
 }
 

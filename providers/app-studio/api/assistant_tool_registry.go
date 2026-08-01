@@ -156,8 +156,8 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:        projectToolApplyPatch,
-				Description: "Apply one atomic contextual patch to project-relative UTF-8 files. The patch must start with '*** Begin Patch' and end with '*** End Patch'. Use '*** Add File: <path>' with '+' content lines or '*** Update File: <path>' with one or more @@ hunks. Delete File and Move to are unavailable because the repository commit bridge cannot yet preserve deletions. Hunk lines start with space (context), '-' (remove), or '+' (add). Include at least three stable surrounding context lines and an @@ class/function anchor when needed to make every match unique. Parent directories are created automatically. A multi-file patch is fully preflighted before any mutation.",
-				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"patch":{"type":"string","minLength":1,"maxLength":%d,"description":"Codex-style contextual patch envelope using only project-relative paths."}},"required":["patch"],"additionalProperties":false}`, workspace.MaxUnifiedPatchBytes)),
+				Description: "Apply one atomic contextual patch to project-relative UTF-8 files. The patch must start with '*** Begin Patch' and end with '*** End Patch'. Use '*** Add File: <path>' with '+' content lines or '*** Update File: <path>' with one or more contextual hunks. " + projectAssistantContextualPatchFormatInstruction + "Delete File and Move to are unavailable because the repository commit bridge cannot yet preserve deletions. Hunk lines start with space (context), '-' (remove), or '+' (add). Include at least three stable surrounding context lines when needed to make every match unique. Parent directories are created automatically. A multi-file patch is fully preflighted before any mutation.",
+				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"patch":{"type":"string","minLength":1,"maxLength":%d,"description":"Contextual patch envelope using only project-relative paths. Hunk headers are exactly '@@' or '@@ <literal source line>'; numeric unified-diff coordinates are forbidden."}},"required":["patch"],"additionalProperties":false}`, workspace.MaxUnifiedPatchBytes)),
 				Risk:        projectAssistantToolRiskWrite,
 			},
 			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
@@ -166,19 +166,8 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					return "", err
 				}
 				patch, _ := projectToolRawString(req.Arguments["patch"])
-				readPaths, err := workspace.PatchReadPaths(patch)
-				if err != nil {
-					return "", err
-				}
 				if err := workspace.ValidateCommittablePatch(patch); err != nil {
 					return "", err
-				}
-				if req.EnforceMutationSafety {
-					for _, readPath := range readPaths {
-						if !projectAssistantPathWasObserved(readPath, req.ObservedReadFiles) {
-							return "", fmt.Errorf("read_file must successfully read %q in this assistant turn before apply_patch can update, move, or delete it", readPath)
-						}
-					}
 				}
 				return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, workspace.PatchOptions{
 					Patch: patch,
@@ -370,16 +359,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		})
 	}
 	return newProjectAssistantToolRegistry(tools...)
-}
-
-func projectAssistantPathWasObserved(target string, observed []string) bool {
-	for _, raw := range observed {
-		clean, err := workspace.CleanProjectPath(raw)
-		if err == nil && clean == target {
-			return true
-		}
-	}
-	return false
 }
 
 func projectAssistantToolServer(server *Server) (*Server, error) {

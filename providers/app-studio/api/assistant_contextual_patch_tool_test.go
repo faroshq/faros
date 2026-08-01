@@ -58,8 +58,99 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 			t.Fatalf("apply_patch schema still contains %q: %s", forbidden, spec.Parameters)
 		}
 	}
+	for _, want := range []string{
+		"must be exactly '@@' or '@@ <literal source line copied from the file>'",
+		"Never emit Git/unified-diff line coordinates",
+		"@@ -12,4 +12,5 @@",
+		"do not repeat the anchor in the hunk body",
+		"Use plain '@@' when changing the first line",
+		"*** Update File: src/App.jsx",
+	} {
+		if !strings.Contains(spec.Description, want) {
+			t.Fatalf("apply_patch description missing %q: %s", want, spec.Description)
+		}
+	}
+	for _, want := range []string{
+		"Hunk headers are exactly '@@' or '@@ <literal source line>'",
+		"numeric unified-diff coordinates are forbidden",
+	} {
+		if !strings.Contains(string(spec.Parameters), want) {
+			t.Fatalf("apply_patch parameter schema missing %q: %s", want, spec.Parameters)
+		}
+	}
 	if strings.Contains(spec.Description, "'*** Delete File:") || strings.Contains(spec.Description, "optional '*** Move to:") {
 		t.Fatalf("apply_patch still advertises repository-incompatible deletion semantics: %s", spec.Description)
+	}
+}
+
+func TestAssistantNumericUnifiedDiffFailureReturnsTargetedRecovery(t *testing.T) {
+	err := &workspace.PatchError{Code: workspace.PatchErrorInvalidPatch, Message: "line 3: numeric unified-diff hunk headers are not supported; use exactly '@@' or '@@ <literal source line>'"}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
+	for _, want := range []string{
+		"treats text after @@ as a literal source anchor",
+		"never use line coordinates such as @@ -12,4 +12,5 @@",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("recovery missing %q: %s", want, result)
+		}
+	}
+}
+
+func TestAssistantAdvertisedContextualPatchExampleParses(t *testing.T) {
+	const marker = "Valid example:\n"
+	_, example, ok := strings.Cut(projectAssistantContextualPatchFormatInstruction, marker)
+	if !ok {
+		t.Fatalf("contextual patch instruction missing %q", marker)
+	}
+	example = strings.TrimSpace(example)
+	paths, err := workspace.PatchPaths(example)
+	if err != nil {
+		t.Fatalf("advertised contextual patch example is invalid: %v\n%s", err, example)
+	}
+	if got := strings.Join(paths, ","); got != "src/App.jsx" {
+		t.Fatalf("advertised example paths = %q, want src/App.jsx", got)
+	}
+}
+
+func TestAssistantGenericInvalidPatchRecoveryUsesSupportedOperations(t *testing.T) {
+	err := &workspace.PatchError{Code: workspace.PatchErrorInvalidPatch, Message: "the last line must be '*** End Patch'"}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
+	for _, want := range []string{"using only Add File or Update File", "Delete File and Move to are unavailable"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("recovery missing %q: %s", want, result)
+		}
+	}
+}
+
+func TestAssistantMissingContextRecoveryExplainsAnchorCursor(t *testing.T) {
+	err := &workspace.PatchError{Code: workspace.PatchErrorContextNotFound, Path: "src/App.jsx", Hunk: 1, Message: "hunk context was not found after line 1"}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
+	for _, want := range []string{
+		"positions the hunk after that unchanged line",
+		"must not be repeated in the hunk body",
+		"use plain @@ when changing the first line",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("recovery missing %q: %s", want, result)
+		}
+	}
+}
+
+func TestAssistantMissingContextRecoverySurvivesLongExpectedLines(t *testing.T) {
+	err := &workspace.PatchError{
+		Code:    workspace.PatchErrorContextNotFound,
+		Path:    "src/App.jsx",
+		Hunk:    1,
+		Message: "failed to find the expected lines after line 1:\n" + strings.Repeat("long stale source line ", 100),
+	}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
+	if len(result) > projectToolInfoLimit {
+		t.Fatalf("failure result length = %d, want <= %d", len(result), projectToolInfoLimit)
+	}
+	for _, want := range []string{"failed to find the expected lines", "Recovery: reread the named file", "use plain @@ when changing the first line"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("long-context recovery missing %q: %s", want, result)
+		}
 	}
 }
 
@@ -162,7 +253,7 @@ func TestAssistantV2MutationAdmissionRejectsStoppedRun(t *testing.T) {
 	}
 }
 
-func TestAssistantV2LifecycleBlocksCommitBeforeCurrentVerification(t *testing.T) {
+func TestAssistantV2LifecycleDoesNotRequireVerificationBeforeCommit(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	state.RecordSourceMutation()
 	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{}, state).(*projectEinoAssistantLifecycle)
@@ -182,7 +273,7 @@ func TestAssistantV2LifecycleBlocksCommitBeforeCurrentVerification(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if called || !strings.Contains(result, "verify_development_runtime") {
+	if !called || result != `{"status":"succeeded"}` {
 		t.Fatalf("commit result = %q, endpoint called = %v", result, called)
 	}
 }
@@ -203,10 +294,8 @@ func TestAssistantContextualPatchRejectsDeleteAndMoveUntilCommitBridgeSupportsTh
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := tool.Call(context.Background(), projectAssistantToolCallRequest{
-				WorkspaceScope:        scope,
-				EnforceMutationSafety: true,
-				ObservedReadFiles:     []string{"old.txt"},
-				Arguments:             map[string]any{"patch": patch},
+				WorkspaceScope: scope,
+				Arguments:      map[string]any{"patch": patch},
 			})
 			if err == nil || !strings.Contains(err.Error(), "repository commits support deletions") {
 				t.Fatalf("error = %v, want repository deletion limitation", err)
@@ -219,7 +308,7 @@ func TestAssistantContextualPatchRejectsDeleteAndMoveUntilCommitBridgeSupportsTh
 	}
 }
 
-func TestAssistantContextualPatchRequiresReadsAndDoesNotCreateLegacySnapshot(t *testing.T) {
+func TestAssistantContextualPatchUsesLiveWorkspaceAndDoesNotCreateLegacySnapshot(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "src/app.js", Content: "export const theme = 'light'\n"}}); err != nil {
@@ -238,18 +327,13 @@ func TestAssistantContextualPatchRequiresReadsAndDoesNotCreateLegacySnapshot(t *
 +export const created = true
 *** End Patch`
 	req := projectAssistantToolCallRequest{
-		WorkspaceScope:        scope,
-		AssistantRunID:        "run-patch",
-		EnforceMutationSafety: true,
-		Arguments:             map[string]any{"patch": patch},
+		WorkspaceScope: scope,
+		AssistantRunID: "run-patch",
+		Arguments:      map[string]any{"patch": patch},
 	}
-	if _, err := tool.Call(context.Background(), req); err == nil || !strings.Contains(err.Error(), `read_file must successfully read "src/app.js"`) {
-		t.Fatalf("patch without source read error = %v", err)
-	}
-	req.ObservedReadFiles = []string{"src/app.js"}
 	resultJSON, err := tool.Call(context.Background(), req)
 	if err != nil {
-		t.Fatalf("patch after source read returned error: %v", err)
+		t.Fatalf("patch returned error: %v", err)
 	}
 	var result workspace.MutationResult
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
@@ -279,9 +363,8 @@ func TestAssistantContextualPatchAllowsAddWithoutPriorRead(t *testing.T) {
 		t.Fatal("apply_patch tool was not registered")
 	}
 	_, err := tool.Call(context.Background(), projectAssistantToolCallRequest{
-		WorkspaceScope:        scope,
-		AssistantRunID:        "run-add",
-		EnforceMutationSafety: true,
+		WorkspaceScope: scope,
+		AssistantRunID: "run-add",
 		Arguments: map[string]any{"patch": `*** Begin Patch
 *** Add File: nested/app.js
 +export default true

@@ -188,7 +188,13 @@ func (l *projectAssistantRunEventLedger) BeginToolCall(
 			}
 			if state.Outcome != nil {
 				outcome := *state.Outcome
+				if err := l.ensureToolConversationLocked(ctx, callID, toolName, canonicalArgs, state.Attempts, &outcome); err != nil {
+					return projectAssistantRunToolCallDecision{}, err
+				}
 				return projectAssistantRunToolCallDecision{Replay: &outcome}, nil
+			}
+			if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, state.Attempts); err != nil {
+				return projectAssistantRunToolCallDecision{}, err
 			}
 			if state.Effect {
 				return projectAssistantRunToolCallDecision{}, fmt.Errorf(
@@ -220,6 +226,12 @@ func (l *projectAssistantRunEventLedger) BeginToolCall(
 		})
 		if err != nil {
 			return projectAssistantRunToolCallDecision{}, fmt.Errorf("encode assistant run tool call event: %w", err)
+		}
+		// Persist the model-visible call before the event that authorizes backend
+		// dispatch. If the event CAS fails, no effect was authorized and a retry
+		// can idempotently repair this same item before trying again.
+		if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, attempt); err != nil {
+			return projectAssistantRunToolCallDecision{}, err
 		}
 		event := store.AssistantRunEvent{
 			RunID:      l.runID,
@@ -287,7 +299,11 @@ func (l *projectAssistantRunEventLedger) FinishToolCall(
 			)
 		}
 		if state.Outcome != nil {
-			return *state.Outcome, nil
+			persisted := *state.Outcome
+			if err := l.appendToolResultConversationLocked(persistCtx, token.CallID, token.ToolName, persisted); err != nil {
+				return projectAssistantRunToolCallOutcome{}, err
+			}
+			return persisted, nil
 		}
 		payload, err := json.Marshal(projectAssistantRunToolResultPayload{
 			Result: outcome.Result,
@@ -315,8 +331,70 @@ func (l *projectAssistantRunEventLedger) FinishToolCall(
 		if err := l.applyEventLocked(saved); err != nil {
 			return projectAssistantRunToolCallOutcome{}, err
 		}
+		if err := l.appendToolResultConversationLocked(persistCtx, token.CallID, token.ToolName, outcome); err != nil {
+			return projectAssistantRunToolCallOutcome{}, err
+		}
 		return outcome, nil
 	}
+}
+
+func (l *projectAssistantRunEventLedger) ensureToolConversationLocked(
+	ctx context.Context,
+	callID string,
+	toolName string,
+	canonicalArgs json.RawMessage,
+	attempt int,
+	outcome *projectAssistantRunToolCallOutcome,
+) error {
+	if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, attempt); err != nil {
+		return err
+	}
+	if outcome == nil {
+		return nil
+	}
+	return l.appendToolResultConversationLocked(ctx, callID, toolName, *outcome)
+}
+
+func (l *projectAssistantRunEventLedger) appendToolCallConversationLocked(
+	ctx context.Context,
+	callID string,
+	toolName string,
+	canonicalArgs json.RawMessage,
+	attempt int,
+) error {
+	if attempt <= 0 {
+		return fmt.Errorf("append assistant conversation tool call: invalid attempt %d", attempt)
+	}
+	err := appendProjectAssistantConversationMessage(ctx, l.store, l.scope, l.runID,
+		projectAssistantConversationToolCallItemID(l.runID, callID, attempt), projectAssistantConversationToolCall,
+		chatMessage{Role: "assistant", ToolCalls: []chatToolCall{{
+			ID: callID, Type: "function", Function: chatToolCallFunction{Name: toolName, Arguments: string(canonicalArgs)},
+		}}},
+	)
+	if err != nil {
+		return fmt.Errorf("append assistant conversation tool call: %w", err)
+	}
+	return nil
+}
+
+func (l *projectAssistantRunEventLedger) appendToolResultConversationLocked(
+	ctx context.Context,
+	callID string,
+	toolName string,
+	outcome projectAssistantRunToolCallOutcome,
+) error {
+	modelResult := outcome.Result
+	if strings.TrimSpace(modelResult) == "" && outcome.Failed {
+		modelResult = outcome.Error
+	}
+	err := appendProjectAssistantConversationMessage(ctx, l.store, l.scope, l.runID,
+		projectAssistantConversationToolResultItemID(l.runID, callID), projectAssistantConversationToolResult,
+		chatMessage{Role: "tool", Name: toolName, ToolCallID: callID, Content: modelResult},
+	)
+	if err != nil {
+		return fmt.Errorf("append assistant conversation tool result: %w", err)
+	}
+	return nil
 }
 
 func (l *projectAssistantRunEventLedger) refreshLocked(ctx context.Context) error {

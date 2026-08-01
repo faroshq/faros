@@ -397,8 +397,8 @@ func TestResumeProjectAssistantFinalizesClaimedRunAfterPreemption(t *testing.T) 
 	if err != nil {
 		t.Fatalf("GetAssistantRun returned error: %v", err)
 	}
-	if got.Status != store.AssistantRunStatusCompleted {
-		t.Fatalf("run status = %q, want completed after preempted resume cleanup", got.Status)
+	if got.Status != store.AssistantRunStatusFailed {
+		t.Fatalf("run status = %q, want failed after preempted resume cleanup", got.Status)
 	}
 	audit := decodeProjectAssistantRunAudit(t, got.Audit)
 	if len(audit.Decisions) != 1 || audit.Decisions[0].Actor != id.user || audit.Decisions[0].Reason != "preempted" {

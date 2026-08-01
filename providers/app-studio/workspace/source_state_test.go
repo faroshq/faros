@@ -58,6 +58,16 @@ func TestFileStoreUncommittedPathsPersistUnionClearAndProjectUIDIsolation(t *tes
 	if want := []string{"package.json", "src/App.tsx", "src/theme.css"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("reopened paths = %v, want %v", got, want)
 	}
+	if err := reopened.RemoveUncommittedPaths(ctx, oldScope, []string{"src/App.tsx"}); err != nil {
+		t.Fatalf("RemoveUncommittedPaths: %v", err)
+	}
+	got, err = reopened.UncommittedPaths(ctx, oldScope)
+	if err != nil {
+		t.Fatalf("UncommittedPaths after remove: %v", err)
+	}
+	if want := []string{"package.json", "src/theme.css"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("paths after remove = %v, want %v", got, want)
+	}
 	got, err = reopened.UncommittedPaths(ctx, newScope)
 	if err != nil {
 		t.Fatalf("UncommittedPaths recreated project: %v", err)

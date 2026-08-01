@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -43,6 +44,8 @@ const (
 	PatchErrorNoChanges         PatchErrorCode = "no_changes"
 	PatchErrorApplyFailed       PatchErrorCode = "apply_failed"
 )
+
+var standardUnifiedDiffHunkHeader = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@(?: .*)?$`)
 
 // PatchError is a typed, model-safe patch failure. ActualChanges is populated
 // only if an I/O failure could not be completely rolled back.
@@ -289,6 +292,8 @@ func parseUpdateOperation(lines []string, start int) (patchOperation, int, error
 	for lineIndex < len(lines)-1 && !isPatchFileMarker(lines[lineIndex]) {
 		line := lines[lineIndex]
 		switch {
+		case standardUnifiedDiffHunkHeader.MatchString(line):
+			return patchOperation{}, start, invalidPatchLine(lineIndex+1, "numeric unified-diff hunk headers are not supported; use exactly '@@' or '@@ <literal source line>'")
 		case line == "@@" || strings.HasPrefix(line, "@@ "):
 			flush()
 			current = &patchChunk{anchor: strings.TrimSpace(strings.TrimPrefix(line, "@@"))}
@@ -512,7 +517,15 @@ func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, in
 		}
 		switch {
 		case matches == 0:
-			return "", 0, newPatchError(PatchErrorContextNotFound, filePath, hunkNumber, 0, "hunk context was not found after line %d; reread the current file and include stable surrounding lines", cursor)
+			return "", 0, newPatchError(
+				PatchErrorContextNotFound,
+				filePath,
+				hunkNumber,
+				0,
+				"failed to find the expected lines after line %d:\n%s",
+				cursor,
+				patchExpectedLinesPreview(chunk.oldLines),
+			)
 		case matches > 1:
 			return "", 0, newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk context matched %d locations; include more surrounding context or an @@ anchor", matches)
 		}
@@ -527,6 +540,29 @@ func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, in
 		cursor = matchIndex + len(chunk.newLines)
 	}
 	return text.string(), changedHunks, nil
+}
+
+func patchExpectedLinesPreview(lines []string) string {
+	const (
+		maxLines     = 12
+		maxLineRunes = 240
+	)
+	count := len(lines)
+	if count > maxLines {
+		count = maxLines
+	}
+	preview := make([]string, 0, count+1)
+	for _, line := range lines[:count] {
+		runes := []rune(line)
+		if len(runes) > maxLineRunes {
+			line = string(runes[:maxLineRunes]) + "…"
+		}
+		preview = append(preview, line)
+	}
+	if len(lines) > count {
+		preview = append(preview, fmt.Sprintf("… (%d more lines)", len(lines)-count))
+	}
+	return strings.Join(preview, "\n")
 }
 
 func equalStringSlices(left, right []string) bool {

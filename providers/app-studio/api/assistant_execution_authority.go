@@ -65,10 +65,14 @@ func (a projectAssistantServerExecutionAuthority) supervisedRun() (store.Assista
 		strings.TrimSpace(a.req.AssistantRun.ID) == "" || strings.TrimSpace(a.req.Identity.user) == "" {
 		return store.AssistantRun{}, store.ErrAssistantRunConflict
 	}
-	if a.server.projectAssistantSupervisor().accumulatorFor(a.req.MessageScope, a.req.AssistantRun.ID) == nil {
+	runID := a.req.AssistantRun.ID
+	if a.server.projectAssistantSupervisor().accumulatorFor(a.req.MessageScope, runID) == nil {
 		return store.AssistantRun{}, store.ErrAssistantRunConflict
 	}
-	return *a.req.AssistantRun, nil
+	// Only the immutable identity is needed by this authority boundary. Copying
+	// the full request-local run would race the audit recorder updating its
+	// byte-slice fields while a detached durable persistence is in flight.
+	return store.AssistantRun{ID: runID}, nil
 }
 
 func (a projectAssistantServerExecutionAuthority) AdmitMutation(ctx context.Context) error {

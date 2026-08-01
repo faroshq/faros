@@ -54,6 +54,8 @@ type projectAssistantRunRequest struct {
 	MessageScope             store.Scope
 	LLM                      projectLLMSettings
 	History                  []store.Message
+	Conversation             []chatMessage
+	ConversationCheckpointed bool
 	MCPBaseURL               string
 	MCPInsecureSkipTLSVerify bool
 	ApprovalMode             store.AssistantApprovalMode
@@ -73,6 +75,20 @@ type projectAssistantRunRequest struct {
 	executionAuthority projectAssistantExecutionAuthority
 	auditRecorder      *projectAssistantRunAuditRecorder
 	eventLedger        *projectAssistantRunEventLedger
+	// Steering carries user messages admitted into this durable run while the
+	// Eino loop is active. The supervisor persists each message before making it
+	// visible here; the loop drains it only at model-safe boundaries.
+	Steering     <-chan projectAssistantSteeringInput
+	SealSteering func() bool
+	// ActivateSteering rotates the public assistant segment only when the Eino
+	// loop has reached the model-safe boundary that consumes these queued inputs.
+	ActivateSteering func(context.Context, []projectAssistantSteeringInput) error
+}
+
+type projectAssistantSteeringInput struct {
+	MessageID       string
+	ClientRequestID string
+	Content         string
 }
 
 type projectAssistantRunResult struct {

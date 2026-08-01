@@ -115,19 +115,17 @@ func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAss
 }
 
 type projectAssistantToolCallRequest struct {
-	Identity              identity
-	Project               *aiv1alpha1.Project
-	Repository            *ProjectRepositoryView
-	WorkspaceScope        workspace.Scope
-	ProjectRepositoryRef  string
-	MCPEndpoint           string
-	HTTPRequest           *http.Request
-	SessionSnapshot       *projectEinoAssistantSessionSnapshot
-	AssistantRunID        string
-	InitialBuild          bool
-	EnforceMutationSafety bool
-	ObservedReadFiles     []string
-	Arguments             map[string]any
+	Identity             identity
+	Project              *aiv1alpha1.Project
+	Repository           *ProjectRepositoryView
+	WorkspaceScope       workspace.Scope
+	ProjectRepositoryRef string
+	MCPEndpoint          string
+	HTTPRequest          *http.Request
+	SessionSnapshot      *projectEinoAssistantSessionSnapshot
+	AssistantRunID       string
+	InitialBuild         bool
+	Arguments            map[string]any
 }
 
 func refreshProjectToolSnapshot(current, updated *aiv1alpha1.Project) {
@@ -169,7 +167,8 @@ func projectAssistantToolJSONResult(out any, err error) (string, error) {
 	if err != nil {
 		// Preserve a concrete partial result alongside its error. Contextual
 		// patch rollback can fail after changing files, and the execution layer
-		// must see those paths so it can enforce sync, verification, and commit.
+		// must see those paths so it can invalidate stale reads and retain the
+		// actual durable dirty-workspace state.
 		return string(raw), err
 	}
 	return string(raw), nil

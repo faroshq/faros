@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	einotool "github.com/cloudwego/eino/components/tool"
+	einoschema "github.com/cloudwego/eino/schema"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -39,6 +41,57 @@ import (
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
+
+type projectAssistantFailingGraphTool struct {
+	calls *int
+	err   error
+}
+
+func (t projectAssistantFailingGraphTool) Info(context.Context) (*einoschema.ToolInfo, error) {
+	return &einoschema.ToolInfo{Name: "failing_graph_tool"}, nil
+}
+
+func (t projectAssistantFailingGraphTool) InvokableRun(context.Context, string, ...einotool.Option) (string, error) {
+	*t.calls++
+	return "", t.err
+}
+
+func TestProjectAssistantDurableGraphToolFailureIsExactModelFeedback(t *testing.T) {
+	ctx := context.Background()
+	messages, scope := newAssistantRunEventLedgerTestStore(t, "run-graph-failure")
+	calls := 0
+	backendErr := errors.New("workflow dependency unavailable")
+	spec := projectAssistantToolSpec{Name: "failing_graph_tool", Risk: projectAssistantToolRiskRead}
+	tool := projectAssistantDurableGraphTool{
+		InvokableTool: projectAssistantFailingGraphTool{calls: &calls, err: backendErr},
+		spec:          spec,
+		ledger:        newProjectAssistantRunEventLedger(messages, scope, "run-graph-failure"),
+	}
+	result, err := tool.invokableRun(ctx, "call-graph", `{}`)
+	if err != nil || result != "Tool call failed: workflow dependency unavailable" {
+		t.Fatalf("graph failure = (%q, %v), want model-visible feedback", result, err)
+	}
+
+	tool.ledger = newProjectAssistantRunEventLedger(messages, scope, "run-graph-failure")
+	replayed, err := tool.invokableRun(ctx, "call-graph", `{}`)
+	if err != nil || replayed != result {
+		t.Fatalf("graph failure replay = (%q, %v), want %q", replayed, err, result)
+	}
+	if calls != 1 {
+		t.Fatalf("graph backend calls = %d, want durable replay without redispatch", calls)
+	}
+	events := listAssistantRunEventLedgerEvents(t, messages, scope, "run-graph-failure")
+	if len(events) != 2 {
+		t.Fatalf("graph events = %#v, want call and failed result", events)
+	}
+	var payload projectAssistantRunToolResultPayload
+	if err := json.Unmarshal(events[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Failed || payload.Result != result || payload.Error != backendErr.Error() {
+		t.Fatalf("durable graph failure = %#v", payload)
+	}
+}
 
 func stringSliceContains(values []string, want string) bool {
 	for _, value := range values {
@@ -1204,8 +1257,8 @@ func TestProjectAssistantWorkflowPlansFromMemoryRepositoryAndWorkspace(t *testin
 		t.Fatalf("steps = %#v, want at least one deterministic next step", plan.Steps)
 	}
 	steps := strings.Join(plan.Steps, "\n")
-	if !strings.Contains(steps, "commit_project_files") || strings.Contains(steps, "Defer commit handoff") {
-		t.Fatalf("steps = %#v, want ready repository commit guidance", plan.Steps)
+	if strings.Contains(steps, "commit_project_files") || strings.Contains(steps, "Defer commit handoff") {
+		t.Fatalf("steps = %#v, want no manufactured commit obligation", plan.Steps)
 	}
 }
 

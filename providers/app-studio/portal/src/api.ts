@@ -314,7 +314,7 @@ export const api = {
     return items
   },
 
-  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; collaborationMode: 'default' | 'plan' }): Promise<ProjectAssistantRunStart> {
+  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; collaborationMode: 'default' | 'plan'; expectedRunID?: string }): Promise<ProjectAssistantRunStart> {
     return request<ProjectAssistantRunStart>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/messages`, body)
   },
 

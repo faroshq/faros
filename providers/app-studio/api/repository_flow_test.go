@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -439,8 +440,8 @@ func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) 
 	for _, want := range []string{
 		"Use the current project snapshot first, then bounded reads and searches",
 		"The only source-mutation tool is apply_patch",
-		"run verify_development_runtime",
-		"commit only source/config paths actually changed in this run",
+		"use verify_development_runtime only when that evidence is relevant",
+		"Never call commit_project_files unless the user explicitly requested repository persistence",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
@@ -958,8 +959,9 @@ type repositoryFlowEinoModelStep struct {
 }
 
 type repositoryFlowEinoChatModel struct {
-	Steps  []repositoryFlowEinoModelStep
-	Inputs []chatCompletionRequest
+	Steps    []repositoryFlowEinoModelStep
+	Inputs   []chatCompletionRequest
+	nextStep int
 }
 
 func (m *repositoryFlowEinoChatModel) Generate(ctx context.Context, input []*einoschema.Message, opts ...einomodel.Option) (*einoschema.Message, error) {
@@ -979,7 +981,14 @@ func (m *repositoryFlowEinoChatModel) Generate(ctx context.Context, input []*ein
 		ToolChoice: common.ToolChoice,
 	})
 
-	index := len(m.Inputs) - 1
+	if len(input) > 0 && input[len(input)-1] != nil && input[len(input)-1].Role == einoschema.User &&
+		input[len(input)-1].Content == projectEinoAssistantCompactionPrompt {
+		message := einoschema.AssistantMessage("The assistant is inspecting project files and should continue from the latest completed tool result.", nil)
+		callbacks.OnEnd(ctx, &einomodel.CallbackOutput{Message: message})
+		return message, nil
+	}
+	index := m.nextStep
+	m.nextStep++
 	step := repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("Done.", nil)}
 	if index < len(m.Steps) {
 		step = m.Steps[index]
@@ -1002,6 +1011,13 @@ func (m *repositoryFlowEinoChatModel) Stream(ctx context.Context, input []*einos
 	msg, err := m.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
+	}
+	if msg.ResponseMeta == nil {
+		finishReason := "stop"
+		if len(msg.ToolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+		msg.ResponseMeta = &einoschema.ResponseMeta{FinishReason: finishReason}
 	}
 	return einoschema.StreamReaderFromArray([]*einoschema.Message{msg}), nil
 }
@@ -1359,6 +1375,13 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 	if run.Status != store.AssistantRunStatusRunning {
 		t.Fatalf("run status = %q, want running until the supervisor commits the terminal response", run.Status)
 	}
+	conversation, err := loadProjectAssistantConversation(context.Background(), messages, messageScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversation) == 0 || conversation[len(conversation)-1].Role != "assistant" || conversation[len(conversation)-1].Content != "Done." {
+		t.Fatalf("resumed final response was not persisted in canonical conversation history: %#v", conversation)
+	}
 }
 
 func TestResumeProjectAssistantRunRejectsEmptyFollowUpBeforeClaimingRun(t *testing.T) {
@@ -1555,22 +1578,19 @@ func TestResumeProjectAssistantRunClearsStaleFollowUpInterruptWhenRunAlreadyClai
 }
 
 func TestGenerateProjectAssistantStreamSettlesRepeatedToolLoopAtGlobalCeiling(t *testing.T) {
-	closing := projectAssistantBoundedClosingAnswerForTest("I inspected src/App.tsx.")
+	closing := "I inspected src/App.tsx."
 	reply, requests, err := runRepeatedReadFileAssistantStream(t, closing)
 	if !projectEinoAssistantMaxIterationsExceeded(err) {
 		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want Eino max-iterations limit", err, len(requests))
 	}
-	if reply != closing {
-		t.Fatalf("reply = %q, want bounded closing answer", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want no manufactured assistant response", reply)
 	}
 	if got := projectAssistantToolBearingRequestCount(requests); got != projectEinoAssistantRepeatedActionLimit {
 		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectEinoAssistantRepeatedActionLimit)
 	}
-	if len(requests) != projectEinoAssistantRepeatedActionLimit+2 {
-		t.Fatalf("LLM request count = %d, want max iterations, forced return, and fallback closing call", len(requests))
-	}
-	if last := requests[len(requests)-1]; len(last.Tools) != 0 || last.ToolChoice != "none" {
-		t.Fatalf("closing LLM request = %#v, want tools disabled", last)
+	if len(requests) != projectEinoAssistantRepeatedActionLimit {
+		t.Fatalf("LLM request count = %d, want the explicit test iteration ceiling", len(requests))
 	}
 }
 
@@ -1579,9 +1599,8 @@ func TestGenerateProjectAssistantStreamFallsBackWhenGlobalCeilingClosingAnswerIs
 	if !projectEinoAssistantMaxIterationsExceeded(err) {
 		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want Eino max-iterations limit", err, len(requests))
 	}
-	if !projectEinoAssistantBoundedClosingAnswerValid(reply) ||
-		!strings.Contains(reply, "I inspected file read") {
-		t.Fatalf("reply = %q, want evidence-based fallback", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want no manufactured assistant response", reply)
 	}
 	if got := projectAssistantToolBearingRequestCount(requests); got != projectEinoAssistantRepeatedActionLimit {
 		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectEinoAssistantRepeatedActionLimit)
@@ -1589,7 +1608,7 @@ func TestGenerateProjectAssistantStreamFallsBackWhenGlobalCeilingClosingAnswerIs
 }
 
 func TestGenerateProjectAssistantStreamAllowsProductiveDistinctReads(t *testing.T) {
-	closing := projectAssistantBoundedClosingAnswerForTest("I inspected the requested files.")
+	closing := "I inspected the requested files."
 	reply, requests, err := runUniqueReadFileAssistantStream(t, closing)
 	if err != nil {
 		t.Fatalf("generateProjectAssistantStream error = %v after %d productive requests", err, len(requests))
@@ -1606,7 +1625,7 @@ func TestGenerateProjectAssistantStreamAllowsProductiveDistinctReads(t *testing.
 }
 
 func TestGenerateProjectAssistantStreamAllowsOneBatchedDuplicateReadCycle(t *testing.T) {
-	closing := projectAssistantBoundedClosingAnswerForTest("I finished inspecting the project.")
+	closing := "I finished inspecting the project."
 	reply, requests, err := runBatchedDuplicateReadAssistantStream(t, closing)
 	if err != nil {
 		t.Fatalf("generateProjectAssistantStream error = %v after %d requests", err, len(requests))
@@ -1619,23 +1638,22 @@ func TestGenerateProjectAssistantStreamAllowsOneBatchedDuplicateReadCycle(t *tes
 	}
 }
 
-func TestGenerateProjectAssistantStreamClosesMaxIterationsWithToolsDisabled(t *testing.T) {
-	closing := projectAssistantBoundedClosingAnswerForTest("I inspected the project.")
+const projectAssistantTestFiniteIterationCeiling = 100
+
+func TestGenerateProjectAssistantStreamClosesMaxIterationsWithoutOutOfBandModelCall(t *testing.T) {
+	closing := "I inspected the project."
 	reply, requests, err := runMaxIterationReadFileAssistantStream(t, closing)
 	if !projectEinoAssistantMaxIterationsExceeded(err) {
 		t.Fatalf("generateProjectAssistantStream error = %v after %d requests, want Eino max-iterations limit", err, len(requests))
 	}
-	if !projectEinoAssistantBoundedClosingAnswerValid(reply) {
-		t.Fatalf("reply = %q, want evidence-based bounded closing answer", reply)
+	if reply != "" {
+		t.Fatalf("reply = %q, want no manufactured assistant response", reply)
 	}
-	if got := projectAssistantToolBearingRequestCount(requests); got != maxAssistantDeepIterations {
-		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, maxAssistantDeepIterations)
+	if got := projectAssistantToolBearingRequestCount(requests); got != projectAssistantTestFiniteIterationCeiling {
+		t.Fatalf("tool-bearing LLM request count = %d, want %d", got, projectAssistantTestFiniteIterationCeiling)
 	}
-	if len(requests) != maxAssistantDeepIterations+2 {
-		t.Fatalf("LLM request count = %d, want max iterations, forced return, and fallback closing call", len(requests))
-	}
-	if last := requests[len(requests)-1]; len(last.Tools) != 0 || last.ToolChoice != "none" {
-		t.Fatalf("closing LLM request = %#v, want tools disabled", last)
+	if len(requests) != projectAssistantTestFiniteIterationCeiling {
+		t.Fatalf("LLM request count = %d, want the explicit test iteration ceiling", len(requests))
 	}
 }
 
@@ -1828,23 +1846,6 @@ func TestCommitProjectWorkspaceFilesRejectsRepositoryMismatch(t *testing.T) {
 	}
 }
 
-func TestProjectCommitToolReplyReportsRunningCommit(t *testing.T) {
-	reply, ok := projectCommitToolReply([]chatMessage{{
-		Role:    "tool",
-		Name:    "commit_project_files",
-		Content: `{"name":"demo-commit","phase":"Running","files":["index.html"]}`,
-	}})
-	if !ok {
-		t.Fatal("projectCommitToolReply returned ok=false")
-	}
-	if !strings.Contains(reply, "still running") || !strings.Contains(reply, "request demo-commit") {
-		t.Fatalf("reply = %q, want running commit result", reply)
-	}
-	if strings.Contains(reply, "Committed the workspace files") {
-		t.Fatalf("reply = %q, should not claim commit success", reply)
-	}
-}
-
 func TestProjectAssistantStoredContentPrefersFinalReply(t *testing.T) {
 	got := projectAssistantStoredContent("Committed index.html.", "I will inspect the project files.")
 	if got != "Committed index.html." {
@@ -1854,6 +1855,7 @@ func TestProjectAssistantStoredContentPrefersFinalReply(t *testing.T) {
 
 func runRepeatedReadFileAssistantStream(t *testing.T, finalAnswer string) (string, []chatCompletionRequest, error) {
 	t.Helper()
+	t.Setenv(projectAssistantMaxIterationsEnv, strconv.Itoa(projectAssistantTestFiniteIterationCeiling))
 	steps := make([]repositoryFlowEinoModelStep, 0, projectEinoAssistantRepeatedActionLimit+2)
 	for i := 1; i <= projectEinoAssistantRepeatedActionLimit+1; i++ {
 		steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
@@ -1916,8 +1918,9 @@ func runBatchedDuplicateReadAssistantStream(t *testing.T, finalAnswer string) (s
 
 func runMaxIterationReadFileAssistantStream(t *testing.T, finalAnswer string) (string, []chatCompletionRequest, error) {
 	t.Helper()
-	steps := make([]repositoryFlowEinoModelStep, 0, maxAssistantDeepIterations+2)
-	for i := 1; i <= maxAssistantDeepIterations+1; i++ {
+	t.Setenv(projectAssistantMaxIterationsEnv, strconv.Itoa(projectAssistantTestFiniteIterationCeiling))
+	steps := make([]repositoryFlowEinoModelStep, 0, projectAssistantTestFiniteIterationCeiling+2)
+	for i := 1; i <= projectAssistantTestFiniteIterationCeiling+1; i++ {
 		steps = append(steps, repositoryFlowEinoModelStep{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
 			ID:   fmt.Sprintf("call-%d", i),
 			Type: "function",
@@ -1954,7 +1957,7 @@ func runProjectAssistantStreamWithModelAndPrompt(t *testing.T, model *repository
 	}
 	workspaces := workspace.NewFileStore(t.TempDir())
 	seedFiles := []workspace.File{{Path: "src/App.tsx", Content: "export default function App() { return <main>Hello</main> }\n"}}
-	for i := 1; i <= maxAssistantDeepIterations+1; i++ {
+	for i := 1; i <= projectAssistantTestFiniteIterationCeiling+1; i++ {
 		seedFiles = append(seedFiles, workspace.File{
 			Path:    fmt.Sprintf("src/file-%d.tsx", i),
 			Content: fmt.Sprintf("export const value%d = %d\n", i, i),
@@ -1988,42 +1991,6 @@ func decodeProjectAssistantRunAudit(t *testing.T, raw []byte) projectAssistantRu
 		t.Fatalf("decode assistant run audit: %v", err)
 	}
 	return audit
-}
-
-func TestProjectRepeatedToolLoopFallbackSummarizesLastToolResult(t *testing.T) {
-	got := projectRepeatedToolLoopFallback([]chatMessage{{
-		Role:    "tool",
-		Name:    projectToolApplyPatch,
-		Content: `{"operation":"apply_patch","path":"src/App.tsx","additions":1,"deletions":0,"replacements":1}`,
-	}})
-	for _, want := range []string{"latest project tool result", "apply_patch", "src/App.tsx", "+1", "-0"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("fallback = %q, want %q", got, want)
-		}
-	}
-	for _, unwanted := range []string{"repeated the same action", "Last action result", "completed action"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("fallback = %q, should not contain %q", got, unwanted)
-		}
-	}
-}
-
-func TestProjectToolLoopFallbackDoesNotAskForManualContinuation(t *testing.T) {
-	got := projectToolLoopFallback([]chatMessage{{
-		Role:    "tool",
-		Name:    projectToolApplyPatch,
-		Content: `{"operation":"apply_patch","path":"postcss.config.js","additions":3,"deletions":1,"replacements":1}`,
-	}}, "kept requesting actions")
-	for _, want := range []string{"latest project tool result", "apply_patch", "postcss.config.js", "+3", "-1"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("fallback = %q, want %q", got, want)
-		}
-	}
-	for _, unwanted := range []string{"Please ask me to continue", "I stopped because", "hit the per-turn action limit", "Last action result"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("fallback = %q, should not contain %q", got, unwanted)
-		}
-	}
 }
 
 type projectSettingsDynamicClient struct {

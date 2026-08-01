@@ -65,6 +65,9 @@ Environment variables consumed by the binary:
 | `APP_STUDIO_MESSAGE_ENCRYPTION_KEYS` | Comma-separated `key-id:base64-aes-key` entries for message content and metadata encryption at rest |
 | `APP_STUDIO_MESSAGE_RETENTION` | Retention window (`time.ParseDuration`, e.g. `720h`) |
 | `APP_STUDIO_WORKSPACE_ROOT` | Filesystem root for App Studio project workspaces and local file tools |
+| `APP_STUDIO_ASSISTANT_MAX_ITERATIONS` | Optional positive emergency model-call ceiling. The default is continuation-driven/unlimited, matching Codex; exhaustion fails with `budget_limited`. |
+| `APP_STUDIO_ASSISTANT_ROLLOUT_BUDGET_TOKENS` | Optional positive weighted-token budget for the Project conversation; disabled by default. Usage and reminders survive compaction and carry across runs. Exhaustion produces `failed` with `budget_limited`. |
+| `APP_STUDIO_ASSISTANT_MODEL_CONTEXT_TOKENS` | Active model context window used for token-pressure compaction (default `128000` when provider model metadata is unavailable). |
 | `APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verify on MCP calls (dev) |
 | `APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verification only for preview readiness probes (local dev with a self-signed Gateway) |
 | `APP_STUDIO_PREVIEW_CONSOLE_ENABLED` | Automatically shares bounded browser-console evidence while the embedded preview is open; set `false` for a deployment-wide kill switch. |
@@ -113,6 +116,16 @@ subscriber; it never cancels the worker. The portal uses this contract for the
 first project turn as well as later messages, so a refresh during generation
 reconnects without adding another prompt.
 
+A message submitted while the current run is working is durable steering for
+that same run, not a replacement run. The request names the expected run and is
+accepted only for the actor who started it. The supervisor persists an
+idempotent receipt, the user item, a new assistant segment, and the advanced run
+revision before Eino can observe the input. Eino drains steering between model
+calls; input that races with a final response is carried into the new segment.
+Admission and the terminal boundary share one lock, so late input is either
+queued or rejected for the next run, never acknowledged and lost. The active
+collaboration mode remains sticky.
+
 New assistant runs use one sticky collaboration mode: `Default` or `Plan`.
 `Plan` is read-only. `Default` follows the user's request directly and can use
 the current evidence tools and one contextual `apply_patch` source-mutation
@@ -126,49 +139,69 @@ events, and WorkItems the first time it is applied. This is a one-time reset of
 the new-product assistant history, not a compatibility migration.
 
 Every model response batch is admitted before dispatch. Tool-call IDs are
-deterministic, duplicate reads collapse, conflicting IDs or effects fail closed,
-and independent reads run with a bounded concurrency limit. An append-only
+deterministic, malformed calls and conflicting IDs fail closed, and the model's
+call order and cardinality are preserved. Independent tool futures retain
+Eino's native concurrent execution and ordered rejoin, matching Codex's
+per-output-item scheduler. An append-only
 `AssistantRunEvent` ledger records each admitted call and exact model-visible
 result. It provides idempotency within the active run and between concurrent
 workers; it is not a provider-restart continuation mechanism.
+
+An encrypted, append-only conversation-item stream separately records bounded
+user and assistant messages, tool calls/results, steering, compaction summaries,
+interruption markers, and optional conversation-scoped rollout-budget state. New turns reconstruct model context from the latest
+persisted compaction plus subsequent items instead of dropping tool evidence.
+Reasoning, secrets, and transient preview-console payloads are not stored there.
 
 Source edits use contextual Add/Update patches only. Delete and move operations
 remain unavailable until the repository commit bridge can preserve deletions.
 Failed contextual patches reopen only the affected read coverage so the model
 can reread current source and retry without rediscovering unrelated evidence.
 If rollback after an I/O failure is incomplete, the actual remaining paths are
-reported as a partial failure and still create a source revision that must be
-synchronized, operationally verified, and committed; stale reads for those
-paths are invalidated before another edit.
-Repository commits derive their path set from successful mutations recorded by
-the current run; model-supplied unrelated paths are rejected.
+reported as a partial failure and retained in the durable dirty-path set; stale
+reads for those paths are invalidated before another edit. Dirty paths are
+workspace information, not a hidden verification or commit obligation.
+Repository commits may use durable dirty paths from earlier turns. Unrelated
+paths are rejected, approval is bound to a current content digest, and only
+successfully committed paths are removed from the dirty set. The model is
+instructed never to commit unless the user explicitly requests repository
+persistence.
 
 After a source mutation, runtime verification requires positive completion of
 workspace synchronization for that exact mutation revision before it can report
 `ready`. Operational readiness covers synchronization, process/log health, and
 preview reachability only. It never proves rendered content, interactions, data
-flow, application behavior, or acceptance criteria, and every successful
-mutating completion includes that server-owned limitation.
+flow, application behavior, or acceptance criteria. Verification remains an
+optional model-selected tool; middleware does not force it or rewrite the final
+assistant response.
 
 Mutation syncs are serialized in submission order per Project UID, and their
 revision, status, failure, and one bounded retry are checkpointed across
 permission or follow-up interrupts. A repository commit is bound to the exact
-current-run paths and verified workspace digest. After a commit resumes or
-completes, App Studio requires a fresh operational verification before terminal
-success, so an old `ready` result cannot outlive a delayed approval. While a run
+approved paths and current workspace digest; runtime verification is not a
+commit prerequisite. While a run
 owns the project, server-side reservations reject external workspace hydration,
 template switching, manual sync, and deletion; matching disabled portal controls
 are only the UX layer over that server boundary.
 
 This remains a single-replica design: execution cannot continue across a
-provider restart. On the next read, an orphaned running run is surfaced as
-`interrupted`, while permission and input checkpoints stay resumable. Stop
+provider restart. On the next read, an orphaned running run becomes `interrupted`
+with `abortReason: interrupted` and an interruption marker, while permission
+and input checkpoints stay resumable. Stop
 first persists `stopping`, then asks Eino to
 cancel gracefully without retaining a terminal checkpoint. Assistant starts
 use the durable `POST /messages` boundary; the legacy POST-SSE project and
 message endpoints have been removed. Clients must not depend on token replay:
 the remaining GET stream provides complete revisioned snapshots, and a
 reconnect receives the latest one.
+
+The public run lifecycle is `pending_permission`, `pending_input`, `running`,
+`stopping`, `completed`, `failed`, and `interrupted` (`aborted` is accepted only
+for rows written before the Codex terminal-state cutover). Model, provider, and
+budget failures are `failed` with a structured `error`; explicit interruption,
+provider process loss, and replacement are `interrupted`. The portal renders
+terminal errors separately from real assistant prose and re-enables input for
+every terminal state.
 
 Lifecycle logs contain only organization, workspace, project, run, revision,
 and status fields. They intentionally omit prompt text, assistant content,

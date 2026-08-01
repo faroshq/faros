@@ -60,12 +60,12 @@ const (
 	projectLLMProviderGoogle       = "google-ai-studio"
 	projectLLMGoogleCloudScope     = "https://www.googleapis.com/auth/cloud-platform"
 
-	// maxAssistantDeepIterations bounds the number of ChatModel reasoning
-	// cycles Eino allows before terminating a DeepAgent run.
-	// Match Eino's reference DeepAgent headroom while retaining a finite guard
-	// against models that loop indefinitely.
-	maxAssistantDeepIterations                     = 100
+	// App Studio follows Codex's continuation-driven loop by default. Operators
+	// may still install a finite provider safety ceiling explicitly.
+	projectAssistantFiniteIterationCeiling         = int(^uint(0) >> 1)
 	projectAssistantMaxIterationsEnv               = "APP_STUDIO_ASSISTANT_MAX_ITERATIONS"
+	projectAssistantRolloutBudgetTokensEnv         = "APP_STUDIO_ASSISTANT_ROLLOUT_BUDGET_TOKENS"
+	projectAssistantDefaultRolloutBudgetTokens     int64 = 0
 	projectToolInfoLimit                           = 1000
 	projectMCPCallTimeout                          = 2 * time.Minute
 	projectCommitProjectFilesMax                   = 500
@@ -80,16 +80,35 @@ func projectAssistantDeepIterations() int {
 func projectAssistantDeepIterationsForValue(value string) int {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return maxAssistantDeepIterations
+		return projectAssistantFiniteIterationCeiling
 	}
 	if strings.EqualFold(value, "unlimited") {
 		return int(^uint(0) >> 1)
 	}
 	iterations, err := strconv.Atoi(value)
 	if err != nil || iterations <= 0 {
-		return maxAssistantDeepIterations
+		return projectAssistantFiniteIterationCeiling
 	}
 	return iterations
+}
+
+func projectAssistantRolloutBudgetTokens() int64 {
+	return projectAssistantRolloutBudgetTokensForValue(os.Getenv(projectAssistantRolloutBudgetTokensEnv))
+}
+
+func projectAssistantRolloutBudgetTokensForValue(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return projectAssistantDefaultRolloutBudgetTokens
+	}
+	if strings.EqualFold(value, "unlimited") {
+		return 0
+	}
+	tokens, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || tokens <= 0 {
+		return projectAssistantDefaultRolloutBudgetTokens
+	}
+	return tokens
 }
 
 const (
@@ -140,10 +159,14 @@ type PatchProjectLLMSettingsRequest struct {
 }
 
 type projectLLMSettings struct {
-	Provider string
-	BaseURL  string
-	Model    string
-	APIKey   string
+	Provider             string
+	BaseURL              string
+	Model                string
+	APIKey               string
+	MaxRetries           int
+	MaxRetriesConfigured bool
+	RetryBackoff         time.Duration
+	StreamIdleTimeout    time.Duration
 }
 
 type googleServiceAccountCredential struct {
@@ -160,6 +183,25 @@ type chatMessage struct {
 	Name       string         `json:"name,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	Extra      map[string]any `json:"extra,omitempty"`
+}
+
+// projectAssistantDurableMessageExtra keeps only server-owned provenance that
+// is required to distinguish synthetic context from genuine user input. Eino
+// and provider adapters also use Message.Extra for transient values such as
+// hidden reasoning; those values must never enter the conversation stream or a
+// compaction checkpoint.
+func projectAssistantDurableMessageExtra(extra map[string]any) map[string]any {
+	if len(extra) == 0 {
+		return nil
+	}
+	kind, _ := extra[projectEinoAssistantSyntheticMessageKindKey].(string)
+	if kind != projectEinoAssistantWorkspaceMutationEvidenceKind {
+		return nil
+	}
+	return map[string]any{
+		projectEinoAssistantSyntheticMessageKindKey: projectEinoAssistantWorkspaceMutationEvidenceKind,
+	}
 }
 
 type chatTool struct {
@@ -351,6 +393,11 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	if err != nil {
 		return projectAssistantRunResult{}, err
 	}
+	conversationProjection, err := loadProjectAssistantConversationProjection(ctx, s.store, messageScope)
+	if err != nil {
+		return projectAssistantRunResult{}, err
+	}
+	conversation, conversationCheckpointed := projectAssistantConversationForRun(conversationProjection, recent)
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
 	mode, ok := projectAssistantCollaborationModeForRun(durable)
 	if !ok {
@@ -372,6 +419,8 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		MessageScope:             messageScope,
 		LLM:                      settings,
 		History:                  recent,
+		Conversation:             conversation,
+		ConversationCheckpointed: conversationCheckpointed,
 		MCPBaseURL:               s.hubBase,
 		MCPInsecureSkipTLSVerify: s.mcpInsecureSkipTLSVerify,
 		ApprovalMode:             projectAssistantApprovalModeFromRun(durable),
@@ -379,6 +428,13 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		CollaborationMode:        mode,
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
+		Steering:                 s.projectAssistantSupervisor().Steering(messageScope, durable.ID),
+		SealSteering: func() bool {
+			return s.projectAssistantSupervisor().SealSteering(messageScope, durable.ID)
+		},
+		ActivateSteering: func(activateCtx context.Context, inputs []projectAssistantSteeringInput) error {
+			return s.projectAssistantSupervisor().ActivateSteering(activateCtx, messageScope, durable.ID, inputs)
+		},
 	}
 	if hasDurableRun {
 		durableCopy := durable
@@ -395,92 +451,6 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		return projectAssistantRunResult{}, err
 	}
 	return result, nil
-}
-
-func projectRepeatedToolLoopFallback(toolMessages []chatMessage) string {
-	return projectToolLoopFallback(toolMessages, "repeated the same action")
-}
-
-func projectCommitToolReply(toolMessages []chatMessage) (string, bool) {
-	for i := len(toolMessages) - 1; i >= 0; i-- {
-		msg := toolMessages[i]
-		if projectToolBaseName(msg.Name) != projectToolCommitProjectFiles {
-			continue
-		}
-		status := projectToolMessageStatus(msg)
-		summary := summarizeProjectToolResult(msg.Name, msg.Content)
-		summary = strings.TrimSpace(strings.TrimPrefix(summary, "Tool call failed:"))
-
-		var b strings.Builder
-		switch status {
-		case "failed":
-			b.WriteString("I could not commit the workspace files to the managed git source.")
-		case "running":
-			b.WriteString("The repository commit request was created, but it is still running.")
-		default:
-			b.WriteString("Committed the workspace files to the managed git source.")
-		}
-		if summary != "" {
-			b.WriteString(" Last action result: ")
-			b.WriteString(summary)
-			b.WriteString(".")
-		}
-		return b.String(), true
-	}
-	return "", false
-}
-
-func projectToolMessageStatus(msg chatMessage) string {
-	if strings.HasPrefix(strings.TrimSpace(msg.Content), "Tool call failed:") {
-		return "failed"
-	}
-	return projectToolCallResultStatus(msg.Name, msg.Content)
-}
-
-func projectToolLoopFallback(toolMessages []chatMessage, reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "could not finish using tools"
-	}
-	summaries := make([]string, 0, len(toolMessages))
-	for _, msg := range toolMessages {
-		name := strings.TrimSpace(msg.Name)
-		if name == "" {
-			continue
-		}
-		if summary := summarizeProjectToolResult(name, msg.Content); summary != "" {
-			summaries = append(summaries, name+": "+summary)
-			continue
-		}
-		summaries = append(summaries, name)
-	}
-
-	var b strings.Builder
-	if len(summaries) > 0 {
-		if len(summaries) == 1 && strings.HasPrefix(summaries[0], projectToolReadFile+": ") {
-			b.WriteString("I inspected ")
-			b.WriteString(strings.TrimPrefix(summaries[0], projectToolReadFile+": "))
-		} else if len(summaries) == 1 {
-			b.WriteString("I used the latest project tool result: ")
-			b.WriteString(summaries[0])
-		} else {
-			b.WriteString("I used the latest project tool results")
-		}
-		b.WriteString(". ")
-	} else {
-		b.WriteString("I used the available project tools. ")
-	}
-	if reason == "kept requesting actions" {
-		b.WriteString("The turn ended before I could produce a complete final answer, but I can continue from the current project state.")
-	} else {
-		b.WriteString("The turn ended before I could produce a complete final answer, but I can continue from that context.")
-	}
-	if len(summaries) > 1 {
-		b.WriteString(" Recent results: ")
-		b.WriteString(strings.Join(summaries, "; "))
-		b.WriteString(".")
-	}
-	return b.String()
 }
 
 func (s *Server) generateProjectNaming(ctx context.Context, c *asclient.Client, prompt string) (projectNamingResult, error) {
@@ -813,7 +783,7 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 	}
 	if expectedDigest := projectToolString(args["workspaceDigest"]); expectedDigest != "" &&
 		expectedDigest != hex.EncodeToString(workspaceHash.Sum(nil)) {
-		return "", errors.New("workspace content changed after operational verification; verify the current source before committing")
+		return "", errors.New("workspace content changed after commit approval; request approval again for the current content")
 	}
 	commitArgs := map[string]any{
 		"repositoryRef": projectRepositoryRef,
@@ -1808,6 +1778,22 @@ func readProjectLLMSettings(ctx context.Context, c *asclient.Client) (projectLLM
 		settings.Model = v
 	}
 	settings.APIKey = secretDataValue(secret, "apiKey")
+	if v := secretDataValue(secret, "maxRetries"); v != "" {
+		if parsed, parseErr := strconv.Atoi(v); parseErr == nil && parsed >= 0 && parsed <= 10 {
+			settings.MaxRetries = parsed
+			settings.MaxRetriesConfigured = true
+		}
+	}
+	if v := secretDataValue(secret, "retryBackoffMS"); v != "" {
+		if parsed, parseErr := strconv.Atoi(v); parseErr == nil && parsed > 0 {
+			settings.RetryBackoff = time.Duration(parsed) * time.Millisecond
+		}
+	}
+	if v := secretDataValue(secret, "streamIdleTimeoutMS"); v != "" {
+		if parsed, parseErr := strconv.Atoi(v); parseErr == nil && parsed > 0 {
+			settings.StreamIdleTimeout = time.Duration(parsed) * time.Millisecond
+		}
+	}
 	return settings, nil
 }
 
@@ -1828,9 +1814,13 @@ func writeProjectLLMSettings(ctx context.Context, c *asclient.Client, settings p
 
 func defaultProjectLLMSettings() projectLLMSettings {
 	return projectLLMSettings{
-		Provider: defaultProjectLLMProvider,
-		BaseURL:  defaultProjectLLMBaseURL,
-		Model:    defaultProjectLLMModel,
+		Provider:             defaultProjectLLMProvider,
+		BaseURL:              defaultProjectLLMBaseURL,
+		Model:                defaultProjectLLMModel,
+		MaxRetries:           projectEinoAssistantDefaultModelMaxRetries,
+		MaxRetriesConfigured: true,
+		RetryBackoff:         200 * time.Millisecond,
+		StreamIdleTimeout:    projectEinoAssistantDefaultModelStreamIdleTimeout,
 	}
 }
 
@@ -1869,6 +1859,9 @@ func normalizeProjectLLMSettings(settings *projectLLMSettings) error {
 	}
 	if strings.TrimSpace(settings.Model) == "" {
 		return newValidationError("model cannot be empty")
+	}
+	if settings.StreamIdleTimeout <= 0 {
+		settings.StreamIdleTimeout = projectEinoAssistantDefaultModelStreamIdleTimeout
 	}
 	return nil
 }
@@ -2005,9 +1998,12 @@ func (s projectLLMSettings) view() ProjectLLMSettingsView {
 
 func projectLLMSettingsSecret(settings projectLLMSettings) *unstructured.Unstructured {
 	data := map[string]interface{}{
-		"provider": encodeSecretValue(settings.Provider),
-		"baseURL":  encodeSecretValue(settings.BaseURL),
-		"model":    encodeSecretValue(settings.Model),
+		"provider":            encodeSecretValue(settings.Provider),
+		"baseURL":             encodeSecretValue(settings.BaseURL),
+		"model":               encodeSecretValue(settings.Model),
+		"maxRetries":          encodeSecretValue(strconv.Itoa(settings.MaxRetries)),
+		"retryBackoffMS":      encodeSecretValue(strconv.FormatInt(settings.RetryBackoff.Milliseconds(), 10)),
+		"streamIdleTimeoutMS": encodeSecretValue(strconv.FormatInt(settings.StreamIdleTimeout.Milliseconds(), 10)),
 	}
 	if strings.TrimSpace(settings.APIKey) != "" {
 		data["apiKey"] = encodeSecretValue(settings.APIKey)
@@ -2172,13 +2168,15 @@ func appendProjectAssistantV2ModePrompt(b *strings.Builder, mode projectAssistan
 
 	b.WriteString("Default mode follows the authority in the user's request: answer, explanation, review, status, and diagnosis requests authorize inspection only; change, build, fix, remove, and implementation requests authorize scoped action. Diagnose reported defects from current evidence before editing. Do not turn an explanatory question into an implementation task. ")
 	b.WriteString("Use the current project snapshot first, then bounded reads and searches for unanswered questions. Additional evidence must answer a new question rather than rediscover a result already returned. ")
-	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add new files or update existing files; include enough unchanged context for a unique match and group independent related changes in one patch. File deletion and rename are not currently supported, so state that limitation instead of attempting either operation. Do not assume a shell or host filesystem access. ")
-	b.WriteString("Workspace changes synchronize automatically. After a repair, rerun the original observation when an available tool can observe it, then run verify_development_runtime. That tool proves operational synchronization, process/log health, and preview reachability only; it does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria. ")
+	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add new files or update existing files; include enough unchanged context for a unique match and group independent related changes in one patch. ")
+	b.WriteString(projectAssistantContextualPatchFormatInstruction)
+	b.WriteString("File deletion and rename are not currently supported, so state that limitation instead of attempting either operation. Do not assume a shell or host filesystem access. ")
+	b.WriteString("Workspace changes synchronize automatically. Rerun the original observation or use verify_development_runtime only when that evidence is relevant to the user's request. The verification tool proves operational synchronization, process/log health, and preview reachability only; it does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria. Dirty files do not create an obligation to verify or commit. ")
 	if initialBuild {
 		b.WriteString("The project-creation request is the one-time authorization for this initial source build. It does not authorize unrelated infrastructure, production promotion, or repository replacement. ")
 	}
 	if repositoryCommitReady {
-		b.WriteString("After current-revision operational verification succeeds, commit only source/config paths actually changed in this run to repositoryRef \"" + repoRef + "\" with a concise message. ")
+		b.WriteString("Never call commit_project_files unless the user explicitly requested repository persistence. When they did, commit only durable dirty source/config paths to repositoryRef \"" + repoRef + "\" with a concise message. ")
 	} else {
 		b.WriteString("Repository state does not permit a commit in this run. Continue with authorized workspace work, but do not call commit_project_files or imply the changes were persisted to git. ")
 	}

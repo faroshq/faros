@@ -21,6 +21,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -281,8 +282,13 @@ func (s *encryptedStore) SaveAssistantRun(ctx context.Context, scope Scope, run 
 	if err != nil {
 		return err
 	}
+	terminalError, err := s.encryptAssistantRunBlob(scope, run, "error", run.Error)
+	if err != nil {
+		return err
+	}
 	run.Checkpoint = checkpoint
 	run.Audit = audit
+	run.Error = terminalError
 	return s.inner.SaveAssistantRun(ctx, scope, run)
 }
 
@@ -306,8 +312,13 @@ func (s *encryptedStore) CreateAssistantRun(ctx context.Context, scope Scope, us
 	if err != nil {
 		return AssistantRun{}, err
 	}
+	terminalError, err := s.encryptAssistantRunBlob(scope, run, "error", run.Error)
+	if err != nil {
+		return AssistantRun{}, err
+	}
 	run.Checkpoint = checkpoint
 	run.Audit = audit
+	run.Error = terminalError
 	created, err := s.inner.CreateAssistantRun(ctx, scope, user, assistant, run)
 	if err != nil {
 		return AssistantRun{}, err
@@ -359,8 +370,13 @@ func (s *encryptedStore) SaveAssistantRunSnapshot(ctx context.Context, scope Sco
 	if err != nil {
 		return err
 	}
+	terminalError, err := s.encryptAssistantRunBlob(scope, run, "error", run.Error)
+	if err != nil {
+		return err
+	}
 	run.Checkpoint = checkpoint
 	run.Audit = audit
+	run.Error = terminalError
 	encryptedMessages := make([]Message, len(messages))
 	for i := range messages {
 		encryptedMessages[i], err = s.encryptMessage(scope, messages[i])
@@ -445,6 +461,81 @@ func (s *encryptedStore) ListAssistantRunEvents(ctx context.Context, scope Scope
 		}
 	}
 	return events, nil
+}
+
+func (s *encryptedStore) AppendAssistantConversationItem(ctx context.Context, scope Scope, item AssistantConversationItem) (AssistantConversationItem, error) {
+	prepared, err := prepareAssistantConversationItem(scope, item)
+	if err != nil {
+		return AssistantConversationItem{}, err
+	}
+	if existing, found, err := s.findAssistantConversationItem(ctx, scope, prepared.RunID, prepared.ID); err != nil {
+		return AssistantConversationItem{}, err
+	} else if found {
+		if !assistantConversationItemsMatch(existing, prepared) {
+			return AssistantConversationItem{}, ErrAssistantConversationItemConflict
+		}
+		return existing, nil
+	}
+	run := AssistantRun{ID: prepared.RunID}
+	prepared.Payload, err = s.encryptAssistantRunBlob(scope, run, "conversation:"+prepared.ID, prepared.Payload)
+	if err != nil {
+		return AssistantConversationItem{}, err
+	}
+	created, err := s.inner.AppendAssistantConversationItem(ctx, scope, prepared)
+	if errors.Is(err, ErrAssistantConversationItemConflict) {
+		existing, found, findErr := s.findAssistantConversationItem(ctx, scope, item.RunID, item.ID)
+		if findErr != nil {
+			return AssistantConversationItem{}, findErr
+		}
+		if found && assistantConversationItemsMatch(existing, item) {
+			return existing, nil
+		}
+	}
+	if err != nil {
+		return AssistantConversationItem{}, err
+	}
+	if err := s.decryptAssistantRunBlob(scope, &run, "conversation:"+created.ID, &created.Payload); err != nil {
+		return AssistantConversationItem{}, err
+	}
+	return created, nil
+}
+
+func (s *encryptedStore) findAssistantConversationItem(ctx context.Context, scope Scope, runID, itemID string) (AssistantConversationItem, bool, error) {
+	after := int64(0)
+	for {
+		items, err := s.inner.ListAssistantConversationItems(ctx, scope, after, 500)
+		if err != nil {
+			return AssistantConversationItem{}, false, err
+		}
+		for _, item := range items {
+			if item.RunID != runID || item.ID != itemID {
+				continue
+			}
+			run := AssistantRun{ID: item.RunID}
+			if err := s.decryptAssistantRunBlob(scope, &run, "conversation:"+item.ID, &item.Payload); err != nil {
+				return AssistantConversationItem{}, false, err
+			}
+			return item, true, nil
+		}
+		if len(items) < 500 {
+			return AssistantConversationItem{}, false, nil
+		}
+		after = items[len(items)-1].Sequence
+	}
+}
+
+func (s *encryptedStore) ListAssistantConversationItems(ctx context.Context, scope Scope, afterSequence int64, limit int) ([]AssistantConversationItem, error) {
+	items, err := s.inner.ListAssistantConversationItems(ctx, scope, afterSequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		run := AssistantRun{ID: items[i].RunID}
+		if err := s.decryptAssistantRunBlob(scope, &run, "conversation:"+items[i].ID, &items[i].Payload); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 func (s *encryptedStore) DeleteProjectMessages(ctx context.Context, scope Scope) error {
@@ -585,7 +676,10 @@ func (s *encryptedStore) decryptAssistantRunBlobs(scope Scope, run *AssistantRun
 	if err := s.decryptAssistantRunBlob(scope, run, "checkpoint", &run.Checkpoint); err != nil {
 		return err
 	}
-	return s.decryptAssistantRunBlob(scope, run, "audit", &run.Audit)
+	if err := s.decryptAssistantRunBlob(scope, run, "audit", &run.Audit); err != nil {
+		return err
+	}
+	return s.decryptAssistantRunBlob(scope, run, "error", &run.Error)
 }
 
 func (s *encryptedStore) decryptAssistantRunBlob(scope Scope, run *AssistantRun, label string, value *json.RawMessage) error {

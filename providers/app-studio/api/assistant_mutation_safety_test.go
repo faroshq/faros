@@ -30,7 +30,7 @@ import (
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
-func TestAssistantApplyPatchRequiresSameTurnReadAndReturnsDiff(t *testing.T) {
+func TestAssistantApplyPatchUsesLiveWorkspaceAndReturnsDiff(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{
@@ -44,20 +44,15 @@ func TestAssistantApplyPatchRequiresSameTurnReadAndReturnsDiff(t *testing.T) {
 		t.Fatal("apply_patch tool was not registered")
 	}
 	req := projectAssistantToolCallRequest{
-		WorkspaceScope:        scope,
-		AssistantRunID:        "run-1",
-		EnforceMutationSafety: true,
+		WorkspaceScope: scope,
+		AssistantRunID: "run-1",
 		Arguments: map[string]any{
 			"patch": "*** Begin Patch\n*** Update File: src/app.js\n@@\n-const theme = 'light'\n+const theme = 'dark'\n*** End Patch",
 		},
 	}
-	if _, err := patch.Call(context.Background(), req); err == nil || !strings.Contains(err.Error(), "read_file") {
-		t.Fatalf("patch error = %v, want read_file rejection", err)
-	}
-	req.ObservedReadFiles = []string{"src/app.js", "src/other.js"}
 	result, err := patch.Call(context.Background(), req)
 	if err != nil {
-		t.Fatalf("patch after read returned error: %v", err)
+		t.Fatalf("patch returned error: %v", err)
 	}
 	var decoded workspace.MutationResult
 	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
@@ -110,6 +105,7 @@ func TestAssistantObservedReadPathsSurviveMutationAndCheckpoint(t *testing.T) {
 func TestAssistantFilesystemTelemetryRecordsObservedReadPath(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	messages, scope := newAssistantRunEventLedgerTestStore(t, "run-read-telemetry")
+	calls := 0
 	middleware := projectEinoAssistantFilesystemTelemetryMiddleware(projectAssistantRunRequest{
 		AssistantRun: &store.AssistantRun{ID: "run-read-telemetry", Mode: store.AssistantRunModeDefault},
 		eventLedger:  newProjectAssistantRunEventLedger(messages, scope, "run-read-telemetry"),
@@ -117,6 +113,7 @@ func TestAssistantFilesystemTelemetryRecordsObservedReadPath(t *testing.T) {
 	wrapped, err := middleware.WrapInvokableToolCall(
 		context.Background(),
 		func(context.Context, string, ...einotool.Option) (string, error) {
+			calls++
 			return "     1\tconst theme = 'light'\n", nil
 		},
 		&adk.ToolContext{Name: projectToolReadFile},
@@ -129,5 +126,75 @@ func TestAssistantFilesystemTelemetryRecordsObservedReadPath(t *testing.T) {
 	}
 	if got := state.ObservedReadFilePaths(); len(got) != 1 || got[0] != "src/app.js" {
 		t.Fatalf("observed reads = %v, want src/app.js", got)
+	}
+
+	secondMessages, secondScope := newAssistantRunEventLedgerTestStore(t, "run-read-telemetry-2")
+	secondMiddleware := projectEinoAssistantFilesystemTelemetryMiddleware(projectAssistantRunRequest{
+		AssistantRun: &store.AssistantRun{ID: "run-read-telemetry-2", Mode: store.AssistantRunModeDefault},
+		eventLedger:  newProjectAssistantRunEventLedger(secondMessages, secondScope, "run-read-telemetry-2"),
+	}, state)
+	second, err := secondMiddleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			calls++
+			return "     1\tconst theme = 'light'\n", nil
+		},
+		&adk.ToolContext{Name: projectToolReadFile},
+	)
+	if err != nil {
+		t.Fatalf("second WrapInvokableToolCall returned error: %v", err)
+	}
+	if _, err := second(context.Background(), `{"file_path":"./src/app.js","limit":2000}`); err != nil {
+		t.Fatalf("repeated read_file returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("read endpoint calls = %d, want repeated reads dispatched", calls)
+	}
+}
+
+func TestAssistantFilesystemFailureIsDurableModelFeedback(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	messages, scope := newAssistantRunEventLedgerTestStore(t, "run-read-failure")
+	calls := 0
+	wrap := func(ledger *projectAssistantRunEventLedger) adk.InvokableToolCallEndpoint {
+		middleware := projectEinoAssistantFilesystemTelemetryMiddleware(projectAssistantRunRequest{
+			AssistantRun: &store.AssistantRun{ID: "run-read-failure", Mode: store.AssistantRunModeDefault},
+			eventLedger:  ledger,
+		}, state)
+		wrapped, err := middleware.WrapInvokableToolCall(
+			context.Background(),
+			func(context.Context, string, ...einotool.Option) (string, error) {
+				calls++
+				return "", errors.New("source file is temporarily unavailable")
+			},
+			&adk.ToolContext{Name: projectToolReadFile},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wrapped
+	}
+	arguments := `{"file_path":"src/app.js","limit":2000}`
+	result, err := wrap(newProjectAssistantRunEventLedger(messages, scope, "run-read-failure"))(context.Background(), arguments)
+	if err != nil || !strings.Contains(result, "Tool call failed: source file is temporarily unavailable") {
+		t.Fatalf("read failure = (%q, %v), want model-visible feedback", result, err)
+	}
+	replayed, err := wrap(newProjectAssistantRunEventLedger(messages, scope, "run-read-failure"))(context.Background(), arguments)
+	if err != nil || replayed != result {
+		t.Fatalf("replayed read failure = (%q, %v), want %q", replayed, err, result)
+	}
+	if calls != 1 {
+		t.Fatalf("read endpoint calls = %d, want durable failure replay without redispatch", calls)
+	}
+	events := listAssistantRunEventLedgerEvents(t, messages, scope, "run-read-failure")
+	if len(events) != 2 {
+		t.Fatalf("events = %#v, want call and failed result", events)
+	}
+	var payload projectAssistantRunToolResultPayload
+	if err := json.Unmarshal(events[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Failed || payload.Result != result {
+		t.Fatalf("durable read failure = %#v", payload)
 	}
 }

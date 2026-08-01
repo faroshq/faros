@@ -33,6 +33,11 @@ const assistantV2CutoverSchemaVersion = "assistant-v2-destructive-cutover-v1"
 const approvalModeSchemaVersion = "approval-mode-v1"
 const bootstrapPermitSchemaVersion = "project-bootstrap-permit-v1"
 const assistantRunEventSchemaVersion = "assistant-run-event-v1"
+const assistantCodexTerminalSchemaVersion = "assistant-codex-terminal-v1"
+const assistantCodexTerminalParitySchemaVersion = "assistant-codex-terminal-v2"
+const assistantConversationSchemaVersion = "assistant-conversation-items-v1"
+const assistantConversationProjectStreamSchemaVersion = "assistant-conversation-project-stream-v1"
+const assistantConversationIdentitySchemaVersion = "assistant-conversation-identity-v2"
 
 const lockMessageSchemaMigrations = `SELECT pg_advisory_xact_lock(870408091945886937)`
 
@@ -114,6 +119,21 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := ensureSchemaVersion(ctx, tx, assistantRunEventSchemaVersion, assistantRunEventSchemaStatements()...); err != nil {
 		return err
 	}
+	if err := ensureSchemaVersion(ctx, tx, assistantCodexTerminalSchemaVersion, assistantCodexTerminalSchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantCodexTerminalParitySchemaVersion, assistantCodexTerminalParitySchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantConversationSchemaVersion, assistantConversationSchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantConversationProjectStreamSchemaVersion, assistantConversationProjectStreamSchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantConversationIdentitySchemaVersion, assistantConversationIdentitySchemaStatements()...); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
@@ -154,6 +174,7 @@ func assistantSchemaStatements() []string {
 			status text NOT NULL, client_request_id text NOT NULL DEFAULT '', user_message_id text NOT NULL DEFAULT '',
 			active_message_id text NOT NULL DEFAULT '', revision bigint NOT NULL DEFAULT 0, request_id text NOT NULL DEFAULT '',
 			checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb, audit jsonb NOT NULL DEFAULT '{}'::jsonb,
+			terminal_error jsonb NOT NULL DEFAULT '{}'::jsonb, abort_reason text NOT NULL DEFAULT '',
 			created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
 			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 		)`,
@@ -164,7 +185,31 @@ func assistantSchemaStatements() []string {
 			WHERE client_request_id <> ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_runs_active_idx
 			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid)
-			WHERE status NOT IN ('completed','aborted','failed','interrupted')`,
+			WHERE status NOT IN ('completed','failed','interrupted','aborted')`,
+	}
+}
+
+func assistantCodexTerminalParitySchemaStatements() []string {
+	return []string{
+		// The v1 partial index treats the new terminal values as active. Drop it
+		// before rewriting historical rows or multiple old terminal runs in one
+		// project can collide while the UPDATE is still in progress.
+		`DROP INDEX IF EXISTS app_studio_runs_active_idx`,
+		`UPDATE app_studio_assistant_runs SET status = 'failed' WHERE status = 'completed' AND terminal_error <> '{}'::jsonb`,
+		`UPDATE app_studio_assistant_runs SET status = 'failed' WHERE status = 'aborted' AND abort_reason = 'budget_limited'`,
+		`UPDATE app_studio_assistant_runs SET status = 'interrupted' WHERE status = 'aborted'`,
+		`CREATE UNIQUE INDEX app_studio_runs_active_idx ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid) WHERE status NOT IN ('completed','failed','interrupted','aborted')`,
+	}
+}
+
+func assistantCodexTerminalSchemaStatements() []string {
+	return []string{
+		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS terminal_error jsonb NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS abort_reason text NOT NULL DEFAULT ''`,
+		`UPDATE app_studio_assistant_runs SET terminal_error = jsonb_build_object('message', 'The assistant run failed before it could finish.'), status = 'completed' WHERE status = 'failed'`,
+		`UPDATE app_studio_assistant_runs SET abort_reason = 'interrupted', status = 'aborted' WHERE status = 'interrupted'`,
+		`DROP INDEX IF EXISTS app_studio_runs_active_idx`,
+		`CREATE UNIQUE INDEX app_studio_runs_active_idx ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid) WHERE status NOT IN ('completed','aborted')`,
 	}
 }
 
@@ -197,6 +242,48 @@ func assistantRunEventSchemaStatements() []string {
 			REFERENCES app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 			ON DELETE CASCADE
 	)`}
+}
+
+func assistantConversationSchemaStatements() []string {
+	return []string{`CREATE TABLE IF NOT EXISTS app_studio_assistant_conversation_items (
+		org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+		item_id text NOT NULL, run_id text NOT NULL, sequence bigint NOT NULL CHECK (sequence > 0), item_type text NOT NULL,
+		payload jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL,
+		PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id, item_id),
+		UNIQUE (org_uuid, workspace_uuid, project_name, project_uid, sequence)
+	)`, `CREATE INDEX IF NOT EXISTS app_studio_assistant_conversation_items_scope_idx
+		ON app_studio_assistant_conversation_items (org_uuid, workspace_uuid, project_name, project_uid, sequence)`}
+}
+
+func assistantConversationProjectStreamSchemaStatements() []string {
+	return []string{`DO $$
+	DECLARE constraint_name text;
+	BEGIN
+		FOR constraint_name IN
+			SELECT conname FROM pg_constraint
+			WHERE conrelid = 'app_studio_assistant_conversation_items'::regclass AND contype = 'f'
+		LOOP
+			EXECUTE format('ALTER TABLE app_studio_assistant_conversation_items DROP CONSTRAINT %I', constraint_name);
+		END LOOP;
+	END $$`}
+}
+
+// assistantConversationIdentitySchemaStatements widens item identity from a
+// project-global item ID to (run ID, item ID). Existing rows remain valid and
+// keep their sequence; later runs may safely reuse synthetic item IDs.
+func assistantConversationIdentitySchemaStatements() []string {
+	return []string{`DO $$
+	DECLARE constraint_name text;
+	BEGIN
+		SELECT conname INTO constraint_name
+		FROM pg_constraint
+		WHERE conrelid = 'app_studio_assistant_conversation_items'::regclass AND contype = 'p';
+		IF constraint_name IS NOT NULL THEN
+			EXECUTE format('ALTER TABLE app_studio_assistant_conversation_items DROP CONSTRAINT %I', constraint_name);
+		END IF;
+		ALTER TABLE app_studio_assistant_conversation_items
+			ADD PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id, item_id);
+	END $$`}
 }
 
 func ensureSchemaVersion(ctx context.Context, tx *sql.Tx, version string, stmts ...string) error {
@@ -490,13 +577,17 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 	if err != nil {
 		return fmt.Errorf("assistant run audit is not valid json: %w", err)
 	}
+	terminalError, err := normalizeAssistantRunError(run.Error)
+	if err != nil {
+		return err
+	}
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
 			org_uuid, workspace_uuid, project_name, project_uid, run_id, mode, approval_mode,
 			status, client_request_id, user_message_id, active_message_id, revision, request_id,
-			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+			checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 		DO UPDATE SET
 			status = EXCLUDED.status,
@@ -504,13 +595,15 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 			request_id = EXCLUDED.request_id,
 			checkpoint = EXCLUDED.checkpoint,
 			audit = EXCLUDED.audit,
+			terminal_error = EXCLUDED.terminal_error,
+			abort_reason = EXCLUDED.abort_reason,
 			updated_at = EXCLUDED.updated_at
 			WHERE app_studio_assistant_runs.mode = EXCLUDED.mode
 				AND app_studio_assistant_runs.approval_mode = EXCLUDED.approval_mode
 		`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.Mode, run.ApprovalMode,
 		run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
+		string(normalizedCheckpoint), string(normalizedAudit), string(terminalError), run.AbortReason, run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 	)
 	if err != nil {
 		if isAssistantRunUniqueViolation(err) {
@@ -543,6 +636,10 @@ func (s *PostgresStore) CreateAssistantRun(ctx context.Context, scope Scope, use
 	if err != nil {
 		return AssistantRun{}, err
 	}
+	terminalError, err := normalizeAssistantRunError(run.Error)
+	if err != nil {
+		return AssistantRun{}, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -554,14 +651,14 @@ func (s *PostgresStore) CreateAssistantRun(ctx context.Context, scope Scope, use
 		INSERT INTO app_studio_assistant_runs (
 			org_uuid, workspace_uuid, project_name, project_uid, run_id, mode, approval_mode, status,
 			client_request_id, user_message_id, active_message_id, revision, request_id,
-			checkpoint, audit, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+			checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT DO NOTHING
 		RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-		          request_id, checkpoint, audit, created_at, updated_at
+		          request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.Mode, run.ApprovalMode, run.Status,
 		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
+		string(checkpoint), string(audit), string(terminalError), run.AbortReason, run.CreatedAt.UTC(), run.UpdatedAt.UTC())
 	inserted, err := scanAssistantRun(row, scope)
 	if err == sql.ErrNoRows {
 		existing, lookupErr := getAssistantRunByClientRequestID(ctx, tx, scope, run.ClientRequestID)
@@ -606,6 +703,10 @@ func (s *PostgresStore) SaveAssistantRunSnapshot(ctx context.Context, scope Scop
 	if err != nil {
 		return err
 	}
+	terminalError, err := normalizeAssistantRunError(run.Error)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin save assistant run snapshot: %w", err)
@@ -620,14 +721,16 @@ func (s *PostgresStore) SaveAssistantRunSnapshot(ctx context.Context, scope Scop
 			request_id = $9,
 			checkpoint = $10,
 			audit = $11,
-			updated_at = $12
+			terminal_error = $12,
+			abort_reason = $13,
+			updated_at = $14
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
-			  AND revision = $13
-			  AND mode = $14
-			  AND approval_mode = $15
+			  AND revision = $15
+			  AND mode = $16
+			  AND approval_mode = $17
 		`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
 		run.Status, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(checkpoint), string(audit), run.UpdatedAt.UTC(), expectedRevision, run.Mode, run.ApprovalMode)
+		string(checkpoint), string(audit), string(terminalError), run.AbortReason, run.UpdatedAt.UTC(), expectedRevision, run.Mode, run.ApprovalMode)
 	if err != nil {
 		if isAssistantRunUniqueViolation(err) {
 			return fmt.Errorf("%w: project already has active assistant run", ErrAssistantRunConflict)
@@ -727,7 +830,7 @@ func (s *PostgresStore) requestAssistantRunStop(ctx context.Context, scope Scope
 		WHERE org_uuid=$3 AND workspace_uuid=$4 AND project_name=$5 AND project_uid=$6
 			AND run_id=$7 AND revision=$8 AND status=$9
 		RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-			request_id, checkpoint, audit, created_at, updated_at`,
+			request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at`,
 		AssistantRunStatusStopping, now.UTC(), scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
 		runID, expectedRunRevision, AssistantRunStatusRunning)
 	run, err := scanAssistantRun(row, scope)
@@ -778,7 +881,7 @@ func (s *PostgresStore) ClaimAssistantRun(ctx context.Context, scope Scope, id s
 		  AND request_id = $8
 			AND status IN ($9, $10)
 			RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-		          request_id, checkpoint, audit, created_at, updated_at
+		          request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
 	`,
 		AssistantRunStatusRunning, now.UTC(),
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id, requestID,
@@ -807,7 +910,7 @@ func (s *PostgresStore) GetAssistantRun(ctx context.Context, scope Scope, id str
 	}
 	row := s.db.QueryRowContext(ctx, `
 			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at
+		       request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id)
@@ -844,7 +947,7 @@ func (s *PostgresStore) LatestAssistantRun(ctx context.Context, scope Scope) (As
 	}
 	row := s.db.QueryRowContext(ctx, `
 			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at
+		       request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 		ORDER BY updated_at DESC, run_id DESC
@@ -1015,11 +1118,11 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 		USING app_studio_assistant_runs AS run
 		WHERE event.org_uuid=run.org_uuid AND event.workspace_uuid=run.workspace_uuid
 			AND event.project_name=run.project_name AND event.project_uid=run.project_uid AND event.run_id=run.run_id
-			AND run.status IN ('completed', 'aborted', 'failed', 'interrupted') AND run.updated_at < $1`, before.UTC()); err != nil {
+			AND run.status IN ('completed', 'aborted') AND run.updated_at < $1`, before.UTC()); err != nil {
 		return 0, fmt.Errorf("delete stale assistant run events: %w", err)
 	}
 	runRes, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs
-		WHERE status IN ('completed', 'aborted', 'failed', 'interrupted') AND updated_at < $1`, before.UTC())
+		WHERE status IN ('completed', 'aborted') AND updated_at < $1`, before.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete stale assistant runs: %w", err)
 	}
@@ -1124,12 +1227,23 @@ func normalizeAssistantRunJSON(run AssistantRun) (json.RawMessage, json.RawMessa
 	return normalizedCheckpoint, normalizedAudit, nil
 }
 
+func normalizeAssistantRunError(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	normalized, err := normalizePostgresJSONB(raw)
+	if err != nil {
+		return nil, fmt.Errorf("assistant run terminal error is not valid json: %w", err)
+	}
+	return normalized, nil
+}
+
 func getAssistantRunByClientRequestID(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, scope Scope, clientRequestID string) (AssistantRun, error) {
 	row := queryer.QueryRowContext(ctx, `
 			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at
+		       request_id, checkpoint, audit, terminal_error, abort_reason, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND client_request_id = $5
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, clientRequestID)
@@ -1165,6 +1279,8 @@ func scanAssistantRun(row interface {
 		&run.RequestID,
 		&run.Checkpoint,
 		&run.Audit,
+		&run.Error,
+		&run.AbortReason,
 		&run.CreatedAt,
 		&run.UpdatedAt,
 	); err != nil {
@@ -1176,6 +1292,7 @@ func scanAssistantRun(row interface {
 	run.ApprovalMode, _ = NormalizeAssistantApprovalMode(run.ApprovalMode)
 	run.Checkpoint = cloneRawMessage(run.Checkpoint)
 	run.Audit = cloneRawMessage(run.Audit)
+	run.Error = cloneRawMessage(run.Error)
 	run.CreatedAt = run.CreatedAt.UTC()
 	run.UpdatedAt = run.UpdatedAt.UTC()
 	return run, nil

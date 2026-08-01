@@ -454,6 +454,15 @@ func (t projectAssistantDurableGraphTool) InvokableRun(
 	argumentsInJSON string,
 	opts ...einotool.Option,
 ) (string, error) {
+	return t.invokableRun(ctx, compose.GetToolCallID(ctx), argumentsInJSON, opts...)
+}
+
+func (t projectAssistantDurableGraphTool) invokableRun(
+	ctx context.Context,
+	callID string,
+	argumentsInJSON string,
+	opts ...einotool.Option,
+) (string, error) {
 	args, err := projectEinoToolArguments(argumentsInJSON)
 	if err != nil {
 		return "", fmt.Errorf("decode %s workflow arguments: %w", t.spec.Name, err)
@@ -467,17 +476,32 @@ func (t projectAssistantDurableGraphTool) InvokableRun(
 			return "", err
 		}
 	}
-	decision, err := t.ledger.BeginToolCall(ctx, compose.GetToolCallID(ctx), t.spec, args)
+	decision, err := t.ledger.BeginToolCall(ctx, callID, t.spec, args)
 	if err != nil {
 		return "", err
 	}
 	if decision.Replay != nil {
-		return decision.Replay.InvokeResult()
+		result, replayErr := decision.Replay.InvokeResult()
+		if replayErr != nil && decision.Replay.Failed && strings.TrimSpace(decision.Replay.Result) != "" {
+			return decision.Replay.Result, nil
+		}
+		return result, replayErr
 	}
 	result, invokeErr := t.InvokableTool.InvokableRun(ctx, argumentsInJSON, opts...)
-	outcome, err := t.ledger.FinishToolCall(ctx, decision.Token, result, invokeErr)
+	modelResult := result
+	returnFailureToModel := invokeErr != nil && !projectEinoAssistantPropagateToolError(invokeErr)
+	if returnFailureToModel {
+		modelResult = projectEinoAssistantSafeToolFailureResult(projectToolBaseName(t.spec.Name), invokeErr)
+	}
+	outcome, err := t.ledger.FinishToolCall(ctx, decision.Token, modelResult, invokeErr)
 	if err != nil {
 		return "", err
+	}
+	if returnFailureToModel {
+		if !outcome.Failed {
+			return "", errors.New("assistant run graph tool failure was not recorded as failed")
+		}
+		return outcome.Result, nil
 	}
 	return outcome.InvokeResult()
 }
@@ -1328,11 +1352,6 @@ func projectAssistantWorkflowSteps(memory aiv1alpha1.ProjectMemory, repository *
 		steps = append(steps, "Inspect the listed workspace files before writing or patching source.")
 	} else {
 		steps = append(steps, "List the workspace files before editing an existing project.")
-	}
-	if repository != nil && repository.Status == projectRepositoryStatusReady {
-		steps = append(steps, "After approved workspace edits, commit changed source files through commit_project_files.")
-	} else {
-		steps = append(steps, "Defer commit handoff until the repository binding is ready.")
 	}
 	return steps
 }

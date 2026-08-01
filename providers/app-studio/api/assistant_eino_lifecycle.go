@@ -18,147 +18,54 @@ package api
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
-	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
-	"github.com/google/uuid"
 
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
-const projectEinoAssistantProgressCorrectionPrefix = "[App Studio progress correction] "
-
-// projectEinoAssistantLifecycle observes the two facts App Studio must enforce
-// around source effects: a successful source mutation invalidates prior
-// verification, and commit requires successful verification of the latest
-// mutation. It deliberately does not infer phases or rewrite the model's tool
-// catalog; Eino remains the owner of the conversational execution loop.
+// projectEinoAssistantLifecycle records durable effects without adding hidden
+// verification or commit obligations to Eino's conversational loop.
 type projectEinoAssistantLifecycle struct {
 	*adk.BaseChatModelAgentMiddleware
 
-	runState       *projectEinoAssistantRunState
-	initialBuild   bool
-	repositoryRef  string
-	workspace      *workspace.FileStore
-	workspaceScope workspace.Scope
-	repositoryView func(context.Context) (*ProjectRepositoryView, error)
-	auditRecorder  *projectAssistantRunAuditRecorder
-}
-
-type projectEinoAssistantCompletionBarrierModel struct {
-	einomodel.BaseChatModel
-
-	verificationToolName string
-	toolArguments        string
-	runState             *projectEinoAssistantRunState
-}
-
-type projectEinoAssistantForcedToolModel struct {
-	einomodel.BaseChatModel
-}
-
-func (m *projectEinoAssistantForcedToolModel) Generate(
-	ctx context.Context,
-	input []*schema.Message,
-	opts ...einomodel.Option,
-) (*schema.Message, error) {
-	return m.BaseChatModel.Generate(ctx, input, append(opts, einomodel.WithToolChoice(schema.ToolChoiceForced))...)
-}
-
-func (m *projectEinoAssistantForcedToolModel) Stream(
-	ctx context.Context,
-	input []*schema.Message,
-	opts ...einomodel.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	return m.BaseChatModel.Stream(ctx, input, append(opts, einomodel.WithToolChoice(schema.ToolChoiceForced))...)
-}
-
-func (m *projectEinoAssistantCompletionBarrierModel) Generate(
-	ctx context.Context,
-	input []*schema.Message,
-	opts ...einomodel.Option,
-) (*schema.Message, error) {
-	message, err := m.BaseChatModel.Generate(ctx, input, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return projectEinoAssistantRequiredToolBarrierMessage(message, m.verificationToolName, m.toolArguments, m.runState), nil
-}
-
-func (m *projectEinoAssistantCompletionBarrierModel) Stream(
-	ctx context.Context,
-	input []*schema.Message,
-	opts ...einomodel.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
-	if err != nil {
-		return nil, err
-	}
-	message, err := schema.ConcatMessageStream(reader)
-	if err != nil {
-		return nil, fmt.Errorf("combine assistant completion stream: %w", err)
-	}
-	if message == nil {
-		return nil, errors.New("assistant completion returned an empty model stream")
-	}
-	message = projectEinoAssistantRequiredToolBarrierMessage(message, m.verificationToolName, m.toolArguments, m.runState)
-	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
-}
-
-func projectEinoAssistantRequiredToolBarrierMessage(
-	message *schema.Message,
-	toolName string,
-	arguments string,
-	runState *projectEinoAssistantRunState,
-) *schema.Message {
-	if message == nil || len(message.ToolCalls) > 0 || runState == nil ||
-		(strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.ReasoningContent) == "" && len(message.AssistantGenMultiContent) == 0) {
-		return message
-	}
-	result := *message
-	result.Role = schema.Assistant
-	result.Content = ""
-	result.MultiContent = nil
-	result.UserInputMultiContent = nil
-	result.AssistantGenMultiContent = nil
-	result.Name = ""
-	result.ToolCallID = ""
-	result.ToolName = ""
-	result.ReasoningContent = ""
-	if strings.TrimSpace(arguments) == "" {
-		arguments = `{}`
-	}
-	result.ToolCalls = []schema.ToolCall{{
-		ID:   "call-" + uuid.NewString(),
-		Type: "function",
-		Function: schema.FunctionCall{
-			Name:      strings.TrimSpace(toolName),
-			Arguments: strings.TrimSpace(arguments),
-		},
-	}}
-	adk.EnsureMessageID(&result)
-	runState.RewriteCompletionAsVerification(&result)
-	return &result
+	runState         *projectEinoAssistantRunState
+	server           *Server
+	req              projectAssistantRunRequest
+	initialBuild     bool
+	repositoryRef    string
+	workspace        *workspace.FileStore
+	workspaceScope   workspace.Scope
+	repositoryView   func(context.Context) (*ProjectRepositoryView, error)
+	auditRecorder    *projectAssistantRunAuditRecorder
+	steering         <-chan projectAssistantSteeringInput
+	activateSteering func(context.Context, []projectAssistantSteeringInput) error
+	managedToolNames map[string]struct{}
 }
 
 func projectEinoAssistantLifecycleMiddleware(
 	req projectAssistantRunRequest,
 	runState *projectEinoAssistantRunState,
+	servers ...*Server,
 ) adk.ChatModelAgentMiddleware {
 	lifecycle := &projectEinoAssistantLifecycle{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		runState:                     runState,
+		req:                          req,
 		initialBuild:                 projectAssistantInitialBuildActive(req, runState),
 		repositoryRef:                projectEinoAssistantProjectRepositoryRef(req),
 		workspace:                    req.Workspace,
 		workspaceScope:               req.WorkspaceScope,
 		auditRecorder:                req.auditRecorder,
+		steering:                     req.Steering,
+		activateSteering:             req.ActivateSteering,
+	}
+	if len(servers) > 0 {
+		lifecycle.server = servers[0]
 	}
 	if req.Client != nil && req.Project != nil {
 		lifecycle.repositoryView = func(ctx context.Context) (*ProjectRepositoryView, error) {
@@ -189,48 +96,235 @@ func (m *projectEinoAssistantLifecycle) BeforeModelRewriteState(
 	if m.runState == nil {
 		return ctx, state, nil
 	}
-	m.refreshRepositoryState(ctx)
-	ordinal := m.runState.NextModelCallOrdinal()
 	if state == nil {
 		return ctx, state, nil
 	}
-	toolName, repeated := m.runState.RepeatedCompletedAction()
-	_, stalled := m.runState.ConsecutiveNoProgressModelCalls()
+	if err := m.refreshLiveRequestContext(ctx); err != nil {
+		return ctx, state, err
+	}
+	if err := m.refreshExecutableToolContext(ctx, state, modelCtx); err != nil {
+		return ctx, state, err
+	}
+	if !m.runState.TakeSteeringDeferral() {
+		if _, err := projectEinoAssistantDrainSteeringAtBoundary(ctx, m.steering, m.runState, state, m.activateSteering); err != nil {
+			return ctx, state, err
+		}
+	}
+	budget := m.runState.RolloutBudget()
+	if err := budget.ExhaustionError(); err != nil {
+		return ctx, state, err
+	}
+	var rolloutBudgetRemaining *int64
+	if reminder := budget.PendingReminder(); reminder != nil {
+		state.Messages = append(state.Messages, projectEinoAssistantRolloutBudgetMessage(reminder))
+		remaining := reminder.RemainingTokens
+		rolloutBudgetRemaining = &remaining
+		if err := budget.DeliverReminder(ctx, reminder); err != nil {
+			return ctx, state, err
+		}
+	}
+	if err := m.rewriteLiveContext(ctx, state); err != nil {
+		return ctx, state, err
+	}
+	ordinal := m.runState.NextModelCallOrdinal()
 	if m.auditRecorder != nil {
 		sourceRevision, verifiedRevision := m.runState.SourceMutationRevisions()
-		var tools []*schema.ToolInfo
-		if modelCtx != nil {
-			tools = modelCtx.Tools
-		}
 		if err := m.auditRecorder.recordModelCall(
 			ctx,
 			ordinal,
 			sourceRevision,
 			verifiedRevision,
-			repeated >= projectEinoAssistantRepeatedActionWarnAt || stalled >= projectEinoAssistantRepeatedActionWarnAt,
-			tools,
+			rolloutBudgetRemaining,
+			state.ToolInfos,
 			nil,
 		); err != nil {
 			return ctx, state, err
 		}
 	}
-	if repeated < projectEinoAssistantRepeatedActionWarnAt && stalled < projectEinoAssistantRepeatedActionWarnAt {
-		return ctx, state, nil
+	return ctx, state, nil
+}
+
+func (m *projectEinoAssistantLifecycle) refreshExecutableToolContext(
+	ctx context.Context,
+	state *adk.ChatModelAgentState,
+	modelCtx *adk.ModelContext,
+) error {
+	if m == nil || m.server == nil || m.runState == nil || state == nil {
+		return nil
 	}
-	messages := state.Messages[:0]
-	for _, message := range state.Messages {
-		if message != nil && message.Role == schema.System &&
-			strings.HasPrefix(message.Content, projectEinoAssistantProgressCorrectionPrefix) {
+	discovery, ok := m.runState.ToolDiscovery()
+	if !ok {
+		return nil
+	}
+	tools, err := projectEinoAssistantToolsForDiscovery(ctx, m.server, m.req, m.runState, discovery)
+	if err != nil {
+		return err
+	}
+	infos := make([]*schema.ToolInfo, 0, len(tools))
+	currentNames := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
 			continue
 		}
-		messages = append(messages, message)
+		info, infoErr := tool.Info(ctx)
+		if infoErr != nil {
+			return infoErr
+		}
+		if info == nil || strings.TrimSpace(info.Name) == "" {
+			continue
+		}
+		name := projectAssistantToolKey(info.Name)
+		if _, exists := currentNames[name]; exists {
+			continue
+		}
+		currentNames[name] = struct{}{}
+		infos = append(infos, info)
 	}
-	instruction := "The last model turn produced no new evidence or action progress. Do not repeat a tool call whose result is already in context. Inspect different evidence, take the next authorized action, or stop and report the exact limitation."
-	if toolName != "" && repeated >= projectEinoAssistantRepeatedActionWarnAt {
-		instruction = "Do not call " + projectToolBaseName(toolName) + " again with the same arguments; its result is already in context. Inspect different evidence, take the next authorized action, or stop and report the exact limitation."
+	if m.managedToolNames == nil {
+		m.managedToolNames = map[string]struct{}{}
 	}
-	state.Messages = append(messages, schema.SystemMessage(projectEinoAssistantProgressCorrectionPrefix+instruction))
-	return ctx, state, nil
+	frameworkInfos := make([]*schema.ToolInfo, 0, len(state.ToolInfos))
+	for _, info := range state.ToolInfos {
+		if info == nil {
+			continue
+		}
+		name := projectAssistantToolKey(info.Name)
+		if _, managed := m.managedToolNames[name]; managed {
+			continue
+		}
+		if _, current := currentNames[name]; current {
+			continue
+		}
+		frameworkInfos = append(frameworkInfos, info)
+	}
+	for name := range currentNames {
+		m.managedToolNames[name] = struct{}{}
+	}
+	state.ToolInfos = append(frameworkInfos, infos...)
+	state.DeferredToolInfos = nil
+	if modelCtx != nil {
+		modelCtx.Tools = state.ToolInfos
+	}
+	return nil
+}
+
+func (m *projectEinoAssistantLifecycle) refreshLiveRequestContext(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if m.req.Client != nil && m.req.Project != nil && strings.TrimSpace(m.req.Project.Name) != "" {
+		current, err := refreshProjectAssistantWorkflowRunContext(ctx, projectAssistantWorkflowRunContext{
+			Client:     m.req.Client,
+			Project:    m.req.Project,
+			Repository: m.req.Repository,
+		})
+		// This is a fresh-view attempt, not a new availability dependency: a
+		// transient project read must not discard the request view that was
+		// already authorized when the run began.
+		if err == nil {
+			m.req.Project = current.Project
+			m.req.Repository = current.Repository
+		}
+	}
+	m.refreshRepositoryState(ctx)
+	// newAgent resolves the first request's executable tool set immediately
+	// before this hook runs. Reuse that just-captured view for its first sample;
+	// every later sample refreshes discovery before rebuilding prompt context.
+	if m.server != nil && m.runState.CurrentModelCallOrdinal() > 0 {
+		m.runState.SetToolDiscovery(projectEinoAssistantDiscoverTools(ctx, m.server, m.req))
+	}
+	return nil
+}
+
+func (m *projectEinoAssistantLifecycle) rewriteLiveContext(ctx context.Context, state *adk.ChatModelAgentState) error {
+	if m == nil || state == nil || m.req.Project == nil {
+		return nil
+	}
+	contextMessages := []chatMessage{{
+		Role:    "system",
+		Content: projectEinoAssistantLiveContextPrefix + projectSystemPromptForMode(m.req.Project, m.req.Repository, m.req.CollaborationMode, projectAssistantInitialBuildActive(m.req, m.runState)),
+	}}
+	if snapshot, ok := projectEinoAssistantSessionContextMessage(ctx, m.req, m.runState); ok {
+		snapshot.Content = projectEinoAssistantLiveContextPrefix + snapshot.Content
+		contextMessages = append(contextMessages, snapshot)
+	}
+	if prompt := m.runState.ToolPrompt(); prompt != "" {
+		contextMessages = append(contextMessages, chatMessage{Role: "system", Content: projectEinoAssistantLiveContextPrefix + prompt})
+	}
+	live, err := projectChatMessagesToEino(contextMessages)
+	if err != nil {
+		return err
+	}
+	conversation := projectEinoMessagesToChat(state.Messages)
+	conversation = projectEinoAssistantConversationPayload(conversation)
+	conversationMessages, err := projectChatMessagesToEino(conversation)
+	if err != nil {
+		return err
+	}
+	state.Messages = append(live, conversationMessages...)
+	return nil
+}
+
+func projectEinoAssistantDrainSteering(
+	steering <-chan projectAssistantSteeringInput,
+	runState *projectEinoAssistantRunState,
+	state *adk.ChatModelAgentState,
+) int {
+	drained, _ := projectEinoAssistantDrainSteeringAtBoundary(context.Background(), steering, runState, state, nil)
+	return drained
+}
+
+func projectEinoAssistantDrainSteeringAtBoundary(
+	ctx context.Context,
+	steering <-chan projectAssistantSteeringInput,
+	runState *projectEinoAssistantRunState,
+	state *adk.ChatModelAgentState,
+	activate func(context.Context, []projectAssistantSteeringInput) error,
+) (int, error) {
+	if steering == nil || runState == nil {
+		return 0, nil
+	}
+	inputs := make([]projectAssistantSteeringInput, 0, 1)
+	for {
+		select {
+		case input, ok := <-steering:
+			if !ok {
+				return projectEinoAssistantActivateSteeringInputs(ctx, inputs, runState, state, activate)
+			}
+			content := strings.TrimSpace(input.Content)
+			if content == "" {
+				continue
+			}
+			input.Content = content
+			inputs = append(inputs, input)
+		default:
+			return projectEinoAssistantActivateSteeringInputs(ctx, inputs, runState, state, activate)
+		}
+	}
+}
+
+func projectEinoAssistantActivateSteeringInputs(
+	ctx context.Context,
+	inputs []projectAssistantSteeringInput,
+	runState *projectEinoAssistantRunState,
+	state *adk.ChatModelAgentState,
+	activate func(context.Context, []projectAssistantSteeringInput) error,
+) (int, error) {
+	if len(inputs) == 0 {
+		return 0, nil
+	}
+	if activate != nil {
+		if err := activate(ctx, inputs); err != nil {
+			return 0, err
+		}
+	}
+	for _, input := range inputs {
+		runState.RecordSteeringInput(input.Content)
+		if state != nil {
+			state.Messages = append(state.Messages, schema.UserMessage(input.Content))
+		}
+	}
+	return len(inputs), nil
 }
 
 func (m *projectEinoAssistantLifecycle) refreshRepositoryState(ctx context.Context) {
@@ -245,66 +339,6 @@ func (m *projectEinoAssistantLifecycle) refreshRepositoryState(ctx context.Conte
 		m.repositoryRef = ref
 		m.runState.SetProjectRepositoryRef(ref)
 	}
-	// Readiness is monotonic for this run: a transient later read failure must
-	// never waive a commit that became required while the assistant was active.
-	if projectEinoAssistantRepositoryCommitReady(repository) {
-		m.runState.ConfigureCommitRequirement(true)
-	}
-}
-
-func (m *projectEinoAssistantLifecycle) WrapModel(
-	_ context.Context,
-	base einomodel.BaseChatModel,
-	modelCtx *adk.ModelContext,
-) (einomodel.BaseChatModel, error) {
-	if base == nil || m.runState == nil {
-		return base, nil
-	}
-	if m.runState.NeedsCompletionVerification() {
-		if name := projectEinoAssistantLifecycleToolName(modelCtx, projectToolVerifyDevelopmentRuntime); name != "" {
-			return &projectEinoAssistantCompletionBarrierModel{
-				BaseChatModel:        base,
-				verificationToolName: name,
-				toolArguments:        `{}`,
-				runState:             m.runState,
-			}, nil
-		}
-		return base, nil
-	}
-	evidence := m.runState.CompletionEvidence()
-	if evidence.SourceMutationRevision > 0 && !evidence.LatestMutationVerified && m.runState.ClaimRepairOpportunity() {
-		// A current-revision not-ready result requires another diagnostic or
-		// repair action before prose can terminate the run.
-		return &projectEinoAssistantForcedToolModel{BaseChatModel: base}, nil
-	}
-	if m.runState.ShouldRequestSourceCommit() {
-		if name := projectEinoAssistantLifecycleToolName(modelCtx, projectToolCommitProjectFiles); name != "" {
-			arguments := projectEinoToolArgumentsString(map[string]any{
-				"repositoryRef": m.repositoryRef,
-				"paths":         m.runState.SuccessfulMutationPaths(),
-				"message":       "Apply App Studio changes",
-			})
-			return &projectEinoAssistantCompletionBarrierModel{
-				BaseChatModel:        base,
-				verificationToolName: name,
-				toolArguments:        arguments,
-				runState:             m.runState,
-			}, nil
-		}
-	}
-	return base, nil
-}
-
-func projectEinoAssistantLifecycleToolName(modelCtx *adk.ModelContext, baseName string) string {
-	if modelCtx == nil {
-		return ""
-	}
-	for _, tool := range modelCtx.Tools {
-		if tool != nil && projectToolBaseName(tool.Name) == baseName {
-			return strings.TrimSpace(tool.Name)
-		}
-	}
-	return ""
 }
 
 func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
@@ -321,11 +355,6 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 		if projectEinoAssistantCommitTool(name) && m.runState != nil {
 			commitRevision, _ = m.runState.SourceMutationRevisions()
 		}
-		if projectEinoAssistantCommitTool(name) &&
-			(m.runState == nil || !m.runState.SourceMutationVerified()) {
-			return "Tool call failed: verify_development_runtime must successfully verify the latest workspace mutation before commit approval can be requested.", nil
-		}
-
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
 			if name == projectToolVerifyDevelopmentRuntime && m.runState != nil {
@@ -375,7 +404,8 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 					// caller may be cancelled immediately after that side effect, so
 					// give this server-owned bookkeeping a bounded detached context.
 					clearCtx, cancelClear := detachedProjectPersistenceContext(ctx)
-					_ = m.workspace.ClearUncommittedPaths(clearCtx, m.workspaceScope)
+					args, _ := projectEinoToolArguments(argumentsInJSON)
+					_ = m.workspace.RemoveUncommittedPaths(clearCtx, m.workspaceScope, projectToolStringList(args["paths"]))
 					cancelClear()
 				}
 			}

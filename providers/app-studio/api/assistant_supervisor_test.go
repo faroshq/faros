@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
+
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/tenant"
 	"github.com/faroshq/provider-app-studio/workspace"
@@ -71,6 +73,162 @@ func TestProjectAssistantSupervisorOwnsExecutionAfterStarterCancellation(t *test
 	}
 }
 
+func TestProjectAssistantSupervisorPersistsAndQueuesSteeringOnActiveRun(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-uid"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := bindProjectAssistantStartRequest(&run, "test-user", "build it"); err != nil {
+		t.Fatal(err)
+	}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "build it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now.Add(time.Microsecond), UpdatedAt: now.Add(time.Microsecond)}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, run, assistant, func(ctx context.Context, _ *projectAssistantSnapshotAccumulator) {
+		close(started)
+		<-ctx.Done()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	defer supervisor.Abort(scope, run.ID)
+	accumulator := supervisor.accumulatorFor(scope, run.ID)
+	if err := accumulator.UpdateMessage(context.Background(), "first partial", projectAssistantDurableMetadataForTransition(run, "Working", true, false, nil, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.UpdateText(context.Background(), "first persisted partial", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := accumulator.UpdateText(context.Background(), "latest throttled partial", false); err != nil {
+		t.Fatal(err)
+	}
+	beforeSteering, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, steeringMessage, _, handled, err := supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "test-user", "also add tests", "steer-1", store.AssistantRunModeDefault,
+	)
+	if err != nil || !handled {
+		t.Fatalf("EnqueueSteering handled=%v err=%v", handled, err)
+	}
+	if updated.ID != run.ID || updated.Revision != beforeSteering.Revision {
+		t.Fatalf("queued run = %#v, want unchanged output revision %d", updated, beforeSteering.Revision)
+	}
+	persisted, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil || persisted.Revision != updated.Revision {
+		t.Fatalf("persisted run = %#v err=%v", persisted, err)
+	}
+	persistedMessages, err := memoryStore.ListMessages(context.Background(), scope, 50, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistedMessage store.Message
+	for _, message := range persistedMessages.Items {
+		if message.ID == steeringMessage.ID {
+			persistedMessage = message
+			break
+		}
+	}
+	if persistedMessage.Content != "also add tests" {
+		t.Fatalf("persisted steering message = %#v", persistedMessage)
+	}
+	if got := len(persistedMessages.Items); got != 3 {
+		t.Fatalf("persisted message count = %d, want user receipt before boundary rotation", got)
+	}
+	for index, role := range []string{"user", "assistant", "user"} {
+		if persistedMessages.Items[index].Role != role {
+			t.Fatalf("persisted role[%d] = %q, want %q", index, persistedMessages.Items[index].Role, role)
+		}
+	}
+	priorAssistant := persistedMessages.Items[1]
+	if priorAssistant.Content != "first persisted partial" || priorAssistant.Metadata[projectAssistantMetadataWorkingStatus] != "Working" {
+		t.Fatalf("in-flight assistant segment changed before safe boundary: %#v", priorAssistant)
+	}
+	var steeringInput projectAssistantSteeringInput
+	select {
+	case input := <-supervisor.Steering(scope, run.ID):
+		if input.MessageID != steeringMessage.ID || input.Content != steeringMessage.Content {
+			t.Fatalf("steering input = %#v", input)
+		}
+		steeringInput = input
+	default:
+		t.Fatal("steering input was not queued")
+	}
+	if err := supervisor.ActivateSteering(context.Background(), scope, run.ID, []projectAssistantSteeringInput{steeringInput}); err != nil {
+		t.Fatalf("ActivateSteering: %v", err)
+	}
+	updated, err = memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil || updated.Revision != beforeSteering.Revision+1 {
+		t.Fatalf("activated run = %#v err=%v, want revision %d", updated, err, beforeSteering.Revision+1)
+	}
+	persistedMessages, err = memoryStore.ListMessages(context.Background(), scope, 50, "")
+	if err != nil || len(persistedMessages.Items) != 4 {
+		t.Fatalf("activated message stream count=%d err=%v, want four", len(persistedMessages.Items), err)
+	}
+	for index, role := range []string{"user", "assistant", "user", "assistant"} {
+		if persistedMessages.Items[index].Role != role {
+			t.Fatalf("activated role[%d] = %q, want %q", index, persistedMessages.Items[index].Role, role)
+		}
+	}
+	priorAssistant = persistedMessages.Items[1]
+	if priorAssistant.Metadata[projectAssistantMetadataWorkingStatus] == "Working" || priorAssistant.Metadata[projectAssistantMetadataProvisional] != false {
+		t.Fatalf("assistant segment was not closed at safe boundary: %#v", priorAssistant)
+	}
+
+	replayed, replayedMessage, _, handled, err := supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "test-user", "also add tests", "steer-1", store.AssistantRunModeDefault,
+	)
+	if err != nil || !handled || replayed.Revision != updated.Revision || replayedMessage.ID != steeringMessage.ID {
+		t.Fatalf("idempotent replay run=%#v message=%#v handled=%v err=%v", replayed, replayedMessage, handled, err)
+	}
+	if _, _, _, handled, err := supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "other-user", "inject", "steer-other", store.AssistantRunModeDefault,
+	); !handled || !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("cross-actor steering handled=%v err=%v, want conflict", handled, err)
+	}
+	if _, _, _, handled, err := supervisor.EnqueueSteering(
+		context.Background(), scope, "run-other", "test-user", "misdirected", "steer-other-run", store.AssistantRunModeDefault,
+	); handled || err != nil {
+		t.Fatalf("wrong-run steering handled=%v err=%v, want unhandled", handled, err)
+	}
+	recoveryServer := &Server{store: memoryStore}
+	recoveredRun, recoveredUser, recoveredAssistant, handled, err := recoveryServer.recoverProjectAssistantSteeringReplay(
+		context.Background(), scope, run.ID, "test-user", "also add tests", "steer-1", store.AssistantRunModeDefault,
+	)
+	if err != nil || !handled || recoveredRun.ID != run.ID || recoveredUser.ID != steeringMessage.ID || recoveredAssistant.ID != updated.ActiveMessageID {
+		t.Fatalf("durable steering replay run=%#v user=%#v assistant=%#v handled=%v err=%v", recoveredRun, recoveredUser, recoveredAssistant, handled, err)
+	}
+	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
+	supervisor.mu.Lock()
+	supervisor.runs[key].steeringReceipts = map[string]store.Message{}
+	supervisor.mu.Unlock()
+	replayed, replayedMessage, _, handled, err = supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "test-user", "also add tests", "steer-1", store.AssistantRunModeDefault,
+	)
+	if err != nil || !handled || replayed.Revision != updated.Revision || replayedMessage.ID != steeringMessage.ID {
+		t.Fatalf("reattached durable replay run=%#v message=%#v handled=%v err=%v", replayed, replayedMessage, handled, err)
+	}
+	persistedMessages, err = memoryStore.ListMessages(context.Background(), scope, 50, "")
+	if err != nil || len(persistedMessages.Items) != 4 {
+		t.Fatalf("durable replay duplicated messages: count=%d err=%v", len(persistedMessages.Items), err)
+	}
+	if !supervisor.SealSteering(scope, run.ID) {
+		t.Fatal("SealSteering did not close an empty steering boundary")
+	}
+	_, _, _, handled, err = supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "test-user", "too late", "steer-2", store.AssistantRunModeDefault,
+	)
+	if !handled || !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("post-seal steering handled=%v err=%v, want conflict", handled, err)
+	}
+}
+
 func TestProjectAssistantSupervisorShutdownLogsOneInterruptedTerminalTransition(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
@@ -82,10 +240,10 @@ func TestProjectAssistantSupervisorShutdownLogsOneInterruptedTerminalTransition(
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
 	}
-	var interrupted int
+	var interruptedCount int
 	supervisor.lifecycleLog = func(event string, gotScope store.Scope, gotRun store.AssistantRun) {
 		if event == "interrupted" {
-			interrupted++
+			interruptedCount++
 			if gotScope != scope || gotRun.Status != store.AssistantRunStatusInterrupted || gotRun.ID != run.ID {
 				t.Fatalf("interrupted lifecycle fields = %#v %#v", gotScope, gotRun)
 			}
@@ -100,8 +258,8 @@ func TestProjectAssistantSupervisorShutdownLogsOneInterruptedTerminalTransition(
 	}
 	<-entered
 	supervisor.Shutdown(context.Background())
-	if interrupted != 1 {
-		t.Fatalf("interrupted lifecycle events = %d, want one", interrupted)
+	if interruptedCount != 1 {
+		t.Fatalf("interrupted lifecycle events = %d, want one", interruptedCount)
 	}
 }
 
@@ -387,8 +545,8 @@ func TestProjectAssistantSupervisorAbortCannotBeOverwrittenByLateCompletion(t *t
 	if err != nil {
 		t.Fatalf("GetAssistantRun: %v", err)
 	}
-	if got.Status != store.AssistantRunStatusAborted {
-		t.Fatalf("status = %q, want aborted", got.Status)
+	if got.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("status = %q, want interrupted", got.Status)
 	}
 }
 
@@ -426,8 +584,8 @@ func TestProjectAssistantSupervisorAbortPersistsAuditAndClearsPendingInterrupt(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != store.AssistantRunStatusAborted {
-		t.Fatalf("status = %q, want aborted", got.Status)
+	if got.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("status = %q, want interrupted", got.Status)
 	}
 	audit := decodeProjectAssistantRunAudit(t, got.Audit)
 	if audit.Outcome != projectAssistantAuditOutcomeAborted {
@@ -608,6 +766,43 @@ func TestProjectAssistantSupervisorRestartAttachesPendingRunWithoutMutation(t *t
 	}
 	if got.Status != store.AssistantRunStatusPendingInput || got.Revision != 1 {
 		t.Fatalf("restart attach mutated durable run: %#v", got)
+	}
+}
+
+func TestProjectAssistantSupervisorQueuesSteeringWhilePermissionIsPending(t *testing.T) {
+	memory := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memory)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := bindProjectAssistantStartRequest(&run, "test-user", "inspect it"); err != nil {
+		t.Fatal(err)
+	}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "inspect it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := memory.CreateAssistantRun(context.Background(), scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Attach(scope, created, assistant); err != nil {
+		t.Fatal(err)
+	}
+	queued, receipt, currentAssistant, handled, err := supervisor.EnqueueSteering(
+		context.Background(), scope, run.ID, "test-user", "also inspect tests", "steer-pending", store.AssistantRunModePlan,
+	)
+	if err != nil || !handled {
+		t.Fatalf("pending EnqueueSteering handled=%v err=%v", handled, err)
+	}
+	if queued.Status != store.AssistantRunStatusPendingPermission || queued.Revision != run.Revision || currentAssistant.ID != assistant.ID {
+		t.Fatalf("pending steering rotated output before resume: run=%#v assistant=%#v", queued, currentAssistant)
+	}
+	select {
+	case input := <-supervisor.Steering(scope, run.ID):
+		if input.MessageID != receipt.ID || input.Content != "also inspect tests" {
+			t.Fatalf("queued pending steering = %#v", input)
+		}
+	default:
+		t.Fatal("pending steering was not queued for the resumed sampling boundary")
 	}
 }
 
@@ -796,6 +991,34 @@ func TestResumeSnapshotPersistenceFailurePreventsSuccessfulTerminalTransition(t 
 	}
 	if persisted.Status == store.AssistantRunStatusCompleted {
 		t.Fatalf("persistence failure allowed successful completion: %#v", persisted)
+	}
+}
+
+func TestConversationPersistenceFailureTerminalizesWorkerOwnedRun(t *testing.T) {
+	memory := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memory)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := bindProjectAssistantStartRequest(&run, "test-user", "build it"); err != nil {
+		t.Fatal(err)
+	}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "build it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if _, err := memory.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	accumulator, err := supervisor.Attach(scope, run, assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accumulator.FailPersistence(errors.New("conversation append unavailable"))
+	persisted, err := memory.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != store.AssistantRunStatusFailed || len(persisted.Error) == 0 {
+		t.Fatalf("conversation persistence failure left nonterminal run: %#v", persisted)
 	}
 }
 
@@ -1124,6 +1347,81 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantWorkerPersistsCodexTerminalContract(t *testing.T) {
+	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
+	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct{ Query string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.Contains(request.Query, "ProjectYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\n  uid: test-project-uid-demo\nspec: {}\n"}}}})
+		case strings.Contains(request.Query, "SecretYaml"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"v1": map[string]any{"SecretYaml": string(secret)}}})
+		default:
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+	}))
+	defer graphQL.Close()
+
+	tests := []struct {
+		name        string
+		err         error
+		wantStatus  store.AssistantRunStatus
+		wantAbort   store.AssistantRunAbortReason
+		wantErrInfo string
+	}{
+		{name: "provider failure", err: errors.New("provider unavailable"), wantStatus: store.AssistantRunStatusFailed, wantErrInfo: "other"},
+		{name: "iteration limit", err: adk.ErrExceedMaxIterations, wantStatus: store.AssistantRunStatusFailed, wantAbort: store.AssistantRunAbortReasonIterationLimited, wantErrInfo: "max_iterations_exceeded"},
+		{name: "rollout budget", err: &projectAssistantSessionBudgetExceededError{LimitTokens: 100, WeightedTokensUsed: 101}, wantStatus: store.AssistantRunStatusFailed, wantAbort: store.AssistantRunAbortReasonBudgetLimited, wantErrInfo: "session_budget_exceeded"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			memoryStore := store.NewMemoryStore()
+			server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+			server.assistantEngine = terminalStartRouteEngine{err: tt.err}
+			router := mux.NewRouter()
+			server.Register(router)
+			request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"answer this","clientRequestID":"terminal-request"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer caller-token")
+			request.Header.Set("X-Kedge-User", "test-user")
+			request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+			request.Header.Set("X-Kedge-Cluster", "cluster-a")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf("start status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+			}
+
+			scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+			deadline := time.Now().Add(time.Second)
+			for {
+				run, getErr := memoryStore.LatestAssistantRun(context.Background(), scope)
+				if getErr == nil && assistantRunTerminal(run.Status) {
+					if run.Status != tt.wantStatus || run.AbortReason != tt.wantAbort {
+						t.Fatalf("terminal run = %#v, want status %q abort %q", run, tt.wantStatus, tt.wantAbort)
+					}
+					var terminalError projectAssistantRunErrorView
+					if json.Unmarshal(run.Error, &terminalError) != nil || terminalError.ErrorInfo != tt.wantErrInfo {
+						t.Fatalf("terminal error = %s, want errorInfo %q", run.Error, tt.wantErrInfo)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("assistant run did not become terminal: run=%#v err=%v", run, getErr)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
 func TestProjectAssistantSupervisorResumesFreeTextAndPersistsLatestPlanSnapshot(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
@@ -1331,6 +1629,16 @@ func (replyStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssi
 }
 
 type failingStartRouteEngine struct{}
+
+type terminalStartRouteEngine struct{ err error }
+
+func (e terminalStartRouteEngine) StreamProjectAssistant(context.Context, projectAssistantRunRequest) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, e.err
+}
+
+func (terminalStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
+	return projectAssistantRunResult{}, errors.New("unexpected resume")
+}
 
 func (failingStartRouteEngine) StreamProjectAssistant(context.Context, projectAssistantRunRequest) (projectAssistantRunResult, error) {
 	return projectAssistantRunResult{}, errors.New("expected failure")

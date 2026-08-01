@@ -24,7 +24,8 @@ export interface ProjectMessage {
   createdAt: string
 }
 
-export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
+export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'failed' | 'interrupted' | 'aborted'
+export type ProjectAssistantAbortReason = 'interrupted' | 'replaced' | 'budget_limited' | 'iteration_limited'
 export type ProjectAssistantRunMode = 'default' | 'plan'
 export type ProjectAssistantApprovalMode = 'always_ask' | 'auto_approve'
 
@@ -45,6 +46,8 @@ export interface ProjectAssistantRun {
   requestID?: string
   createdAt?: string
   updatedAt?: string
+  error?: { message: string; errorInfo?: string }
+  abortReason?: ProjectAssistantAbortReason
 }
 
 export interface ProjectAssistantSnapshot {
@@ -150,7 +153,7 @@ export interface ProjectAssistantUIInterruptRequest {
 export interface ProjectAssistantResumeResponse {
   runID: string
   requestID: string
-  status: 'pending_permission' | 'pending_input' | 'running' | 'completed' | 'aborted'
+  status: 'pending_permission' | 'pending_input' | 'running' | 'completed' | 'failed' | 'interrupted' | 'aborted'
   decision?: 'allow' | 'deny'
   uiEvents?: ProjectAssistantUIEvent[]
   assistantMessage?: ProjectMessage

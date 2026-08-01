@@ -25,19 +25,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 
 	"github.com/cloudwego/eino/adk"
-	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
-)
-
-const (
-	projectEinoAssistantToolBatchMaxCalls         = 12
-	projectEinoAssistantToolBatchMaxReads         = 8
-	projectEinoAssistantToolBatchMaxPrimary       = 1
-	projectEinoAssistantToolBatchMaxParallelReads = 4
-	projectEinoAssistantToolBatchCorrectionMarker = "[App Studio tool-batch correction]"
 )
 
 var errProjectAssistantInvalidToolBatch = errors.New("invalid assistant tool batch")
@@ -62,8 +52,6 @@ type projectEinoAssistantToolBatchMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 
 	runState *projectEinoAssistantRunState
-	readGate chan struct{}
-	effectMu sync.RWMutex
 }
 
 func projectEinoAssistantToolBatchAdmissionMiddleware(
@@ -72,14 +60,15 @@ func projectEinoAssistantToolBatchAdmissionMiddleware(
 	return &projectEinoAssistantToolBatchMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		runState:                     runState,
-		readGate:                     make(chan struct{}, projectEinoAssistantToolBatchMaxParallelReads),
 	}
 }
 
 // AfterModelRewriteState is the last admission boundary before Eino hands an
-// assistant response to its tools node. The retry policy has already rejected
-// structurally invalid batches by this point; this hook canonicalizes the
-// accepted calls, collapses duplicate reads, and assigns stable call IDs.
+// assistant response to its tools node. This hook rejects structurally invalid
+// batches, canonicalizes accepted calls, and assigns stable call IDs. It preserves the
+// model's call order and cardinality. Execution policy belongs to the tool
+// concurrency gate and invocation-time authority, not to a second model-facing
+// read/action protocol.
 func (m *projectEinoAssistantToolBatchMiddleware) AfterModelRewriteState(
 	ctx context.Context,
 	state *adk.ChatModelAgentState,
@@ -113,65 +102,24 @@ func (m *projectEinoAssistantToolBatchMiddleware) AfterModelRewriteState(
 	return ctx, state, nil
 }
 
-// WrapInvokableToolCall supplies the execution half of admission. Eino may run
-// an admitted read-only batch concurrently, but no more than four reads reach
-// backends at once. Primary actions take the exclusive side of the same gate.
+// WrapInvokableToolCall preserves Eino's native per-output-item scheduling.
+// Eino starts independent tool futures together and rejoins them in model
+// order, matching Codex's FuturesOrdered loop. Authorization and durable
+// idempotency remain enforced inside each endpoint.
 func (m *projectEinoAssistantToolBatchMiddleware) WrapInvokableToolCall(
 	_ context.Context,
 	endpoint adk.InvokableToolCallEndpoint,
-	toolCtx *adk.ToolContext,
+	_ *adk.ToolContext,
 ) (adk.InvokableToolCallEndpoint, error) {
-	name := ""
-	if toolCtx != nil {
-		name = toolCtx.Name
-	}
-	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
-		release, err := m.acquire(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		defer release()
-		return endpoint(ctx, argumentsInJSON, opts...)
-	}, nil
+	return endpoint, nil
 }
 
 func (m *projectEinoAssistantToolBatchMiddleware) WrapEnhancedInvokableToolCall(
 	_ context.Context,
 	endpoint adk.EnhancedInvokableToolCallEndpoint,
-	toolCtx *adk.ToolContext,
+	_ *adk.ToolContext,
 ) (adk.EnhancedInvokableToolCallEndpoint, error) {
-	name := ""
-	if toolCtx != nil {
-		name = toolCtx.Name
-	}
-	return func(ctx context.Context, argument *schema.ToolArgument, opts ...einotool.Option) (*schema.ToolResult, error) {
-		release, err := m.acquire(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		defer release()
-		return endpoint(ctx, argument, opts...)
-	}, nil
-}
-
-func (m *projectEinoAssistantToolBatchMiddleware) acquire(
-	ctx context.Context,
-	name string,
-) (func(), error) {
-	if !projectEinoAssistantToolBatchRead(name) {
-		m.effectMu.Lock()
-		return m.effectMu.Unlock, nil
-	}
-	select {
-	case m.readGate <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	m.effectMu.RLock()
-	return func() {
-		m.effectMu.RUnlock()
-		<-m.readGate
-	}, nil
+	return endpoint, nil
 }
 
 func projectEinoAssistantNormalizeToolBatch(
@@ -206,14 +154,11 @@ func projectEinoAssistantAnalyzeToolBatch(calls []schema.ToolCall) ([]schema.Too
 		return nil, nil
 	}
 
-	normalized := make([]schema.ToolCall, 0, min(len(calls), projectEinoAssistantToolBatchMaxCalls))
-	callBySignature := make(map[string]int, len(calls))
+	normalized := make([]schema.ToolCall, 0, len(calls))
 	signatureByID := make(map[string]string, len(calls))
-	readCount := 0
-	primaryCount := 0
 
 	for index := range calls {
-		call, signature, isRead, err := projectEinoAssistantCanonicalToolCall(calls[index], index)
+		call, signature, _, err := projectEinoAssistantCanonicalToolCall(calls[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -226,48 +171,7 @@ func projectEinoAssistantAnalyzeToolBatch(calls []schema.ToolCall) ([]schema.Too
 			}
 			signatureByID[call.ID] = signature
 		}
-		if admittedIndex, duplicate := callBySignature[signature]; duplicate {
-			if !isRead {
-				return nil, &projectEinoAssistantInvalidToolBatchError{
-					Code:   "duplicate_primary_action",
-					Reason: fmt.Sprintf("call %d repeats an effectful or interactive action", index+1),
-				}
-			}
-			if normalized[admittedIndex].ID == "" && call.ID != "" {
-				normalized[admittedIndex].ID = call.ID
-			}
-			continue
-		}
-		callBySignature[signature] = len(normalized)
 		normalized = append(normalized, call)
-		if isRead {
-			readCount++
-		} else {
-			primaryCount++
-		}
-	}
-
-	switch {
-	case len(normalized) > projectEinoAssistantToolBatchMaxCalls:
-		return nil, &projectEinoAssistantInvalidToolBatchError{
-			Code:   "too_many_calls",
-			Reason: fmt.Sprintf("the response contains %d distinct calls; the maximum is %d", len(normalized), projectEinoAssistantToolBatchMaxCalls),
-		}
-	case readCount > projectEinoAssistantToolBatchMaxReads:
-		return nil, &projectEinoAssistantInvalidToolBatchError{
-			Code:   "too_many_reads",
-			Reason: fmt.Sprintf("the response contains %d distinct evidence reads; the maximum is %d", readCount, projectEinoAssistantToolBatchMaxReads),
-		}
-	case primaryCount > projectEinoAssistantToolBatchMaxPrimary:
-		return nil, &projectEinoAssistantInvalidToolBatchError{
-			Code:   "too_many_primary_actions",
-			Reason: "the response contains more than one effectful, interactive, or progress action",
-		}
-	case readCount > 0 && primaryCount > 0:
-		return nil, &projectEinoAssistantInvalidToolBatchError{
-			Code:   "mixed_reads_and_primary_action",
-			Reason: "evidence reads and a primary action must be returned in separate model responses",
-		}
 	}
 	return normalized, nil
 }
@@ -381,31 +285,6 @@ func projectEinoAssistantToolBatchRead(name string) bool {
 	// This optional local tool is absent from the nil-server registry used for
 	// classification, but its contract is always read-only when registered.
 	return baseName == projectToolGetPreviewConsoleLogs
-}
-
-func projectEinoAssistantToolBatchCorrection(
-	input []*schema.Message,
-	batchErr error,
-) []*schema.Message {
-	messages := append([]*schema.Message(nil), input...)
-	reason := "the response did not satisfy the App Studio action-batch contract"
-	var admissionErr *projectEinoAssistantInvalidToolBatchError
-	if errors.As(batchErr, &admissionErr) {
-		reason = admissionErr.Code + ": " + admissionErr.Reason
-	}
-	messages = append(messages, schema.SystemMessage(
-		projectEinoAssistantToolBatchCorrectionMarker+" The previous response was rejected before any tool executed ("+reason+"). Return exactly one corrected response: either up to eight distinct independent evidence reads, or one primary action. Do not mix reads with an action, repeat effectful calls, or reuse a call ID for different arguments.",
-	))
-	return messages
-}
-
-func projectEinoAssistantHasToolBatchCorrection(messages []*schema.Message) bool {
-	for _, message := range messages {
-		if message != nil && strings.Contains(message.Content, projectEinoAssistantToolBatchCorrectionMarker) {
-			return true
-		}
-	}
-	return false
 }
 
 // The model callback runs inside Eino's retry wrapper and therefore observes a

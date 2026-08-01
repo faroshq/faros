@@ -111,6 +111,57 @@ func (s *FileStore) ClearUncommittedPaths(ctx context.Context, scope Scope) erro
 	return nil
 }
 
+// RemoveUncommittedPaths removes only the paths successfully persisted by a
+// repository commit. Other durable dirty paths remain available to later turns.
+func (s *FileStore) RemoveUncommittedPaths(ctx context.Context, scope Scope, paths []string) error {
+	if s == nil {
+		return errors.New("project workspace store is not configured")
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+
+	current, err := s.uncommittedPaths(ctx, scope)
+	if err != nil {
+		return err
+	}
+	remove := make(map[string]struct{}, len(paths))
+	for _, raw := range paths {
+		clean, err := cleanProjectPath(raw)
+		if err != nil {
+			return err
+		}
+		remove[clean] = struct{}{}
+	}
+	remaining := make(map[string]struct{}, len(current))
+	for _, path := range current {
+		if _, ok := remove[path]; !ok {
+			remaining[path] = struct{}{}
+		}
+	}
+	if len(remaining) == 0 {
+		_, statePath, err := s.sourceStatePath(scope)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(statePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("clear workspace source state: %w", err)
+		}
+		return nil
+	}
+	dir, statePath, err := s.sourceStatePath(scope)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(workspaceSourceState{UncommittedPaths: sortedWorkspaceSourcePaths(remaining)})
+	if err != nil {
+		return fmt.Errorf("encode workspace source state: %w", err)
+	}
+	if err := writeFileAtomically(dir, statePath, raw, 0o600, false); err != nil {
+		return fmt.Errorf("persist workspace source state: %w", err)
+	}
+	return nil
+}
+
 func (s *FileStore) uncommittedPaths(ctx context.Context, scope Scope) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -189,9 +189,36 @@ func TestContextualPatchRejectsAmbiguousAndMissingContextWithTypedErrors(t *test
 			if !errors.As(err, &patchErr) || patchErr.Code != tt.wantCode || patchErr.Path != "app.txt" || patchErr.Matches != tt.wantMatch {
 				t.Fatalf("error = %#v, want code=%q path=app.txt matches=%d", err, tt.wantCode, tt.wantMatch)
 			}
+			if tt.wantCode == PatchErrorContextNotFound && !strings.Contains(patchErr.Message, "failed to find the expected lines after line 0:\nmissing") {
+				t.Fatalf("missing-context error did not preserve exact expected lines: %q", patchErr.Message)
+			}
 			assertWorkspaceContent(t, store, scope, "app.txt", "same\nsame\n")
 		})
 	}
+}
+
+func TestContextualPatchRejectsNumericUnifiedDiffHunkHeader(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "app.txt", Content: "old\n"}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.txt
+@@ -1,1 +1,1 @@
+-old
++new
+*** End Patch`
+	_, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	var patchErr *PatchError
+	if !errors.As(err, &patchErr) || patchErr.Code != PatchErrorInvalidPatch {
+		t.Fatalf("error = %#v, want invalid_patch", err)
+	}
+	if !strings.Contains(err.Error(), "numeric unified-diff hunk headers are not supported") {
+		t.Fatalf("error = %q, want targeted numeric-header guidance", err)
+	}
+	assertWorkspaceContent(t, store, scope, "app.txt", "old\n")
 }
 
 func TestContextualPatchPreflightsEveryOperationBeforeMutation(t *testing.T) {

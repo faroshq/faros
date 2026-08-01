@@ -29,6 +29,7 @@ type projectAssistantTurnKind string
 const (
 	projectAssistantTurnMessage projectAssistantTurnKind = "message"
 	projectAssistantTurnResume  projectAssistantTurnKind = "resume"
+	projectAssistantTurnSteer   projectAssistantTurnKind = "steer"
 )
 
 const projectAssistantRunHandoffTimeout = 10 * time.Second

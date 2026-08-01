@@ -16,6 +16,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,12 +28,13 @@ import (
 // MemoryStore is an in-memory implementation used for tests and explicit
 // local development. It must not be used as a silent production fallback.
 type MemoryStore struct {
-	mu               sync.RWMutex
-	messages         map[Scope]map[string]Message
-	assistantRuns    map[Scope]map[string]AssistantRun
-	assistantEvents  map[Scope]map[string][]AssistantRunEvent
-	approvalModes    map[Scope]map[string]AssistantApprovalPreference
-	bootstrapPermits map[Scope]projectBootstrapPermit
+	mu                sync.RWMutex
+	messages          map[Scope]map[string]Message
+	assistantRuns     map[Scope]map[string]AssistantRun
+	assistantEvents   map[Scope]map[string][]AssistantRunEvent
+	conversationItems map[Scope][]AssistantConversationItem
+	approvalModes     map[Scope]map[string]AssistantApprovalPreference
+	bootstrapPermits  map[Scope]projectBootstrapPermit
 }
 
 type projectBootstrapPermit struct {
@@ -40,11 +43,12 @@ type projectBootstrapPermit struct {
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		messages:         map[Scope]map[string]Message{},
-		assistantRuns:    map[Scope]map[string]AssistantRun{},
-		assistantEvents:  map[Scope]map[string][]AssistantRunEvent{},
-		approvalModes:    map[Scope]map[string]AssistantApprovalPreference{},
-		bootstrapPermits: map[Scope]projectBootstrapPermit{},
+		messages:          map[Scope]map[string]Message{},
+		assistantRuns:     map[Scope]map[string]AssistantRun{},
+		assistantEvents:   map[Scope]map[string][]AssistantRunEvent{},
+		conversationItems: map[Scope][]AssistantConversationItem{},
+		approvalModes:     map[Scope]map[string]AssistantApprovalPreference{},
+		bootstrapPermits:  map[Scope]projectBootstrapPermit{},
 	}
 }
 
@@ -494,6 +498,46 @@ func (s *MemoryStore) ListAssistantRunEvents(_ context.Context, scope Scope, run
 	return events, nil
 }
 
+func (s *MemoryStore) AppendAssistantConversationItem(_ context.Context, scope Scope, item AssistantConversationItem) (AssistantConversationItem, error) {
+	prepared, err := prepareAssistantConversationItem(scope, item)
+	if err != nil {
+		return AssistantConversationItem{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.conversationItems[scope] {
+		if existing.ID == prepared.ID && existing.RunID == prepared.RunID {
+			if !assistantConversationItemsMatch(existing, prepared) {
+				return AssistantConversationItem{}, ErrAssistantConversationItemConflict
+			}
+			return cloneAssistantConversationItem(existing), nil
+		}
+	}
+	prepared.Sequence = int64(len(s.conversationItems[scope]) + 1)
+	s.conversationItems[scope] = append(s.conversationItems[scope], cloneAssistantConversationItem(prepared))
+	return cloneAssistantConversationItem(prepared), nil
+}
+
+func (s *MemoryStore) ListAssistantConversationItems(_ context.Context, scope Scope, afterSequence int64, limit int) ([]AssistantConversationItem, error) {
+	if err := scope.validate(); err != nil {
+		return nil, err
+	}
+	limit = normalizeLimit(limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]AssistantConversationItem, 0, limit)
+	for _, item := range s.conversationItems[scope] {
+		if item.Sequence <= afterSequence {
+			continue
+		}
+		items = append(items, cloneAssistantConversationItem(item))
+		if len(items) == limit {
+			break
+		}
+	}
+	return items, nil
+}
+
 func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) error {
 	if err := scope.validate(); err != nil {
 		return err
@@ -503,6 +547,7 @@ func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) erro
 	delete(s.messages, scope)
 	delete(s.assistantRuns, scope)
 	delete(s.assistantEvents, scope)
+	delete(s.conversationItems, scope)
 	delete(s.bootstrapPermits, scope)
 	delete(s.approvalModes, scope)
 	return nil
@@ -528,6 +573,13 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 			if assistantRunStatusTerminal(run.Status) && run.UpdatedAt.Before(before) {
 				delete(runs, id)
 				delete(s.assistantEvents[scope], id)
+				items := s.conversationItems[scope][:0]
+				for _, item := range s.conversationItems[scope] {
+					if item.RunID != id {
+						items = append(items, item)
+					}
+				}
+				s.conversationItems[scope] = items
 				deleted++
 			}
 		}
@@ -536,6 +588,9 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 		}
 		if len(s.assistantEvents[scope]) == 0 {
 			delete(s.assistantEvents, scope)
+		}
+		if len(s.conversationItems[scope]) == 0 {
+			delete(s.conversationItems, scope)
 		}
 	}
 	return deleted, nil
@@ -569,12 +624,18 @@ func cloneRawMessage(src []byte) []byte {
 func cloneAssistantRun(run AssistantRun) AssistantRun {
 	run.Checkpoint = cloneRawMessage(run.Checkpoint)
 	run.Audit = cloneRawMessage(run.Audit)
+	run.Error = cloneRawMessage(run.Error)
 	return run
 }
 
 func cloneAssistantRunEvent(event AssistantRunEvent) AssistantRunEvent {
 	event.Payload = cloneRawMessage(event.Payload)
 	return event
+}
+
+func cloneAssistantConversationItem(item AssistantConversationItem) AssistantConversationItem {
+	item.Payload = cloneRawMessage(item.Payload)
+	return item
 }
 
 func prepareMessage(scope Scope, msg Message) Message {
@@ -598,7 +659,7 @@ func prepareAssistantRun(scope Scope, run AssistantRun) AssistantRun {
 		run.UpdatedAt = run.CreatedAt
 	}
 	run.ProjectName, run.ProjectUID = scope.ProjectName, scope.ProjectUID
-	run.Checkpoint, run.Audit = cloneRawMessage(run.Checkpoint), cloneRawMessage(run.Audit)
+	run.Checkpoint, run.Audit, run.Error = cloneRawMessage(run.Checkpoint), cloneRawMessage(run.Audit), cloneRawMessage(run.Error)
 	return run
 }
 
@@ -608,6 +669,22 @@ func validateAssistantRun(run AssistantRun) error {
 	}
 	if _, err := NormalizeAssistantApprovalMode(run.ApprovalMode); err != nil {
 		return err
+	}
+	switch run.Status {
+	case AssistantRunStatusPendingPermission, AssistantRunStatusPendingInput, AssistantRunStatusRunning,
+		AssistantRunStatusStopping, AssistantRunStatusCompleted, AssistantRunStatusFailed,
+		AssistantRunStatusInterrupted, AssistantRunStatusAborted:
+	default:
+		return fmt.Errorf("invalid assistant run status %q", run.Status)
+	}
+	if len(run.Error) > 0 && !json.Valid(run.Error) {
+		return errors.New("assistant run error must be valid json")
+	}
+	switch run.AbortReason {
+	case "", AssistantRunAbortReasonInterrupted, AssistantRunAbortReasonReplaced,
+		AssistantRunAbortReasonBudgetLimited, AssistantRunAbortReasonIterationLimited:
+	default:
+		return fmt.Errorf("invalid assistant run abort reason %q", run.AbortReason)
 	}
 	return validateAssistantRunMode(run)
 }

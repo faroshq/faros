@@ -52,7 +52,7 @@ func TestProjectEinoAssistantModelCallbackRecordsStreamedToolCalls(t *testing.T)
 		1,
 		0,
 		0,
-		false,
+		nil,
 		nil,
 		nil,
 	); err != nil {

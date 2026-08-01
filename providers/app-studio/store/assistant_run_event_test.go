@@ -238,3 +238,104 @@ func TestEncryptedStoreEncryptsAssistantRunEventPayload(t *testing.T) {
 		t.Fatalf("decrypted events = %#v, want payload %s", got, wantPayload)
 	}
 }
+
+func TestEncryptedStoreConversationItemsAreAppendOnlyAndEncrypted(t *testing.T) {
+	ctx := context.Background()
+	base := NewMemoryStore()
+	encrypted, err := NewEncryptedStore(base, testEncryptionKeys(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	if err := encrypted.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-1", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{"role":"user","content":"private question"}`)
+	first, err := encrypted.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{ID: "item-1", RunID: "run-1", Type: "user_message", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := encrypted.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{ID: "item-1", RunID: "run-1", Type: "user_message", Payload: payload})
+	if err != nil || replayed.Sequence != first.Sequence {
+		t.Fatalf("idempotent append = (%#v, %v), want sequence %d", replayed, err, first.Sequence)
+	}
+	second, err := encrypted.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "item-1", RunID: "run-2", Type: "tool_result", Payload: json.RawMessage(`{"content":"different run"}`),
+	})
+	if err != nil || second.Sequence != first.Sequence+1 {
+		t.Fatalf("run-scoped append = (%#v, %v), want next sequence", second, err)
+	}
+	raw, err := base.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil || len(raw) != 2 || strings.Contains(string(raw[0].Payload), "private question") || strings.Contains(string(raw[1].Payload), "different run") {
+		t.Fatalf("raw conversation items = %#v, err=%v", raw, err)
+	}
+	got, err := encrypted.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil || len(got) != 2 || string(got[0].Payload) != string(payload) || string(got[1].Payload) != `{"content":"different run"}` {
+		t.Fatalf("decrypted conversation items = %#v, err=%v", got, err)
+	}
+	if err := encrypted.DeleteProjectMessages(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if remaining, err := encrypted.ListAssistantConversationItems(ctx, scope, 0, 10); err != nil || len(remaining) != 0 {
+		t.Fatalf("conversation items after project deletion = %#v, err=%v", remaining, err)
+	}
+}
+
+func TestMemoryStoreConversationItemIdentityIsRunScopedAndReplayChecked(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	first, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "tool-result-call-1", RunID: "run-1", Type: "tool_result", Payload: json.RawMessage(`{"result":"one"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "tool-result-call-1", RunID: "run-1", Type: "tool_result", Payload: json.RawMessage(` { "result": "one" } `),
+	})
+	if err != nil || replayed.Sequence != first.Sequence {
+		t.Fatalf("semantic replay = (%#v, %v), want sequence %d", replayed, err, first.Sequence)
+	}
+	second, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "tool-result-call-1", RunID: "run-2", Type: "tool_result", Payload: json.RawMessage(`{"result":"two"}`),
+	})
+	if err != nil || second.Sequence != first.Sequence+1 {
+		t.Fatalf("cross-run item = (%#v, %v), want next sequence", second, err)
+	}
+	for _, collision := range []AssistantConversationItem{
+		{ID: first.ID, RunID: first.RunID, Type: "assistant_message", Payload: first.Payload},
+		{ID: first.ID, RunID: first.RunID, Type: first.Type, Payload: json.RawMessage(`{"result":"changed"}`)},
+	} {
+		if _, err := memory.AppendAssistantConversationItem(ctx, scope, collision); !errors.Is(err, ErrAssistantConversationItemConflict) {
+			t.Errorf("collision %#v error = %v, want ErrAssistantConversationItemConflict", collision, err)
+		}
+	}
+	items, err := memory.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil || len(items) != 2 || items[0].RunID != "run-1" || items[1].RunID != "run-2" {
+		t.Fatalf("stored items = %#v, err=%v", items, err)
+	}
+}
+
+func TestMemoryStoreAcceptsCodexTerminalRunStatuses(t *testing.T) {
+	s := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	for _, status := range []AssistantRunStatus{AssistantRunStatusFailed, AssistantRunStatusInterrupted} {
+		if err := s.SaveAssistantRun(context.Background(), scope, AssistantRun{ID: "run-" + string(status), Mode: AssistantRunModeDefault, Status: status}); err != nil {
+			t.Fatalf("SaveAssistantRun rejected Codex terminal status %q: %v", status, err)
+		}
+	}
+}
+
+func TestAssistantConversationLockKeyIsPostgresTextSafeAndScopeSpecific(t *testing.T) {
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	key := assistantConversationLockKey(scope)
+	if len(key) != 64 || strings.ContainsRune(key, '\x00') {
+		t.Fatalf("conversation lock key = %q, want 64-character text-safe digest", key)
+	}
+	other := scope
+	other.ProjectUID = "project-b"
+	if assistantConversationLockKey(other) == key {
+		t.Fatal("conversation lock key did not change across project scopes")
+	}
+}

@@ -56,6 +56,7 @@ import {
   assistantRunStartPayload,
   assistantRunStartFingerprint,
   assistantRunMatchesStartRequest,
+  assistantRunCanImplementPlan,
   assistantRunRequiresLiveControls,
   assistantRunTerminal,
   firstProjectStartPlan,
@@ -459,11 +460,11 @@ const assistantRunController = new ConversationRunController({
       messageStreaming.value = true
       return
     }
-    if (response.status === 'aborted' && activeAssistantRun?.id === runID) {
+    if ((response.status === 'interrupted' || response.status === 'aborted') && activeAssistantRun?.id === runID) {
       const message = messages.value.find((item) => item.id === activeAssistantRun?.activeMessageID)
       if (message) applyAssistantSnapshot(abortedConversationSnapshot({ run: activeAssistantRun, message }), projectName)
       else {
-        activeAssistantRun = { ...activeAssistantRun, status: 'aborted', revision: activeAssistantRun.revision + 1 }
+        activeAssistantRun = { ...activeAssistantRun, status: 'interrupted', revision: activeAssistantRun.revision + 1 }
         messageStreaming.value = false
         conversationStatus.value = ''
       }
@@ -499,7 +500,7 @@ const canStartProjectFromPrompt = computed(() => canSubmitCreatePrompt(prompt.va
 const canSendPrompt = computed(() =>
   (llmSettings.value?.configured ?? false) &&
   prompt.value.trim().length > 0 &&
-  !messageStreaming.value &&
+  (!messageStreaming.value || activeAssistantRun?.status === 'running') &&
   !assistantResumeBusy.value &&
   !approvalModeLoading.value &&
   !approvalModeSaving.value,
@@ -1954,13 +1955,16 @@ function assistantRunForMessage(messageID: string): AssistantRun | undefined {
   return Object.values(assistantRunRevisions).find((run) => run.activeMessageID === messageID)
 }
 
+function assistantRunErrorForMessage(messageID: string): string {
+  return assistantRunForMessage(messageID)?.error?.message?.trim() || ''
+}
+
 function canImplementPlan(message: ProjectMessageView): boolean {
   const run = assistantRunForMessage(message.id)
   const lastConversationMessage = conversationMessages.value[conversationMessages.value.length - 1]
   return message.role === 'assistant' &&
     lastConversationMessage?.id === message.id &&
-    run?.mode === 'plan' &&
-    normalizeAssistantRunStatus(run.status) === 'completed' &&
+		assistantRunCanImplementPlan(run) &&
     !messageStreaming.value &&
     !busy.value &&
     !assistantResumeBusy.value
@@ -2420,7 +2424,8 @@ async function confirmDeleteProject() {
 
 async function sendMessage() {
   const content = prompt.value.trim()
-  if (!content || !selected.value || !llmSettings.value?.configured || messageStreaming.value || assistantResumeBusy.value || approvalModeLoading.value || approvalModeSaving.value) return
+  const steeringActiveRun = messageStreaming.value && activeAssistantRun?.status === 'running'
+  if (!content || !selected.value || !llmSettings.value?.configured || (messageStreaming.value && !steeringActiveRun) || assistantResumeBusy.value || approvalModeLoading.value || approvalModeSaving.value) return
   const projectName = selected.value.name
   prompt.value = ''
   busy.value = true
@@ -2432,6 +2437,7 @@ async function sendMessage() {
   const startOperation = {
     content,
     collaborationMode: firstProjectPending ? 'default' as const : assistantIntent.value,
+    ...(steeringActiveRun ? { expectedRunID: activeAssistantRun!.id } : {}),
   }
   const submissionFingerprint = assistantRunStartFingerprint(projectName, startOperation)
   const clientRequestID = firstProjectPending
@@ -2712,7 +2718,7 @@ function assistantPlanCompletionLabel(plan?: AssistantPlan): string {
 
 function projectMessageViewStatus(message: ProjectMessage): ProjectMessageViewStatus | undefined {
   if (message.role !== 'assistant') return undefined
-  return projectMessageAssistantStatus(message) === 'interrupted' ? 'interrupted' : undefined
+  return String(message.metadata?.assistantStatus ?? '').trim().toLowerCase() === 'interrupted' ? 'interrupted' : undefined
 }
 
 function projectMessageActionFeed(message: ProjectMessage): ProjectAssistantActionFeedItem[] {
@@ -3674,6 +3680,13 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                   aria-atomic="false"
                   v-html="renderAssistantResponse(message)"
                 />
+                <div
+                  v-if="assistantRunErrorForMessage(message.id)"
+                  class="mt-3 rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger"
+                  role="alert"
+                >
+                  {{ assistantRunErrorForMessage(message.id) }}
+                </div>
                 <button
                   v-if="canImplementPlan(message)"
                   type="button"
@@ -3847,7 +3860,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               />
             </div>
             <button
-              v-if="messageStreaming && activeAssistantRun?.status !== 'stopping'"
+              v-if="messageStreaming && !prompt.trim() && activeAssistantRun?.status !== 'stopping'"
               type="button"
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-danger/30 bg-danger-subtle text-danger transition hover:bg-danger-subtle/80"
               title="Stop generating"

@@ -2,12 +2,14 @@ import type { ProjectAssistantRunMode, ProjectMessage } from './types'
 
 export interface AssistantRun {
   id: string
-  status: 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
+  status: 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'failed' | 'interrupted' | 'aborted'
   mode: ProjectAssistantRunMode
   revision: number
   activeMessageID: string
   clientRequestID?: string
   userMessageID?: string
+  error?: { message: string; errorInfo?: string }
+  abortReason?: 'interrupted' | 'replaced' | 'budget_limited' | 'iteration_limited'
 }
 
 export interface AssistantSnapshot {
@@ -19,6 +21,7 @@ export interface AssistantRunStartRequest {
   content: string
   clientRequestID: string
   collaborationMode: 'default' | 'plan'
+  expectedRunID?: string
 }
 
 export interface ConversationState<TMessage extends ProjectMessage = ProjectMessage> {
@@ -58,6 +61,7 @@ export function assistantRunStartFingerprint(projectName: string, request: Omit<
     projectName,
     request.content,
     request.collaborationMode,
+    request.expectedRunID ?? '',
   ])
 }
 
@@ -88,9 +92,9 @@ export function normalizeAssistantRunStatus(status: unknown): AssistantRun['stat
     case 'running':
     case 'stopping':
     case 'completed':
-    case 'aborted':
     case 'failed':
     case 'interrupted':
+    case 'aborted':
       return normalized
     default:
       return undefined
@@ -100,9 +104,9 @@ export function normalizeAssistantRunStatus(status: unknown): AssistantRun['stat
 export function assistantRunTerminal(status: unknown): boolean {
   switch (normalizeAssistantRunStatus(status)) {
     case 'completed':
-    case 'aborted':
     case 'failed':
     case 'interrupted':
+    case 'aborted':
       return true
     default:
       return false
@@ -111,6 +115,15 @@ export function assistantRunTerminal(status: unknown): boolean {
 
 export function assistantRunRequiresLiveControls(run: AssistantRun | null | undefined): run is AssistantRun {
   return Boolean(run && !assistantRunTerminal(run.status))
+}
+
+export function assistantRunCanImplementPlan(run: AssistantRun | null | undefined): run is AssistantRun {
+  return Boolean(
+    run &&
+    run.mode === 'plan' &&
+    normalizeAssistantRunStatus(run.status) === 'completed' &&
+    !run.error?.message?.trim(),
+  )
 }
 
 // Control hydration is deliberately separate from message merge: a reload may
@@ -148,8 +161,8 @@ export function acceptScopedConversationSnapshot(
 
 export function abortedConversationSnapshot(snapshot: AssistantSnapshot): AssistantSnapshot {
   return {
-    run: { ...snapshot.run, status: 'aborted', revision: snapshot.run.revision + 1 },
-    message: { ...snapshot.message, metadata: { ...snapshot.message.metadata, assistantStatus: 'Aborted', assistantProvisional: false } },
+    run: { ...snapshot.run, status: 'interrupted', revision: snapshot.run.revision + 1 },
+    message: { ...snapshot.message, metadata: { ...snapshot.message.metadata, assistantStatus: 'Interrupted', assistantProvisional: false } },
   }
 }
 

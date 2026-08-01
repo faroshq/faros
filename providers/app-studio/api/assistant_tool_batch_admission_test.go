@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,7 +32,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestProjectEinoAssistantToolBatchAdmissionCollapses133DuplicateReads(t *testing.T) {
+func TestProjectEinoAssistantToolBatchAdmissionPreservesModelCalls(t *testing.T) {
 	calls := make([]schema.ToolCall, 133)
 	for index := range calls {
 		calls[index] = projectEinoAssistantToolCallForAdmissionTest(
@@ -45,8 +46,8 @@ func TestProjectEinoAssistantToolBatchAdmissionCollapses133DuplicateReads(t *tes
 	if err != nil {
 		t.Fatalf("normalize tool batch: %v", err)
 	}
-	if len(normalized) != 1 {
-		t.Fatalf("normalized calls = %d, want one logical read", len(normalized))
+	if len(normalized) != len(calls) {
+		t.Fatalf("normalized calls = %d, want all %d model calls", len(normalized), len(calls))
 	}
 	if normalized[0].ID != "read-0" {
 		t.Fatalf("call ID = %q, want first model-provided ID", normalized[0].ID)
@@ -56,7 +57,28 @@ func TestProjectEinoAssistantToolBatchAdmissionCollapses133DuplicateReads(t *tes
 	}
 }
 
-func TestProjectEinoAssistantToolBatchAdmissionRejectsUnsafeBatches(t *testing.T) {
+func TestProjectEinoAssistantToolBatchAdmissionAllowsMixedAndRepeatedActions(t *testing.T) {
+	calls := []schema.ToolCall{
+		projectEinoAssistantToolCallForAdmissionTest("read", projectToolReadFile, `{"file_path":"a"}`),
+		projectEinoAssistantToolCallForAdmissionTest("patch-1", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
+		projectEinoAssistantToolCallForAdmissionTest("patch-2", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
+		projectEinoAssistantToolCallForAdmissionTest("commit", projectToolCommitProjectFiles, `{"paths":["a"]}`),
+	}
+	normalized, err := projectEinoAssistantNormalizeToolBatch(calls, 2)
+	if err != nil {
+		t.Fatalf("normalize mixed tool batch: %v", err)
+	}
+	if len(normalized) != len(calls) {
+		t.Fatalf("normalized calls = %d, want all %d model calls", len(normalized), len(calls))
+	}
+	for index := range normalized {
+		if normalized[index].ID != calls[index].ID || normalized[index].Function.Name != calls[index].Function.Name {
+			t.Fatalf("normalized call %d = %#v, want model call %#v", index, normalized[index], calls[index])
+		}
+	}
+}
+
+func TestProjectEinoAssistantToolBatchAdmissionRejectsMalformedBatches(t *testing.T) {
 	tests := []struct {
 		name  string
 		calls []schema.ToolCall
@@ -69,35 +91,6 @@ func TestProjectEinoAssistantToolBatchAdmissionRejectsUnsafeBatches(t *testing.T
 				projectEinoAssistantToolCallForAdmissionTest("same", projectToolReadFile, `{"file_path":"b"}`),
 			},
 			code: "conflicting_tool_call_id",
-		},
-		{
-			name: "duplicate primary action",
-			calls: []schema.ToolCall{
-				projectEinoAssistantToolCallForAdmissionTest("patch-1", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
-				projectEinoAssistantToolCallForAdmissionTest("patch-2", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
-			},
-			code: "duplicate_primary_action",
-		},
-		{
-			name: "multiple primary actions",
-			calls: []schema.ToolCall{
-				projectEinoAssistantToolCallForAdmissionTest("patch", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
-				projectEinoAssistantToolCallForAdmissionTest("commit", projectToolCommitProjectFiles, `{"paths":["a"]}`),
-			},
-			code: "too_many_primary_actions",
-		},
-		{
-			name: "read and primary action",
-			calls: []schema.ToolCall{
-				projectEinoAssistantToolCallForAdmissionTest("read", projectToolReadFile, `{"file_path":"a"}`),
-				projectEinoAssistantToolCallForAdmissionTest("patch", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
-			},
-			code: "mixed_reads_and_primary_action",
-		},
-		{
-			name:  "more than eight reads",
-			calls: projectEinoAssistantDistinctReadCallsForAdmissionTest(9),
-			code:  "too_many_reads",
 		},
 		{
 			name: "malformed arguments",
@@ -185,24 +178,24 @@ func TestProjectEinoAssistantToolBatchMiddlewareReconcilesRunState(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(state.Messages[len(state.Messages)-1].ToolCalls); got != 1 {
-		t.Fatalf("state calls = %d, want one", got)
+	if got := len(state.Messages[len(state.Messages)-1].ToolCalls); got != 2 {
+		t.Fatalf("state calls = %d, want two", got)
 	}
 	runState.mu.Lock()
 	defer runState.mu.Unlock()
-	if got := len(runState.toolCalls); got != 1 {
-		t.Fatalf("run-state calls = %d, want one normalized call", got)
+	if got := len(runState.toolCalls); got != 2 {
+		t.Fatalf("run-state calls = %d, want two normalized calls", got)
 	}
-	if len(runState.messages) != 1 || len(runState.messages[0].ToolCalls) != 1 {
-		t.Fatalf("run-state messages = %#v, want one normalized assistant batch", runState.messages)
+	if len(runState.messages) != 1 || len(runState.messages[0].ToolCalls) != 2 {
+		t.Fatalf("run-state messages = %#v, want the normalized assistant batch", runState.messages)
 	}
 }
 
-func TestProjectEinoAssistantModelRetryConfigCorrectsInvalidBatchOnce(t *testing.T) {
+func TestProjectEinoAssistantModelRetryConfigDoesNotReplayInvalidCompletedBatch(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	invalid := schema.AssistantMessage("", []schema.ToolCall{
-		projectEinoAssistantToolCallForAdmissionTest("read", projectToolReadFile, `{"file_path":"a"}`),
-		projectEinoAssistantToolCallForAdmissionTest("patch", projectToolApplyPatch, `{"path":"a","oldText":"x","newText":"y"}`),
+		projectEinoAssistantToolCallForAdmissionTest("same", projectToolReadFile, `{"file_path":"a"}`),
+		projectEinoAssistantToolCallForAdmissionTest("same", projectToolReadFile, `{"file_path":"b"}`),
 	})
 	runState.RecordAssistantReply(projectEinoAssistantReplyFromMessage(invalid))
 	config := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{}, runState)
@@ -212,43 +205,69 @@ func TestProjectEinoAssistantModelRetryConfigCorrectsInvalidBatchOnce(t *testing
 		InputMessages: input,
 		OutputMessage: invalid,
 	})
-	if !decision.Retry || decision.RewriteError != nil ||
-		!projectEinoAssistantHasToolBatchCorrection(decision.ModifiedInputMessages) {
-		t.Fatalf("first decision = %#v, want one corrective retry", decision)
-	}
-	runState.mu.Lock()
-	if len(runState.messages) != 0 || len(runState.toolCalls) != 0 {
-		runState.mu.Unlock()
-		t.Fatal("rejected model batch remained in run state")
-	}
-	runState.mu.Unlock()
-
-	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
-		RetryAttempt:  2,
-		InputMessages: decision.ModifiedInputMessages,
-		OutputMessage: invalid,
-	})
-	if decision.Retry || !errors.Is(decision.RewriteError, errProjectAssistantInvalidToolBatch) {
-		t.Fatalf("second decision = %#v, want terminal invalid-batch error", decision)
+	if decision.Retry || decision.RewriteError != nil || len(decision.ModifiedInputMessages) != 0 {
+		t.Fatalf("decision = %#v, want completed malformed response left to structural admission", decision)
 	}
 }
 
-func TestProjectEinoAssistantModelRetryConfigRetriesOnlyPreResponseTimeoutOnce(t *testing.T) {
-	config := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{}, nil)
+func TestProjectEinoAssistantModelRetryConfigRetriesIncompleteResponses(t *testing.T) {
+	defaults := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{}, nil)
+	if defaults.MaxRetries != 5 || defaults.BackoffFunc(context.Background(), 1) != 200*time.Millisecond {
+		t.Fatalf("default retry config = (%d, %s), want (5, 200ms)", defaults.MaxRetries, defaults.BackoffFunc(context.Background(), 1))
+	}
+	backoffOnly := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{LLM: projectLLMSettings{
+		RetryBackoff: 10 * time.Millisecond,
+	}}, nil)
+	if backoffOnly.MaxRetries != 5 {
+		t.Fatalf("backoff-only max retries = %d, want default 5", backoffOnly.MaxRetries)
+	}
+	disabled := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{LLM: projectLLMSettings{
+		MaxRetriesConfigured: true,
+		RetryBackoff:         10 * time.Millisecond,
+	}}, nil)
+	if disabled.MaxRetries != 0 {
+		t.Fatalf("explicitly disabled max retries = %d, want 0", disabled.MaxRetries)
+	}
+	var retryStatuses []string
+	config := projectEinoAssistantModelRetryConfig(projectAssistantRunRequest{
+		LLM: projectLLMSettings{
+			MaxRetries:   4,
+			RetryBackoff: 10 * time.Millisecond,
+		},
+		StreamCallbacks: projectAssistantStreamCallbacks{
+			OnStatus: func(status string) { retryStatuses = append(retryStatuses, status) },
+		},
+	}, nil)
+	if config.MaxRetries != 4 {
+		t.Fatalf("max retries = %d, want provider-configured 4", config.MaxRetries)
+	}
+	if got := config.BackoffFunc(context.Background(), 3); got != 40*time.Millisecond {
+		t.Fatalf("third retry backoff = %s, want 40ms", got)
+	}
 	timeoutErr := &projectEinoAssistantModelTimeoutError{Code: "model_first_response_timeout"}
 	decision := config.ShouldRetry(context.Background(), &adk.RetryContext{
 		RetryAttempt: 1,
 		Err:          timeoutErr,
 	})
-	if !decision.Retry || decision.RejectReason != "model timeout" {
-		t.Fatalf("first timeout decision = %#v, want one retry", decision)
+	if !decision.Retry || decision.RejectReason != "transport failure" {
+		t.Fatalf("first timeout decision = %#v, want transport retry", decision)
+	}
+	if len(retryStatuses) != 1 || retryStatuses[0] != "Model connection was interrupted; reconnecting 1/4" {
+		t.Fatalf("pre-stream retry statuses = %#v, want reconnecting 1/4", retryStatuses)
 	}
 	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
 		RetryAttempt: 2,
 		Err:          timeoutErr,
 	})
-	if decision.Retry || decision.RewriteError != nil {
-		t.Fatalf("second timeout decision = %#v, want typed timeout to propagate", decision)
+	if !decision.Retry || decision.RejectReason != "transport failure" {
+		t.Fatalf("second timeout decision = %#v, want provider-configured retry policy", decision)
+	}
+	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
+		RetryAttempt: 1,
+		Err:          context.DeadlineExceeded,
+	})
+	if !decision.Retry {
+		t.Fatalf("provider request timeout decision = %#v, want retry", decision)
 	}
 
 	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
@@ -256,12 +275,36 @@ func TestProjectEinoAssistantModelRetryConfigRetriesOnlyPreResponseTimeoutOnce(t
 		OutputMessage: schema.AssistantMessage("partial", nil),
 		Err:           &projectEinoAssistantModelTimeoutError{Code: "model_stream_idle_timeout"},
 	})
+	if !decision.Retry || decision.RejectReason != "transport failure" {
+		t.Fatalf("partial stream timeout decision = %#v, want retry before response completion", decision)
+	}
+
+	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
+		RetryAttempt:  1,
+		OutputMessage: schema.AssistantMessage("complete", nil),
+	})
 	if decision.Retry {
-		t.Fatalf("partial stream timeout decision = %#v, want no replay after output", decision)
+		t.Fatalf("completed response decision = %#v, want accepted response", decision)
+	}
+	decision = config.ShouldRetry(context.Background(), &adk.RetryContext{
+		RetryAttempt: 5,
+		Err:          &projectEinoAssistantIncompleteStreamError{},
+	})
+	if decision.Retry {
+		t.Fatalf("exhausted retry decision = %#v, want original terminal stream error", decision)
 	}
 }
 
-func TestProjectEinoAssistantToolBatchMiddlewareCapsParallelReadsAtFour(t *testing.T) {
+func TestProjectEinoAssistantReconnectStatusUsesCodexAttemptCounts(t *testing.T) {
+	if got := projectEinoAssistantReconnectStatus(1, 5); got != "Model connection was interrupted; reconnecting 1/5" {
+		t.Fatalf("first reconnect status = %q", got)
+	}
+	if got := projectEinoAssistantReconnectStatus(3, 5); got != "Model connection was interrupted; reconnecting 3/5" {
+		t.Fatalf("third reconnect status = %q", got)
+	}
+}
+
+func TestProjectEinoAssistantToolBatchMiddlewarePreservesNativeConcurrentScheduling(t *testing.T) {
 	middleware := projectEinoAssistantToolBatchAdmissionMiddleware(nil)
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
@@ -297,22 +340,17 @@ func TestProjectEinoAssistantToolBatchMiddlewareCapsParallelReadsAtFour(t *testi
 			}
 		}()
 	}
-	for index := 0; index < projectEinoAssistantToolBatchMaxParallelReads; index++ {
+	for index := 0; index < 8; index++ {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
-			t.Fatal("timed out waiting for admitted reads")
+			t.Fatal("wrapped tool call serialized Eino's native concurrent batch")
 		}
-	}
-	select {
-	case <-started:
-		t.Fatal("a fifth read reached the backend before a slot was released")
-	case <-time.After(25 * time.Millisecond):
 	}
 	close(release)
 	wait.Wait()
-	if got := atomic.LoadInt32(&peak); got != projectEinoAssistantToolBatchMaxParallelReads {
-		t.Fatalf("peak concurrency = %d, want %d", got, projectEinoAssistantToolBatchMaxParallelReads)
+	if got := atomic.LoadInt32(&peak); got != 8 {
+		t.Fatalf("peak concurrency = %d, want 8", got)
 	}
 }
 
@@ -356,6 +394,78 @@ func TestProjectEinoAssistantBoundedModelTimesOutFirstResponseAndIdleStream(t *t
 			t.Fatalf("second Recv error = %v, want stream-idle timeout", err)
 		}
 	})
+}
+
+func TestProjectEinoAssistantBoundedModelUsesCodexStreamDefaultsAndProviderOverride(t *testing.T) {
+	base := projectEinoAssistantTimeoutTestModel{mode: "complete"}
+	bounded, ok := projectEinoAssistantBoundModel(base, projectLLMSettings{}).(*projectEinoAssistantBoundedModel)
+	if !ok {
+		t.Fatalf("bounded model type = %T", bounded)
+	}
+	if bounded.firstResponseTimeout != 300*time.Second || bounded.streamIdleTimeout != 300*time.Second {
+		t.Fatalf("default timeouts = (%s, %s), want 5m", bounded.firstResponseTimeout, bounded.streamIdleTimeout)
+	}
+	if !bounded.requireCompletion {
+		t.Fatal("OpenAI-compatible stream should require a completion marker")
+	}
+
+	bounded = projectEinoAssistantBoundModel(base, projectLLMSettings{
+		Provider:          projectLLMProviderGoogle,
+		StreamIdleTimeout: 17 * time.Second,
+	}).(*projectEinoAssistantBoundedModel)
+	if bounded.firstResponseTimeout != 17*time.Second || bounded.streamIdleTimeout != 17*time.Second {
+		t.Fatalf("provider timeouts = (%s, %s), want 17s", bounded.firstResponseTimeout, bounded.streamIdleTimeout)
+	}
+	if !bounded.requireCompletion {
+		t.Fatal("Google stream should require its native finish reason")
+	}
+}
+
+func TestProjectEinoAssistantBoundedStreamRequiresTerminalFinishReason(t *testing.T) {
+	t.Run("missing marker", func(t *testing.T) {
+		model := &projectEinoAssistantBoundedModel{
+			BaseChatModel:        projectEinoAssistantTimeoutTestModel{mode: "incomplete"},
+			firstResponseTimeout: time.Second,
+			streamIdleTimeout:    time.Second,
+			requireCompletion:    true,
+		}
+		reader, err := model.Stream(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		message, err := reader.Recv()
+		if err != nil || message == nil || message.Content != "partial" {
+			t.Fatalf("first chunk = %#v, %v", message, err)
+		}
+		_, err = reader.Recv()
+		var incomplete *projectEinoAssistantIncompleteStreamError
+		if !errors.As(err, &incomplete) || !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("terminal error = %v, want retryable incomplete stream", err)
+		}
+	})
+
+	for _, finishReason := range []string{"stop", "tool_calls"} {
+		t.Run(finishReason, func(t *testing.T) {
+			model := &projectEinoAssistantBoundedModel{
+				BaseChatModel:        projectEinoAssistantTimeoutTestModel{mode: finishReason},
+				firstResponseTimeout: time.Second,
+				streamIdleTimeout:    time.Second,
+				requireCompletion:    true,
+			}
+			reader, err := model.Stream(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			if _, err := reader.Recv(); err != nil {
+				t.Fatalf("completed chunk: %v", err)
+			}
+			if _, err := reader.Recv(); !errors.Is(err, io.EOF) {
+				t.Fatalf("terminal error = %v, want EOF", err)
+			}
+		})
+	}
 }
 
 func projectEinoAssistantToolCallForAdmissionTest(id, name, arguments string) schema.ToolCall {
@@ -402,10 +512,19 @@ func (m projectEinoAssistantTimeoutTestModel) Stream(
 	reader, writer := schema.Pipe[*schema.Message](1)
 	go func() {
 		defer writer.Close()
-		if m.mode == "idle-after-first" {
+		switch m.mode {
+		case "idle-after-first":
 			writer.Send(schema.AssistantMessage("started", nil), nil)
+			<-ctx.Done()
+		case "incomplete":
+			writer.Send(schema.AssistantMessage("partial", nil), nil)
+		case "stop", "tool_calls", "complete":
+			message := schema.AssistantMessage("complete", nil)
+			message.ResponseMeta = &schema.ResponseMeta{FinishReason: m.mode}
+			writer.Send(message, nil)
+		default:
+			<-ctx.Done()
 		}
-		<-ctx.Done()
 	}()
 	return reader, nil
 }

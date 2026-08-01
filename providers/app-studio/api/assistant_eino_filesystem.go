@@ -197,29 +197,33 @@ func (m *projectEinoAssistantFilesystemTelemetry) WrapInvokableToolCall(
 			}
 			return outcome.InvokeResult()
 		}
-		rangeCovered := m.runState != nil && hasReadRange &&
-			m.runState.ReadFileRangeCovered(readPath, readStart, readEnd)
-		if ledgerDecision.Replay == nil && m.runState != nil && (rangeCovered || m.runState.RepeatedCompletedRead(name, canonicalArguments)) {
-			result := "Tool call skipped: this read already completed after the latest workspace mutation; use the prior result or inspect different evidence."
-			m.runState.RecordCompletedAction(name, canonicalArguments, false)
-			m.emitToolCall(projectToolCallStreamEvent{
-				ID:        callID,
-				Name:      name,
-				Status:    "skipped",
-				Arguments: arguments,
-				Summary:   "Skipped an unchanged duplicate read.",
-			})
-			m.recordToolMessage(callID, name, result)
-			return finishDurable(result, nil)
-		}
-
 		var result string
 		var endpointErr error
+		modelFailure := false
+		modelFailureError := ""
 		if ledgerDecision.Replay != nil {
 			result, endpointErr = ledgerDecision.Replay.InvokeResult()
+			if ledgerDecision.Replay.Failed && strings.TrimSpace(ledgerDecision.Replay.Result) != "" {
+				result = ledgerDecision.Replay.Result
+				endpointErr = nil
+				modelFailure = true
+				modelFailureError = projectEinoAssistantSafeErrorText(errors.New(ledgerDecision.Replay.Error))
+			}
 		} else {
 			result, endpointErr = endpoint(ctx, argumentsInJSON, opts...)
-			result, endpointErr = finishDurable(result, endpointErr)
+			if endpointErr != nil && !projectEinoAssistantPropagateToolError(endpointErr) {
+				modelFailure = true
+				modelFailureError = projectEinoAssistantSafeErrorText(endpointErr)
+				result = projectEinoAssistantSafeToolFailureResult(projectToolBaseName(name), endpointErr)
+				outcome, finishErr := m.req.eventLedger.FinishToolCall(ctx, ledgerDecision.Token, result, endpointErr)
+				if finishErr != nil {
+					return "", finishErr
+				}
+				result = outcome.Result
+				endpointErr = nil
+			} else {
+				result, endpointErr = finishDurable(result, endpointErr)
+			}
 		}
 		if endpointErr != nil {
 			safeError := projectEinoAssistantSafeErrorText(endpointErr)
@@ -235,6 +239,20 @@ func (m *projectEinoAssistantFilesystemTelemetry) WrapInvokableToolCall(
 			})
 			m.recordToolMessage(callID, name, truncateProjectToolInfo("Tool call failed: "+safeError))
 			return result, endpointErr
+		}
+		if modelFailure {
+			if m.runState != nil {
+				m.runState.RecordCompletedAction(name, canonicalArguments, false)
+			}
+			m.emitToolCall(projectToolCallStreamEvent{
+				ID:        callID,
+				Name:      name,
+				Status:    "failed",
+				Arguments: arguments,
+				Error:     modelFailureError,
+			})
+			m.recordToolMessage(callID, name, result)
+			return result, nil
 		}
 		if m.runState != nil {
 			m.runState.RecordCompletedRead(name, canonicalArguments)

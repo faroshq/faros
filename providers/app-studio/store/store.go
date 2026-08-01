@@ -28,6 +28,7 @@ import (
 var ErrAssistantRunNotFound = errors.New("assistant run not found")
 var ErrAssistantRunConflict = errors.New("assistant run version conflict")
 var ErrAssistantRunEventConflict = errors.New("assistant run event sequence conflict")
+var ErrAssistantConversationItemConflict = errors.New("assistant conversation item conflict")
 var ErrAssistantApprovalModeInvalid = errors.New("assistant approval mode is invalid")
 var ErrProjectBootstrapPermitConflict = errors.New("project bootstrap permit conflict")
 
@@ -64,6 +65,15 @@ type Message struct {
 
 type AssistantRunStatus string
 
+type AssistantRunAbortReason string
+
+const (
+	AssistantRunAbortReasonInterrupted      AssistantRunAbortReason = "interrupted"
+	AssistantRunAbortReasonReplaced         AssistantRunAbortReason = "replaced"
+	AssistantRunAbortReasonBudgetLimited    AssistantRunAbortReason = "budget_limited"
+	AssistantRunAbortReasonIterationLimited AssistantRunAbortReason = "iteration_limited"
+)
+
 // AssistantRunMode is derived by the server from the user-selected action.
 type AssistantRunMode string
 
@@ -94,30 +104,34 @@ const (
 	AssistantRunStatusRunning           AssistantRunStatus = "running"
 	AssistantRunStatusStopping          AssistantRunStatus = "stopping"
 	AssistantRunStatusCompleted         AssistantRunStatus = "completed"
-	AssistantRunStatusAborted           AssistantRunStatus = "aborted"
 	AssistantRunStatusFailed            AssistantRunStatus = "failed"
 	AssistantRunStatusInterrupted       AssistantRunStatus = "interrupted"
+	// AssistantRunStatusAborted is read only for rows written before the Codex
+	// terminal-state cutover. New transitions use Failed or Interrupted.
+	AssistantRunStatusAborted AssistantRunStatus = "aborted"
 )
 
 // AssistantRun stores resumable assistant execution state. Checkpoint is an
 // App Studio API-owned JSON payload so store implementations do not need to
 // know private chat/tool types.
 type AssistantRun struct {
-	ID              string                `json:"id"`
-	ProjectName     string                `json:"projectName,omitempty"`
-	ProjectUID      string                `json:"projectUID,omitempty"`
-	Mode            AssistantRunMode      `json:"mode,omitempty"`
-	ApprovalMode    AssistantApprovalMode `json:"approvalMode"`
-	Status          AssistantRunStatus    `json:"status"`
-	ClientRequestID string                `json:"clientRequestID,omitempty"`
-	UserMessageID   string                `json:"userMessageID,omitempty"`
-	ActiveMessageID string                `json:"activeMessageID,omitempty"`
-	Revision        int64                 `json:"revision,omitempty"`
-	RequestID       string                `json:"requestID,omitempty"`
-	Checkpoint      json.RawMessage       `json:"checkpoint,omitempty"`
-	Audit           json.RawMessage       `json:"audit,omitempty"`
-	CreatedAt       time.Time             `json:"createdAt"`
-	UpdatedAt       time.Time             `json:"updatedAt"`
+	ID              string                  `json:"id"`
+	ProjectName     string                  `json:"projectName,omitempty"`
+	ProjectUID      string                  `json:"projectUID,omitempty"`
+	Mode            AssistantRunMode        `json:"mode,omitempty"`
+	ApprovalMode    AssistantApprovalMode   `json:"approvalMode"`
+	Status          AssistantRunStatus      `json:"status"`
+	ClientRequestID string                  `json:"clientRequestID,omitempty"`
+	UserMessageID   string                  `json:"userMessageID,omitempty"`
+	ActiveMessageID string                  `json:"activeMessageID,omitempty"`
+	Revision        int64                   `json:"revision,omitempty"`
+	RequestID       string                  `json:"requestID,omitempty"`
+	Checkpoint      json.RawMessage         `json:"checkpoint,omitempty"`
+	Audit           json.RawMessage         `json:"audit,omitempty"`
+	Error           json.RawMessage         `json:"error,omitempty"`
+	AbortReason     AssistantRunAbortReason `json:"abortReason,omitempty"`
+	CreatedAt       time.Time               `json:"createdAt"`
+	UpdatedAt       time.Time               `json:"updatedAt"`
 }
 
 // AssistantRunEvent is one immutable entry in a run's durable execution log.
@@ -132,6 +146,19 @@ type AssistantRunEvent struct {
 	CallID      string          `json:"callID,omitempty"`
 	ToolName    string          `json:"toolName,omitempty"`
 	ArgsDigest  string          `json:"argsDigest,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+}
+
+// AssistantConversationItem is one encrypted, append-only response item used
+// to reconstruct model context without discarding tool evidence.
+type AssistantConversationItem struct {
+	ID          string          `json:"id"`
+	RunID       string          `json:"runID"`
+	ProjectName string          `json:"projectName,omitempty"`
+	ProjectUID  string          `json:"projectUID,omitempty"`
+	Sequence    int64           `json:"sequence"`
+	Type        string          `json:"type"`
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	CreatedAt   time.Time       `json:"createdAt"`
 }
@@ -163,8 +190,63 @@ type Store interface {
 	LatestAssistantRun(ctx context.Context, scope Scope) (AssistantRun, error)
 	AppendAssistantRunEvent(ctx context.Context, scope Scope, event AssistantRunEvent, expectedSequence int64) (AssistantRunEvent, error)
 	ListAssistantRunEvents(ctx context.Context, scope Scope, runID string, afterSequence int64, limit int) ([]AssistantRunEvent, error)
+	AppendAssistantConversationItem(ctx context.Context, scope Scope, item AssistantConversationItem) (AssistantConversationItem, error)
+	ListAssistantConversationItems(ctx context.Context, scope Scope, afterSequence int64, limit int) ([]AssistantConversationItem, error)
 	DeleteProjectMessages(ctx context.Context, scope Scope) error
 	DeleteMessagesOlderThan(ctx context.Context, before time.Time) (int64, error)
+}
+
+func prepareAssistantConversationItem(scope Scope, item AssistantConversationItem) (AssistantConversationItem, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantConversationItem{}, err
+	}
+	item.ID = strings.TrimSpace(item.ID)
+	item.RunID = strings.TrimSpace(item.RunID)
+	item.Type = strings.TrimSpace(item.Type)
+	if item.ID == "" || item.RunID == "" || item.Type == "" {
+		return AssistantConversationItem{}, errors.New("assistant conversation item id, run id, and type are required")
+	}
+	item.ProjectName, item.ProjectUID = scope.ProjectName, scope.ProjectUID
+	if len(item.Payload) == 0 {
+		item.Payload = json.RawMessage(`{}`)
+	}
+	if !json.Valid(item.Payload) {
+		return AssistantConversationItem{}, errors.New("assistant conversation item payload must be valid json")
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	} else {
+		item.CreatedAt = item.CreatedAt.UTC()
+	}
+	return item, nil
+}
+
+// assistantConversationItemsMatch defines an idempotent append. An item ID is
+// only reusable for the same run, type, and semantic JSON payload; accepting a
+// mismatched replay would silently splice one run's evidence into another.
+func assistantConversationItemsMatch(existing, candidate AssistantConversationItem) bool {
+	return strings.TrimSpace(existing.RunID) == strings.TrimSpace(candidate.RunID) &&
+		strings.TrimSpace(existing.Type) == strings.TrimSpace(candidate.Type) &&
+		assistantConversationPayloadEqual(existing.Payload, candidate.Payload)
+}
+
+func assistantConversationPayloadEqual(left, right json.RawMessage) bool {
+	leftCanonical, leftErr := canonicalAssistantConversationPayload(left)
+	rightCanonical, rightErr := canonicalAssistantConversationPayload(right)
+	return leftErr == nil && rightErr == nil && string(leftCanonical) == string(rightCanonical)
+}
+
+func canonicalAssistantConversationPayload(payload json.RawMessage) ([]byte, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if decoder.More() {
+		return nil, errors.New("assistant conversation payload has trailing value")
+	}
+	return json.Marshal(value)
 }
 
 // NormalizeAssistantApprovalMode validates a persisted or API-supplied mode.
@@ -184,7 +266,7 @@ func NormalizeAssistantApprovalMode(mode AssistantApprovalMode) (AssistantApprov
 
 func assistantRunStatusTerminal(status AssistantRunStatus) bool {
 	switch status {
-	case AssistantRunStatusCompleted, AssistantRunStatusAborted, AssistantRunStatusFailed, AssistantRunStatusInterrupted:
+	case AssistantRunStatusCompleted, AssistantRunStatusFailed, AssistantRunStatusInterrupted, AssistantRunStatusAborted:
 		return true
 	default:
 		return false

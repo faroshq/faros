@@ -70,7 +70,6 @@ type projectAssistantCheckpointState struct {
 	PatchRecoveryPath         string                                           `json:"patchRecoveryPath,omitempty"`
 	PatchRecoveryReadComplete bool                                             `json:"patchRecoveryReadComplete,omitempty"`
 	RuntimeWarmupAttempts     int                                              `json:"runtimeWarmupAttempts,omitempty"`
-	RepairOpportunityRevision uint64                                           `json:"repairOpportunityRevision,omitempty"`
 	NoProgressModelCallCount  int                                              `json:"noProgressModelCallCount,omitempty"`
 	ActionBatchModelCall      int                                              `json:"actionBatchModelCall,omitempty"`
 	ActionBatchObserved       bool                                             `json:"actionBatchObserved,omitempty"`
@@ -81,6 +80,7 @@ type projectAssistantCheckpointState struct {
 	ObservedReadFilePaths     []string                                         `json:"observedReadFilePaths,omitempty"`
 	SuccessfulMutationPaths   []string                                         `json:"successfulMutationPaths,omitempty"`
 	SessionSnapshot           *projectEinoAssistantSessionSnapshot             `json:"sessionSnapshot,omitempty"`
+	RolloutBudget             *projectAssistantRolloutBudgetState              `json:"rolloutBudget,omitempty"`
 	Eino                      *projectAssistantEinoCheckpointState             `json:"eino,omitempty"`
 }
 
@@ -128,21 +128,39 @@ type projectAssistantResumeResponse struct {
 }
 
 type projectAssistantRunAudit struct {
-	Version            int                               `json:"version,omitempty"`
-	StartRequestDigest string                            `json:"startRequestDigest,omitempty"`
-	StopRequestID      string                            `json:"stopRequestID,omitempty"`
-	StopRequestDigest  string                            `json:"stopRequestDigest,omitempty"`
-	Provider           string                            `json:"provider,omitempty"`
-	Model              string                            `json:"model,omitempty"`
-	ApprovalMode       store.AssistantApprovalMode       `json:"approvalMode,omitempty"`
-	Profile            projectAssistantTurnProfile       `json:"profile,omitempty"`
-	StartedAt          time.Time                         `json:"startedAt,omitempty"`
-	Tools              []projectAssistantAuditTool       `json:"tools,omitempty"`
-	ModelCalls         []projectAssistantAuditModelCall  `json:"modelCalls,omitempty"`
-	Failure            *projectAssistantAuditFailure     `json:"failure,omitempty"`
-	Outcome            projectAssistantAuditOutcome      `json:"outcome,omitempty"`
-	DurationMS         int64                             `json:"durationMs,omitempty"`
-	Decisions          []projectAssistantPermissionAudit `json:"decisions,omitempty"`
+	Version            int                                 `json:"version,omitempty"`
+	StartRequestDigest string                              `json:"startRequestDigest,omitempty"`
+	ActorDigest        string                              `json:"actorDigest,omitempty"`
+	StopRequestID      string                              `json:"stopRequestID,omitempty"`
+	StopRequestDigest  string                              `json:"stopRequestDigest,omitempty"`
+	Provider           string                              `json:"provider,omitempty"`
+	Model              string                              `json:"model,omitempty"`
+	ApprovalMode       store.AssistantApprovalMode         `json:"approvalMode,omitempty"`
+	Profile            projectAssistantTurnProfile         `json:"profile,omitempty"`
+	StartedAt          time.Time                           `json:"startedAt,omitempty"`
+	Tools              []projectAssistantAuditTool         `json:"tools,omitempty"`
+	ModelCalls         []projectAssistantAuditModelCall    `json:"modelCalls,omitempty"`
+	Compactions        []projectAssistantAuditCompaction   `json:"compactions,omitempty"`
+	RolloutBudget      *projectAssistantRolloutBudgetState `json:"rolloutBudget,omitempty"`
+	Failure            *projectAssistantAuditFailure       `json:"failure,omitempty"`
+	Outcome            projectAssistantAuditOutcome        `json:"outcome,omitempty"`
+	DurationMS         int64                               `json:"durationMs,omitempty"`
+	Decisions          []projectAssistantPermissionAudit   `json:"decisions,omitempty"`
+}
+
+type projectAssistantAuditCompaction struct {
+	ID                       string `json:"id"`
+	Trigger                  string `json:"trigger"`
+	Status                   string `json:"status"`
+	WindowNumber             uint64 `json:"windowNumber,omitempty"`
+	PreviousWindowID         string `json:"previousWindowID,omitempty"`
+	WindowID                 string `json:"windowID,omitempty"`
+	PriorTokenEstimate       int    `json:"priorTokenEstimate,omitempty"`
+	ReplacementTokenEstimate int    `json:"replacementTokenEstimate,omitempty"`
+	IgnoredToolCallCount     int    `json:"ignoredToolCallCount,omitempty"`
+	Error                    string `json:"error,omitempty"`
+	AtOffsetMS               int64  `json:"atOffsetMs"`
+	CompletedAtOffsetMS      *int64 `json:"completedAtOffsetMs,omitempty"`
 }
 
 func (s *Server) saveProjectAssistantRun(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
@@ -586,7 +604,8 @@ func (s *Server) resumeProjectAssistantRunWithRepositoryAndClient(
 		staleBindingError := "Project repository binding changed after the assistant paused"
 		tc := state.ToolCalls[state.CurrentIndex]
 		now := time.Now().UTC()
-		run.Status = store.AssistantRunStatusCompleted
+		run.Status = store.AssistantRunStatusFailed
+		run.Error = projectAssistantRunErrorJSON(errors.New(staleBindingError), "stale_repository_binding")
 		run.UpdatedAt = now
 		run, err = appendProjectAssistantRunAudit(run, projectAssistantPermissionAudit{
 			RequestID:  run.RequestID,
@@ -752,12 +771,32 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	}
 	var pendingPermissionToolCallID string
 	var pendingFollowUpToolCallID string
+	activeMessageID := assistantID
+	syncSteeringSegment := func() {
+		if accumulator == nil {
+			return
+		}
+		messageID := accumulator.ActiveMessageID()
+		if messageID == "" || messageID == activeMessageID {
+			return
+		}
+		assistantContent.Reset()
+		assistantID = messageID
+		activeMessageID = messageID
+		pendingPermissionToolCallID = ""
+		pendingFollowUpToolCallID = ""
+		metadataState = &projectAssistantDurableMetadataState{
+			status:             "Working",
+			workSegmentStarted: time.Now().UTC(),
+		}
+	}
 	emitAssistantEvent := func(event projectAssistantEvent) {
 		callbackMu.Lock()
 		defer callbackMu.Unlock()
 		if callbacksClosed {
 			return
 		}
+		syncSteeringSegment()
 		switch event.Type {
 		case projectAssistantEventPermissionNeeded:
 			if event.Permission != nil && event.Permission.ToolCallID != "" {
@@ -826,6 +865,13 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		ApprovalMode:             projectAssistantApprovalModeFromRun(resumeRun),
 		Continuation:             &state,
 		AssistantRun:             &resumeRun,
+		Steering:                 s.projectAssistantSupervisor().Steering(messageScope, resumeRun.ID),
+		SealSteering: func() bool {
+			return s.projectAssistantSupervisor().SealSteering(messageScope, resumeRun.ID)
+		},
+		ActivateSteering: func(activateCtx context.Context, inputs []projectAssistantSteeringInput) error {
+			return s.projectAssistantSupervisor().ActivateSteering(activateCtx, messageScope, resumeRun.ID, inputs)
+		},
 		StreamCallbacks: projectAssistantStreamCallbacks{
 			OnChunk: func(chunk string) {
 				callbackMu.Lock()
@@ -833,6 +879,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				content := appendProjectAssistantStreamBlock(assistantContent, chunk)
 				if accumulator != nil {
 					recordSnapshotErr(accumulator.UpdateText(ctx, content, false))
@@ -844,6 +891,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				if metadataState.appendProgress(message) {
 					persistMetadata(ctx, nil)
 				}
@@ -854,6 +902,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				metadataState.provisional = true
 				persistMetadata(ctx, nil)
 			},
@@ -863,6 +912,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				metadataState.provisional = false
 				persistMetadata(ctx, nil)
 			},
@@ -872,6 +922,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				metadataState.status = status
 				persistMetadata(ctx, nil)
 			},
@@ -881,6 +932,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				metadataState.plan = &plan
 				persistMetadata(ctx, nil)
 			},
@@ -890,6 +942,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				if callbacksClosed {
 					return
 				}
+				syncSteeringSegment()
 				streamToolCall(toolCall)
 				persistMetadata(ctx, nil)
 			},
@@ -900,6 +953,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	currentToolCallID := strings.TrimSpace(state.Eino.ToolCallID)
 	result, err := s.projectAssistantEngine().ResumeProjectAssistant(ctx, engineReq, resumeReq, state)
 	callbackMu.Lock()
+	syncSteeringSegment()
 	callbacksClosed = true
 	assistantText := assistantContent.String()
 	metadataToolCalls := append([]projectToolCallStreamEvent(nil), metadataState.toolCalls...)
@@ -915,13 +969,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	out.Result = projectAssistantResumeToolResult(result.Content, currentToolCall)
 	previewRefreshNeeded := s.projectAssistantPreviewRefreshNeeded(ctx, engineReq.WorkspaceScope, "", false, metadataToolCalls)
 	if err != nil {
-		out.AssistantContent = projectAssistantMutationAwareTerminalContent(
-			result.Content,
-			assistantText,
-			err,
-			result.CompletionEvidence,
-			false,
-		)
+		out.AssistantContent = projectAssistantDurableFinalContent(result.Content, assistantText)
 		var permissionErr *projectAssistantPermissionRequiredError
 		if !errors.As(err, &permissionErr) {
 			var inputErr *projectAssistantInputRequiredError
@@ -1019,21 +1067,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
 	defer cancelPersist()
 	out.Status = store.AssistantRunStatusCompleted
-	if reason := projectAssistantCompletionSuspensionReason(result, result.InitialBuild); reason != "" {
-		out.Status = store.AssistantRunStatusInterrupted
-		out.SuspensionReason = reason
-	}
-	engineCompleted := out.Status == store.AssistantRunStatusCompleted
-	resultContent := s.projectAssistantRunTerminalContent(
-		persistCtx,
-		messageScope,
-		run,
-		result.Content,
-		assistantText,
-		nil,
-		result.CompletionEvidence,
-		engineCompleted,
-	)
+	resultContent := projectAssistantDurableFinalContent(result.Content, assistantText)
 	streamedContent := ""
 	out.AssistantContent = resultContent
 	appendProjectAssistantResumeResolvedUI(&out, strings.TrimSpace(resumeReq.AssistantMessageID), currentRequestID, currentToolCall)
@@ -1058,6 +1092,19 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		return projectAssistantResumeResponse{}, err
 	} else if assistantMessage != nil {
 		out.AssistantMessage = assistantMessage
+	}
+	if strings.TrimSpace(resultContent) != "" {
+		if err := appendProjectAssistantConversationMessage(
+			persistCtx,
+			s.store,
+			messageScope,
+			run.ID,
+			"assistant-"+assistantID,
+			projectAssistantConversationAssistant,
+			chatMessage{Role: "assistant", Content: resultContent},
+		); err != nil {
+			return projectAssistantResumeResponse{}, fmt.Errorf("persist resumed assistant conversation item: %w", err)
+		}
 	}
 	run.Status = out.Status
 	run.UpdatedAt = time.Now().UTC()
@@ -1206,7 +1253,22 @@ func (s *Server) completeClaimedProjectAssistantRunAfterResumeError(
 	out.ToolCall = toolCall
 	appendProjectAssistantResumeResolvedUI(&out, strings.TrimSpace(resumeReq.AssistantMessageID), run.RequestID, toolCall)
 	now := time.Now().UTC()
-	run.Status = store.AssistantRunStatusCompleted
+	if errors.Is(cause, context.Canceled) {
+		run.Status = store.AssistantRunStatusInterrupted
+		run.AbortReason = store.AssistantRunAbortReasonInterrupted
+		run.Error = projectAssistantRunErrorJSON(cause, "interrupted")
+	} else if projectEinoAssistantIterationLimited(cause) {
+		run.Status = store.AssistantRunStatusFailed
+		run.AbortReason = store.AssistantRunAbortReasonIterationLimited
+		run.Error = projectAssistantRunErrorJSON(cause, "max_iterations_exceeded")
+	} else if projectEinoAssistantBudgetLimited(cause) {
+		run.Status = store.AssistantRunStatusFailed
+		run.AbortReason = store.AssistantRunAbortReasonBudgetLimited
+		run.Error = projectAssistantRunErrorJSON(cause, "session_budget_exceeded")
+	} else {
+		run.Status = store.AssistantRunStatusFailed
+		run.Error = projectAssistantRunErrorJSON(cause, projectAssistantRunErrorInfo(cause))
+	}
 	run.UpdatedAt = now
 	updatedRun, auditErr := appendProjectAssistantRunAudit(run, projectAssistantPermissionAudit{
 		RequestID:       run.RequestID,
@@ -1462,6 +1524,7 @@ func cloneChatMessages(src []chatMessage) []chatMessage {
 	for i, msg := range src {
 		dst[i] = msg
 		dst[i].ToolCalls = cloneProjectAssistantToolCalls(msg.ToolCalls)
+		dst[i].Extra = projectAssistantDurableMessageExtra(msg.Extra)
 	}
 	return dst
 }

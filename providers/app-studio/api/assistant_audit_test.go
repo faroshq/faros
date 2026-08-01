@@ -129,12 +129,13 @@ func TestProjectAssistantRunAuditRecordsModelCallShapeWithoutPayloads(t *testing
 	started := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	run := &store.AssistantRun{ID: "run-model-call"}
 	recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, started)
+	remaining := int64(1234)
 	recorder.recordModelCall(
 		context.Background(),
 		2,
 		7,
 		5,
-		true,
+		&remaining,
 		[]*schema.ToolInfo{
 			{Name: projectToolApplyPatch},
 			{Name: projectEinoAssistantWriteTodosTool},
@@ -177,7 +178,8 @@ func TestProjectAssistantRunAuditRecordsModelCallShapeWithoutPayloads(t *testing
 	if call.Ordinal != 2 ||
 		call.SourceRevision != 7 ||
 		call.VerifiedRevision != 5 ||
-		!call.WarningInjected ||
+		call.RolloutBudgetRemaining == nil ||
+		*call.RolloutBudgetRemaining != remaining ||
 		call.Outcome != "tool_calls" {
 		t.Fatalf("model call = %#v", call)
 	}
@@ -232,7 +234,7 @@ func TestProjectAssistantRunAuditPersistsBoundedModelMilestones(t *testing.T) {
 		1,
 		0,
 		0,
-		false,
+		nil,
 		[]*schema.ToolInfo{{Name: projectToolDefineInitialProjectPlan}},
 		nil,
 	); err != nil {
@@ -277,7 +279,7 @@ func TestProjectAssistantRunAuditTransportErrorDoesNotPreemptRetryResult(t *test
 		1,
 		0,
 		0,
-		false,
+		nil,
 		nil,
 		nil,
 	); err != nil {
@@ -310,7 +312,7 @@ func TestProjectAssistantRunAuditKeepsFailureAdjacentModelCalls(t *testing.T) {
 	recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, time.Now().UTC())
 	total := projectAssistantAuditMaxModelCalls + 3
 	for ordinal := 1; ordinal <= total; ordinal++ {
-		recorder.recordModelCall(context.Background(), ordinal, 0, 0, false, nil, nil)
+		recorder.recordModelCall(context.Background(), ordinal, 0, 0, nil, nil, nil)
 		recorder.recordModelResult(
 			context.Background(),
 			ordinal,
@@ -337,7 +339,7 @@ func TestProjectAssistantRunAuditKeepsFailureAdjacentModelCalls(t *testing.T) {
 func TestProjectAssistantRunAuditMarksUnfinishedModelCallAsError(t *testing.T) {
 	run := &store.AssistantRun{ID: "run-model-call-error"}
 	recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, run, time.Now().UTC())
-	recorder.recordModelCall(context.Background(), 1, 0, 0, false, nil, nil)
+	recorder.recordModelCall(context.Background(), 1, 0, 0, nil, nil, nil)
 	recorder.recordModelError()
 
 	var audit projectAssistantRunAudit
@@ -813,9 +815,51 @@ func TestCompleteClaimedProjectAssistantRunAfterResumeErrorFinalizesAudit(t *tes
 	if err := json.Unmarshal(saved.Audit, &audit); err != nil {
 		t.Fatalf("decode audit: %v", err)
 	}
-	if saved.Status != store.AssistantRunStatusCompleted ||
+	if saved.Status != store.AssistantRunStatusFailed ||
 		audit.Outcome != projectAssistantAuditOutcomeFailed ||
 		audit.DurationMS < 1000 {
 		t.Fatalf("saved run = %#v, audit = %#v; want finalized failure", saved, audit)
+	}
+}
+
+func TestProjectAssistantCompactionAuditUpdatesBoundedMetadataWithoutSummary(t *testing.T) {
+	run := store.AssistantRun{}
+	recorder := newProjectAssistantRunAuditRecorder(projectAssistantRunRequest{}, &run, time.Now().UTC())
+	ctx := context.Background()
+	if err := recorder.recordCompaction(ctx, projectAssistantAuditCompaction{
+		ID:                 "compact-1",
+		Trigger:            "auto",
+		Status:             "started",
+		PriorTokenEstimate: 24001,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.recordCompaction(ctx, projectAssistantAuditCompaction{
+		ID:                       "compact-1",
+		Trigger:                  "auto",
+		Status:                   "completed",
+		WindowNumber:             2,
+		PreviousWindowID:         "window-1",
+		WindowID:                 "window-2",
+		PriorTokenEstimate:       24001,
+		ReplacementTokenEstimate: 8000,
+		IgnoredToolCallCount:     2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var audit projectAssistantRunAudit
+	if err := json.Unmarshal(run.Audit, &audit); err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.Compactions) != 1 {
+		t.Fatalf("compactions = %#v, want one updated entry", audit.Compactions)
+	}
+	entry := audit.Compactions[0]
+	if entry.Status != "completed" || entry.WindowID != "window-2" || entry.ReplacementTokenEstimate != 8000 || entry.IgnoredToolCallCount != 2 || entry.CompletedAtOffsetMS == nil {
+		t.Fatalf("compaction audit = %#v", entry)
+	}
+	if strings.Contains(string(run.Audit), "summary") {
+		t.Fatalf("compaction audit leaked summary-shaped content: %s", run.Audit)
 	}
 }

@@ -11,7 +11,7 @@ const message = (id, content) => ({ id, projectID: 'p', role: 'assistant', conte
 const snapshot = (revision, content, status = 'running') => ({ run: { id: 'run-1', mode: 'default', status, revision, activeMessageID: 'a-1' }, message: message('a-1', content) })
 
 test('assistantRunTerminal recognizes run and display forms of every closed outcome', () => {
-  for (const status of ['completed', 'aborted', 'failed', 'interrupted', 'Completed', 'Aborted', 'Failed', 'Interrupted']) {
+  for (const status of ['completed', 'failed', 'interrupted', 'aborted', 'Completed', 'Failed', 'Interrupted', 'Aborted']) {
     assert.equal(state.assistantRunTerminal(status), true, status)
   }
   for (const status of ['running', 'stopping', 'pending_permission', 'pending_input', 'Working', undefined]) {
@@ -35,6 +35,23 @@ test('mergeConversationSnapshot keeps the stable assistant message ID and reject
   assert.equal(current.messages.filter((item) => item.id === 'a-1').length, 1)
   assert.strictEqual(old, current)
   assert.strictEqual(duplicate, current)
+})
+
+test('steering appends a new assistant segment after the steered user item', () => {
+  const initial = {
+    messages: [
+      { ...message('u-1', 'build it'), role: 'user', createdAt: '2026-01-01T00:00:00.000000Z' },
+      { ...message('a-1', 'working'), createdAt: '2026-01-01T00:00:00.000001Z' },
+      { ...message('u-2', 'also add tests'), role: 'user', createdAt: '2026-01-01T00:00:01.000000Z' },
+    ],
+    runs: { 'run-1': { ...snapshot(1, 'working').run, revision: 1 } },
+  }
+  const steered = state.mergeConversationSnapshot(initial, {
+    run: { ...snapshot(2, 'continued').run, revision: 2, activeMessageID: 'a-2' },
+    message: { ...message('a-2', 'continued'), createdAt: '2026-01-01T00:00:01.000001Z' },
+  })
+
+  assert.deepEqual(steered.messages.map((item) => item.id), ['u-1', 'a-1', 'u-2', 'a-2'])
 })
 
 test('a collaboration mode remains fixed across revisions without duplicating its message', () => {
@@ -147,6 +164,14 @@ test('nonterminal runs require live controls and terminal runs do not', () => {
   assert.equal(state.assistantRunRequiresLiveControls(completed), false)
 })
 
+test('plan implementation requires a successful completed plan run', () => {
+  const completed = { ...snapshot(4, 'plan', 'completed').run, mode: 'plan' }
+  assert.equal(state.assistantRunCanImplementPlan(completed), true)
+  assert.equal(state.assistantRunCanImplementPlan({ ...completed, error: { message: 'provider failed' } }), false)
+  assert.equal(state.assistantRunCanImplementPlan({ ...completed, mode: 'default' }), false)
+  assert.equal(state.assistantRunCanImplementPlan({ ...completed, status: 'running' }), false)
+})
+
 test('a stale nonterminal snapshot is rejected and cannot be used to attach a subscription', () => {
   const current = snapshot(4, 'newer')
   const stale = snapshot(3, 'older')
@@ -185,11 +210,11 @@ test('a snapshot captured for a project is rejected after selection changes', ()
   assert.equal(result.accepted, false)
 })
 
-test('a successful abort snapshot immediately makes the run terminal and non-provisional', () => {
-  const stopped = state.abortedConversationSnapshot(snapshot(4, 'working'))
-  assert.equal(stopped.run.status, 'aborted')
+test('a successful stop snapshot immediately makes the run interrupted and non-provisional', () => {
+	const stopped = state.abortedConversationSnapshot(snapshot(4, 'working'))
+	assert.equal(stopped.run.status, 'interrupted')
   assert.equal(stopped.run.revision, 5)
-  assert.equal(stopped.message.metadata.assistantStatus, 'Aborted')
+	assert.equal(stopped.message.metadata.assistantStatus, 'Interrupted')
   assert.equal(stopped.message.metadata.assistantProvisional, false)
 })
 

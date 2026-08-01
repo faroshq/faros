@@ -24,9 +24,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
+
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
+
+func TestProjectAssistantRunErrorInfoClassifiesExhaustedModelRetries(t *testing.T) {
+	err := &adk.RetryExhaustedError{LastErr: &projectEinoAssistantIncompleteStreamError{}, TotalRetries: 5}
+	if got := projectAssistantRunErrorInfo(err); got != "response_too_many_failed_attempts" {
+		t.Fatalf("error info = %q, want response_too_many_failed_attempts", got)
+	}
+}
 
 func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing.T) {
 	now := time.Now().UTC()
@@ -87,77 +96,28 @@ func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing
 	}
 }
 
-func TestProjectAssistantMutationTerminalContentExplainsStateConversationally(t *testing.T) {
-	complete := projectAssistantMutationTerminalContent(projectAssistantCompletionEvidence{
-		SourceMutationRevision:   4,
-		VerifiedMutationRevision: 4,
-		LatestMutationVerified:   true,
-		VerificationOutcome:      "ready",
-		VerificationSummary:      "The development runtime is ready.",
-	}, true)
-	for _, expected := range []string{
-		"Status: Complete",
-		"development preview is operationally reachable",
-		"Operational checks:",
-		"The development runtime is ready.",
-		"Application behavior was not independently verified",
-		"acceptance criteria were not proven",
-	} {
-		if !strings.Contains(complete, expected) {
-			t.Fatalf("complete content = %q, want %q", complete, expected)
-		}
+func TestProjectAssistantRunViewIncludesStructuredTerminalFields(t *testing.T) {
+	run := store.AssistantRun{
+		ID:          "run-1",
+		Mode:        store.AssistantRunModeDefault,
+		Status:      store.AssistantRunStatusAborted,
+		Error:       json.RawMessage(`{"message":"retry budget exhausted","errorInfo":"session_budget_exceeded"}`),
+		AbortReason: store.AssistantRunAbortReasonBudgetLimited,
 	}
-	if strings.Contains(complete, "Workspace revision") || strings.Contains(complete, "Outcome:") {
-		t.Fatalf("complete content exposes internal verification language: %q", complete)
+	view := projectAssistantRunToAPI(run)
+	if view.Error == nil || view.Error.Message != "retry budget exhausted" || view.Error.ErrorInfo != "session_budget_exceeded" {
+		t.Fatalf("terminal error view = %#v", view.Error)
 	}
-
-	pending := projectAssistantMutationTerminalContent(projectAssistantCompletionEvidence{
-		PlanDefined:              true,
-		PlanComplete:             false,
-		VerificationOutcome:      "ready",
-		VerificationSummary:      "The development runtime is ready. The Git repository is still becoming ready, so commit and CI handoff are pending.",
-		SourceMutationRevision:   4,
-		VerifiedMutationRevision: 4,
-		LatestMutationVerified:   true,
-	}, true)
-	for _, expected := range []string{
-		"Status: Incomplete",
-		"development preview is operationally reachable",
-		"requested project work is not finished yet",
-		"repository is still becoming ready",
-		"Finish the remaining project steps",
-	} {
-		if !strings.Contains(pending, expected) {
-			t.Fatalf("pending content = %q, want %q", pending, expected)
-		}
-	}
-	if strings.Contains(pending, "initial project objective is incomplete") {
-		t.Fatalf("pending content contains circular blocker: %q", pending)
+	if view.AbortReason != store.AssistantRunAbortReasonBudgetLimited {
+		t.Fatalf("abort reason = %q", view.AbortReason)
 	}
 }
 
-func TestProjectAssistantMutationAwareTerminalContentPreservesCompletedAgentSummary(t *testing.T) {
-	evidence := projectAssistantCompletionEvidence{
-		SourceMutationRevision:   4,
-		VerifiedMutationRevision: 4,
-		LatestMutationVerified:   true,
-		VerificationOutcome:      "ready",
-		PlanDefined:              true,
-		PlanComplete:             true,
-	}
-	const summary = "Built the ordering flow and verified it in the development preview."
-	if got := projectAssistantMutationAwareTerminalContent(summary, "", nil, evidence, true); !strings.HasPrefix(got, "Built the ordering flow") || strings.Contains(got, "verified it in the development preview") || !strings.Contains(got, "Application behavior was not independently verified") {
-		t.Fatalf("terminal content = %q, want truthful DeepAgent change summary plus server verification scope", got)
-	}
-
-	got := projectAssistantMutationAwareTerminalContent("", "", nil, evidence, true)
-	if !strings.Contains(got, "Status: Complete") {
-		t.Fatalf("empty completed response fallback = %q, want complete mutation summary", got)
-	}
-
-	got = projectAssistantMutationAwareTerminalContent(summary, "", errors.New("model failed"), evidence, false)
-	if !strings.Contains(got, "Status: Incomplete") {
-		t.Fatalf("failed response content = %q, want incomplete mutation summary", got)
+func TestProjectAssistantTerminalContentPreservesFinalProse(t *testing.T) {
+	server := &Server{}
+	const want = "Final model prose."
+	if got := server.projectAssistantRunTerminalContent(context.Background(), store.Scope{}, store.AssistantRun{}, want, "partial", errors.New("provider failed"), projectAssistantCompletionEvidence{}, false); got != want {
+		t.Fatalf("terminal content = %q, want %q", got, want)
 	}
 }
 
@@ -212,21 +172,8 @@ func TestProjectAssistantEffectAwareTerminalContentDisclosesSuccessfulNonSourceM
 				projectAssistantCompletionEvidence{},
 				true,
 			)
-			for _, want := range []string{
-				"Updated the project configuration",
-				"Verification scope:",
-				"Application behavior was not independently verified",
-				"acceptance criteria were not proven",
-			} {
-				if !strings.Contains(got, want) {
-					t.Fatalf("terminal content = %q, want %q", got, want)
-				}
-			}
-			if strings.Contains(got, "confirmed the checkout flow works") {
-				t.Fatalf("terminal content preserved model behavioral overclaim: %q", got)
-			}
-			if strings.Contains(got, "Operational checks:") {
-				t.Fatalf("non-source terminal content reported source operational verification: %q", got)
+			if want := "Updated the project configuration and confirmed the checkout flow works."; got != want {
+				t.Fatalf("terminal content = %q, want unchanged model response %q", got, want)
 			}
 		})
 	}
@@ -290,32 +237,6 @@ func TestProjectAssistantSuccessfulNonSourceRunEffectRejectsNonMutationsAndFaile
 	}
 }
 
-func TestProjectAssistantTruthfulModelSummaryRejectsBehavioralOverclaims(t *testing.T) {
-	for _, tt := range []struct {
-		input string
-		want  string
-	}{
-		{input: "Built the ordering flow and verified it in the development preview.", want: "Built the ordering flow"},
-		{input: "Acceptance criteria passed in the rendered preview.", want: ""},
-		{input: "Updated the API handler and unit tests passed.", want: "Updated the API handler"},
-		{input: "Updated the API handler; application behavior was not independently verified.", want: "Updated the API handler"},
-		{input: "Application behavior was not independently verified, but the acceptance criteria passed.", want: ""},
-		{input: "The preview renders correctly.", want: ""},
-		{input: "The checkout flow succeeded.", want: ""},
-		{input: "The app behaves as requested.", want: ""},
-		{input: "Validated all acceptance criteria in the preview.", want: ""},
-		{input: "Tested the development preview end to end.", want: ""},
-		{input: "Observed the checkout flow complete successfully.", want: ""},
-		{input: "Fixed the checkout flow and updated its error message.", want: "Fixed the checkout flow and updated its error message."},
-	} {
-		t.Run(tt.input, func(t *testing.T) {
-			if got := projectAssistantTruthfulModelSummary(tt.input); got != tt.want {
-				t.Fatalf("truthful summary = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	now := time.Now().UTC()
 	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, Revision: 2, CreatedAt: now, UpdatedAt: now}
@@ -358,212 +279,6 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	}
 }
 
-func TestProjectAssistantInitialCompletionSuspensionReason(t *testing.T) {
-	tests := []struct {
-		name     string
-		evidence projectAssistantCompletionEvidence
-		want     string
-	}{
-		{name: "no completion evidence is unchanged"},
-		{
-			name: "complete initial build",
-			evidence: projectAssistantCompletionEvidence{
-				PlanDefined:              true,
-				PlanComplete:             true,
-				SourceMutationRevision:   5,
-				VerifiedMutationRevision: 5,
-				LatestMutationVerified:   true,
-				VerificationOutcome:      "ready",
-			},
-		},
-		{
-			name: "complete ordinary mutation",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision:   2,
-				VerifiedMutationRevision: 2,
-				LatestMutationVerified:   true,
-				VerificationOutcome:      "ready",
-			},
-		},
-		{
-			name: "ordinary dirty mutation suspends",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision: 2,
-				VerificationOutcome:    "not_run",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "non-authoritative reachable cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision:   2,
-				VerifiedMutationRevision: 2,
-				LatestMutationVerified:   true,
-				VerificationOutcome:      "reachable",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "non-authoritative available cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision:   2,
-				VerifiedMutationRevision: 2,
-				LatestMutationVerified:   true,
-				VerificationOutcome:      "available",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "not ready cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision: 2,
-				VerificationOutcome:    "not_ready",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "unavailable cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision: 2,
-				VerificationOutcome:    "unavailable",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "not configured cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision: 2,
-				VerificationOutcome:    "not_configured",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "non-canonical uppercase ready cannot complete",
-			evidence: projectAssistantCompletionEvidence{
-				SourceMutationRevision:   2,
-				VerifiedMutationRevision: 2,
-				LatestMutationVerified:   true,
-				VerificationOutcome:      "READY",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "early prose suspends",
-			evidence: projectAssistantCompletionEvidence{
-				PlanDefined:         true,
-				VerificationOutcome: "not_run",
-			},
-			want: "objective incomplete",
-		},
-		{
-			name: "provisioning suspends distinctly",
-			evidence: projectAssistantCompletionEvidence{
-				PlanDefined:         true,
-				PlanComplete:        true,
-				VerificationOutcome: "provisioning",
-			},
-			want: "runtime provisioning",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := projectAssistantRunResult{CompletionEvidence: tt.evidence}
-			if got := projectAssistantCompletionSuspensionReason(result, false); got != tt.want {
-				t.Fatalf("reason = %q, want %q", got, tt.want)
-			}
-		})
-	}
-	if got := projectAssistantCompletionSuspensionReason(projectAssistantRunResult{}, true); got != "objective incomplete" {
-		t.Fatalf("fresh initial prose reason = %q, want objective incomplete", got)
-	}
-}
-
-func TestProjectAssistantCompletedPlanSnapshotRequiresVerifiedTerminalWork(t *testing.T) {
-	plan := &projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
-		{Content: "Edit source", ActiveForm: "Editing source", Status: "completed"},
-		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
-		{Content: "Commit changes", ActiveForm: "Committing changes", Status: "pending"},
-	}}
-	ready := projectAssistantCompletionEvidence{
-		SourceMutationRevision:   3,
-		VerifiedMutationRevision: 3,
-		LatestMutationVerified:   true,
-		VerificationOutcome:      "ready",
-	}
-	if !projectAssistantVerifiedMutationCompleted(ready) {
-		t.Fatal("current exact-ready verification was not recognized")
-	}
-	if projectAssistantTerminalPlanCompleted(ready, nil) {
-		t.Fatal("runtime readiness alone authorized terminal plan completion")
-	}
-	if !projectAssistantTerminalPlanCompleted(ready, []projectToolCallStreamEvent{{
-		Name:   projectToolCommitProjectFiles,
-		Status: "succeeded",
-	}}) {
-		t.Fatal("verified mutation with successful commit did not authorize terminal plan completion")
-	}
-	plannedReady := ready
-	plannedReady.PlanDefined = true
-	plannedReady.PlanComplete = true
-	if !projectAssistantTerminalPlanCompleted(plannedReady, nil) {
-		t.Fatal("completed authoritative plan did not authorize terminal plan completion")
-	}
-	completed := projectAssistantCompletedPlanSnapshot(plan)
-	if completed == nil || len(completed.Steps) != len(plan.Steps) {
-		t.Fatalf("completed plan = %#v, want cloned plan", completed)
-	}
-	for index, step := range completed.Steps {
-		if step.Status != "completed" {
-			t.Fatalf("completed step %d status = %q, want completed", index, step.Status)
-		}
-		if step.Content != plan.Steps[index].Content || step.ActiveForm != plan.Steps[index].ActiveForm {
-			t.Fatalf("completed step %d = %#v, want content preserved", index, step)
-		}
-	}
-	if plan.Steps[1].Status != "in_progress" || plan.Steps[2].Status != "pending" {
-		t.Fatalf("source plan was mutated: %#v", plan)
-	}
-
-	for _, evidence := range []projectAssistantCompletionEvidence{
-		{},
-		{
-			SourceMutationRevision:   3,
-			VerifiedMutationRevision: 2,
-			LatestMutationVerified:   true,
-			VerificationOutcome:      "ready",
-		},
-		{
-			SourceMutationRevision:   3,
-			VerifiedMutationRevision: 3,
-			LatestMutationVerified:   true,
-			VerificationOutcome:      "READY",
-		},
-		{
-			SourceMutationRevision:   3,
-			VerifiedMutationRevision: 3,
-			VerificationOutcome:      "ready",
-		},
-	} {
-		if projectAssistantTerminalPlanCompleted(evidence, []projectToolCallStreamEvent{{
-			Name:   projectToolCommitProjectFiles,
-			Status: "succeeded",
-		}}) {
-			t.Fatalf("evidence %#v unexpectedly authorized terminal plan completion", evidence)
-		}
-	}
-	incompletePlan := ready
-	incompletePlan.PlanDefined = true
-	if projectAssistantTerminalPlanCompleted(incompletePlan, []projectToolCallStreamEvent{{
-		Name:   projectToolCommitProjectFiles,
-		Status: "succeeded",
-	}}) {
-		t.Fatal("successful commit overrode an explicitly incomplete authoritative plan")
-	}
-	if completed := projectAssistantCompletedPlanSnapshot(nil); completed != nil {
-		t.Fatalf("nil plan completion = %#v, want nil", completed)
-	}
-}
-
 func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitions(t *testing.T) {
 	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
 		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
@@ -575,9 +290,7 @@ func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitio
 		status store.AssistantRunStatus
 	}{
 		{name: "running", status: store.AssistantRunStatusRunning},
-		{name: "interrupted", status: store.AssistantRunStatusInterrupted},
 		{name: "aborted", status: store.AssistantRunStatusAborted},
-		{name: "failed", status: store.AssistantRunStatusFailed},
 		{name: "claimed", status: store.AssistantRunStatusRunning},
 		{name: "completed", status: store.AssistantRunStatusCompleted},
 	} {

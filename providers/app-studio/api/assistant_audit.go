@@ -30,14 +30,60 @@ import (
 )
 
 const (
-	projectAssistantAuditVersion       = 1
-	projectAssistantAuditMaxTools      = 128
-	projectAssistantAuditMaxModelCalls = 32
-	projectAssistantAuditMaxToolNames  = 32
-	projectAssistantAuditMaxDecisions  = 64
-	projectAssistantAuditMaxPathBytes  = 512
-	projectAssistantAuditMaxSummaryLen = 256
+	projectAssistantAuditVersion        = 1
+	projectAssistantAuditMaxTools       = 128
+	projectAssistantAuditMaxModelCalls  = 32
+	projectAssistantAuditMaxCompactions = 16
+	projectAssistantAuditMaxToolNames   = 32
+	projectAssistantAuditMaxDecisions   = 64
+	projectAssistantAuditMaxPathBytes   = 512
+	projectAssistantAuditMaxSummaryLen  = 256
 )
+
+func (r *projectAssistantRunAuditRecorder) recordCompaction(
+	ctx context.Context,
+	entry projectAssistantAuditCompaction,
+) error {
+	if r == nil || strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Status) == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	entry.ID = projectAssistantAuditString(entry.ID, projectAssistantAuditMaxSummaryLen)
+	entry.Trigger = projectAssistantAuditString(entry.Trigger, projectAssistantAuditMaxSummaryLen)
+	entry.Status = projectAssistantAuditString(entry.Status, projectAssistantAuditMaxSummaryLen)
+	entry.PreviousWindowID = projectAssistantAuditString(entry.PreviousWindowID, projectAssistantAuditMaxSummaryLen)
+	entry.WindowID = projectAssistantAuditString(entry.WindowID, projectAssistantAuditMaxSummaryLen)
+	entry.Error = projectAssistantAuditString(entry.Error, projectAssistantAuditMaxSummaryLen)
+	entry.AtOffsetMS = projectAssistantAuditOffsetMS(r.started, now)
+	if entry.Status != "started" {
+		completed := entry.AtOffsetMS
+		entry.CompletedAtOffsetMS = &completed
+	}
+
+	r.mu.Lock()
+	for index := range r.audit.Compactions {
+		if r.audit.Compactions[index].ID != entry.ID {
+			continue
+		}
+		entry.AtOffsetMS = r.audit.Compactions[index].AtOffsetMS
+		r.audit.Compactions[index] = entry
+		r.updateRunLocked()
+		raw := r.auditSnapshotLocked()
+		r.mu.Unlock()
+		return r.persistSnapshot(ctx, raw)
+	}
+	if len(r.audit.Compactions) >= projectAssistantAuditMaxCompactions {
+		r.audit.Compactions = append(
+			[]projectAssistantAuditCompaction(nil),
+			r.audit.Compactions[len(r.audit.Compactions)-projectAssistantAuditMaxCompactions+1:]...,
+		)
+	}
+	r.audit.Compactions = append(r.audit.Compactions, entry)
+	r.updateRunLocked()
+	raw := r.auditSnapshotLocked()
+	r.mu.Unlock()
+	return r.persistSnapshot(ctx, raw)
+}
 
 type projectAssistantAuditOutcome string
 
@@ -66,7 +112,7 @@ type projectAssistantAuditModelCall struct {
 	Ordinal                   int      `json:"ordinal"`
 	SourceRevision            uint64   `json:"sourceRevision,omitempty"`
 	VerifiedRevision          uint64   `json:"verifiedRevision,omitempty"`
-	WarningInjected           bool     `json:"warningInjected,omitempty"`
+	RolloutBudgetRemaining    *int64   `json:"rolloutBudgetRemainingTokens,omitempty"`
 	VisibleTools              []string `json:"visibleTools,omitempty"`
 	Outcome                   string   `json:"outcome,omitempty"`
 	RequestedTools            []string `json:"requestedTools,omitempty"`
@@ -197,7 +243,7 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 	ordinal int,
 	sourceRevision uint64,
 	verifiedRevision uint64,
-	warningInjected bool,
+	rolloutBudgetRemaining *int64,
 	toolInfos []*schema.ToolInfo,
 	deferredToolInfos []*schema.ToolInfo,
 ) error {
@@ -205,12 +251,12 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 		return nil
 	}
 	entry := projectAssistantAuditModelCall{
-		Ordinal:          ordinal,
-		SourceRevision:   sourceRevision,
-		VerifiedRevision: verifiedRevision,
-		WarningInjected:  warningInjected,
-		VisibleTools:     projectAssistantAuditToolNames(toolInfos, deferredToolInfos),
-		AtOffsetMS:       projectAssistantAuditOffsetMS(r.started, time.Now().UTC()),
+		Ordinal:                ordinal,
+		SourceRevision:         sourceRevision,
+		VerifiedRevision:       verifiedRevision,
+		RolloutBudgetRemaining: rolloutBudgetRemaining,
+		VisibleTools:           projectAssistantAuditToolNames(toolInfos, deferredToolInfos),
+		AtOffsetMS:             projectAssistantAuditOffsetMS(r.started, time.Now().UTC()),
 	}
 	r.mu.Lock()
 	if len(r.audit.ModelCalls) >= projectAssistantAuditMaxModelCalls {
@@ -220,6 +266,31 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 		)
 	}
 	r.audit.ModelCalls = append(r.audit.ModelCalls, entry)
+	r.updateRunLocked()
+	raw := r.auditSnapshotLocked()
+	r.mu.Unlock()
+	return r.persistSnapshot(ctx, raw)
+}
+
+func (r *projectAssistantRunAuditRecorder) rolloutBudgetSnapshot() *projectAssistantRolloutBudgetState {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneProjectAssistantRolloutBudgetStatePtr(r.audit.RolloutBudget)
+}
+
+func (r *projectAssistantRunAuditRecorder) recordRolloutBudget(
+	ctx context.Context,
+	state projectAssistantRolloutBudgetState,
+) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	copy := cloneProjectAssistantRolloutBudgetState(state)
+	r.audit.RolloutBudget = &copy
 	r.updateRunLocked()
 	raw := r.auditSnapshotLocked()
 	r.mu.Unlock()
@@ -441,6 +512,8 @@ func projectAssistantFailureSummary(err error, kind string) string {
 		}
 	case "max_iterations":
 		summary = "assistant reached the bounded model-call limit"
+	case "session_budget":
+		summary = errProjectAssistantSessionBudgetExceeded.Error()
 	case "no_output":
 		summary = "assistant model produced no accepted output"
 	case "cancelled":
@@ -461,6 +534,8 @@ func projectAssistantFailureKind(err error) string {
 		return "no_progress"
 	case projectEinoAssistantMaxIterationsExceeded(err):
 		return "max_iterations"
+	case projectEinoAssistantRolloutBudgetExceeded(err):
+		return "session_budget"
 	case errors.Is(err, errProjectAssistantNoOutput):
 		return "no_output"
 	case errors.Is(err, context.Canceled):
@@ -620,6 +695,8 @@ func projectAssistantAuditReason(failure string) string {
 		return "no_progress"
 	case strings.Contains(failure, "exceed max iterations"):
 		return "max_iterations"
+	case strings.Contains(failure, errProjectAssistantSessionBudgetExceeded.Error()):
+		return "session_budget"
 	case strings.Contains(failure, errProjectAssistantNoOutput.Error()):
 		return "no_output"
 	default:

@@ -34,7 +34,7 @@ const (
 	projectEinoAssistantTodoProgressMaxLabelBytes = 120
 
 	projectEinoAssistantRepeatedActionWarnAt = 2
-	projectEinoAssistantRepeatedActionLimit  = maxAssistantDeepIterations
+	projectEinoAssistantRepeatedActionLimit  = 100
 )
 
 type projectEinoAssistantNoProgressError struct {

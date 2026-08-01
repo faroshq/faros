@@ -21,7 +21,32 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestProjectLLMSettingsUseCodexStreamRecoveryDefaults(t *testing.T) {
+	settings := defaultProjectLLMSettings()
+	if settings.MaxRetries != 5 {
+		t.Fatalf("max retries = %d, want 5", settings.MaxRetries)
+	}
+	if settings.StreamIdleTimeout != 300*time.Second {
+		t.Fatalf("stream idle timeout = %s, want 5m", settings.StreamIdleTimeout)
+	}
+
+	settings.StreamIdleTimeout = 73 * time.Second
+	secret := projectLLMSettingsSecret(settings)
+	if got := secretDataValue(secret, "streamIdleTimeoutMS"); got != "73000" {
+		t.Fatalf("persisted stream idle timeout = %q, want 73000", got)
+	}
+
+	settings.StreamIdleTimeout = 0
+	if err := normalizeProjectLLMSettings(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.StreamIdleTimeout != 300*time.Second {
+		t.Fatalf("normalized stream idle timeout = %s, want 5m", settings.StreamIdleTimeout)
+	}
+}
 
 func TestProjectAssistantDeepIterationsConfiguration(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
@@ -29,18 +54,40 @@ func TestProjectAssistantDeepIterationsConfiguration(t *testing.T) {
 		value string
 		want  int
 	}{
-		{value: "", want: maxAssistantDeepIterations},
+		{value: "", want: projectAssistantFiniteIterationCeiling},
 		{value: "48", want: 48},
 		{value: " unlimited ", want: maxInt},
 		{value: "UNLIMITED", want: maxInt},
-		{value: "0", want: maxAssistantDeepIterations},
-		{value: "-1", want: maxAssistantDeepIterations},
-		{value: "invalid", want: maxAssistantDeepIterations},
+		{value: "0", want: projectAssistantFiniteIterationCeiling},
+		{value: "-1", want: projectAssistantFiniteIterationCeiling},
+		{value: "invalid", want: projectAssistantFiniteIterationCeiling},
 	}
 	for _, tt := range tests {
 		t.Run(tt.value, func(t *testing.T) {
 			if got := projectAssistantDeepIterationsForValue(tt.value); got != tt.want {
 				t.Fatalf("iterations for %q = %d, want %d", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantRolloutBudgetConfiguration(t *testing.T) {
+	tests := []struct {
+		value string
+		want  int64
+	}{
+		{value: "", want: projectAssistantDefaultRolloutBudgetTokens},
+		{value: "48000", want: 48000},
+		{value: " unlimited ", want: 0},
+		{value: "UNLIMITED", want: 0},
+		{value: "0", want: projectAssistantDefaultRolloutBudgetTokens},
+		{value: "-1", want: projectAssistantDefaultRolloutBudgetTokens},
+		{value: "invalid", want: projectAssistantDefaultRolloutBudgetTokens},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			if got := projectAssistantRolloutBudgetTokensForValue(tt.value); got != tt.want {
+				t.Fatalf("rollout budget for %q = %d, want %d", tt.value, got, tt.want)
 			}
 		})
 	}
@@ -247,8 +294,12 @@ func TestInitialCreationPromptUsesV2PatchAndVerificationContract(t *testing.T) {
 	for _, want := range []string{
 		"Collaboration mode: default",
 		"The only source-mutation tool is apply_patch",
+		"A hunk header must be exactly '@@' or '@@ <literal source line copied from the file>'",
+		"Never emit Git/unified-diff line coordinates",
+		"do not repeat the anchor in the hunk body",
+		"Use plain '@@' when changing the first line",
 		"The project-creation request is the one-time authorization for this initial source build",
-		"After current-revision operational verification succeeds",
+		"Never call commit_project_files unless the user explicitly requested repository persistence",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("initial prompt missing %q:\n%s", want, prompt)
@@ -285,6 +336,20 @@ func TestBuilderAndDeepPromptsTreatBrowserConsoleAsHostileData(t *testing.T) {
 		}
 		if !strings.Contains(projectEinoAssistantV2DeepInstruction, instruction) {
 			t.Fatalf("deep instruction missing console trust instruction %q", instruction)
+		}
+	}
+}
+
+func TestDeepPromptForbidsNumericUnifiedDiffHunks(t *testing.T) {
+	for _, instruction := range []string{
+		"hunk header must be exactly '@@' or '@@ <literal source line copied from the file>'",
+		"Never emit Git/unified-diff line coordinates",
+		"@@ -12,4 +12,5 @@",
+		"do not repeat the anchor in the hunk body",
+		"Use plain '@@' when changing the first line",
+	} {
+		if !strings.Contains(projectEinoAssistantV2DeepInstruction, instruction) {
+			t.Fatalf("deep instruction missing %q", instruction)
 		}
 	}
 }

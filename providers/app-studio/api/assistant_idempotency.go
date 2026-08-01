@@ -45,6 +45,11 @@ func projectAssistantStartRequestDigest(actor, content string, mode store.Assist
 	return hex.EncodeToString(sum[:])
 }
 
+func projectAssistantActorDigest(actor string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(actor)))
+	return hex.EncodeToString(sum[:])
+}
+
 func bindProjectAssistantStartRequest(run *store.AssistantRun, actor, content string) error {
 	if run == nil {
 		return fmt.Errorf("bind assistant start request: run is required")
@@ -59,12 +64,56 @@ func bindProjectAssistantStartRequest(run *store.AssistantRun, actor, content st
 		audit.Version = projectAssistantAuditVersion
 	}
 	audit.StartRequestDigest = projectAssistantStartRequestDigest(actor, content, run.Mode)
+	audit.ActorDigest = projectAssistantActorDigest(actor)
 	raw, err := json.Marshal(audit)
 	if err != nil {
 		return fmt.Errorf("encode assistant run audit: %w", err)
 	}
 	run.Audit = raw
 	return nil
+}
+
+func projectAssistantRunActorMatches(run store.AssistantRun, actor string) bool {
+	var audit projectAssistantRunAudit
+	return len(run.Audit) > 0 && json.Unmarshal(run.Audit, &audit) == nil &&
+		audit.ActorDigest != "" && audit.ActorDigest == projectAssistantActorDigest(actor)
+}
+
+func findProjectAssistantSteeringReceipt(
+	ctx context.Context,
+	messages store.Store,
+	scope store.Scope,
+	run store.AssistantRun,
+	actor string,
+	content string,
+	clientRequestID string,
+) (store.Message, bool, error) {
+	if messages == nil || !projectAssistantRunActorMatches(run, actor) {
+		return store.Message{}, false, fmt.Errorf("%w: assistant steering actor does not own the expected run", store.ErrAssistantRunConflict)
+	}
+	wantDigest := projectAssistantStartRequestDigest(actor, content, run.Mode)
+	for cursor := ""; ; {
+		page, err := messages.ListMessages(ctx, scope, 250, cursor)
+		if err != nil {
+			return store.Message{}, false, err
+		}
+		for _, message := range page.Items {
+			requestID, _ := message.Metadata[projectAssistantSteeringRequestMetadata].(string)
+			runID, _ := message.Metadata[projectAssistantSteeringRunMetadata].(string)
+			if requestID != clientRequestID || runID != run.ID {
+				continue
+			}
+			digest, _ := message.Metadata[projectAssistantSteeringDigestMetadata].(string)
+			if digest != wantDigest || message.ActorID != actor || message.Content != content {
+				return store.Message{}, false, fmt.Errorf("%w: steering request ID was already used for different input", store.ErrAssistantRunConflict)
+			}
+			return message, true, nil
+		}
+		if page.NextCursor == "" {
+			return store.Message{}, false, nil
+		}
+		cursor = page.NextCursor
+	}
 }
 
 func validateProjectAssistantStartReplay(run store.AssistantRun, actor, content string, mode store.AssistantRunMode) error {

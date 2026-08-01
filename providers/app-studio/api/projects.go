@@ -72,6 +72,7 @@ type CreateProjectMessageRequest struct {
 	Content           string `json:"content"`
 	ClientRequestID   string `json:"clientRequestID,omitempty"`
 	CollaborationMode string `json:"collaborationMode,omitempty"`
+	ExpectedRunID     string `json:"expectedRunID,omitempty"`
 }
 
 func projectInitialBootstrapPromptDigest(content string) string {
@@ -816,20 +817,34 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 			transitionTerminal(store.AssistantRunStatusCompleted, string(store.AssistantRunStatusCompleted), nil)
 			return
 		}
-		if resumeErr == nil && resp.Status == store.AssistantRunStatusInterrupted {
-			reason := strings.TrimSpace(resp.SuspensionReason)
-			if reason == "" {
-				reason = "objective incomplete"
-			}
-			transitionTerminal(store.AssistantRunStatusInterrupted, reason, nil)
+		if errors.Is(resumeErr, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
+			_ = accumulator.UpdateRun(context.Background(), func(current *store.AssistantRun) {
+				current.AbortReason = store.AssistantRunAbortReasonInterrupted
+			})
+			transitionTerminal(store.AssistantRunStatusInterrupted, "interrupted", resumeErr)
 			return
 		}
-		if errors.Is(resumeErr, context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled) {
-			transitionTerminal(store.AssistantRunStatusAborted, "aborted", resumeErr)
+		if projectEinoAssistantIterationLimited(resumeErr) {
+			_ = accumulator.UpdateRun(context.Background(), func(current *store.AssistantRun) {
+				current.AbortReason = store.AssistantRunAbortReasonIterationLimited
+				current.Error = projectAssistantRunErrorJSON(resumeErr, "max_iterations_exceeded")
+			})
+			transitionTerminal(store.AssistantRunStatusFailed, "iteration_limited", resumeErr)
+			return
+		}
+		if projectEinoAssistantBudgetLimited(resumeErr) {
+			_ = accumulator.UpdateRun(context.Background(), func(current *store.AssistantRun) {
+				current.AbortReason = store.AssistantRunAbortReasonBudgetLimited
+				current.Error = projectAssistantRunErrorJSON(resumeErr, "session_budget_exceeded")
+			})
+			transitionTerminal(store.AssistantRunStatusFailed, "budget_limited", resumeErr)
 			return
 		}
 		if resumeErr != nil {
-			transitionTerminal(store.AssistantRunStatusFailed, projectAssistantFailureReason(resumeErr), resumeErr)
+			_ = accumulator.UpdateRun(context.Background(), func(current *store.AssistantRun) {
+				current.Error = projectAssistantRunErrorJSON(resumeErr, projectAssistantRunErrorInfo(resumeErr))
+			})
+			transitionTerminal(store.AssistantRunStatusFailed, "failed", resumeErr)
 			return
 		}
 		_ = accumulator.SetStatus(context.Background(), resp.Status)

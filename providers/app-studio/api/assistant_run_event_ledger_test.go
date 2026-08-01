@@ -99,6 +99,106 @@ func TestAssistantRunEventLedgerReplaysExactCompletedCall(t *testing.T) {
 	if events := listAssistantRunEventLedgerEvents(t, messageStore, scope, "run-replay"); len(events) != 2 {
 		t.Fatalf("replay appended events: %#v", events)
 	}
+	items, err := messageStore.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("conversation items = %#v, want call and result", items)
+	}
+	var toolMessage chatMessage
+	if err := json.Unmarshal(items[1].Payload, &toolMessage); err != nil {
+		t.Fatal(err)
+	}
+	if toolMessage.Content != wantResult {
+		t.Fatalf("model-visible failure = %q, want exact result without duplicated backend error", toolMessage.Content)
+	}
+}
+
+func TestAssistantToolPersistsFailureAndReturnsItToModel(t *testing.T) {
+	ctx := context.Background()
+	messageStore, scope := newAssistantRunEventLedgerTestStore(t, "run-model-failure")
+	ledger := newProjectAssistantRunEventLedger(messageStore, scope, "run-model-failure")
+	spec := projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}
+	args := map[string]any{"patch": "*** Begin Patch\n*** End Patch"}
+	decision, err := ledger.BeginToolCall(ctx, "call-patch", spec, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{eventLedger: ledger},
+		runState: newProjectEinoAssistantRunState(),
+	}
+	wantResult := "Tool call failed: context_not_found: expected current source"
+	result, err := tool.finishDurableToolFailureForModel(ctx, decision, wantResult, errors.New("context_not_found: expected current source"))
+	if err != nil || result != wantResult {
+		t.Fatalf("finish failure = (%q, %v), want model-visible result", result, err)
+	}
+
+	restarted := newProjectAssistantRunEventLedger(messageStore, scope, "run-model-failure")
+	replay, err := restarted.BeginToolCall(ctx, "call-patch", spec, args)
+	if err != nil || replay.Replay == nil || !replay.Replay.Failed {
+		t.Fatalf("durable failure replay = %#v, err=%v", replay, err)
+	}
+	tool.req.eventLedger = restarted
+	result, err = tool.replayDurableToolCall("call-patch", spec, args, *replay.Replay)
+	if err != nil || result != wantResult {
+		t.Fatalf("model failure replay = (%q, %v), want failed result returned to model", result, err)
+	}
+}
+
+func TestAssistantRunEventLedgerConversationCallFailureDoesNotAuthorizeEffect(t *testing.T) {
+	ctx := context.Background()
+	base, scope := newAssistantRunEventLedgerTestStore(t, "run-call-repair")
+	messageStore := &failingConversationItemStore{Store: base, failType: projectAssistantConversationToolCall, remaining: 1}
+	ledger := newProjectAssistantRunEventLedger(messageStore, scope, "run-call-repair")
+	spec := projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}
+	args := map[string]any{"patch": "*** Begin Patch\n*** End Patch"}
+
+	if _, err := ledger.BeginToolCall(ctx, "call-patch", spec, args); err == nil {
+		t.Fatal("BeginToolCall succeeded despite conversation append failure")
+	}
+	if events := listAssistantRunEventLedgerEvents(t, base, scope, "run-call-repair"); len(events) != 0 {
+		t.Fatalf("failed conversation append authorized an effect: %#v", events)
+	}
+
+	decision, err := ledger.BeginToolCall(ctx, "call-patch", spec, args)
+	if err != nil || !decision.ShouldDispatch() {
+		t.Fatalf("repaired BeginToolCall = %#v, err=%v; want dispatch", decision, err)
+	}
+	if events := listAssistantRunEventLedgerEvents(t, base, scope, "run-call-repair"); len(events) != 1 {
+		t.Fatalf("repaired call events = %#v, want one authorization", events)
+	}
+}
+
+func TestAssistantRunEventLedgerReplayRepairsMissingConversationResult(t *testing.T) {
+	ctx := context.Background()
+	base, scope := newAssistantRunEventLedgerTestStore(t, "run-result-repair")
+	messageStore := &failingConversationItemStore{Store: base, failType: projectAssistantConversationToolResult, remaining: 1}
+	ledger := newProjectAssistantRunEventLedger(messageStore, scope, "run-result-repair")
+	spec := projectAssistantToolSpec{Name: projectToolReadFile, Risk: projectAssistantToolRiskRead}
+	decision, err := ledger.BeginToolCall(ctx, "call-read", spec, map[string]any{"path": "README.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.FinishToolCall(ctx, decision.Token, "contents", nil); err == nil {
+		t.Fatal("FinishToolCall succeeded despite conversation result append failure")
+	}
+	if events := listAssistantRunEventLedgerEvents(t, base, scope, "run-result-repair"); len(events) != 2 {
+		t.Fatalf("durable ledger did not retain completed outcome: %#v", events)
+	}
+
+	repaired, err := ledger.FinishToolCall(ctx, decision.Token, "ignored retry value", errors.New("ignored retry error"))
+	if err != nil || repaired.Result != "contents" || repaired.Failed {
+		t.Fatalf("repaired result = %#v, err=%v", repaired, err)
+	}
+	items, err := base.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[1].Type != projectAssistantConversationToolResult {
+		t.Fatalf("repaired conversation items = %#v", items)
+	}
 }
 
 func TestAssistantRunEventLedgerRejectsConflictingCallID(t *testing.T) {
@@ -333,4 +433,26 @@ func listAssistantRunEventLedgerEvents(
 		t.Fatalf("ListAssistantRunEvents: %v", err)
 	}
 	return events
+}
+
+type failingConversationItemStore struct {
+	store.Store
+	mu        sync.Mutex
+	failType  string
+	remaining int
+}
+
+func (s *failingConversationItemStore) AppendAssistantConversationItem(
+	ctx context.Context,
+	scope store.Scope,
+	item store.AssistantConversationItem,
+) (store.AssistantConversationItem, error) {
+	s.mu.Lock()
+	if item.Type == s.failType && s.remaining > 0 {
+		s.remaining--
+		s.mu.Unlock()
+		return store.AssistantConversationItem{}, errors.New("injected conversation append failure")
+	}
+	s.mu.Unlock()
+	return s.Store.AppendAssistantConversationItem(ctx, scope, item)
 }
