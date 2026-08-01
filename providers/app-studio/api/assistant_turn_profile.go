@@ -460,10 +460,6 @@ func escalateProjectAssistantTurnPolicy(current, next projectAssistantTurnPolicy
 	return normalizeProjectAssistantTurnPolicy(merged, projectAssistantTurnProfileDiscussion)
 }
 
-func projectAssistantToolsForTurnProfile(tools []projectAssistantTool, profile projectAssistantTurnProfile) []projectAssistantTool {
-	return projectAssistantToolsForTurnPolicy(tools, projectAssistantTurnPolicyForProfile(profile))
-}
-
 func projectAssistantToolsForTurnPolicy(tools []projectAssistantTool, policy projectAssistantTurnPolicy) []projectAssistantTool {
 	out := make([]projectAssistantTool, 0, len(tools))
 	for _, tool := range tools {
