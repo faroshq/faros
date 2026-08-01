@@ -2092,6 +2092,12 @@ func projectEinoAssistantPhaseAllowsTool(
 		return name == projectToolDefineInitialProjectPlan
 	case projectEinoAssistantPhaseApproval:
 		if operationalRead {
+			// An inline-adaptive approval turn is about the pending plan, not
+			// re-opening environment selection: catalog reads (adaptive now
+			// exposes them for Q&A turns) stay hidden until a decision lands.
+			if inlinePromotion && bundle == projectAssistantToolBundleInfrastructure {
+				return false
+			}
 			return true
 		}
 		if !inlinePromotion && (templateBootstrap || directAction) {

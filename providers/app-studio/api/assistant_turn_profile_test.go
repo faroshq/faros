@@ -47,6 +47,12 @@ func TestProjectAssistantTurnProfileClassifier(t *testing.T) {
 		{name: "git push", message: "push my changes to git", want: projectAssistantTurnProfileImplementation},
 		{name: "pull request", message: "open a pull request for this branch", want: projectAssistantTurnProfileImplementation},
 		{name: "merge", message: "merge the feature branch", want: projectAssistantTurnProfileImplementation},
+		// Template-catalog asks must land where the infrastructure read tools
+		// (and select_project_template) are exposed, not in toolless chat.
+		{name: "template listing", message: "list templates and pick one with database", want: projectAssistantTurnProfileExploration},
+		{name: "template catalog read", message: "read mcp templates", want: projectAssistantTurnProfileExploration},
+		{name: "database backing question", message: "is this database backed?", want: projectAssistantTurnProfileExploration},
+		{name: "template switch", message: "switch the project to the application template", want: projectAssistantTurnProfileImplementation},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -452,8 +458,8 @@ func TestProjectAssistantTurnPolicyAllowsExpectedToolBundles(t *testing.T) {
 		{
 			name:       "adaptive",
 			profile:    projectAssistantTurnProfileAdaptive,
-			wantAllow:  []string{projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep, projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolVerifyDevelopmentRuntime, projectToolRequestProjectPlanApproval, projectToolAskFollowUp},
-			wantReject: []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles, projectToolInfrastructureListTemplates, projectToolInfrastructureProvision},
+			wantAllow:  []string{projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep, projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolVerifyDevelopmentRuntime, projectToolRequestProjectPlanApproval, projectToolAskFollowUp, projectToolInfrastructureListTemplates, projectToolInfrastructureDescribeTemplate, projectToolInfrastructureListInstances, projectToolInfrastructureGetInstance},
+			wantReject: []string{projectToolRestartRuntime, projectToolWriteFile, projectToolCommitProjectFiles, projectToolInfrastructureProvision},
 		},
 		{
 			name:       "exploration",
