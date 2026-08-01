@@ -639,12 +639,26 @@ func TestValidateNewAssistantRunRequiresOriginAndConsistentMode(t *testing.T) {
 	if err := validateNewAssistantRun(user, assistant, base); err != nil {
 		t.Fatalf("valid discussion run: %v", err)
 	}
+	for _, mode := range []AssistantRunMode{AssistantRunModeDefault, AssistantRunModePlan} {
+		v2 := base
+		v2.Mode = mode
+		v2.EngineVersion = AssistantEngineVersionV2
+		if err := validateNewAssistantRun(user, assistant, v2); err != nil {
+			t.Fatalf("valid v2 %s run: %v", mode, err)
+		}
+	}
 	for name, run := range map[string]AssistantRun{
 		"missing origin":        func() AssistantRun { r := base; r.UserMessageID = ""; return r }(),
 		"mismatched origin":     func() AssistantRun { r := base; r.UserMessageID = "other"; return r }(),
 		"missing mode":          func() AssistantRun { r := base; r.Mode = ""; return r }(),
 		"discussion work item":  func() AssistantRun { r := base; r.WorkItemID = "item"; return r }(),
 		"new without work item": func() AssistantRun { r := base; r.Mode = AssistantRunModeNew; return r }(),
+		"default without v2":    func() AssistantRun { r := base; r.Mode = AssistantRunModeDefault; return r }(),
+		"v2 legacy mode": func() AssistantRun {
+			r := base
+			r.EngineVersion = AssistantEngineVersionV2
+			return r
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateNewAssistantRun(user, assistant, run); err == nil {

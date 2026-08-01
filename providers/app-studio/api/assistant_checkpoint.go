@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"k8s.io/klog/v2"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -53,6 +52,14 @@ type projectAssistantCheckpointState struct {
 	PlanProgress              projectAssistantPlanSnapshot                     `json:"planProgress,omitempty"`
 	SourceMutationRevision    uint64                                           `json:"sourceMutationRevision,omitempty"`
 	VerifiedMutationRevision  uint64                                           `json:"verifiedMutationRevision,omitempty"`
+	DevelopmentSyncRevision   uint64                                           `json:"developmentSyncRevision,omitempty"`
+	DevelopmentSyncStatus     string                                           `json:"developmentSyncStatus,omitempty"`
+	DevelopmentSyncFailure    string                                           `json:"developmentSyncFailure,omitempty"`
+	DevelopmentSyncRetry      uint64                                           `json:"developmentSyncRetry,omitempty"`
+	CommitRequired            bool                                             `json:"commitRequired,omitempty"`
+	CommittedMutationRevision uint64                                           `json:"committedMutationRevision,omitempty"`
+	CommitAttemptedRevision   uint64                                           `json:"commitAttemptedRevision,omitempty"`
+	VerifiedWorkspaceDigest   string                                           `json:"verifiedWorkspaceDigest,omitempty"`
 	CheckedMutationRevision   uint64                                           `json:"checkedMutationRevision,omitempty"`
 	VerificationAttempted     bool                                             `json:"verificationAttempted,omitempty"`
 	VerificationOutcome       string                                           `json:"verificationOutcome,omitempty"`
@@ -65,6 +72,7 @@ type projectAssistantCheckpointState struct {
 	PatchRecoveryPath         string                                           `json:"patchRecoveryPath,omitempty"`
 	PatchRecoveryReadComplete bool                                             `json:"patchRecoveryReadComplete,omitempty"`
 	RuntimeWarmupAttempts     int                                              `json:"runtimeWarmupAttempts,omitempty"`
+	RepairOpportunityRevision uint64                                           `json:"repairOpportunityRevision,omitempty"`
 	NoProgressActionCount     int                                              `json:"noProgressActionCount,omitempty"` // legacy per-action counter
 	NoProgressModelCallCount  int                                              `json:"noProgressModelCallCount,omitempty"`
 	ActionBatchModelCall      int                                              `json:"actionBatchModelCall,omitempty"`
@@ -432,10 +440,14 @@ func projectAssistantPermissionReasonForArguments(spec projectAssistantToolSpec,
 	switch spec.Risk {
 	case projectAssistantToolRiskWrite:
 		if projectAssistantDirectApprovalGrantsWritePlan(spec.Name) {
-			if target, err := projectAssistantWriteTargetPath(spec.Name, args); err == nil {
+			if targets, err := projectAssistantWriteTargetPaths(spec.Name, args); err == nil && len(targets) > 0 {
+				quoted := make([]string, 0, len(targets))
+				for _, target := range targets {
+					quoted = append(quoted, fmt.Sprintf("%q", target))
+				}
 				return fmt.Sprintf(
-					"Allow App Studio to create or modify %q using workspace edit tools until the next commit request.",
-					target,
+					"Allow App Studio to create or modify %s using workspace edit tools until the next commit request.",
+					strings.Join(quoted, ", "),
 				)
 			}
 		}
@@ -751,7 +763,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	callbacksClosed := false
 	persistMetadata := func(ctx context.Context, runStatus *store.AssistantRunStatus) {
 		if accumulator != nil {
-			recordSnapshotErr(s.persistProjectAssistantDurableMetadata(ctx, accumulator, projectWorkspaceScope(id, p.Name), metadataState, runStatus))
+			recordSnapshotErr(s.persistProjectAssistantDurableMetadata(ctx, accumulator, projectWorkspaceScope(id, p), metadataState, runStatus))
 		}
 	}
 	var pendingPermissionToolCallID string
@@ -821,7 +833,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		Client:                   c,
 		Project:                  p,
 		Repository:               repository,
-		WorkspaceScope:           projectWorkspaceScope(id, p.Name),
+		WorkspaceScope:           projectWorkspaceScope(id, p),
 		Workspace:                s.workspaces,
 		MessageScope:             messageScope,
 		LLM:                      settings,
@@ -900,26 +912,6 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 			OnAssistantEvent: emitAssistantEvent,
 		},
 	}
-	// A free-text resume answer is a fresh user instruction ("go for it",
-	// "fix the login") — re-route it so the engine can escalate the run's
-	// tool policy. Without this, a run that began as a discussion question
-	// restores its toolless policy from the checkpoint on every resume, and
-	// the model can only keep asking for access it will never get. Routing
-	// failures fall through to the checkpoint policy (no escalation).
-	if answer := strings.TrimSpace(resumeReq.Answer); answer != "" {
-		if history, histErr := s.loadProjectAssistantTurnMessages(ctx, messageScope, resumeRun, true); histErr == nil {
-			// The answer is not persisted as a message yet — append it so the
-			// router classifies the instruction, not the stale history.
-			history = append(history, store.Message{Role: aiv1alpha1.ProjectMessageRoleUser, Content: answer})
-			if turnDecision, routeErr := s.projectAssistantTurnRouter()(ctx, projectAssistantTurnRouteRequest{LLM: settings, History: history}); routeErr == nil {
-				engineReq.TurnPolicy = projectAssistantTurnPolicyForDecision(turnDecision)
-				engineReq.TurnProfile = engineReq.TurnPolicy.profile
-				klog.FromContext(ctx).V(2).Info("assistant resume re-route",
-					"project", p.Name, "profile", turnDecision.Profile, "confidence", turnDecision.Confidence,
-					"mutation", turnDecision.RequestsMutation)
-			}
-		}
-	}
 	currentRequestID := run.RequestID
 	currentToolCallID := strings.TrimSpace(state.Eino.ToolCallID)
 	result, err := s.projectAssistantEngine().ResumeProjectAssistant(ctx, engineReq, resumeReq, state)
@@ -939,10 +931,13 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	out.Result = projectAssistantResumeToolResult(result.Content, currentToolCall)
 	previewRefreshNeeded := s.projectAssistantPreviewRefreshNeeded(ctx, engineReq.WorkspaceScope, "", false, metadataToolCalls)
 	if err != nil {
-		out.AssistantContent = projectAssistantDurableTerminalContent(result.Content, assistantText, err)
-		if result.CompletionEvidence.SourceMutationRevision > 0 {
-			out.AssistantContent = projectAssistantMutationTerminalContent(result.CompletionEvidence, false)
-		}
+		out.AssistantContent = projectAssistantMutationAwareTerminalContent(
+			result.Content,
+			assistantText,
+			err,
+			result.CompletionEvidence,
+			false,
+		)
 		var permissionErr *projectAssistantPermissionRequiredError
 		if !errors.As(err, &permissionErr) {
 			var inputErr *projectAssistantInputRequiredError
@@ -1044,16 +1039,19 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		out.Status = store.AssistantRunStatusInterrupted
 		out.SuspensionReason = reason
 	}
-	resultContent := result.Content
-	streamedContent := assistantText
-	if result.CompletionEvidence.SourceMutationRevision > 0 {
-		resultContent = projectAssistantMutationTerminalContent(
-			result.CompletionEvidence,
-			out.Status == store.AssistantRunStatusCompleted,
-		)
-		streamedContent = ""
-		out.AssistantContent = resultContent
-	}
+	engineCompleted := out.Status == store.AssistantRunStatusCompleted
+	resultContent := s.projectAssistantRunTerminalContent(
+		persistCtx,
+		messageScope,
+		run,
+		result.Content,
+		assistantText,
+		nil,
+		result.CompletionEvidence,
+		engineCompleted,
+	)
+	streamedContent := ""
+	out.AssistantContent = resultContent
 	appendProjectAssistantResumeResolvedUI(&out, strings.TrimSpace(resumeReq.AssistantMessageID), currentRequestID, currentToolCall)
 	appendProjectAssistantResumeDevelopmentPreviewRefreshUI(&out, previewRefreshNeeded)
 	if err := s.updateProjectAssistantPermissionMessage(persistCtx, messageScope, strings.TrimSpace(resumeReq.AssistantMessageID), out); err != nil {

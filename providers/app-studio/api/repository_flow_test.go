@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1210,7 +1209,7 @@ func TestCallProjectMCPToolTreatsIsErrorAsFailure(t *testing.T) {
 
 func TestProjectLocalToolRunsWorkspaceMutationTools(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	server := NewWithWorkspace(nil, nil, workspaces, "", false)
 
 	for _, call := range []struct {
@@ -1296,7 +1295,7 @@ func TestGenerateProjectAssistantStreamRequestsPermissionForWriteTool(t *testing
 	if len(model.Inputs) != 1 {
 		t.Fatalf("Eino model request count = %d, want 1", len(model.Inputs))
 	}
-	if _, err := workspaces.ReadFile(context.Background(), workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}, workspace.ReadOptions{Path: "src/App.tsx"}); err == nil {
+	if _, err := workspaces.ReadFile(context.Background(), workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}, workspace.ReadOptions{Path: "src/App.tsx"}); err == nil {
 		t.Fatal("write_file ran before permission was approved")
 	}
 
@@ -1792,7 +1791,7 @@ func TestResumeProjectAssistantRunApprovesPendingTool(t *testing.T) {
 	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
-	workspaceScope := projectWorkspaceScope(id, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
 	call := chatStreamingCall{Index: 0, ID: "call-write", Type: "function"}
 	call.Function.Name = projectToolWriteFile
 	call.Function.Arguments = `{"path":"src/App.tsx","content":"approved\n"}`
@@ -1819,7 +1818,7 @@ func TestResumeProjectAssistantRunApprovesPendingTool(t *testing.T) {
 		id,
 		fixture.Client,
 		project,
-		&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady},
+		&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusProvisioning},
 		permissionErr.RunID,
 		projectAssistantResumeRequest{
 			RequestID:          permissionErr.RequestID,
@@ -2096,8 +2095,8 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 		t.Fatalf("resume response = %#v, want plan approval after follow-up", resp)
 	}
 	progress, ok := projectAssistantProgressSnapshotFromMetadata(resp.AssistantMessage.Metadata[projectAssistantMetadataProgress])
-	if !ok || !reflect.DeepEqual(progress.Messages, []string{"Thanks, I can build that."}) {
-		t.Fatalf("resume progress = %#v, want preserved follow-up update", progress)
+	if ok && len(progress.Messages) != 0 {
+		t.Fatalf("resume progress = %#v, want no arbitrary tool-call narration", progress)
 	}
 	updatedMsg, err := server.findProjectMessage(context.Background(), messageScope, assistantMessageID)
 	if err != nil {
@@ -2360,7 +2359,7 @@ func TestResumeProjectAssistantRunFailsWorkItemWhenContinuationLLMFailsAfterTool
 	if err == nil || !strings.Contains(err.Error(), "continuation model failed") {
 		t.Fatalf("resumeProjectAssistantRun error = %v, want continuation decode failure", err)
 	}
-	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/App.tsx"})
+	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "src/App.tsx"})
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -2436,7 +2435,7 @@ func TestResumeProjectAssistantRunClaimsBeforeCommitSideEffects(t *testing.T) {
 	project.Name = "demo"
 	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
-	workspaceScope := projectWorkspaceScope(id, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
 	if err := workspaces.ApplyFiles(context.Background(), workspaceScope, []workspace.File{
 		{Path: "package.json", Content: `{"scripts":{"build":"vite build"}}` + "\n"},
 		{Path: "src/App.tsx", Content: "approved\n"},
@@ -2600,8 +2599,8 @@ func TestResumeProjectAssistantRunPersistsAssistantTextBeforeNextPause(t *testin
 				t.Fatalf("findProjectMessage returned error: %v", err)
 			}
 			progress, ok := projectAssistantProgressSnapshotFromMetadata(updatedMessage.Metadata[projectAssistantMetadataProgress])
-			if updatedMessage.Content != "" || !ok || !reflect.DeepEqual(progress.Messages, []string{"First change applied."}) {
-				t.Fatalf("assistant content = %q progress = %#v, want progress separate from final content", updatedMessage.Content, progress)
+			if updatedMessage.Content != "" || (ok && len(progress.Messages) != 0) {
+				t.Fatalf("assistant content = %q progress = %#v, want no arbitrary tool-call narration", updatedMessage.Content, progress)
 			}
 			if tt.wantFresh && updatedMessage.ID == assistantMessageID {
 				t.Fatalf("assistant message id = %q, want fresh message for stale resume id", updatedMessage.ID)
@@ -2625,7 +2624,7 @@ func TestResumeProjectAssistantRunDirectWriteApprovalRepromptsForDifferentPath(t
 	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
-	workspaceScope := projectWorkspaceScope(id, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
 
 	firstCall := chatStreamingCall{Index: 0, ID: "call-first-write", Type: "function"}
 	firstCall.Function.Name = projectToolWriteFile
@@ -2728,7 +2727,7 @@ func TestResumeProjectAssistantRunRejectsStaleRepositoryBinding(t *testing.T) {
 	project.UID = "test-project-uid-demo"
 	id := identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1", user: "user@example.com"}
 	messageScope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
-	workspaceScope := projectWorkspaceScope(id, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
 	if err := workspaces.ApplyFiles(context.Background(), workspaceScope, []workspace.File{{Path: "src/App.tsx", Content: "approved\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}
@@ -2808,6 +2807,7 @@ func TestResumeProjectAssistantRunRejectsStaleRepositoryBinding(t *testing.T) {
 }
 
 func TestResumeProjectAssistantRunPreemptsToolBatchAfterApprovedPermission(t *testing.T) {
+	t.Skip("engine-v1 WorkItem batch resume is view-only after the v2 cutover")
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
@@ -2880,10 +2880,10 @@ func TestResumeProjectAssistantRunPreemptsToolBatchAfterApprovedPermission(t *te
 	if first.Status != store.AssistantRunStatusCompleted || first.Permission != nil {
 		t.Fatalf("first resume response = %#v, want completed run after first approved Eino resume", first)
 	}
-	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "one.txt"}); err != nil {
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "one.txt"}); err != nil {
 		t.Fatalf("one.txt was not written after first approval: %v", err)
 	}
-	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "two.txt"}); err == nil {
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "two.txt"}); err == nil {
 		t.Fatal("two.txt was written after only the first approval")
 	}
 	run, err := messages.GetAssistantRun(context.Background(), messageScope, permissionErr.RunID)
@@ -2988,7 +2988,7 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 		id,
 		client,
 		project,
-		&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady},
+		&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusProvisioning},
 		permissionErr.RunID,
 		projectAssistantResumeRequest{RequestID: permissionErr.RequestID, Decision: string(projectAssistantPermissionAllow)},
 	)
@@ -2999,15 +2999,14 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 		t.Fatalf("resume response = %#v, want completed", resp)
 	}
 	if resp.AssistantMessage == nil ||
-		!strings.Contains(resp.AssistantMessage.Content, "Status: Complete") ||
-		!strings.Contains(resp.AssistantMessage.Content, "The latest app changes are running in the development preview") ||
-		strings.Contains(resp.AssistantMessage.Content, "I wrote src/App.tsx after approval.") {
-		t.Fatalf("assistant message = %#v, want factual verification-only completion", resp.AssistantMessage)
+		!strings.HasPrefix(resp.AssistantMessage.Content, "I wrote src/App.tsx after approval.") ||
+		!strings.Contains(resp.AssistantMessage.Content, "Application behavior was not independently verified") {
+		t.Fatalf("assistant message = %#v, want preserved DeepAgent completion summary plus server verification scope", resp.AssistantMessage)
 	}
 	if len(model.Inputs) != 3 {
 		t.Fatalf("Eino model request count = %d, want initial request plus bounded resumed retry", len(model.Inputs))
 	}
-	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/App.tsx"})
+	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "src/App.tsx"})
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
@@ -3018,16 +3017,16 @@ func TestResumeProjectAssistantRunContinuesLLMAfterApprovedPermission(t *testing
 	if err != nil {
 		t.Fatalf("LoadRecentMessages returned error: %v", err)
 	}
-	var sawFactualCompletion bool
+	var sawAgentCompletion bool
 	for _, msg := range recent {
 		if msg.Role == aiv1alpha1.ProjectMessageRoleAssistant &&
-			strings.Contains(msg.Content, "Status: Complete") &&
-			strings.Contains(msg.Content, "The latest app changes are running in the development preview") {
-			sawFactualCompletion = true
+			strings.HasPrefix(msg.Content, "I wrote src/App.tsx after approval.") &&
+			strings.Contains(msg.Content, "Application behavior was not independently verified") {
+			sawAgentCompletion = true
 		}
 	}
-	if !sawFactualCompletion {
-		t.Fatalf("messages = %#v, want persisted factual verification completion", recent)
+	if !sawAgentCompletion {
+		t.Fatalf("messages = %#v, want persisted DeepAgent completion summary", recent)
 	}
 }
 
@@ -3233,7 +3232,7 @@ func TestCommitProjectWorkspaceFilesReportsProviderFailure(t *testing.T) {
 	defer mcp.Close()
 
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "index.html", Content: "hello\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}
@@ -3282,7 +3281,7 @@ func TestCommitProjectWorkspaceFilesRejectsRepositoryMismatch(t *testing.T) {
 	defer mcp.Close()
 
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "index.html", Content: "hello\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}
@@ -3437,7 +3436,7 @@ func runProjectAssistantStreamWithModelAndPrompt(t *testing.T, model *repository
 			Content: fmt.Sprintf("export const value%d = %d\n", i, i),
 		})
 	}
-	if err := workspaces.ApplyFiles(context.Background(), workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}, seedFiles); err != nil {
+	if err := workspaces.ApplyFiles(context.Background(), workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}, seedFiles); err != nil {
 		t.Fatalf("seed workspace files: %v", err)
 	}
 	server := NewWithWorkspace(nil, messages, workspaces, hubBase, false)
@@ -3538,7 +3537,7 @@ func TestCommitProjectWorkspaceFilesBoundsPayloadBeforeProviderCode(t *testing.T
 	}))
 	defer mcp.Close()
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	server := NewWithWorkspace(nil, nil, workspaces, mcp.URL, false)
 
 	tooManyPaths := make([]any, 0, projectCommitProjectFilesMax+1)
@@ -3668,6 +3667,52 @@ func TestProjectRepositoryViewIncludesCommits(t *testing.T) {
 	}
 	if view.Commits[1].CommitSHA != "abc123" || view.Commits[1].FileCount != 2 || view.Commits[1].Message != "Initial app" {
 		t.Fatalf("unexpected commit view: %#v", view.Commits[1])
+	}
+}
+
+func TestProjectRepositoryViewFiltersCommitsWhenBackendIgnoresSelector(t *testing.T) {
+	project := projectWithRepository("demo-repo", "demo", "github")
+	matching := codeRepositoryCommitObject("matching", "demo-repo", "Succeeded", "abc123", "Demo", 1, time.Now().UTC())
+	unrelated := codeRepositoryCommitObject("unrelated", "other-repo", "Succeeded", "zzz999", "Other", 1, time.Now().UTC())
+	spoofed := codeRepositoryCommitObject("spoofed", "other-repo", "Succeeded", "bad999", "Spoofed", 1, time.Now().UTC())
+	spoofed.SetLabels(map[string]string{codeLabelRepository: "demo-repo"})
+
+	view := projectRepositoryViewFromResources(
+		context.Background(),
+		project,
+		codeObjectGetter(codeRepositoryObject("demo-repo", "demo", "github", true), codeConnectionObject("github")),
+		func(context.Context, k8sschema.GroupVersionResource, metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+			return &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*matching, *unrelated, *spoofed}}, nil
+		},
+	)
+	if view == nil {
+		t.Fatal("projectRepositoryView returned nil")
+	}
+	if len(view.Commits) != 1 || view.Commits[0].Name != "matching" {
+		t.Fatalf("commits = %#v, want only matching repository commit", view.Commits)
+	}
+}
+
+func TestProjectRepositoryViewPreservesCommitListFailure(t *testing.T) {
+	project := projectWithRepository("demo-repo", "demo", "github")
+	wantErr := errors.New("commit discovery unavailable")
+	view := projectRepositoryViewFromResources(
+		context.Background(),
+		project,
+		codeObjectGetter(codeRepositoryObject("demo-repo", "demo", "github", true), codeConnectionObject("github")),
+		func(context.Context, k8sschema.GroupVersionResource, metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+			return nil, wantErr
+		},
+	)
+	if view == nil {
+		t.Fatal("projectRepositoryView returned nil")
+	}
+	if !errors.Is(view.commitsErr, wantErr) {
+		t.Fatalf("commitsErr = %v, want %v", view.commitsErr, wantErr)
+	}
+	cp := (&Server{}).checkpointCI(view, projectCheckpointStateDone)
+	if cp.State != projectCheckpointStateError || cp.Reason != "Could not read repository commit history." {
+		t.Fatalf("checkpoint = %#v, want commit-history error", cp)
 	}
 }
 

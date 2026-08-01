@@ -25,7 +25,7 @@ export interface ProjectMessage {
 }
 
 export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
-export type ProjectAssistantRunMode = 'adaptive' | 'discussion' | 'new' | 'continue'
+export type ProjectAssistantRunMode = 'default' | 'plan' | 'adaptive' | 'discussion' | 'new' | 'continue'
 export type ProjectAssistantWorkItemStatus = 'active' | 'suspended' | 'completed' | 'cancelled'
 export type ProjectAssistantApprovalMode = 'always_ask' | 'auto_approve'
 
@@ -48,6 +48,8 @@ export interface ProjectAssistantWorkItem {
 
 export interface ProjectAssistantRun {
   id: string
+  engineVersion?: 'v2'
+  /** Present only on legacy engine-v1 history. */
   workItemID?: string
   mode?: ProjectAssistantRunMode
   approvalMode?: ProjectAssistantApprovalMode

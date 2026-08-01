@@ -124,10 +124,8 @@ type projectAssistantTemplateInspectionResult struct {
 }
 
 type projectAssistantRuntimeVerificationToolInput struct {
-	IncludeFiles *bool `json:"includeFiles,omitempty" jsonschema_description:"Whether to include a bounded current workspace file list in the readiness result. Defaults to true."`
-	MaxFiles     int   `json:"maxFiles,omitempty" jsonschema_description:"Maximum workspace file paths to include when includeFiles is true."`
-	IncludeLogs  *bool `json:"includeLogs,omitempty" jsonschema_description:"Whether to include bounded runtime logs when a deployed runtime is not ready. Defaults to true."`
-	TailLines    int   `json:"tailLines,omitempty" jsonschema_description:"Maximum trailing runtime log lines when logs are needed (default 40, maximum 100)."`
+	IncludeLogs *bool `json:"includeLogs,omitempty" jsonschema_description:"Whether to include bounded runtime logs when a deployed runtime is not ready. Defaults to true."`
+	TailLines   int   `json:"tailLines,omitempty" jsonschema_description:"Maximum trailing runtime log lines when logs are needed (default 40, maximum 100)."`
 }
 
 type projectAssistantRuntimeVerificationResult struct {
@@ -254,6 +252,7 @@ type projectAssistantWorkflowRunContext struct {
 	WorkspaceScope workspace.Scope
 	RunState       *projectEinoAssistantRunState
 	ApprovalMode   store.AssistantApprovalMode
+	EventLedger    *projectAssistantRunEventLedger
 	// Identity and Client carry the caller's tenant identity and project
 	// client so runtime/preview tools can query the live development
 	// runtime instead of returning a placeholder status.
@@ -269,6 +268,7 @@ func projectAssistantWorkflowRunContextForRequest(server *Server, req projectAss
 		WorkspaceScope: req.WorkspaceScope,
 		RunState:       runState,
 		ApprovalMode:   req.ApprovalMode,
+		EventLedger:    req.eventLedger,
 		Identity:       req.Identity,
 		Client:         req.Client,
 	}
@@ -320,8 +320,8 @@ func projectAssistantWorkflowToolSpecs() []projectAssistantToolSpec {
 		},
 		{
 			Name:        projectToolVerifyDevelopmentRuntime,
-			Description: "Run post-edit verification in one read: project readiness, live runtime status, preview URL, and diagnostic logs only when the runtime state warrants them.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list in readiness."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include."},"includeLogs":{"type":"boolean","description":"Whether to include bounded runtime logs when a deployed runtime is not ready."},"tailLines":{"type":"integer","minimum":1,"maximum":100,"description":"Maximum trailing runtime log lines when logs are needed."}}}`),
+			Description: "Run post-edit operational verification in one read: current workspace synchronization, live process and log health, and preview reachability. This does not independently verify rendered content, interactions, data flow, application behavior, or acceptance criteria.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"includeLogs":{"type":"boolean","description":"Whether to include bounded runtime logs when a deployed runtime is not ready."},"tailLines":{"type":"integer","minimum":1,"maximum":100,"description":"Maximum trailing runtime log lines when logs are needed."}}}`),
 			Risk:        projectAssistantToolRiskRead,
 		},
 		{
@@ -362,6 +362,15 @@ func newProjectAssistantGraphWorkflowTools(ctx context.Context, runCtx projectAs
 		}
 		if err := annotateProjectAssistantGraphTool(ctx, graphTool, spec); err != nil {
 			return nil, err
+		}
+		// Runtime-effect workflows install this wrapper inside their approval
+		// boundary. Read workflows have no interrupt boundary, so wrapping them
+		// here records the call before any live source is consulted.
+		if runCtx.EventLedger != nil && spec.Risk == projectAssistantToolRiskRead {
+			graphTool, err = newProjectAssistantDurableGraphTool(graphTool, spec, runCtx.EventLedger)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, graphTool)
 	}
@@ -406,6 +415,56 @@ func annotateProjectAssistantGraphTool(ctx context.Context, graphTool einotool.B
 	info.Extra["bundle"] = string(projectAssistantToolBundleForSpec(spec))
 	info.Extra["risk"] = string(spec.Risk)
 	return nil
+}
+
+// projectAssistantDurableGraphTool brings Eino-native workflow tools under the
+// same append-only dispatch boundary as registry and MCP tools. The wrapper is
+// deliberately installed inside approvaltool for effectful runtime workflows:
+// a pending approval must not be recorded as though the backend may have run.
+type projectAssistantDurableGraphTool struct {
+	einotool.InvokableTool
+	spec   projectAssistantToolSpec
+	ledger *projectAssistantRunEventLedger
+}
+
+func newProjectAssistantDurableGraphTool(
+	graphTool einotool.BaseTool,
+	spec projectAssistantToolSpec,
+	ledger *projectAssistantRunEventLedger,
+) (einotool.BaseTool, error) {
+	invokable, ok := graphTool.(einotool.InvokableTool)
+	if !ok {
+		return nil, fmt.Errorf("project assistant graph tool %q is not invokable", spec.Name)
+	}
+	return projectAssistantDurableGraphTool{
+		InvokableTool: invokable,
+		spec:          spec,
+		ledger:        ledger,
+	}, nil
+}
+
+func (t projectAssistantDurableGraphTool) InvokableRun(
+	ctx context.Context,
+	argumentsInJSON string,
+	opts ...einotool.Option,
+) (string, error) {
+	args, err := projectEinoToolArguments(argumentsInJSON)
+	if err != nil {
+		return "", fmt.Errorf("decode %s workflow arguments: %w", t.spec.Name, err)
+	}
+	decision, err := t.ledger.BeginToolCall(ctx, compose.GetToolCallID(ctx), t.spec, args)
+	if err != nil {
+		return "", err
+	}
+	if decision.Replay != nil {
+		return decision.Replay.InvokeResult()
+	}
+	result, invokeErr := t.InvokableTool.InvokableRun(ctx, argumentsInJSON, opts...)
+	outcome, err := t.ledger.FinishToolCall(ctx, decision.Token, result, invokeErr)
+	if err != nil {
+		return "", err
+	}
+	return outcome.InvokeResult()
 }
 
 func newProjectAssistantPlanningGraphTool(runCtx projectAssistantWorkflowRunContext) (einotool.BaseTool, error) {

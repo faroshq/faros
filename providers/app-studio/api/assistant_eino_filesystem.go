@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strconv"
@@ -179,9 +180,33 @@ func (m *projectEinoAssistantFilesystemTelemetry) WrapInvokableToolCall(
 			Status:    "running",
 			Arguments: arguments,
 		})
+		var ledgerDecision projectAssistantRunToolCallDecision
+		if projectAssistantRequestUsesV2(m.req) {
+			if m.req.eventLedger == nil {
+				return "", errors.New("assistant run event ledger is not configured")
+			}
+			decision, ledgerErr := m.req.eventLedger.BeginToolCall(ctx, callID, projectAssistantToolSpec{
+				Name: name,
+				Risk: projectAssistantToolRiskRead,
+			}, args)
+			if ledgerErr != nil {
+				return "", ledgerErr
+			}
+			ledgerDecision = decision
+		}
+		finishDurable := func(result string, invokeErr error) (string, error) {
+			if !projectAssistantRequestUsesV2(m.req) {
+				return result, invokeErr
+			}
+			outcome, finishErr := m.req.eventLedger.FinishToolCall(ctx, ledgerDecision.Token, result, invokeErr)
+			if finishErr != nil {
+				return "", finishErr
+			}
+			return outcome.InvokeResult()
+		}
 		rangeCovered := m.runState != nil && hasReadRange &&
 			m.runState.ReadFileRangeCovered(readPath, readStart, readEnd)
-		if m.runState != nil && (rangeCovered || m.runState.RepeatedCompletedRead(name, canonicalArguments)) {
+		if ledgerDecision.Replay == nil && m.runState != nil && (rangeCovered || m.runState.RepeatedCompletedRead(name, canonicalArguments)) {
 			result := "Tool call skipped: this read already completed after the latest workspace mutation; use the prior result or inspect different evidence."
 			m.runState.RecordCompletedAction(name, canonicalArguments, false)
 			m.emitToolCall(projectToolCallStreamEvent{
@@ -192,10 +217,17 @@ func (m *projectEinoAssistantFilesystemTelemetry) WrapInvokableToolCall(
 				Summary:   "Skipped an unchanged duplicate read.",
 			})
 			m.recordToolMessage(callID, name, result)
-			return result, nil
+			return finishDurable(result, nil)
 		}
 
-		result, endpointErr := endpoint(ctx, argumentsInJSON, opts...)
+		var result string
+		var endpointErr error
+		if ledgerDecision.Replay != nil {
+			result, endpointErr = ledgerDecision.Replay.InvokeResult()
+		} else {
+			result, endpointErr = endpoint(ctx, argumentsInJSON, opts...)
+			result, endpointErr = finishDurable(result, endpointErr)
+		}
 		if endpointErr != nil {
 			safeError := projectEinoAssistantSafeErrorText(endpointErr)
 			if m.runState != nil {

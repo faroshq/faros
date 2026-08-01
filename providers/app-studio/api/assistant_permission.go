@@ -36,6 +36,15 @@ const (
 	projectAssistantPermissionReplan projectAssistantPermissionDecision = "replan"
 )
 
+func projectAssistantToolHasEffect(spec projectAssistantToolSpec) bool {
+	switch spec.Risk {
+	case projectAssistantToolRiskPlan, projectAssistantToolRiskWrite, projectAssistantToolRiskRuntime, projectAssistantToolRiskCommit:
+		return true
+	default:
+		return false
+	}
+}
+
 func projectAssistantPermissionForTool(spec projectAssistantToolSpec) projectAssistantPermissionDecision {
 	return projectAssistantPermissionForToolWithPolicy(spec, false)
 }
@@ -168,6 +177,54 @@ func projectAssistantPermissionForApprovalMode(
 	}
 }
 
+// projectAssistantPermissionForV2 keeps collaboration mode, approval policy,
+// and tool risk independent. Default mode supplies mutation intent; the
+// approval preference decides whether an individual effect pauses. Workspace
+// and lifecycle validation still run at invocation time.
+func projectAssistantPermissionForV2(
+	spec projectAssistantToolSpec,
+	mode store.AssistantApprovalMode,
+	runState *projectEinoAssistantRunState,
+	args map[string]any,
+	templateBootstrapAllowed bool,
+) projectAssistantPermissionDecision {
+	switch spec.Risk {
+	case projectAssistantToolRiskRead, projectAssistantToolRiskInput:
+		return projectAssistantPermissionAllow
+	case projectAssistantToolRiskPlan:
+		if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
+			if runState != nil {
+				active := runState.ApprovedPlan()
+				if active != nil && active.RunLocal {
+					return projectAssistantPermissionAllow
+				}
+			}
+		}
+		return projectAssistantPermissionDeny
+	case projectAssistantToolRiskWrite:
+		if runState != nil {
+			if active := runState.ApprovedPlan(); active != nil && active.RunLocal {
+				if projectAssistantApprovedPlanAllowsWrite(active, spec.Name, args) ||
+					(projectToolBaseName(spec.Name) == projectToolSelectTemplate && templateBootstrapAllowed) {
+					return projectAssistantPermissionAllow
+				}
+				return projectAssistantPermissionDeny
+			}
+		}
+		if mode == store.AssistantApprovalModeAutoApprove {
+			return projectAssistantPermissionAllow
+		}
+		return projectAssistantPermissionAsk
+	case projectAssistantToolRiskRuntime, projectAssistantToolRiskCommit:
+		if mode == store.AssistantApprovalModeAutoApprove {
+			return projectAssistantPermissionAllow
+		}
+		return projectAssistantPermissionAsk
+	default:
+		return projectAssistantPermissionDeny
+	}
+}
+
 func projectAssistantApprovedPlanActive(plan *projectAssistantApprovedPlan) bool {
 	return plan != nil &&
 		plan.Version == projectAssistantApprovedPlanVersionWorkspaceMutation &&
@@ -189,22 +246,29 @@ func projectAssistantApprovedPlanAllowsWrite(plan *projectAssistantApprovedPlan,
 	// Initial project creation is the only unbounded grant. It is derived from
 	// the user's create request and remains local to that Eino run.
 	if plan.AllowAllWrites {
-		_, err := projectAssistantWriteTargetPath(toolName, args)
+		_, err := projectAssistantWriteTargetPaths(toolName, args)
 		return plan.RunLocal && err == nil
 	}
 	if !projectAssistantApprovedPlanHasCapability(plan, projectAssistantCapabilityWorkspaceMutate) {
 		return false
 	}
-	targetPath, err := projectAssistantWriteTargetPath(toolName, args)
+	targetPaths, err := projectAssistantWriteTargetPaths(toolName, args)
 	if err != nil {
 		return false
 	}
-	for _, approved := range plan.TargetPaths {
-		if projectAssistantPathWithinApprovedTarget(targetPath, approved) {
-			return true
+	for _, targetPath := range targetPaths {
+		covered := false
+		for _, approved := range plan.TargetPaths {
+			if projectAssistantPathWithinApprovedTarget(targetPath, approved) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
 		}
 	}
-	return false
+	return len(targetPaths) > 0
 }
 
 func projectAssistantApprovedPlanHasCapability(plan *projectAssistantApprovedPlan, capability string) bool {
@@ -284,13 +348,55 @@ func projectAssistantDirectApprovalGrantsWritePlan(toolName string) bool {
 }
 
 func projectAssistantWriteTargetPath(toolName string, args map[string]any) (string, error) {
+	paths, err := projectAssistantWriteTargetPaths(toolName, args)
+	if err != nil {
+		return "", err
+	}
+	if len(paths) != 1 {
+		return "", fmt.Errorf("tool %q affects %d workspace paths; a single path is required", toolName, len(paths))
+	}
+	return paths[0], nil
+}
+
+// projectAssistantWriteTargetPaths returns every workspace path a mutation can
+// affect. Contextual apply_patch payloads may add, delete, update, or move more
+// than one file, so authorization must cover the complete parsed set rather
+// than a representative path.
+func projectAssistantWriteTargetPaths(toolName string, args map[string]any) ([]string, error) {
 	switch strings.TrimSpace(toolName) {
-	case projectToolWriteFile, projectToolApplyPatch:
-		return projectAssistantCanonicalGrantTarget(projectToolString(args["path"]), false)
+	case projectToolWriteFile:
+		clean, err := projectAssistantCanonicalGrantTarget(projectToolString(args["path"]), false)
+		if err != nil {
+			return nil, err
+		}
+		return []string{clean}, nil
+	case projectToolApplyPatch:
+		if patch, ok := projectToolRawString(args["patch"]); ok && strings.TrimSpace(patch) != "" {
+			paths, err := workspace.PatchPaths(patch)
+			if err != nil {
+				return nil, err
+			}
+			if len(paths) == 0 {
+				return nil, fmt.Errorf("apply_patch must affect at least one workspace path")
+			}
+			return paths, nil
+		}
+		// Legacy persisted permission checkpoints may still contain the former
+		// single-file argument shape. Keep them readable/resumable while v2 only
+		// advertises the contextual patch grammar.
+		clean, err := projectAssistantCanonicalGrantTarget(projectToolString(args["path"]), false)
+		if err != nil {
+			return nil, err
+		}
+		return []string{clean}, nil
 	case projectToolMkdir:
-		return projectAssistantCanonicalGrantTarget(projectToolString(args["path"]), true)
+		clean, err := projectAssistantCanonicalGrantTarget(projectToolString(args["path"]), true)
+		if err != nil {
+			return nil, err
+		}
+		return []string{clean}, nil
 	default:
-		return "", fmt.Errorf("tool %q cannot use workspace mutation grants", toolName)
+		return nil, fmt.Errorf("tool %q cannot use workspace mutation grants", toolName)
 	}
 }
 

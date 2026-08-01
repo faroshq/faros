@@ -28,6 +28,7 @@ import (
 
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/tenant"
+	"github.com/faroshq/provider-app-studio/workspace"
 	"github.com/gorilla/mux"
 )
 
@@ -949,7 +950,7 @@ func TestResumedAssistantSegmentPublishesTerminalMessageAndRunAtomically(t *test
 	supervisor := newProjectAssistantSupervisor(context.Background(), msgStore)
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	now := time.Now().UTC()
-	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Checkpoint: json.RawMessage(`{"permission":"stale"}`), Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
 	if _, err := msgStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
@@ -967,7 +968,7 @@ func TestResumedAssistantSegmentPublishesTerminalMessageAndRunAtomically(t *test
 	<-updates
 	state := &projectAssistantDurableMetadataState{status: "Writing files", toolCalls: []projectToolCallStreamEvent{{ID: "tool-1", Name: projectToolWriteFile, Status: "succeeded"}}}
 	server := NewWithWorkspace(nil, msgStore, nil, "", false)
-	if err := server.persistProjectAssistantDurableMetadata(context.Background(), accumulator, projectWorkspaceScope(identity{}, scope.ProjectName), state, nil); err != nil {
+	if err := server.persistProjectAssistantDurableMetadata(context.Background(), accumulator, workspace.Scope{}, state, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := accumulator.UpdateText(context.Background(), "done", true); err != nil {
@@ -985,8 +986,18 @@ func TestResumedAssistantSegmentPublishesTerminalMessageAndRunAtomically(t *test
 	if terminal.Run.Status != store.AssistantRunStatusCompleted || terminal.Message.Content != "done" || terminal.Message.Metadata[projectAssistantMetadataPreviewRefreshNeeded] != true {
 		t.Fatalf("terminal snapshot = %#v", terminal)
 	}
+	if len(terminal.Run.Checkpoint) != 0 {
+		t.Fatalf("terminal checkpoint = %s, want cleared with terminal status", terminal.Run.Checkpoint)
+	}
 	if _, ok := terminal.Message.Metadata[projectMessageMetadataAssistantActionFeed]; !ok {
 		t.Fatalf("terminal metadata lost actions: %#v", terminal.Message.Metadata)
+	}
+	persisted, err := msgStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Checkpoint) != 0 {
+		t.Fatalf("persisted terminal checkpoint = %s, want cleared", persisted.Checkpoint)
 	}
 }
 
@@ -1514,6 +1525,17 @@ func TestProjectAssistantRunStartConsumesServerOwnedInitialBootstrap(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("first durable run did not reach assistant engine")
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		latest, latestErr := messages.LatestAssistantRun(context.Background(), scope)
+		if latestErr == nil && assistantRunTerminal(latest.Status) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("first durable run did not become terminal: run=%#v err=%v", latest, latestErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	post(`{"content":"continue","clientRequestID":"request-2"}`)
 	select {
@@ -1699,7 +1721,7 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	}
 }
 
-func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *testing.T) {
+func TestProjectAssistantSupervisorV2FreeTextResumeSkipsSemanticRouterAndPersistsLatestPlanSnapshot(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
 	if err != nil {
@@ -1723,6 +1745,11 @@ func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *tes
 
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	routerCalled := make(chan struct{}, 1)
+	server.assistantTurnRouter = func(context.Context, projectAssistantTurnRouteRequest) (projectAssistantTurnDecision, error) {
+		routerCalled <- struct{}{}
+		return projectAssistantTurnDecision{}, nil
+	}
 	latestPlan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
 		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
 		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
@@ -1735,12 +1762,12 @@ func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *tes
 	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 	now := time.Now().UTC()
 	checkpoint, err := json.Marshal(projectAssistantCheckpointState{Eino: &projectAssistantEinoCheckpointState{
-		CheckpointID: "run-1", Checkpoint: []byte("checkpoint"), InterruptID: "interrupt-1", InterruptType: projectAssistantInterruptTypePermission, ToolCallID: "tool-1", ToolName: projectToolWriteFile,
+		CheckpointID: "run-1", Checkpoint: []byte("checkpoint"), InterruptID: "interrupt-1", InterruptType: projectAssistantInterruptTypeFollowUp, ToolCallID: "tool-1", ToolName: projectToolAskFollowUp,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "permission-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", EngineVersion: store.AssistantEngineVersionV2, Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusPendingInput, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "follow-up-1", Checkpoint: checkpoint, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "hello", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
@@ -1748,7 +1775,7 @@ func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *tes
 	}
 	router := mux.NewRouter()
 	server.Register(router)
-	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/run-1/resume", strings.NewReader(`{"requestID":"permission-1","decision":"allow"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/run-1/resume", strings.NewReader(`{"requestID":"follow-up-1","answer":"Continue with the plan."}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer caller-token")
 	request.Header.Set("X-Kedge-User", "test-user")
@@ -1799,12 +1826,20 @@ func TestProjectAssistantSupervisorResumeWorkerPersistsLatestPlanSnapshot(t *tes
 	if terminal.Status != store.AssistantRunStatusCompleted || !reflect.DeepEqual(message.Metadata[projectAssistantMetadataPlan], latestPlan) {
 		t.Fatalf("terminal run = %#v, message = %#v, want completed latest plan", terminal, message)
 	}
+	if len(terminal.Checkpoint) != 0 {
+		t.Fatalf("terminal checkpoint = %s, want stale resume checkpoint cleared", terminal.Checkpoint)
+	}
 	if terminal.Revision <= live.Run.Revision {
 		t.Fatalf("terminal revision = %d, want greater than live revision %d", terminal.Revision, live.Run.Revision)
 	}
+	select {
+	case <-routerCalled:
+		t.Fatal("engine-v2 free-text resume invoked the semantic turn router")
+	default:
+	}
 }
 
-func TestProjectAssistantSupervisorResumeFailurePreservesNoProgressReasonAndMessage(t *testing.T) {
+func TestProjectAssistantSupervisorRejectsLegacyResumeWithoutMutatingWorkItem(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
 	if err != nil {
@@ -1881,43 +1916,22 @@ func TestProjectAssistantSupervisorResumeFailurePreservesNoProgressReasonAndMess
 	request.Header.Set("X-Kedge-Cluster", "cluster-a")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("resume status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "legacy assistant run is view-only") {
+		t.Fatalf("resume status = %d, want legacy view-only rejection: %s", response.Code, response.Body.String())
 	}
-
-	var terminal store.AssistantRun
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		terminal, err = memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
-		if err == nil && terminal.Status == store.AssistantRunStatusFailed {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if terminal.Status != store.AssistantRunStatusFailed {
-		t.Fatalf("terminal run = %#v, want failed", terminal)
-	}
-	updatedItem, err := memoryStore.GetAssistantWorkItem(context.Background(), scope, item.ID)
+	unchanged, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updatedItem.Status != store.AssistantWorkItemStatusSuspended || updatedItem.StatusReason != "no_progress" {
-		t.Fatalf("terminal WorkItem = %#v, want suspended no_progress", updatedItem)
+	if unchanged.Status != store.AssistantRunStatusPendingPermission || unchanged.Revision != 1 {
+		t.Fatalf("legacy run changed after rejected resume: %#v", unchanged)
 	}
-	message, err := server.findProjectMessage(context.Background(), scope, run.ActiveMessageID)
+	unchangedItem, err := memoryStore.GetAssistantWorkItem(context.Background(), scope, item.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !projectEinoAssistantBoundedClosingAnswerValid(message.Content) || !strings.Contains(message.Content, "Continue") {
-		t.Fatalf("terminal message = %q, want non-empty resumable explanation", message.Content)
-	}
-	audit := decodeProjectAssistantRunAudit(t, terminal.Audit)
-	if audit.Failure == nil ||
-		audit.Failure.Kind != "no_progress" ||
-		audit.Failure.Phase != projectEinoAssistantPhaseMutate ||
-		audit.Failure.ToolName != projectToolReadFile ||
-		audit.Failure.Calls != projectEinoAssistantRepeatedActionLimit {
-		t.Fatalf("terminal audit failure = %#v, want typed mutate no-progress", audit.Failure)
+	if unchangedItem.Status != store.AssistantWorkItemStatusActive || unchangedItem.Revision != 1 {
+		t.Fatalf("legacy work item changed after rejected resume: %#v", unchangedItem)
 	}
 }
 
@@ -1978,41 +1992,20 @@ func TestResumeProjectAssistantRouteDetachesRequestAndPublishesRunningSnapshot(t
 	request.Header.Set("X-Kedge-Cluster", "cluster-a")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("resume status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "legacy assistant run is view-only") {
+		t.Fatalf("resume status = %d, want legacy view-only rejection: %s", recorder.Code, recorder.Body.String())
 	}
 	select {
 	case <-engine.entered:
-	case <-time.After(time.Second):
-		got, getErr := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
-		t.Fatalf("resume engine did not start; run = %#v, err = %v", got, getErr)
+		t.Fatal("legacy resume reached the assistant engine")
+	default:
 	}
-	updates, unsubscribe, err := server.projectAssistantSupervisor().Subscribe(scope, run.ID, 0)
+	got, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unsubscribe()
-	select {
-	case snapshot := <-updates:
-		if snapshot.Run.Status != store.AssistantRunStatusRunning || snapshot.Run.Revision != 2 {
-			t.Fatalf("resume snapshot = %#v, want running revision 2", snapshot.Run)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("resume did not publish running snapshot")
-	}
-	cancelStarter()
-	select {
-	case <-engine.finished:
-		t.Fatal("canceling initiating HTTP request canceled resumed worker")
-	case <-time.After(25 * time.Millisecond):
-	}
-	if !server.projectAssistantSupervisor().Abort(scope, run.ID) {
-		t.Fatal("Abort did not find resumed worker")
-	}
-	select {
-	case <-engine.finished:
-	case <-time.After(time.Second):
-		t.Fatal("Abort did not cancel resumed worker")
+	if got.Status != store.AssistantRunStatusPendingPermission || got.Revision != 1 {
+		t.Fatalf("legacy run changed after rejected resume: %#v", got)
 	}
 }
 

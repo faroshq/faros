@@ -54,7 +54,8 @@ type Server struct {
 	assistantRunManager          *projectAssistantRunManager
 	assistantSupervisor          *projectAssistantSupervisor
 	developmentSyncLocks         map[string]*sync.Mutex
-	developmentSyncAfterMutation func(identity, *aiv1alpha1.Project, string)
+	developmentSyncTails         map[string]chan struct{}
+	developmentSyncAfterMutation func(identity, *aiv1alpha1.Project, string) error
 	projectCreatePreflight       projectCreatePreflightGenerator
 	// developmentSyncFailures records the most recent post-mutation sync
 	// failure per project so verify_development_runtime can report it. A
@@ -135,8 +136,8 @@ func (s *Server) projectAssistantRunManager() *projectAssistantRunManager {
 	return s.assistantRunManager
 }
 
-func (s *Server) developmentSyncLock(id identity, projectName string) *sync.Mutex {
-	key := id.orgUUID + "/" + id.workspaceUUID + "/" + projectName
+func (s *Server) developmentSyncLock(id identity, project *aiv1alpha1.Project) *sync.Mutex {
+	key := developmentSyncFailureKey(id, project)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.developmentSyncLocks == nil {

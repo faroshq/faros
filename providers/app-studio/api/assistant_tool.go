@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -158,12 +159,18 @@ func (t projectAssistantToolFunc) Call(ctx context.Context, req projectAssistant
 }
 
 func projectAssistantToolJSONResult(out any, err error) (string, error) {
-	if err != nil {
-		return "", err
+	raw, encodeErr := json.Marshal(out)
+	if encodeErr != nil {
+		if err != nil {
+			return "", errors.Join(err, fmt.Errorf("encode local tool result: %w", encodeErr))
+		}
+		return "", fmt.Errorf("encode local tool result: %w", encodeErr)
 	}
-	raw, err := json.Marshal(out)
 	if err != nil {
-		return "", fmt.Errorf("encode local tool result: %w", err)
+		// Preserve a concrete partial result alongside its error. Contextual
+		// patch rollback can fail after changing files, and the execution layer
+		// must see those paths so it can enforce sync, verification, and commit.
+		return string(raw), err
 	}
 	return string(raw), nil
 }

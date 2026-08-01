@@ -190,9 +190,11 @@ func TestProjectEinoAssistantMessageOutputDoesNotPublishFailedStream(t *testing.
 	}
 }
 
-func TestProjectEinoAssistantMessageOutputRoutesToolCallContentToProgress(t *testing.T) {
+func TestProjectEinoAssistantMessageOutputDoesNotPublishToolCallContent(t *testing.T) {
 	var chunks []string
 	var progress []string
+	var provisional []string
+	resets := 0
 	output := &adk.TypedMessageVariant[*schema.Message]{
 		IsStreaming: true,
 		MessageStream: schema.StreamReaderFromArray([]*schema.Message{
@@ -210,8 +212,10 @@ func TestProjectEinoAssistantMessageOutputRoutesToolCallContentToProgress(t *tes
 	}
 
 	msg, err := projectEinoAssistantMessageOutput(context.Background(), output, projectAssistantStreamCallbacks{
-		OnChunk:    func(chunk string) { chunks = append(chunks, chunk) },
-		OnProgress: func(message string) { progress = append(progress, message) },
+		OnChunk:            func(chunk string) { chunks = append(chunks, chunk) },
+		OnProgress:         func(message string) { progress = append(progress, message) },
+		OnProvisionalText:  func(content string) { provisional = append(provisional, content) },
+		OnProvisionalReset: func() { resets++ },
 	})
 	if err != nil {
 		t.Fatalf("message output returned error: %v", err)
@@ -219,8 +223,11 @@ func TestProjectEinoAssistantMessageOutputRoutesToolCallContentToProgress(t *tes
 	if msg == nil || len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != projectToolCheckProjectReadiness {
 		t.Fatalf("message = %#v, want preserved tool call for existing tool summary UX", msg)
 	}
-	if len(chunks) != 0 || strings.Join(progress, "") != "I will inspect the project." {
-		t.Fatalf("chunks = %#v progress = %#v, want tool-call prose routed only to progress", chunks, progress)
+	if len(chunks) != 0 || len(progress) != 0 {
+		t.Fatalf("chunks = %#v progress = %#v, want tool-call prose hidden", chunks, progress)
+	}
+	if len(provisional) != 1 || provisional[0] != "I will inspect the project." || resets != 1 {
+		t.Fatalf("provisional = %#v resets = %d, want provisional tool-call prose cleared", provisional, resets)
 	}
 }
 
@@ -367,6 +374,35 @@ func TestCollectProjectAssistantTurnEventsIgnoresMessageStreamWillRetryError(t *
 	}
 }
 
+func TestCollectProjectAssistantTurnEventsDoesNotPersistToolCallProseAsFinalOutput(t *testing.T) {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Output: &adk.TypedAgentOutput[*schema.Message]{
+			MessageOutput: &adk.TypedMessageVariant[*schema.Message]{
+				Message: schema.AssistantMessage("I will inspect the project.", []schema.ToolCall{{
+					ID:       "call-readiness",
+					Function: schema.FunctionCall{Name: projectToolCheckProjectReadiness},
+				}}),
+				Role: schema.Assistant,
+			},
+		},
+	})
+	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
+		Output: &adk.TypedAgentOutput[*schema.Message]{
+			MessageOutput: &adk.TypedMessageVariant[*schema.Message]{
+				Message: schema.AssistantMessage("", nil),
+				Role:    schema.Assistant,
+			},
+		},
+	})
+	generator.Close()
+
+	outcome := collectProjectAssistantTurnEventsForTest(t, iter)
+	if outcome.receivedOutput || outcome.result.Content != "" {
+		t.Fatalf("outcome = %#v, want no terminal output from tool-call prose", outcome)
+	}
+}
+
 func TestCollectProjectAssistantTurnEventsPropagatesMaxIterations(t *testing.T) {
 	iter, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
 	generator.Send(&adk.TypedAgentEvent[*schema.Message]{
@@ -451,7 +487,7 @@ func TestEinoAssistantEngineDoesNotUseToolSearchForSmallReadToolSet(t *testing.T
 		projectAssistantRunRequest{
 			Identity:       identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
 			Project:        &aiv1alpha1.Project{},
-			WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+			WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"},
 			ToolPort:       projectAssistantDirectToolPort{},
 		},
 	)
@@ -733,7 +769,7 @@ func TestEinoAssistantEngineDeepTodosRequireAnApprovedMultiStepImplementationPla
 				},
 			}
 			if tt.req.WorkspaceScope == (workspace.Scope{}) {
-				tt.req.WorkspaceScope = workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+				tt.req.WorkspaceScope = workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 			}
 			if tt.req.MessageScope == (store.Scope{}) {
 				tt.req.MessageScope = store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
@@ -1080,7 +1116,7 @@ func TestEinoAssistantEngineProfileFiltersReadOnlyAndRuntimeTools(t *testing.T) 
 func TestEinoAssistantEngineUsesScopedCanonicalFilesystemReads(t *testing.T) {
 	ctx := context.Background()
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if _, err := workspaces.WriteFile(ctx, scope, workspace.WriteOptions{
 		Path:    "README.md",
 		Content: "# Project README\nCanonical filesystem integration.\n",
@@ -1287,7 +1323,7 @@ func TestEinoAssistantEngineReportsCanonicalFilesystemBackendFailureAsFailed(t *
 func TestEinoAssistantEngineTerminalPhaseDeniesCanonicalReadBeforeTelemetry(t *testing.T) {
 	ctx := context.Background()
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	const unreadContent = "terminal-phase-endpoint-must-not-run"
 	if _, err := workspaces.WriteFile(ctx, scope, workspace.WriteOptions{
 		Path:    "README.md",
@@ -1396,6 +1432,48 @@ func TestEinoAssistantCheckpointPreservesTurnPolicy(t *testing.T) {
 	}
 }
 
+func TestEinoAssistantResumeReschedulesPendingCurrentRevisionSync(t *testing.T) {
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	project.UID = "project-uid-demo"
+	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1"}
+
+	beforeInterrupt := newProjectEinoAssistantRunState()
+	beforeInterrupt.BeginDevelopmentSyncForNextMutation()
+	beforeInterrupt.RecordSourceMutation()
+	restored := newProjectEinoAssistantRunState()
+	restored.RestoreCheckpointState(beforeInterrupt.CheckpointState())
+
+	entered := make(chan struct{})
+	server.developmentSyncAfterMutation = func(_ identity, _ *aiv1alpha1.Project, _ string) error {
+		close(entered)
+		return nil
+	}
+	engine := projectEinoAssistantEngine{server: server}
+	engine.resumeCurrentDevelopmentSync(projectAssistantRunRequest{Identity: id, Project: project}, restored)
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("resume did not reschedule the pending current-revision sync")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, reason := restored.DevelopmentSyncEvidence(1)
+		if status == "succeeded" {
+			if reason != "" {
+				t.Fatalf("resumed sync reason = %q, want empty", reason)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("resumed sync status = %q, reason = %q", status, reason)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestEinoAssistantCheckpointHashesSeenToolCallArgumentsAndRestoresLegacySignatures(t *testing.T) {
 	const secretSource = "checkpoint-secret-source"
 	call := chatToolCall{
@@ -1500,7 +1578,7 @@ func TestEinoAssistantEngineAddsProjectSnapshotToInput(t *testing.T) {
 	project.Spec.DisplayName = "Demo App"
 	project.Spec.Memory.Requirements = []string{"ship a tested build"}
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
-	scope := projectWorkspaceScope(id, project.Name)
+	scope := projectWorkspaceScope(id, project)
 	if _, err := workspaces.WriteFile(context.Background(), scope, workspace.WriteOptions{Path: "package.json", Content: `{"scripts":{"build":"vite build","test":"vitest"}}`}); err != nil {
 		t.Fatalf("WriteFile package.json returned error: %v", err)
 	}
@@ -1591,7 +1669,7 @@ func TestEinoAssistantRunStateCheckpointsProjectSnapshot(t *testing.T) {
 	}
 }
 
-func TestEinoAssistantEngineFailsWhenTurnLoopHasNoAssistantOutput(t *testing.T) {
+func TestEinoAssistantEngineExhaustsRetriesWhenTurnLoopHasNoAssistantOutput(t *testing.T) {
 	engine := projectEinoAssistantEngine{
 		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
 			return emptyOutputEinoChatModel{}, nil
@@ -1600,17 +1678,14 @@ func TestEinoAssistantEngineFailsWhenTurnLoopHasNoAssistantOutput(t *testing.T) 
 			return nil, nil
 		},
 	}
-	result, err := engine.StreamProjectAssistant(
+	_, err := engine.StreamProjectAssistant(
 		context.Background(),
 		projectAssistantRunRequest{
 			Project: &aiv1alpha1.Project{},
 		},
 	)
-	if !errors.Is(err, errProjectAssistantNoOutput) {
-		t.Fatalf("StreamProjectAssistant error = %v, want no-output failure", err)
-	}
-	if !projectEinoAssistantBoundedClosingAnswerValid(result.Content) {
-		t.Fatalf("result content = %q, want structured incomplete handoff", result.Content)
+	if !errors.Is(err, adk.ErrExceedMaxRetries) {
+		t.Fatalf("StreamProjectAssistant error = %v, want exhausted empty-output retries", err)
 	}
 }
 
@@ -1757,7 +1832,7 @@ func TestEinoAssistantEngineAsksFollowUpThroughEinoInterrupt(t *testing.T) {
 		Identity:       id,
 		Project:        project,
 		Repository:     &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true},
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
@@ -1934,6 +2009,7 @@ func TestProjectEinoAssistantToolInfoClassifiesProductWorkflowBundles(t *testing
 }
 
 func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
+	t.Skip("engine-v1 multi-effect permission batches are retired; v2 batch admission rejects them before dispatch")
 	messages := &countingAssistantRunStore{MemoryStore: store.NewMemoryStore()}
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
 	writeTool, ok := server.projectAssistantToolRegistry().Get(projectToolWriteFile)
@@ -1976,7 +2052,7 @@ func TestEinoAssistantEngineStopsToolBatchAfterPermissionRequest(t *testing.T) {
 	req := attachProjectAssistantBuildRunForEngineTest(t, server, projectAssistantRunRequest{
 		Identity:       id,
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		StreamCallbacks: projectAssistantStreamCallbacks{
 			OnAssistantEvent: func(event projectAssistantEvent) {
@@ -2051,7 +2127,7 @@ func TestEinoAssistantEngineRequiresPermissionForRuntimeGraphTool(t *testing.T) 
 		Identity:       identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		ToolPort:       projectAssistantDirectToolPort{},
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		TurnProfile:    projectAssistantTurnProfileImplementation,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
@@ -2138,7 +2214,7 @@ func TestEinoAssistantEngineRejectsHiddenDirectWriteToolBeforeInvocation(t *test
 		ToolPort:           newProjectAssistantHTTPToolPort(server, httptest.NewRequest(http.MethodPost, "/", nil)),
 		executionAuthority: &projectAssistantExplicitTestAuthority{},
 		Project:            project,
-		WorkspaceScope:     projectWorkspaceScope(id, project.Name),
+		WorkspaceScope:     projectWorkspaceScope(id, project),
 		MessageScope:       testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:          workspaces,
 		TurnProfile:        projectAssistantTurnProfileImplementation,
@@ -2174,6 +2250,7 @@ func TestEinoAssistantEngineRejectsHiddenDirectWriteToolBeforeInvocation(t *test
 }
 
 func TestEinoAssistantEngineApprovedPlanAllowsOnlyScopedWrite(t *testing.T) {
+	t.Skip("engine-v1 WorkItem plan grants are view-only after the v2 cutover")
 	messages := &countingAssistantRunStore{MemoryStore: store.NewMemoryStore()}
 	workspaces := workspace.NewFileStore(t.TempDir())
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
@@ -2225,7 +2302,7 @@ func TestEinoAssistantEngineApprovedPlanAllowsOnlyScopedWrite(t *testing.T) {
 		Identity:       identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		Project:        project,
 		Workspace:      workspaces,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		TurnProfile:    projectAssistantTurnProfileImplementation,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
@@ -2269,10 +2346,10 @@ func TestEinoAssistantEngineApprovedPlanAllowsOnlyScopedWrite(t *testing.T) {
 	if projectToolEventsWithStatus(toolEvents, "permission_required") != 1 {
 		t.Fatalf("tool events = %#v, want one permission-required event", toolEvents)
 	}
-	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/one.tsx"}); err != nil {
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "src/one.tsx"}); err != nil {
 		t.Fatalf("approved src/one.tsx write failed: %v", err)
 	}
-	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/two.tsx"}); err == nil {
+	if _, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "src/two.tsx"}); err == nil {
 		t.Fatal("out-of-plan src/two.tsx write unexpectedly succeeded")
 	}
 }
@@ -2328,7 +2405,7 @@ func TestEinoAssistantEngineInitialCreationPlanAllowsWriteWithoutPersistingGrant
 		Identity:            identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		Project:             project,
 		Workspace:           workspaces,
-		WorkspaceScope:      projectWorkspaceScope(id, project.Name),
+		WorkspaceScope:      projectWorkspaceScope(id, project),
 		MessageScope:        scope,
 		InitialApprovedPlan: ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan()),
 		TurnProfile:         projectAssistantTurnProfileImplementation,
@@ -2339,7 +2416,7 @@ func TestEinoAssistantEngineInitialCreationPlanAllowsWriteWithoutPersistingGrant
 	if err != nil {
 		t.Fatalf("StreamProjectAssistant returned error: %v", err)
 	}
-	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project.Name), workspace.ReadOptions{Path: "src/App.tsx"})
+	read, err := workspaces.ReadFile(context.Background(), projectWorkspaceScope(id, project), workspace.ReadOptions{Path: "src/App.tsx"})
 	if err != nil || read.Content != "initial build\n" {
 		t.Fatalf("initial write = %#v, %v; want initial build", read, err)
 	}
@@ -2386,7 +2463,7 @@ func TestEinoAssistantEnginePlanApprovalAllowsScopedWriteOnResume(t *testing.T) 
 		Identity:       identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		ToolPort:       projectAssistantDirectToolPort{},
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 		TurnProfile:    projectAssistantTurnProfileImplementation,
@@ -2534,7 +2611,7 @@ func TestEinoAssistantEngineAdaptivePromotionApprovalRestoresPlanProgressAndImpl
 	}
 	req := projectAssistantRunRequest{
 		Identity: id, Project: project, Workspace: workspaces,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name), MessageScope: scope,
+		WorkspaceScope: projectWorkspaceScope(id, project), MessageScope: scope,
 		ToolPort:     projectAssistantDirectToolPort{},
 		TurnProfile:  projectAssistantTurnProfileAdaptive,
 		TurnPolicy:   projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileAdaptive),
@@ -2642,7 +2719,7 @@ func TestEinoAssistantEngineAdaptiveAutoApprovePromotesToolsInline(t *testing.T)
 	var assistantEvents []projectAssistantEvent
 	req := projectAssistantRunRequest{
 		Identity: id, Project: project, Workspace: workspaces,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name), MessageScope: scope,
+		WorkspaceScope: projectWorkspaceScope(id, project), MessageScope: scope,
 		ToolPort:     projectAssistantDirectToolPort{},
 		TurnProfile:  projectAssistantTurnProfileAdaptive,
 		TurnPolicy:   projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileAdaptive),
@@ -2726,7 +2803,125 @@ func TestEinoAssistantEngineAdaptiveAutoApprovePromotesToolsInline(t *testing.T)
 	}
 }
 
+func TestEinoAssistantEngineV2DiagnosesBeforePatchAndReportsVerificationScope(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	server := NewWithWorkspace(nil, messages, workspaces, "", false)
+	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1", user: "alice"}
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
+	scope := testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
+	if _, err := workspaces.WriteFile(ctx, workspaceScope, workspace.WriteOptions{
+		Path:    "src/App.tsx",
+		Content: "export const status = 'broken'\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := messages.SetAssistantApprovalPreference(ctx, scope, store.AssistantApprovalPreference{
+		ActorID: id.user,
+		Mode:    store.AssistantApprovalModeAutoApprove,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx,
+		scope,
+		id.user,
+		"The status remains broken; fix it.",
+		"debug-fix-diagnostic-regression",
+		store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := started.Run
+	if _, err := server.projectAssistantSupervisor().Attach(scope, run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+	model := &diagnosePlanPatchVerifyEinoChatModel{}
+	engine := projectEinoAssistantEngine{
+		server: server,
+		newModel: func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState) (einomodel.BaseChatModel, error) {
+			return model, nil
+		},
+		newTools: newProjectEinoAssistantToolsFactoryWithVerificationResultForTest(
+			server,
+			`{"status":"ready","summary":"The development runtime is operationally ready."}`,
+		),
+	}
+	req := projectAssistantRunRequest{
+		Identity: id, Project: project, Workspace: workspaces,
+		WorkspaceScope: workspaceScope, MessageScope: scope,
+		ToolPort:          projectAssistantDirectToolPort{},
+		CollaborationMode: projectAssistantCollaborationModeDefault,
+		TurnProfile:       projectAssistantTurnProfileImplementation,
+		TurnPolicy:        projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+		ApprovalMode:      run.ApprovalMode,
+		AssistantRun:      &run,
+	}
+
+	result, err := engine.StreamProjectAssistant(ctx, req)
+	if err != nil {
+		t.Fatalf("StreamProjectAssistant: %v", err)
+	}
+	if !strings.Contains(result.Content, "Fixed the status source") {
+		t.Fatalf("content = %q, want model-authored change summary", result.Content)
+	}
+	if run.EngineVersion != store.AssistantEngineVersionV2 || run.WorkItemID != "" {
+		t.Fatalf("durable run = %#v, want engine-v2 run without WorkItem", run)
+	}
+	if len(model.inputs) < 6 {
+		t.Fatalf("model inputs = %d, want read, logs, search, patch, verify, and report", len(model.inputs))
+	}
+	for index, want := range []string{
+		projectToolReadFile,
+		projectToolGetRuntimeLogs,
+		projectToolGrep,
+		projectToolApplyPatch,
+		projectToolVerifyDevelopmentRuntime,
+	} {
+		if !einoMessagesContainToolCall(model.inputs[index+1], want) {
+			t.Fatalf("model input %d does not retain preceding %s evidence: %#v", index+1, want, model.inputs[index+1])
+		}
+	}
+	read, err := workspaces.ReadFile(ctx, workspaceScope, workspace.ReadOptions{Path: "src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read.Content, "fixed") {
+		t.Fatalf("patched content = %q, want fixed status", read.Content)
+	}
+	events, err := messages.ListAssistantRunEvents(ctx, scope, run.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 10 {
+		t.Fatalf("durable events = %#v, want call/result pairs for five tools", events)
+	}
+	for index := 0; index < len(events); index += 2 {
+		if events[index].Type != projectAssistantRunToolCallEventType || events[index+1].Type != projectAssistantRunToolResultEventType ||
+			events[index].CallID != events[index+1].CallID {
+			t.Fatalf("durable event pair %d = %#v / %#v", index/2, events[index], events[index+1])
+		}
+	}
+	terminal := projectAssistantMutationAwareTerminalContent(result.Content, "", nil, result.CompletionEvidence, true)
+	for _, want := range []string{
+		"Fixed the status source",
+		"Operational checks: passed",
+		"Application behavior was not independently verified",
+	} {
+		if !strings.Contains(terminal, want) {
+			t.Fatalf("terminal content = %q, want %q", terminal, want)
+		}
+	}
+}
+
 func TestEinoAssistantEngineAdaptiveAutoApproveDefersBatchedWriteUntilNextIteration(t *testing.T) {
+	t.Skip("adaptive phase promotion is retired; v2 uses a fixed collaboration mode and completed-response admission")
 	ctx := context.Background()
 	messages := store.NewMemoryStore()
 	workspaces := workspace.NewFileStore(t.TempDir())
@@ -2768,7 +2963,7 @@ func TestEinoAssistantEngineAdaptiveAutoApproveDefersBatchedWriteUntilNextIterat
 	}
 	req := projectAssistantRunRequest{
 		Identity: id, Project: project, Workspace: workspaces,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name), MessageScope: scope,
+		WorkspaceScope: projectWorkspaceScope(id, project), MessageScope: scope,
 		ToolPort:     projectAssistantDirectToolPort{},
 		TurnProfile:  projectAssistantTurnProfileAdaptive,
 		TurnPolicy:   projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileAdaptive),
@@ -2864,7 +3059,7 @@ func TestEinoAssistantEngineAdaptiveAutoApproveFailsClosedBeforeMutation(t *test
 			}
 			req := projectAssistantRunRequest{
 				Identity: id, Project: project, Workspace: workspaces,
-				WorkspaceScope: projectWorkspaceScope(id, project.Name), MessageScope: scope,
+				WorkspaceScope: projectWorkspaceScope(id, project), MessageScope: scope,
 				ToolPort:     projectAssistantDirectToolPort{},
 				TurnProfile:  projectAssistantTurnProfileAdaptive,
 				TurnPolicy:   projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileAdaptive),
@@ -2956,7 +3151,7 @@ func TestEinoAssistantEngineCheckpointsDynamicJSONToolCallMetadata(t *testing.T)
 	req := attachProjectAssistantBuildRunForEngineTest(t, server, projectAssistantRunRequest{
 		Identity:       identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 	}, "dynamic-tool-checkpoint")
 	_, err := engine.StreamProjectAssistant(
@@ -3010,7 +3205,7 @@ func TestEinoAssistantEngineResumesApprovedToolThroughTurnLoop(t *testing.T) {
 		Identity:       identity{orgUUID: id.orgUUID, workspaceUUID: id.workspaceUUID, tenantPath: id.tenantPath, user: "alice"},
 		ToolPort:       projectAssistantDirectToolPort{},
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		MessageScope:   testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name),
 		Workspace:      workspaces,
 	}
@@ -3478,6 +3673,10 @@ type planThenWriteEinoChatModel struct {
 	inputs [][]*schema.Message
 }
 
+type diagnosePlanPatchVerifyEinoChatModel struct {
+	inputs [][]*schema.Message
+}
+
 type adaptiveAutoApprovePlanThenWriteEinoChatModel struct {
 	toolNames [][]string
 	calls     int
@@ -3485,6 +3684,46 @@ type adaptiveAutoApprovePlanThenWriteEinoChatModel struct {
 
 type adaptiveAutoApproveBatchedPlanWriteEinoChatModel struct {
 	inputs [][]*schema.Message
+}
+
+func (m *diagnosePlanPatchVerifyEinoChatModel) Generate(ctx context.Context, input []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.inputs = append(m.inputs, cloneEinoMessagesForTest(input))
+	var call schema.ToolCall
+	call.Type = "function"
+	switch len(m.inputs) {
+	case 1:
+		call.ID = "call-read"
+		call.Function = schema.FunctionCall{Name: projectToolReadFile, Arguments: `{"file_path":"src/App.tsx","offset":1,"limit":200}`}
+	case 2:
+		call.ID = "call-logs"
+		call.Function = schema.FunctionCall{Name: projectToolGetRuntimeLogs, Arguments: `{}`}
+	case 3:
+		call.ID = "call-grep"
+		call.Function = schema.FunctionCall{Name: projectToolGrep, Arguments: `{"pattern":"broken","path":"src"}`}
+	case 4:
+		call.ID = "call-patch"
+		call.Function = schema.FunctionCall{
+			Name:      projectToolApplyPatch,
+			Arguments: `{"patch":"*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-export const status = 'broken'\n+export const status = 'fixed'\n*** End Patch"}`,
+		}
+	case 5:
+		call.ID = "call-verify"
+		call.Function = schema.FunctionCall{Name: projectToolVerifyDevelopmentRuntime, Arguments: `{}`}
+	default:
+		return schema.AssistantMessage("Fixed the status source. Operational checks are ready; application behavior was not independently verified.", nil), nil
+	}
+	return schema.AssistantMessage("", []schema.ToolCall{call}), nil
+}
+
+func (m *diagnosePlanPatchVerifyEinoChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
 
 func (m *adaptiveAutoApproveBatchedPlanWriteEinoChatModel) Generate(ctx context.Context, input []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
@@ -4179,6 +4418,20 @@ func einoMessagesContainToolResult(messages []*schema.Message, toolCallID, text 
 	return false
 }
 
+func einoMessagesContainToolCall(messages []*schema.Message, name string) bool {
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			if projectToolBaseName(call.Function.Name) == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func einoMessagesContainContent(messages []*schema.Message, text string) bool {
 	for _, msg := range messages {
 		if msg != nil && strings.Contains(msg.Content, text) {
@@ -4232,7 +4485,7 @@ func projectEinoRunRequestForProfileTest(profile projectAssistantTurnProfile) pr
 		Identity:           identity{orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1", user: "alice"},
 		Project:            project,
 		Repository:         &ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady, Ready: true},
-		WorkspaceScope:     workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+		WorkspaceScope:     workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"},
 		MessageScope:       store.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid-demo"},
 		TurnProfile:        profile,
 		ToolPort:           projectAssistantDirectToolPort{},

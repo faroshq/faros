@@ -14,20 +14,22 @@ test.after(async () => vite?.close())
 test('renders the current response mode as an accessible composer control', async () => {
   const { default: ResponseModePicker } = await vite.ssrLoadModule('/src/ResponseModePicker.vue')
   const html = await renderToString(createSSRApp(ResponseModePicker, {
-    mode: 'auto',
+    mode: 'default',
   }))
-  assert.match(html, /Response mode: Adaptive/)
+  assert.match(html, /Response mode: Default/)
   assert.match(html, /aria-haspopup="dialog"/)
   assert.match(html, /aria-expanded="false"/)
-  assert.match(html, />Adaptive</)
+  assert.match(html, />Default</)
 })
 
-test('provides only adaptive and discussion choices in one responsive popover', async () => {
+test('provides only explicit default and read-only plan choices in one responsive popover', async () => {
   const source = await readFile(new URL('./ResponseModePicker.vue', import.meta.url), 'utf8')
   assert.match(source, /How should App Studio respond\?/)
-  assert.match(source, /chooseMode\('auto'\)/)
-  assert.match(source, /chooseMode\('ask'\)/)
+  assert.match(source, /chooseMode\('default'\)/)
+  assert.match(source, /chooseMode\('plan'\)/)
+  assert.match(source, /produce a plan without changing the project/)
   assert.doesNotMatch(source, /chooseMode\('build'\)/)
+  assert.doesNotMatch(source, /chooseMode\('auto'\)/)
   assert.doesNotMatch(source, /Continue previous work/)
   assert.doesNotMatch(source, /suspendedTasks/)
   assert.match(source, /if \(!open\.value \|\| event\.key !== 'Escape'\) return/)

@@ -1017,13 +1017,15 @@ func (s blockProjectAssistantStopStore) RequestAssistantRunStopWithAssistantMess
 func TestEinoToolSchedulesDevelopmentSyncAfterMutatingTool(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	server := &Server{}
-	var gotName string
-	var gotProjectName string
-	server.developmentSyncAfterMutation = func(_ identity, p *aiv1alpha1.Project, name string) {
-		gotName = name
+	type scheduledSync struct{ name, project string }
+	scheduled := make(chan scheduledSync, 1)
+	server.developmentSyncAfterMutation = func(_ identity, p *aiv1alpha1.Project, name string) error {
+		projectName := ""
 		if p != nil {
-			gotProjectName = p.Name
+			projectName = p.Name
 		}
+		scheduled <- scheduledSync{name: name, project: projectName}
+		return nil
 	}
 	localTool := projectAssistantToolFunc{
 		spec: projectAssistantToolSpec{
@@ -1042,7 +1044,7 @@ func TestEinoToolSchedulesDevelopmentSyncAfterMutatingTool(t *testing.T) {
 		tool:   localTool,
 		req: projectAssistantRunRequest{
 			Project:            project,
-			WorkspaceScope:     workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+			WorkspaceScope:     workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"},
 			ToolPort:           projectAssistantDirectToolPort{},
 			executionAuthority: &projectAssistantExplicitTestAuthority{},
 		},
@@ -1052,8 +1054,617 @@ func TestEinoToolSchedulesDevelopmentSyncAfterMutatingTool(t *testing.T) {
 	if _, err := tool.invokeAllowedTool(context.Background(), "call-write", localTool.Spec(), map[string]any{"path": "src/App.tsx"}); err != nil {
 		t.Fatalf("invokeAllowedTool returned error: %v", err)
 	}
-	if gotName != projectToolWriteFile || gotProjectName != "demo" {
-		t.Fatalf("scheduled sync = (%q, %q), want (%q, demo)", gotName, gotProjectName, projectToolWriteFile)
+	select {
+	case got := <-scheduled:
+		if got.name != projectToolWriteFile || got.project != "demo" {
+			t.Fatalf("scheduled sync = (%q, %q), want (%q, demo)", got.name, got.project, projectToolWriteFile)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("development sync was not scheduled")
+	}
+}
+
+func TestEinoToolReplayDoesNotRepeatMutationOrSync(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	server := NewWithWorkspace(nil, messages, workspaces, "", false)
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	project.UID = "test-project-uid-demo"
+	scope := testProjectMessageScope("org-a", "ws-1", project.Name)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx,
+		scope,
+		"alice",
+		"fix the app",
+		"sync-replay-request",
+		store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+
+	var mutationCalls int
+	syncs := make(chan struct{}, 2)
+	server.developmentSyncAfterMutation = func(identity, *aiv1alpha1.Project, string) error {
+		syncs <- struct{}{}
+		return nil
+	}
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			mutationCalls++
+			return `{"operation":"apply_patch","paths":["src/App.tsx"]}`, nil
+		},
+	}
+	run := started.Run
+	req := projectAssistantRunRequest{
+		Identity:          identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"},
+		Project:           project,
+		WorkspaceScope:    projectWorkspaceScope(identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, project),
+		MessageScope:      scope,
+		ToolPort:          projectAssistantDirectToolPort{},
+		AssistantRun:      &run,
+		ApprovalMode:      run.ApprovalMode,
+		CollaborationMode: projectAssistantCollaborationModeDefault,
+		eventLedger:       newProjectAssistantRunEventLedger(messages, scope, run.ID),
+	}
+	tool := projectEinoAssistantTool{server: server, tool: localTool, req: req, runState: newProjectEinoAssistantRunState()}
+	args := map[string]any{"patch": "*** Begin Patch\n*** Add File: src/App.tsx\n+ok\n*** End Patch"}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := tool.invokeAllowedTool(ctx, "call-patch", localTool.Spec(), args); err != nil {
+			t.Fatalf("invoke attempt %d: %v", attempt+1, err)
+		}
+	}
+	if mutationCalls != 1 {
+		t.Fatalf("mutation calls = %d, want one durable dispatch", mutationCalls)
+	}
+	select {
+	case <-syncs:
+	case <-time.After(time.Second):
+		t.Fatal("original mutation did not schedule sync")
+	}
+	select {
+	case <-syncs:
+		t.Fatal("durable replay scheduled a second sync")
+	case <-time.After(25 * time.Millisecond):
+	}
+	events, err := messages.ListAssistantRunEvents(ctx, scope, run.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("durable events = %#v, want one call/result pair", events)
+	}
+}
+
+func TestEinoToolTracksPartialPatchMutationAfterIncompleteRollback(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "test-project-uid-demo"}}
+	scope := testProjectMessageScope("org-a", "ws-1", project.Name)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx, scope, "alice", "fix the app", "partial-patch-mutation", store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+
+	var mutationCalls int
+	syncs := make(chan struct{}, 2)
+	server.developmentSyncAfterMutation = func(identity, *aiv1alpha1.Project, string) error {
+		syncs <- struct{}{}
+		return nil
+	}
+	actual := workspace.MutationResult{
+		Operation: "apply_patch",
+		Path:      "src/App.tsx",
+		Paths:     []string{"src/App.tsx"},
+		Additions: 1,
+		Deletions: 1,
+	}
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			mutationCalls++
+			return projectAssistantToolJSONResult(actual, &workspace.PatchError{
+				Code:          workspace.PatchErrorApplyFailed,
+				Path:          "src/theme.css",
+				Message:       "patch application failed; rollback was incomplete",
+				ActualChanges: []workspace.MutationResult{actual},
+			})
+		},
+	}
+	run := started.Run
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordObservedReadFile("src/App.tsx")
+	tool := projectEinoAssistantTool{
+		server: server,
+		tool:   localTool,
+		req: projectAssistantRunRequest{
+			Identity:          identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"},
+			Project:           project,
+			WorkspaceScope:    projectWorkspaceScope(identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, project),
+			MessageScope:      scope,
+			ToolPort:          projectAssistantDirectToolPort{},
+			AssistantRun:      &run,
+			CollaborationMode: projectAssistantCollaborationModeDefault,
+			eventLedger:       newProjectAssistantRunEventLedger(messages, scope, run.ID),
+		},
+		runState: runState,
+	}
+	args := map[string]any{"patch": "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"}
+	result, err := tool.invokeAllowedTool(ctx, "call-partial-patch", localTool.Spec(), args)
+	if err != nil {
+		t.Fatalf("partial mutation result returned transport error: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatalf("decode partial mutation result: %v", err)
+	}
+	if projectToolString(decoded["status"]) != "partial_failure" ||
+		!strings.Contains(projectToolString(decoded["message"]), "remain changed") {
+		t.Fatalf("partial mutation result = %#v", decoded)
+	}
+	if projectEinoAssistantPhaseSuccessfulToolContent(result) {
+		t.Fatalf("partial mutation result was classified as a successful patch: %s", result)
+	}
+	if !projectEinoAssistantSuccessfulWorkspaceMutationResult(projectToolApplyPatch, result) {
+		t.Fatalf("partial mutation result lost its real workspace delta: %s", result)
+	}
+	if current, verified := runState.SourceMutationRevisions(); current != 1 || verified != 0 {
+		t.Fatalf("source revisions = (%d, %d), want (1, 0)", current, verified)
+	}
+	if got := strings.Join(runState.SuccessfulMutationPaths(), ","); got != "src/App.tsx" {
+		t.Fatalf("mutation paths = %q, want src/App.tsx", got)
+	}
+	if got := runState.ObservedReadFilePaths(); len(got) != 0 {
+		t.Fatalf("stale observed reads = %#v, want invalidated", got)
+	}
+	select {
+	case <-syncs:
+	case <-time.After(time.Second):
+		t.Fatal("partial workspace mutation did not schedule synchronization")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, _ := runState.DevelopmentSyncEvidence(1)
+		if status == "succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partial mutation sync status = %q, want succeeded", status)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	replayed, err := tool.invokeAllowedTool(ctx, "call-partial-patch", localTool.Spec(), args)
+	if err != nil || replayed != result {
+		t.Fatalf("durable partial replay = (%q, %v), want original result", replayed, err)
+	}
+	if mutationCalls != 1 {
+		t.Fatalf("partial mutation calls = %d, want one durable dispatch", mutationCalls)
+	}
+	select {
+	case <-syncs:
+		t.Fatal("durable partial replay scheduled a second sync")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestEinoToolFailedPatchReplayStaysFailedAndDoesNotSync(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "test-project-uid-demo"}}
+	scope := testProjectMessageScope("org-a", "ws-1", project.Name)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx, scope, "alice", "fix the app", "failed-patch-replay", store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+
+	var mutationCalls int
+	syncs := make(chan struct{}, 1)
+	server.developmentSyncAfterMutation = func(identity, *aiv1alpha1.Project, string) error {
+		syncs <- struct{}{}
+		return nil
+	}
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			mutationCalls++
+			return "", errors.New("context did not match")
+		},
+	}
+	run := started.Run
+	var toolEvents []projectToolCallStreamEvent
+	var builderEvents int
+	req := projectAssistantRunRequest{
+		Identity:          identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"},
+		Project:           project,
+		WorkspaceScope:    projectWorkspaceScope(identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, project),
+		MessageScope:      scope,
+		ToolPort:          projectAssistantDirectToolPort{},
+		AssistantRun:      &run,
+		ApprovalMode:      run.ApprovalMode,
+		CollaborationMode: projectAssistantCollaborationModeDefault,
+		eventLedger:       newProjectAssistantRunEventLedger(messages, scope, run.ID),
+		StreamCallbacks: projectAssistantStreamCallbacks{
+			OnToolCall: func(event projectToolCallStreamEvent) { toolEvents = append(toolEvents, event) },
+			OnAssistantEvent: func(event projectAssistantEvent) {
+				if event.BuilderEvent != nil && event.BuilderEvent.Type == projectBuilderEventWorkspaceChanged {
+					builderEvents++
+				}
+			},
+		},
+	}
+	tool := projectEinoAssistantTool{server: server, tool: localTool, req: req, runState: newProjectEinoAssistantRunState()}
+	args := map[string]any{"patch": "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"}
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := tool.invokeAllowedTool(ctx, "call-failed-patch", localTool.Spec(), args)
+		if err != nil || !strings.HasPrefix(result, "Tool call failed:") {
+			t.Fatalf("invoke attempt %d = (%q, %v), want shaped failure", attempt+1, result, err)
+		}
+	}
+	if mutationCalls != 1 {
+		t.Fatalf("mutation calls = %d, want one durable dispatch", mutationCalls)
+	}
+	select {
+	case <-syncs:
+		t.Fatal("failed mutation scheduled development sync")
+	default:
+	}
+	if builderEvents != 0 {
+		t.Fatalf("workspace_changed events = %d, want none", builderEvents)
+	}
+	for _, event := range toolEvents {
+		if event.Status == "succeeded" || event.Mutation != nil {
+			t.Fatalf("failed replay emitted successful mutation event: %#v", event)
+		}
+	}
+}
+
+func TestEinoToolFailedContextualPatchReopensSameRead(t *testing.T) {
+	ctx := context.Background()
+	runState := newProjectEinoAssistantRunState()
+	readCalls := 0
+	filesystem := projectEinoAssistantFilesystemTelemetryMiddleware(projectAssistantRunRequest{}, runState)
+	read, err := filesystem.WrapInvokableToolCall(
+		ctx,
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			readCalls++
+			return "     1\told\n", nil
+		},
+		&adk.ToolContext{Name: projectToolReadFile},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readArgs := `{"file_path":"src/App.tsx","offset":1,"limit":20}`
+	if _, err := read(ctx, readArgs); err != nil {
+		t.Fatal(err)
+	}
+
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "test-project-uid-demo"}}
+	scope := testProjectMessageScope("org-a", "ws-1", project.Name)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx, scope, "alice", "fix", "failed-patch-reread", store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			return "", errors.New("context did not match")
+		},
+	}
+	run := started.Run
+	tool := projectEinoAssistantTool{
+		server: server,
+		tool:   localTool,
+		req: projectAssistantRunRequest{
+			Identity:          identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"},
+			Project:           project,
+			WorkspaceScope:    projectWorkspaceScope(identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, project),
+			MessageScope:      scope,
+			ToolPort:          projectAssistantDirectToolPort{},
+			AssistantRun:      &run,
+			CollaborationMode: projectAssistantCollaborationModeDefault,
+			eventLedger:       newProjectAssistantRunEventLedger(messages, scope, run.ID),
+		},
+		runState: runState,
+	}
+	patchArgs := map[string]any{"patch": "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"}
+	if result, err := tool.invokeAllowedTool(ctx, "call-patch", localTool.Spec(), patchArgs); err != nil || !strings.HasPrefix(result, "Tool call failed:") {
+		t.Fatalf("failed patch = (%q, %v)", result, err)
+	}
+	if _, err := read(ctx, readArgs); err != nil {
+		t.Fatal(err)
+	}
+	if readCalls != 2 {
+		t.Fatalf("read dispatches = %d, want original read plus failed-patch recovery reread", readCalls)
+	}
+}
+
+func TestEinoToolBlockedSyncCannotVerifyLatestMutation(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "test-project-uid-demo"}}
+	scope := testProjectMessageScope("org-a", "ws-1", project.Name)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		ctx, scope, "alice", "fix", "blocked-sync", store.AssistantRunModeDefault,
+		func(store.AssistantRun, store.Message, bool) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, started.Run, started.Assistant); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server.developmentSyncAfterMutation = func(identity, *aiv1alpha1.Project, string) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	localTool := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			return `{"operation":"apply_patch","paths":["src/App.tsx"]}`, nil
+		},
+	}
+	run := started.Run
+	runState := newProjectEinoAssistantRunState()
+	tool := projectEinoAssistantTool{
+		server: server,
+		tool:   localTool,
+		req: projectAssistantRunRequest{
+			Identity:          identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"},
+			Project:           project,
+			WorkspaceScope:    projectWorkspaceScope(identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, project),
+			MessageScope:      scope,
+			ToolPort:          projectAssistantDirectToolPort{},
+			AssistantRun:      &run,
+			CollaborationMode: projectAssistantCollaborationModeDefault,
+			eventLedger:       newProjectAssistantRunEventLedger(messages, scope, run.ID),
+		},
+		runState: runState,
+	}
+	if _, err := tool.invokeAllowedTool(ctx, "call-patch", localTool.Spec(), map[string]any{"patch": "*** Begin Patch\n*** Add File: src/App.tsx\n+ok\n*** End Patch"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("development sync did not start")
+	}
+	status, reason := runState.DevelopmentSyncEvidence(1)
+	result, err := formatProjectAssistantRuntimeVerification(ctx, &projectAssistantRuntimeVerificationContext{
+		CheckedMutationRevision: 1,
+		DevelopmentSyncStatus:   status,
+		DevelopmentSyncFailure:  reason,
+		Runtime: &projectAssistantRuntimeWorkflowResult{
+			Status:     "ready",
+			PreviewURL: "https://demo.example",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runState.RecordDevelopmentVerificationResult(string(encoded))
+	if result.Status == "ready" || runState.SourceMutationVerified() {
+		t.Fatalf("blocked sync verification = %#v, source verified=%t", result, runState.SourceMutationVerified())
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		status, _ = runState.DevelopmentSyncEvidence(1)
+		if status == "succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sync status = %q, want succeeded after release", status)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestEinoV2CommitArgumentsAreDerivedFromRunMutations(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordSuccessfulMutationPath("src/App.tsx")
+	runState.RecordSuccessfulMutationPath("src/theme.css")
+	tool := projectEinoAssistantTool{runState: runState}
+	args, err := tool.v2CommitArguments(map[string]any{
+		"repositoryRef": "repo",
+		"paths":         []any{"src/App.tsx", "src/theme.css"},
+		"message":       "fix",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(projectToolStringList(args["paths"]), ","); got != "src/App.tsx,src/theme.css" {
+		t.Fatalf("derived paths = %q, want complete run mutation set", got)
+	}
+	if _, err := tool.v2CommitArguments(map[string]any{"paths": []any{"README.md"}}); err == nil || !strings.Contains(err.Error(), "not mutated") {
+		t.Fatalf("unrelated commit path error = %v", err)
+	}
+	if _, err := tool.v2CommitArguments(map[string]any{"paths": []any{"src/App.tsx"}}); err == nil || !strings.Contains(err.Error(), "omit") {
+		t.Fatalf("partial commit path error = %v", err)
+	}
+}
+
+func TestEinoV2FreshRunCommitsPriorAndCurrentUncommittedPathsThenClearsState(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{
+		OrgUUID:       "org-a",
+		WorkspaceUUID: "ws-1",
+		ProjectName:   "demo",
+		ProjectUID:    "project-uid",
+	}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{
+		{Path: "package.json", Content: `{"scripts":{"build":"vite build"}}`},
+		{Path: "src/App.tsx", Content: "export const App = () => <main />\n"},
+	}); err != nil {
+		t.Fatalf("ApplyFiles: %v", err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"package.json"}); err != nil {
+		t.Fatalf("seed prior uncommitted path: %v", err)
+	}
+
+	runState := newProjectEinoAssistantRunState()
+	req := projectAssistantRunRequest{
+		Workspace:      workspaces,
+		WorkspaceScope: scope,
+		AssistantRun: &store.AssistantRun{
+			EngineVersion: store.AssistantEngineVersionV2,
+			Mode:          store.AssistantRunModeDefault,
+		},
+	}
+	if err := restoreProjectEinoAssistantUncommittedPaths(ctx, req, runState); err != nil {
+		t.Fatalf("restoreProjectEinoAssistantUncommittedPaths: %v", err)
+	}
+	if got := strings.Join(runState.SuccessfulMutationPaths(), ","); got != "package.json" {
+		t.Fatalf("restored paths = %q, want package.json", got)
+	}
+
+	runState.RecordSuccessfulMutationPath("src/App.tsx")
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatalf("persist current uncommitted path: %v", err)
+	}
+	revision := runState.BeginDevelopmentSyncForNextMutation()
+	runState.RecordSourceMutation()
+	runState.CompleteDevelopmentSync(revision, nil)
+	runState.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":2,"status":"ready"}`)
+	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, runState.SuccessfulMutationPaths())
+	if err != nil {
+		t.Fatalf("projectEinoAssistantWorkspaceDigest: %v", err)
+	}
+	runState.RecordVerifiedWorkspaceDigest(digest)
+	runState.ConfigureCommitRequirement(true)
+
+	tool := projectEinoAssistantTool{req: req, runState: runState}
+	args, err := tool.v2CommitArguments(map[string]any{
+		"repositoryRef": "demo-repo",
+		"paths":         []any{"package.json", "src/App.tsx"},
+		"message":       "Update application",
+	})
+	if err != nil {
+		t.Fatalf("v2CommitArguments: %v", err)
+	}
+	if got := strings.Join(projectToolStringList(args["paths"]), ","); got != "package.json,src/App.tsx" {
+		t.Fatalf("commit paths = %q, want prior and current paths", got)
+	}
+	if got := projectToolString(args["workspaceDigest"]); got == "" || got != digest {
+		t.Fatalf("workspace digest = %q, want %q", got, digest)
+	}
+
+	lifecycle := &projectEinoAssistantLifecycle{
+		v2:             true,
+		runState:       runState,
+		workspace:      workspaces,
+		workspaceScope: scope,
+	}
+	commit := wrapProjectEinoAssistantLifecycleTool(
+		t,
+		lifecycle,
+		projectToolCommitProjectFiles,
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			return `{"commitSHA":"abc123"}`, nil
+		},
+	)
+	commitCtx, cancelCommit := context.WithCancel(ctx)
+	cancelCommit()
+	if _, err := commit(commitCtx, projectEinoToolArgumentsString(args)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if evidence := runState.CompletionEvidence(); !evidence.LatestMutationCommitted {
+		t.Fatalf("completion evidence = %#v, want committed mutation", evidence)
+	}
+	paths, err := workspaces.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatalf("UncommittedPaths after commit: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("uncommitted paths after commit = %v, want empty", paths)
+	}
+}
+
+func TestEinoV2FreshRunCanVerifyAndCommitPriorUncommittedPathsWithoutAnotherEdit(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "package.json", Content: `{"name":"demo"}`}}); err != nil {
+		t.Fatalf("ApplyFiles: %v", err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"package.json"}); err != nil {
+		t.Fatalf("seed prior uncommitted path: %v", err)
+	}
+
+	runState := newProjectEinoAssistantRunState()
+	req := projectAssistantRunRequest{
+		Workspace: workspaces, WorkspaceScope: scope,
+		AssistantRun: &store.AssistantRun{EngineVersion: store.AssistantEngineVersionV2, Mode: store.AssistantRunModeDefault},
+	}
+	if err := restoreProjectEinoAssistantUncommittedPaths(ctx, req, runState); err != nil {
+		t.Fatalf("restoreProjectEinoAssistantUncommittedPaths: %v", err)
+	}
+	revision, _ := runState.SourceMutationRevisions()
+	if revision != 1 {
+		t.Fatalf("restored mutation revision = %d, want 1", revision)
+	}
+	runState.BeginDevelopmentSyncForCurrentMutation()
+	runState.CompleteDevelopmentSync(revision, nil)
+	runState.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
+	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, runState.SuccessfulMutationPaths())
+	if err != nil {
+		t.Fatalf("projectEinoAssistantWorkspaceDigest: %v", err)
+	}
+	runState.RecordVerifiedWorkspaceDigest(digest)
+	runState.ConfigureCommitRequirement(true)
+
+	args, err := (projectEinoAssistantTool{req: req, runState: runState}).v2CommitArguments(map[string]any{
+		"repositoryRef": "demo-repo",
+		"paths":         []any{"package.json"},
+		"message":       "Commit pending application source",
+	})
+	if err != nil {
+		t.Fatalf("v2CommitArguments: %v", err)
+	}
+	if got := strings.Join(projectToolStringList(args["paths"]), ","); got != "package.json" {
+		t.Fatalf("commit paths = %q, want package.json", got)
+	}
+	if got := projectToolString(args["workspaceDigest"]); got != digest {
+		t.Fatalf("workspace digest = %q, want %q", got, digest)
 	}
 }
 
@@ -1091,7 +1702,7 @@ func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *test
 			_, _ = w.Write([]byte(`{"data":{"applyStatusYaml":"ok"}}`))
 		case strings.Contains(req.Query, "applyYaml"):
 			appliedYAML, _ := req.Variables["yaml"].(string)
-			if strings.Contains(appliedYAML, "kind: Project\n") {
+			if strings.HasPrefix(strings.TrimSpace(appliedYAML), "apiVersion: ai.kedge.faros.sh/") && strings.Contains(appliedYAML, "kind: Project\n") {
 				projectYAML = appliedYAML
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"applyYaml": appliedYAML}})
@@ -1113,13 +1724,14 @@ func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *test
 		name    string
 		project *aiv1alpha1.Project
 	}
-	var scheduled []scheduledSync
-	server.developmentSyncAfterMutation = func(_ identity, p *aiv1alpha1.Project, name string) {
-		scheduled = append(scheduled, scheduledSync{name: name, project: p.DeepCopy()})
+	scheduled := make(chan scheduledSync, 2)
+	server.developmentSyncAfterMutation = func(_ identity, p *aiv1alpha1.Project, name string) error {
+		scheduled <- scheduledSync{name: name, project: p.DeepCopy()}
+		return nil
 	}
 
 	project := &aiv1alpha1.Project{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "test-project-uid-demo"},
 		Spec:       aiv1alpha1.ProjectSpec{DisplayName: "Demo"},
 	}
 	id := identity{
@@ -1131,7 +1743,7 @@ func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *test
 	req := projectAssistantRunRequest{
 		Identity:           id,
 		Project:            project,
-		WorkspaceScope:     projectWorkspaceScope(id, project.Name),
+		WorkspaceScope:     projectWorkspaceScope(id, project),
 		ToolPort:           projectAssistantDirectToolPort{},
 		executionAuthority: &projectAssistantExplicitTestAuthority{},
 	}
@@ -1157,10 +1769,16 @@ func TestEinoSelectTemplateRefreshesProjectUsedBySubsequentWorkspaceSync(t *test
 	invoke(projectToolSelectTemplate, map[string]any{"template": "application"})
 	invoke(projectToolWriteFile, map[string]any{"path": "web/src/App.tsx", "content": "export default function App() {}\n"})
 
-	if len(scheduled) != 2 {
-		t.Fatalf("scheduled syncs = %d, want 2", len(scheduled))
+	syncs := make([]scheduledSync, 0, 2)
+	for len(syncs) < 2 {
+		select {
+		case sync := <-scheduled:
+			syncs = append(syncs, sync)
+		case <-time.After(time.Second):
+			t.Fatalf("scheduled syncs = %d, want 2", len(syncs))
+		}
 	}
-	for _, sync := range scheduled {
+	for _, sync := range syncs {
 		if sync.project.Spec.Template == nil || sync.project.Spec.Template.Name != "application" {
 			t.Fatalf("%s sync project template = %#v, want application", sync.name, sync.project.Spec.Template)
 		}

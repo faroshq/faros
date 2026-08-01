@@ -17,73 +17,44 @@ limitations under the License.
 package api
 
 import (
-	"context"
 	"testing"
-
-	"github.com/faroshq/provider-app-studio/store"
 )
 
-func TestCreateProjectMessageAssistantActionDefaultsToAuto(t *testing.T) {
-	action, err := (CreateProjectMessageRequest{}).assistantAction()
+func TestCreateProjectMessageCollaborationModeDefaultsToDefault(t *testing.T) {
+	mode, err := (CreateProjectMessageRequest{}).collaborationMode()
 	if err != nil {
-		t.Fatalf("assistantAction: %v", err)
+		t.Fatalf("collaborationMode: %v", err)
 	}
-	if action != projectAssistantActionAuto {
-		t.Fatalf("action = %q, want auto", action)
+	if mode != projectAssistantCollaborationModeDefault {
+		t.Fatalf("mode = %q, want default", mode)
 	}
 }
 
-func TestCreateProjectMessageAssistantActionValidatesBuildAndContinue(t *testing.T) {
+func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		req  CreateProjectMessageRequest
-		want projectAssistantAction
+		want projectAssistantCollaborationMode
 		ok   bool
 	}{
-		{name: "auto", req: CreateProjectMessageRequest{AssistantAction: "auto"}, want: projectAssistantActionAuto, ok: true},
-		{name: "ask", req: CreateProjectMessageRequest{AssistantAction: "ask"}, want: projectAssistantActionAsk, ok: true},
-		{name: "build", req: CreateProjectMessageRequest{AssistantAction: "build"}, want: projectAssistantActionBuild, ok: true},
-		{name: "continue", req: CreateProjectMessageRequest{AssistantAction: "continue", WorkItemID: "wi-1", WorkItemRevision: 2}, want: projectAssistantActionContinue, ok: true},
-		{name: "continue requires item", req: CreateProjectMessageRequest{AssistantAction: "continue"}},
-		{name: "auto rejects selection", req: CreateProjectMessageRequest{AssistantAction: "auto", WorkItemID: "wi-1", WorkItemRevision: 1}},
-		{name: "build rejects selection", req: CreateProjectMessageRequest{AssistantAction: "build", WorkItemID: "wi-1", WorkItemRevision: 1}},
-		{name: "unknown", req: CreateProjectMessageRequest{AssistantAction: "mutate"}},
+		{name: "default", req: CreateProjectMessageRequest{CollaborationMode: "default"}, want: projectAssistantCollaborationModeDefault, ok: true},
+		{name: "plan", req: CreateProjectMessageRequest{CollaborationMode: "plan"}, want: projectAssistantCollaborationModePlan, ok: true},
+		{name: "unknown", req: CreateProjectMessageRequest{CollaborationMode: "adaptive"}},
+		{name: "legacy action", req: CreateProjectMessageRequest{AssistantAction: "auto"}},
+		{name: "legacy work item", req: CreateProjectMessageRequest{WorkItemID: "wi-1"}},
+		{name: "legacy work item revision", req: CreateProjectMessageRequest{WorkItemRevision: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.req.assistantAction()
+			got, err := tc.req.collaborationMode()
 			if tc.ok {
 				if err != nil || got != tc.want {
-					t.Fatalf("assistantAction = %q, %v; want %q, nil", got, err, tc.want)
+					t.Fatalf("collaborationMode = %q, %v; want %q, nil", got, err, tc.want)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("assistantAction = %q, nil; want validation error", got)
+				t.Fatalf("collaborationMode = %q, nil; want validation error", got)
 			}
 		})
-	}
-}
-
-func TestAutoStartsAdaptiveRegardlessOfWording(t *testing.T) {
-	messages := store.NewMemoryStore()
-	server := NewWithWorkspace(nil, messages, nil, "", false)
-	scope := testProjectMessageScope("org-a", "workspace-a", "demo")
-
-	started, err := server.startProjectAssistantAdaptiveRunDurably(
-		context.Background(),
-		scope,
-		"alice",
-		"I just tried to use the queue custom toast but it didnt work",
-		"auto-exact-wording-1",
-		func(store.AssistantRun, store.Message, bool) error { return nil },
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if started.Run.Mode != store.AssistantRunModeAdaptive {
-		t.Fatalf("run mode = %q, want adaptive", started.Run.Mode)
-	}
-	if started.Run.WorkItemID != "" {
-		t.Fatalf("work item = %q, want none before escalation", started.Run.WorkItemID)
 	}
 }

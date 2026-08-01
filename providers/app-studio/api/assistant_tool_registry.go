@@ -164,10 +164,12 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 				return "", errors.New("plan approval is handled by the assistant run state")
 			},
 		},
+		// Legacy engine-v1 compatibility only. New HTTP runs are stamped v2 and
+		// filter this whole-file primitive from both collaboration modes.
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:        projectToolWriteFile,
-				Description: "Create a complete UTF-8 project file in the App Studio workspace. Initial project builds may replace generated files; for later changes, write_file is create-only and existing files must be changed with apply_patch. Use write_todos, not todo.md or todos.md, for execution tracking.",
+				Description: "Create a complete UTF-8 project file in the App Studio workspace. Initial project builds may replace generated files; for later changes, write_file is create-only and existing files must be changed with apply_patch.",
 				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"path":{"type":"string","description":"Project-relative file path."},"content":{"type":"string","description":"Complete UTF-8 text content to write. Maximum %d bytes."}},"required":["path","content"]}`, workspace.MaxWriteBytes)),
 				Risk:        projectAssistantToolRiskWrite,
 			},
@@ -187,8 +189,8 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:        projectToolApplyPatch,
-				Description: "Apply an exact text replacement to one App Studio workspace file after reading that file in this assistant turn. oldText must match exactly once unless replaceAll is true, and the edit fails if the file changes before the write. For large files, patch one small stable unique anchor at a time. If oldText is not found, reread the relevant section and retry with exact current text; never fall back to write_file for an existing file.",
-				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"path":{"type":"string","description":"Project-relative file path."},"oldText":{"type":"string","description":"Exact text to replace. Maximum patch payload %d bytes with newText."},"newText":{"type":"string","description":"Replacement text."},"replaceAll":{"type":"boolean","description":"Replace every exact match instead of requiring one match."}},"required":["path","oldText","newText"]}`, workspace.MaxPatchBytes)),
+				Description: "Apply one atomic contextual patch to project-relative UTF-8 files. The patch must start with '*** Begin Patch' and end with '*** End Patch'. Use '*** Add File: <path>' with '+' content lines or '*** Update File: <path>' with one or more @@ hunks. Delete File and Move to are unavailable because the repository commit bridge cannot yet preserve deletions. Hunk lines start with space (context), '-' (remove), or '+' (add). Include at least three stable surrounding context lines and an @@ class/function anchor when needed to make every match unique. Parent directories are created automatically. A multi-file patch is fully preflighted before any mutation.",
+				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"patch":{"type":"string","minLength":1,"maxLength":%d,"description":"Codex-style contextual patch envelope using only project-relative paths."}},"required":["patch"],"additionalProperties":false}`, workspace.MaxUnifiedPatchBytes)),
 				Risk:        projectAssistantToolRiskWrite,
 			},
 			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
@@ -196,24 +198,48 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 				if err != nil {
 					return "", err
 				}
-				oldText, _ := projectToolRawString(req.Arguments["oldText"])
-				newText, _ := projectToolRawString(req.Arguments["newText"])
-				opts := workspace.PatchOptions{
-					Path:       projectToolString(req.Arguments["path"]),
-					OldText:    oldText,
-					NewText:    newText,
-					ReplaceAll: projectToolBool(req.Arguments["replaceAll"]),
+				patch, _ := projectToolRawString(req.Arguments["patch"])
+				// Engine-v1 checkpoints encoded exact replacement arguments. New v2
+				// model schemas expose only the contextual patch envelope above.
+				if strings.TrimSpace(patch) == "" && projectToolString(req.Arguments["path"]) != "" {
+					oldText, _ := projectToolRawString(req.Arguments["oldText"])
+					newText, _ := projectToolRawString(req.Arguments["newText"])
+					clean, err := workspace.CleanProjectPath(projectToolString(req.Arguments["path"]))
+					if err != nil {
+						return "", err
+					}
+					if req.EnforceMutationSafety && !projectAssistantPathWasObserved(clean, req.ObservedReadFiles) {
+						return "", fmt.Errorf("read_file must successfully read %q in this assistant turn before apply_patch can edit it", clean)
+					}
+					return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, workspace.PatchOptions{
+						Path:       clean,
+						OldText:    oldText,
+						NewText:    newText,
+						ReplaceAll: projectToolBool(req.Arguments["replaceAll"]),
+					}))
 				}
-				clean, err := workspace.CleanProjectPath(opts.Path)
+				readPaths, err := workspace.PatchReadPaths(patch)
 				if err != nil {
 					return "", err
 				}
-				if req.EnforceMutationSafety && !projectAssistantPathWasObserved(clean, req.ObservedReadFiles) {
-					return "", fmt.Errorf("read_file must successfully read %q in this assistant turn before apply_patch can edit it", clean)
+				if err := workspace.ValidateCommittablePatch(patch); err != nil {
+					return "", err
 				}
-				return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, opts))
+				if req.EnforceMutationSafety {
+					for _, readPath := range readPaths {
+						if !projectAssistantPathWasObserved(readPath, req.ObservedReadFiles) {
+							return "", fmt.Errorf("read_file must successfully read %q in this assistant turn before apply_patch can update, move, or delete it", readPath)
+						}
+					}
+				}
+				return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, workspace.PatchOptions{
+					Patch:      patch,
+					SnapshotID: req.AssistantRunID,
+				}))
 			},
 		},
+		// Legacy engine-v1 compatibility only. Contextual apply_patch creates
+		// parent directories atomically for every new v2 source file.
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:        projectToolMkdir,
@@ -226,7 +252,9 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 				if err != nil {
 					return "", err
 				}
-				return projectAssistantToolJSONResult(s.workspaces.Mkdir(ctx, req.WorkspaceScope, workspace.MkdirOptions{Path: projectToolString(req.Arguments["path"])}))
+				return projectAssistantToolJSONResult(s.workspaces.Mkdir(ctx, req.WorkspaceScope, workspace.MkdirOptions{
+					Path: projectToolString(req.Arguments["path"]),
+				}))
 			},
 		},
 		projectAssistantToolFunc{

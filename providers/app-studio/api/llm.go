@@ -19,9 +19,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -351,7 +353,13 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	}
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
 	var turnDecision projectAssistantTurnDecision
+	mode, v2 := projectAssistantCollaborationModeForRun(durable)
+	v2 = v2 && projectAssistantRunUsesV2(&durable)
 	switch {
+	case hasDurableRun && v2 && mode == projectAssistantCollaborationModePlan:
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDebugging)
+	case hasDurableRun && v2:
+		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
 	case hasDurableRun && durable.WorkItemID != "":
 		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
 	case hasDurableRun && durable.Mode == store.AssistantRunModeDiscussion:
@@ -393,7 +401,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		Client:                   c,
 		Project:                  p,
 		Repository:               projectRepositoryView(ctx, c, p),
-		WorkspaceScope:           projectWorkspaceScope(id, p.Name),
+		WorkspaceScope:           projectWorkspaceScope(id, p),
 		Workspace:                s.workspaces,
 		MessageScope:             messageScope,
 		LLM:                      settings,
@@ -402,6 +410,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		MCPInsecureSkipTLSVerify: s.mcpInsecureSkipTLSVerify,
 		ApprovalMode:             projectAssistantApprovalModeFromRun(durable),
 		StreamCallbacks:          callbacks,
+		CollaborationMode:        mode,
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
 		RequestedAction:          requestedAction,
@@ -428,6 +437,9 @@ func (s *Server) generateProjectAssistantResultWithStart(
 
 func projectAssistantRoutingAudit(run store.AssistantRun, hasDurableRun bool, decision projectAssistantTurnDecision) (string, string, string, projectAssistantTurnConfidence) {
 	if hasDurableRun {
+		if mode, ok := projectAssistantCollaborationModeForRun(run); ok && projectAssistantRunUsesV2(&run) {
+			return string(mode), string(mode), "explicit_collaboration_mode", projectAssistantTurnConfidenceHigh
+		}
 		switch run.Mode {
 		case store.AssistantRunModeAdaptive:
 			return string(projectAssistantActionAuto), string(projectAssistantTurnProfileAdaptive), "adaptive_auto_policy", decision.Confidence
@@ -444,6 +456,8 @@ func projectAssistantRoutingAudit(run store.AssistantRun, hasDurableRun bool, de
 
 func (s *Server) loadProjectAssistantTurnMessages(ctx context.Context, scope store.Scope, run store.AssistantRun, hasDurableRun bool) ([]store.Message, error) {
 	switch {
+	case hasDurableRun && projectAssistantRunUsesV2(&run):
+		return s.store.LoadRecentMessages(ctx, scope, 24)
 	case hasDurableRun && run.WorkItemID != "":
 		return s.store.LoadMessagesForWorkItem(ctx, scope, run.WorkItemID, 24)
 	case hasDurableRun && (run.Mode == store.AssistantRunModeDiscussion || run.Mode == store.AssistantRunModeAdaptive):
@@ -805,11 +819,15 @@ func projectLLMJSONContent(content string) string {
 	return content
 }
 
-func projectWorkspaceScope(id identity, projectName string) workspace.Scope {
+func projectWorkspaceScope(id identity, project *aiv1alpha1.Project) workspace.Scope {
+	if project == nil {
+		return workspace.Scope{}
+	}
 	return workspace.Scope{
 		OrgUUID:       id.orgUUID,
 		WorkspaceUUID: id.workspaceUUID,
-		ProjectName:   projectName,
+		ProjectName:   project.Name,
+		ProjectUID:    string(project.UID),
 	}
 }
 
@@ -854,6 +872,7 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 	}
 	files := make([]map[string]string, 0, len(cleanPaths))
 	var totalBytes int64
+	workspaceHash := sha256.New()
 	for _, p := range cleanPaths {
 		read, err := s.workspaces.ReadFile(ctx, scope, workspace.ReadOptions{Path: p, MaxBytes: workspace.MaxWriteBytes})
 		if err != nil {
@@ -869,10 +888,18 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 		if totalBytes > projectCommitProjectFilesMaxSize {
 			return "", fmt.Errorf("commit_project_files payload is too large: %d > %d bytes", totalBytes, projectCommitProjectFilesMaxSize)
 		}
+		_, _ = workspaceHash.Write([]byte(read.Path))
+		_, _ = workspaceHash.Write([]byte{0})
+		_, _ = workspaceHash.Write([]byte(read.Content))
+		_, _ = workspaceHash.Write([]byte{0})
 		files = append(files, map[string]string{"path": read.Path, "content": read.Content})
 	}
 	if len(files) == 0 {
 		return "", errors.New("no files to commit")
+	}
+	if expectedDigest := projectToolString(args["workspaceDigest"]); expectedDigest != "" &&
+		expectedDigest != hex.EncodeToString(workspaceHash.Sum(nil)) {
+		return "", errors.New("workspace content changed after operational verification; verify the current source before committing")
 	}
 	commitArgs := map[string]any{
 		"repositoryRef": projectRepositoryRef,
@@ -898,10 +925,15 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 	return resp, nil
 }
 
-func ensureProjectToolCallIDs(toolCalls []chatToolCall) {
+func ensureProjectToolCallIDs(toolCalls []chatToolCall, modelCallOrdinal int) {
 	for i := range toolCalls {
 		if toolCalls[i].ID == "" {
-			toolCalls[i].ID = fmt.Sprintf("tool-%d", i+1)
+			toolCalls[i].ID = projectEinoAssistantSyntheticToolCallID(
+				modelCallOrdinal,
+				i,
+				toolCalls[i].Function.Name,
+				toolCalls[i].Function.Arguments,
+			)
 		}
 	}
 }
@@ -989,7 +1021,14 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 	case projectToolWriteFile:
 		return summarizeProjectMutationArgs(args, []string{"path"}, true)
 	case projectToolApplyPatch:
-		return summarizeProjectMutationArgs(args, []string{"path"}, false)
+		patch, _ := projectToolRawString(args["patch"])
+		if paths, err := workspace.PatchPaths(patch); err == nil && len(paths) > 0 {
+			return truncateProjectToolInfo(fmt.Sprintf("%d path(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
+		}
+		if projectToolString(args["path"]) != "" {
+			return summarizeProjectMutationArgs(args, []string{"path"}, false)
+		}
+		return "contextual patch"
 	case projectToolMkdir:
 		return summarizeProjectToolKeyValues(args, []string{"path"})
 	}
@@ -1332,11 +1371,17 @@ func summarizeProjectPlanningWorkflowArgs(args map[string]any) string {
 
 func summarizeWorkspaceMutationResult(decoded map[string]any) string {
 	parts := []string{}
+	if status := projectToolString(decoded["status"]); status != "" {
+		parts = append(parts, "status "+status)
+	}
 	if op := projectToolString(decoded["operation"]); op != "" {
 		parts = append(parts, op)
 	}
 	if path := projectToolString(decoded["path"]); path != "" {
 		parts = append(parts, path)
+	}
+	if paths := projectToolStringList(decoded["paths"]); len(paths) > 0 {
+		parts = append(parts, fmt.Sprintf("%d path(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
 	}
 	if size, ok := projectToolNumber(decoded["size"]); ok {
 		parts = append(parts, fmt.Sprintf("%d bytes", size))
@@ -1349,6 +1394,9 @@ func summarizeWorkspaceMutationResult(decoded map[string]any) string {
 	}
 	if deletions, ok := projectToolNumber(decoded["deletions"]); ok {
 		parts = append(parts, fmt.Sprintf("-%d", deletions))
+	}
+	if message := projectToolString(decoded["message"]); message != "" {
+		parts = append(parts, message)
 	}
 	return truncateProjectToolInfo(strings.Join(parts, "; "))
 }
@@ -1454,11 +1502,17 @@ func summarizeWorkspaceSearchResult(decoded map[string]any) string {
 
 func projectToolCallResultStatus(name, result string) string {
 	baseName := projectToolBaseName(name)
-	if baseName != projectToolCommitFiles && baseName != projectToolCommitProjectFiles {
-		return "succeeded"
-	}
 	decoded := map[string]any{}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(result)), &decoded); err != nil {
+		return "succeeded"
+	}
+	switch strings.ToLower(projectToolString(decoded["status"])) {
+	case "pending", "running":
+		return "running"
+	case "failed", "partial_failure", "error":
+		return "failed"
+	}
+	if baseName != projectToolCommitFiles && baseName != projectToolCommitProjectFiles {
 		return "succeeded"
 	}
 	switch strings.ToLower(projectToolString(decoded["phase"])) {
@@ -1512,6 +1566,9 @@ func projectToolFilePaths(value any) []string {
 }
 
 func projectToolStringList(value any) []string {
+	if strings, ok := value.([]string); ok {
+		return append([]string(nil), strings...)
+	}
 	items, ok := value.([]any)
 	if !ok {
 		return nil
@@ -2155,6 +2212,19 @@ func projectPromptMessagesForProfile(p *aiv1alpha1.Project, repository *ProjectR
 
 func projectPromptMessagesForInitialPlan(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message, profile projectAssistantTurnProfile, initialPlan bool) []chatMessage {
 	messages := []chatMessage{{Role: "system", Content: projectSystemPromptForInitialPlan(p, repository, profile, initialPlan)}}
+	return appendProjectAssistantConversationHistory(messages, history)
+}
+
+func projectPromptMessagesForCollaborationMode(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message, mode projectAssistantCollaborationMode, initialBuild bool) []chatMessage {
+	profile := projectAssistantTurnProfileImplementation
+	if mode == projectAssistantCollaborationModePlan {
+		profile = projectAssistantTurnProfileDebugging
+	}
+	messages := []chatMessage{{Role: "system", Content: projectSystemPromptForMode(p, repository, profile, mode, initialBuild)}}
+	return appendProjectAssistantConversationHistory(messages, history)
+}
+
+func appendProjectAssistantConversationHistory(messages []chatMessage, history []store.Message) []chatMessage {
 	var lastRole, lastContent string
 	for _, m := range history {
 		if m.Role != aiv1alpha1.ProjectMessageRoleUser && m.Role != aiv1alpha1.ProjectMessageRoleAssistant {
@@ -2183,6 +2253,10 @@ func projectSystemPrompt(p *aiv1alpha1.Project, repository *ProjectRepositoryVie
 }
 
 func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *ProjectRepositoryView, profile projectAssistantTurnProfile, initialPlan bool) string {
+	return projectSystemPromptForMode(p, repository, profile, "", initialPlan)
+}
+
+func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectRepositoryView, profile projectAssistantTurnProfile, collaborationMode projectAssistantCollaborationMode, initialBuild bool) string {
 	profile = normalizeProjectAssistantTurnProfile(profile)
 	var b strings.Builder
 	b.WriteString("You are the assistant for a persistent Kedge Project workspace. ")
@@ -2192,6 +2266,7 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 	b.WriteString("Do not name tools, expose hidden reasoning, raw arguments, or raw results, repeat the plan or status UI, or narrate routine calls. ")
 	b.WriteString("Do not narrate each tool call or say what tool you will call next in assistant prose; App Studio shows detailed tool progress through its status and tool summary UI. ")
 	b.WriteString("Do not claim that you changed files or deployed resources unless a tool result or other evidence supports it. ")
+	b.WriteString("Diagnostic constitution: every conclusion about the current app requires current evidence. Characterize the reported symptom and expected behavior, then locate the boundary where observed and expected behavior diverge. Keep workspace state, workspace synchronization, runtime operational health, and application behavior as separate claims. After a repair, rerun the original observation when the available tools can observe it. If application behavior cannot be observed, state that limitation and do not claim it or the acceptance criteria were verified. ")
 	b.WriteString("Do not invent App Studio product capabilities, UI tabs, cloud providers, infrastructure templates, setup flows, deployment targets, or integrations. ")
 	b.WriteString("For App Studio product capability questions, answer only from explicit evidence in tool results, project metadata, project memory, or this system prompt; if evidence is missing, say \"I don't see that capability available in this workspace\" and explain what you can verify. ")
 	b.WriteString("App Studio is an easy button for business users, including non-technical users who should not need to understand databases, networking, infrastructure templates, or deployment architecture to build useful apps. ")
@@ -2199,7 +2274,11 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 	b.WriteString("When a live development sandbox exists, assume App Studio source changes run in that sandbox; separate development sandbox guidance from production launch guidance. ")
 	b.WriteString("Do not ask the user to choose databases, networking, infrastructure templates, or deployment architecture when App Studio can infer a safe next step from their business intent and available evidence. ")
 	b.WriteString("When requirements are unclear, ask concise follow-up questions instead of guessing.\n\n")
-	b.WriteString("Conversation mode: " + string(profile) + "\n")
+	if collaborationMode != "" {
+		b.WriteString("Collaboration mode: " + string(collaborationMode) + "\n")
+	} else {
+		b.WriteString("Conversation mode: " + string(profile) + "\n")
+	}
 	b.WriteString("Project metadata:\n")
 	b.WriteString("- Name: " + p.Name + "\n")
 	if p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) != "" {
@@ -2209,14 +2288,21 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 			"This template is the app's ENVIRONMENT CONTRACT: before reasoning about what infrastructure, backing services, or environment variables the app has, call infrastructure__describe_template on THIS template and treat its agent.usage / agent.outputs as authoritative. " +
 			"Backing services the template declares (for example a managed database) exist for the development instance too, with the same injected environment (for example DATABASE_URL) — do not conclude a declared service is missing just because the app code does not use it yet, and do not provision a separate instance of a service the bound template already provides.\n")
 	} else {
-		b.WriteString("- Development template: NONE — the project has no development environment yet, so nothing runs and no preview exists until one is bound. Binding a template is your FIRST implementation step: translate the user's business intent into requirements yourself, call inspect_development_templates once to inspect every development-capable template, choose the matching template, and bind it with select_project_template. That one call returns each candidate's full agent.usage contract and each component's workspace directory, toolchain, and start command — read the toolchains before choosing, because they decide which language the app must be written in, and prefer a template whose toolchain matches the stack the app needs. Do not perform generic tool discovery or separate infrastructure list/describe calls for this initial development-template choice. Template selection is INDEPENDENT of repository provisioning — never wait for the repository to bind a template; repository state only gates committing files, not template selection or workspace edits.\n")
+		if collaborationMode != "" {
+			b.WriteString("- Development template: NONE — the project has no development environment, running process, or preview. If an authorized implementation requires runnable source, inspect the development templates once, choose a template whose declared component toolchains match the application, and bind it before writing runtime source. Template selection is independent of repository provisioning; repository state gates commits only. Inspection-only requests and Plan mode do not authorize binding a template.\n")
+		} else {
+			b.WriteString("- Development template: NONE — the project has no development environment yet, so nothing runs and no preview exists until one is bound. Binding a template is your FIRST implementation step: translate the user's business intent into requirements yourself, call inspect_development_templates once to inspect every development-capable template, choose the matching template, and bind it with select_project_template. That one call returns each candidate's full agent.usage contract and each component's workspace directory, toolchain, and start command — read the toolchains before choosing, because they decide which language the app must be written in, and prefer a template whose toolchain matches the stack the app needs. Do not perform generic tool discovery or separate infrastructure list/describe calls for this initial development-template choice. Template selection is INDEPENDENT of repository provisioning — never wait for the repository to bind a template; repository state only gates committing files, not template selection or workspace edits.\n")
+		}
 	}
 	b.WriteString("- Display name: " + p.Spec.DisplayName + "\n")
 	if strings.TrimSpace(p.Spec.Description) != "" {
 		b.WriteString("- Description: " + p.Spec.Description + "\n")
 	}
+	repositoryRef := ""
+	repositoryCommitReady := false
 	if repo := p.Spec.Repository; repo != nil && strings.TrimSpace(repo.RepositoryRef) != "" {
 		repoRef := strings.TrimSpace(repo.RepositoryRef)
+		repositoryRef = repoRef
 		b.WriteString("\nSource repository:\n")
 		b.WriteString("- Repository resource: " + repoRef + "\n")
 		if repoName := strings.TrimSpace(repo.Name); repoName != "" {
@@ -2225,15 +2311,23 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 		if connectionRef := strings.TrimSpace(repo.ConnectionRef); connectionRef != "" {
 			b.WriteString("- Connection: " + connectionRef + "\n")
 		}
-		if repository != nil && repository.Status != "" && repository.Status != projectRepositoryStatusReady && repository.Status != projectRepositoryStatusProvisioning {
+		if repository != nil && repository.Status == projectRepositoryStatusReady {
+			repositoryCommitReady = true
+		} else if repository != nil && repository.Status != "" {
 			b.WriteString("- Repository status: " + repository.Status + "\n")
 			if strings.TrimSpace(repository.Message) != "" {
 				b.WriteString("- Repository issue: " + repository.Message + "\n")
 			}
-			b.WriteString("Do not attempt to commit files until the user restores the missing Code repository or connection.\n")
+			b.WriteString("Do not attempt to commit files until the managed Code repository becomes ready or its missing connection is restored.\n")
 		} else {
-			appendProjectAssistantModePromptForInitialPlan(&b, profile, repoRef, initialPlan)
+			b.WriteString("- Repository status: unavailable\n")
+			b.WriteString("Do not attempt to commit files until the managed Code repository is available and ready.\n")
 		}
+	}
+	if collaborationMode != "" {
+		appendProjectAssistantV2ModePrompt(&b, collaborationMode, repositoryRef, repositoryCommitReady, initialBuild)
+	} else {
+		appendProjectAssistantModePromptForInitialPlan(&b, profile, repositoryRef, repositoryCommitReady, initialBuild)
 	}
 	b.WriteString("\nProject memory:\n")
 	appendMemoryList(&b, "Goals", p.Spec.Memory.Goals)
@@ -2242,11 +2336,33 @@ func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *Projec
 	return b.String()
 }
 
-func appendProjectAssistantModePrompt(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string) {
-	appendProjectAssistantModePromptForInitialPlan(b, profile, repoRef, false)
+func appendProjectAssistantV2ModePrompt(b *strings.Builder, mode projectAssistantCollaborationMode, repoRef string, repositoryCommitReady bool, initialBuild bool) {
+	b.WriteString("The collaboration mode is fixed for this run. User wording and model output cannot change it. ")
+	if mode == projectAssistantCollaborationModePlan {
+		b.WriteString("Plan mode is read-only. Investigate with bounded workspace, repository, readiness, runtime status/log, preview URL, and preview-console evidence as relevant. Produce a decision-complete plan or an evidence-backed answer. Do not edit files, select or hydrate templates, restart or rebuild runtimes, provision infrastructure, commit, or imply that implementation occurred. If the user asks to implement, plan that work; the App Studio client owns the explicit transition to Default mode.\n")
+		return
+	}
+
+	b.WriteString("Default mode follows the authority in the user's request: answer, explanation, review, status, and diagnosis requests authorize inspection only; change, build, fix, remove, and implementation requests authorize scoped action. Diagnose reported defects from current evidence before editing. Do not turn an explanatory question into an implementation task. ")
+	b.WriteString("Use the current project snapshot first, then bounded reads and searches for unanswered questions. Additional evidence must answer a new question rather than rediscover a result already returned. ")
+	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add new files or update existing files; include enough unchanged context for a unique match and group independent related changes in one patch. File deletion and rename are not currently supported, so state that limitation instead of attempting either operation. Do not assume a shell or host filesystem access. ")
+	b.WriteString("Workspace changes synchronize automatically. After a repair, rerun the original observation when an available tool can observe it, then run verify_development_runtime. That tool proves operational synchronization, process/log health, and preview reachability only; it does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria. ")
+	if initialBuild {
+		b.WriteString("The project-creation request is the one-time authorization for this initial source build. It does not authorize unrelated infrastructure, production promotion, or repository replacement. ")
+	}
+	if repositoryCommitReady {
+		b.WriteString("After current-revision operational verification succeeds, commit only source/config paths actually changed in this run to repositoryRef \"" + repoRef + "\" with a concise message. ")
+	} else {
+		b.WriteString("Repository state does not permit a commit in this run. Continue with authorized workspace work, but do not call commit_project_files or imply the changes were persisted to git. ")
+	}
+	b.WriteString("Preserve unrelated existing work. Never reset, restore, or replace broad workspace state to recover from a localized failure. Finish with the supported result, exact checks performed, remaining limitations, and no claim that application behavior was independently verified unless a future behavioral tool actually observed it.\n")
 }
 
-func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string, initialPlan bool) {
+func appendProjectAssistantModePrompt(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string) {
+	appendProjectAssistantModePromptForInitialPlan(b, profile, repoRef, strings.TrimSpace(repoRef) != "", false)
+}
+
+func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string, repositoryCommitReady bool, initialPlan bool) {
 	switch normalizeProjectAssistantTurnProfile(profile) {
 	case projectAssistantTurnProfileDiscussion:
 		b.WriteString("Answer exploratory or conceptual questions directly from the conversation and project memory. Do not inspect current workspace state unless the user asks a current-state question or asks to change/debug the app.\n")
@@ -2259,26 +2375,26 @@ func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile 
 		appendProjectAssistantTemplateFitPrompt(b)
 		b.WriteString("Do not edit, deploy, provision, or commit.\n")
 	case projectAssistantTurnProfileDebugging:
-		b.WriteString("Diagnose in read-only mode. Use check_project_readiness, ls, read_file, glob, grep, get_runtime_status, and get_preview_url as needed. Do not mutate files, deploy runtime resources, or commit unless the user explicitly asks you to fix the issue.\n")
+		b.WriteString("Diagnose in read-only mode. Use current source and readiness evidence from check_project_readiness, ls, read_file, glob, and grep together with get_runtime_status, get_runtime_logs, get_preview_url, and preview console evidence when available. Characterize the symptom and expected behavior, identify the supported failing boundary and cause, or explicitly state which evidence is unavailable. Do not mutate files, deploy runtime resources, or commit unless the user explicitly asks you to fix the issue.\n")
 	case projectAssistantTurnProfileDebugFix:
-		b.WriteString("First diagnose the issue with read-only workflow, workspace, and runtime status tools. ")
-		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, initialPlan)
+		b.WriteString("First perform the same read-only diagnosis as debugging mode: gather current source, readiness, runtime status and logs, preview URL, and preview console evidence as available; characterize the symptom and expected behavior; and identify a supported failing boundary and suspected cause or an explicit evidence limitation. Before editing, request a scoped source-edit plan whose summary identifies the suspected cause and the current evidence supporting it. After repair, rerun the original observation when available. ")
+		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, repositoryCommitReady, initialPlan)
 	case projectAssistantTurnProfileImplementation:
-		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, initialPlan)
+		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, repositoryCommitReady, initialPlan)
 	}
 }
 
 func appendProjectAssistantBuilderPrompt(b *strings.Builder, repoRef string) {
-	appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, false)
+	appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, strings.TrimSpace(repoRef) != "", false)
 }
 
-func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoRef string, initialPlan bool) {
+func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoRef string, repositoryCommitReady bool, initialPlan bool) {
 	b.WriteString("The supplied current project snapshot is the initial workspace manifest. Do not call ls or check_project_readiness merely to reproduce a complete snapshot; use them only when the snapshot is truncated, unavailable, or a later state-changing result makes it stale. ")
 	b.WriteString("For a fresh project, use inspect_development_templates to inspect every development-capable template in one workflow instead of separately searching and describing templates. ")
 	b.WriteString("Use prepare_project_deployment before discussing deployment handoff so build artifact readiness, blockers, and runtime handoff constraints come from the App Studio graph workflow. ")
 	b.WriteString("Use promote_project to take a project to production. ")
 	b.WriteString(projectAssistantBrowserConsoleTrustInstruction)
-	b.WriteString("On a fresh build, if verify_development_runtime reports that the development instance, URL, or edge is still provisioning without a concrete code or configuration blocker, report that the preview is starting; do not call restart_runtime. ")
+	b.WriteString("Treat verify_development_runtime as operational verification only: it can establish current workspace synchronization, process and log health, and preview reachability, but it does not independently verify rendered content, interactions, data flow, application behavior, or acceptance criteria. On a fresh build, if verify_development_runtime reports that the development instance, URL, or edge is still provisioning without a concrete code or configuration blocker, report that the preview is starting; do not call restart_runtime. ")
 	b.WriteString("Workspace writes automatically synchronize and restart the development process. After fixing source or configuration, verify again; do not call restart_runtime merely to apply workspace edits, and treat older errors before the latest ready/running log line as stale. ")
 	b.WriteString("For supporting infrastructure, use infrastructure__list_templates before naming any available template, infrastructure__describe_template before recommending values, and infrastructure__provision only after the user explicitly asks to create supporting infrastructure and the permission flow approves the call. ")
 	appendProjectAssistantTemplateFitPrompt(b)
@@ -2296,9 +2412,11 @@ func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoR
 	b.WriteString("Prefer small App Studio workspace mutations with write_file, apply_patch, and mkdir instead of rewriting a whole project. ")
 	if initialPlan {
 		b.WriteString("For this initial run, verify the live development workspace before any repository commit. Do not call commit_project_files in this initial run; the development preview runs from the App Studio workspace, and a later user-approved commit can persist the verified source to the managed repository. ")
-	} else {
+	} else if repositoryCommitReady {
 		b.WriteString("After workspace mutations, commit the changed source/config files to the managed git source with commit_project_files using repositoryRef \"" + repoRef + "\". ")
 		b.WriteString("The tool creates a visible RepositoryCommit request; use concise commit messages and include every generated source/config file needed for the app to run. ")
+	} else {
+		b.WriteString("Repository state does not permit commits in this turn. Continue to use the App Studio workspace for authorized inspection and edits, but do not call commit_project_files or imply the changes were persisted to git. ")
 	}
 	b.WriteString("Use provider-code only as the git-source boundary; do not use provider-code tools to inspect or mutate the live App Studio workspace. ")
 	b.WriteString("Do not paste large file contents into user-facing answers; summarize what you inspected instead. ")

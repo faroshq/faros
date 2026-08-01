@@ -808,6 +808,12 @@ func (a *projectAssistantSnapshotAccumulator) UpdateText(ctx context.Context, co
 func (a *projectAssistantSnapshotAccumulator) SetStatus(ctx context.Context, status store.AssistantRunStatus) error {
 	return a.UpdateSnapshot(ctx, func(run *store.AssistantRun, message *store.Message) {
 		run.Status = status
+		if assistantRunTerminal(status) {
+			// A terminal snapshot is no longer resumable. Clear the permission or
+			// input checkpoint in the same revisioned run/message transition so a
+			// completed resumed segment cannot retain stale pre-terminal evidence.
+			run.Checkpoint = nil
+		}
 		next := *run
 		next.Revision++
 		provisional, _ := message.Metadata[projectAssistantMetadataProvisional].(bool)

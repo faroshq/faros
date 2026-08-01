@@ -113,39 +113,53 @@ subscriber; it never cancels the worker. The portal uses this contract for the
 first project turn as well as later messages, so a refresh during generation
 reconnects without adding another prompt.
 
-Every request carries an assistant action. Omitted actions are `auto`: the run
-starts in an adaptive mode with bounded project reads but no WorkItem or
-mutation authority. It may answer directly, inspect the project, or request
-plan approval. A plan request atomically promotes that same run and its root
-messages into a durable, actor-bound WorkItem before the permission checkpoint
-is saved. Explicit Ask remains read-only; explicit Build creates the WorkItem
-at start; `continue` requires a selected suspended WorkItem ID and exact
-revision. Mutation history, plan grants, runs, and messages are scoped by the
-immutable Kubernetes Project UID and WorkItem rather than by the reusable
-project name. The portal exposes only Adaptive and Discuss; explicit `build`
-and `continue` remain API compatibility contracts for existing clients and
-persisted runs, not composer choices.
+New assistant runs use one sticky collaboration mode: `Default` or `Plan`.
+`Plan` is read-only. `Default` follows the user's request directly and can use
+the current evidence tools and one contextual `apply_patch` source-mutation
+tool; the retired semantic action router, WorkItem promotion flow, whole-file
+write tools, and workspace hydration tool are not part of the current model
+contract. The portal's explicit **Implement plan** action starts a fresh Default
+turn rather than silently changing the mode of a running turn.
 
-Mutation-capable Eino runs expose a phase-specific tool catalog for
-`approval -> mutate -> verify -> repair/warmup/commit -> report`, while every tool
-invocation still validates the durable lifecycle and grant. A phase-local
-no-progress bound warns the model before stopping a run that keeps reasoning
-without plan approval or an approved source mutation. The WorkItem is suspended
-with reason `no_progress`; a new Adaptive message starts a fresh turn from the
-preserved project state. After a source mutation, the strict verification
-catalog and global iteration ceiling apply so a run-local mutation marker is
-never discarded by this handoff. This does not apply to read-only Ask turns.
+Every model response batch is admitted before dispatch. Tool-call IDs are
+deterministic, duplicate reads collapse, conflicting IDs or effects fail closed,
+and independent reads run with a bounded concurrency limit. An append-only
+`AssistantRunEvent` ledger records each admitted call and exact model-visible
+result. It provides idempotency within the active run and between concurrent
+workers; it is not a provider-restart continuation mechanism.
 
-Patch conflicts enter a persisted two-step recovery lane: reread only the failed
-target, then retry only `apply_patch` for that target. Transient runtime
-provisioning and missing process evidence enter a bounded operational lane with
-only status, preview, logs, and verification reads. Source repair reopens only
-when verification reports concrete build or application log blockers.
+Source edits use contextual Add/Update patches only. Delete and move operations
+remain unavailable until the repository commit bridge can preserve deletions.
+Failed contextual patches reopen only the affected read coverage so the model
+can reread current source and retry without rediscovering unrelated evidence.
+If rollback after an I/O failure is incomplete, the actual remaining paths are
+reported as a partial failure and still create a source revision that must be
+synchronized, operationally verified, and committed; stale reads for those
+paths are invalidated before another edit.
+Repository commits derive their path set from successful mutations recorded by
+the current run; model-supplied unrelated paths are rejected.
+
+After a source mutation, runtime verification requires positive completion of
+workspace synchronization for that exact mutation revision before it can report
+`ready`. Operational readiness covers synchronization, process/log health, and
+preview reachability only. It never proves rendered content, interactions, data
+flow, application behavior, or acceptance criteria, and every successful
+mutating completion includes that server-owned limitation.
+
+Mutation syncs are serialized in submission order per Project UID, and their
+revision, status, failure, and one bounded retry are checkpointed across
+permission or follow-up interrupts. A repository commit is bound to the exact
+current-run paths and verified workspace digest. After a commit resumes or
+completes, App Studio requires a fresh operational verification before terminal
+success, so an old `ready` result cannot outlive a delayed approval. While a run
+owns the project, server-side reservations reject external workspace hydration,
+template switching, manual sync, and deletion; matching disabled portal controls
+are only the UX layer over that server boundary.
 
 This remains a single-replica design: execution cannot continue across a
 provider restart. On the next read, an orphaned running run is surfaced as
-`interrupted`; its WorkItem becomes suspended, while permission and input
-checkpoints stay resumable. Stop first persists `stopping`, then asks Eino to
+`interrupted`, while permission and input checkpoints stay resumable. Stop
+first persists `stopping`, then asks Eino to
 cancel gracefully without retaining a terminal checkpoint. Assistant starts
 use the durable `POST /messages` boundary; the legacy POST-SSE project and
 message endpoints have been removed. Clients must not depend on token replay:
@@ -164,6 +178,7 @@ go test -race ./api ./store
 cd portal \
   && npm run test:workbench \
   && npm run test:preview-state \
+  && npm run test:preview-actions \
   && npm run test:create-readiness \
   && npm run test:llm-settings \
   && npm run test:assistant-actions \

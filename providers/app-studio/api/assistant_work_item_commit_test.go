@@ -95,7 +95,7 @@ func TestEinoAssistantEngineWorkItemCommitRequestRetiresGrant(t *testing.T) {
 	req := projectAssistantRunRequest{
 		Identity:       id,
 		Project:        project,
-		WorkspaceScope: projectWorkspaceScope(id, project.Name),
+		WorkspaceScope: projectWorkspaceScope(id, project),
 		Workspace:      workspaces,
 		MessageScope:   scope,
 		AssistantRun:   &started.Run,

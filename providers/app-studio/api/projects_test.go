@@ -430,6 +430,50 @@ func TestGenerateProjectAssistantStreamWithStartBypassesRouter(t *testing.T) {
 	}
 }
 
+func TestReserveProjectExternalOperationRejectsActiveAssistant(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	id := identity{orgUUID: "org-a", workspaceUUID: "ws-1", user: "alice"}
+	project := &aiv1alpha1.Project{}
+	project.Name = "demo"
+	project.UID = "project-uid-demo"
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project)
+	started, err := server.startProjectAssistantRunDurablyWithMode(
+		context.Background(),
+		scope,
+		id.user,
+		"fix the app",
+		"external-operation-gate",
+		store.AssistantRunModeDefault,
+		func(run store.AssistantRun, assistant store.Message, _ bool) error {
+			_, attachErr := server.projectAssistantSupervisor().Attach(scope, run, assistant)
+			return attachErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { server.projectAssistantSupervisor().Abort(scope, started.Run.ID) })
+
+	recorder := httptest.NewRecorder()
+	release, ok := server.reserveProjectExternalOperation(
+		recorder,
+		context.Background(),
+		id,
+		project,
+		"loading the workspace from git",
+	)
+	if release != nil {
+		release()
+	}
+	if ok || recorder.Code != http.StatusConflict {
+		t.Fatalf("operation reservation = (%t, %d, %q), want conflict", ok, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "active assistant run") {
+		t.Fatalf("conflict body = %q, want active assistant run guidance", recorder.Body.String())
+	}
+}
+
 type capturingProjectAssistantEngine struct {
 	req projectAssistantRunRequest
 }

@@ -27,6 +27,7 @@ import (
 
 var ErrAssistantRunNotFound = errors.New("assistant run not found")
 var ErrAssistantRunConflict = errors.New("assistant run version conflict")
+var ErrAssistantRunEventConflict = errors.New("assistant run event sequence conflict")
 var ErrAssistantWorkItemNotFound = errors.New("assistant work item not found")
 var ErrAssistantWorkItemConflict = errors.New("assistant work item conflict")
 var ErrAssistantApprovalModeInvalid = errors.New("assistant approval mode is invalid")
@@ -74,11 +75,15 @@ type AssistantRunMode string
 type AssistantApprovalMode string
 
 const (
+	AssistantRunModeDefault    AssistantRunMode = "default"
+	AssistantRunModePlan       AssistantRunMode = "plan"
 	AssistantRunModeDiscussion AssistantRunMode = "discussion"
 	AssistantRunModeAdaptive   AssistantRunMode = "adaptive"
 	AssistantRunModeNew        AssistantRunMode = "new"
 	AssistantRunModeContinue   AssistantRunMode = "continue"
 )
+
+const AssistantEngineVersionV2 = "v2"
 
 const (
 	AssistantApprovalModeAlwaysAsk   AssistantApprovalMode = "always_ask"
@@ -112,6 +117,7 @@ type AssistantRun struct {
 	ProjectUID            string                `json:"projectUID,omitempty"`
 	WorkItemID            string                `json:"workItemID,omitempty"`
 	Mode                  AssistantRunMode      `json:"mode,omitempty"`
+	EngineVersion         string                `json:"engineVersion,omitempty"`
 	ApprovalMode          AssistantApprovalMode `json:"approvalMode"`
 	ExpectedGrantRevision string                `json:"expectedGrantRevision,omitempty"`
 	Status                AssistantRunStatus    `json:"status"`
@@ -124,6 +130,22 @@ type AssistantRun struct {
 	Audit                 json.RawMessage       `json:"audit,omitempty"`
 	CreatedAt             time.Time             `json:"createdAt"`
 	UpdatedAt             time.Time             `json:"updatedAt"`
+}
+
+// AssistantRunEvent is one immutable entry in a run's durable execution log.
+// Sequence is scoped by the tenant/project/run key and must increase by one.
+// Payload remains an opaque JSON document owned by the assistant engine.
+type AssistantRunEvent struct {
+	RunID       string          `json:"runID"`
+	ProjectName string          `json:"projectName,omitempty"`
+	ProjectUID  string          `json:"projectUID,omitempty"`
+	Sequence    int64           `json:"sequence"`
+	Type        string          `json:"type"`
+	CallID      string          `json:"callID,omitempty"`
+	ToolName    string          `json:"toolName,omitempty"`
+	ArgsDigest  string          `json:"argsDigest,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
 }
 
 type AssistantWorkItemStatus string
@@ -197,6 +219,8 @@ type Store interface {
 	GetAssistantRun(ctx context.Context, scope Scope, id string) (AssistantRun, error)
 	FindAssistantRunByClientRequestID(ctx context.Context, scope Scope, clientRequestID string) (AssistantRun, error)
 	LatestAssistantRun(ctx context.Context, scope Scope) (AssistantRun, error)
+	AppendAssistantRunEvent(ctx context.Context, scope Scope, event AssistantRunEvent, expectedSequence int64) (AssistantRunEvent, error)
+	ListAssistantRunEvents(ctx context.Context, scope Scope, runID string, afterSequence int64, limit int) ([]AssistantRunEvent, error)
 	DeleteProjectMessages(ctx context.Context, scope Scope) error
 	DeleteMessagesOlderThan(ctx context.Context, before time.Time) (int64, error)
 }
@@ -224,6 +248,57 @@ func assistantRunStatusTerminal(status AssistantRunStatus) bool {
 	default:
 		return false
 	}
+}
+
+func prepareAssistantRunEvent(scope Scope, event AssistantRunEvent, expectedSequence int64) (AssistantRunEvent, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantRunEvent{}, err
+	}
+	event.RunID = strings.TrimSpace(event.RunID)
+	event.Type = strings.TrimSpace(event.Type)
+	event.CallID = strings.TrimSpace(event.CallID)
+	event.ToolName = strings.TrimSpace(event.ToolName)
+	event.ArgsDigest = strings.TrimSpace(event.ArgsDigest)
+	if event.RunID == "" || event.Type == "" {
+		return AssistantRunEvent{}, fmt.Errorf("assistant run event run id and type are required")
+	}
+	if expectedSequence < 0 || expectedSequence == 1<<63-1 {
+		return AssistantRunEvent{}, fmt.Errorf("%w: invalid expected sequence %d", ErrAssistantRunEventConflict, expectedSequence)
+	}
+	nextSequence := expectedSequence + 1
+	if event.Sequence != 0 && event.Sequence != nextSequence {
+		return AssistantRunEvent{}, fmt.Errorf("%w: event sequence must advance from %d to %d", ErrAssistantRunEventConflict, expectedSequence, nextSequence)
+	}
+	event.Sequence = nextSequence
+	if len(event.Payload) == 0 {
+		event.Payload = json.RawMessage(`{}`)
+	}
+	if !json.Valid(event.Payload) {
+		return AssistantRunEvent{}, fmt.Errorf("assistant run event payload is not valid json")
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	} else {
+		event.CreatedAt = event.CreatedAt.UTC()
+	}
+	event.ProjectName = scope.ProjectName
+	event.ProjectUID = scope.ProjectUID
+	event.Payload = cloneRawMessage(event.Payload)
+	return event, nil
+}
+
+func validateAssistantRunEventList(scope Scope, runID string, afterSequence int64) (string, error) {
+	if err := scope.validate(); err != nil {
+		return "", err
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return "", fmt.Errorf("assistant run event run id is required")
+	}
+	if afterSequence < 0 {
+		return "", fmt.Errorf("%w: invalid after sequence %d", ErrAssistantRunEventConflict, afterSequence)
+	}
+	return runID, nil
 }
 
 // assistantWorkItemTerminalTransitionValid keeps WorkItem lifecycle ownership

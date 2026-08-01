@@ -31,7 +31,7 @@ import (
 
 func TestAssistantMutationToolsFenceExistingFiles(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{
 		Path:    "src/app.js",
 		Content: "const theme = 'light'\n",
@@ -71,7 +71,7 @@ func TestAssistantMutationToolsFenceExistingFiles(t *testing.T) {
 
 func TestAssistantApplyPatchRequiresSameTurnReadAndReturnsDiff(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{
 		Path:    "src/app.js",
 		Content: "const theme = 'light'\n",

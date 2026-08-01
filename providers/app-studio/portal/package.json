@@ -10,6 +10,7 @@
     "test:workbench": "node --test src/workbench.test.mjs",
     "test:preview-state": "node --test src/previewState.test.mjs",
     "test:preview-console": "node --test src/previewConsole.test.mjs",
+    "test:preview-actions": "node --test src/previewActionsMenu.test.mjs",
     "test:create-readiness": "node --test src/createReadiness.test.mjs",
     "test:llm-settings": "node --test src/llmSettingsValidation.test.mjs",
     "test:assistant-actions": "node --test src/assistantActionFeed.test.mjs src/assistantActionLog.test.mjs",

@@ -70,12 +70,12 @@ func (s *PostgresStore) CreateWorkItemAndAssistantRun(ctx context.Context, scope
 	}
 	row = tx.QueryRowContext(ctx, `INSERT INTO app_studio_assistant_runs (
 		org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status,
-		client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at, engine_version
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 	RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		request_id, checkpoint, audit, created_at, updated_at`,
+		request_id, checkpoint, audit, created_at, updated_at, engine_version`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status,
-		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
+		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(), run.EngineVersion)
 	if _, err := scanAssistantRun(row, scope); err != nil {
 		return AssistantWorkItem{}, fmt.Errorf("create work item run: %w", err)
 	}
@@ -135,7 +135,7 @@ func (s *PostgresStore) PromoteAssistantRunToWorkItem(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row := tx.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at
+	row := tx.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at,engine_version
 		FROM app_studio_assistant_runs
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5
 		FOR UPDATE`,
@@ -244,7 +244,7 @@ func (s *PostgresStore) PromoteAssistantRunToWorkItem(
 		SET work_item_id=$6, mode=$7, revision=revision+1, updated_at=$8
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
 			AND run_id=$5 AND revision=$9 AND mode=$10 AND work_item_id='' AND status=$11
-		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
+		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at,engine_version`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
 		run.ID, item.ID, AssistantRunModeNew, now.UTC(), expectedRunRevision,
 		AssistantRunModeAdaptive, AssistantRunStatusRunning)
@@ -371,7 +371,7 @@ func (s *PostgresStore) ResumeWorkItemAndCreateAssistantRun(ctx context.Context,
 	if err != nil {
 		return AssistantWorkItem{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision, request_id, checkpoint, audit, created_at, updated_at, engine_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID, string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(), run.EngineVersion); err != nil {
 		return AssistantWorkItem{}, fmt.Errorf("%w: create continuation run: %v", ErrAssistantRunConflict, err)
 	}
 	if err := appendMessageTx(ctx, tx, scope, user); err != nil {
@@ -653,9 +653,9 @@ func (s *PostgresStore) transitionWorkItemAndRun(ctx context.Context, scope Scop
 	res, err = tx.ExecContext(ctx, `UPDATE app_studio_assistant_runs
 		SET status=$6, active_message_id=$7, revision=$8, request_id=$9, checkpoint='{}'::jsonb, audit=$10, updated_at=$11
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5
-			AND revision=$12 AND work_item_id=$13 AND mode=$14`,
+			AND revision=$12 AND work_item_id=$13 AND mode=$14 AND engine_version=$15`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
-		run.Status, run.ActiveMessageID, run.Revision, run.RequestID, string(audit), run.UpdatedAt.UTC(), run.Revision-1, run.WorkItemID, run.Mode)
+		run.Status, run.ActiveMessageID, run.Revision, run.RequestID, string(audit), run.UpdatedAt.UTC(), run.Revision-1, run.WorkItemID, run.Mode, run.EngineVersion)
 	if err != nil {
 		return fmt.Errorf("transition work item run: %w", err)
 	}
@@ -714,7 +714,7 @@ func (s *PostgresStore) requestAssistantRunStop(ctx context.Context, scope Scope
 		SET status=$8, revision=revision+1, updated_at=$9
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
 			AND run_id=$5 AND work_item_id=$6 AND revision=$7 AND status=$10
-		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at`,
+		RETURNING run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at,engine_version`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
 		runID, workItemID, expectedRunRevision, AssistantRunStatusStopping, now.UTC(), AssistantRunStatusRunning)
 	run, err := scanAssistantRun(row, scope)
@@ -792,7 +792,7 @@ func normalizeAssistantWorkItemExecutionPlan(executionPlan json.RawMessage) (jso
 }
 
 func (s *PostgresStore) LatestAssistantRunForWorkItem(ctx context.Context, scope Scope, workItemID string) (AssistantRun, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at FROM app_studio_assistant_runs
+	row := s.db.QueryRowContext(ctx, `SELECT run_id,work_item_id,mode,approval_mode,expected_grant_revision,status,client_request_id,user_message_id,active_message_id,revision,request_id,checkpoint,audit,created_at,updated_at,engine_version FROM app_studio_assistant_runs
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND work_item_id=$5 ORDER BY updated_at DESC, run_id DESC LIMIT 1`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, workItemID)
 	run, err := scanAssistantRun(row, scope)
 	if err == sql.ErrNoRows {

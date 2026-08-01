@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -79,11 +80,20 @@ type projectEinoAssistantRunState struct {
 	planProgress              projectAssistantPlanSnapshot
 	sourceMutationRevision    uint64
 	verifiedMutationRevision  uint64
+	commitRequired            bool
+	committedMutationRevision uint64
+	commitAttemptedRevision   uint64
+	verifiedWorkspaceDigest   string
 	checkedMutationRevision   uint64
 	verificationAttempted     bool
 	verificationOutcome       string
 	verificationSummary       string
 	verificationBlockers      []string
+	developmentSyncRevision   uint64
+	developmentSyncStatus     string
+	developmentSyncFailure    string
+	developmentSyncRetry      uint64
+	developmentSyncChanged    chan struct{}
 	completedReadCalls        map[string]uint64
 	observedReadFilePaths     map[string]struct{}
 	successfulMutationPaths   map[string]struct{}
@@ -95,6 +105,7 @@ type projectEinoAssistantRunState struct {
 	patchRecoveryPath         string
 	patchRecoveryReadComplete bool
 	runtimeWarmupAttempts     int
+	repairOpportunityRevision uint64
 	noProgressModelCallCount  int
 	actionBatchModelCall      int
 	actionBatchObserved       bool
@@ -140,6 +151,7 @@ func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
 		successfulMutationPaths: map[string]struct{}{},
 		transientToolResults:    map[string]string{},
 		progressPhases:          map[projectEinoAssistantPhase]bool{},
+		developmentSyncChanged:  make(chan struct{}),
 		turnPolicy:              projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion),
 	}
 }
@@ -389,6 +401,14 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.sourceMutationRevision = state.SourceMutationRevision
 	s.checkedMutationRevision = state.CheckedMutationRevision
 	s.verifiedMutationRevision = state.VerifiedMutationRevision
+	s.developmentSyncRevision = state.DevelopmentSyncRevision
+	s.developmentSyncStatus = strings.TrimSpace(state.DevelopmentSyncStatus)
+	s.developmentSyncFailure = strings.TrimSpace(state.DevelopmentSyncFailure)
+	s.developmentSyncRetry = state.DevelopmentSyncRetry
+	s.commitRequired = state.CommitRequired
+	s.committedMutationRevision = state.CommittedMutationRevision
+	s.commitAttemptedRevision = state.CommitAttemptedRevision
+	s.verifiedWorkspaceDigest = strings.TrimSpace(state.VerifiedWorkspaceDigest)
 	s.verificationAttempted = state.VerificationAttempted
 	s.verificationOutcome = strings.TrimSpace(state.VerificationOutcome)
 	s.verificationSummary = strings.TrimSpace(state.VerificationSummary)
@@ -402,6 +422,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 		s.patchRecoveryReadComplete = state.PatchRecoveryReadComplete
 	}
 	s.runtimeWarmupAttempts = min(max(state.RuntimeWarmupAttempts, 0), projectEinoAssistantRepeatedActionLimit)
+	s.repairOpportunityRevision = state.RepairOpportunityRevision
 	// Legacy checkpoints counted every tool invocation and could therefore
 	// exhaust the guard within one model response. Start those checkpoints with
 	// a clean model-call counter rather than carrying forward false strikes.
@@ -480,6 +501,17 @@ func (s *projectEinoAssistantRunState) SetExecutionPlan(plan projectAssistantApp
 	defer s.mu.Unlock()
 	s.executionPlan = &normalized
 	s.executionPlanRevision = strings.TrimSpace(revision)
+}
+
+func (s *projectEinoAssistantRunState) ClearExecutionPlan() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.executionPlan = nil
+	s.executionPlanRevision = ""
+	s.planProgress = projectAssistantPlanSnapshot{}
 }
 
 func (s *projectEinoAssistantRunState) ExecutionPlan() (*projectAssistantApprovedPlan, string) {
@@ -584,6 +616,12 @@ func (s *projectEinoAssistantRunState) RecordSourceMutation() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sourceMutationRevision++
+	if s.developmentSyncRevision != s.sourceMutationRevision {
+		s.developmentSyncRevision = s.sourceMutationRevision
+		s.developmentSyncStatus = "unknown"
+		s.developmentSyncFailure = "positive workspace synchronization evidence is unavailable for this mutation"
+		s.signalDevelopmentSyncChangedLocked()
+	}
 	s.verifiedMutationRevision = 0
 	s.checkedMutationRevision = 0
 	s.verificationAttempted = false
@@ -591,8 +629,147 @@ func (s *projectEinoAssistantRunState) RecordSourceMutation() {
 	s.verificationSummary = ""
 	s.verificationBlockers = nil
 	s.runtimeWarmupAttempts = 0
+	s.verifiedWorkspaceDigest = ""
 	s.completedReadCalls = map[string]uint64{}
 	s.readFileCoverage = map[string][]projectEinoAssistantLineRange{}
+}
+
+func (s *projectEinoAssistantRunState) BeginDevelopmentSyncForNextMutation() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revision := s.sourceMutationRevision + 1
+	s.developmentSyncRevision = revision
+	s.developmentSyncStatus = "pending"
+	s.developmentSyncFailure = ""
+	s.signalDevelopmentSyncChangedLocked()
+	return revision
+}
+
+func (s *projectEinoAssistantRunState) BeginDevelopmentSyncForCurrentMutation() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sourceMutationRevision == 0 {
+		return 0
+	}
+	s.developmentSyncRevision = s.sourceMutationRevision
+	s.developmentSyncStatus = "pending"
+	s.developmentSyncFailure = ""
+	s.signalDevelopmentSyncChangedLocked()
+	return s.sourceMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) ClaimDevelopmentSyncRetry(revision uint64) (uint64, bool) {
+	if s == nil || revision == 0 {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sourceMutationRevision != revision ||
+		s.developmentSyncRevision != revision ||
+		s.developmentSyncStatus != "failed" ||
+		s.developmentSyncRetry == revision {
+		return 0, false
+	}
+	s.developmentSyncRetry = revision
+	s.developmentSyncStatus = "pending"
+	s.developmentSyncFailure = ""
+	s.signalDevelopmentSyncChangedLocked()
+	return revision, true
+}
+
+func (s *projectEinoAssistantRunState) CompleteDevelopmentSync(revision uint64, syncErr error) {
+	if s == nil || revision == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.developmentSyncRevision != revision {
+		return
+	}
+	if syncErr != nil {
+		s.developmentSyncStatus = "failed"
+		s.developmentSyncFailure = strings.TrimSpace(syncErr.Error())
+		if s.developmentSyncFailure == "" {
+			s.developmentSyncFailure = "workspace synchronization failed"
+		}
+		s.signalDevelopmentSyncChangedLocked()
+		return
+	}
+	s.developmentSyncStatus = "succeeded"
+	s.developmentSyncFailure = ""
+	s.signalDevelopmentSyncChangedLocked()
+}
+
+func (s *projectEinoAssistantRunState) signalDevelopmentSyncChangedLocked() {
+	if s.developmentSyncChanged != nil {
+		close(s.developmentSyncChanged)
+	}
+	s.developmentSyncChanged = make(chan struct{})
+}
+
+// WaitForDevelopmentSync boundedly observes the current revision rather than
+// making verification race the background synchronization goroutine.
+func (s *projectEinoAssistantRunState) WaitForDevelopmentSync(
+	ctx context.Context,
+	revision uint64,
+	timeout time.Duration,
+) (string, string) {
+	if s == nil || revision == 0 || timeout <= 0 {
+		return s.DevelopmentSyncEvidence(revision)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		status := strings.TrimSpace(s.developmentSyncStatus)
+		failure := strings.TrimSpace(s.developmentSyncFailure)
+		if s.developmentSyncRevision != revision {
+			status = "unknown"
+			failure = "positive workspace synchronization evidence is unavailable for this mutation"
+		}
+		if status == "" {
+			status = "unknown"
+		}
+		if status != "pending" {
+			s.mu.Unlock()
+			return status, failure
+		}
+		if s.developmentSyncChanged == nil {
+			s.developmentSyncChanged = make(chan struct{})
+		}
+		changed := s.developmentSyncChanged
+		s.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return s.DevelopmentSyncEvidence(revision)
+		case <-timer.C:
+			return s.DevelopmentSyncEvidence(revision)
+		case <-changed:
+		}
+	}
+}
+
+func (s *projectEinoAssistantRunState) DevelopmentSyncEvidence(revision uint64) (string, string) {
+	if s == nil || revision == 0 {
+		return "unknown", "positive workspace synchronization evidence is unavailable"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.developmentSyncRevision != revision {
+		return "unknown", "positive workspace synchronization evidence is unavailable for this mutation"
+	}
+	status := strings.TrimSpace(s.developmentSyncStatus)
+	if status == "" {
+		status = "unknown"
+	}
+	return status, strings.TrimSpace(s.developmentSyncFailure)
 }
 
 func (s *projectEinoAssistantRunState) RecordDevelopmentVerification(ready bool) {
@@ -684,9 +861,9 @@ func (s *projectEinoAssistantRunState) RewriteCompletionAsVerification(message *
 		return
 	}
 	reply := projectEinoAssistantReplyFromMessage(message)
-	ensureProjectToolCallIDs(reply.ToolCalls)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ensureProjectToolCallIDs(reply.ToolCalls, s.modelCallOrdinal)
 	if len(s.messages) > 0 {
 		last := s.messages[len(s.messages)-1]
 		if last.Role == "assistant" && len(last.ToolCalls) == 0 {
@@ -733,14 +910,17 @@ func (s *projectEinoAssistantRunState) CompletionEvidence() projectAssistantComp
 		outcome = "not_run"
 	}
 	evidence := projectAssistantCompletionEvidence{
-		PlanDefined:              planDefined,
-		PlanComplete:             planComplete,
-		SourceMutationRevision:   s.sourceMutationRevision,
-		VerifiedMutationRevision: s.verifiedMutationRevision,
-		LatestMutationVerified:   latestVerified,
-		VerificationOutcome:      outcome,
-		VerificationSummary:      strings.TrimSpace(s.verificationSummary),
-		Blockers:                 append([]string(nil), s.verificationBlockers...),
+		PlanDefined:               planDefined,
+		PlanComplete:              planComplete,
+		SourceMutationRevision:    s.sourceMutationRevision,
+		VerifiedMutationRevision:  s.verifiedMutationRevision,
+		LatestMutationVerified:    latestVerified,
+		CommitRequired:            s.commitRequired,
+		CommittedMutationRevision: s.committedMutationRevision,
+		LatestMutationCommitted:   !s.commitRequired || (s.sourceMutationRevision > 0 && s.committedMutationRevision == s.sourceMutationRevision),
+		VerificationOutcome:       outcome,
+		VerificationSummary:       strings.TrimSpace(s.verificationSummary),
+		Blockers:                  append([]string(nil), s.verificationBlockers...),
 	}
 	if outcome == "provisioning" {
 		evidence.Blockers = append(evidence.Blockers, "runtime provisioning")
@@ -756,6 +936,132 @@ func (s *projectEinoAssistantRunState) SourceMutationVerified() bool {
 	defer s.mu.Unlock()
 	return s.sourceMutationRevision > 0 &&
 		s.verifiedMutationRevision == s.sourceMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) ConfigureCommitRequirement(required bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commitRequired = required
+	if !required {
+		s.committedMutationRevision = 0
+	}
+}
+
+func (s *projectEinoAssistantRunState) RecordSourceCommit() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sourceMutationRevision > 0 && s.verifiedMutationRevision == s.sourceMutationRevision {
+		s.commitAttemptedRevision = s.sourceMutationRevision
+		s.committedMutationRevision = s.sourceMutationRevision
+		// A commit can remain at a permission checkpoint while the runtime
+		// changes independently. Require a new operational observation after
+		// the commit before the run can claim a current verified completion.
+		s.verifiedMutationRevision = 0
+		s.checkedMutationRevision = 0
+		s.verificationAttempted = false
+		s.verificationOutcome = ""
+		s.verificationSummary = ""
+		s.verificationBlockers = nil
+		s.verifiedWorkspaceDigest = ""
+	}
+}
+
+func (s *projectEinoAssistantRunState) RecordSourceCommitAttempt(revision uint64) {
+	if s == nil || revision == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revision > s.commitAttemptedRevision {
+		s.commitAttemptedRevision = revision
+	}
+}
+
+func (s *projectEinoAssistantRunState) SourceMutationCommitRequired() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitRequired && s.sourceMutationRevision > 0 && s.committedMutationRevision != s.sourceMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) ShouldRequestSourceCommit() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitRequired && s.sourceMutationRevision > 0 &&
+		s.verifiedMutationRevision == s.sourceMutationRevision &&
+		s.committedMutationRevision != s.sourceMutationRevision &&
+		s.commitAttemptedRevision != s.sourceMutationRevision
+}
+
+func (s *projectEinoAssistantRunState) ClaimRepairOpportunity() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sourceMutationRevision == 0 ||
+		s.checkedMutationRevision != s.sourceMutationRevision ||
+		s.verifiedMutationRevision == s.sourceMutationRevision ||
+		s.repairOpportunityRevision == s.sourceMutationRevision {
+		return false
+	}
+	s.repairOpportunityRevision = s.sourceMutationRevision
+	return true
+}
+
+func (s *projectEinoAssistantRunState) RecordVerifiedWorkspaceDigest(digest string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sourceMutationRevision > 0 && s.verifiedMutationRevision == s.sourceMutationRevision {
+		s.verifiedWorkspaceDigest = strings.TrimSpace(digest)
+	}
+}
+
+func (s *projectEinoAssistantRunState) VerifiedWorkspaceDigestMatches(digest string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sourceMutationRevision > 0 &&
+		s.verifiedMutationRevision == s.sourceMutationRevision &&
+		s.verifiedWorkspaceDigest != "" &&
+		s.verifiedWorkspaceDigest == strings.TrimSpace(digest)
+}
+
+func (s *projectEinoAssistantRunState) VerifiedWorkspaceDigest() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.verifiedWorkspaceDigest
+}
+
+func (s *projectEinoAssistantRunState) RecordVerificationBindingFailure(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.verifiedMutationRevision = 0
+	s.verificationOutcome = "not_ready"
+	s.verificationBlockers = append(s.verificationBlockers, strings.TrimSpace(reason))
+	s.verifiedWorkspaceDigest = ""
 }
 
 func (s *projectEinoAssistantRunState) SourceMutationRevisions() (uint64, uint64) {
@@ -865,6 +1171,21 @@ func (s *projectEinoAssistantRunState) ReopenReadFile(path string) {
 	defer s.mu.Unlock()
 	s.completedReadCalls = map[string]uint64{}
 	delete(s.readFileCoverage, path)
+}
+
+func (s *projectEinoAssistantRunState) InvalidateObservedReadFile(path string) {
+	if s == nil {
+		return
+	}
+	path, err := workspace.CleanProjectPath(path)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completedReadCalls = map[string]uint64{}
+	delete(s.readFileCoverage, path)
+	delete(s.observedReadFilePaths, path)
 }
 
 func (s *projectEinoAssistantRunState) CompletedReadFilePaths() []string {
@@ -1098,6 +1419,15 @@ func (s *projectEinoAssistantRunState) NextModelCallOrdinal() int {
 	return s.modelCallOrdinal
 }
 
+func (s *projectEinoAssistantRunState) CurrentModelCallOrdinal() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelCallOrdinal
+}
+
 func (s *projectEinoAssistantRunState) RecordModelInput(messages []chatMessage) {
 	if s == nil {
 		return
@@ -1124,7 +1454,7 @@ func (s *projectEinoAssistantRunState) RecordAssistantReply(reply projectAssista
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(reply.ToolCalls) > 0 {
-		ensureProjectToolCallIDs(reply.ToolCalls)
+		ensureProjectToolCallIDs(reply.ToolCalls, s.modelCallOrdinal)
 		s.toolCalls = cloneProjectAssistantToolCalls(reply.ToolCalls)
 		for _, tc := range reply.ToolCalls {
 			sig := projectEinoAssistantToolCallSignature(tc.Function.Name, tc.Function.Arguments)
@@ -1223,6 +1553,14 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		PlanProgress:              cloneProjectAssistantPlanSnapshot(s.planProgress),
 		SourceMutationRevision:    s.sourceMutationRevision,
 		VerifiedMutationRevision:  s.verifiedMutationRevision,
+		DevelopmentSyncRevision:   s.developmentSyncRevision,
+		DevelopmentSyncStatus:     strings.TrimSpace(s.developmentSyncStatus),
+		DevelopmentSyncFailure:    strings.TrimSpace(s.developmentSyncFailure),
+		DevelopmentSyncRetry:      s.developmentSyncRetry,
+		CommitRequired:            s.commitRequired,
+		CommittedMutationRevision: s.committedMutationRevision,
+		CommitAttemptedRevision:   s.commitAttemptedRevision,
+		VerifiedWorkspaceDigest:   s.verifiedWorkspaceDigest,
 		CheckedMutationRevision:   s.checkedMutationRevision,
 		VerificationAttempted:     s.verificationAttempted,
 		VerificationOutcome:       strings.TrimSpace(s.verificationOutcome),
@@ -1235,6 +1573,7 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		PatchRecoveryPath:         s.patchRecoveryPath,
 		PatchRecoveryReadComplete: s.patchRecoveryReadComplete,
 		RuntimeWarmupAttempts:     s.runtimeWarmupAttempts,
+		RepairOpportunityRevision: s.repairOpportunityRevision,
 		NoProgressModelCallCount:  s.noProgressModelCallCount,
 		ActionBatchModelCall:      s.actionBatchModelCall,
 		ActionBatchObserved:       s.actionBatchObserved,

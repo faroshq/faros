@@ -58,6 +58,7 @@ type projectAssistantRunRequest struct {
 	MCPInsecureSkipTLSVerify bool
 	ApprovalMode             store.AssistantApprovalMode
 	StreamCallbacks          projectAssistantStreamCallbacks
+	CollaborationMode        projectAssistantCollaborationMode
 	TurnProfile              projectAssistantTurnProfile
 	TurnPolicy               projectAssistantTurnPolicy
 	RequestedAction          string
@@ -76,6 +77,7 @@ type projectAssistantRunRequest struct {
 	// HTTP, provider, or Eino contract.
 	executionAuthority projectAssistantExecutionAuthority
 	auditRecorder      *projectAssistantRunAuditRecorder
+	eventLedger        *projectAssistantRunEventLedger
 }
 
 type projectAssistantRunResult struct {
@@ -86,14 +88,17 @@ type projectAssistantRunResult struct {
 }
 
 type projectAssistantCompletionEvidence struct {
-	PlanDefined              bool     `json:"planDefined"`
-	PlanComplete             bool     `json:"planComplete"`
-	SourceMutationRevision   uint64   `json:"sourceMutationRevision,omitempty"`
-	VerifiedMutationRevision uint64   `json:"verifiedMutationRevision,omitempty"`
-	LatestMutationVerified   bool     `json:"latestMutationVerified"`
-	VerificationOutcome      string   `json:"verificationOutcome,omitempty"`
-	VerificationSummary      string   `json:"verificationSummary,omitempty"`
-	Blockers                 []string `json:"blockers,omitempty"`
+	PlanDefined               bool     `json:"planDefined"`
+	PlanComplete              bool     `json:"planComplete"`
+	SourceMutationRevision    uint64   `json:"sourceMutationRevision,omitempty"`
+	VerifiedMutationRevision  uint64   `json:"verifiedMutationRevision,omitempty"`
+	LatestMutationVerified    bool     `json:"latestMutationVerified"`
+	CommitRequired            bool     `json:"commitRequired,omitempty"`
+	CommittedMutationRevision uint64   `json:"committedMutationRevision,omitempty"`
+	LatestMutationCommitted   bool     `json:"latestMutationCommitted,omitempty"`
+	VerificationOutcome       string   `json:"verificationOutcome,omitempty"`
+	VerificationSummary       string   `json:"verificationSummary,omitempty"`
+	Blockers                  []string `json:"blockers,omitempty"`
 }
 
 type projectAssistantEvent struct {

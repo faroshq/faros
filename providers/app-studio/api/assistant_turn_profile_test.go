@@ -322,6 +322,156 @@ func TestProjectAssistantModePromptsPutBuilderGuidanceOnlyOnWriteProfiles(t *tes
 	}
 }
 
+func TestProjectAssistantPromptAlwaysIncludesModeContractAcrossRepositoryStates(t *testing.T) {
+	profiles := map[projectAssistantTurnProfile]string{
+		projectAssistantTurnProfileDiscussion:     "Answer exploratory or conceptual questions directly",
+		projectAssistantTurnProfileAdaptive:       "Answer directly when project inspection is unnecessary",
+		projectAssistantTurnProfileGuidance:       "Give practical guidance, recommendations, and tradeoffs",
+		projectAssistantTurnProfileExploration:    "Use read-only App Studio workflow",
+		projectAssistantTurnProfileDebugging:      "Diagnose in read-only mode",
+		projectAssistantTurnProfileDebugFix:       "First perform the same read-only diagnosis as debugging mode",
+		projectAssistantTurnProfileImplementation: "The supplied current project snapshot is the initial workspace manifest",
+	}
+	repositories := map[string]*ProjectRepositoryView{
+		"ready":        {Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true},
+		"provisioning": {Ref: "demo-repo", Status: projectRepositoryStatusProvisioning},
+		"unhealthy":    {Ref: "demo-repo", Status: projectRepositoryStatusUnavailable, Message: "connection missing"},
+		"missing_view": nil,
+	}
+	for state, repository := range repositories {
+		for profile, marker := range profiles {
+			t.Run(state+"/"+string(profile), func(t *testing.T) {
+				project := projectWithRepository("demo-repo", "demo", "github")
+				project.Name = "demo-project"
+				prompt := projectSystemPrompt(project, repository, profile)
+				if !strings.Contains(prompt, marker) {
+					t.Fatalf("prompt missing mode contract %q:\n%s", marker, prompt)
+				}
+				if state != "ready" && strings.Contains(prompt, `After workspace mutations, commit the changed source/config files`) {
+					t.Fatalf("%s prompt includes commit guidance without a ready repository:\n%s", state, prompt)
+				}
+				if strings.Contains(prompt, `repositoryRef ""`) {
+					t.Fatalf("prompt includes empty repository reference:\n%s", prompt)
+				}
+			})
+		}
+	}
+
+	project := projectWithRepository("demo-repo", "demo", "github")
+	project.Name = "demo-project"
+	project.Spec.Repository = nil
+	for profile, marker := range profiles {
+		t.Run("absent/"+string(profile), func(t *testing.T) {
+			prompt := projectSystemPrompt(project, nil, profile)
+			if !strings.Contains(prompt, marker) {
+				t.Fatalf("prompt missing mode contract %q without a repository:\n%s", marker, prompt)
+			}
+			if strings.Contains(prompt, `After workspace mutations, commit the changed source/config files`) || strings.Contains(prompt, `repositoryRef ""`) {
+				t.Fatalf("prompt includes commit guidance without a repository:\n%s", prompt)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantPromptDefinesEvidenceFirstDiagnosticConstitution(t *testing.T) {
+	project := projectWithRepository("demo-repo", "demo", "github")
+	project.Name = "demo-project"
+	prompt := projectSystemPrompt(project, &ProjectRepositoryView{Status: projectRepositoryStatusReady}, projectAssistantTurnProfileDebugFix)
+	for _, want := range []string{
+		"every conclusion about the current app requires current evidence",
+		"reported symptom and expected behavior",
+		"boundary where observed and expected behavior diverge",
+		"workspace state, workspace synchronization, runtime operational health, and application behavior as separate claims",
+		"rerun the original observation",
+		"do not claim it or the acceptance criteria were verified",
+		"plan whose summary identifies the suspected cause and the current evidence supporting it",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing diagnostic contract %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestProjectAssistantV2PromptsKeepCollaborationModeAcrossRepositoryStates(t *testing.T) {
+	for _, legacy := range []string{"request_project_plan_approval", "write_file", "mkdir", "durable implementation task"} {
+		if strings.Contains(projectEinoAssistantV2DeepInstruction, legacy) {
+			t.Fatalf("v2 deep-agent instruction leaked legacy execution guidance %q:\n%s", legacy, projectEinoAssistantV2DeepInstruction)
+		}
+	}
+	base := projectWithRepository("demo-repo", "demo", "github")
+	base.Name = "demo-project"
+	states := map[string]struct {
+		project    *aiv1alpha1.Project
+		repository *ProjectRepositoryView
+		commit     bool
+	}{
+		"ready": {
+			project:    base.DeepCopy(),
+			repository: &ProjectRepositoryView{Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true},
+			commit:     true,
+		},
+		"unhealthy": {
+			project:    base.DeepCopy(),
+			repository: &ProjectRepositoryView{Ref: "demo-repo", Status: projectRepositoryStatusUnavailable, Message: "connection missing"},
+		},
+		"missing": {
+			project: base.DeepCopy(),
+		},
+		"absent": {
+			project: func() *aiv1alpha1.Project {
+				project := base.DeepCopy()
+				project.Spec.Repository = nil
+				return project
+			}(),
+		},
+	}
+
+	for state, fixture := range states {
+		for _, mode := range []projectAssistantCollaborationMode{
+			projectAssistantCollaborationModeDefault,
+			projectAssistantCollaborationModePlan,
+		} {
+			t.Run(state+"/"+string(mode), func(t *testing.T) {
+				prompt := projectSystemPromptForMode(fixture.project, fixture.repository, projectAssistantTurnProfileDiscussion, mode, false)
+				for _, want := range []string{
+					"Collaboration mode: " + string(mode),
+					"The collaboration mode is fixed for this run",
+					"every conclusion about the current app requires current evidence",
+					"workspace state, workspace synchronization, runtime operational health, and application behavior as separate claims",
+				} {
+					if !strings.Contains(prompt, want) {
+						t.Fatalf("%s/%s prompt missing %q:\n%s", state, mode, want, prompt)
+					}
+				}
+				for _, legacy := range []string{"request_project_plan_approval", "write_file", "mkdir", "durable implementation task"} {
+					if strings.Contains(prompt, legacy) {
+						t.Fatalf("%s/%s v2 prompt leaked legacy execution guidance %q:\n%s", state, mode, legacy, prompt)
+					}
+				}
+				if mode == projectAssistantCollaborationModePlan {
+					if !strings.Contains(prompt, "Plan mode is read-only") || !strings.Contains(prompt, "the App Studio client owns the explicit transition to Default mode") {
+						t.Fatalf("%s plan prompt lacks server-owned read-only transition contract:\n%s", state, prompt)
+					}
+					return
+				}
+				for _, want := range []string{
+					"answer, explanation, review, status, and diagnosis requests authorize inspection only",
+					"The only source-mutation tool is apply_patch",
+					"does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria",
+				} {
+					if !strings.Contains(prompt, want) {
+						t.Fatalf("%s default prompt missing %q:\n%s", state, want, prompt)
+					}
+				}
+				commitGuidance := strings.Contains(prompt, "commit only source/config paths actually changed in this run")
+				if commitGuidance != fixture.commit {
+					t.Fatalf("%s commit guidance = %t, want %t:\n%s", state, commitGuidance, fixture.commit, prompt)
+				}
+			})
+		}
+	}
+}
+
 // The bound template is the app's environment contract — the prompt must
 // direct the model to describe THAT template (agent.usage) before reasoning
 // about what infrastructure the app has, and must forbid concluding a

@@ -38,13 +38,16 @@ import (
 )
 
 const (
-	MaxProjectPathBytes       = 1024
-	DefaultListLimit          = 200
-	MaxListLimit              = 500
-	DefaultReadMaxBytes       = 64 << 10
-	MaxReadMaxBytes           = 256 << 10
-	MaxWriteBytes             = MaxReadMaxBytes
-	MaxPatchBytes             = 64 << 10
+	MaxProjectPathBytes = 1024
+	DefaultListLimit    = 200
+	MaxListLimit        = 500
+	DefaultReadMaxBytes = 64 << 10
+	MaxReadMaxBytes     = 256 << 10
+	MaxWriteBytes       = MaxReadMaxBytes
+	MaxPatchBytes       = 64 << 10
+	// MaxUnifiedPatchBytes bounds the complete model-authored patch envelope.
+	// Individual resulting files remain bounded by MaxWriteBytes.
+	MaxUnifiedPatchBytes      = MaxWriteBytes
 	DefaultSearchLimit        = 50
 	MaxSearchLimit            = 100
 	MaxSearchFragmentBytes    = 240
@@ -58,11 +61,13 @@ var errStopWalk = errors.New("stop workspace walk")
 // was read, so the requested write was not applied.
 var ErrMutationConflict = errors.New("workspace file changed during edit")
 
-// Scope identifies one App Studio project workspace.
+// Scope identifies one App Studio project workspace incarnation. ProjectUID
+// prevents a recreated Project from inheriting the deleted Project's files.
 type Scope struct {
 	OrgUUID       string
 	WorkspaceUUID string
 	ProjectName   string
+	ProjectUID    string
 }
 
 // File is one UTF-8 text file to materialize into a project workspace.
@@ -73,13 +78,16 @@ type File struct {
 
 // MutationResult describes one workspace mutation.
 type MutationResult struct {
-	Operation    string `json:"operation"`
-	Path         string `json:"path"`
-	Size         int64  `json:"size,omitempty"`
-	Replacements int    `json:"replacements,omitempty"`
-	Additions    int    `json:"additions,omitempty"`
-	Deletions    int    `json:"deletions,omitempty"`
-	Patch        string `json:"patch,omitempty"`
+	Operation    string           `json:"operation"`
+	Path         string           `json:"path,omitempty"`
+	PreviousPath string           `json:"previousPath,omitempty"`
+	Paths        []string         `json:"paths,omitempty"`
+	Size         int64            `json:"size,omitempty"`
+	Replacements int              `json:"replacements,omitempty"`
+	Additions    int              `json:"additions,omitempty"`
+	Deletions    int              `json:"deletions,omitempty"`
+	Patch        string           `json:"patch,omitempty"`
+	Files        []MutationResult `json:"files,omitempty"`
 }
 
 // FileInfo describes one file in a project workspace.
@@ -114,13 +122,18 @@ type WriteOptions struct {
 	SnapshotID string
 }
 
-// PatchOptions configures an exact text replacement in one workspace file.
+// PatchOptions configures a contextual multi-file workspace patch. The legacy
+// exact-replacement fields remain temporarily for non-model server helpers;
+// model-visible tools supply only Patch.
 type PatchOptions struct {
+	Patch      string
+	SnapshotID string
+
+	// Deprecated: use Patch.
 	Path       string
 	OldText    string
 	NewText    string
 	ReplaceAll bool
-	SnapshotID string
 }
 
 // MkdirOptions configures workspace directory creation.
@@ -256,6 +269,9 @@ func (s *FileStore) WriteFile(ctx context.Context, scope Scope, opts WriteOption
 
 // ApplyPatch replaces exact text in one bounded UTF-8 workspace file.
 func (s *FileStore) ApplyPatch(ctx context.Context, scope Scope, opts PatchOptions) (MutationResult, error) {
+	if strings.TrimSpace(opts.Patch) != "" || strings.TrimSpace(opts.Path) == "" {
+		return s.applyUnifiedPatch(ctx, scope, opts)
+	}
 	if s == nil {
 		return MutationResult{}, errors.New("project workspace store is not configured")
 	}
@@ -600,7 +616,7 @@ func (s *FileStore) walkFiles(ctx context.Context, dir string, visit func(FileIn
 			return err
 		}
 		name := d.Name()
-		if d.IsDir() && (name == ".git" || name == "node_modules") {
+		if d.IsDir() && (name == ".git" || name == "node_modules" || strings.EqualFold(name, workspaceSnapshotDirectory)) {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() && strings.HasPrefix(name, workspaceTempFilePrefix) {
@@ -632,13 +648,13 @@ func (s *FileStore) scopeDir(scope Scope) (string, error) {
 	if s == nil || strings.TrimSpace(s.root) == "" {
 		return "", errors.New("project workspace store is not configured")
 	}
-	parts := []string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName}
+	parts := []string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID}
 	for _, part := range parts {
 		if err := validateScopeSegment(part); err != nil {
 			return "", err
 		}
 	}
-	return filepath.Join(s.root, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName), nil
+	return filepath.Join(s.root, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID), nil
 }
 
 func validateScopeSegment(value string) error {
@@ -698,7 +714,7 @@ func isReservedPathSegment(part string) bool {
 		return true
 	}
 	switch part {
-	case ".git", "node_modules":
+	case ".git", "node_modules", workspaceSnapshotDirectory:
 		return true
 	default:
 		return false

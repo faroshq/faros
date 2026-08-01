@@ -86,7 +86,7 @@ func projectEinoAssistantRewriteWorkspaceMutations(
 	messages = append(messages, schema.AssistantMessage("", compactedCalls))
 	messages = append(messages, compactedResponses...)
 	messages = append(messages, schema.UserMessage(
-		"<system-reminder>Workspace mutations succeeded: "+strings.Join(summaries, "; ")+". Treat successful whole-file writes as authoritative and proceed to development verification; reread only after a conflict, failed patch, or later mutation.</system-reminder>",
+		"<system-reminder>Workspace mutations succeeded: "+strings.Join(summaries, "; ")+". Treat that result as authoritative and proceed to operational development verification; reread only after a conflict, failed patch, or later mutation.</system-reminder>",
 	))
 	return messages, nil
 }

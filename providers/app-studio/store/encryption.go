@@ -719,6 +719,38 @@ func (s *encryptedStore) LatestAssistantRun(ctx context.Context, scope Scope) (A
 	return run, nil
 }
 
+func (s *encryptedStore) AppendAssistantRunEvent(ctx context.Context, scope Scope, event AssistantRunEvent, expectedSequence int64) (AssistantRunEvent, error) {
+	event, err := prepareAssistantRunEvent(scope, event, expectedSequence)
+	if err != nil {
+		return AssistantRunEvent{}, err
+	}
+	event.Payload, err = s.encryptAssistantRunBlob(scope, AssistantRun{ID: event.RunID}, assistantRunEventBlobLabel(event), event.Payload)
+	if err != nil {
+		return AssistantRunEvent{}, err
+	}
+	saved, err := s.inner.AppendAssistantRunEvent(ctx, scope, event, expectedSequence)
+	if err != nil {
+		return AssistantRunEvent{}, err
+	}
+	if err := s.decryptAssistantRunEvent(scope, &saved); err != nil {
+		return AssistantRunEvent{}, err
+	}
+	return saved, nil
+}
+
+func (s *encryptedStore) ListAssistantRunEvents(ctx context.Context, scope Scope, runID string, afterSequence int64, limit int) ([]AssistantRunEvent, error) {
+	events, err := s.inner.ListAssistantRunEvents(ctx, scope, runID, afterSequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range events {
+		if err := s.decryptAssistantRunEvent(scope, &events[i]); err != nil {
+			return nil, err
+		}
+	}
+	return events, nil
+}
+
 func (s *encryptedStore) DeleteProjectMessages(ctx context.Context, scope Scope) error {
 	return s.inner.DeleteProjectMessages(ctx, scope)
 }
@@ -898,6 +930,18 @@ func assistantRunAAD(scope Scope, run AssistantRun, label string) []byte {
 		run.ID,
 		label,
 	}, "\x00"))
+}
+
+func assistantRunEventBlobLabel(event AssistantRunEvent) string {
+	return fmt.Sprintf("event:%d:%s", event.Sequence, event.Type)
+}
+
+func (s *encryptedStore) decryptAssistantRunEvent(scope Scope, event *AssistantRunEvent) error {
+	if event == nil {
+		return nil
+	}
+	run := AssistantRun{ID: event.RunID}
+	return s.decryptAssistantRunBlob(scope, &run, assistantRunEventBlobLabel(*event), &event.Payload)
 }
 
 func (s *encryptedStore) encryptAssistantWorkItemGrant(scope Scope, item AssistantWorkItem, plaintext []byte) ([]byte, error) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ import (
 
 func TestFileStoreAppliesListsReadsAndSearchesProjectFiles(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	if err := store.ApplyFiles(context.Background(), scope, []File{
 		{Path: "package.json", Content: `{"scripts":{"dev":"vite"}}`},
@@ -65,9 +66,75 @@ func TestFileStoreAppliesListsReadsAndSearchesProjectFiles(t *testing.T) {
 	}
 }
 
-func TestFileStoreRejectsUnsafePaths(t *testing.T) {
+func TestFileStoreProjectUIDIsolatesRecreatedProjectSourceAndSnapshots(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	oldScope := Scope{
+		OrgUUID:       "org-a",
+		WorkspaceUUID: "ws-1",
+		ProjectName:   "demo",
+		ProjectUID:    "project-old",
+	}
+	newScope := oldScope
+	newScope.ProjectUID = "project-new"
+
+	if err := store.ApplyFiles(ctx, oldScope, []File{{Path: "src/App.tsx", Content: "old before\n"}}); err != nil {
+		t.Fatalf("seed old project: %v", err)
+	}
+	if _, err := store.WriteFile(ctx, oldScope, WriteOptions{
+		Path:       "src/App.tsx",
+		Content:    "old after\n",
+		SnapshotID: "run-1",
+	}); err != nil {
+		t.Fatalf("mutate old project: %v", err)
+	}
+	if _, err := store.ReadFile(ctx, newScope, ReadOptions{Path: "src/App.tsx"}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("new project read old source error = %v, want not exist", err)
+	}
+
+	if err := store.ApplyFiles(ctx, newScope, []File{{Path: "src/App.tsx", Content: "new before\n"}}); err != nil {
+		t.Fatalf("seed new project: %v", err)
+	}
+	if _, err := store.WriteFile(ctx, newScope, WriteOptions{
+		Path:       "src/App.tsx",
+		Content:    "new after\n",
+		SnapshotID: "run-1",
+	}); err != nil {
+		t.Fatalf("mutate new project: %v", err)
+	}
+
+	if _, err := store.RestoreSnapshot(ctx, oldScope, "run-1"); err != nil {
+		t.Fatalf("restore old project snapshot: %v", err)
+	}
+	oldRead, err := store.ReadFile(ctx, oldScope, ReadOptions{Path: "src/App.tsx"})
+	if err != nil || oldRead.Content != "old before\n" {
+		t.Fatalf("old project after restore = %#v, %v", oldRead, err)
+	}
+	newRead, err := store.ReadFile(ctx, newScope, ReadOptions{Path: "src/App.tsx"})
+	if err != nil || newRead.Content != "new after\n" {
+		t.Fatalf("new project changed by old restore = %#v, %v", newRead, err)
+	}
+
+	if _, err := store.RestoreSnapshot(ctx, newScope, "run-1"); err != nil {
+		t.Fatalf("restore new project snapshot: %v", err)
+	}
+	newRead, err = store.ReadFile(ctx, newScope, ReadOptions{Path: "src/App.tsx"})
+	if err != nil || newRead.Content != "new before\n" {
+		t.Fatalf("new project after restore = %#v, %v", newRead, err)
+	}
+}
+
+func TestFileStoreRequiresProjectUID(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	if _, err := store.ListFiles(context.Background(), scope, ListOptions{}); err == nil {
+		t.Fatal("ListFiles accepted a workspace scope without a Project UID")
+	}
+}
+
+func TestFileStoreRejectsUnsafePaths(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	for _, path := range []string{"", "../escape.txt", "/tmp/escape.txt", "src/../escape.txt", ".git/config", "node_modules/pkg/index.js", "bad\x00name"} {
 		t.Run(path, func(t *testing.T) {
@@ -81,7 +148,7 @@ func TestFileStoreRejectsUnsafePaths(t *testing.T) {
 
 func TestFileStoreRejectsSymlinkEscapes(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	dir, err := store.scopeDir(scope)
 	if err != nil {
 		t.Fatalf("scopeDir returned error: %v", err)
@@ -120,7 +187,7 @@ func TestFileStoreRejectsSymlinkEscapes(t *testing.T) {
 
 func TestFileStoreClampsBounds(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	files := make([]File, 0, MaxListLimit+20)
 	for i := 0; i < MaxListLimit+20; i++ {
@@ -176,7 +243,7 @@ func TestFileStoreClampsBounds(t *testing.T) {
 
 func TestFileStoreMutatesWorkspaceFiles(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	mkdir, err := store.Mkdir(context.Background(), scope, MkdirOptions{Path: "src/components"})
 	if err != nil {
@@ -219,7 +286,7 @@ func TestFileStoreMutatesWorkspaceFiles(t *testing.T) {
 
 func TestFileStoreMutationValidation(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	if _, err := store.WriteFile(context.Background(), scope, WriteOptions{
 		Path:    "too-large.txt",
@@ -278,7 +345,7 @@ func TestFileStoreMutationValidation(t *testing.T) {
 
 func TestFileStoreCreateOnlyAndStructuredDiff(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 
 	result, err := store.WriteFile(context.Background(), scope, WriteOptions{
 		Path:       "src/app.js",
@@ -324,7 +391,7 @@ func TestFileStoreCreateOnlyAndStructuredDiff(t *testing.T) {
 
 func TestFileStoreMutationsPreserveExistingFileMode(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "start.sh", Content: "#!/bin/sh\necho light\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}
@@ -355,7 +422,7 @@ func TestFileStoreMutationsPreserveExistingFileMode(t *testing.T) {
 
 func TestFileStoreRestoresAssistantSnapshotWithoutClobberingNewerChanges(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "src/app.js", Content: "light\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}
@@ -417,9 +484,9 @@ func TestFileStoreRestoresAssistantSnapshotWithoutClobberingNewerChanges(t *test
 
 func TestFileStoreDeleteSnapshotsIsProjectScoped(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
-	otherProject := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "other"}
-	otherWorkspace := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-2", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	otherProject := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "other", ProjectUID: "test-project-uid"}
+	otherWorkspace := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-2", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	for _, target := range []Scope{scope, otherProject, otherWorkspace} {
 		if _, err := store.WriteFile(context.Background(), target, WriteOptions{
 			Path:       "src/app.js",
@@ -462,7 +529,7 @@ func TestFileStoreDeleteSnapshotsIsProjectScoped(t *testing.T) {
 
 func TestFileStoreSnapshotFailureDoesNotMutateSource(t *testing.T) {
 	store := NewFileStore(t.TempDir())
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"}
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "src/app.js", Content: "light\n"}}); err != nil {
 		t.Fatalf("ApplyFiles returned error: %v", err)
 	}

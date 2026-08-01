@@ -30,6 +30,7 @@ type MemoryStore struct {
 	mu               sync.RWMutex
 	messages         map[Scope]map[string]Message
 	assistantRuns    map[Scope]map[string]AssistantRun
+	assistantEvents  map[Scope]map[string][]AssistantRunEvent
 	workItems        map[Scope]map[string]AssistantWorkItem
 	approvalModes    map[Scope]map[string]AssistantApprovalPreference
 	bootstrapPermits map[Scope]projectBootstrapPermit
@@ -43,6 +44,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		messages:         map[Scope]map[string]Message{},
 		assistantRuns:    map[Scope]map[string]AssistantRun{},
+		assistantEvents:  map[Scope]map[string][]AssistantRunEvent{},
 		workItems:        map[Scope]map[string]AssistantWorkItem{},
 		approvalModes:    map[Scope]map[string]AssistantApprovalPreference{},
 		bootstrapPermits: map[Scope]projectBootstrapPermit{},
@@ -262,6 +264,7 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 		return err
 	}
 	run.ApprovalMode = approvalMode
+	run.EngineVersion = strings.TrimSpace(run.EngineVersion)
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
 	}
@@ -285,6 +288,7 @@ func (s *MemoryStore) SaveAssistantRun(_ context.Context, scope Scope, run Assis
 		run.Revision = existing.Revision
 		run.WorkItemID = existing.WorkItemID
 		run.Mode = existing.Mode
+		run.EngineVersion = existing.EngineVersion
 		run.ApprovalMode = existing.ApprovalMode
 		run.ExpectedGrantRevision = existing.ExpectedGrantRevision
 	}
@@ -701,8 +705,8 @@ func (s *MemoryStore) transitionWorkItemAndRun(scope Scope, workItemID string, e
 	run.CreatedAt = current.CreatedAt
 	run.ClientRequestID = current.ClientRequestID
 	run.UserMessageID = current.UserMessageID
-	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.ApprovalMode != current.ApprovalMode {
-		return fmt.Errorf("%w: immutable assistant run work item, mode, or approval mode", ErrAssistantRunConflict)
+	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.EngineVersion != current.EngineVersion || run.ApprovalMode != current.ApprovalMode {
+		return fmt.Errorf("%w: immutable assistant run work item, mode, engine version, or approval mode", ErrAssistantRunConflict)
 	}
 	run.ExpectedGrantRevision = current.ExpectedGrantRevision
 	run.WorkItemID = current.WorkItemID
@@ -901,8 +905,8 @@ func (s *MemoryStore) SaveAssistantRunSnapshot(_ context.Context, scope Scope, r
 	run.CreatedAt = current.CreatedAt
 	run.ClientRequestID = current.ClientRequestID
 	run.UserMessageID = current.UserMessageID
-	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.ApprovalMode != current.ApprovalMode {
-		return fmt.Errorf("%w: immutable assistant run work item, mode, or approval mode", ErrAssistantRunConflict)
+	if run.WorkItemID != current.WorkItemID || run.Mode != current.Mode || run.EngineVersion != current.EngineVersion || run.ApprovalMode != current.ApprovalMode {
+		return fmt.Errorf("%w: immutable assistant run work item, mode, engine version, or approval mode", ErrAssistantRunConflict)
 	}
 	run.ExpectedGrantRevision = current.ExpectedGrantRevision
 	if s.messages[scope] == nil {
@@ -1012,6 +1016,56 @@ func (s *MemoryStore) LatestAssistantRun(_ context.Context, scope Scope) (Assist
 	return cloneAssistantRun(latest), nil
 }
 
+func (s *MemoryStore) AppendAssistantRunEvent(_ context.Context, scope Scope, event AssistantRunEvent, expectedSequence int64) (AssistantRunEvent, error) {
+	event, err := prepareAssistantRunEvent(scope, event, expectedSequence)
+	if err != nil {
+		return AssistantRunEvent{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.assistantRuns[scope][event.RunID]; !ok {
+		return AssistantRunEvent{}, fmt.Errorf("%w: %q", ErrAssistantRunNotFound, event.RunID)
+	}
+	if s.assistantEvents[scope] == nil {
+		s.assistantEvents[scope] = map[string][]AssistantRunEvent{}
+	}
+	events := s.assistantEvents[scope][event.RunID]
+	currentSequence := int64(0)
+	if len(events) > 0 {
+		currentSequence = events[len(events)-1].Sequence
+	}
+	if currentSequence != expectedSequence {
+		return AssistantRunEvent{}, fmt.Errorf("%w: assistant run %q is at sequence %d, expected %d", ErrAssistantRunEventConflict, event.RunID, currentSequence, expectedSequence)
+	}
+	s.assistantEvents[scope][event.RunID] = append(events, cloneAssistantRunEvent(event))
+	return cloneAssistantRunEvent(event), nil
+}
+
+func (s *MemoryStore) ListAssistantRunEvents(_ context.Context, scope Scope, runID string, afterSequence int64, limit int) ([]AssistantRunEvent, error) {
+	runID, err := validateAssistantRunEventList(scope, runID, afterSequence)
+	if err != nil {
+		return nil, err
+	}
+	limit = normalizeLimit(limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.assistantRuns[scope][runID]; !ok {
+		return nil, fmt.Errorf("%w: %q", ErrAssistantRunNotFound, runID)
+	}
+	stored := s.assistantEvents[scope][runID]
+	events := make([]AssistantRunEvent, 0, min(len(stored), limit))
+	for _, event := range stored {
+		if event.Sequence <= afterSequence {
+			continue
+		}
+		events = append(events, cloneAssistantRunEvent(event))
+		if len(events) == limit {
+			break
+		}
+	}
+	return events, nil
+}
+
 func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) error {
 	if err := scope.validate(); err != nil {
 		return err
@@ -1020,6 +1074,7 @@ func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) erro
 	defer s.mu.Unlock()
 	delete(s.messages, scope)
 	delete(s.assistantRuns, scope)
+	delete(s.assistantEvents, scope)
 	delete(s.workItems, scope)
 	delete(s.bootstrapPermits, scope)
 	delete(s.approvalModes, scope)
@@ -1045,11 +1100,15 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 		for id, run := range runs {
 			if run.WorkItemID == "" && assistantRunStatusTerminal(run.Status) && run.UpdatedAt.Before(before) {
 				delete(runs, id)
+				delete(s.assistantEvents[scope], id)
 				deleted++
 			}
 		}
 		if len(runs) == 0 {
 			delete(s.assistantRuns, scope)
+		}
+		if len(s.assistantEvents[scope]) == 0 {
+			delete(s.assistantEvents, scope)
 		}
 	}
 	return deleted, nil
@@ -1086,6 +1145,11 @@ func cloneAssistantRun(run AssistantRun) AssistantRun {
 	return run
 }
 
+func cloneAssistantRunEvent(event AssistantRunEvent) AssistantRunEvent {
+	event.Payload = cloneRawMessage(event.Payload)
+	return event
+}
+
 func cloneAssistantWorkItem(item AssistantWorkItem) AssistantWorkItem {
 	item.PlanGrant = cloneRawMessage(item.PlanGrant)
 	item.ExecutionPlan = cloneRawMessage(item.ExecutionPlan)
@@ -1107,6 +1171,7 @@ func prepareMessage(scope Scope, msg Message) Message {
 }
 
 func prepareAssistantRun(scope Scope, run AssistantRun) AssistantRun {
+	run.EngineVersion = strings.TrimSpace(run.EngineVersion)
 	run.ApprovalMode, _ = NormalizeAssistantApprovalMode(run.ApprovalMode)
 	if run.CreatedAt.IsZero() {
 		run.CreatedAt = time.Now().UTC()
@@ -1169,6 +1234,9 @@ func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) 
 	if _, err := NormalizeAssistantApprovalMode(run.ApprovalMode); err != nil {
 		return err
 	}
+	if err := validateAssistantRunEngineContract(run); err != nil {
+		return err
+	}
 	if user.ID == "" || assistant.ID == "" {
 		return fmt.Errorf("user and assistant message ids are required")
 	}
@@ -1191,7 +1259,7 @@ func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) 
 		return fmt.Errorf("assistant run active message id must match assistant message")
 	}
 	switch run.Mode {
-	case AssistantRunModeDiscussion, AssistantRunModeAdaptive:
+	case AssistantRunModeDefault, AssistantRunModePlan, AssistantRunModeDiscussion, AssistantRunModeAdaptive:
 		if run.WorkItemID != "" || user.WorkItemID != "" || assistant.WorkItemID != "" {
 			return fmt.Errorf("discussion and adaptive runs cannot have a work item")
 		}
@@ -1208,8 +1276,26 @@ func validateNewAssistantRun(user Message, assistant Message, run AssistantRun) 
 	return nil
 }
 
+func validateAssistantRunEngineContract(run AssistantRun) error {
+	v2 := strings.TrimSpace(run.EngineVersion) == AssistantEngineVersionV2
+	switch run.Mode {
+	case AssistantRunModeDefault, AssistantRunModePlan:
+		if !v2 {
+			return fmt.Errorf("default and plan assistant runs require engine version %q", AssistantEngineVersionV2)
+		}
+	case AssistantRunModeDiscussion, AssistantRunModeAdaptive, AssistantRunModeNew, AssistantRunModeContinue:
+		if v2 {
+			return fmt.Errorf("assistant engine version %q requires default or plan mode", AssistantEngineVersionV2)
+		}
+	}
+	return nil
+}
+
 func validateAssistantRunSnapshot(run AssistantRun, messages []Message, expectedRevision int64) error {
 	if _, err := NormalizeAssistantApprovalMode(run.ApprovalMode); err != nil {
+		return err
+	}
+	if err := validateAssistantRunEngineContract(run); err != nil {
 		return err
 	}
 	if run.ID == "" || run.Status == "" {

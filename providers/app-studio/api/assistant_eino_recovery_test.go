@@ -474,6 +474,16 @@ func TestProjectEinoAssistantModelRetryConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "empty tool-free response retries",
+			retryCtx: &adk.RetryContext{
+				RetryAttempt:  1,
+				InputMessages: input,
+				OutputMessage: schema.AssistantMessage(" \n ", nil),
+			},
+			wantRetry:  true,
+			wantReason: "empty assistant response",
+		},
+		{
 			name: "discussion prose is accepted",
 			req: projectAssistantRunRequest{
 				TurnProfile: projectAssistantTurnProfileDiscussion,

@@ -69,9 +69,13 @@ type PatchProjectMemoryRequest struct {
 }
 
 type CreateProjectMessageRequest struct {
-	Role             string `json:"role,omitempty"`
-	Content          string `json:"content"`
-	ClientRequestID  string `json:"clientRequestID,omitempty"`
+	Role              string `json:"role,omitempty"`
+	Content           string `json:"content"`
+	ClientRequestID   string `json:"clientRequestID,omitempty"`
+	CollaborationMode string `json:"collaborationMode,omitempty"`
+
+	// Legacy v1 fields are decoded only so the server can fail explicitly
+	// instead of silently interpreting a stale portal request as a v2 turn.
 	AssistantAction  string `json:"assistantAction,omitempty"`
 	WorkItemID       string `json:"workItemID,omitempty"`
 	WorkItemRevision int64  `json:"workItemRevision,omitempty"`
@@ -99,6 +103,15 @@ func (s *Server) consumeProjectInitialBootstrap(ctx context.Context, scope store
 	)
 }
 
+type projectAssistantCollaborationMode string
+
+const (
+	projectAssistantCollaborationModeDefault projectAssistantCollaborationMode = "default"
+	projectAssistantCollaborationModePlan    projectAssistantCollaborationMode = "plan"
+)
+
+// projectAssistantAction is retained only to decode and present engine-v1
+// routing audits. New requests reject this contract and never route through it.
 type projectAssistantAction string
 
 const (
@@ -108,35 +121,45 @@ const (
 	projectAssistantActionContinue projectAssistantAction = "continue"
 )
 
-// assistantAction validates the explicit execution intent at the HTTP
-// boundary. Omitting it lets the server route clear mutation requests into a
-// WorkItem while ordinary conversation remains non-mutating.
-func (r CreateProjectMessageRequest) assistantAction() (projectAssistantAction, error) {
-	action := projectAssistantAction(strings.ToLower(strings.TrimSpace(r.AssistantAction)))
-	if action == "" {
-		action = projectAssistantActionAuto
-	}
-	switch action {
-	case projectAssistantActionAuto:
-		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
-			return "", newValidationError("auto does not accept a work item")
-		}
-	case projectAssistantActionAsk:
-		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
-			return "", newValidationError("ask does not accept a work item")
-		}
-	case projectAssistantActionBuild:
-		if strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
-			return "", newValidationError("build creates a new work item")
-		}
-	case projectAssistantActionContinue:
-		if strings.TrimSpace(r.WorkItemID) == "" || r.WorkItemRevision <= 0 {
-			return "", newValidationError("continue requires workItemID and workItemRevision")
-		}
+func projectAssistantCollaborationModeForRun(run store.AssistantRun) (projectAssistantCollaborationMode, bool) {
+	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(string(run.Mode))))
+	switch mode {
+	case projectAssistantCollaborationModeDefault, projectAssistantCollaborationModePlan:
+		return mode, true
 	default:
-		return "", newValidationError("assistantAction must be auto, ask, build, or continue")
+		return "", false
 	}
-	return action, nil
+}
+
+func projectAssistantRunUsesV2(run *store.AssistantRun) bool {
+	if run == nil || strings.TrimSpace(run.EngineVersion) != store.AssistantEngineVersionV2 {
+		return false
+	}
+	_, ok := projectAssistantCollaborationModeForRun(*run)
+	return ok
+}
+
+func projectAssistantRequestUsesV2(req projectAssistantRunRequest) bool {
+	return projectAssistantRunUsesV2(req.AssistantRun)
+}
+
+// collaborationMode is the complete v2 turn-routing contract. It is selected
+// by the client and remains fixed for the run; prompt text and model output
+// cannot promote a Plan turn into a mutating turn.
+func (r CreateProjectMessageRequest) collaborationMode() (projectAssistantCollaborationMode, error) {
+	if strings.TrimSpace(r.AssistantAction) != "" || strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
+		return "", newValidationError("assistantAction, workItemID, and workItemRevision belong to the retired assistant engine; reload App Studio and start a fresh turn")
+	}
+	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(r.CollaborationMode)))
+	if mode == "" {
+		mode = projectAssistantCollaborationModeDefault
+	}
+	switch mode {
+	case projectAssistantCollaborationModeDefault, projectAssistantCollaborationModePlan:
+		return mode, nil
+	default:
+		return "", newValidationError("collaborationMode must be default or plan")
+	}
 }
 
 type ProjectView struct {
@@ -178,6 +201,7 @@ type ProjectRepositoryView struct {
 	Message       string                        `json:"message,omitempty"`
 	Ready         bool                          `json:"ready,omitempty"`
 	Commits       []ProjectRepositoryCommitView `json:"commits,omitempty"`
+	commitsErr    error
 }
 
 type ProjectRepositoryCommitView struct {
@@ -212,12 +236,13 @@ type projectToolCallStreamEvent struct {
 }
 
 type projectAssistantMutation struct {
-	Path           string `json:"path,omitempty"`
-	Additions      int    `json:"additions,omitempty"`
-	Deletions      int    `json:"deletions,omitempty"`
-	Replacements   int    `json:"replacements,omitempty"`
-	Patch          string `json:"patch,omitempty"`
-	PatchTruncated bool   `json:"patchTruncated,omitempty"`
+	Path           string   `json:"path,omitempty"`
+	Paths          []string `json:"paths,omitempty"`
+	Additions      int      `json:"additions,omitempty"`
+	Deletions      int      `json:"deletions,omitempty"`
+	Replacements   int      `json:"replacements,omitempty"`
+	Patch          string   `json:"patch,omitempty"`
+	PatchTruncated bool     `json:"patchTruncated,omitempty"`
 }
 
 const projectAPIInitializingMessage = "App Studio is still initializing for this workspace. Try again shortly."
@@ -650,6 +675,45 @@ func validProjectSharingMode(mode aiv1alpha1.ProjectSharingMode) bool {
 	}
 }
 
+func (s *Server) reserveProjectExternalOperation(
+	w http.ResponseWriter,
+	ctx context.Context,
+	id identity,
+	p *aiv1alpha1.Project,
+	action string,
+) (func(), bool) {
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	if s.store != nil {
+		if err := s.reconcileOrphanedProjectAssistantRun(ctx, scope); err != nil {
+			writeStatus(w, http.StatusInternalServerError, "InternalError", "check assistant activity: "+err.Error())
+			return nil, false
+		}
+	}
+	release, err := s.projectAssistantSupervisor().Reserve(scope)
+	if err != nil {
+		if errors.Is(err, store.ErrAssistantRunConflict) {
+			writeStatus(w, http.StatusConflict, "Conflict", "wait for or stop the active assistant run before "+action)
+			return nil, false
+		}
+		writeProjectError(w, err)
+		return nil, false
+	}
+	if s.store != nil {
+		run, latestErr := s.store.LatestAssistantRun(ctx, scope)
+		switch {
+		case latestErr == nil && !assistantRunTerminal(run.Status):
+			release()
+			writeStatus(w, http.StatusConflict, "Conflict", "resolve or stop the active assistant run before "+action)
+			return nil, false
+		case latestErr != nil && !errors.Is(latestErr, store.ErrAssistantRunNotFound):
+			release()
+			writeStatus(w, http.StatusInternalServerError, "InternalError", "check assistant activity: "+latestErr.Error())
+			return nil, false
+		}
+	}
+	return release, true
+}
+
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	c, id, ok := s.requireProjectClient(w, r)
 	if !ok {
@@ -661,6 +725,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
+	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
+	releaseAssistantReservation, ok := s.reserveProjectExternalOperation(w, r.Context(), id, p, "deleting this project")
+	if !ok {
+		return
+	}
+	defer releaseAssistantReservation()
 	if err := s.deleteProjectProviderResources(r.Context(), c, p, id); err != nil {
 		writeProjectError(w, err)
 		return
@@ -685,14 +755,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.store != nil {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
-		if err := s.store.DeleteProjectMessages(cleanupCtx, projectMessageScope(id.orgUUID, id.workspaceUUID, p)); err != nil {
+		if err := s.store.DeleteProjectMessages(cleanupCtx, messageScope); err != nil {
 			klog.FromContext(r.Context()).Error(err, "delete project messages", "project", name)
 		}
 		cancelCleanup()
 	}
 	if s.workspaces != nil {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
-		if err := s.workspaces.DeleteSnapshots(cleanupCtx, projectWorkspaceScope(id, p.Name)); err != nil {
+		if err := s.workspaces.DeleteSnapshots(cleanupCtx, projectWorkspaceScope(id, p)); err != nil {
 			klog.FromContext(r.Context()).Error(err, "delete project workspace snapshots", "project", name)
 		}
 		cancelCleanup()
@@ -748,6 +818,10 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.TrimSpace(run.ActiveMessageID) == "" {
 		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
+		return
+	}
+	if !projectAssistantRunUsesV2(&run) {
+		writeProjectError(w, newValidationError("this legacy assistant run is view-only; start a fresh Default or Plan turn"))
 		return
 	}
 	if _, _, err := preflightProjectAssistantResume(run, req); err != nil {

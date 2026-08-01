@@ -627,6 +627,34 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 			if _, wrapped := askTool.(approvaltool.InvokableApprovableTool); !wrapped {
 				t.Fatal("always-ask runtime tool is missing its approval wrapper")
 			}
+
+			ledger := newProjectAssistantRunEventLedger(store.NewMemoryStore(), store.Scope{
+				OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo",
+			}, "run-v2")
+			durableAuto, err := tt.new(projectAssistantWorkflowRunContext{
+				ApprovalMode: store.AssistantApprovalModeAutoApprove,
+				EventLedger:  ledger,
+			})
+			if err != nil {
+				t.Fatalf("create durable auto-approve tool: %v", err)
+			}
+			if _, ok := durableAuto.(projectAssistantDurableGraphTool); !ok {
+				t.Fatalf("durable auto-approve tool = %T, want ledger wrapper", durableAuto)
+			}
+			durableAsk, err := tt.new(projectAssistantWorkflowRunContext{
+				ApprovalMode: store.AssistantApprovalModeAlwaysAsk,
+				EventLedger:  ledger,
+			})
+			if err != nil {
+				t.Fatalf("create durable always-ask tool: %v", err)
+			}
+			approval, ok := durableAsk.(approvaltool.InvokableApprovableTool)
+			if !ok {
+				t.Fatalf("durable always-ask tool = %T, want approval wrapper", durableAsk)
+			}
+			if _, ok := approval.InvokableTool.(projectAssistantDurableGraphTool); !ok {
+				t.Fatalf("approval inner tool = %T, want ledger inside approval boundary", approval.InvokableTool)
+			}
 		})
 	}
 }

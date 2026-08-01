@@ -24,16 +24,209 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	openaimodel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/patchtoolcalls"
+	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"google.golang.org/genai"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"github.com/faroshq/provider-app-studio/workspace"
 )
+
+const (
+	projectEinoAssistantModelFirstResponseTimeout = 60 * time.Second
+	projectEinoAssistantModelStreamIdleTimeout    = 60 * time.Second
+)
+
+type projectEinoAssistantModelTimeoutError struct {
+	Code string
+}
+
+func (e *projectEinoAssistantModelTimeoutError) Error() string {
+	if e != nil && e.Code == "model_stream_idle_timeout" {
+		return "model_stream_idle_timeout: assistant model stream produced no new data for 60 seconds"
+	}
+	return "model_first_response_timeout: assistant model produced no first response for 60 seconds"
+}
+
+func (*projectEinoAssistantModelTimeoutError) Timeout() bool   { return true }
+func (*projectEinoAssistantModelTimeoutError) Temporary() bool { return true }
+
+type projectEinoAssistantBoundedModel struct {
+	einomodel.BaseChatModel
+
+	firstResponseTimeout time.Duration
+	streamIdleTimeout    time.Duration
+}
+
+func projectEinoAssistantBoundModel(base einomodel.BaseChatModel) einomodel.BaseChatModel {
+	if base == nil {
+		return nil
+	}
+	return &projectEinoAssistantBoundedModel{
+		BaseChatModel:        base,
+		firstResponseTimeout: projectEinoAssistantModelFirstResponseTimeout,
+		streamIdleTimeout:    projectEinoAssistantModelStreamIdleTimeout,
+	}
+}
+
+func (m *projectEinoAssistantBoundedModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.Message, error) {
+	type result struct {
+		message *schema.Message
+		err     error
+	}
+	modelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resultCh := make(chan result)
+	go func() {
+		message, err := m.BaseChatModel.Generate(modelCtx, input, opts...)
+		select {
+		case resultCh <- result{message: message, err: err}:
+		case <-modelCtx.Done():
+		}
+	}()
+	timer := time.NewTimer(m.firstResponseTimeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, &projectEinoAssistantModelTimeoutError{Code: "model_first_response_timeout"}
+	case result := <-resultCh:
+		return result.message, result.err
+	}
+}
+
+func (m *projectEinoAssistantBoundedModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	type result struct {
+		reader *schema.StreamReader[*schema.Message]
+		err    error
+	}
+	started := time.Now()
+	modelCtx, cancel := context.WithCancel(ctx)
+	resultCh := make(chan result)
+	go func() {
+		reader, err := m.BaseChatModel.Stream(modelCtx, input, opts...)
+		select {
+		case resultCh <- result{reader: reader, err: err}:
+		case <-modelCtx.Done():
+			if reader != nil {
+				reader.Close()
+			}
+		}
+	}()
+	timer := time.NewTimer(m.firstResponseTimeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		cancel()
+		return nil, ctx.Err()
+	case <-timer.C:
+		cancel()
+		return nil, &projectEinoAssistantModelTimeoutError{Code: "model_first_response_timeout"}
+	case result := <-resultCh:
+		if result.err != nil {
+			cancel()
+			return nil, result.err
+		}
+		if result.reader == nil {
+			cancel()
+			return nil, errors.New("assistant model returned no response stream")
+		}
+		remaining := m.firstResponseTimeout - time.Since(started)
+		return projectEinoAssistantBoundedStream(
+			ctx,
+			modelCtx,
+			cancel,
+			result.reader,
+			remaining,
+			m.streamIdleTimeout,
+		), nil
+	}
+}
+
+func projectEinoAssistantBoundedStream(
+	ctx context.Context,
+	modelCtx context.Context,
+	cancel context.CancelFunc,
+	source *schema.StreamReader[*schema.Message],
+	firstResponseTimeout time.Duration,
+	idleTimeout time.Duration,
+) *schema.StreamReader[*schema.Message] {
+	reader, writer := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer cancel()
+		defer source.Close()
+		defer writer.Close()
+		wait := firstResponseTimeout
+		first := true
+		for {
+			if wait <= 0 {
+				writer.Send(nil, &projectEinoAssistantModelTimeoutError{Code: "model_first_response_timeout"})
+				return
+			}
+			type receiveResult struct {
+				message *schema.Message
+				err     error
+			}
+			received := make(chan receiveResult)
+			go func() {
+				message, err := source.Recv()
+				select {
+				case received <- receiveResult{message: message, err: err}:
+				case <-modelCtx.Done():
+				}
+			}()
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				writer.Send(nil, ctx.Err())
+				return
+			case <-modelCtx.Done():
+				timer.Stop()
+				writer.Send(nil, modelCtx.Err())
+				return
+			case <-timer.C:
+				code := "model_stream_idle_timeout"
+				if first {
+					code = "model_first_response_timeout"
+				}
+				writer.Send(nil, &projectEinoAssistantModelTimeoutError{Code: code})
+				return
+			case result := <-received:
+				timer.Stop()
+				if errors.Is(result.err, io.EOF) {
+					return
+				}
+				if result.err != nil {
+					writer.Send(nil, result.err)
+					return
+				}
+				if writer.Send(result.message, nil) {
+					return
+				}
+				first = false
+				wait = idleTimeout
+			}
+		}
+	}()
+	return reader
+}
 
 var projectEinoAssistantSerializedCookiePattern = regexp.MustCompile(
 	`(?i)\\?["']\b(?:set-cookie|cookie)\b\\?["'][ \t]*:[ \t]*\\?["']`,
@@ -112,7 +305,7 @@ func projectEinoAssistantRetryableHTTPStatus(status int) bool {
 
 func projectEinoAssistantModelRetryConfig(
 	_ projectAssistantRunRequest,
-	_ *projectEinoAssistantRunState,
+	runState *projectEinoAssistantRunState,
 ) *adk.ModelRetryConfig {
 	return &adk.ModelRetryConfig{
 		MaxRetries: 2,
@@ -123,13 +316,59 @@ func projectEinoAssistantModelRetryConfig(
 			if retryCtx == nil || ctx.Err() != nil {
 				return &adk.RetryDecision{}
 			}
-			if retryCtx.OutputMessage == nil {
+			if retryCtx.Err != nil {
+				// Once any model output exists, do not replay the request: a
+				// partial stream may already contain a user-visible response or a
+				// tool call observed by the callback/audit boundary. Exactly-once
+				// replay is only safe before the first response item.
+				if retryCtx.OutputMessage != nil {
+					return &adk.RetryDecision{}
+				}
+				var timeoutErr *projectEinoAssistantModelTimeoutError
+				if errors.As(retryCtx.Err, &timeoutErr) {
+					if retryCtx.RetryAttempt == 1 {
+						return &adk.RetryDecision{
+							Retry:        true,
+							RejectReason: "model timeout",
+						}
+					}
+					// A model timeout receives exactly one transport retry. The
+					// typed timeout remains the terminal diagnostic afterward.
+					return &adk.RetryDecision{}
+				}
 				if !projectEinoAssistantShouldRetryModelError(retryCtx.Err) {
 					return &adk.RetryDecision{}
 				}
 				return &adk.RetryDecision{
 					Retry:        true,
 					RejectReason: "transient model provider failure",
+				}
+			}
+			if retryCtx.OutputMessage == nil {
+				return &adk.RetryDecision{
+					Retry:        true,
+					RejectReason: "empty assistant response",
+				}
+			}
+			if len(retryCtx.OutputMessage.ToolCalls) > 0 {
+				if _, err := projectEinoAssistantAnalyzeToolBatch(retryCtx.OutputMessage.ToolCalls); err != nil {
+					runState.discardLatestModelToolBatch(retryCtx.OutputMessage.ToolCalls)
+					if projectEinoAssistantHasToolBatchCorrection(retryCtx.InputMessages) {
+						return &adk.RetryDecision{RewriteError: err}
+					}
+					return &adk.RetryDecision{
+						Retry:                 true,
+						ModifiedInputMessages: projectEinoAssistantToolBatchCorrection(retryCtx.InputMessages, err),
+						RejectReason:          "invalid tool batch",
+					}
+				}
+			}
+			if retryCtx.Err == nil &&
+				len(retryCtx.OutputMessage.ToolCalls) == 0 &&
+				strings.TrimSpace(projectEinoAssistantSummaryText(retryCtx.OutputMessage)) == "" {
+				return &adk.RetryDecision{
+					Retry:        true,
+					RejectReason: "empty assistant response",
 				}
 			}
 			return &adk.RetryDecision{}
@@ -140,6 +379,30 @@ func projectEinoAssistantModelRetryConfig(
 func projectEinoAssistantWillRetry(err error) bool {
 	var retryError *adk.WillRetryError
 	return errors.As(err, &retryError)
+}
+
+func projectEinoAssistantPublishRetryStatus(
+	err error,
+	callbacks projectAssistantStreamCallbacks,
+) {
+	if callbacks.OnStatus == nil {
+		return
+	}
+	var retryError *adk.WillRetryError
+	if !errors.As(err, &retryError) {
+		return
+	}
+	reason, _ := retryError.RejectReason().(string)
+	switch reason {
+	case "model timeout":
+		callbacks.OnStatus("Model timed out; retrying 1/1")
+	case "invalid tool batch":
+		callbacks.OnStatus("Model returned an invalid action batch; retrying 1/1")
+	case "empty assistant response":
+		callbacks.OnStatus("Model returned no action; retrying")
+	case "transient model provider failure":
+		callbacks.OnStatus("Model request failed transiently; retrying")
+	}
 }
 
 type projectEinoAssistantSafeToolErrorMiddleware struct {
@@ -204,13 +467,23 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 	lowerReason := strings.ToLower(safeReason)
 	switch {
 	case toolName == projectToolWriteFile && strings.Contains(lowerReason, "create-only"):
-		recovery = " Recovery: do not retry write_file for this existing path. Use apply_patch with a small exact replacement."
+		recovery = " Recovery: do not retry write_file for an existing path. Use apply_patch with a small exact replacement after reading the current file."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "oldtext was not found"):
-		recovery = " Recovery: reread the relevant target section, copy a small unique exact oldText anchor, and retry apply_patch. Do not fall back to write_file."
-	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "oldtext matched"):
-		recovery = " Recovery: add surrounding context so oldText is unique and retry apply_patch. Use replaceAll only when every match should change; do not fall back to write_file."
-	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "patch made no changes"):
-		recovery = " Recovery: choose newText that implements the requested behavior and differs from oldText, then retry apply_patch. Do not verify an unchanged workspace."
+		recovery = " Recovery: reread the relevant target section, copy a small unique exact oldText anchor, and retry. Do not fall back to write_file."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "matched") && strings.Contains(lowerReason, "times"):
+		recovery = " Recovery: add surrounding context so oldText is unique. Use replaceAll only when every match should change; do not fall back to write_file."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "made no changes"):
+		recovery = " Recovery: provide newText that implements the requested behavior and differs from oldText. Do not verify an unchanged workspace."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorContextNotFound)):
+		recovery = " Recovery: reread the named file around the failed hunk, then retry one contextual patch with current unchanged lines and an @@ anchor when helpful."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorContextAmbiguous)):
+		recovery = " Recovery: add more stable unchanged lines or an @@ class/function anchor so the failed hunk matches exactly one location."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorNoChanges)):
+		recovery = " Recovery: revise the contextual patch so it makes the requested change; do not verify an unchanged workspace."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorWorkspaceConflict)):
+		recovery = " Recovery: reread every affected existing file because workspace contents changed during the edit, then build a new contextual patch from current evidence."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorInvalidPatch)):
+		recovery = " Recovery: return one valid *** Begin Patch / *** End Patch envelope using Add File, Update File, Delete File, and optional Move to sections."
 	}
 	return truncateProjectToolInfo("Tool call failed: " + safeReason + recovery)
 }

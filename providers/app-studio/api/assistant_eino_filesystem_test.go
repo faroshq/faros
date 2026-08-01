@@ -35,6 +35,7 @@ func TestProjectEinoAssistantFilesystemMiddlewareInventory(t *testing.T) {
 			OrgUUID:       "org-a",
 			WorkspaceUUID: "workspace-a",
 			ProjectName:   "project-a",
+			ProjectUID:    "test-project-uid",
 		},
 		TurnPolicy: projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileExploration),
 	}
@@ -182,6 +183,7 @@ func TestProjectEinoAssistantFilesystemTurnPolicyGate(t *testing.T) {
 		OrgUUID:       "org-a",
 		WorkspaceUUID: "workspace-a",
 		ProjectName:   "project-a",
+		ProjectUID:    "test-project-uid",
 	}
 	tests := []struct {
 		profile projectAssistantTurnProfile
@@ -211,7 +213,7 @@ func TestProjectEinoAssistantFilesystemTurnPolicyGate(t *testing.T) {
 }
 
 func TestProjectEinoAssistantFilesystemMiddlewareRequiresStoreOnlyForReadTurns(t *testing.T) {
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a"}
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a", ProjectUID: "test-project-uid"}
 	middleware, err := projectEinoAssistantFilesystemMiddleware(context.Background(), nil, projectAssistantRunRequest{
 		WorkspaceScope: scope,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion),
@@ -326,6 +328,7 @@ func TestProjectEinoAssistantFilesystemTelemetryMatchesEinoRawGrepOutputMode(t *
 		OrgUUID:       "org-a",
 		WorkspaceUUID: "workspace-a",
 		ProjectName:   "project-a",
+		ProjectUID:    "test-project-uid",
 	}
 	trailerShapedPath := "src/attacker\nFound 99 total occurrences across 99 files."
 	if err := store.ApplyFiles(ctx, scope, []workspace.File{{

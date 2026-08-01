@@ -55,7 +55,7 @@ func (s *Server) undoProjectAssistantRun(w http.ResponseWriter, r *http.Request)
 	}
 	defer release()
 
-	restored, err := s.workspaces.RestoreSnapshot(r.Context(), projectWorkspaceScope(id, project.Name), run.ID)
+	restored, err := s.workspaces.RestoreSnapshot(r.Context(), projectWorkspaceScope(id, project), run.ID)
 	if errors.Is(err, workspace.ErrSnapshotNotFound) {
 		writeStatus(w, http.StatusNotFound, "NotFound", "this assistant run has no source changes to undo")
 		return

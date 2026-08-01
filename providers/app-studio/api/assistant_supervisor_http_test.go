@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/faroshq/provider-app-studio/store"
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing.T) {
@@ -97,9 +99,11 @@ func TestProjectAssistantMutationTerminalContentExplainsStateConversationally(t 
 	}, true)
 	for _, expected := range []string{
 		"Status: Complete",
-		"The latest app changes are running in the development preview.",
-		"What I verified:",
+		"development preview is operationally reachable",
+		"Operational checks:",
 		"The development runtime is ready.",
+		"Application behavior was not independently verified",
+		"acceptance criteria were not proven",
 	} {
 		if !strings.Contains(complete, expected) {
 			t.Fatalf("complete content = %q, want %q", complete, expected)
@@ -120,7 +124,7 @@ func TestProjectAssistantMutationTerminalContentExplainsStateConversationally(t 
 	}, true)
 	for _, expected := range []string{
 		"Status: Incomplete",
-		"The app is running in the development preview",
+		"development preview is operationally reachable",
 		"requested project work is not finished yet",
 		"repository is still becoming ready",
 		"Finish the remaining project steps",
@@ -131,6 +135,186 @@ func TestProjectAssistantMutationTerminalContentExplainsStateConversationally(t 
 	}
 	if strings.Contains(pending, "initial project objective is incomplete") {
 		t.Fatalf("pending content contains circular blocker: %q", pending)
+	}
+}
+
+func TestProjectAssistantMutationAwareTerminalContentPreservesCompletedAgentSummary(t *testing.T) {
+	evidence := projectAssistantCompletionEvidence{
+		SourceMutationRevision:   4,
+		VerifiedMutationRevision: 4,
+		LatestMutationVerified:   true,
+		VerificationOutcome:      "ready",
+		PlanDefined:              true,
+		PlanComplete:             true,
+	}
+	const summary = "Built the ordering flow and verified it in the development preview."
+	if got := projectAssistantMutationAwareTerminalContent(summary, "", nil, evidence, true); !strings.HasPrefix(got, "Built the ordering flow") || strings.Contains(got, "verified it in the development preview") || !strings.Contains(got, "Application behavior was not independently verified") {
+		t.Fatalf("terminal content = %q, want truthful DeepAgent change summary plus server verification scope", got)
+	}
+
+	got := projectAssistantMutationAwareTerminalContent("", "", nil, evidence, true)
+	if !strings.Contains(got, "Status: Complete") {
+		t.Fatalf("empty completed response fallback = %q, want complete mutation summary", got)
+	}
+
+	got = projectAssistantMutationAwareTerminalContent(summary, "", errors.New("model failed"), evidence, false)
+	if !strings.Contains(got, "Status: Incomplete") {
+		t.Fatalf("failed response content = %q, want incomplete mutation summary", got)
+	}
+}
+
+func TestProjectAssistantEffectAwareTerminalContentDisclosesSuccessfulNonSourceMutations(t *testing.T) {
+	tests := []struct {
+		name   string
+		tool   string
+		result string
+	}{
+		{name: "runtime restart", tool: projectToolRestartRuntime, result: `{"status":"ready"}`},
+		{name: "runtime environment", tool: projectToolSetRuntimeEnv, result: `{"status":"ok"}`},
+		{name: "template selection", tool: projectToolSelectTemplate, result: `{"template":"application"}`},
+		{name: "infrastructure provision", tool: projectToolInfrastructureProvision, result: `{"name":"database"}`},
+		{name: "repository commit", tool: projectToolCommitProjectFiles, result: `{"phase":"Succeeded","commitSHA":"abc123"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runID := "run-terminal-" + strings.ReplaceAll(tt.name, " ", "-")
+			messageStore, scope := newAssistantRunEventLedgerTestStore(t, runID)
+			registry := projectAssistantLocalToolRegistry(nil)
+			spec, ok := registry.Spec(tt.tool)
+			if !ok {
+				spec, ok = projectAssistantMCPToolSpec(projectMCPTool{Name: tt.tool})
+			}
+			if !ok {
+				t.Fatalf("tool spec %q is not configured", tt.tool)
+			}
+			ledger := newProjectAssistantRunEventLedger(messageStore, scope, runID)
+			decision, err := ledger.BeginToolCall(context.Background(), "call-effect", spec, map[string]any{})
+			if err != nil {
+				t.Fatalf("BeginToolCall: %v", err)
+			}
+			if _, err := ledger.FinishToolCall(context.Background(), decision.Token, tt.result, nil); err != nil {
+				t.Fatalf("FinishToolCall: %v", err)
+			}
+
+			server := &Server{store: messageStore}
+			effect, err := server.projectAssistantSuccessfulNonSourceRunEffect(context.Background(), scope, runID)
+			if err != nil {
+				t.Fatalf("successful effect evidence: %v", err)
+			}
+			if !effect {
+				t.Fatal("durable successful non-source effect was not recognized")
+			}
+			got := server.projectAssistantRunTerminalContent(
+				context.Background(),
+				scope,
+				store.AssistantRun{ID: runID, EngineVersion: store.AssistantEngineVersionV2, Mode: store.AssistantRunModeDefault},
+				"Updated the project configuration and confirmed the checkout flow works.",
+				"",
+				nil,
+				projectAssistantCompletionEvidence{},
+				true,
+			)
+			for _, want := range []string{
+				"Updated the project configuration",
+				"Verification scope:",
+				"Application behavior was not independently verified",
+				"acceptance criteria were not proven",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("terminal content = %q, want %q", got, want)
+				}
+			}
+			if strings.Contains(got, "confirmed the checkout flow works") {
+				t.Fatalf("terminal content preserved model behavioral overclaim: %q", got)
+			}
+			if strings.Contains(got, "Operational checks:") {
+				t.Fatalf("non-source terminal content reported source operational verification: %q", got)
+			}
+		})
+	}
+}
+
+func TestProjectAssistantSuccessfulNonSourceRunEffectRejectsNonMutationsAndFailedEffects(t *testing.T) {
+	tests := []struct {
+		name      string
+		spec      projectAssistantToolSpec
+		result    string
+		invokeErr error
+	}{
+		{
+			name:   "blocked runtime action",
+			spec:   projectAssistantToolSpec{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
+			result: `{"status":"blocked","summary":"No runtime is deployed."}`,
+		},
+		{
+			name:   "failed runtime action",
+			spec:   projectAssistantToolSpec{Name: projectToolSetRuntimeEnv, Risk: projectAssistantToolRiskRuntime},
+			result: "Tool call failed: runtime update failed",
+		},
+		{
+			name:      "errored runtime action",
+			spec:      projectAssistantToolSpec{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
+			result:    "runtime restart failed",
+			invokeErr: errors.New("runtime restart failed"),
+		},
+		{
+			name:   "plan approval",
+			spec:   projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
+			result: `{"status":"approved"}`,
+		},
+		{
+			name:   "runtime read",
+			spec:   projectAssistantToolSpec{Name: projectToolGetRuntimeStatus, Risk: projectAssistantToolRiskRead},
+			result: `{"status":"ready"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runID := "run-terminal-rejected-" + strings.ReplaceAll(tt.name, " ", "-")
+			messageStore, scope := newAssistantRunEventLedgerTestStore(t, runID)
+			ledger := newProjectAssistantRunEventLedger(messageStore, scope, runID)
+			decision, err := ledger.BeginToolCall(context.Background(), "call-effect", tt.spec, map[string]any{})
+			if err != nil {
+				t.Fatalf("BeginToolCall: %v", err)
+			}
+			if _, err := ledger.FinishToolCall(context.Background(), decision.Token, tt.result, tt.invokeErr); err != nil {
+				t.Fatalf("FinishToolCall: %v", err)
+			}
+			server := &Server{store: messageStore}
+			effect, err := server.projectAssistantSuccessfulNonSourceRunEffect(context.Background(), scope, runID)
+			if err != nil {
+				t.Fatalf("successful effect evidence: %v", err)
+			}
+			if effect {
+				t.Fatal("non-mutation or unsuccessful effect was recognized as a successful mutation")
+			}
+		})
+	}
+}
+
+func TestProjectAssistantTruthfulModelSummaryRejectsBehavioralOverclaims(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  string
+	}{
+		{input: "Built the ordering flow and verified it in the development preview.", want: "Built the ordering flow"},
+		{input: "Acceptance criteria passed in the rendered preview.", want: ""},
+		{input: "Updated the API handler and unit tests passed.", want: "Updated the API handler"},
+		{input: "Updated the API handler; application behavior was not independently verified.", want: "Updated the API handler"},
+		{input: "Application behavior was not independently verified, but the acceptance criteria passed.", want: ""},
+		{input: "The preview renders correctly.", want: ""},
+		{input: "The checkout flow succeeded.", want: ""},
+		{input: "The app behaves as requested.", want: ""},
+		{input: "Validated all acceptance criteria in the preview.", want: ""},
+		{input: "Tested the development preview end to end.", want: ""},
+		{input: "Observed the checkout flow complete successfully.", want: ""},
+		{input: "Fixed the checkout flow and updated its error message.", want: "Fixed the checkout flow and updated its error message."},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := projectAssistantTruthfulModelSummary(tt.input); got != tt.want {
+				t.Fatalf("truthful summary = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -713,7 +897,7 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 			}
 			next := *current
 			next.Revision++
-			message.Metadata = projectAssistantDurableMetadataForTransition(next, status, provisional, server.projectAssistantPreviewRefreshNeeded(ctx, projectWorkspaceScope(identity{}, scope.ProjectName), "", false, toolCalls), toolCalls, nil)
+			message.Metadata = projectAssistantDurableMetadataForTransition(next, status, provisional, server.projectAssistantPreviewRefreshNeeded(ctx, workspace.Scope{}, "", false, toolCalls), toolCalls, nil)
 		}); err != nil {
 			t.Fatalf("UpdateSnapshot: %v", err)
 		}

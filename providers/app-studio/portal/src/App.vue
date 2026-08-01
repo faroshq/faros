@@ -25,6 +25,7 @@ import {
   Send,
   Settings2,
   Square,
+  TriangleAlert,
   Trash2,
   Users,
   Wrench,
@@ -48,13 +49,16 @@ import { buildAssistantTrace, type AssistantTraceBlock } from './assistantTrace'
 import AssistantPlanPopover from './AssistantPlanPopover.vue'
 import ApprovalModePicker from './ApprovalModePicker.vue'
 import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
+import PreviewActionsMenu from './PreviewActionsMenu.vue'
 import {
   ConversationRunController,
   abortedConversationSnapshot,
   acceptScopedConversationSnapshot,
   assistantRunStartPayload,
   assistantRunStartFingerprint,
+  assistantRunIsLegacyViewOnly,
   assistantRunMatchesStartRequest,
+  assistantRunRequiresLiveControls,
   assistantRunTerminal,
   firstProjectStartPlan,
   firstProjectSubmissionAccepted,
@@ -63,6 +67,7 @@ import {
   firstProjectSubmissionWithProject,
   mergeConversationSnapshot,
   newFirstProjectSubmission,
+  normalizeAssistantRunStatus,
   normalizeSnapshotMessage,
   orderConversationMessages,
   replaceOptimisticUserMessage,
@@ -295,9 +300,12 @@ const providers = ref<ProviderItem[]>([])
 const selected = ref<Project | null>(null)
 const messages = ref<ProjectMessageView[]>([])
 const conversationMessages = computed(() => projectMessagesForConversation(messages.value))
+const legacyAssistantRunViewOnly = ref(false)
 const pendingApproval = computed<PendingApprovalView | null>(() => {
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const message = messages.value[i]
+  const currentMessages = messages.value
+  if (!assistantRunRequiresLiveControls(activeAssistantRun)) return null
+  for (let i = currentMessages.length - 1; i >= 0; i--) {
+    const message = currentMessages[i]
     const interrupt = message.interrupt
     if (interrupt?.status === 'pending' && interrupt.kind !== 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
       return { message, interrupt }
@@ -306,8 +314,10 @@ const pendingApproval = computed<PendingApprovalView | null>(() => {
   return null
 })
 const pendingFollowUp = computed<PendingFollowUpView | null>(() => {
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const message = messages.value[i]
+  const currentMessages = messages.value
+  if (!assistantRunRequiresLiveControls(activeAssistantRun)) return null
+  for (let i = currentMessages.length - 1; i >= 0; i--) {
+    const message = currentMessages[i]
     const interrupt = message.interrupt
     if (interrupt?.status === 'pending' && interrupt.kind === 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
       return { message, interrupt }
@@ -334,7 +344,7 @@ const projectSettingsError = ref<string | null>(null)
 const deleteProjectTarget = ref<Project | null>(null)
 const deletingProject = ref(false)
 const prompt = ref('')
-const assistantIntent = ref<AssistantResponseMode>('auto')
+const assistantIntent = ref<AssistantResponseMode>('default')
 const approvalMode = ref<ProjectAssistantApprovalMode>('auto_approve')
 const approvalModeLoading = ref(false)
 const approvalModeSaving = ref(false)
@@ -379,7 +389,6 @@ const importSelectedRepository = ref('')
 const importBusy = ref(false)
 const importError = ref<string | null>(null)
 const developmentTemplates = ref<DevelopmentTemplate[]>([])
-const developmentTemplateSelection = ref('')
 const developmentTemplateBusy = ref(false)
 const developmentHydrateBusy = ref(false)
 const workbench = ref(createDefaultWorkbenchState())
@@ -540,6 +549,7 @@ watch(activePlanMessage, (current, previous) => {
 })
 const conversationWorkingLabel = computed(() => {
   const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
+  if (legacyAssistantRunViewOnly.value) return ''
   if (activeAssistantRun?.status === 'stopping') return 'Stopping'
   if (activeAssistantRun?.status === 'pending_permission') return 'Waiting for approval'
   if (activeAssistantRun?.status === 'pending_input') return 'Waiting for your answer'
@@ -947,7 +957,6 @@ watch(
   () => selected.value?.name,
   () => {
     void previewConsoleController.disconnect()
-    developmentTemplateSelection.value = selected.value?.template ?? ''
     developmentSyncStatus.value = null
     developmentSyncError.value = null
     developmentPreviewAuthorizationError.value = null
@@ -1086,6 +1095,7 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
+      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1096,6 +1106,7 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
+      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1112,6 +1123,7 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
+      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1243,10 +1255,9 @@ async function importRepositoryProject() {
 // applyDevelopmentTemplate binds (or switches) the project's development
 // environment onto the selected template; the backend re-provisions in
 // development mode and re-syncs the workspace.
-async function applyDevelopmentTemplate() {
+async function applyDevelopmentTemplate(template: string) {
   const projectName = selected.value?.name
-  const template = developmentTemplateSelection.value
-  if (!projectName || !template || developmentTemplateBusy.value) return
+  if (!projectName || !template || messageStreaming.value || developmentTemplateBusy.value) return
   // Switching templates re-provisions the development environment; the
   // workspace and git repository survive, but the running instance does not.
   if (!(await confirmDialog({ title: `Switch to the "${template}" template?`, message: 'The current development instance will be replaced (your code stays in the workspace and git).', confirmLabel: 'Switch' }))) return
@@ -1427,7 +1438,7 @@ onBeforeUnmount(clearPromotionPoll)
 // git repository (the durable source of truth) and re-syncs the runtime.
 async function hydrateDevelopmentWorkspace() {
   const projectName = selected.value?.name
-  if (!projectName || developmentHydrateBusy.value) return
+  if (!projectName || messageStreaming.value || developmentHydrateBusy.value) return
   // Hydration overwrites workspace files with the repository's tree.
   if (!(await confirmDialog({ title: 'Load the workspace from git?', message: 'Files in the workspace will be overwritten with the repository versions (workspace-only files are kept).', confirmLabel: 'Load' }))) return
   developmentHydrateBusy.value = true
@@ -1888,6 +1899,7 @@ async function openProject(name: string, updateURL = true) {
     activeAssistantSubscription?.abort()
     activeAssistantRun = null
     activeAssistantProject = ''
+    legacyAssistantRunViewOnly.value = false
     messageStreaming.value = false
   }
   error.value = null
@@ -1952,6 +1964,31 @@ function selectAssistantResponseMode(mode: AssistantResponseMode) {
   assistantIntent.value = mode
 }
 
+function assistantRunForMessage(messageID: string): AssistantRun | undefined {
+  return Object.values(assistantRunRevisions).find((run) => run.activeMessageID === messageID)
+}
+
+function canImplementPlan(message: ProjectMessageView): boolean {
+  const run = assistantRunForMessage(message.id)
+  const lastConversationMessage = conversationMessages.value[conversationMessages.value.length - 1]
+  return message.role === 'assistant' &&
+    lastConversationMessage?.id === message.id &&
+    run?.engineVersion === 'v2' &&
+    run.mode === 'plan' &&
+    normalizeAssistantRunStatus(run.status) === 'completed' &&
+    !messageStreaming.value &&
+    !busy.value &&
+    !assistantResumeBusy.value
+}
+
+async function implementPlan(message: ProjectMessageView) {
+  if (!canImplementPlan(message)) return
+  assistantIntent.value = 'default'
+  prompt.value = 'Implement the plan above.'
+  await nextTick()
+  await sendMessage()
+}
+
 function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName = selected.value?.name ?? '', source: 'stream' | 'start' | 'latest' = 'stream', expectedRunID = ''): { accepted: boolean; current: AssistantRun | undefined } {
   const selectedProject = selected.value?.name ?? ''
   const normalized = { ...snapshot, message: normalizeSnapshotMessage(snapshot.message) }
@@ -1965,21 +2002,26 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
   if (current.messages !== messages.value) messages.value = current.messages.map(toProjectMessageView)
   Object.assign(assistantRunRevisions, current.runs)
   const acceptedTerminal = assistantRunTerminal(normalized.run.status) && (!previousRun || !assistantRunTerminal(previousRun.status) || normalized.run.revision > previousRun.revision)
+  const requiresLiveControls = assistantRunRequiresLiveControls(normalized.run)
   activeAssistantRun = normalized.run
+  legacyAssistantRunViewOnly.value = assistantRunIsLegacyViewOnly(normalized.run)
   if (!assistantRunTerminal(normalized.run.status) && normalized.run.approvalMode) {
     approvalMode.value = normalized.run.approvalMode
   }
   activeAssistantProject = projectName
-  assistantRunController.markHealthySnapshot(normalized.run.revision)
-  messageStreaming.value = !assistantRunTerminal(normalized.run.status)
+  if (requiresLiveControls) assistantRunController.markHealthySnapshot(normalized.run.revision)
+  else assistantRunController.disconnect()
+  messageStreaming.value = requiresLiveControls
   if (assistantRunTerminal(normalized.run.status) && acceptedTerminal) {
     conversationStatus.value = ''
     assistantRunController.disconnect()
     void loadCheckpoints()
     if (normalized.message.metadata?.previewRefreshNeeded === true) void refreshDevelopmentPreviewFrame('Preview refreshed')
-  } else if (!assistantRunTerminal(normalized.run.status)) {
+  } else if (requiresLiveControls) {
     const status = normalized.message.metadata?.assistantStatus
     conversationStatus.value = typeof status === 'string' ? status : 'Working'
+  } else {
+    conversationStatus.value = ''
   }
   return accepted
 }
@@ -1990,7 +2032,7 @@ async function recoverAssistantConversation(projectName: string): Promise<{ acce
   const snapshot = await api.getLatestAssistantRun(props.ctx, projectName)
   if (!snapshot || selected.value?.name !== projectName) return undefined
   const applied = applyAssistantSnapshot(snapshot, projectName, 'latest', expectedRunID)
-  if (applied.accepted && applied.current && !assistantRunTerminal(applied.current.status)) {
+  if (applied.accepted && assistantRunRequiresLiveControls(applied.current)) {
     assistantRunController.start(applied.current.id, applied.current.revision)
   }
   return applied
@@ -2028,6 +2070,7 @@ function applyAssistantInterrupt(projectName: string, assistantMessageID: string
 }
 
 async function syncDevelopmentPreview() {
+	if (messageStreaming.value) return
 	const projectName = selected.value?.name
 	await syncDevelopmentPreviewForProject(projectName, 'Synced and refreshed preview')
 }
@@ -2404,7 +2447,7 @@ async function sendMessage() {
     : null
   const startOperation = {
     content,
-    assistantAction: firstProjectPending ? 'auto' as const : assistantIntent.value,
+    collaborationMode: firstProjectPending ? 'default' as const : assistantIntent.value,
   }
   const submissionFingerprint = assistantRunStartFingerprint(projectName, startOperation)
   const clientRequestID = firstProjectPending
@@ -2644,12 +2687,16 @@ function projectMessageProgress(message: ProjectMessage): AssistantProgress | un
   return parseAssistantProgress(message.metadata?.assistantProgress)
 }
 
-function assistantProgressCompleted(message: ProjectMessageView): boolean {
-  return message.metadata?.assistantStatus === 'Completed'
+function projectMessageAssistantStatus(message: ProjectMessage): ReturnType<typeof normalizeAssistantRunStatus> {
+  return normalizeAssistantRunStatus(message.metadata?.assistantStatus) ?? normalizeAssistantRunStatus(message.metadata?.status)
+}
+
+function assistantProgressClosed(message: ProjectMessageView): boolean {
+  return assistantRunTerminal(projectMessageAssistantStatus(message))
 }
 
 function assistantProgressExpanded(message: ProjectMessageView): boolean {
-  return !assistantProgressCompleted(message) || expandedAssistantProgressIDs.value.has(message.id)
+  return !assistantProgressClosed(message) || expandedAssistantProgressIDs.value.has(message.id)
 }
 
 function toggleAssistantProgress(messageID: string): void {
@@ -2682,7 +2729,8 @@ function assistantPlanCompletionLabel(plan?: AssistantPlan): string {
 }
 
 function projectMessageViewStatus(message: ProjectMessage): ProjectMessageViewStatus | undefined {
-  return message.role === 'assistant' && message.metadata?.status === 'interrupted' ? 'interrupted' : undefined
+  if (message.role !== 'assistant') return undefined
+  return projectMessageAssistantStatus(message) === 'interrupted' ? 'interrupted' : undefined
 }
 
 function projectMessageActionFeed(message: ProjectMessage): ProjectAssistantActionFeedItem[] {
@@ -3583,7 +3631,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                   :items="message.actionFeed"
                 />
                 <template v-if="message.progress">
-                  <div v-if="assistantProgressCompleted(message)" class="mb-3">
+                  <div v-if="assistantProgressClosed(message)" class="mb-3 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       class="inline-flex items-center gap-1.5 rounded-md py-1 text-[12px] font-medium text-text-muted transition hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -3600,14 +3648,24 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                         aria-hidden="true"
                       />
                     </button>
+                    <span
+                      v-if="message.viewStatus === 'interrupted'"
+                      class="inline-flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning-subtle px-2 py-1 text-[11px] font-medium text-warning"
+                      role="status"
+                      aria-live="polite"
+                      aria-atomic="true"
+                    >
+                      <TriangleAlert class="h-3 w-3" :stroke-width="2" aria-hidden="true" />
+                      Interrupted before completion
+                    </span>
                   </div>
                   <div
                     v-show="assistantProgressExpanded(message)"
                     :id="assistantProgressRegionID(message.id)"
                     class="mb-3 space-y-3"
-                    :role="assistantProgressCompleted(message) ? undefined : 'log'"
-                    :aria-live="assistantProgressCompleted(message) ? undefined : 'polite'"
-                    :aria-relevant="assistantProgressCompleted(message) ? undefined : 'additions'"
+                    :role="assistantProgressClosed(message) ? undefined : 'log'"
+                    :aria-live="assistantProgressClosed(message) ? undefined : 'polite'"
+                    :aria-relevant="assistantProgressClosed(message) ? undefined : 'additions'"
                     aria-atomic="false"
                   >
                     <template
@@ -3642,12 +3700,24 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                   aria-atomic="false"
                   v-html="renderAssistantResponse(message)"
                 />
-                <div
-                  v-if="message.viewStatus === 'interrupted'"
-                  class="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border-subtle px-2 py-1 text-[11px] font-medium text-text-muted"
+                <button
+                  v-if="canImplementPlan(message)"
+                  type="button"
+                  class="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent-subtle px-3 py-1.5 text-[12px] font-medium text-accent transition hover:bg-accent/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  @click="implementPlan(message)"
                 >
-                  <Square class="h-3 w-3 fill-current" :stroke-width="2" />
-                  Interrupted
+                  Implement plan
+                  <ArrowRight class="h-3.5 w-3.5" :stroke-width="1.75" aria-hidden="true" />
+                </button>
+                <div
+                  v-if="message.viewStatus === 'interrupted' && !message.progress"
+                  class="mt-2 inline-flex items-center gap-1.5 rounded-md border border-warning/30 bg-warning-subtle px-2 py-1 text-[11px] font-medium text-warning"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <TriangleAlert class="h-3 w-3" :stroke-width="2" aria-hidden="true" />
+                  Interrupted before completion
                 </div>
                 <div v-if="projectMessageUndo(message)" class="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-text-muted">
                   <RotateCcw class="h-3.5 w-3.5 text-success" :stroke-width="1.75" />
@@ -3685,7 +3755,15 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
 
         <form class="shrink-0 border-t border-border-subtle p-3" @submit.prevent="sendMessage">
           <div
-            v-if="pendingFollowUp"
+            v-if="legacyAssistantRunViewOnly"
+            class="mb-2 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-[12px] leading-5 text-text-secondary"
+            role="status"
+          >
+            <TriangleAlert class="mt-0.5 h-4 w-4 shrink-0 text-warning" :stroke-width="1.75" />
+            <span>This legacy run is view-only. Start a fresh turn in Default or Plan mode to continue.</span>
+          </div>
+          <div
+            v-else-if="pendingFollowUp"
             class="mb-2 rounded-lg border border-accent/30 bg-accent-subtle p-3 shadow-sm"
           >
             <div class="flex min-w-0 items-start gap-3">
@@ -3807,7 +3885,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               />
             </div>
             <button
-              v-if="messageStreaming && activeAssistantRun?.status !== 'stopping'"
+              v-if="messageStreaming && !legacyAssistantRunViewOnly && activeAssistantRun?.status !== 'stopping'"
               type="button"
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-danger/30 bg-danger-subtle text-danger transition hover:bg-danger-subtle/80"
               title="Stop generating"
@@ -3817,7 +3895,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               <Square class="h-4 w-4 fill-current" :stroke-width="2" />
             </button>
             <button
-              v-else-if="activeAssistantRun?.status === 'stopping'"
+              v-else-if="!legacyAssistantRunViewOnly && activeAssistantRun?.status === 'stopping'"
               type="button"
               disabled
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-hover text-text-muted"
@@ -4027,45 +4105,20 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               <StatusBadge :status="developmentPreviewPhase" />
             </div>
             <div class="ml-auto flex shrink-0 items-center gap-2">
-              <template v-if="developmentTemplates.length > 0">
-                <select
-                  v-model="developmentTemplateSelection"
-                  class="h-8 max-w-[180px] rounded-md border border-border-subtle bg-surface px-2 text-[12px] text-text-secondary"
-                  title="Infrastructure template backing this development environment"
-                  :disabled="developmentTemplateBusy"
-                >
-                  <option value="" disabled>{{ selected?.template ? selected.template : 'Choose template…' }}</option>
-                  <option v-for="tpl in developmentTemplates" :key="tpl.name" :value="tpl.name">
-                    {{ tpl.displayName || tpl.name }}
-                  </option>
-                </select>
-                <button
-                  v-if="developmentTemplateSelection && developmentTemplateSelection !== (selected?.template ?? '')"
-                  type="button"
-                  class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-3 text-[12px] font-medium text-text-primary transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
-                  :disabled="developmentTemplateBusy"
-                  title="Switch the development environment onto this template. Code is preserved in git and re-synced."
-                  @click="applyDevelopmentTemplate"
-                >
-                  <Loader2 v-if="developmentTemplateBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />
-                  Apply
-                </button>
-              </template>
+              <PreviewActionsMenu
+                :templates="developmentTemplates"
+                :current-template="selected?.template"
+                :template-busy="developmentTemplateBusy"
+                :hydrate-busy="developmentHydrateBusy"
+                :hydrate-disabled="!selected"
+                :disabled="messageStreaming"
+                @select-template="applyDevelopmentTemplate"
+                @load-from-git="hydrateDevelopmentWorkspace"
+              />
               <button
                 type="button"
                 class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="!selected || developmentHydrateBusy"
-                title="Replace-load the workspace from the project's git repository and re-sync"
-                @click="hydrateDevelopmentWorkspace"
-              >
-                <Loader2 v-if="developmentHydrateBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />
-                <GitBranch v-else class="h-3.5 w-3.5" :stroke-width="1.75" />
-                Load from git
-              </button>
-              <button
-                type="button"
-                class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="!selected || !developmentBinding || developmentSyncBusy"
+                :disabled="!selected || !developmentBinding || messageStreaming || developmentSyncBusy"
                 title="Sync"
                 @click="syncDevelopmentPreview"
               >

@@ -1372,7 +1372,7 @@ func TestProjectEinoAssistantPhaseInlineAdaptivePreregistersCommitWithoutInitial
 		ApprovalMode: store.AssistantApprovalModeAutoApprove,
 	}
 	req := projectAssistantRunRequest{
-		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a"},
+		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a", ProjectUID: "test-project-uid"},
 		TurnProfile:    projectAssistantTurnProfileAdaptive,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileAdaptive),
 		ApprovalMode:   store.AssistantApprovalModeAutoApprove,
@@ -2731,6 +2731,77 @@ func TestProjectEinoAssistantPhaseApprovalInspectionPreservesDirectDependencyRea
 	}
 }
 
+func TestProjectEinoAssistantPhaseDebugFixKeepsNonredundantDiagnosticEvidenceOpen(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	req := projectAssistantRunRequest{
+		TurnProfile: projectAssistantTurnProfileDebugFix,
+		TurnPolicy:  projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugFix),
+	}
+	middleware := projectEinoAssistantPhaseMiddleware(req, runState)
+	state := &adk.ChatModelAgentState{ToolInfos: []*schema.ToolInfo{
+		projectEinoAssistantPhaseToolInfo(projectToolLS, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolReadFile, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolGlob, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolGrep, projectAssistantToolRiskRead, projectAssistantToolBundleWorkspaceRead),
+		projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeStatus, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo(projectToolGetRuntimeLogs, projectAssistantToolRiskRead, projectAssistantToolBundleRuntime),
+		projectEinoAssistantPhaseToolInfo(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
+		projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+	}}
+	var err error
+	if _, state, err = middleware.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("initial diagnostic model call: %v", err)
+	}
+	runState.RecordReadFileRange("src/App.tsx", 1, 200)
+	if _, state, err = middleware.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("second diagnostic model call: %v", err)
+	}
+	names := projectEinoAssistantPhaseToolNames(state.ToolInfos)
+	for _, retained := range []string{
+		projectToolLS,
+		projectToolReadFile,
+		projectToolGlob,
+		projectToolGrep,
+		projectToolGetRuntimeStatus,
+		projectToolGetRuntimeLogs,
+		projectToolRequestProjectPlanApproval,
+	} {
+		if !projectEinoAssistantPhaseToolNamesContain(names, retained) {
+			t.Fatalf("diagnostic tools = %#v, want %s retained", names, retained)
+		}
+	}
+	if projectEinoAssistantPhaseToolNamesContain(names, projectToolWriteFile) {
+		t.Fatalf("diagnostic tools = %#v, want mutation hidden before approval", names)
+	}
+	guidance := state.Messages[len(state.Messages)-1].Content
+	for _, want := range []string{
+		"Continue diagnosis only to answer a concrete unresolved question with new evidence",
+		"do not repeat reads or rediscover evidence already returned",
+		"suspected cause and its supporting evidence",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Fatalf("diagnostic guidance = %q, want %q", guidance, want)
+		}
+	}
+
+	calls := 0
+	wrapped, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			calls++
+			return "new runtime boundary evidence", nil
+		},
+		&adk.ToolContext{Name: projectToolGrep},
+	)
+	if err != nil {
+		t.Fatalf("wrap grep: %v", err)
+	}
+	result, err := wrapped(context.Background(), `{"pattern":"fetch\\("}`)
+	if err != nil || result != "new runtime boundary evidence" || calls != 1 {
+		t.Fatalf("second evidence batch result = %q calls = %d error = %v, want endpoint call", result, calls, err)
+	}
+}
+
 func TestProjectEinoAssistantPhaseApprovalGrepOnlyKeepsInspectionOpen(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	runState.RecordCompletedRead(projectToolGrep, `{"pattern":"App"}`)
@@ -3097,7 +3168,7 @@ func TestProjectEinoAssistantPhaseMiddlewareRestoresCanonicalToolsAfterResume(t 
 	}
 	runCtx := &adk.ChatModelAgentContext{Tools: tools}
 	filesystemMiddleware, err := projectEinoAssistantFilesystemMiddleware(ctx, workspace.NewFileStore(t.TempDir()), projectAssistantRunRequest{
-		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo"},
+		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"},
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
 	})
 	if err != nil {
@@ -3335,7 +3406,7 @@ func projectEinoAssistantPhaseSearchableToolInfo(name string) *schema.ToolInfo {
 func projectEinoAssistantPhaseFactoryToolInfos(t *testing.T) []*schema.ToolInfo {
 	t.Helper()
 	req := projectAssistantRunRequest{
-		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a"},
+		WorkspaceScope: workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "project-a", ProjectUID: "test-project-uid"},
 		TurnProfile:    projectAssistantTurnProfileImplementation,
 		TurnPolicy:     projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
 	}
@@ -3412,7 +3483,12 @@ func projectEinoAssistantPhaseStringSlicesEqual(got, want []string) bool {
 
 func TestProjectEinoAssistantInitialBuildRequiresDefinedPlanAndCompletedProgress(t *testing.T) {
 	authority := projectAssistantInitialCreationPlan("Build a swipe app for cat profiles.")
-	req := projectAssistantRunRequest{InitialApprovedPlan: &authority}
+	req := projectAssistantRunRequest{
+		InitialApprovedPlan: &authority,
+		Project: &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+			Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+		}},
+	}
 	runState := newProjectEinoAssistantRunState()
 	runState.ApprovePlan(authority)
 	state := &adk.ChatModelAgentState{}
@@ -3440,10 +3516,12 @@ func TestProjectEinoAssistantInitialBuildRequiresDefinedPlanAndCompletedProgress
 
 	state.Messages = []*schema.Message{
 		projectEinoAssistantPhaseToolResult(projectToolWriteFile, `{"path":"src/App.tsx"}`),
-		projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"ready"}`),
+		projectEinoAssistantPhaseToolResult(projectToolVerifyDevelopmentRuntime, `{"status":"ready","checkedMutationRevision":1}`),
 	}
-	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhaseMutate {
-		t.Fatalf("verified but incomplete-plan phase = %q, want mutate", got)
+	runState.RecordSourceMutation()
+	runState.RecordDevelopmentVerificationResult(`{"status":"ready","checkedMutationRevision":1}`)
+	if got := projectEinoAssistantPhaseForState(req, runState, state); got != projectEinoAssistantPhaseReport {
+		t.Fatalf("verified but incomplete-plan phase = %q, want report", got)
 	}
 
 	runState.SetPlanProgress(projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
@@ -3460,6 +3538,8 @@ func TestProjectEinoAssistantPlanPhaseExposesOnlyInternalPlanTool(t *testing.T) 
 		projectEinoAssistantPhaseToolInfo(projectToolDefineInitialProjectPlan, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
 		projectEinoAssistantPhaseToolInfo(projectToolRequestProjectPlanApproval, projectAssistantToolRiskPlan, projectAssistantToolBundleCollaboration),
 		projectEinoAssistantPhaseToolInfo(projectToolWriteFile, projectAssistantToolRiskWrite, projectAssistantToolBundleEdit),
+		projectEinoAssistantPhaseToolInfo(projectToolInspectDevelopmentTemplates, projectAssistantToolRiskRead, projectAssistantToolBundleWorkflow),
+		projectEinoAssistantPhaseToolInfo(projectToolSelectTemplate, projectAssistantToolRiskWrite, projectAssistantToolBundleWorkflow),
 	}
 	authority := projectAssistantInitialCreationPlan("Build a cat app.")
 	got := projectEinoAssistantPhaseFilterTools(
@@ -3472,5 +3552,20 @@ func TestProjectEinoAssistantPlanPhaseExposesOnlyInternalPlanTool(t *testing.T) 
 	)
 	if names := projectEinoAssistantPhaseToolNames(got); !projectEinoAssistantPhaseStringSlicesEqual(names, []string{projectToolDefineInitialProjectPlan}) {
 		t.Fatalf("plan tools = %#v, want only internal plan definition", names)
+	}
+
+	got = projectEinoAssistantPhaseFilterTools(
+		projectEinoAssistantPhasePlan,
+		&authority,
+		true,
+		tools,
+		false,
+		projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
+	)
+	if names := projectEinoAssistantPhaseToolNames(got); !projectEinoAssistantPhaseStringSlicesEqual(names, []string{
+		projectToolInspectDevelopmentTemplates,
+		projectToolSelectTemplate,
+	}) {
+		t.Fatalf("template-less plan tools = %#v, want inspect then select only", names)
 	}
 }

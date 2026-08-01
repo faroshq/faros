@@ -47,6 +47,7 @@ type projectAssistantRunStartResponse struct {
 // must remain server-side.
 type projectAssistantRunView struct {
 	ID              string                      `json:"id"`
+	EngineVersion   string                      `json:"engineVersion,omitempty"`
 	WorkItemID      string                      `json:"workItemID,omitempty"`
 	Mode            store.AssistantRunMode      `json:"mode,omitempty"`
 	ApprovalMode    store.AssistantApprovalMode `json:"approvalMode,omitempty"`
@@ -66,9 +67,14 @@ type projectAssistantRunSnapshotResponse struct {
 }
 
 func projectAssistantRunToAPI(run store.AssistantRun) projectAssistantRunView {
+	legacyWorkItemID := run.WorkItemID
+	if projectAssistantRunUsesV2(&run) {
+		legacyWorkItemID = ""
+	}
 	return projectAssistantRunView{
 		ID:              run.ID,
-		WorkItemID:      run.WorkItemID,
+		EngineVersion:   run.EngineVersion,
+		WorkItemID:      legacyWorkItemID,
 		Mode:            run.Mode,
 		ApprovalMode:    run.ApprovalMode,
 		Status:          run.Status,
@@ -119,6 +125,294 @@ func projectAssistantDurableTerminalContent(reply, streamed string, err error) s
 		return projectAssistantContentWithTerminalFailure(content, err)
 	}
 	return content
+}
+
+func projectAssistantMutationAwareTerminalContent(
+	reply, streamed string,
+	err error,
+	evidence projectAssistantCompletionEvidence,
+	engineCompleted bool,
+) string {
+	return projectAssistantEffectAwareTerminalContent(
+		reply,
+		streamed,
+		err,
+		evidence,
+		engineCompleted,
+		false,
+	)
+}
+
+func projectAssistantEffectAwareTerminalContent(
+	reply, streamed string,
+	err error,
+	evidence projectAssistantCompletionEvidence,
+	engineCompleted bool,
+	successfulNonSourceEffect bool,
+) string {
+	content := projectAssistantDurableTerminalContent(reply, streamed, err)
+	if evidence.SourceMutationRevision == 0 && (!engineCompleted || !successfulNonSourceEffect) {
+		return content
+	}
+	if engineCompleted && strings.TrimSpace(content) != "" {
+		content = projectAssistantTruthfulModelSummary(content)
+		if content != "" || evidence.SourceMutationRevision == 0 {
+			return projectAssistantContentWithVerificationScope(content, evidence)
+		}
+	}
+	if evidence.SourceMutationRevision == 0 {
+		return projectAssistantContentWithVerificationScope("", evidence)
+	}
+	return projectAssistantMutationTerminalContent(evidence, engineCompleted)
+}
+
+func (s *Server) projectAssistantRunTerminalContent(
+	ctx context.Context,
+	scope store.Scope,
+	run store.AssistantRun,
+	reply, streamed string,
+	err error,
+	evidence projectAssistantCompletionEvidence,
+	engineCompleted bool,
+) string {
+	return projectAssistantEffectAwareTerminalContent(
+		reply,
+		streamed,
+		err,
+		evidence,
+		engineCompleted,
+		s.projectAssistantSuccessfulTerminalEffectWithoutSourceEvidence(
+			ctx,
+			scope,
+			run,
+			evidence,
+			engineCompleted,
+		),
+	)
+}
+
+func projectAssistantTruthfulModelSummary(content string) string {
+	content = strings.TrimSpace(content)
+	lower := strings.ToLower(content)
+	claimIndex := -1
+	for _, claim := range []string{
+		"verify", "verified", "confirmed", "passed", "satisfied", "met",
+		"works", "working", "renders", "rendered", "behaves", "succeeded",
+		"successful", "correct", "correctly", "functional", "functioning",
+		"tested", "validated", "observed", "demonstrated", "proved", "proven",
+		"exercised", "checked",
+	} {
+		index := projectAssistantSummaryWordIndex(lower, claim)
+		if index >= 0 && (claimIndex < 0 || index < claimIndex) {
+			claimIndex = index
+		}
+	}
+	for _, scope := range []string{
+		"acceptance criteria",
+		"application behavior",
+		"development preview",
+		"rendered content",
+		"user interaction",
+		"data flow",
+		"user flow",
+	} {
+		index := strings.Index(lower, scope)
+		if index >= 0 && (claimIndex < 0 || index < claimIndex) {
+			claimIndex = index
+		}
+	}
+	if claimIndex < 0 {
+		return content
+	}
+	cut := -1
+	for _, separator := range []string{". ", "\n", ";", ", but ", " and "} {
+		if index := strings.LastIndex(lower[:claimIndex], separator); index >= 0 {
+			candidate := index
+			if separator == ". " {
+				candidate++
+			}
+			if candidate > cut {
+				cut = candidate
+			}
+		}
+	}
+	if cut < 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimRight(content[:cut], " ,;:-"))
+}
+
+func projectAssistantSummaryWordIndex(content, word string) int {
+	for offset := 0; offset < len(content); {
+		index := strings.Index(content[offset:], word)
+		if index < 0 {
+			return -1
+		}
+		index += offset
+		beforeOK := index == 0 || content[index-1] < 'a' || content[index-1] > 'z'
+		after := index + len(word)
+		afterOK := after == len(content) || content[after] < 'a' || content[after] > 'z'
+		if beforeOK && afterOK {
+			return index
+		}
+		offset = index + len(word)
+	}
+	return -1
+}
+
+func projectAssistantContentWithVerificationScope(
+	content string,
+	evidence projectAssistantCompletionEvidence,
+) string {
+	lines := []string{"Verification scope:"}
+	if evidence.SourceMutationRevision > 0 {
+		operational := "not completed for the current workspace revision"
+		if projectAssistantVerifiedMutationCompleted(evidence) {
+			operational = "passed for the current workspace revision (synchronization, process/log health, and preview reachability only)"
+		}
+		lines = append(lines, "- Operational checks: "+operational+".")
+	}
+	lines = append(lines,
+		"- Application behavior was not independently verified; rendered content, interactions, data flow, and acceptance criteria were not proven.",
+	)
+	block := strings.Join(lines, "\n")
+	content = strings.TrimSpace(content)
+	if strings.Contains(content, block) {
+		return content
+	}
+	if content == "" {
+		return block
+	}
+	return content + "\n\n" + block
+}
+
+type projectAssistantDurableTerminalEffectCall struct {
+	toolName   string
+	argsDigest string
+}
+
+func (s *Server) projectAssistantSuccessfulTerminalEffectWithoutSourceEvidence(
+	ctx context.Context,
+	scope store.Scope,
+	run store.AssistantRun,
+	evidence projectAssistantCompletionEvidence,
+	engineCompleted bool,
+) bool {
+	if !engineCompleted || evidence.SourceMutationRevision > 0 || !projectAssistantRunUsesV2(&run) {
+		return false
+	}
+	effect, err := s.projectAssistantSuccessfulNonSourceRunEffect(ctx, scope, run.ID)
+	if err != nil {
+		// If durable effect evidence cannot be read, fail closed on response
+		// truthfulness: the disclosure makes no positive claim and is safer
+		// than preserving a model-authored behavioral overclaim.
+		return true
+	}
+	return effect
+}
+
+func (s *Server) projectAssistantSuccessfulNonSourceRunEffect(
+	ctx context.Context,
+	scope store.Scope,
+	runID string,
+) (bool, error) {
+	if s == nil || s.store == nil || strings.TrimSpace(runID) == "" {
+		return false, errors.New("assistant run event store is not configured")
+	}
+	registry := projectAssistantLocalToolRegistry(nil)
+	calls := map[string]projectAssistantDurableTerminalEffectCall{}
+	afterSequence := int64(0)
+	for {
+		events, err := s.store.ListAssistantRunEvents(
+			ctx,
+			scope,
+			runID,
+			afterSequence,
+			projectAssistantRunEventPageSize,
+		)
+		if err != nil {
+			return false, err
+		}
+		for _, event := range events {
+			switch event.Type {
+			case projectAssistantRunToolCallEventType:
+				var payload projectAssistantRunToolCallPayload
+				if json.Unmarshal(event.Payload, &payload) != nil || !payload.Effect ||
+					!projectAssistantTerminalToolMutates(registry, event.ToolName) {
+					continue
+				}
+				calls[event.CallID] = projectAssistantDurableTerminalEffectCall{
+					toolName:   event.ToolName,
+					argsDigest: event.ArgsDigest,
+				}
+			case projectAssistantRunToolResultEventType:
+				call, ok := calls[event.CallID]
+				if !ok || call.toolName != event.ToolName || call.argsDigest != event.ArgsDigest {
+					continue
+				}
+				var payload projectAssistantRunToolResultPayload
+				if json.Unmarshal(event.Payload, &payload) != nil {
+					continue
+				}
+				if projectAssistantTerminalEffectResultSucceeded(call.toolName, payload) {
+					return true, nil
+				}
+			}
+		}
+		if len(events) < projectAssistantRunEventPageSize {
+			return false, nil
+		}
+		nextSequence := events[len(events)-1].Sequence
+		if nextSequence <= afterSequence {
+			return false, errors.New("assistant run event pagination did not advance")
+		}
+		afterSequence = nextSequence
+	}
+}
+
+func projectAssistantTerminalToolMutates(
+	registry projectAssistantToolRegistry,
+	name string,
+) bool {
+	spec, ok := registry.Spec(name)
+	if !ok {
+		spec, ok = projectAssistantWorkflowToolSpec(name)
+	}
+	if !ok {
+		spec, ok = projectAssistantMCPToolSpec(projectMCPTool{Name: name})
+	}
+	if !ok {
+		return false
+	}
+	switch spec.Risk {
+	case projectAssistantToolRiskWrite, projectAssistantToolRiskRuntime, projectAssistantToolRiskCommit:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectAssistantTerminalEffectResultSucceeded(
+	name string,
+	payload projectAssistantRunToolResultPayload,
+) bool {
+	if payload.Failed || !projectEinoAssistantPhaseSuccessfulToolContent(payload.Result) {
+		return false
+	}
+	if projectEinoAssistantCommitTool(name) && projectToolCallResultStatus(name, payload.Result) != "succeeded" {
+		return false
+	}
+	decoded := map[string]any{}
+	if json.Unmarshal([]byte(strings.TrimSpace(payload.Result)), &decoded) != nil {
+		return true
+	}
+	for _, field := range []string{"status", "phase", "outcome"} {
+		switch strings.ToLower(projectToolString(decoded[field])) {
+		case "blocked", "cancelled", "canceled", "denied", "error", "failed", "failure", "not_configured", "not_ready", "rejected", "unavailable":
+			return false
+		}
+	}
+	return true
 }
 
 // appendProjectAssistantStreamBlock keeps complete assistant updates readable
@@ -187,7 +481,11 @@ func (s *Server) startProjectAssistantRunDurablyWithMode(ctx context.Context, sc
 	assistantAt := now.Add(time.Microsecond)
 	user := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleUser, ActorID: actor, Content: content, CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: newMessageID(), Role: aiv1alpha1.ProjectMessageRoleAssistant, CreatedAt: assistantAt, UpdatedAt: assistantAt}
-	run := store.AssistantRun{ID: "run-" + uuid.NewString(), Mode: mode, Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	engineVersion := ""
+	if collaborationMode := projectAssistantCollaborationMode(mode); collaborationMode == projectAssistantCollaborationModeDefault || collaborationMode == projectAssistantCollaborationModePlan {
+		engineVersion = store.AssistantEngineVersionV2
+	}
+	run := store.AssistantRun{ID: "run-" + uuid.NewString(), EngineVersion: engineVersion, Mode: mode, Status: store.AssistantRunStatusRunning, ClientRequestID: clientRequestID, UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := s.captureProjectAssistantApprovalMode(ctx, scope, actor, &run); err != nil {
 		return projectAssistantDurableStartResult{}, err
 	}
@@ -750,7 +1048,7 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project)
 	supervisor := s.projectAssistantSupervisor()
-	action, err := request.assistantAction()
+	mode, err := request.collaborationMode()
 	if err != nil {
 		writeProjectError(w, err)
 		return
@@ -765,37 +1063,29 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if initialBootstrap {
-		action = projectAssistantActionBuild
+		mode = projectAssistantCollaborationModeDefault
 	}
 	startWorker := func(created store.AssistantRun, assistant store.Message, start *projectAssistantStreamStart) error {
 		return supervisor.Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 			s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, created, start)
 		})
 	}
-	var started projectAssistantDurableStartResult
-	switch action {
-	case projectAssistantActionAuto:
-		started, err = s.startProjectAssistantAdaptiveRunDurably(r.Context(), scope, id.user, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message, _ bool) error {
-			return startWorker(created, assistant, nil)
-		})
-	case projectAssistantActionAsk:
-		started, err = s.startProjectAssistantRunDurably(r.Context(), scope, id.user, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message, _ bool) error {
-			return startWorker(created, assistant, nil)
-		})
-	case projectAssistantActionBuild:
-		started, err = s.startProjectAssistantBuildRunDurablyWithInitialBootstrap(r.Context(), scope, id.user, request.Content, request.ClientRequestID, initialBootstrap, func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) error {
+	started, err := s.startProjectAssistantRunDurablyWithMode(
+		r.Context(),
+		scope,
+		id.user,
+		request.Content,
+		request.ClientRequestID,
+		store.AssistantRunMode(mode),
+		func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) error {
 			var start *projectAssistantStreamStart
 			if initialBootstrap && transcriptEmpty {
 				plan := projectAssistantInitialCreationPlan(request.Content)
 				start = &projectAssistantStreamStart{InitialApprovedPlan: cloneProjectAssistantApprovedPlan(&plan)}
 			}
 			return startWorker(created, assistant, start)
-		})
-	case projectAssistantActionContinue:
-		started, err = s.startProjectAssistantContinueRunDurably(r.Context(), scope, request.WorkItemID, id.user, request.WorkItemRevision, request.Content, request.ClientRequestID, func(created store.AssistantRun, assistant store.Message, _ bool) error {
-			return startWorker(created, assistant, nil)
-		})
-	}
+		},
+	)
 	if err != nil {
 		if errors.Is(err, store.ErrAssistantRunConflict) {
 			if _, latestErr := s.store.LatestAssistantRun(r.Context(), scope); latestErr == nil {
@@ -803,10 +1093,6 @@ func (s *Server) startProjectAssistantRun(w http.ResponseWriter, r *http.Request
 			} else {
 				writeStatus(w, http.StatusConflict, "Conflict", "assistant run start is already in progress")
 			}
-			return
-		}
-		if errors.Is(err, store.ErrAssistantWorkItemConflict) {
-			writeStatus(w, http.StatusConflict, "Conflict", err.Error())
 			return
 		}
 		writeProjectError(w, err)
@@ -825,7 +1111,7 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 			strings.TrimSpace(start.InitialApprovedPlan.Goal) != "",
 		workSegmentStarted: workSegmentStarted,
 	}
-	workspaceScope := projectWorkspaceScope(id, project.Name)
+	workspaceScope := projectWorkspaceScope(id, project)
 	persistMetadata := func(ctx context.Context, runStatus *store.AssistantRunStatus) error {
 		return s.persistProjectAssistantDurableMetadata(ctx, accumulator, workspaceScope, state, runStatus)
 	}
@@ -970,13 +1256,23 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	callbackMu.Unlock()
 	state.initialBuild = state.initialBuild || result.InitialBuild
 	reply := result.Content
-	initialBuildCompletionEnforced := state.initialBuild
+	// Current v2 follows the Codex-style Default loop and does not require the
+	// retired internal initial-build plan artifact. Explicit Plan mode remains
+	// a separate read-only turn; source/verification/commit facts are the v2
+	// completion boundary.
+	initialBuildCompletionEnforced := state.initialBuild && !projectAssistantRunUsesV2(&run)
 	completionSuspensionReason := projectAssistantCompletionSuspensionReason(result, initialBuildCompletionEnforced)
 	engineCompleted := err == nil && completionSuspensionReason == ""
-	finalContent := projectAssistantDurableTerminalContent(reply, contentText, err)
-	if result.CompletionEvidence.SourceMutationRevision > 0 {
-		finalContent = projectAssistantMutationTerminalContent(result.CompletionEvidence, engineCompleted)
-	}
+	finalContent := s.projectAssistantRunTerminalContent(
+		ctx,
+		projectMessageScope(id.orgUUID, id.workspaceUUID, project),
+		run,
+		reply,
+		contentText,
+		err,
+		result.CompletionEvidence,
+		engineCompleted,
+	)
 	recordSnapshotErr(accumulator.UpdateText(ctx, finalContent, true))
 	if getSnapshotErr() != nil {
 		return
@@ -1005,7 +1301,11 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 		(err == nil || projectEinoAssistantBoundedExit(err)) {
 		state.status = "Suspended"
 		runStatus := store.AssistantRunStatusInterrupted
-		recordSnapshotErr(persistWorkItemTerminal(ctx, runStatus, store.AssistantWorkItemStatusSuspended, reason))
+		if hasDurableWorkItem() {
+			recordSnapshotErr(persistWorkItemTerminal(ctx, runStatus, store.AssistantWorkItemStatusSuspended, reason))
+		} else {
+			recordSnapshotErr(persistMetadata(ctx, &runStatus))
+		}
 		return
 	}
 	if err == nil {
@@ -1093,6 +1393,7 @@ func projectAssistantCompletionSuspensionReason(result projectAssistantRunResult
 	if (planRequired && !evidence.PlanComplete) ||
 		(mutating && (!evidence.LatestMutationVerified ||
 			evidence.VerifiedMutationRevision != evidence.SourceMutationRevision)) ||
+		(mutating && evidence.CommitRequired && !evidence.LatestMutationCommitted) ||
 		strings.TrimSpace(evidence.VerificationOutcome) != "ready" {
 		return "objective incomplete"
 	}
@@ -1158,17 +1459,17 @@ func projectAssistantMutationTerminalContent(
 	switch {
 	case complete:
 		lines = append(lines,
-			"The latest app changes are running in the development preview.",
+			"The latest app changes are synchronized and the development preview is operationally reachable.",
 			"",
-			"What I verified:",
-			"- The current workspace passed runtime verification.",
+			"Operational checks:",
+			"- The current workspace passed operational verification.",
 		)
 	case runtimeVerified:
 		lines = append(lines,
-			"The app is running in the development preview, but the requested project work is not finished yet.",
+			"The development preview is operationally reachable, but the requested project work is not finished yet.",
 			"",
-			"What I verified:",
-			"- The current workspace passed runtime verification.",
+			"Operational checks:",
+			"- The current workspace passed operational verification.",
 		)
 	case strings.EqualFold(strings.TrimSpace(evidence.VerificationOutcome), "provisioning"):
 		lines = append(lines,
@@ -1179,7 +1480,7 @@ func projectAssistantMutationTerminalContent(
 		)
 	default:
 		lines = append(lines,
-			"The latest app changes are saved, but I could not finish runtime verification yet.",
+			"The latest app changes are saved, but I could not finish operational verification yet.",
 			"",
 			"What is ready:",
 			"- Your changes are preserved in the project workspace.",
@@ -1206,12 +1507,12 @@ func projectAssistantMutationTerminalContent(
 			next = "Wait for the development environment to finish starting, then verify again."
 		case "not_ready":
 			if len(evidence.Blockers) > 0 {
-				next = "Resolve the issue above, then run runtime verification again."
+				next = "Resolve the issue above, then run operational verification again."
 			}
 		}
 		lines = append(lines, "", "Next:", "- "+next)
 	}
-	return strings.Join(lines, "\n")
+	return projectAssistantContentWithVerificationScope(strings.Join(lines, "\n"), evidence)
 }
 
 func projectAssistantWorkItemFailureReason(err error) string {
@@ -1422,7 +1723,12 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 		}
 		return err
 	}
-	if run.Status != store.AssistantRunStatusRunning && run.Status != store.AssistantRunStatusStopping {
+	if assistantRunTerminal(run.Status) {
+		return nil
+	}
+	legacy := !projectAssistantRunUsesV2(&run)
+	if !legacy && run.Status != store.AssistantRunStatusRunning && run.Status != store.AssistantRunStatusStopping {
+		// Current v2 permission/input checkpoints remain intentionally resumable.
 		return nil
 	}
 	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
@@ -1445,12 +1751,19 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 	}
 	message.UpdatedAt = run.UpdatedAt
 	message.Metadata = projectAssistantDurableMetadataFromExisting(run, "Interrupted", false, message.Metadata)
+	if legacy {
+		projectAssistantClearPendingInterruptMetadata(&message, run.ID)
+	}
 	if run.WorkItemID != "" {
 		item, itemErr := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
 		if itemErr != nil {
 			return itemErr
 		}
-		if err := s.store.TransitionWorkItemAndRun(ctx, scope, item.ID, item.Revision, run, store.AssistantWorkItemStatusSuspended, "provider restarted", run.UpdatedAt); err != nil {
+		reason := "provider restarted"
+		if legacy {
+			reason = "retired assistant engine"
+		}
+		if err := s.store.TransitionWorkItemAndRun(ctx, scope, item.ID, item.Revision, run, store.AssistantWorkItemStatusSuspended, reason, run.UpdatedAt); err != nil {
 			return err
 		}
 		if err := s.store.AppendMessage(ctx, scope, message); err != nil {

@@ -4,11 +4,28 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const source = await readFile(new URL('./conversationResilience.ts', import.meta.url), 'utf8')
+const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } })
 const state = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 const message = (id, content) => ({ id, projectID: 'p', role: 'assistant', content, createdAt: '2026-01-01T00:00:00Z' })
 const snapshot = (revision, content, status = 'running') => ({ run: { id: 'run-1', status, revision, activeMessageID: 'a-1' }, message: message('a-1', content) })
+
+test('assistantRunTerminal recognizes run and display forms of every closed outcome', () => {
+  for (const status of ['completed', 'aborted', 'failed', 'interrupted', 'Completed', 'Aborted', 'Failed', 'Interrupted']) {
+    assert.equal(state.assistantRunTerminal(status), true, status)
+  }
+  for (const status of ['running', 'stopping', 'pending_permission', 'pending_input', 'Working', undefined]) {
+    assert.equal(state.assistantRunTerminal(status), false, String(status))
+  }
+})
+
+test('normalizeAssistantRunStatus validates and normalizes persisted display statuses', () => {
+  assert.equal(state.normalizeAssistantRunStatus('Interrupted'), 'interrupted')
+  assert.equal(state.normalizeAssistantRunStatus(' pending_input '), 'pending_input')
+  assert.equal(state.normalizeAssistantRunStatus('Suspended'), undefined)
+  assert.equal(state.normalizeAssistantRunStatus(undefined), undefined)
+})
 
 test('mergeConversationSnapshot keeps the stable assistant message ID and rejects older or duplicate revisions', () => {
   const initial = { messages: [message('u-1', 'hello'), message('a-1', 'old')], runs: {} }
@@ -21,30 +38,30 @@ test('mergeConversationSnapshot keeps the stable assistant message ID and reject
   assert.strictEqual(duplicate, current)
 })
 
-test('an adaptive run can gain a work item mid-run and later suspend without duplicating its message', () => {
-  const adaptive = {
+test('a v2 collaboration mode remains fixed across revisions without duplicating its message', () => {
+  const startedSnapshot = {
     ...snapshot(1, 'Inspecting safely'),
-    run: { ...snapshot(1, 'Inspecting safely').run, mode: 'adaptive' },
+    run: { ...snapshot(1, 'Inspecting safely').run, engineVersion: 'v2', mode: 'plan' },
   }
-  const promoted = {
-    ...snapshot(2, 'Action proposed'),
-    run: { ...snapshot(2, 'Action proposed').run, mode: 'new', workItemID: 'work-item-1' },
+  const revised = {
+    ...snapshot(2, 'Plan ready'),
+    run: { ...snapshot(2, 'Plan ready').run, engineVersion: 'v2', mode: 'plan' },
   }
-  const suspended = {
-    ...snapshot(3, 'Continue when ready', 'interrupted'),
-    run: { ...snapshot(3, 'Continue when ready', 'interrupted').run, mode: 'new', workItemID: 'work-item-1' },
+  const completed = {
+    ...snapshot(3, 'Plan ready', 'completed'),
+    run: { ...snapshot(3, 'Plan ready', 'completed').run, engineVersion: 'v2', mode: 'plan' },
   }
 
-  const started = state.mergeConversationSnapshot({ messages: [], runs: {} }, adaptive)
-  const withWorkItem = state.mergeConversationSnapshot(started, promoted)
-  const terminal = state.mergeConversationSnapshot(withWorkItem, suspended)
+  const started = state.mergeConversationSnapshot({ messages: [], runs: {} }, startedSnapshot)
+  const revisedState = state.mergeConversationSnapshot(started, revised)
+  const terminal = state.mergeConversationSnapshot(revisedState, completed)
 
-  assert.equal(withWorkItem.runs['run-1'].workItemID, 'work-item-1')
-  assert.equal(withWorkItem.runs['run-1'].mode, 'new')
-  assert.equal(terminal.runs['run-1'].status, 'interrupted')
-  assert.equal(terminal.runs['run-1'].workItemID, 'work-item-1')
+  assert.equal(revisedState.runs['run-1'].engineVersion, 'v2')
+  assert.equal(revisedState.runs['run-1'].mode, 'plan')
+  assert.equal(terminal.runs['run-1'].status, 'completed')
+  assert.equal(terminal.runs['run-1'].mode, 'plan')
   assert.equal(terminal.messages.filter((item) => item.id === 'a-1').length, 1)
-  assert.equal(terminal.messages[0].content, 'Continue when ready')
+  assert.equal(terminal.messages[0].content, 'Plan ready')
 })
 
 test('first-project durable start replaces its optimistic user message without duplicating it', () => {
@@ -72,15 +89,15 @@ test('first-project retry reuses the created project and durable request identit
   const firstRun = state.firstProjectStartPlan(created)
   assert.deepEqual(
     state.assistantRunStartPayload(firstRun.content, firstRun.clientRequestID),
-    { content: 'ship it', clientRequestID: 'request-1', assistantAction: 'auto' },
+    { content: 'ship it', clientRequestID: 'request-1', collaborationMode: 'default' },
   )
   assert.deepEqual(
     state.assistantRunStartPayload('continue', 'request-2'),
-    { content: 'continue', clientRequestID: 'request-2', assistantAction: 'auto' },
+    { content: 'continue', clientRequestID: 'request-2', collaborationMode: 'default' },
   )
   assert.deepEqual(
-    state.assistantRunStartPayload('change the theme', 'request-3', 'build'),
-    { content: 'change the theme', clientRequestID: 'request-3', assistantAction: 'build' },
+    state.assistantRunStartPayload('plan a theme change', 'request-3', 'plan'),
+    { content: 'plan a theme change', clientRequestID: 'request-3', collaborationMode: 'plan' },
   )
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-1', content: 'ship it' }), true)
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
@@ -94,21 +111,20 @@ test('first-project pending submission matches the project/message handoff into 
 })
 
 test('message retry identity is bound to the requested operation', () => {
-  const build = { content: 'ship it', assistantAction: 'build' }
-  const ask = { content: 'ship it', assistantAction: 'ask' }
-  const continuation = { content: 'ship it', assistantAction: 'continue', workItemID: 'work-1', workItemRevision: 3 }
-  assert.notEqual(state.assistantRunStartFingerprint('demo', build), state.assistantRunStartFingerprint('demo', ask))
-  assert.notEqual(state.assistantRunStartFingerprint('demo', build), state.assistantRunStartFingerprint('other', build))
-  assert.notEqual(state.assistantRunStartFingerprint('demo', continuation), state.assistantRunStartFingerprint('demo', { ...continuation, workItemRevision: 4 }))
+  const normal = { content: 'ship it', collaborationMode: 'default' }
+  const plan = { content: 'ship it', collaborationMode: 'plan' }
+  assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', plan))
+  assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('other', normal))
+  assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', { ...normal, content: 'different' }))
 })
 
 test('conflict recovery only accepts the run created for the exact retry identity and operation', () => {
-  const request = { content: 'continue', clientRequestID: 'request-1', assistantAction: 'continue', workItemID: 'work-1', workItemRevision: 3 }
-  const run = { id: 'run-1', status: 'running', mode: 'continue', workItemID: 'work-1', revision: 1, activeMessageID: 'a-1', clientRequestID: 'request-1' }
+  const request = { content: 'continue', clientRequestID: 'request-1', collaborationMode: 'default' }
+  const run = { id: 'run-1', status: 'running', engineVersion: 'v2', mode: 'default', revision: 1, activeMessageID: 'a-1', clientRequestID: 'request-1' }
   assert.equal(state.assistantRunMatchesStartRequest(run, request), true)
   assert.equal(state.assistantRunMatchesStartRequest({ ...run, clientRequestID: 'request-2' }, request), false)
-  assert.equal(state.assistantRunMatchesStartRequest({ ...run, mode: 'new' }, request), false)
-  assert.equal(state.assistantRunMatchesStartRequest({ ...run, workItemID: 'work-2' }, request), false)
+  assert.equal(state.assistantRunMatchesStartRequest({ ...run, mode: 'plan' }, request), false)
+  assert.equal(state.assistantRunMatchesStartRequest({ ...run, engineVersion: undefined }, request), false)
 })
 
 test('first-project generation rejects late replies after navigation and a new attempt has a fresh key', () => {
@@ -124,6 +140,25 @@ test('equal revision rehydrates active controls but an older active snapshot can
   const terminal = snapshot(5, 'done', 'completed')
   assert.equal(state.canHydrateConversationRun(active.run, active.run), true)
   assert.equal(state.canHydrateConversationRun(terminal.run, active.run), false)
+})
+
+test('legacy nonterminal recovery is static and leaves the composer available for a fresh v2 turn', () => {
+  const legacyPending = snapshot(4, 'waiting', 'pending_input').run
+  const v2Pending = { ...legacyPending, engineVersion: 'v2', mode: 'default' }
+  const legacyCompleted = { ...legacyPending, status: 'completed' }
+
+  assert.equal(state.assistantRunIsLegacyViewOnly(legacyPending), true)
+  assert.equal(state.assistantRunRequiresLiveControls(legacyPending), false)
+  assert.equal(state.assistantRunIsLegacyViewOnly(v2Pending), false)
+  assert.equal(state.assistantRunRequiresLiveControls(v2Pending), true)
+  assert.equal(state.assistantRunIsLegacyViewOnly(legacyCompleted), false)
+  assert.equal(state.assistantRunRequiresLiveControls(legacyCompleted), false)
+
+  assert.match(appSource, /legacyAssistantRunViewOnly\.value = assistantRunIsLegacyViewOnly\(normalized\.run\)/)
+  assert.match(appSource, /messageStreaming\.value = requiresLiveControls/)
+  assert.match(appSource, /if \(applied\.accepted && assistantRunRequiresLiveControls\(applied\.current\)\)/)
+  assert.match(appSource, /if \(!assistantRunRequiresLiveControls\(activeAssistantRun\)\) return null/)
+  assert.match(appSource, /This legacy run is view-only\. Start a fresh turn in Default or Plan mode to continue\./)
 })
 
 test('a stale nonterminal snapshot is rejected and cannot be used to attach a subscription', () => {

@@ -40,9 +40,10 @@ type projectEinoPermissionInterruptInfo struct {
 }
 
 type projectEinoPermissionInterruptState struct {
-	ToolCallID      string `json:"toolCallID,omitempty"`
-	ToolName        string `json:"toolName,omitempty"`
-	ArgumentsInJSON string `json:"argumentsInJSON,omitempty"`
+	ToolCallID            string `json:"toolCallID,omitempty"`
+	ToolName              string `json:"toolName,omitempty"`
+	ArgumentsInJSON       string `json:"argumentsInJSON,omitempty"`
+	CommitWorkspaceDigest string `json:"commitWorkspaceDigest,omitempty"`
 }
 
 type projectEinoPermissionResumeData struct {

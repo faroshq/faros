@@ -79,9 +79,113 @@ func TestProjectEinoAssistantLifecycleRequiresFreshVerificationForCommit(t *test
 	}
 }
 
+func TestProjectEinoAssistantLifecyclePromotesRepositoryReadinessDuringV2Run(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	revision := state.BeginDevelopmentSyncForNextMutation()
+	state.RecordSourceMutation()
+	state.CompleteDevelopmentSync(revision, nil)
+	state.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
+
+	views := []*ProjectRepositoryView{
+		{Ref: "demo-repo", Status: projectRepositoryStatusProvisioning},
+		{Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true},
+		nil,
+	}
+	next := 0
+	lifecycle := &projectEinoAssistantLifecycle{
+		v2:       true,
+		runState: state,
+		repositoryView: func(context.Context) (*ProjectRepositoryView, error) {
+			view := views[next]
+			next++
+			return view, nil
+		},
+	}
+
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), nil, nil); err != nil {
+		t.Fatalf("BeforeModelRewriteState provisioning: %v", err)
+	}
+	if state.SourceMutationCommitRequired() || state.ShouldRequestSourceCommit() {
+		t.Fatal("provisioning repository required a commit")
+	}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), nil, nil); err != nil {
+		t.Fatalf("BeforeModelRewriteState ready: %v", err)
+	}
+	if !state.SourceMutationCommitRequired() || !state.ShouldRequestSourceCommit() {
+		t.Fatal("ready repository did not require the verified mutation to be committed")
+	}
+	if got := state.ProjectRepositoryRef(); got != "demo-repo" {
+		t.Fatalf("repository ref = %q, want demo-repo", got)
+	}
+
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), nil, nil); err != nil {
+		t.Fatalf("BeforeModelRewriteState unavailable: %v", err)
+	}
+	if !state.SourceMutationCommitRequired() {
+		t.Fatal("transient unavailable repository waived an established commit requirement")
+	}
+}
+
+func TestProjectEinoAssistantLifecycleCompletesInitialPlanAfterFreshVerification(t *testing.T) {
+	authority := projectAssistantInitialCreationPlan("Build the app")
+	state := newProjectEinoAssistantRunState()
+	state.ApprovePlan(authority)
+	state.SetExecutionPlan(projectAssistantApprovedPlan{
+		Goal:     authority.Goal,
+		Steps:    []string{"Build", "Verify"},
+		RunLocal: true,
+	}, "plan-1")
+	middleware := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		InitialApprovedPlan: &authority,
+	}, state)
+
+	write := wrapProjectEinoAssistantLifecycleTool(t, middleware, projectToolWriteFile, func(context.Context, string, ...einotool.Option) (string, error) {
+		return `{"operation":"write_file"}`, nil
+	})
+	if _, err := write(context.Background(), `{}`); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	verify := wrapProjectEinoAssistantLifecycleTool(t, middleware, projectToolVerifyDevelopmentRuntime, func(context.Context, string, ...einotool.Option) (string, error) {
+		return `{"status":"ready","checkedMutationRevision":1}`, nil
+	})
+	if _, err := verify(context.Background(), `{}`); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !state.ExecutionPlanComplete() {
+		t.Fatal("fresh initial-build verification did not complete the execution plan")
+	}
+}
+
+func TestProjectEinoAssistantLifecycleDoesNotCompleteOrdinaryEditPlan(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.SetExecutionPlan(projectAssistantApprovedPlan{
+		Goal:  "Update the app",
+		Steps: []string{"Edit", "Verify"},
+	}, "plan-1")
+	middleware := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{}, state)
+
+	write := wrapProjectEinoAssistantLifecycleTool(t, middleware, projectToolWriteFile, func(context.Context, string, ...einotool.Option) (string, error) {
+		return `{"operation":"write_file"}`, nil
+	})
+	if _, err := write(context.Background(), `{}`); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	verify := wrapProjectEinoAssistantLifecycleTool(t, middleware, projectToolVerifyDevelopmentRuntime, func(context.Context, string, ...einotool.Option) (string, error) {
+		return `{"status":"ready","checkedMutationRevision":1}`, nil
+	})
+	if _, err := verify(context.Background(), `{}`); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if state.ExecutionPlanComplete() {
+		t.Fatal("ordinary edit verification unexpectedly completed the execution plan")
+	}
+}
+
 func TestProjectEinoAssistantLifecycleCheckpointPreservesVerificationRevision(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
+	revision := state.BeginDevelopmentSyncForNextMutation()
 	state.RecordSourceMutation()
+	state.CompleteDevelopmentSync(revision, nil)
 	state.RecordDevelopmentVerification(true)
 
 	checkpoint := state.CheckpointState()
@@ -90,10 +194,41 @@ func TestProjectEinoAssistantLifecycleCheckpointPreservesVerificationRevision(t 
 	if !restored.SourceMutationVerified() {
 		t.Fatal("restored checkpoint lost fresh verification")
 	}
+	status, reason := restored.DevelopmentSyncEvidence(1)
+	if status != "succeeded" || reason != "" {
+		t.Fatalf("restored sync evidence = (%q, %q), want succeeded", status, reason)
+	}
 
 	restored.RecordSourceMutation()
 	if restored.SourceMutationVerified() {
 		t.Fatal("new source mutation did not invalidate restored verification")
+	}
+}
+
+func TestProjectEinoAssistantLifecycleRequiresFreshOperationalVerificationAfterCommit(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.ConfigureCommitRequirement(true)
+	revision := state.BeginDevelopmentSyncForNextMutation()
+	state.RecordSourceMutation()
+	state.CompleteDevelopmentSync(revision, nil)
+	state.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
+	if !state.SourceMutationVerified() {
+		t.Fatal("pre-commit operational verification was not recorded")
+	}
+
+	state.RecordSourceCommit()
+	evidence := state.CompletionEvidence()
+	if !evidence.LatestMutationCommitted {
+		t.Fatalf("commit evidence = %#v, want current mutation committed", evidence)
+	}
+	if evidence.LatestMutationVerified || !state.NeedsCompletionVerification() {
+		t.Fatalf("post-commit evidence = %#v, want one fresh operational verification", evidence)
+	}
+
+	state.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
+	evidence = state.CompletionEvidence()
+	if !evidence.LatestMutationCommitted || !evidence.LatestMutationVerified {
+		t.Fatalf("fresh post-commit evidence = %#v, want committed and verified", evidence)
 	}
 }
 
@@ -135,7 +270,7 @@ func TestProjectEinoAssistantLifecycleTreatsRepositoryHandoffAsRuntimeWarning(t 
 	state := newProjectEinoAssistantRunState()
 	state.RecordSourceMutation()
 	state.RecordDevelopmentVerificationResult(
-		`{"checkedMutationRevision":1,"status":"ready","summary":"The development runtime is ready. The Git repository is still becoming ready, so commit and CI handoff are pending.","warnings":["The repository handoff is still in progress."]}`,
+		`{"checkedMutationRevision":1,"status":"ready","summary":"The development runtime is operationally ready. The Git repository is still becoming ready, so commit and CI handoff are pending. Application behavior was not independently verified.","warnings":["The repository handoff is still in progress."]}`,
 	)
 
 	if !state.SourceMutationVerified() {
