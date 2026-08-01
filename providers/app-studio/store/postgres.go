@@ -28,14 +28,13 @@ import (
 	"github.com/lib/pq"
 )
 
-const messageSchemaVersion = "work-item-v2"
+const messageSchemaVersion = "assistant-v2-only-v1"
+const assistantV2CutoverSchemaVersion = "assistant-v2-destructive-cutover-v1"
 const approvalModeSchemaVersion = "approval-mode-v1"
-const approvalModeDefaultSchemaVersion = "approval-mode-default-auto-approve-v1"
-const clientRequestUniqueSchemaVersion = "client-request-unique-v1"
-const executionPlanSchemaVersion = "work-item-execution-plan-v1"
-const cancellationReceiptSchemaVersion = "work-item-cancellation-receipt-v1"
 const bootstrapPermitSchemaVersion = "project-bootstrap-permit-v1"
 const assistantRunEventSchemaVersion = "assistant-run-event-v1"
+
+const lockMessageSchemaMigrations = `SELECT pg_advisory_xact_lock(870408091945886937)`
 
 const createMessageSchemaMigrationsTable = `CREATE TABLE IF NOT EXISTS app_studio_message_schema_migrations (
 	version text PRIMARY KEY,
@@ -86,51 +85,27 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store is nil")
 	}
-
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin schema migration tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
+	// Serialize every migration transaction before even creating the marker
+	// table. This also makes the destructive V2 cutover safe when multiple
+	// provider replicas start against the same database at once.
+	if _, err = tx.ExecContext(ctx, lockMessageSchemaMigrations); err != nil {
+		return fmt.Errorf("lock schema migrations: %w", err)
+	}
 	if _, err = tx.ExecContext(ctx, createMessageSchemaMigrationsTable); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
 	}
-
-	stmts := workItemSchemaStatements()
-	missing, err := schemaVersionMissing(ctx, tx, messageSchemaVersion)
-	if err != nil {
+	if err := ensureSchemaVersion(ctx, tx, assistantV2CutoverSchemaVersion, assistantV2CutoverSchemaStatements()...); err != nil {
 		return err
 	}
-	if missing {
-		if err := rejectPopulatedLegacyProjectSchema(ctx, tx); err != nil {
-			return err
-		}
-		// Empty legacy tables can be upgraded in place. Populated tables without
-		// project_uid are rejected above: assigning their rows to a current
-		// Project UID based only on a reused name would leak a prior project.
-		for _, stmt := range workItemSchemaUpgradeStatements() {
-			if _, err := tx.ExecContext(ctx, stmt); err != nil {
-				return fmt.Errorf("upgrade legacy App Studio schema for %s: %w", messageSchemaVersion, err)
-			}
-		}
-	}
-	if err := ensureSchemaVersion(ctx, tx, messageSchemaVersion, stmts...); err != nil {
-		return err
-	}
-	if err := ensureSchemaVersion(ctx, tx, clientRequestUniqueSchemaVersion, clientRequestUniqueSchemaStatements()...); err != nil {
+	if err := ensureSchemaVersion(ctx, tx, messageSchemaVersion, assistantSchemaStatements()...); err != nil {
 		return err
 	}
 	if err := ensureSchemaVersion(ctx, tx, approvalModeSchemaVersion, approvalModeSchemaStatements()...); err != nil {
-		return err
-	}
-	if err := ensureSchemaVersion(ctx, tx, approvalModeDefaultSchemaVersion, approvalModeDefaultSchemaStatements()...); err != nil {
-		return err
-	}
-	if err := ensureSchemaVersion(ctx, tx, executionPlanSchemaVersion, executionPlanSchemaStatements()...); err != nil {
-		return err
-	}
-	if err := ensureSchemaVersion(ctx, tx, cancellationReceiptSchemaVersion, cancellationReceiptSchemaStatements()...); err != nil {
 		return err
 	}
 	if err := ensureSchemaVersion(ctx, tx, bootstrapPermitSchemaVersion, bootstrapPermitSchemaStatements()...); err != nil {
@@ -145,113 +120,61 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-func clientRequestUniqueSchemaStatements() []string {
-	return []string{`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
-		ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, client_request_id)
-		WHERE client_request_id <> ''`}
+// assistantV2CutoverSchemaStatements intentionally discards pre-V2 assistant
+// conversations and runs. App Studio is not preserving the retired WorkItem,
+// engine-version, or semantic-mode storage contract.
+func assistantV2CutoverSchemaStatements() []string {
+	statements := []string{
+		`DROP TABLE IF EXISTS app_studio_assistant_run_events`,
+		`DROP TABLE IF EXISTS app_studio_assistant_work_items`,
+		`DROP TABLE IF EXISTS app_studio_assistant_runs`,
+		`DROP TABLE IF EXISTS app_studio_messages`,
+	}
+	statements = append(statements, assistantSchemaStatements()...)
+	statements = append(statements, assistantRunEventSchemaStatements()...)
+	return statements
 }
 
-func workItemSchemaUpgradeStatements() []string {
+func assistantSchemaStatements() []string {
 	return []string{
-		`CREATE TABLE IF NOT EXISTS app_studio_messages (org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL DEFAULT '', message_id text NOT NULL, role text NOT NULL DEFAULT '', actor_id text NOT NULL DEFAULT '', work_item_id text NOT NULL DEFAULT '', content text NOT NULL DEFAULT '', content_encrypted boolean NOT NULL DEFAULT false, content_key_id text NOT NULL DEFAULT '', metadata jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, message_id))`,
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_runs (org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL DEFAULT '', run_id text NOT NULL, work_item_id text NOT NULL DEFAULT '', mode text NOT NULL DEFAULT 'discussion', engine_version text NOT NULL DEFAULT '', approval_mode text NOT NULL DEFAULT 'auto_approve', expected_grant_revision text NOT NULL DEFAULT '', status text NOT NULL DEFAULT '', client_request_id text NOT NULL DEFAULT '', user_message_id text NOT NULL DEFAULT '', active_message_id text NOT NULL DEFAULT '', revision bigint NOT NULL DEFAULT 0, request_id text NOT NULL DEFAULT '', checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb, audit jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id))`,
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_work_items (org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL DEFAULT '', work_item_id text NOT NULL, root_message_id text NOT NULL, created_by text NOT NULL, status text NOT NULL, status_reason text NOT NULL DEFAULT '', revision bigint NOT NULL DEFAULT 0, active_run_id text NOT NULL DEFAULT '', plan_grant jsonb NOT NULL DEFAULT '{}'::jsonb, grant_revision text NOT NULL DEFAULT '', execution_plan jsonb NOT NULL DEFAULT '{}'::jsonb, execution_plan_revision text NOT NULL DEFAULT '', cancellation_receipt jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, work_item_id))`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS project_uid text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS actor_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS work_item_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS content text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS content_encrypted boolean NOT NULL DEFAULT false`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS content_key_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`,
-		`ALTER TABLE app_studio_messages ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS project_uid text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS work_item_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'discussion'`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS engine_version text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS approval_mode text NOT NULL DEFAULT 'auto_approve'`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS expected_grant_revision text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS client_request_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS user_message_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS active_message_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS request_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS audit jsonb NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()`,
-		`ALTER TABLE app_studio_assistant_runs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`,
-		`ALTER TABLE app_studio_assistant_work_items ADD COLUMN IF NOT EXISTS cancellation_receipt jsonb NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE app_studio_messages DROP CONSTRAINT IF EXISTS app_studio_messages_pkey`,
-		`ALTER TABLE app_studio_messages ADD PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, message_id)`,
-		`ALTER TABLE app_studio_assistant_runs DROP CONSTRAINT IF EXISTS app_studio_assistant_runs_pkey`,
-		`ALTER TABLE app_studio_assistant_runs ADD PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)`,
-		`DROP INDEX IF EXISTS app_studio_assistant_runs_scope_client_request_idx`,
-		`DROP INDEX IF EXISTS app_studio_assistant_runs_scope_active_idx`,
+		`CREATE TABLE IF NOT EXISTS app_studio_messages (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			message_id text NOT NULL, role text NOT NULL, actor_id text NOT NULL DEFAULT '', content text NOT NULL,
+			content_encrypted boolean NOT NULL DEFAULT false, content_key_id text NOT NULL DEFAULT '',
+			metadata jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS app_studio_messages_scope_created_idx
+			ON app_studio_messages (org_uuid, workspace_uuid, project_name, project_uid, created_at, message_id)`,
+		`CREATE INDEX IF NOT EXISTS app_studio_messages_created_idx ON app_studio_messages (created_at)`,
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_runs (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			run_id text NOT NULL, mode text NOT NULL CHECK (mode IN ('default', 'plan')),
+			approval_mode text NOT NULL DEFAULT 'auto_approve' CHECK (approval_mode IN ('always_ask', 'auto_approve')),
+			status text NOT NULL, client_request_id text NOT NULL DEFAULT '', user_message_id text NOT NULL DEFAULT '',
+			active_message_id text NOT NULL DEFAULT '', revision bigint NOT NULL DEFAULT 0, request_id text NOT NULL DEFAULT '',
+			checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb, audit jsonb NOT NULL DEFAULT '{}'::jsonb,
+			created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_updated_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, updated_at, run_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, client_request_id)
+			WHERE client_request_id <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_runs_active_idx
+			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid)
+			WHERE status NOT IN ('completed','aborted','failed','interrupted')`,
 	}
-}
-
-func rejectPopulatedLegacyProjectSchema(ctx context.Context, tx *sql.Tx) error {
-	for _, table := range []string{"app_studio_messages", "app_studio_assistant_runs"} {
-		var exists, hasProjectUID, hasRows bool
-		if err := tx.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
-			return fmt.Errorf("check legacy App Studio table %s: %w", table, err)
-		}
-		if !exists {
-			continue
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name='project_uid')`, table).Scan(&hasProjectUID); err != nil {
-			return fmt.Errorf("inspect legacy App Studio table %s: %w", table, err)
-		}
-		if hasProjectUID {
-			continue
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+table+`)`).Scan(&hasRows); err != nil {
-			return fmt.Errorf("inspect legacy App Studio rows in %s: %w", table, err)
-		}
-		if hasRows {
-			return fmt.Errorf("legacy App Studio %s rows have no project_uid; schema migration stopped without changing data. Map each legacy (org_uuid, workspace_uuid, project_name) to its immutable Project UID, backfill project_uid, and rerun", table)
-		}
-	}
-	return nil
 }
 
 func approvalModeSchemaStatements() []string {
-	return []string{
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences (
-			org_uuid text NOT NULL,
-			workspace_uuid text NOT NULL,
-			project_name text NOT NULL,
-			project_uid text NOT NULL,
-			actor_id text NOT NULL,
-				approval_mode text NOT NULL CHECK (approval_mode IN ('always_ask', 'auto_approve')),
-			updated_at timestamptz NOT NULL,
-			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
-			)`,
-		`ALTER TABLE app_studio_assistant_runs
-				ADD COLUMN IF NOT EXISTS approval_mode text NOT NULL DEFAULT 'auto_approve'
-				CHECK (approval_mode IN ('always_ask', 'auto_approve'))`,
-	}
-}
-
-func approvalModeDefaultSchemaStatements() []string {
-	return []string{`ALTER TABLE app_studio_assistant_runs
-		ALTER COLUMN approval_mode SET DEFAULT 'auto_approve'`}
-}
-
-func executionPlanSchemaStatements() []string {
-	return []string{
-		`ALTER TABLE app_studio_assistant_work_items
-			ADD COLUMN IF NOT EXISTS execution_plan jsonb NOT NULL DEFAULT '{}'::jsonb`,
-		`ALTER TABLE app_studio_assistant_work_items
-			ADD COLUMN IF NOT EXISTS execution_plan_revision text NOT NULL DEFAULT ''`,
-	}
-}
-
-func cancellationReceiptSchemaStatements() []string {
-	return []string{`ALTER TABLE app_studio_assistant_work_items
-		ADD COLUMN IF NOT EXISTS cancellation_receipt jsonb NOT NULL DEFAULT '{}'::jsonb`}
+	return []string{`CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences (
+		org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+		actor_id text NOT NULL, approval_mode text NOT NULL CHECK (approval_mode IN ('always_ask', 'auto_approve')),
+		updated_at timestamptz NOT NULL,
+		PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
+	)`}
 }
 
 func bootstrapPermitSchemaStatements() []string {
@@ -264,105 +187,16 @@ func bootstrapPermitSchemaStatements() []string {
 }
 
 func assistantRunEventSchemaStatements() []string {
-	return []string{
-		`ALTER TABLE app_studio_assistant_runs
-			ADD COLUMN IF NOT EXISTS engine_version text NOT NULL DEFAULT ''`,
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_run_events (
-			org_uuid text NOT NULL,
-			workspace_uuid text NOT NULL,
-			project_name text NOT NULL,
-			project_uid text NOT NULL,
-			run_id text NOT NULL,
-			sequence bigint NOT NULL CHECK (sequence > 0),
-			event_type text NOT NULL,
-			call_id text NOT NULL DEFAULT '',
-			tool_name text NOT NULL DEFAULT '',
-			args_digest text NOT NULL DEFAULT '',
-			payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-			created_at timestamptz NOT NULL,
-			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id, sequence),
-			FOREIGN KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)
-				REFERENCES app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id)
-				ON DELETE CASCADE
-		)`,
-	}
-}
-
-func workItemSchemaStatements() []string {
-	return []string{
-		`CREATE TABLE IF NOT EXISTS app_studio_messages (
-			org_uuid text NOT NULL,
-			workspace_uuid text NOT NULL,
-			project_name text NOT NULL,
-			project_uid text NOT NULL,
-			message_id text NOT NULL,
-			role text NOT NULL,
-			actor_id text NOT NULL DEFAULT '',
-			work_item_id text NOT NULL DEFAULT '',
-			content text NOT NULL,
-			content_encrypted boolean NOT NULL DEFAULT false,
-			content_key_id text NOT NULL DEFAULT '',
-			metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-			created_at timestamptz NOT NULL,
-			updated_at timestamptz NOT NULL,
-			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, message_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS app_studio_messages_scope_created_idx
-			ON app_studio_messages (org_uuid, workspace_uuid, project_name, project_uid, created_at, message_id)`,
-		`CREATE INDEX IF NOT EXISTS app_studio_messages_created_idx
-			ON app_studio_messages (created_at)`,
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_runs (
-			org_uuid text NOT NULL,
-			workspace_uuid text NOT NULL,
-			project_name text NOT NULL,
-			project_uid text NOT NULL,
-			run_id text NOT NULL,
-				work_item_id text NOT NULL DEFAULT '',
-				mode text NOT NULL DEFAULT 'discussion',
-				engine_version text NOT NULL DEFAULT '',
-				approval_mode text NOT NULL DEFAULT 'auto_approve' CHECK (approval_mode IN ('always_ask', 'auto_approve')),
-				expected_grant_revision text NOT NULL DEFAULT '',
-			status text NOT NULL,
-			client_request_id text NOT NULL DEFAULT '',
-			user_message_id text NOT NULL DEFAULT '',
-			active_message_id text NOT NULL DEFAULT '',
-			revision bigint NOT NULL DEFAULT 0,
-			request_id text NOT NULL DEFAULT '',
-			checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb,
-			audit jsonb NOT NULL DEFAULT '{}'::jsonb,
-			created_at timestamptz NOT NULL,
-			updated_at timestamptz NOT NULL,
-			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_updated_idx
-			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, updated_at, run_id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_runs_scope_client_request_idx
-			ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, client_request_id)
-			WHERE client_request_id <> ''`,
-		`CREATE TABLE IF NOT EXISTS app_studio_assistant_work_items (
-			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
-			work_item_id text NOT NULL, root_message_id text NOT NULL, created_by text NOT NULL,
-			status text NOT NULL, status_reason text NOT NULL DEFAULT '', revision bigint NOT NULL,
-			active_run_id text NOT NULL DEFAULT '', plan_grant jsonb NOT NULL DEFAULT '{}'::jsonb,
-			grant_revision text NOT NULL DEFAULT '', execution_plan jsonb NOT NULL DEFAULT '{}'::jsonb,
-			execution_plan_revision text NOT NULL DEFAULT '', cancellation_receipt jsonb NOT NULL DEFAULT '{}'::jsonb,
-			created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
-			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, work_item_id),
-			UNIQUE (org_uuid, workspace_uuid, project_name, project_uid, root_message_id)
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_work_items_active_idx ON app_studio_assistant_work_items (org_uuid, workspace_uuid, project_name, project_uid) WHERE status = 'active'`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_runs_active_idx ON app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid) WHERE status NOT IN ('completed','aborted','failed','interrupted')`,
-	}
-}
-
-func schemaVersionMissing(ctx context.Context, tx *sql.Tx, version string) (bool, error) {
-	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
-		SELECT 1 FROM app_studio_message_schema_migrations WHERE version = $1
-	)`, version).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check schema migration %s: %w", version, err)
-	}
-	return !exists, nil
+	return []string{`CREATE TABLE IF NOT EXISTS app_studio_assistant_run_events (
+		org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+		run_id text NOT NULL, sequence bigint NOT NULL CHECK (sequence > 0), event_type text NOT NULL,
+		call_id text NOT NULL DEFAULT '', tool_name text NOT NULL DEFAULT '', args_digest text NOT NULL DEFAULT '',
+		payload jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL,
+		PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id, sequence),
+		FOREIGN KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id)
+			REFERENCES app_studio_assistant_runs (org_uuid, workspace_uuid, project_name, project_uid, run_id)
+			ON DELETE CASCADE
+	)`}
 }
 
 func ensureSchemaVersion(ctx context.Context, tx *sql.Tx, version string, stmts ...string) error {
@@ -414,13 +248,12 @@ func (s *PostgresStore) AppendMessage(ctx context.Context, scope Scope, msg Mess
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_studio_messages (
 			org_uuid, workspace_uuid, project_name, project_uid, message_id,
-			actor_id, work_item_id, role, content, content_encrypted, content_key_id,
+			actor_id, role, content, content_encrypted, content_key_id,
 			metadata, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, message_id)
 		DO UPDATE SET
 			actor_id = EXCLUDED.actor_id,
-			work_item_id = EXCLUDED.work_item_id,
 			role = EXCLUDED.role,
 			content = EXCLUDED.content,
 			content_encrypted = EXCLUDED.content_encrypted,
@@ -429,10 +262,9 @@ func (s *PostgresStore) AppendMessage(ctx context.Context, scope Scope, msg Mess
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at
 		WHERE app_studio_messages.actor_id = EXCLUDED.actor_id
-			AND app_studio_messages.work_item_id = EXCLUDED.work_item_id
 	`,
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, msg.ID,
-		msg.ActorID, msg.WorkItemID, msg.Role, msg.Content, msg.ContentEncrypted, msg.ContentKeyID,
+		msg.ActorID, msg.Role, msg.Content, msg.ContentEncrypted, msg.ContentKeyID,
 		metadata, msg.CreatedAt.UTC(), msg.UpdatedAt.UTC(),
 	)
 	if err != nil {
@@ -441,7 +273,7 @@ func (s *PostgresStore) AppendMessage(ctx context.Context, scope Scope, msg Mess
 	if n, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("count upsert message: %w", err)
 	} else if n != 1 {
-		return fmt.Errorf("%w: message %q actor and work item are immutable", ErrAssistantWorkItemConflict, msg.ID)
+		return fmt.Errorf("message %q actor is immutable", msg.ID)
 	}
 	return nil
 }
@@ -461,7 +293,7 @@ func (s *PostgresStore) ListMessages(ctx context.Context, scope Scope, limit int
 	}
 
 	query := `
-		SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id,
+		SELECT message_id, actor_id, role, content, content_encrypted, content_key_id,
 		       metadata, created_at, updated_at
 		FROM app_studio_messages
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4`
@@ -505,14 +337,6 @@ func (s *PostgresStore) ListMessages(ctx context.Context, scope Scope, limit int
 }
 
 func (s *PostgresStore) LoadRecentMessages(ctx context.Context, scope Scope, limit int) (items []Message, err error) {
-	return s.loadRecentMessages(ctx, scope, limit, false)
-}
-
-func (s *PostgresStore) LoadRecentDiscussionMessages(ctx context.Context, scope Scope, limit int) (items []Message, err error) {
-	return s.loadRecentMessages(ctx, scope, limit, true)
-}
-
-func (s *PostgresStore) loadRecentMessages(ctx context.Context, scope Scope, limit int, discussionOnly bool) (items []Message, err error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is nil")
 	}
@@ -521,14 +345,11 @@ func (s *PostgresStore) loadRecentMessages(ctx context.Context, scope Scope, lim
 	}
 	limit = normalizeLimit(limit)
 	query := `
-		SELECT message_id, actor_id, work_item_id, role, content, content_encrypted, content_key_id,
+		SELECT message_id, actor_id, role, content, content_encrypted, content_key_id,
 		       metadata, created_at, updated_at
 		FROM app_studio_messages
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`
-	if discussionOnly {
-		query += ` AND work_item_id = ''`
-	}
 	query += `
 		ORDER BY created_at DESC, message_id DESC
 		LIMIT $5
@@ -672,10 +493,10 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
-			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision,
+			org_uuid, workspace_uuid, project_name, project_uid, run_id, mode, approval_mode,
 			status, client_request_id, user_message_id, active_message_id, revision, request_id,
-			checkpoint, audit, created_at, updated_at, engine_version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			checkpoint, audit, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, run_id)
 		DO UPDATE SET
 			status = EXCLUDED.status,
@@ -684,14 +505,12 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 			checkpoint = EXCLUDED.checkpoint,
 			audit = EXCLUDED.audit,
 			updated_at = EXCLUDED.updated_at
-			WHERE app_studio_assistant_runs.work_item_id = EXCLUDED.work_item_id
-				AND app_studio_assistant_runs.mode = EXCLUDED.mode
-				AND app_studio_assistant_runs.engine_version = EXCLUDED.engine_version
+			WHERE app_studio_assistant_runs.mode = EXCLUDED.mode
 				AND app_studio_assistant_runs.approval_mode = EXCLUDED.approval_mode
 		`,
-		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.Mode, run.ApprovalMode,
 		run.Status, run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(), run.EngineVersion,
+		string(normalizedCheckpoint), string(normalizedAudit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(),
 	)
 	if err != nil {
 		if isAssistantRunUniqueViolation(err) {
@@ -702,7 +521,7 @@ func (s *PostgresStore) SaveAssistantRun(ctx context.Context, scope Scope, run A
 	if n, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("count upsert assistant run: %w", err)
 	} else if n != 1 {
-		return fmt.Errorf("%w: assistant run %q work item and mode are immutable", ErrAssistantRunConflict, run.ID)
+		return fmt.Errorf("%w: assistant run %q contract is immutable", ErrAssistantRunConflict, run.ID)
 	}
 	return nil
 }
@@ -733,16 +552,16 @@ func (s *PostgresStore) CreateAssistantRun(ctx context.Context, scope Scope, use
 
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO app_studio_assistant_runs (
-			org_uuid, workspace_uuid, project_name, project_uid, run_id, work_item_id, mode, approval_mode, expected_grant_revision, status,
+			org_uuid, workspace_uuid, project_name, project_uid, run_id, mode, approval_mode, status,
 			client_request_id, user_message_id, active_message_id, revision, request_id,
-			checkpoint, audit, created_at, updated_at, engine_version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			checkpoint, audit, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		ON CONFLICT DO NOTHING
-		RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		          request_id, checkpoint, audit, created_at, updated_at, engine_version
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.WorkItemID, run.Mode, run.ApprovalMode, run.ExpectedGrantRevision, run.Status,
+		RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+		          request_id, checkpoint, audit, created_at, updated_at
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID, run.Mode, run.ApprovalMode, run.Status,
 		run.ClientRequestID, run.UserMessageID, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC(), run.EngineVersion)
+		string(checkpoint), string(audit), run.CreatedAt.UTC(), run.UpdatedAt.UTC())
 	inserted, err := scanAssistantRun(row, scope)
 	if err == sql.ErrNoRows {
 		existing, lookupErr := getAssistantRunByClientRequestID(ctx, tx, scope, run.ClientRequestID)
@@ -804,13 +623,11 @@ func (s *PostgresStore) SaveAssistantRunSnapshot(ctx context.Context, scope Scop
 			updated_at = $12
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
 			  AND revision = $13
-			  AND work_item_id = $14
-			  AND mode = $15
-			  AND approval_mode = $16
-			  AND engine_version = $17
+			  AND mode = $14
+			  AND approval_mode = $15
 		`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, run.ID,
 		run.Status, run.ActiveMessageID, run.Revision, run.RequestID,
-		string(checkpoint), string(audit), run.UpdatedAt.UTC(), expectedRevision, run.WorkItemID, run.Mode, run.ApprovalMode, run.EngineVersion)
+		string(checkpoint), string(audit), run.UpdatedAt.UTC(), expectedRevision, run.Mode, run.ApprovalMode)
 	if err != nil {
 		if isAssistantRunUniqueViolation(err) {
 			return fmt.Errorf("%w: project already has active assistant run", ErrAssistantRunConflict)
@@ -879,6 +696,61 @@ func sanitizePostgresJSONBValue(value any) any {
 	}
 }
 
+func (s *PostgresStore) RequestAssistantRunStop(ctx context.Context, scope Scope, runID string, expectedRunRevision int64, now time.Time) (AssistantRun, error) {
+	return s.requestAssistantRunStop(ctx, scope, runID, expectedRunRevision, Message{}, now)
+}
+
+func (s *PostgresStore) RequestAssistantRunStopWithAssistantMessage(ctx context.Context, scope Scope, runID string, expectedRunRevision int64, assistant Message, now time.Time) (AssistantRun, error) {
+	return s.requestAssistantRunStop(ctx, scope, runID, expectedRunRevision, assistant, now)
+}
+
+func (s *PostgresStore) requestAssistantRunStop(ctx context.Context, scope Scope, runID string, expectedRunRevision int64, assistant Message, now time.Time) (AssistantRun, error) {
+	if s == nil || s.db == nil {
+		return AssistantRun{}, fmt.Errorf("postgres store is nil")
+	}
+	if err := scope.validate(); err != nil {
+		return AssistantRun{}, err
+	}
+	if runID == "" || expectedRunRevision < 1 {
+		return AssistantRun{}, fmt.Errorf("assistant run and revision are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantRun{}, fmt.Errorf("begin stop assistant run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	row := tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_runs
+		SET status=$1, revision=revision+1, updated_at=$2
+		WHERE org_uuid=$3 AND workspace_uuid=$4 AND project_name=$5 AND project_uid=$6
+			AND run_id=$7 AND revision=$8 AND status=$9
+		RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+			request_id, checkpoint, audit, created_at, updated_at`,
+		AssistantRunStatusStopping, now.UTC(), scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		runID, expectedRunRevision, AssistantRunStatusRunning)
+	run, err := scanAssistantRun(row, scope)
+	if err == sql.ErrNoRows {
+		return AssistantRun{}, fmt.Errorf("%w: assistant run %q", ErrAssistantRunConflict, runID)
+	}
+	if err != nil {
+		return AssistantRun{}, fmt.Errorf("stop assistant run: %w", err)
+	}
+	if assistant.ID != "" {
+		if assistant.Role != "assistant" || assistant.ID != run.ActiveMessageID {
+			return AssistantRun{}, fmt.Errorf("assistant lifecycle message must be the active run message")
+		}
+		if err := appendMessageTx(ctx, tx, scope, prepareMessage(scope, assistant)); err != nil {
+			return AssistantRun{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantRun{}, fmt.Errorf("commit stop assistant run: %w", err)
+	}
+	return run, nil
+}
+
 func (s *PostgresStore) ClaimAssistantRun(ctx context.Context, scope Scope, id string, requestID string, now time.Time) (AssistantRun, error) {
 	if s == nil || s.db == nil {
 		return AssistantRun{}, fmt.Errorf("postgres store is nil")
@@ -904,9 +776,9 @@ func (s *PostgresStore) ClaimAssistantRun(ctx context.Context, scope Scope, id s
 		  AND project_uid = $6
 		  AND run_id = $7
 		  AND request_id = $8
-		  AND status IN ($9, $10)
-			RETURNING run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		          request_id, checkpoint, audit, created_at, updated_at, engine_version
+			AND status IN ($9, $10)
+			RETURNING run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+		          request_id, checkpoint, audit, created_at, updated_at
 	`,
 		AssistantRunStatusRunning, now.UTC(),
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id, requestID,
@@ -934,8 +806,8 @@ func (s *PostgresStore) GetAssistantRun(ctx context.Context, scope Scope, id str
 		return AssistantRun{}, fmt.Errorf("assistant run id is required")
 	}
 	row := s.db.QueryRowContext(ctx, `
-			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at, engine_version
+			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND run_id = $5
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id)
@@ -971,8 +843,8 @@ func (s *PostgresStore) LatestAssistantRun(ctx context.Context, scope Scope) (As
 		return AssistantRun{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at, engine_version
+			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 		ORDER BY updated_at DESC, run_id DESC
@@ -1124,12 +996,6 @@ func (s *PostgresStore) DeleteProjectMessages(ctx context.Context, scope Scope) 
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project assistant runs: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
-		DELETE FROM app_studio_assistant_work_items
-		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
-		return fmt.Errorf("delete project assistant work items: %w", err)
-	}
 	return nil
 }
 
@@ -1137,7 +1003,7 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("postgres store is nil")
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_messages WHERE work_item_id = '' AND created_at < $1`, before.UTC())
+	res, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_messages WHERE created_at < $1`, before.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete stale messages: %w", err)
 	}
@@ -1149,11 +1015,11 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 		USING app_studio_assistant_runs AS run
 		WHERE event.org_uuid=run.org_uuid AND event.workspace_uuid=run.workspace_uuid
 			AND event.project_name=run.project_name AND event.project_uid=run.project_uid AND event.run_id=run.run_id
-			AND run.work_item_id='' AND run.status IN ('completed', 'aborted', 'failed', 'interrupted') AND run.updated_at < $1`, before.UTC()); err != nil {
+			AND run.status IN ('completed', 'aborted', 'failed', 'interrupted') AND run.updated_at < $1`, before.UTC()); err != nil {
 		return 0, fmt.Errorf("delete stale assistant run events: %w", err)
 	}
 	runRes, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs
-		WHERE work_item_id = '' AND status IN ('completed', 'aborted', 'failed', 'interrupted') AND updated_at < $1`, before.UTC())
+		WHERE status IN ('completed', 'aborted', 'failed', 'interrupted') AND updated_at < $1`, before.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete stale assistant runs: %w", err)
 	}
@@ -1176,7 +1042,6 @@ func scanMessage(row interface {
 	if err := row.Scan(
 		&msg.ID,
 		&msg.ActorID,
-		&msg.WorkItemID,
 		&msg.Role,
 		&msg.Content,
 		&msg.ContentEncrypted,
@@ -1211,13 +1076,12 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, scope Scope, msg Message) 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO app_studio_messages (
 			org_uuid, workspace_uuid, project_name, project_uid, message_id,
-			actor_id, work_item_id, role, content, content_encrypted, content_key_id,
+			actor_id, role, content, content_encrypted, content_key_id,
 			metadata, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, message_id)
 		DO UPDATE SET
 			actor_id = EXCLUDED.actor_id,
-			work_item_id = EXCLUDED.work_item_id,
 			role = EXCLUDED.role,
 			content = EXCLUDED.content,
 			content_encrypted = EXCLUDED.content_encrypted,
@@ -1226,9 +1090,8 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, scope Scope, msg Message) 
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at
 		WHERE app_studio_messages.actor_id = EXCLUDED.actor_id
-			AND app_studio_messages.work_item_id = EXCLUDED.work_item_id
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, msg.ID,
-		msg.ActorID, msg.WorkItemID, msg.Role, msg.Content, msg.ContentEncrypted, msg.ContentKeyID,
+		msg.ActorID, msg.Role, msg.Content, msg.ContentEncrypted, msg.ContentKeyID,
 		metadata, msg.CreatedAt.UTC(), msg.UpdatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("upsert snapshot message: %w", err)
@@ -1236,7 +1099,7 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, scope Scope, msg Message) 
 	if n, err := result.RowsAffected(); err != nil {
 		return fmt.Errorf("count upsert snapshot message: %w", err)
 	} else if n != 1 {
-		return fmt.Errorf("%w: message %q actor and work item are immutable", ErrAssistantWorkItemConflict, msg.ID)
+		return fmt.Errorf("message %q actor is immutable", msg.ID)
 	}
 	return nil
 }
@@ -1265,8 +1128,8 @@ func getAssistantRunByClientRequestID(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, scope Scope, clientRequestID string) (AssistantRun, error) {
 	row := queryer.QueryRowContext(ctx, `
-			SELECT run_id, work_item_id, mode, approval_mode, expected_grant_revision, status, client_request_id, user_message_id, active_message_id, revision,
-		       request_id, checkpoint, audit, created_at, updated_at, engine_version
+			SELECT run_id, mode, approval_mode, status, client_request_id, user_message_id, active_message_id, revision,
+		       request_id, checkpoint, audit, created_at, updated_at
 		FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4 AND client_request_id = $5
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, clientRequestID)
@@ -1292,10 +1155,8 @@ func scanAssistantRun(row interface {
 	var status string
 	if err := row.Scan(
 		&run.ID,
-		&run.WorkItemID,
 		&run.Mode,
 		&run.ApprovalMode,
-		&run.ExpectedGrantRevision,
 		&status,
 		&run.ClientRequestID,
 		&run.UserMessageID,
@@ -1306,7 +1167,6 @@ func scanAssistantRun(row interface {
 		&run.Audit,
 		&run.CreatedAt,
 		&run.UpdatedAt,
-		&run.EngineVersion,
 	); err != nil {
 		return AssistantRun{}, err
 	}

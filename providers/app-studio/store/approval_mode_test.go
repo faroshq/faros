@@ -24,18 +24,11 @@ import (
 
 func TestApprovalModeSchemaMigrationIsAdditive(t *testing.T) {
 	statements := approvalModeSchemaStatements()
-	if len(statements) != 2 {
+	if len(statements) != 1 {
 		t.Fatalf("approval mode schema statements = %#v", statements)
 	}
 	if !strings.Contains(statements[0], "app_studio_assistant_approval_preferences") {
 		t.Fatalf("preference table statement = %q", statements[0])
-	}
-	if !strings.Contains(statements[1], "ADD COLUMN IF NOT EXISTS approval_mode") {
-		t.Fatalf("assistant run migration statement = %q", statements[1])
-	}
-	defaultStatements := approvalModeDefaultSchemaStatements()
-	if len(defaultStatements) != 1 || !strings.Contains(defaultStatements[0], "SET DEFAULT 'auto_approve'") {
-		t.Fatalf("approval mode default migration statements = %#v", defaultStatements)
 	}
 }
 
@@ -91,7 +84,7 @@ func TestMemoryStoreAssistantRunApprovalModeIsDurableAndImmutable(t *testing.T) 
 	assistant := Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	run := AssistantRun{
 		ID:              "run-1",
-		Mode:            AssistantRunModeAdaptive,
+		Mode:            AssistantRunModeDefault,
 		ApprovalMode:    AssistantApprovalModeAutoApprove,
 		Status:          AssistantRunStatusRunning,
 		ClientRequestID: "request-1",
@@ -140,7 +133,7 @@ func TestMemoryStoreAssistantRunApprovalModeDefaultsAndValidates(t *testing.T) {
 	assistant := Message{ID: "assistant-1", Role: "assistant", CreatedAt: now, UpdatedAt: now}
 	run := AssistantRun{
 		ID:              "run-1",
-		Mode:            AssistantRunModeDiscussion,
+		Mode:            AssistantRunModeDefault,
 		Status:          AssistantRunStatusCompleted,
 		ClientRequestID: "request-1",
 		UserMessageID:   user.ID,

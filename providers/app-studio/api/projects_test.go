@@ -37,29 +37,6 @@ import (
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
-func TestProjectAssistantTurnDecisionForStreamStartUsesPrecomputedDecision(t *testing.T) {
-	want := projectAssistantTurnDecision{
-		Profile:              projectAssistantTurnProfileImplementation,
-		RequiresCurrentState: true,
-		RequestsMutation:     true,
-		Confidence:           projectAssistantTurnConfidenceHigh,
-	}
-	called := false
-	got, err := projectAssistantTurnDecisionForStreamStart(context.Background(), func(context.Context, projectAssistantTurnRouteRequest) (projectAssistantTurnDecision, error) {
-		called = true
-		return projectAssistantTurnDecision{}, nil
-	}, projectAssistantTurnRouteRequest{}, &projectAssistantStreamStart{TurnDecision: &want})
-	if err != nil {
-		t.Fatalf("projectAssistantTurnDecisionForStreamStart returned error: %v", err)
-	}
-	if called {
-		t.Fatal("stream start invoked the ordinary router despite a precomputed decision")
-	}
-	if got != want {
-		t.Fatalf("decision = %#v, want %#v", got, want)
-	}
-}
-
 func TestProjectInitialBootstrapPromptDigestDoesNotExposePrompt(t *testing.T) {
 	digest := projectInitialBootstrapPromptDigest("Build a todo app")
 	if digest == projectInitialBootstrapPromptDigest("Build an unbounded platform") || digest == "Build a todo app" {
@@ -397,7 +374,7 @@ func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDy
 	)
 }
 
-func TestGenerateProjectAssistantStreamWithStartBypassesRouter(t *testing.T) {
+func TestGenerateProjectAssistantStreamWithStartUsesInitialCreationGrant(t *testing.T) {
 	messages := store.NewMemoryStore()
 	workspaces := workspace.NewFileStore(t.TempDir())
 	server := NewWithWorkspace(nil, messages, workspaces, "", false)
@@ -408,17 +385,16 @@ func TestGenerateProjectAssistantStreamWithStartBypassesRouter(t *testing.T) {
 	if err := appendProjectUserMessage(context.Background(), messages, testProjectMessageScope(id.orgUUID, id.workspaceUUID, project.Name), "Build a todo app"); err != nil {
 		t.Fatalf("append user message: %v", err)
 	}
-	server.assistantTurnRouter = func(context.Context, projectAssistantTurnRouteRequest) (projectAssistantTurnDecision, error) {
-		t.Fatal("ordinary router should not run for a fresh stream preflight")
-		return projectAssistantTurnDecision{}, nil
-	}
 	engine := &capturingProjectAssistantEngine{}
 	server.assistantEngine = engine
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
-	decision := projectAssistantTurnDecision{Profile: projectAssistantTurnProfileImplementation, RequestsMutation: true, Confidence: projectAssistantTurnConfidenceHigh}
-	start := &projectAssistantStreamStart{TurnDecision: &decision, InitialApprovedPlan: ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan())}
-	_, err := server.generateProjectAssistantStreamWithStart(httptest.NewRequest(http.MethodPost, "/", nil), id, client, project, projectAssistantStreamCallbacks{}, start)
+	start := &projectAssistantStreamStart{InitialApprovedPlan: ptrProjectAssistantApprovedPlan(projectAssistantInitialCreationPlan())}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request = request.WithContext(context.WithValue(request.Context(), projectAssistantSupervisorRunContextKey{}, store.AssistantRun{
+		ID: "run-initial", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning,
+	}))
+	_, err := server.generateProjectAssistantStreamWithStart(request, id, client, project, projectAssistantStreamCallbacks{}, start)
 	if err != nil {
 		t.Fatalf("generateProjectAssistantStreamWithStart returned error: %v", err)
 	}

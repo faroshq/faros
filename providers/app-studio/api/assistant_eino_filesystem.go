@@ -180,24 +180,17 @@ func (m *projectEinoAssistantFilesystemTelemetry) WrapInvokableToolCall(
 			Status:    "running",
 			Arguments: arguments,
 		})
-		var ledgerDecision projectAssistantRunToolCallDecision
-		if projectAssistantRequestUsesV2(m.req) {
-			if m.req.eventLedger == nil {
-				return "", errors.New("assistant run event ledger is not configured")
-			}
-			decision, ledgerErr := m.req.eventLedger.BeginToolCall(ctx, callID, projectAssistantToolSpec{
-				Name: name,
-				Risk: projectAssistantToolRiskRead,
-			}, args)
-			if ledgerErr != nil {
-				return "", ledgerErr
-			}
-			ledgerDecision = decision
+		if m.req.eventLedger == nil {
+			return "", errors.New("assistant run event ledger is not configured")
+		}
+		ledgerDecision, ledgerErr := m.req.eventLedger.BeginToolCall(ctx, callID, projectAssistantToolSpec{
+			Name: name,
+			Risk: projectAssistantToolRiskRead,
+		}, args)
+		if ledgerErr != nil {
+			return "", ledgerErr
 		}
 		finishDurable := func(result string, invokeErr error) (string, error) {
-			if !projectAssistantRequestUsesV2(m.req) {
-				return result, invokeErr
-			}
 			outcome, finishErr := m.req.eventLedger.FinishToolCall(ctx, ledgerDecision.Token, result, invokeErr)
 			if finishErr != nil {
 				return "", finishErr

@@ -122,7 +122,7 @@ func (s *Server) checkpointGit(repo *ProjectRepositoryView) projectCheckpoint {
 		cp.Reason = "No repository connected."
 		cp.Remediation = &projectCheckpointRemediation{
 			Kind:    projectCheckpointFixAuto,
-			Tool:    projectToolHydrateWorkspace,
+			Tool:    projectActionWorkspaceSync,
 			Message: "Connect a Git repository to hold the project's source.",
 		}
 		return cp

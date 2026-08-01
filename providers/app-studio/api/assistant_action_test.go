@@ -17,6 +17,9 @@ limitations under the License.
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -40,9 +43,6 @@ func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
 		{name: "default", req: CreateProjectMessageRequest{CollaborationMode: "default"}, want: projectAssistantCollaborationModeDefault, ok: true},
 		{name: "plan", req: CreateProjectMessageRequest{CollaborationMode: "plan"}, want: projectAssistantCollaborationModePlan, ok: true},
 		{name: "unknown", req: CreateProjectMessageRequest{CollaborationMode: "adaptive"}},
-		{name: "legacy action", req: CreateProjectMessageRequest{AssistantAction: "auto"}},
-		{name: "legacy work item", req: CreateProjectMessageRequest{WorkItemID: "wi-1"}},
-		{name: "legacy work item revision", req: CreateProjectMessageRequest{WorkItemRevision: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := tc.req.collaborationMode()
@@ -56,5 +56,40 @@ func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
 				t.Fatalf("collaborationMode = %q, nil; want validation error", got)
 			}
 		})
+	}
+}
+
+func TestCreateProjectMessageStrictDecoderRejectsUnknownFields(t *testing.T) {
+	for _, payload := range []string{
+		`{"content":"hello","clientRequestID":"request-1","assistantAction":"auto"}`,
+		`{"content":"hello","clientRequestID":"request-1","role":"user"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest("POST", "/api/projects/demo/messages", strings.NewReader(payload))
+		var body CreateProjectMessageRequest
+		if decodeStrictJSON(recorder, request, &body) {
+			t.Fatalf("decodeStrictJSON accepted unknown field in %s", payload)
+		}
+		if recorder.Code != 400 {
+			t.Fatalf("status = %d, want 400", recorder.Code)
+		}
+	}
+}
+
+func TestProjectAssistantResumeStrictDecoderRejectsClientMessageAndRetiredFields(t *testing.T) {
+	for _, payload := range []string{
+		`{"requestID":"permission-1","decision":"allow","assistantMessageID":"message-1"}`,
+		`{"requestID":"permission-1","decision":"allow","workItemID":"work-item-1"}`,
+		`{"requestID":"permission-1","decision":"allow","engineVersion":"engine-v1"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest("POST", "/api/projects/demo/assistant/run-1/resume", strings.NewReader(payload))
+		var body projectAssistantResumeRequest
+		if decodeStrictJSON(recorder, request, &body) {
+			t.Fatalf("decodeStrictJSON accepted retired resume field in %s", payload)
+		}
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", recorder.Code)
+		}
 	}
 }

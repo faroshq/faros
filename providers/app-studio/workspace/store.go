@@ -31,7 +31,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/pmezard/go-difflib/difflib"
@@ -44,7 +43,6 @@ const (
 	DefaultReadMaxBytes = 64 << 10
 	MaxReadMaxBytes     = 256 << 10
 	MaxWriteBytes       = MaxReadMaxBytes
-	MaxPatchBytes       = 64 << 10
 	// MaxUnifiedPatchBytes bounds the complete model-authored patch envelope.
 	// Individual resulting files remain bounded by MaxWriteBytes.
 	MaxUnifiedPatchBytes      = MaxWriteBytes
@@ -116,29 +114,14 @@ type ReadOptions struct {
 
 // WriteOptions configures a whole-file workspace write.
 type WriteOptions struct {
-	Path       string
-	Content    string
-	CreateOnly bool
-	SnapshotID string
+	Path    string
+	Content string
 }
 
-// PatchOptions configures a contextual multi-file workspace patch. The legacy
-// exact-replacement fields remain temporarily for non-model server helpers;
-// model-visible tools supply only Patch.
+// PatchOptions configures a contextual multi-file workspace patch.
 type PatchOptions struct {
 	Patch      string
 	SnapshotID string
-
-	// Deprecated: use Patch.
-	Path       string
-	OldText    string
-	NewText    string
-	ReplaceAll bool
-}
-
-// MkdirOptions configures workspace directory creation.
-type MkdirOptions struct {
-	Path string
 }
 
 // FileContent is a bounded text-file read response.
@@ -245,132 +228,19 @@ func (s *FileStore) WriteFile(ctx context.Context, scope Scope, opts WriteOption
 	defer s.mutationMu.Unlock()
 
 	clean, _ := cleanProjectPath(opts.Path)
-	before, existed, err := s.readMutationTarget(ctx, scope, clean)
+	before, _, err := s.readMutationTarget(ctx, scope, clean)
 	if err != nil {
 		return MutationResult{}, err
 	}
-	if opts.CreateOnly && existed {
-		return MutationResult{}, fmt.Errorf("write_file is create-only for existing projects; use apply_patch for %q", clean)
-	}
-	if err := s.prepareSnapshotFile(ctx, scope, opts.SnapshotID, clean, before, existed, []byte(opts.Content), true); err != nil {
+	if err := s.applyFiles(ctx, scope, []File{{Path: clean, Content: opts.Content}}); err != nil {
 		return MutationResult{}, err
-	}
-	if opts.CreateOnly {
-		if err := s.createFile(ctx, scope, File{Path: clean, Content: opts.Content}); err != nil {
-			return MutationResult{}, errors.Join(err, s.resetSnapshotAfter(scope, opts.SnapshotID, clean, before, existed))
-		}
-	} else {
-		if err := s.applyFiles(ctx, scope, []File{{Path: clean, Content: opts.Content}}); err != nil {
-			return MutationResult{}, errors.Join(err, s.resetSnapshotAfter(scope, opts.SnapshotID, clean, before, existed))
-		}
 	}
 	return mutationResult("write_file", clean, before, opts.Content, 0), nil
 }
 
-// ApplyPatch replaces exact text in one bounded UTF-8 workspace file.
+// ApplyPatch applies one contextual patch to the project workspace.
 func (s *FileStore) ApplyPatch(ctx context.Context, scope Scope, opts PatchOptions) (MutationResult, error) {
-	if strings.TrimSpace(opts.Patch) != "" || strings.TrimSpace(opts.Path) == "" {
-		return s.applyUnifiedPatch(ctx, scope, opts)
-	}
-	if s == nil {
-		return MutationResult{}, errors.New("project workspace store is not configured")
-	}
-	if strings.TrimSpace(opts.OldText) == "" {
-		return MutationResult{}, errors.New("oldText is required")
-	}
-	if len([]byte(opts.OldText))+len([]byte(opts.NewText)) > MaxPatchBytes {
-		return MutationResult{}, fmt.Errorf("patch text is too large: %d > %d bytes", len([]byte(opts.OldText))+len([]byte(opts.NewText)), MaxPatchBytes)
-	}
-	if !validTextContent(opts.OldText) || !validTextContent(opts.NewText) {
-		return MutationResult{}, errors.New("patch text must be UTF-8 text without NUL bytes")
-	}
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-
-	read, err := s.ReadFile(ctx, scope, ReadOptions{Path: opts.Path, MaxBytes: MaxWriteBytes})
-	if err != nil {
-		return MutationResult{}, err
-	}
-	if read.Binary {
-		return MutationResult{}, fmt.Errorf("file %q is binary", read.Path)
-	}
-	if read.Truncated {
-		return MutationResult{}, fmt.Errorf("file %q is too large to patch", read.Path)
-	}
-	count := strings.Count(read.Content, opts.OldText)
-	if count == 0 {
-		return MutationResult{}, fmt.Errorf("oldText was not found in %q", read.Path)
-	}
-	if count > 1 && !opts.ReplaceAll {
-		return MutationResult{}, fmt.Errorf("oldText matched %d times in %q; set replaceAll to true or provide a more specific oldText", count, read.Path)
-	}
-	replacements := 1
-	next := strings.Replace(read.Content, opts.OldText, opts.NewText, 1)
-	if opts.ReplaceAll {
-		replacements = count
-		next = strings.ReplaceAll(read.Content, opts.OldText, opts.NewText)
-	}
-	if next == read.Content {
-		return MutationResult{}, fmt.Errorf("patch made no changes in %q; newText must differ from the matched oldText", read.Path)
-	}
-	current, existed, err := s.readMutationTarget(ctx, scope, read.Path)
-	if err != nil {
-		return MutationResult{}, err
-	}
-	if !existed || !bytes.Equal(current, []byte(read.Content)) {
-		return MutationResult{}, fmt.Errorf("%w: %q", ErrMutationConflict, read.Path)
-	}
-	if err := s.prepareSnapshotFile(ctx, scope, opts.SnapshotID, read.Path, []byte(read.Content), true, []byte(next), true); err != nil {
-		return MutationResult{}, err
-	}
-	if err := s.applyFiles(ctx, scope, []File{{Path: read.Path, Content: next}}); err != nil {
-		return MutationResult{}, errors.Join(err, s.resetSnapshotAfter(scope, opts.SnapshotID, read.Path, []byte(read.Content), true))
-	}
-	return mutationResult("apply_patch", read.Path, []byte(read.Content), next, replacements), nil
-}
-
-func (s *FileStore) resetSnapshotAfter(scope Scope, snapshotID, clean string, content []byte, existed bool) error {
-	if strings.TrimSpace(snapshotID) == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.prepareSnapshotFile(ctx, scope, snapshotID, clean, content, existed, content, existed); err != nil {
-		return fmt.Errorf("restore workspace snapshot metadata: %w", err)
-	}
-	return nil
-}
-
-func (s *FileStore) createFile(ctx context.Context, scope Scope, file File) error {
-	dir, err := s.scopeDir(scope)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	clean, err := cleanProjectPath(file.Path)
-	if err != nil {
-		return err
-	}
-	target := filepath.Join(dir, filepath.FromSlash(clean))
-	if err := ensureWithin(dir, target); err != nil {
-		return err
-	}
-	if err := mkdirAllForFile(dir, clean); err != nil {
-		return fmt.Errorf("create parent directory for %q: %w", clean, err)
-	}
-	if err := rejectSymlink(target, clean); err != nil {
-		return err
-	}
-	err = writeFileAtomically(filepath.Dir(target), target, []byte(file.Content), 0o644, true)
-	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("write_file is create-only for existing projects; use apply_patch for %q", clean)
-	}
-	if err != nil {
-		return fmt.Errorf("create %q: %w", clean, err)
-	}
-	return nil
+	return s.applyUnifiedPatch(ctx, scope, opts)
 }
 
 func writeFileAtomically(dir, target string, content []byte, mode fs.FileMode, createOnly bool) error {
@@ -441,40 +311,6 @@ func mutationResult(operation, filePath string, before []byte, after string, rep
 		Deletions:    deletions,
 		Patch:        patch,
 	}
-}
-
-// Mkdir creates a directory in the project workspace. Empty directories are not
-// git artifacts, but this gives later writes a safe parent path.
-func (s *FileStore) Mkdir(ctx context.Context, scope Scope, opts MkdirOptions) (MutationResult, error) {
-	dir, err := s.scopeDir(scope)
-	if err != nil {
-		return MutationResult{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return MutationResult{}, err
-	}
-	clean, err := cleanProjectPath(opts.Path)
-	if err != nil {
-		return MutationResult{}, err
-	}
-	target := filepath.Join(dir, filepath.FromSlash(clean))
-	if err := ensureWithin(dir, target); err != nil {
-		return MutationResult{}, err
-	}
-	if err := mkdirAllForFile(dir, path.Join(clean, ".keep")); err != nil {
-		return MutationResult{}, fmt.Errorf("create directory %q: %w", clean, err)
-	}
-	info, err := os.Lstat(target)
-	if err != nil {
-		return MutationResult{}, fmt.Errorf("stat directory %q: %w", clean, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return MutationResult{}, fmt.Errorf("path %q is a symlink", clean)
-	}
-	if !info.IsDir() {
-		return MutationResult{}, fmt.Errorf("path %q is not a directory", clean)
-	}
-	return MutationResult{Operation: "mkdir", Path: clean}, nil
 }
 
 // ListFiles lists regular files in the scoped project workspace.

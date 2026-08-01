@@ -50,7 +50,6 @@ type Server struct {
 	mcpInsecureSkipTLSVerify     bool
 	previewInsecureSkipTLSVerify bool
 	assistantEngine              projectAssistantEngine
-	assistantTurnRouter          projectAssistantTurnRouter
 	assistantRunManager          *projectAssistantRunManager
 	assistantSupervisor          *projectAssistantSupervisor
 	developmentSyncLocks         map[string]*sync.Mutex
@@ -118,15 +117,6 @@ func (s *Server) projectAssistantEngine() projectAssistantEngine {
 	return s.assistantEngine
 }
 
-func (s *Server) projectAssistantTurnRouter() projectAssistantTurnRouter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.assistantTurnRouter == nil {
-		return projectAssistantSemanticTurnRouter
-	}
-	return s.assistantTurnRouter
-}
-
 func (s *Server) projectAssistantRunManager() *projectAssistantRunManager {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,12 +172,8 @@ func (s *Server) Register(r *mux.Router) {
 	r.HandleFunc("/api/projects/{project}/preview-console/sessions/{session}", s.deleteProjectPreviewConsoleSession).Methods(http.MethodDelete)
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/resume", s.resumeProjectAssistant).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/stop", s.stopProjectAssistant).Methods(http.MethodPost)
-	r.HandleFunc("/api/projects/{project}/assistant/{run}/undo", s.undoProjectAssistantRun).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.getProjectAssistantApprovalMode).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.patchProjectAssistantApprovalMode).Methods(http.MethodPatch)
-	r.HandleFunc("/api/projects/{project}/assistant/work-items", s.listProjectAssistantWorkItems).Methods(http.MethodGet)
-	r.HandleFunc("/api/projects/{project}/assistant/work-items/{workItem}", s.getProjectAssistantWorkItem).Methods(http.MethodGet)
-	r.HandleFunc("/api/projects/{project}/assistant/work-items/{workItem}/cancel", s.cancelProjectAssistantWorkItem).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/runs/latest", s.latestProjectAssistantRun).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/{run}/stream", s.streamProjectAssistantSnapshots).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/memory", s.getProjectMemory).Methods(http.MethodGet)

@@ -61,10 +61,6 @@ type projectAssistantRunRequest struct {
 	CollaborationMode        projectAssistantCollaborationMode
 	TurnProfile              projectAssistantTurnProfile
 	TurnPolicy               projectAssistantTurnPolicy
-	RequestedAction          string
-	ResolvedAction           string
-	ClassificationReason     string
-	ClassificationConfidence projectAssistantTurnConfidence
 	// InitialApprovedPlan is a run-local grant derived from the explicit
 	// prompt that created a fresh Project. It is never saved as a cross-turn
 	// plan grant; checkpoints retain it only while this initial run is active.
@@ -72,9 +68,8 @@ type projectAssistantRunRequest struct {
 	Continuation        *projectAssistantCheckpointState
 	AssistantRun        *store.AssistantRun
 	// executionAuthority is an App Studio-internal seam for focused engine
-	// tests. Production requests leave it nil and are bound to the Server's
-	// durable WorkItem authority below; it is deliberately not part of any
-	// HTTP, provider, or Eino contract.
+	// tests. Production requests leave it nil; it is deliberately not part of
+	// any HTTP, provider, or Eino contract.
 	executionAuthority projectAssistantExecutionAuthority
 	auditRecorder      *projectAssistantRunAuditRecorder
 	eventLedger        *projectAssistantRunEventLedger

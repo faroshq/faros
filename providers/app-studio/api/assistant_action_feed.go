@@ -169,15 +169,12 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 			item.Count = count
 			item.Outcome = projectAssistantCountOutcome(count, "reference", "references")
 		}
-	case projectToolWriteFile, projectToolApplyPatch:
+	case projectToolApplyPatch:
 		item.Target = projectAssistantActionSafeTarget(projectAssistantActionArgumentField(args, arguments, "path", "path"))
 		item.Title = projectAssistantActionLifecycleTitle(status, "Updating file", "Updated file", "File update failed")
 		if status == projectAssistantActionFeedStatusSucceeded {
 			item.Outcome = projectAssistantMutationOutcome(summary)
 		}
-	case projectToolMkdir:
-		item.Target = projectAssistantActionSafeTarget(projectAssistantActionArgumentField(args, arguments, "path", "path"))
-		item.Title = projectAssistantActionLifecycleTitle(status, "Creating folder", "Created folder", "Folder creation failed")
 	case projectToolVerifyDevelopmentRuntime:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Checking development preview", "Checked development preview", "Preview check failed")
 	case projectToolGetPreviewURL:
@@ -256,7 +253,7 @@ func projectAssistantActionFeedItemKind(name string) string {
 	switch base := projectToolBaseName(name); {
 	case base == projectToolAskFollowUp:
 		return projectAssistantActionFeedItemClarify
-	case base == projectToolRequestProjectPlanApproval || base == projectToolPlanProjectChanges:
+	case base == projectToolPlanProjectChanges:
 		return projectAssistantActionFeedItemPlan
 	case base == projectToolCheckProjectReadiness || base == projectToolPrepareProjectDeployment ||
 		base == projectToolVerifyDevelopmentRuntime || base == projectToolGetRuntimeStatus ||
@@ -265,7 +262,7 @@ func projectAssistantActionFeedItemKind(name string) string {
 		return projectAssistantActionFeedItemRun
 	case base == projectToolCommitProjectFiles || base == projectToolCommitFiles:
 		return projectAssistantActionFeedItemCommit
-	case base == projectToolWriteFile || base == projectToolApplyPatch || base == projectToolMkdir:
+	case base == projectToolApplyPatch:
 		return projectAssistantActionFeedItemEdit
 	case base == projectToolLS || base == projectToolReadFile || base == projectToolGlob || base == projectToolGrep:
 		return projectAssistantActionFeedItemInspect
@@ -345,7 +342,7 @@ func projectAssistantActionFeedGrouping(item *projectAssistantActionFeedItem, ba
 	case projectToolGrep:
 		item.GroupKey = "inspect:search"
 		item.GroupTitle = "Searched project"
-	case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+	case projectToolApplyPatch:
 		item.GroupKey = "edit:files"
 		item.GroupTitle = "Updated files"
 	case projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment,

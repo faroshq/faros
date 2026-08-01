@@ -18,6 +18,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
@@ -25,6 +27,7 @@ import (
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 
 	"github.com/faroshq/provider-app-studio/workspace"
 )
@@ -41,11 +44,107 @@ type projectEinoAssistantLifecycle struct {
 
 	runState       *projectEinoAssistantRunState
 	initialBuild   bool
-	v2             bool
 	repositoryRef  string
 	workspace      *workspace.FileStore
 	workspaceScope workspace.Scope
 	repositoryView func(context.Context) (*ProjectRepositoryView, error)
+	auditRecorder  *projectAssistantRunAuditRecorder
+}
+
+type projectEinoAssistantCompletionBarrierModel struct {
+	einomodel.BaseChatModel
+
+	verificationToolName string
+	toolArguments        string
+	runState             *projectEinoAssistantRunState
+}
+
+type projectEinoAssistantForcedToolModel struct {
+	einomodel.BaseChatModel
+}
+
+func (m *projectEinoAssistantForcedToolModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.Message, error) {
+	return m.BaseChatModel.Generate(ctx, input, append(opts, einomodel.WithToolChoice(schema.ToolChoiceForced))...)
+}
+
+func (m *projectEinoAssistantForcedToolModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	return m.BaseChatModel.Stream(ctx, input, append(opts, einomodel.WithToolChoice(schema.ToolChoiceForced))...)
+}
+
+func (m *projectEinoAssistantCompletionBarrierModel) Generate(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.Message, error) {
+	message, err := m.BaseChatModel.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return projectEinoAssistantRequiredToolBarrierMessage(message, m.verificationToolName, m.toolArguments, m.runState), nil
+}
+
+func (m *projectEinoAssistantCompletionBarrierModel) Stream(
+	ctx context.Context,
+	input []*schema.Message,
+	opts ...einomodel.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	reader, err := m.BaseChatModel.Stream(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	message, err := schema.ConcatMessageStream(reader)
+	if err != nil {
+		return nil, fmt.Errorf("combine assistant completion stream: %w", err)
+	}
+	if message == nil {
+		return nil, errors.New("assistant completion returned an empty model stream")
+	}
+	message = projectEinoAssistantRequiredToolBarrierMessage(message, m.verificationToolName, m.toolArguments, m.runState)
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func projectEinoAssistantRequiredToolBarrierMessage(
+	message *schema.Message,
+	toolName string,
+	arguments string,
+	runState *projectEinoAssistantRunState,
+) *schema.Message {
+	if message == nil || len(message.ToolCalls) > 0 || runState == nil ||
+		(strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.ReasoningContent) == "" && len(message.AssistantGenMultiContent) == 0) {
+		return message
+	}
+	result := *message
+	result.Role = schema.Assistant
+	result.Content = ""
+	result.MultiContent = nil
+	result.UserInputMultiContent = nil
+	result.AssistantGenMultiContent = nil
+	result.Name = ""
+	result.ToolCallID = ""
+	result.ToolName = ""
+	result.ReasoningContent = ""
+	if strings.TrimSpace(arguments) == "" {
+		arguments = `{}`
+	}
+	result.ToolCalls = []schema.ToolCall{{
+		ID:   "call-" + uuid.NewString(),
+		Type: "function",
+		Function: schema.FunctionCall{
+			Name:      strings.TrimSpace(toolName),
+			Arguments: strings.TrimSpace(arguments),
+		},
+	}}
+	adk.EnsureMessageID(&result)
+	runState.RewriteCompletionAsVerification(&result)
+	return &result
 }
 
 func projectEinoAssistantLifecycleMiddleware(
@@ -56,10 +155,10 @@ func projectEinoAssistantLifecycleMiddleware(
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		runState:                     runState,
 		initialBuild:                 projectAssistantInitialBuildActive(req, runState),
-		v2:                           projectAssistantRequestUsesV2(req),
 		repositoryRef:                projectEinoAssistantProjectRepositoryRef(req),
 		workspace:                    req.Workspace,
 		workspaceScope:               req.WorkspaceScope,
+		auditRecorder:                req.auditRecorder,
 	}
 	if req.Client != nil && req.Project != nil {
 		lifecycle.repositoryView = func(ctx context.Context) (*ProjectRepositoryView, error) {
@@ -85,18 +184,36 @@ func projectEinoAssistantRepositoryCommitReady(repository *ProjectRepositoryView
 func (m *projectEinoAssistantLifecycle) BeforeModelRewriteState(
 	ctx context.Context,
 	state *adk.ChatModelAgentState,
-	_ *adk.ModelContext,
+	modelCtx *adk.ModelContext,
 ) (context.Context, *adk.ChatModelAgentState, error) {
-	if !m.v2 || m.runState == nil {
+	if m.runState == nil {
 		return ctx, state, nil
 	}
 	m.refreshRepositoryState(ctx)
-	m.runState.NextModelCallOrdinal()
+	ordinal := m.runState.NextModelCallOrdinal()
 	if state == nil {
 		return ctx, state, nil
 	}
 	toolName, repeated := m.runState.RepeatedCompletedAction()
 	_, stalled := m.runState.ConsecutiveNoProgressModelCalls()
+	if m.auditRecorder != nil {
+		sourceRevision, verifiedRevision := m.runState.SourceMutationRevisions()
+		var tools []*schema.ToolInfo
+		if modelCtx != nil {
+			tools = modelCtx.Tools
+		}
+		if err := m.auditRecorder.recordModelCall(
+			ctx,
+			ordinal,
+			sourceRevision,
+			verifiedRevision,
+			repeated >= projectEinoAssistantRepeatedActionWarnAt || stalled >= projectEinoAssistantRepeatedActionWarnAt,
+			tools,
+			nil,
+		); err != nil {
+			return ctx, state, err
+		}
+	}
 	if repeated < projectEinoAssistantRepeatedActionWarnAt && stalled < projectEinoAssistantRepeatedActionWarnAt {
 		return ctx, state, nil
 	}
@@ -140,7 +257,7 @@ func (m *projectEinoAssistantLifecycle) WrapModel(
 	base einomodel.BaseChatModel,
 	modelCtx *adk.ModelContext,
 ) (einomodel.BaseChatModel, error) {
-	if base == nil || !m.v2 || m.runState == nil {
+	if base == nil || m.runState == nil {
 		return base, nil
 	}
 	if m.runState.NeedsCompletionVerification() {
@@ -214,7 +331,7 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 			if name == projectToolVerifyDevelopmentRuntime && m.runState != nil {
 				m.runState.RecordDevelopmentVerification(false)
 			}
-			if m.v2 && m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) {
+			if m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) {
 				if _, interrupted := compose.IsInterruptRerunError(err); !interrupted {
 					if projectEinoAssistantCommitTool(name) {
 						m.runState.RecordSourceCommitAttempt(commitRevision)
@@ -225,15 +342,10 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 			return result, err
 		}
 		switch {
-		case !m.v2 && projectEinoAssistantWorkspaceMutationTool(name) &&
-			projectEinoAssistantSuccessfulWorkspaceMutationResult(name, result):
-			if m.runState != nil {
-				m.runState.RecordSourceMutation()
-			}
 		case name == projectToolVerifyDevelopmentRuntime:
 			if m.runState != nil {
 				m.runState.RecordDevelopmentVerificationResult(result)
-				if m.v2 && m.runState.SourceMutationVerified() {
+				if m.runState.SourceMutationVerified() {
 					digest, digestErr := projectEinoAssistantWorkspaceDigest(
 						ctx,
 						m.workspace,
@@ -251,12 +363,12 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 				}
 			}
 		case projectEinoAssistantCommitTool(name) &&
-			projectEinoAssistantPhaseSuccessfulToolContent(result) &&
+			projectEinoAssistantSuccessfulToolContent(result) &&
 			projectToolCallResultStatus(name, result) == "succeeded":
 			if m.runState != nil {
 				m.runState.RecordSourceCommit()
 				m.runState.CompleteExecutionPlan()
-				if m.v2 && m.workspace != nil {
+				if m.workspace != nil {
 					// The external commit already succeeded. Clearing local pending
 					// state is best-effort here: returning an error would encourage a
 					// duplicate repository commit after a completed side effect. The
@@ -268,9 +380,9 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 				}
 			}
 		}
-		if m.v2 && m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) &&
+		if m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) &&
 			!projectEinoAssistantPendingPermissionResult(result) {
-			successful := projectEinoAssistantPhaseSuccessfulToolContent(result)
+			successful := projectEinoAssistantSuccessfulToolContent(result)
 			if projectEinoAssistantCommitTool(name) {
 				successful = successful && projectToolCallResultStatus(name, result) == "succeeded"
 				m.runState.RecordSourceCommitAttempt(commitRevision)
@@ -289,6 +401,19 @@ func projectEinoAssistantCanonicalActionArguments(raw string) string {
 	return projectEinoToolArgumentsString(args)
 }
 
+func projectEinoAssistantCommitTool(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolCommitProjectFiles, projectToolCommitFiles:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectEinoAssistantPendingPermissionResult(content string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(content)), "tool call skipped: waiting for approval")
+}
+
 func projectEinoAssistantVerificationReady(content string) bool {
-	return projectEinoAssistantPhaseVerificationReady(content)
+	return projectEinoAssistantVerificationContentReady(content)
 }

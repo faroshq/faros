@@ -16,17 +16,13 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/lib/pq"
 )
 
 func TestMemoryStoreAssistantRunEventsAreAppendOnlyAndScoped(t *testing.T) {
@@ -36,7 +32,7 @@ func TestMemoryStoreAssistantRunEventsAreAppendOnlyAndScoped(t *testing.T) {
 	otherScope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-b"}
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	for _, candidate := range []Scope{scope, otherScope} {
-		if err := s.SaveAssistantRun(ctx, candidate, AssistantRun{ID: "run-1", EngineVersion: AssistantEngineVersionV2, Status: AssistantRunStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
+		if err := s.SaveAssistantRun(ctx, candidate, AssistantRun{ID: "run-1", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
 			t.Fatalf("SaveAssistantRun(%s): %v", candidate.ProjectUID, err)
 		}
 	}
@@ -119,7 +115,7 @@ func TestMemoryStoreAssistantRunEventCASSerializesWriters(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore()
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
-	if err := s.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-1", Status: AssistantRunStatusRunning}); err != nil {
+	if err := s.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-1", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning}); err != nil {
 		t.Fatalf("SaveAssistantRun: %v", err)
 	}
 
@@ -155,7 +151,7 @@ func TestMemoryStoreAssistantRunEventCASSerializesWriters(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreAssistantRunEngineVersionAndEventRetention(t *testing.T) {
+func TestMemoryStoreAssistantRunContractAndEventRetention(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore()
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
@@ -163,7 +159,6 @@ func TestMemoryStoreAssistantRunEngineVersionAndEventRetention(t *testing.T) {
 	run := AssistantRun{
 		ID:              "run-1",
 		Mode:            AssistantRunModeDefault,
-		EngineVersion:   AssistantEngineVersionV2,
 		ApprovalMode:    AssistantApprovalModeAutoApprove,
 		Status:          AssistantRunStatusRunning,
 		ClientRequestID: "request-1",
@@ -179,16 +174,12 @@ func TestMemoryStoreAssistantRunEngineVersionAndEventRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAssistantRun: %v", err)
 	}
-	if created.EngineVersion != AssistantEngineVersionV2 {
-		t.Fatalf("engine version = %q, want %q", created.EngineVersion, AssistantEngineVersionV2)
-	}
 	changed := created
-	changed.Mode = AssistantRunModeDiscussion
-	changed.EngineVersion = "v3"
+	changed.Mode = AssistantRunModePlan
 	changed.Revision++
 	changed.UpdatedAt = now.Add(time.Second)
 	if err := s.SaveAssistantRunSnapshot(ctx, scope, changed, nil, created.Revision); !errors.Is(err, ErrAssistantRunConflict) {
-		t.Fatalf("changed engine contract snapshot error = %v, want ErrAssistantRunConflict", err)
+		t.Fatalf("changed run contract snapshot error = %v, want ErrAssistantRunConflict", err)
 	}
 
 	terminal := created
@@ -225,7 +216,7 @@ func TestEncryptedStoreEncryptsAssistantRunEventPayload(t *testing.T) {
 		t.Fatalf("NewEncryptedStore: %v", err)
 	}
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
-	if err := encrypted.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-1", EngineVersion: AssistantEngineVersionV2, Status: AssistantRunStatusRunning}); err != nil {
+	if err := encrypted.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-1", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning}); err != nil {
 		t.Fatalf("SaveAssistantRun: %v", err)
 	}
 	wantPayload := json.RawMessage(`{"secret":"tool-result-secret"}`)
@@ -245,148 +236,5 @@ func TestEncryptedStoreEncryptsAssistantRunEventPayload(t *testing.T) {
 	}
 	if len(got) != 1 || string(got[0].Payload) != string(wantPayload) {
 		t.Fatalf("decrypted events = %#v, want payload %s", got, wantPayload)
-	}
-}
-
-func TestAssistantRunEventSchemaMigrationIsAdditive(t *testing.T) {
-	statements := assistantRunEventSchemaStatements()
-	if assistantRunEventSchemaVersion == messageSchemaVersion || len(statements) == 0 {
-		t.Fatalf("assistant event migration version=%q statements=%#v", assistantRunEventSchemaVersion, statements)
-	}
-	for _, statement := range statements {
-		upper := strings.ToUpper(strings.TrimSpace(statement))
-		if strings.HasPrefix(upper, "DROP ") || strings.HasPrefix(upper, "DELETE ") || strings.HasPrefix(upper, "TRUNCATE ") {
-			t.Fatalf("assistant event migration is destructive: %q", statement)
-		}
-	}
-	if !schemaStatementsContain(statements, "ADD COLUMN IF NOT EXISTS engine_version") ||
-		!schemaStatementsContain(statements, "CREATE TABLE IF NOT EXISTS app_studio_assistant_run_events") ||
-		!schemaStatementsContain(statements, "ON DELETE CASCADE") {
-		t.Fatalf("assistant event migration does not contain engine version, event table, and run-owned retention: %#v", statements)
-	}
-	if !schemaStatementsContain(workItemSchemaStatements(), "engine_version text NOT NULL DEFAULT ''") ||
-		!schemaStatementsContain(workItemSchemaUpgradeStatements(), "ADD COLUMN IF NOT EXISTS engine_version") {
-		t.Fatal("fresh and legacy work-item schemas do not include the engine version column")
-	}
-}
-
-func TestPostgresStoreAssistantRunEventMigrationAndRoundTripExternalDSN(t *testing.T) {
-	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))
-	if dsn == "" {
-		t.Skip("APP_STUDIO_TEST_POSTGRES_DSN is not set")
-	}
-	ctx := context.Background()
-	admin, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer admin.Close()
-	schemaName := "app_studio_events_" + time.Now().UTC().Format("20060102150405")
-	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schemaName)); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schemaName)+" CASCADE")
-	})
-	scopedDSN := postgresDSNWithSearchPath(t, dsn, schemaName)
-	legacy, err := sql.Open("postgres", scopedDSN)
-	if err != nil {
-		t.Fatalf("open legacy schema: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, createMessageSchemaMigrationsTable); err != nil {
-		t.Fatalf("create migrations table: %v", err)
-	}
-	for _, statement := range workItemSchemaStatements() {
-		if _, err := legacy.ExecContext(ctx, statement); err != nil {
-			t.Fatalf("apply prior work-item schema statement: %v", err)
-		}
-	}
-	if _, err := legacy.ExecContext(ctx, `ALTER TABLE app_studio_assistant_runs DROP COLUMN engine_version`); err != nil {
-		t.Fatalf("shape prior run schema: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO app_studio_message_schema_migrations(version) VALUES ($1)`, messageSchemaVersion); err != nil {
-		t.Fatalf("record prior schema version: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO app_studio_assistant_work_items (
-		org_uuid,workspace_uuid,project_name,project_uid,work_item_id,root_message_id,created_by,status,revision,created_at,updated_at
-	) VALUES ('org-a','workspace-a','demo','project-a','item-1','user-1','alice','suspended',1,now(),now())`); err != nil {
-		t.Fatalf("insert legacy work item: %v", err)
-	}
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO app_studio_assistant_runs (
-		org_uuid,workspace_uuid,project_name,project_uid,run_id,work_item_id,mode,approval_mode,status,revision,created_at,updated_at
-	) VALUES ('org-a','workspace-a','demo','project-a','run-1','item-1','continue','auto_approve','completed',1,now(),now())`); err != nil {
-		t.Fatalf("insert legacy assistant run: %v", err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("close legacy schema: %v", err)
-	}
-
-	s, err := OpenPostgres(ctx, scopedDSN)
-	if err != nil {
-		t.Fatalf("OpenPostgres after prior schema: %v", err)
-	}
-	defer s.Close()
-	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
-	run, err := s.GetAssistantRun(ctx, scope, "run-1")
-	if err != nil {
-		t.Fatalf("GetAssistantRun after migration: %v", err)
-	}
-	if run.EngineVersion != "" {
-		t.Fatalf("legacy engine version = %q, want empty", run.EngineVersion)
-	}
-	if _, err := s.GetAssistantWorkItem(ctx, scope, "item-1"); err != nil {
-		t.Fatalf("GetAssistantWorkItem after migration: %v", err)
-	}
-	first, err := s.AppendAssistantRunEvent(ctx, scope, AssistantRunEvent{RunID: run.ID, Type: "legacy_replayed", Payload: json.RawMessage(`{"ok":true}`)}, 0)
-	if err != nil {
-		t.Fatalf("AppendAssistantRunEvent after migration: %v", err)
-	}
-	if first.Sequence != 1 {
-		t.Fatalf("first sequence = %d, want 1", first.Sequence)
-	}
-	if _, err := s.AppendAssistantRunEvent(ctx, scope, AssistantRunEvent{RunID: run.ID, Type: "conflict"}, 0); !errors.Is(err, ErrAssistantRunEventConflict) {
-		t.Fatalf("stale event CAS error = %v, want ErrAssistantRunEventConflict", err)
-	}
-	events, err := s.ListAssistantRunEvents(ctx, scope, run.ID, 0, 10)
-	if err != nil {
-		t.Fatalf("ListAssistantRunEvents: %v", err)
-	}
-	if len(events) != 1 || events[0].Sequence != 1 || !jsonSemanticallyEqual(events[0].Payload, first.Payload) {
-		t.Fatalf("events = %#v, want persisted first event", events)
-	}
-
-	old := time.Date(2026, 7, 31, 11, 0, 0, 0, time.UTC)
-	if err := s.SaveAssistantRun(ctx, scope, AssistantRun{
-		ID: "run-retained-event", EngineVersion: AssistantEngineVersionV2,
-		Status: AssistantRunStatusCompleted, CreatedAt: old, UpdatedAt: old,
-	}); err != nil {
-		t.Fatalf("SaveAssistantRun retention candidate: %v", err)
-	}
-	versioned, err := s.GetAssistantRun(ctx, scope, "run-retained-event")
-	if err != nil {
-		t.Fatalf("GetAssistantRun versioned run: %v", err)
-	}
-	if versioned.EngineVersion != AssistantEngineVersionV2 {
-		t.Fatalf("versioned engine = %q, want %q", versioned.EngineVersion, AssistantEngineVersionV2)
-	}
-	versioned.EngineVersion = "v3"
-	if err := s.SaveAssistantRun(ctx, scope, versioned); !errors.Is(err, ErrAssistantRunConflict) {
-		t.Fatalf("changed engine version error = %v, want ErrAssistantRunConflict", err)
-	}
-	if _, err := s.AppendAssistantRunEvent(ctx, scope, AssistantRunEvent{RunID: "run-retained-event", Type: "completed"}, 0); err != nil {
-		t.Fatalf("AppendAssistantRunEvent retention candidate: %v", err)
-	}
-	deleted, err := s.DeleteMessagesOlderThan(ctx, old.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("DeleteMessagesOlderThan: %v", err)
-	}
-	if deleted != 1 {
-		t.Fatalf("retention deleted = %d, want one unowned run", deleted)
-	}
-	if _, err := s.ListAssistantRunEvents(ctx, scope, "run-retained-event", 0, 10); !errors.Is(err, ErrAssistantRunNotFound) {
-		t.Fatalf("retained event after run deletion error = %v, want ErrAssistantRunNotFound", err)
-	}
-	if _, err := s.ListAssistantRunEvents(ctx, scope, run.ID, 0, 10); err != nil {
-		t.Fatalf("work-item run events were removed by unowned-run retention: %v", err)
 	}
 }

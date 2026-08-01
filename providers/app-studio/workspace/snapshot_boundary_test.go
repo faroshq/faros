@@ -86,12 +86,11 @@ func TestFileStoreInternalRestoreSnapshotStillWorksWithReservedDirectory(t *test
 	if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/App.tsx", Content: "before\n"}}); err != nil {
 		t.Fatalf("ApplyFiles: %v", err)
 	}
-	if _, err := store.WriteFile(ctx, scope, WriteOptions{
-		Path:       "src/App.tsx",
-		Content:    "after\n",
+	if _, err := store.ApplyPatch(ctx, scope, PatchOptions{
+		Patch:      singleLineUpdatePatch("src/App.tsx", "before", "after"),
 		SnapshotID: "run-restore",
 	}); err != nil {
-		t.Fatalf("WriteFile with snapshot: %v", err)
+		t.Fatalf("ApplyPatch with snapshot: %v", err)
 	}
 	snapshotDir, err := store.snapshotDir(scope, "run-restore")
 	if err != nil {

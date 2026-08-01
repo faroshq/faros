@@ -43,7 +43,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/klog/v2"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -104,13 +103,11 @@ const (
 	projectToolRestartRuntime                 = "restart_runtime"
 	projectToolSetRuntimeEnv                  = "set_runtime_env"
 	projectToolAskFollowUp                    = "ask_follow_up"
-	projectToolRequestProjectPlanApproval     = "request_project_plan_approval"
 	projectToolDefineInitialProjectPlan       = "define_initial_project_plan"
-	projectToolWriteFile                      = "write_file"
 	projectToolApplyPatch                     = "apply_patch"
-	projectToolMkdir                          = "mkdir"
 	projectToolSelectTemplate                 = "select_project_template"
-	projectToolHydrateWorkspace               = "hydrate_workspace"
+	projectActionWorkspaceSync                = "workspace_sync"
+	projectActionRestoreWorkspace             = "restore_workspace"
 	projectToolCommitProjectFiles             = "commit_project_files"
 	projectToolCommitFiles                    = "commit_files"
 	projectToolCodeCommitFiles                = "code__commit_files"
@@ -347,54 +344,23 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	r = r.WithContext(ctx)
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
 	durable, hasDurableRun := r.Context().Value(projectAssistantSupervisorRunContextKey{}).(store.AssistantRun)
-	recent, err := s.loadProjectAssistantTurnMessages(ctx, messageScope, durable, hasDurableRun)
+	if !hasDurableRun {
+		return projectAssistantRunResult{}, store.ErrAssistantRunConflict
+	}
+	recent, err := s.store.LoadRecentMessages(ctx, messageScope, 24)
 	if err != nil {
 		return projectAssistantRunResult{}, err
 	}
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
-	var turnDecision projectAssistantTurnDecision
-	mode, v2 := projectAssistantCollaborationModeForRun(durable)
-	v2 = v2 && projectAssistantRunUsesV2(&durable)
-	switch {
-	case hasDurableRun && v2 && mode == projectAssistantCollaborationModePlan:
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDebugging)
-	case hasDurableRun && v2:
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
-	case hasDurableRun && durable.WorkItemID != "":
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
-	case hasDurableRun && durable.Mode == store.AssistantRunModeDiscussion:
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDiscussion)
-	case hasDurableRun && durable.Mode == store.AssistantRunModeAdaptive:
-		advisory, routeErr := projectAssistantTurnDecisionForStreamStart(ctx, s.projectAssistantTurnRouter(), projectAssistantTurnRouteRequest{
-			LLM:     settings,
-			History: recent,
-		}, start)
-		if routeErr != nil {
-			return projectAssistantRunResult{}, routeErr
-		}
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileAdaptive)
-		turnDecision.RequiresRuntimeState = advisory.RequiresRuntimeState
-		turnDecision.Confidence = advisory.Confidence
-	case hasDurableRun && (durable.Mode == store.AssistantRunModeNew || durable.Mode == store.AssistantRunModeContinue):
-		turnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
-	default:
-		turnDecision, err = projectAssistantTurnDecisionForStreamStart(ctx, s.projectAssistantTurnRouter(), projectAssistantTurnRouteRequest{
-			LLM:     settings,
-			History: recent,
-		}, start)
-		if err != nil {
-			return projectAssistantRunResult{}, err
-		}
+	mode, ok := projectAssistantCollaborationModeForRun(durable)
+	if !ok {
+		return projectAssistantRunResult{}, store.ErrAssistantRunConflict
 	}
-	turnPolicy := projectAssistantTurnPolicyForDecision(turnDecision)
-	requestedAction, resolvedAction, classificationReason, classificationConfidence :=
-		projectAssistantRoutingAudit(durable, hasDurableRun, turnDecision)
-	// The router decides which tool bundles this turn gets; a silent
-	// misclassification reads exactly like a model refusing to work, so keep
-	// the decision observable (V(2): per-turn, debugging signal).
-	klog.FromContext(ctx).V(2).Info("assistant turn route",
-		"project", p.Name, "profile", turnDecision.Profile, "confidence", turnDecision.Confidence,
-		"mutation", turnDecision.RequestsMutation, "runtime", turnDecision.RequiresRuntimeState)
+	profile := projectAssistantTurnProfileImplementation
+	if mode == projectAssistantCollaborationModePlan {
+		profile = projectAssistantTurnProfileDebugging
+	}
+	turnPolicy := projectAssistantTurnPolicyForProfile(profile)
 	req := projectAssistantRunRequest{
 		Identity:                 id,
 		ToolPort:                 newProjectAssistantHTTPToolPort(s, r),
@@ -413,10 +379,6 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		CollaborationMode:        mode,
 		TurnProfile:              turnPolicy.profile,
 		TurnPolicy:               turnPolicy,
-		RequestedAction:          requestedAction,
-		ResolvedAction:           resolvedAction,
-		ClassificationReason:     classificationReason,
-		ClassificationConfidence: classificationConfidence,
 	}
 	if hasDurableRun {
 		durableCopy := durable
@@ -433,46 +395,6 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		return projectAssistantRunResult{}, err
 	}
 	return result, nil
-}
-
-func projectAssistantRoutingAudit(run store.AssistantRun, hasDurableRun bool, decision projectAssistantTurnDecision) (string, string, string, projectAssistantTurnConfidence) {
-	if hasDurableRun {
-		if mode, ok := projectAssistantCollaborationModeForRun(run); ok && projectAssistantRunUsesV2(&run) {
-			return string(mode), string(mode), "explicit_collaboration_mode", projectAssistantTurnConfidenceHigh
-		}
-		switch run.Mode {
-		case store.AssistantRunModeAdaptive:
-			return string(projectAssistantActionAuto), string(projectAssistantTurnProfileAdaptive), "adaptive_auto_policy", decision.Confidence
-		case store.AssistantRunModeDiscussion:
-			return string(projectAssistantActionAsk), string(projectAssistantActionAsk), "explicit_user_action", projectAssistantTurnConfidenceHigh
-		case store.AssistantRunModeNew:
-			return string(projectAssistantActionBuild), string(projectAssistantActionBuild), "explicit_user_action", projectAssistantTurnConfidenceHigh
-		case store.AssistantRunModeContinue:
-			return string(projectAssistantActionContinue), string(projectAssistantActionContinue), "explicit_user_action", projectAssistantTurnConfidenceHigh
-		}
-	}
-	return string(projectAssistantActionAuto), string(decision.Profile), "semantic_classifier", decision.Confidence
-}
-
-func (s *Server) loadProjectAssistantTurnMessages(ctx context.Context, scope store.Scope, run store.AssistantRun, hasDurableRun bool) ([]store.Message, error) {
-	switch {
-	case hasDurableRun && projectAssistantRunUsesV2(&run):
-		return s.store.LoadRecentMessages(ctx, scope, 24)
-	case hasDurableRun && run.WorkItemID != "":
-		return s.store.LoadMessagesForWorkItem(ctx, scope, run.WorkItemID, 24)
-	case hasDurableRun && (run.Mode == store.AssistantRunModeDiscussion || run.Mode == store.AssistantRunModeAdaptive):
-		// Discussion and unpromoted adaptive turns continue only the
-		// non-WorkItem transcript. Mutation work remains WorkItem-scoped above.
-		return s.store.LoadRecentDiscussionMessages(ctx, scope, 24)
-	case hasDurableRun && run.UserMessageID != "":
-		current, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
-		if err != nil {
-			return nil, err
-		}
-		return []store.Message{current}, nil
-	default:
-		return s.store.LoadRecentMessages(ctx, scope, 24)
-	}
 }
 
 func projectRepeatedToolLoopFallback(toolMessages []chatMessage) string {
@@ -609,7 +531,6 @@ func (s *Server) generateProjectNaming(ctx context.Context, c *asclient.Client, 
 type projectCreatePreflight struct {
 	Naming       projectNamingResult
 	TemplateName string
-	TurnDecision projectAssistantTurnDecision
 }
 
 func (s *Server) generateProjectCreatePreflight(ctx context.Context, c *asclient.Client, prompt string, templates []projectDevelopmentTemplateView) (projectCreatePreflight, error) {
@@ -754,10 +675,9 @@ func parseProjectNamingResult(content string) (projectNamingResult, error) {
 func parseProjectCreatePreflight(content string) (projectCreatePreflight, error) {
 	content = projectLLMJSONContent(content)
 	var decoded struct {
-		DisplayName    string                       `json:"displayName"`
-		RepositoryName string                       `json:"repositoryName"`
-		TemplateName   string                       `json:"templateName"`
-		Turn           projectAssistantTurnDecision `json:"turn"`
+		DisplayName    string `json:"displayName"`
+		RepositoryName string `json:"repositoryName"`
+		TemplateName   string `json:"templateName"`
 	}
 	if err := json.Unmarshal([]byte(content), &decoded); err != nil {
 		return projectCreatePreflight{}, fmt.Errorf("decode LLM project create preflight response: %w", err)
@@ -765,7 +685,6 @@ func parseProjectCreatePreflight(content string) (projectCreatePreflight, error)
 	return projectCreatePreflight{
 		Naming:       projectNamingResult{DisplayName: decoded.DisplayName, RepositoryName: decoded.RepositoryName},
 		TemplateName: decoded.TemplateName,
-		TurnDecision: decoded.Turn,
 	}, nil
 }
 
@@ -782,11 +701,6 @@ func normalizeProjectCreatePreflight(preflight projectCreatePreflight, prompt st
 	}
 	if _, ok := available[preflight.TemplateName]; !ok || projectCreatePromptDefersImplementation(prompt) {
 		preflight.TemplateName = ""
-	}
-	if projectCreatePromptDefersImplementation(prompt) {
-		preflight.TurnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileDiscussion)
-	} else {
-		preflight.TurnDecision = fallbackProjectAssistantTurnDecisionWithProfile(projectAssistantTurnProfileImplementation)
 	}
 	return preflight, nil
 }
@@ -1009,28 +923,12 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 			return truncateProjectToolInfo(fmt.Sprintf("%d question(s): %s", len(questions), summarizeProjectToolList(questions, 3)))
 		}
 		return ""
-	case projectToolRequestProjectPlanApproval:
-		parts := []string{}
-		if summary := projectToolString(args["summary"]); summary != "" {
-			parts = append(parts, summary)
-		}
-		if paths := projectToolStringList(args["targetPaths"]); len(paths) > 0 {
-			parts = append(parts, fmt.Sprintf("%d target path(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
-		}
-		return truncateProjectToolInfo(strings.Join(parts, "; "))
-	case projectToolWriteFile:
-		return summarizeProjectMutationArgs(args, []string{"path"}, true)
 	case projectToolApplyPatch:
 		patch, _ := projectToolRawString(args["patch"])
 		if paths, err := workspace.PatchPaths(patch); err == nil && len(paths) > 0 {
 			return truncateProjectToolInfo(fmt.Sprintf("%d path(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
 		}
-		if projectToolString(args["path"]) != "" {
-			return summarizeProjectMutationArgs(args, []string{"path"}, false)
-		}
 		return "contextual patch"
-	case projectToolMkdir:
-		return summarizeProjectToolKeyValues(args, []string{"path"})
 	}
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -1079,20 +977,6 @@ func summarizeProjectToolResult(name, result string) string {
 			}
 		case projectToolPlanProjectChanges:
 			return summarizeProjectPlanningWorkflowResult(decoded)
-		case projectToolRequestProjectPlanApproval:
-			parts := []string{}
-			if status := projectToolString(decoded["status"]); status != "" {
-				parts = append(parts, "status "+status)
-			}
-			if summary := projectToolString(decoded["summary"]); summary != "" {
-				parts = append(parts, summary)
-			}
-			if paths := projectToolStringList(decoded["targetPaths"]); len(paths) > 0 {
-				parts = append(parts, fmt.Sprintf("%d target path(s): %s", len(paths), summarizeProjectToolList(paths, 5)))
-			}
-			if len(parts) > 0 {
-				return truncateProjectToolInfo(strings.Join(parts, "; "))
-			}
 		case projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment:
 			return summarizeProjectReadinessWorkflowResult(decoded)
 		case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolRestartRuntime, projectToolSetRuntimeEnv:
@@ -1115,7 +999,7 @@ func summarizeProjectToolResult(name, result string) string {
 			if answer := projectToolString(decoded["answer"]); answer != "" {
 				return truncateProjectToolInfo("answered: " + answer)
 			}
-		case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+		case projectToolApplyPatch:
 			return summarizeWorkspaceMutationResult(decoded)
 		}
 		if message := projectToolString(decoded["message"]); message != "" {
@@ -1124,22 +1008,6 @@ func summarizeProjectToolResult(name, result string) string {
 	}
 	firstLine := strings.TrimSpace(strings.Split(result, "\n")[0])
 	return truncateProjectToolInfo(firstLine)
-}
-
-func summarizeProjectMutationArgs(args map[string]any, keys []string, includeContentBytes bool) string {
-	parts := []string{}
-	if summary := summarizeProjectToolKeyValues(args, keys); summary != "" {
-		parts = append(parts, summary)
-	}
-	if includeContentBytes {
-		if content, ok := args["content"].(string); ok {
-			parts = append(parts, fmt.Sprintf("%d bytes", len([]byte(content))))
-		}
-	}
-	if projectToolBool(args["replaceAll"]) {
-		parts = append(parts, "replaceAll")
-	}
-	return truncateProjectToolInfo(strings.Join(parts, "; "))
 }
 
 func summarizeProjectToolKeyValues(args map[string]any, keys []string) string {
@@ -2202,25 +2070,8 @@ func normalizeLLMBasePath(path string, host string) string {
 	return path
 }
 
-func projectPromptMessages(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message) []chatMessage {
-	return projectPromptMessagesForProfile(p, repository, history, classifyProjectAssistantTurnProfile(history))
-}
-
-func projectPromptMessagesForProfile(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message, profile projectAssistantTurnProfile) []chatMessage {
-	return projectPromptMessagesForInitialPlan(p, repository, history, profile, false)
-}
-
-func projectPromptMessagesForInitialPlan(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message, profile projectAssistantTurnProfile, initialPlan bool) []chatMessage {
-	messages := []chatMessage{{Role: "system", Content: projectSystemPromptForInitialPlan(p, repository, profile, initialPlan)}}
-	return appendProjectAssistantConversationHistory(messages, history)
-}
-
 func projectPromptMessagesForCollaborationMode(p *aiv1alpha1.Project, repository *ProjectRepositoryView, history []store.Message, mode projectAssistantCollaborationMode, initialBuild bool) []chatMessage {
-	profile := projectAssistantTurnProfileImplementation
-	if mode == projectAssistantCollaborationModePlan {
-		profile = projectAssistantTurnProfileDebugging
-	}
-	messages := []chatMessage{{Role: "system", Content: projectSystemPromptForMode(p, repository, profile, mode, initialBuild)}}
+	messages := []chatMessage{{Role: "system", Content: projectSystemPromptForMode(p, repository, mode, initialBuild)}}
 	return appendProjectAssistantConversationHistory(messages, history)
 }
 
@@ -2244,20 +2095,7 @@ func appendProjectAssistantConversationHistory(messages []chatMessage, history [
 	return messages
 }
 
-func projectSystemPrompt(p *aiv1alpha1.Project, repository *ProjectRepositoryView, profiles ...projectAssistantTurnProfile) string {
-	profile := projectAssistantTurnProfileDiscussion
-	if len(profiles) > 0 {
-		profile = normalizeProjectAssistantTurnProfile(profiles[0])
-	}
-	return projectSystemPromptForInitialPlan(p, repository, profile, false)
-}
-
-func projectSystemPromptForInitialPlan(p *aiv1alpha1.Project, repository *ProjectRepositoryView, profile projectAssistantTurnProfile, initialPlan bool) string {
-	return projectSystemPromptForMode(p, repository, profile, "", initialPlan)
-}
-
-func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectRepositoryView, profile projectAssistantTurnProfile, collaborationMode projectAssistantCollaborationMode, initialBuild bool) string {
-	profile = normalizeProjectAssistantTurnProfile(profile)
+func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectRepositoryView, collaborationMode projectAssistantCollaborationMode, initialBuild bool) string {
 	var b strings.Builder
 	b.WriteString("You are the assistant for a persistent Kedge Project workspace. ")
 	b.WriteString("Help the user reason about and build the application represented by this Project. ")
@@ -2267,6 +2105,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	b.WriteString("Do not narrate each tool call or say what tool you will call next in assistant prose; App Studio shows detailed tool progress through its status and tool summary UI. ")
 	b.WriteString("Do not claim that you changed files or deployed resources unless a tool result or other evidence supports it. ")
 	b.WriteString("Diagnostic constitution: every conclusion about the current app requires current evidence. Characterize the reported symptom and expected behavior, then locate the boundary where observed and expected behavior diverge. Keep workspace state, workspace synchronization, runtime operational health, and application behavior as separate claims. After a repair, rerun the original observation when the available tools can observe it. If application behavior cannot be observed, state that limitation and do not claim it or the acceptance criteria were verified. ")
+	b.WriteString(projectAssistantBrowserConsoleTrustInstruction)
 	b.WriteString("Do not invent App Studio product capabilities, UI tabs, cloud providers, infrastructure templates, setup flows, deployment targets, or integrations. ")
 	b.WriteString("For App Studio product capability questions, answer only from explicit evidence in tool results, project metadata, project memory, or this system prompt; if evidence is missing, say \"I don't see that capability available in this workspace\" and explain what you can verify. ")
 	b.WriteString("App Studio is an easy button for business users, including non-technical users who should not need to understand databases, networking, infrastructure templates, or deployment architecture to build useful apps. ")
@@ -2274,11 +2113,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	b.WriteString("When a live development sandbox exists, assume App Studio source changes run in that sandbox; separate development sandbox guidance from production launch guidance. ")
 	b.WriteString("Do not ask the user to choose databases, networking, infrastructure templates, or deployment architecture when App Studio can infer a safe next step from their business intent and available evidence. ")
 	b.WriteString("When requirements are unclear, ask concise follow-up questions instead of guessing.\n\n")
-	if collaborationMode != "" {
-		b.WriteString("Collaboration mode: " + string(collaborationMode) + "\n")
-	} else {
-		b.WriteString("Conversation mode: " + string(profile) + "\n")
-	}
+	b.WriteString("Collaboration mode: " + string(collaborationMode) + "\n")
 	b.WriteString("Project metadata:\n")
 	b.WriteString("- Name: " + p.Name + "\n")
 	if p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) != "" {
@@ -2288,11 +2123,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 			"This template is the app's ENVIRONMENT CONTRACT: before reasoning about what infrastructure, backing services, or environment variables the app has, call infrastructure__describe_template on THIS template and treat its agent.usage / agent.outputs as authoritative. " +
 			"Backing services the template declares (for example a managed database) exist for the development instance too, with the same injected environment (for example DATABASE_URL) — do not conclude a declared service is missing just because the app code does not use it yet, and do not provision a separate instance of a service the bound template already provides.\n")
 	} else {
-		if collaborationMode != "" {
-			b.WriteString("- Development template: NONE — the project has no development environment, running process, or preview. If an authorized implementation requires runnable source, inspect the development templates once, choose a template whose declared component toolchains match the application, and bind it before writing runtime source. Template selection is independent of repository provisioning; repository state gates commits only. Inspection-only requests and Plan mode do not authorize binding a template.\n")
-		} else {
-			b.WriteString("- Development template: NONE — the project has no development environment yet, so nothing runs and no preview exists until one is bound. Binding a template is your FIRST implementation step: translate the user's business intent into requirements yourself, call inspect_development_templates once to inspect every development-capable template, choose the matching template, and bind it with select_project_template. That one call returns each candidate's full agent.usage contract and each component's workspace directory, toolchain, and start command — read the toolchains before choosing, because they decide which language the app must be written in, and prefer a template whose toolchain matches the stack the app needs. Do not perform generic tool discovery or separate infrastructure list/describe calls for this initial development-template choice. Template selection is INDEPENDENT of repository provisioning — never wait for the repository to bind a template; repository state only gates committing files, not template selection or workspace edits.\n")
-		}
+		b.WriteString("- Development template: NONE — the project has no development environment, running process, or preview. If an authorized implementation requires runnable source, inspect the development templates once, choose a template whose declared component toolchains match the application, and bind it before writing runtime source. Template selection is independent of repository provisioning; repository state gates commits only. Inspection-only requests and Plan mode do not authorize binding a template.\n")
 	}
 	b.WriteString("- Display name: " + p.Spec.DisplayName + "\n")
 	if strings.TrimSpace(p.Spec.Description) != "" {
@@ -2324,11 +2155,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 			b.WriteString("Do not attempt to commit files until the managed Code repository is available and ready.\n")
 		}
 	}
-	if collaborationMode != "" {
-		appendProjectAssistantV2ModePrompt(&b, collaborationMode, repositoryRef, repositoryCommitReady, initialBuild)
-	} else {
-		appendProjectAssistantModePromptForInitialPlan(&b, profile, repositoryRef, repositoryCommitReady, initialBuild)
-	}
+	appendProjectAssistantV2ModePrompt(&b, collaborationMode, repositoryRef, repositoryCommitReady, initialBuild)
 	b.WriteString("\nProject memory:\n")
 	appendMemoryList(&b, "Goals", p.Spec.Memory.Goals)
 	appendMemoryList(&b, "Requirements", p.Spec.Memory.Requirements)
@@ -2356,84 +2183,6 @@ func appendProjectAssistantV2ModePrompt(b *strings.Builder, mode projectAssistan
 		b.WriteString("Repository state does not permit a commit in this run. Continue with authorized workspace work, but do not call commit_project_files or imply the changes were persisted to git. ")
 	}
 	b.WriteString("Preserve unrelated existing work. Never reset, restore, or replace broad workspace state to recover from a localized failure. Finish with the supported result, exact checks performed, remaining limitations, and no claim that application behavior was independently verified unless a future behavioral tool actually observed it.\n")
-}
-
-func appendProjectAssistantModePrompt(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string) {
-	appendProjectAssistantModePromptForInitialPlan(b, profile, repoRef, strings.TrimSpace(repoRef) != "", false)
-}
-
-func appendProjectAssistantModePromptForInitialPlan(b *strings.Builder, profile projectAssistantTurnProfile, repoRef string, repositoryCommitReady bool, initialPlan bool) {
-	switch normalizeProjectAssistantTurnProfile(profile) {
-	case projectAssistantTurnProfileDiscussion:
-		b.WriteString("Answer exploratory or conceptual questions directly from the conversation and project memory. Do not inspect current workspace state unless the user asks a current-state question or asks to change/debug the app.\n")
-	case projectAssistantTurnProfileAdaptive:
-		b.WriteString("Answer directly when project inspection is unnecessary. When current project state matters, use the available bounded read-only tools. If source changes are needed, call request_project_plan_approval with a concise plan and project-relative target paths; App Studio will create a durable implementation task and resolve the plan according to the project's approval mode. When the plan result is approved, continue with the newly available editing tools. Do not claim a change was made without tool evidence, and do not give manual copy/paste replacement instructions.\n")
-	case projectAssistantTurnProfileGuidance:
-		b.WriteString("Give practical guidance, recommendations, and tradeoffs. Do not claim to know current file or runtime state unless tool evidence is available; ask the user for missing context in plain language when needed.\n")
-	case projectAssistantTurnProfileExploration:
-		b.WriteString("Use read-only App Studio workflow, workspace-read, and aggregate MCP infrastructure discovery tools when current project state or available infrastructure templates are needed. Prefer plan_project_changes, check_project_readiness, ls, read_file, glob, grep, infrastructure__list_templates, infrastructure__describe_template, infrastructure__list_instances, and infrastructure__get_instance for bounded inspection. Treat infrastructure templates as capability evidence, not as a menu the user must operate. Before deciding whether a template fits, describe the template and consult the template's agent.usage guidance when that field is available. ")
-		appendProjectAssistantTemplateFitPrompt(b)
-		b.WriteString("Do not edit, deploy, provision, or commit.\n")
-	case projectAssistantTurnProfileDebugging:
-		b.WriteString("Diagnose in read-only mode. Use current source and readiness evidence from check_project_readiness, ls, read_file, glob, and grep together with get_runtime_status, get_runtime_logs, get_preview_url, and preview console evidence when available. Characterize the symptom and expected behavior, identify the supported failing boundary and cause, or explicitly state which evidence is unavailable. Do not mutate files, deploy runtime resources, or commit unless the user explicitly asks you to fix the issue.\n")
-	case projectAssistantTurnProfileDebugFix:
-		b.WriteString("First perform the same read-only diagnosis as debugging mode: gather current source, readiness, runtime status and logs, preview URL, and preview console evidence as available; characterize the symptom and expected behavior; and identify a supported failing boundary and suspected cause or an explicit evidence limitation. Before editing, request a scoped source-edit plan whose summary identifies the suspected cause and the current evidence supporting it. After repair, rerun the original observation when available. ")
-		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, repositoryCommitReady, initialPlan)
-	case projectAssistantTurnProfileImplementation:
-		appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, repositoryCommitReady, initialPlan)
-	}
-}
-
-func appendProjectAssistantBuilderPrompt(b *strings.Builder, repoRef string) {
-	appendProjectAssistantBuilderPromptForInitialPlan(b, repoRef, strings.TrimSpace(repoRef) != "", false)
-}
-
-func appendProjectAssistantBuilderPromptForInitialPlan(b *strings.Builder, repoRef string, repositoryCommitReady bool, initialPlan bool) {
-	b.WriteString("The supplied current project snapshot is the initial workspace manifest. Do not call ls or check_project_readiness merely to reproduce a complete snapshot; use them only when the snapshot is truncated, unavailable, or a later state-changing result makes it stale. ")
-	b.WriteString("For a fresh project, use inspect_development_templates to inspect every development-capable template in one workflow instead of separately searching and describing templates. ")
-	b.WriteString("Use prepare_project_deployment before discussing deployment handoff so build artifact readiness, blockers, and runtime handoff constraints come from the App Studio graph workflow. ")
-	b.WriteString("Use promote_project to take a project to production. ")
-	b.WriteString(projectAssistantBrowserConsoleTrustInstruction)
-	b.WriteString("Treat verify_development_runtime as operational verification only: it can establish current workspace synchronization, process and log health, and preview reachability, but it does not independently verify rendered content, interactions, data flow, application behavior, or acceptance criteria. On a fresh build, if verify_development_runtime reports that the development instance, URL, or edge is still provisioning without a concrete code or configuration blocker, report that the preview is starting; do not call restart_runtime. ")
-	b.WriteString("Workspace writes automatically synchronize and restart the development process. After fixing source or configuration, verify again; do not call restart_runtime merely to apply workspace edits, and treat older errors before the latest ready/running log line as stale. ")
-	b.WriteString("For supporting infrastructure, use infrastructure__list_templates before naming any available template, infrastructure__describe_template before recommending values, and infrastructure__provision only after the user explicitly asks to create supporting infrastructure and the permission flow approves the call. ")
-	appendProjectAssistantTemplateFitPrompt(b)
-	b.WriteString("When the user asks for a supporting capability such as persistent data, first decide whether the current sandbox app can satisfy the development need before provisioning infrastructure. ")
-	b.WriteString("Do not recommend a full application or runtime template just to satisfy a smaller need like persistent data, and do not duplicate App Studio's sandbox runtime unless the user is explicitly moving toward a production launch. ")
-	b.WriteString("Use ls and glob to discover project-relative paths, read_file for bounded targeted reads, and grep to locate code. Inspect relevant existing files before editing. ")
-	b.WriteString("When requirements are unclear during implementation, call ask_follow_up with at most three concise questions instead of guessing. ")
-	if initialPlan {
-		b.WriteString("The user explicitly authorized this fresh project's initial source build. Do not call request_project_plan_approval before write_file, apply_patch, or mkdir in this run. If project creation already bound a development template, that one initial development environment was separately authorized by the create request; do not select, switch, or provision another template without the normal approval flow. The source-build authorization does not cover other runtime actions, supporting infrastructure provisioning, repository changes, or commit_project_files; commit_project_files still requires explicit user approval. ")
-	} else {
-		b.WriteString("Before source edits, call request_project_plan_approval with a concise batch plan, target path envelope, and acceptance criteria; after approval, keep workspace edits inside that envelope. ")
-	}
-	b.WriteString("After source edits are authorized: Prefer a single response containing all independent write_file, apply_patch, and mkdir calls for the current step; never wait for one result before another independent write. App Studio executes those calls in listed order. Keep calls separate when an argument depends on a prior mutation, and never batch reads, verification, template selection, runtime actions, or commit_project_files with those writes. ")
-	b.WriteString("Do not give the user manual copy/paste file replacement instructions when App Studio edit tools are available; request approval and apply the change in the workspace instead. ")
-	b.WriteString("Prefer small App Studio workspace mutations with write_file, apply_patch, and mkdir instead of rewriting a whole project. ")
-	if initialPlan {
-		b.WriteString("For this initial run, verify the live development workspace before any repository commit. Do not call commit_project_files in this initial run; the development preview runs from the App Studio workspace, and a later user-approved commit can persist the verified source to the managed repository. ")
-	} else if repositoryCommitReady {
-		b.WriteString("After workspace mutations, commit the changed source/config files to the managed git source with commit_project_files using repositoryRef \"" + repoRef + "\". ")
-		b.WriteString("The tool creates a visible RepositoryCommit request; use concise commit messages and include every generated source/config file needed for the app to run. ")
-	} else {
-		b.WriteString("Repository state does not permit commits in this turn. Continue to use the App Studio workspace for authorized inspection and edits, but do not call commit_project_files or imply the changes were persisted to git. ")
-	}
-	b.WriteString("Use provider-code only as the git-source boundary; do not use provider-code tools to inspect or mutate the live App Studio workspace. ")
-	b.WriteString("Do not paste large file contents into user-facing answers; summarize what you inspected instead. ")
-	b.WriteString("Do not create another repository for this Project unless the user explicitly asks for a different repository.\n")
-	b.WriteString("Building for launch: the container-image build runs in GitHub Actions, wired into the repository automatically when the project's template is bound. Committing source triggers a per-component image build; when the user wants to launch (go to production / ship a long-running app), make sure the app is committed, then call check_project_build to verify the build. ")
-	b.WriteString("Treat check_project_build as the build-doctor loop: status \"built\" means every launchable component has an image and the app is ready to launch; \"incomplete\" or \"none\" means some or all builds are still running or have failed. On a non-built status, re-check after a short pause; if components stay unbuilt, call get_build_logs to see WHY the build failed (the failed job's log tail), fix that component's build inputs (its workspace subdirectory, package.json build/start scripts, what Railpack expects for that stack), commit the fix, and re-check. For a build that failed for a transient reason rather than a code problem, use rebuild_project to re-run it without a code change. Iterate until status is \"built\" before launching. ")
-	b.WriteString("Do not claim the app is built, published, or ready to launch unless check_project_build reports status \"built\".\n")
-	b.WriteString("Going to production: when the user wants to launch / go live / ship a long-running app, use promote_project. Promotion stands up a SEPARATE production instance of the project's template (its own URL) from the built images, running alongside the development sandbox — it does not replace or stop the sandbox, and it is repeatable (promote again to redeploy newer builds). Only promote when check_project_build is \"built\"; confirm with the user first, and surface the production URL from the returned environment status once it is serving.\n")
-}
-
-func appendProjectAssistantTemplateFitPrompt(b *strings.Builder) {
-	b.WriteString("When infrastructure__describe_template returns provider-authored guidance, consult the template's agent.usage guidance and treat agent.usage as the provider-authored operating contract for the template. ")
-	b.WriteString("Use it to decide the user outcome the template satisfies, the prerequisites it assumes, and whether it provisions a narrow supporting capability or a broader app/runtime stack that may duplicate App Studio's development sandbox. ")
-	b.WriteString("Do not recommend a template merely because it contains one thing the user asked for. ")
-	b.WriteString("For example, if the user asks for persistent todo data while already working in an App Studio sandbox, do not recommend the application template just because it includes Postgres. ")
-	b.WriteString("Its agent.usage says it deploys a full 3-tier web app from frontend and backend container images behind one URL, so it is a production-style app deployment template, not a simple add a database to my sandbox app option. ")
-	b.WriteString("Explain template fit in business terms, and call out when a template includes more than the user asked for. ")
 }
 
 func projectMCPToolsPrompt(tools []chatTool) string {

@@ -74,9 +74,7 @@ type projectEinoAssistantRunState struct {
 	sessionSnapshot           *projectEinoAssistantSessionSnapshot
 	permissionBarrier         bool
 	approvedPlan              *projectAssistantApprovedPlan
-	approvedPlanGrantRevision string
 	executionPlan             *projectAssistantApprovedPlan
-	executionPlanRevision     string
 	planProgress              projectAssistantPlanSnapshot
 	sourceMutationRevision    uint64
 	verifiedMutationRevision  uint64
@@ -113,11 +111,7 @@ type projectEinoAssistantRunState struct {
 	modelCallOrdinal          int
 	transientToolResults      map[string]string
 	transientToolResultCount  uint64
-	// Progress suppression is intentionally run-local. Resuming after user
-	// approval or input starts a new visible work interval and may report the
-	// current phase again.
-	progressPhases      map[projectEinoAssistantPhase]bool
-	lastProgressMessage string
+	lastProgressMessage       string
 }
 
 type projectEinoAssistantLineRange struct {
@@ -150,9 +144,8 @@ func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
 		readFileCoverage:        map[string][]projectEinoAssistantLineRange{},
 		successfulMutationPaths: map[string]struct{}{},
 		transientToolResults:    map[string]string{},
-		progressPhases:          map[projectEinoAssistantPhase]bool{},
 		developmentSyncChanged:  make(chan struct{}),
-		turnPolicy:              projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion),
+		turnPolicy:              projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugging),
 	}
 }
 
@@ -168,40 +161,6 @@ func (s *projectEinoAssistantRunState) AcceptProgressMessage(message string) boo
 	}
 	s.lastProgressMessage = message
 	return true
-}
-
-func (s *projectEinoAssistantRunState) ReserveProgressPhase(phase projectEinoAssistantPhase) bool {
-	if s == nil || phase == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.progressPhases == nil {
-		s.progressPhases = map[projectEinoAssistantPhase]bool{}
-	}
-	if s.progressPhases[phase] {
-		return false
-	}
-	s.progressPhases[phase] = true
-	return true
-}
-
-func (s *projectEinoAssistantRunState) ReleaseProgressPhase(phase projectEinoAssistantPhase) {
-	if s == nil || phase == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.progressPhases, phase)
-}
-
-func (s *projectEinoAssistantRunState) ProgressReported(phase projectEinoAssistantPhase) bool {
-	if s == nil || phase == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.progressPhases[phase]
 }
 
 func (s *projectEinoAssistantRunState) RegisterTransientToolResult(name, result string) string {
@@ -295,7 +254,7 @@ func (s *projectEinoAssistantRunState) SetTurnPolicy(policy projectAssistantTurn
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.turnPolicy = normalizeProjectAssistantTurnPolicy(policy, projectAssistantTurnProfileDiscussion)
+	s.turnPolicy = normalizeProjectAssistantTurnPolicy(policy, projectAssistantTurnProfileDebugging)
 }
 
 func (s *projectEinoAssistantRunState) TurnProfile() projectAssistantTurnProfile {
@@ -304,11 +263,11 @@ func (s *projectEinoAssistantRunState) TurnProfile() projectAssistantTurnProfile
 
 func (s *projectEinoAssistantRunState) TurnPolicy() projectAssistantTurnPolicy {
 	if s == nil {
-		return projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDiscussion)
+		return projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugging)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return normalizeProjectAssistantTurnPolicy(s.turnPolicy, projectAssistantTurnProfileDiscussion)
+	return normalizeProjectAssistantTurnPolicy(s.turnPolicy, projectAssistantTurnProfileDebugging)
 }
 
 func (s *projectEinoAssistantRunState) SetToolPrompt(prompt string) {
@@ -394,9 +353,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.turnPolicy = projectAssistantTurnPolicyForCheckpoint(state)
 	s.projectRepositoryRef = strings.TrimSpace(state.ProjectRepositoryRef)
 	s.approvedPlan = cloneProjectAssistantApprovedPlan(state.ApprovedPlan)
-	s.approvedPlanGrantRevision = strings.TrimSpace(state.ApprovedPlanGrantRevision)
 	s.executionPlan = cloneProjectAssistantApprovedPlan(state.ExecutionPlan)
-	s.executionPlanRevision = strings.TrimSpace(state.ExecutionPlanRevision)
 	s.planProgress = cloneProjectAssistantPlanSnapshot(state.PlanProgress)
 	s.sourceMutationRevision = state.SourceMutationRevision
 	s.checkedMutationRevision = state.CheckedMutationRevision
@@ -423,9 +380,8 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	}
 	s.runtimeWarmupAttempts = min(max(state.RuntimeWarmupAttempts, 0), projectEinoAssistantRepeatedActionLimit)
 	s.repairOpportunityRevision = state.RepairOpportunityRevision
-	// Legacy checkpoints counted every tool invocation and could therefore
-	// exhaust the guard within one model response. Start those checkpoints with
-	// a clean model-call counter rather than carrying forward false strikes.
+	// The durable counter tracks consecutive model calls without progress.
+	// Bound restored state so a malformed checkpoint cannot disable the guard.
 	s.noProgressModelCallCount = min(max(state.NoProgressModelCallCount, 0), projectEinoAssistantRepeatedActionLimit)
 	s.actionBatchModelCall = max(state.ActionBatchModelCall, 0)
 	s.actionBatchObserved = state.ActionBatchObserved
@@ -492,7 +448,7 @@ func (s *projectEinoAssistantRunState) ApprovedPlan() *projectAssistantApprovedP
 	return cloneProjectAssistantApprovedPlan(s.approvedPlan)
 }
 
-func (s *projectEinoAssistantRunState) SetExecutionPlan(plan projectAssistantApprovedPlan, revision string) {
+func (s *projectEinoAssistantRunState) SetExecutionPlan(plan projectAssistantApprovedPlan) {
 	if s == nil {
 		return
 	}
@@ -500,7 +456,6 @@ func (s *projectEinoAssistantRunState) SetExecutionPlan(plan projectAssistantApp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.executionPlan = &normalized
-	s.executionPlanRevision = strings.TrimSpace(revision)
 }
 
 func (s *projectEinoAssistantRunState) ClearExecutionPlan() {
@@ -510,17 +465,16 @@ func (s *projectEinoAssistantRunState) ClearExecutionPlan() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.executionPlan = nil
-	s.executionPlanRevision = ""
 	s.planProgress = projectAssistantPlanSnapshot{}
 }
 
-func (s *projectEinoAssistantRunState) ExecutionPlan() (*projectAssistantApprovedPlan, string) {
+func (s *projectEinoAssistantRunState) ExecutionPlan() *projectAssistantApprovedPlan {
 	if s == nil {
-		return nil, ""
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneProjectAssistantApprovedPlan(s.executionPlan), s.executionPlanRevision
+	return cloneProjectAssistantApprovedPlan(s.executionPlan)
 }
 
 func (s *projectEinoAssistantRunState) SetPlanProgress(plan projectAssistantPlanSnapshot) {
@@ -589,24 +543,6 @@ func (s *projectEinoAssistantRunState) ClearApprovedPlan() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.approvedPlan = nil
-}
-
-func (s *projectEinoAssistantRunState) SetApprovedPlanGrantRevision(revision string) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.approvedPlanGrantRevision = strings.TrimSpace(revision)
-}
-
-func (s *projectEinoAssistantRunState) ApprovedPlanGrantRevision() string {
-	if s == nil {
-		return ""
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.approvedPlanGrantRevision
 }
 
 func (s *projectEinoAssistantRunState) RecordSourceMutation() {
@@ -811,13 +747,6 @@ func (s *projectEinoAssistantRunState) RecordDevelopmentVerificationResult(conte
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if payload.CheckedMutationRevision == 0 {
-		// Legacy live verifier implementations did not echo the revision. The
-		// result is still bound to the current revision at this synchronous
-		// lifecycle boundary. Restored legacy checkpoints remain unverified
-		// because they do not carry CheckedMutationRevision.
-		payload.CheckedMutationRevision = s.sourceMutationRevision
-	}
 	s.verificationAttempted = true
 	s.checkedMutationRevision = payload.CheckedMutationRevision
 	s.verificationSummary = strings.TrimSpace(payload.Summary)
@@ -1547,9 +1476,7 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		ProjectRepositoryRef:      strings.TrimSpace(s.projectRepositoryRef),
 		TurnPolicy:                projectAssistantCheckpointTurnPolicyForPolicy(s.turnPolicy),
 		ApprovedPlan:              cloneProjectAssistantApprovedPlan(s.approvedPlan),
-		ApprovedPlanGrantRevision: strings.TrimSpace(s.approvedPlanGrantRevision),
 		ExecutionPlan:             cloneProjectAssistantApprovedPlan(s.executionPlan),
-		ExecutionPlanRevision:     strings.TrimSpace(s.executionPlanRevision),
 		PlanProgress:              cloneProjectAssistantPlanSnapshot(s.planProgress),
 		SourceMutationRevision:    s.sourceMutationRevision,
 		VerifiedMutationRevision:  s.verifiedMutationRevision,

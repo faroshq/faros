@@ -118,7 +118,7 @@ func (s *Server) hydrateWorkspaceFromRepository(ctx context.Context, id identity
 
 	// Push the hydrated tree through the same per-project ordered queue used by
 	// assistant mutations so a later verification cannot overtake this sync.
-	s.scheduleDevelopmentSyncAfterMutation(id, p, projectToolHydrateWorkspace)
+	s.scheduleDevelopmentSyncAfterMutation(id, p, projectActionWorkspaceSync)
 
 	return resp, nil
 }

@@ -40,6 +40,15 @@ import (
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProjectAssistantWorkflowToolsAreEinoGraphTools(t *testing.T) {
 	server := NewWithWorkspace(nil, store.NewMemoryStore(), workspace.NewFileStore(t.TempDir()), "", false)
 	req := projectAssistantRunRequest{
@@ -1076,7 +1085,7 @@ func TestProjectAssistantWorkflowRegisteredReadOnly(t *testing.T) {
 	if spec.Risk != projectAssistantToolRiskRead {
 		t.Fatalf("risk = %q, want read", spec.Risk)
 	}
-	if got := projectAssistantPermissionForTool(spec); got != projectAssistantPermissionAllow {
+	if got := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, nil, nil, false); got != projectAssistantPermissionAllow {
 		t.Fatalf("permission = %q, want allow", got)
 	}
 	if strings.TrimSpace(string(spec.Parameters)) == "" {
@@ -1094,7 +1103,7 @@ func TestProjectAssistantReadinessWorkflowRegisteredReadOnly(t *testing.T) {
 	if spec.Risk != projectAssistantToolRiskRead {
 		t.Fatalf("risk = %q, want read", spec.Risk)
 	}
-	if got := projectAssistantPermissionForTool(spec); got != projectAssistantPermissionAllow {
+	if got := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, nil, nil, false); got != projectAssistantPermissionAllow {
 		t.Fatalf("permission = %q, want allow", got)
 	}
 	if strings.TrimSpace(string(spec.Parameters)) == "" {
@@ -1112,7 +1121,7 @@ func TestProjectAssistantPrepareDeploymentWorkflowRegisteredReadOnly(t *testing.
 	if spec.Risk != projectAssistantToolRiskRead {
 		t.Fatalf("risk = %q, want read", spec.Risk)
 	}
-	if got := projectAssistantPermissionForTool(spec); got != projectAssistantPermissionAllow {
+	if got := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, nil, nil, false); got != projectAssistantPermissionAllow {
 		t.Fatalf("permission = %q, want allow", got)
 	}
 	if strings.TrimSpace(string(spec.Parameters)) == "" {
@@ -1141,7 +1150,7 @@ func TestProjectAssistantRuntimeWorkflowToolsRegistered(t *testing.T) {
 			if spec.Risk != tt.wantRisk {
 				t.Fatalf("risk = %q, want %q", spec.Risk, tt.wantRisk)
 			}
-			if got := projectAssistantPermissionForTool(spec); got != tt.wantPerm {
+			if got := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, nil, nil, false); got != tt.wantPerm {
 				t.Fatalf("permission = %q, want %q", got, tt.wantPerm)
 			}
 			if got := projectAssistantToolBundleForSpec(spec); got != tt.wantBundle {

@@ -147,7 +147,7 @@ func TestProjectAssistantActionFeedMinimalDisclosureHidesTargetAndOutcome(t *tes
 
 	item := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
 		ID:        "write-1",
-		Name:      projectToolWriteFile,
+		Name:      projectToolApplyPatch,
 		Status:    "succeeded",
 		Arguments: "path src/App.vue; 42 bytes",
 		Summary:   "file updated",

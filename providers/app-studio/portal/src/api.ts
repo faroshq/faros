@@ -6,12 +6,10 @@ import type {
   Project,
   ProjectHydrateResult,
   ProjectAssistantRunStart,
-  ProjectAssistantWorkItem,
   ProjectAssistantAbortResponse,
   ProjectAssistantApprovalMode,
   ProjectAssistantApprovalPreference,
   ProjectAssistantSnapshot,
-  ProjectAssistantUndoResponse,
   ProjectLLMSettings,
   ProjectMemory,
   ProjectMessage,
@@ -316,7 +314,7 @@ export const api = {
     return items
   },
 
-  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; collaborationMode?: 'default' | 'plan' }): Promise<ProjectAssistantRunStart> {
+  async startAssistantRun(ctx: KedgeContext | null, name: string, body: { content: string; clientRequestID: string; collaborationMode: 'default' | 'plan' }): Promise<ProjectAssistantRunStart> {
     return request<ProjectAssistantRunStart>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/messages`, body)
   },
 
@@ -336,7 +334,7 @@ export const api = {
     ctx: KedgeContext | null,
     name: string,
     runID: string,
-    body: { requestID: string; decision?: 'allow' | 'deny'; answer?: string; assistantMessageID?: string },
+    body: { requestID: string; decision?: 'allow' | 'deny'; answer?: string },
   ): Promise<ProjectAssistantSnapshot> {
     return request<ProjectAssistantSnapshot>(
       ctx,
@@ -352,15 +350,6 @@ export const api = {
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/stop`,
       { clientRequestID },
-    )
-  },
-
-  async undoAssistantRun(ctx: KedgeContext | null, name: string, runID: string): Promise<ProjectAssistantUndoResponse> {
-    return request<ProjectAssistantUndoResponse>(
-      ctx,
-      'POST',
-      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/${encodeURIComponent(runID)}/undo`,
-      {},
     )
   },
 
@@ -382,19 +371,6 @@ export const api = {
       'PATCH',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/approval-mode`,
       { mode },
-    )
-  },
-
-  async listAssistantWorkItems(ctx: KedgeContext | null, name: string): Promise<ProjectAssistantWorkItem[]> {
-    return request<ProjectAssistantWorkItem[]>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items`)
-  },
-
-  async cancelAssistantWorkItem(ctx: KedgeContext | null, name: string, workItemID: string, revision: number, clientRequestID: string): Promise<ProjectAssistantWorkItem> {
-    return request<ProjectAssistantWorkItem>(
-      ctx,
-      'POST',
-      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/work-items/${encodeURIComponent(workItemID)}/cancel`,
-      { revision, clientRequestID },
     )
   },
 

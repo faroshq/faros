@@ -17,7 +17,9 @@ limitations under the License.
 package api
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,14 +30,18 @@ import (
 	"github.com/faroshq/provider-app-studio/store"
 )
 
-func TestProjectAssistantPermissionPolicy(t *testing.T) {
+func projectAssistantTestAddPatch(path string) string {
+	return fmt.Sprintf("*** Begin Patch\n*** Add File: %s\n+test\n*** End Patch", path)
+}
+
+func TestProjectAssistantV2AlwaysAskPermissionPolicy(t *testing.T) {
 	tests := []struct {
 		name string
 		risk projectAssistantToolRisk
 		want projectAssistantPermissionDecision
 	}{
 		{name: "read tools auto allow", risk: projectAssistantToolRiskRead, want: projectAssistantPermissionAllow},
-		{name: "plan approval asks", risk: projectAssistantToolRiskPlan, want: projectAssistantPermissionAsk},
+		{name: "plan tools require initial-build authority", risk: projectAssistantToolRiskPlan, want: projectAssistantPermissionDeny},
 		{name: "write tools ask", risk: projectAssistantToolRiskWrite, want: projectAssistantPermissionAsk},
 		{name: "commit tools ask", risk: projectAssistantToolRiskCommit, want: projectAssistantPermissionAsk},
 		{name: "runtime tools ask", risk: projectAssistantToolRiskRuntime, want: projectAssistantPermissionAsk},
@@ -43,10 +49,10 @@ func TestProjectAssistantPermissionPolicy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := projectAssistantPermissionForTool(projectAssistantToolSpec{
+			got := projectAssistantPermissionForV2(projectAssistantToolSpec{
 				Name: "tool",
 				Risk: tt.risk,
-			})
+			}, store.AssistantApprovalModeAlwaysAsk, nil, nil, false)
 			if got != tt.want {
 				t.Fatalf("permission = %q, want %q", got, tt.want)
 			}
@@ -54,17 +60,20 @@ func TestProjectAssistantPermissionPolicy(t *testing.T) {
 	}
 }
 
-func TestProjectAssistantRuntimePermissionIgnoresAutoApprove(t *testing.T) {
-	decision := projectAssistantPermissionForToolWithPolicy(projectAssistantToolSpec{
+func TestProjectAssistantV2RuntimePermissionFollowsApprovalMode(t *testing.T) {
+	spec := projectAssistantToolSpec{
 		Name: projectToolRestartRuntime,
 		Risk: projectAssistantToolRiskRuntime,
-	}, true)
-	if decision != projectAssistantPermissionAsk {
-		t.Fatalf("auto-approved runtime permission = %q, want %q", decision, projectAssistantPermissionAsk)
+	}
+	if decision := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, nil, nil, false); decision != projectAssistantPermissionAsk {
+		t.Fatalf("always-ask runtime permission = %q, want %q", decision, projectAssistantPermissionAsk)
+	}
+	if decision := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAutoApprove, nil, nil, false); decision != projectAssistantPermissionAllow {
+		t.Fatalf("auto-approved runtime permission = %q, want %q", decision, projectAssistantPermissionAllow)
 	}
 }
 
-func TestProjectAssistantPlanApprovalAllowsScopedWritesButNotCommit(t *testing.T) {
+func TestProjectAssistantV2RunLocalPlanAllowsScopedWritesAndFollowsCommitPreference(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	state.ApprovePlan(projectAssistantApprovedPlan{
 		Summary:      "Build dashboard",
@@ -72,46 +81,47 @@ func TestProjectAssistantPlanApprovalAllowsScopedWritesButNotCommit(t *testing.T
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
 		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
 		ApprovedAt:   testProjectAssistantApprovalTime(),
-		ApprovalTool: projectToolRequestProjectPlanApproval,
+		ApprovalTool: projectToolDefineInitialProjectPlan,
+		RunLocal:     true,
 	})
 
-	writeDecision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
-		Name: projectToolWriteFile,
+	writeDecision := projectAssistantPermissionForV2(projectAssistantToolSpec{
+		Name: projectToolApplyPatch,
 		Risk: projectAssistantToolRiskWrite,
-	}, false, state, map[string]any{
-		"path": "src/App.tsx",
-	})
+	}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
+		"patch": projectAssistantTestAddPatch("src/App.tsx"),
+	}, false)
 	if writeDecision != projectAssistantPermissionAllow {
 		t.Fatalf("write permission = %q, want %q", writeDecision, projectAssistantPermissionAllow)
 	}
 
-	outsideDecision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
-		Name: projectToolWriteFile,
+	outsideDecision := projectAssistantPermissionForV2(projectAssistantToolSpec{
+		Name: projectToolApplyPatch,
 		Risk: projectAssistantToolRiskWrite,
-	}, false, state, map[string]any{
-		"path": "README.md",
-	})
-	if outsideDecision != projectAssistantPermissionAsk {
-		t.Fatalf("outside write permission = %q, want %q", outsideDecision, projectAssistantPermissionAsk)
+	}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
+		"patch": projectAssistantTestAddPatch("README.md"),
+	}, false)
+	if outsideDecision != projectAssistantPermissionDeny {
+		t.Fatalf("outside write permission = %q, want %q", outsideDecision, projectAssistantPermissionDeny)
 	}
 
-	commitDecision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
+	commitDecision := projectAssistantPermissionForV2(projectAssistantToolSpec{
 		Name: projectToolCommitProjectFiles,
 		Risk: projectAssistantToolRiskCommit,
-	}, false, state, map[string]any{
+	}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
 		"paths": []any{"src/App.tsx"},
-	})
+	}, false)
 	if commitDecision != projectAssistantPermissionAsk {
 		t.Fatalf("commit permission = %q, want %q", commitDecision, projectAssistantPermissionAsk)
 	}
-	autoCommitDecision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
+	autoCommitDecision := projectAssistantPermissionForV2(projectAssistantToolSpec{
 		Name: projectToolCommitProjectFiles,
 		Risk: projectAssistantToolRiskCommit,
-	}, true, state, map[string]any{
+	}, store.AssistantApprovalModeAutoApprove, state, map[string]any{
 		"paths": []any{"src/App.tsx"},
-	})
-	if autoCommitDecision != projectAssistantPermissionAsk {
-		t.Fatalf("auto-approved commit permission = %q, want %q", autoCommitDecision, projectAssistantPermissionAsk)
+	}, false)
+	if autoCommitDecision != projectAssistantPermissionAllow {
+		t.Fatalf("auto-approved commit permission = %q, want %q", autoCommitDecision, projectAssistantPermissionAllow)
 	}
 }
 
@@ -128,16 +138,18 @@ func TestProjectAssistantWorkspaceMutationGrantAllowsCanonicalEditsWithinScope(t
 		path string
 		want bool
 	}{
-		{name: "write file", tool: projectToolWriteFile, path: "src/App.tsx", want: true},
 		{name: "apply patch", tool: projectToolApplyPatch, path: "src/App.tsx", want: true},
-		{name: "make directory", tool: projectToolMkdir, path: "src/components", want: true},
 		{name: "exact file", tool: projectToolApplyPatch, path: "package.json", want: true},
-		{name: "outside scope", tool: projectToolWriteFile, path: "README.md"},
+		{name: "outside scope", tool: projectToolApplyPatch, path: "README.md"},
 		{name: "unknown write tool", tool: "custom_write_tool", path: "src/App.tsx"},
 		{name: "namespaced write lookalike", tool: "provider__write_file", path: "src/App.tsx"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := projectAssistantApprovedPlanAllowsWrite(plan, tt.tool, map[string]any{"path": tt.path})
+			args := map[string]any{"path": tt.path}
+			if tt.tool == projectToolApplyPatch {
+				args = map[string]any{"patch": projectAssistantTestAddPatch(tt.path)}
+			}
+			got := projectAssistantApprovedPlanAllowsWrite(plan, tt.tool, args)
 			if got != tt.want {
 				t.Fatalf("plan allows %s on %q = %t, want %t", tt.tool, tt.path, got, tt.want)
 			}
@@ -145,48 +157,23 @@ func TestProjectAssistantWorkspaceMutationGrantAllowsCanonicalEditsWithinScope(t
 	}
 }
 
-func TestProjectAssistantOperationOnlyGrantIsInactive(t *testing.T) {
-	for _, raw := range []string{
-		`{"targetPaths":["src/"],"operations":["write_file"]}`,
-		`{"operations":["write_file"],"allowAllWrites":true}`,
-	} {
-		var plan projectAssistantApprovedPlan
-		if err := json.Unmarshal([]byte(raw), &plan); err != nil {
-			t.Fatalf("decode obsolete grant: %v", err)
-		}
-		if projectAssistantApprovedPlanActive(&plan) {
-			t.Fatalf("obsolete grant should be inactive after capability migration: %s", raw)
-		}
-		if projectAssistantApprovedPlanAllowsWrite(&plan, projectToolWriteFile, map[string]any{"path": "src/App.tsx"}) {
-			t.Fatalf("obsolete grant must not authorize workspace mutation: %s", raw)
-		}
-	}
-}
-
-func TestProjectAssistantPlanScopeExpansionRequiresApproval(t *testing.T) {
+func TestProjectAssistantV2InitialExecutionPlanRequiresRunLocalCreationAuthority(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
-	state.ApprovePlan(projectAssistantApprovedPlan{
-		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
-		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
-		TargetPaths:  []string{"src/"},
-	})
 	spec := projectAssistantToolSpec{
-		Name: projectToolRequestProjectPlanApproval,
+		Name: projectToolDefineInitialProjectPlan,
 		Risk: projectAssistantToolRiskPlan,
 	}
-
-	sameScope := projectAssistantPermissionForToolWithRunState(spec, false, state, map[string]any{
-		"targetPaths": []any{"src/App.tsx"},
-	})
-	if sameScope != projectAssistantPermissionAllow {
-		t.Fatalf("same-scope plan permission = %q, want %q", sameScope, projectAssistantPermissionAllow)
+	args := map[string]any{
+		"summary":            "Build the app",
+		"targetPaths":        []any{"src/"},
+		"acceptanceCriteria": []any{"The app starts"},
 	}
-
-	expandedScope := projectAssistantPermissionForToolWithRunState(spec, false, state, map[string]any{
-		"targetPaths": []any{"src/", "secrets/"},
-	})
-	if expandedScope != projectAssistantPermissionAsk {
-		t.Fatalf("expanded-scope plan permission = %q, want %q", expandedScope, projectAssistantPermissionAsk)
+	if decision := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAutoApprove, state, args, false); decision != projectAssistantPermissionDeny {
+		t.Fatalf("unbound initial plan permission = %q, want deny", decision)
+	}
+	state.ApprovePlan(projectAssistantInitialCreationPlan("Build the app"))
+	if decision := projectAssistantPermissionForV2(spec, store.AssistantApprovalModeAlwaysAsk, state, args, false); decision != projectAssistantPermissionAllow {
+		t.Fatalf("run-local initial plan permission = %q, want allow", decision)
 	}
 }
 
@@ -198,7 +185,8 @@ func TestProjectAssistantAutoApprovePreservesApprovedPlanScope(t *testing.T) {
 		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
 		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
 		ApprovedAt:   testProjectAssistantApprovalTime(),
-		ApprovalTool: projectToolRequestProjectPlanApproval,
+		ApprovalTool: projectToolDefineInitialProjectPlan,
+		RunLocal:     true,
 	})
 
 	tests := []struct {
@@ -209,26 +197,14 @@ func TestProjectAssistantAutoApprovePreservesApprovedPlanScope(t *testing.T) {
 	}{
 		{
 			name: "approved operation and path are allowed",
-			spec: projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/App.tsx"},
-			want: projectAssistantPermissionAllow,
-		},
-		{
-			name: "outside path requires replanning without a headless write prompt",
-			spec: projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "package.json"},
-			want: projectAssistantPermissionDecision("replan"),
-		},
-		{
-			name: "alternate canonical edit tool is allowed by the capability",
 			spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/App.tsx"},
+			args: map[string]any{"patch": projectAssistantTestAddPatch("src/App.tsx")},
 			want: projectAssistantPermissionAllow,
 		},
 		{
-			name: "write tool outside the plan authorization model remains denied",
-			spec: projectAssistantToolSpec{Name: "custom_write_tool", Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/App.tsx"},
+			name: "outside path is denied by run-local scope",
+			spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+			args: map[string]any{"patch": projectAssistantTestAddPatch("package.json")},
 			want: projectAssistantPermissionDeny,
 		},
 		{
@@ -241,7 +217,7 @@ func TestProjectAssistantAutoApprovePreservesApprovedPlanScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := projectAssistantPermissionForToolWithRunState(tt.spec, true, state, tt.args); got != tt.want {
+			if got := projectAssistantPermissionForV2(tt.spec, store.AssistantApprovalModeAutoApprove, state, tt.args, true); got != tt.want {
 				t.Fatalf("permission = %q, want %q", got, tt.want)
 			}
 		})
@@ -261,23 +237,23 @@ func TestProjectAssistantInitialCreationWildcardAuthorizesAnyPath(t *testing.T) 
 	})
 
 	for _, path := range []string{"src/App.tsx", "README.md", "deploy/values.yaml"} {
-		decision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
-			Name: projectToolWriteFile,
+		decision := projectAssistantPermissionForV2(projectAssistantToolSpec{
+			Name: projectToolApplyPatch,
 			Risk: projectAssistantToolRiskWrite,
-		}, false, state, map[string]any{
-			"path": path,
-		})
+		}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
+			"patch": projectAssistantTestAddPatch(path),
+		}, false)
 		if decision != projectAssistantPermissionAllow {
 			t.Fatalf("write permission for %q = %q, want %q", path, decision, projectAssistantPermissionAllow)
 		}
 	}
 
-	commitDecision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
+	commitDecision := projectAssistantPermissionForV2(projectAssistantToolSpec{
 		Name: projectToolCommitProjectFiles,
 		Risk: projectAssistantToolRiskCommit,
-	}, false, state, map[string]any{
+	}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
 		"paths": []any{"src/App.tsx"},
-	})
+	}, false)
 	if commitDecision != projectAssistantPermissionAsk {
 		t.Fatalf("commit permission = %q, want %q", commitDecision, projectAssistantPermissionAsk)
 	}
@@ -301,7 +277,7 @@ func TestProjectAssistantWorkspaceGrantRejectsUnsafePaths(t *testing.T) {
 				Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
 				Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
 			}
-			if projectAssistantApprovedPlanAllowsWrite(plan, projectToolWriteFile, map[string]any{"path": tt.candidate}) {
+			if projectAssistantApprovedPlanAllowsWrite(plan, projectToolApplyPatch, map[string]any{"patch": projectAssistantTestAddPatch(tt.candidate)}) {
 				t.Fatalf("unsafe path %q was authorized by grant %#v", tt.candidate, plan.TargetPaths)
 			}
 		})
@@ -309,14 +285,16 @@ func TestProjectAssistantWorkspaceGrantRejectsUnsafePaths(t *testing.T) {
 }
 
 func TestProjectAssistantUnsafePlanTargetIsDenied(t *testing.T) {
-	decision := projectAssistantPermissionForToolWithRunState(
-		projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
-		false,
-		newProjectEinoAssistantRunState(),
-		map[string]any{"targetPaths": []any{"src/../secrets/"}},
+	err := projectAssistantValidateGrantBearingToolArguments(
+		projectAssistantToolSpec{Name: projectToolDefineInitialProjectPlan, Risk: projectAssistantToolRiskPlan},
+		map[string]any{
+			"summary":            "Unsafe plan",
+			"targetPaths":        []any{"src/../secrets/"},
+			"acceptanceCriteria": []any{"The app starts"},
+		},
 	)
-	if decision != projectAssistantPermissionDeny {
-		t.Fatalf("unsafe plan permission = %q, want %q", decision, projectAssistantPermissionDeny)
+	if err == nil {
+		t.Fatal("unsafe plan target passed V2 grant validation")
 	}
 }
 
@@ -324,42 +302,44 @@ func TestProjectAssistantInitialCreationGrantAllowsSourceEditsButNotTemplateSele
 	state := newProjectEinoAssistantRunState()
 	state.ApprovePlan(projectAssistantInitialCreationPlan())
 
-	for _, tool := range []string{projectToolWriteFile, projectToolApplyPatch, projectToolMkdir} {
-		decision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{Name: tool, Risk: projectAssistantToolRiskWrite}, false, state, map[string]any{"path": "src/App.tsx"})
-		if decision != projectAssistantPermissionAllow {
-			t.Fatalf("%s permission = %q, want allow", tool, decision)
-		}
+	decision := projectAssistantPermissionForV2(projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{"patch": projectAssistantTestAddPatch("src/App.tsx")}, false)
+	if decision != projectAssistantPermissionAllow {
+		t.Fatalf("%s permission = %q, want allow", projectToolApplyPatch, decision)
 	}
-	if decision := projectAssistantPermissionForToolWithRunState(
+	if decision := projectAssistantPermissionForV2(
 		projectAssistantToolSpec{Name: projectToolSelectTemplate, Risk: projectAssistantToolRiskWrite},
+		store.AssistantApprovalModeAlwaysAsk,
+		state,
+		map[string]any{"template": "simple-webapp"},
 		false,
-		state,
-		map[string]any{"template": "simple-webapp"},
-	); decision != projectAssistantPermissionAsk {
-		t.Fatalf("%s permission = %q, want explicit approval", projectToolSelectTemplate, decision)
+	); decision != projectAssistantPermissionDeny {
+		t.Fatalf("%s permission = %q, want denied without template bootstrap", projectToolSelectTemplate, decision)
 	}
-	if decision := projectAssistantPermissionForToolWithRunState(
+	if decision := projectAssistantPermissionForV2(
 		projectAssistantToolSpec{Name: projectToolSelectTemplate, Risk: projectAssistantToolRiskWrite},
-		true,
+		store.AssistantApprovalModeAutoApprove,
 		state,
 		map[string]any{"template": "simple-webapp"},
+		true,
 	); decision != projectAssistantPermissionAllow {
-		t.Fatalf("%s permission with local auto-approval = %q, want allow", projectToolSelectTemplate, decision)
+		t.Fatalf("%s permission during template bootstrap = %q, want allow", projectToolSelectTemplate, decision)
 	}
-	for _, spec := range []projectAssistantToolSpec{
-		{Name: projectToolHydrateWorkspace, Risk: projectAssistantToolRiskWrite},
-		{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
-		{Name: projectToolInfrastructureProvision, Risk: projectAssistantToolRiskWrite},
-		{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit},
+	for _, tt := range []struct {
+		spec projectAssistantToolSpec
+		want projectAssistantPermissionDecision
+	}{
+		{spec: projectAssistantToolSpec{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime}, want: projectAssistantPermissionAsk},
+		{spec: projectAssistantToolSpec{Name: projectToolInfrastructureProvision, Risk: projectAssistantToolRiskWrite}, want: projectAssistantPermissionDeny},
+		{spec: projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}, want: projectAssistantPermissionAsk},
 	} {
-		decision := projectAssistantPermissionForToolWithRunState(spec, false, state, map[string]any{"path": "src/App.tsx"})
-		if decision != projectAssistantPermissionAsk {
-			t.Fatalf("%s permission = %q, want ask", spec.Name, decision)
+		decision := projectAssistantPermissionForV2(tt.spec, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{"path": "src/App.tsx"}, false)
+		if decision != tt.want {
+			t.Fatalf("%s permission = %q, want %q", tt.spec.Name, decision, tt.want)
 		}
 	}
 }
 
-func TestProjectAssistantInitialExecutionPlanRevisesOutOfScopeWritesWithoutUserPrompt(t *testing.T) {
+func TestProjectAssistantInitialExecutionPlanDeniesOutOfScopeWrites(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	state.ApprovePlan(normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
 		Goal:         "Build the app",
@@ -370,35 +350,15 @@ func TestProjectAssistantInitialExecutionPlanRevisesOutOfScopeWritesWithoutUserP
 		ApprovalTool: projectToolDefineInitialProjectPlan,
 		RunLocal:     true,
 	}))
-	decision := projectAssistantPermissionForApprovalMode(
-		projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
+	decision := projectAssistantPermissionForV2(
+		projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
 		store.AssistantApprovalModeAlwaysAsk,
 		state,
-		map[string]any{"path": "package.json"},
+		map[string]any{"patch": projectAssistantTestAddPatch("package.json")},
+		false,
 	)
-	if decision != projectAssistantPermissionReplan {
-		t.Fatalf("out-of-scope initial write permission = %q, want internal replan", decision)
-	}
-}
-
-func TestProjectAssistantDirectApprovalGrantsWritePlanOnlyForSourceEdits(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		tool string
-		want bool
-	}{
-		{name: "write file", tool: projectToolWriteFile, want: true},
-		{name: "apply patch", tool: projectToolApplyPatch, want: true},
-		{name: "mkdir", tool: projectToolMkdir, want: true},
-		{name: "template selection", tool: projectToolSelectTemplate},
-		{name: "infrastructure provision", tool: projectToolInfrastructureProvision},
-		{name: "namespaced write lookalike", tool: "provider__write_file"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := projectAssistantDirectApprovalGrantsWritePlan(tt.tool); got != tt.want {
-				t.Fatalf("direct approval grants write plan for %q = %t, want %t", tt.tool, got, tt.want)
-			}
-		})
+	if decision != projectAssistantPermissionDeny {
+		t.Fatalf("out-of-scope initial write permission = %q, want deny", decision)
 	}
 }
 
@@ -440,21 +400,15 @@ func TestProjectAssistantPermissionReasonsDescribeExactActionAndTarget(t *testin
 		},
 		{
 			name: "path scoped plan capability",
-			spec: projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
+			spec: projectAssistantToolSpec{Name: projectToolDefineInitialProjectPlan, Risk: projectAssistantToolRiskPlan},
 			args: map[string]any{"targetPaths": []any{"src/", "package.json"}},
 			want: []string{`"src/"`, `"package.json"`, "workspace edit tools", "until the next commit request"},
 		},
 		{
-			name: "direct write capability",
-			spec: projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/App.tsx"},
-			want: []string{`"src/App.tsx"`, "workspace edit tools", "until the next commit request"},
-		},
-		{
-			name: "direct mkdir subtree capability",
-			spec: projectAssistantToolSpec{Name: projectToolMkdir, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/components"},
-			want: []string{`"src/components/"`, "workspace edit tools", "until the next commit request"},
+			name: "direct patch capability",
+			spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+			args: map[string]any{"patch": projectAssistantTestAddPatch("src/App.tsx")},
+			want: []string{`"src/App.tsx"`, "this workspace edit"},
 		},
 	}
 
@@ -470,23 +424,24 @@ func TestProjectAssistantPermissionReasonsDescribeExactActionAndTarget(t *testin
 	}
 }
 
-func TestProjectAssistantPlanApprovalWithoutCapabilityDoesNotAuthorizeWrites(t *testing.T) {
+func TestProjectAssistantRunLocalPlanWithoutCapabilityDoesNotAuthorizeWrites(t *testing.T) {
 	state := newProjectEinoAssistantRunState()
 	state.ApprovePlan(projectAssistantApprovedPlan{
 		Summary:      "Build dashboard",
 		TargetPaths:  []string{"src/"},
 		ApprovedAt:   testProjectAssistantApprovalTime(),
-		ApprovalTool: projectToolRequestProjectPlanApproval,
+		ApprovalTool: projectToolDefineInitialProjectPlan,
+		RunLocal:     true,
 	})
 
-	decision := projectAssistantPermissionForToolWithRunState(projectAssistantToolSpec{
-		Name: projectToolWriteFile,
+	decision := projectAssistantPermissionForV2(projectAssistantToolSpec{
+		Name: projectToolApplyPatch,
 		Risk: projectAssistantToolRiskWrite,
-	}, false, state, map[string]any{
-		"path": "src/App.tsx",
-	})
-	if decision != projectAssistantPermissionAsk {
-		t.Fatalf("write permission = %q, want %q", decision, projectAssistantPermissionAsk)
+	}, store.AssistantApprovalModeAlwaysAsk, state, map[string]any{
+		"patch": projectAssistantTestAddPatch("src/App.tsx"),
+	}, false)
+	if decision != projectAssistantPermissionDeny {
+		t.Fatalf("write permission = %q, want %q", decision, projectAssistantPermissionDeny)
 	}
 }
 
@@ -505,21 +460,24 @@ func TestProjectAssistantPermissionDeniedToolMessageIsVisibleToModel(t *testing.
 	}
 }
 
-func TestProjectAssistantPermissionForApprovalModeAutoApproveNeverAsks(t *testing.T) {
+func TestProjectAssistantV2AutoApproveNeverAsks(t *testing.T) {
 	tests := []struct {
-		name string
-		spec projectAssistantToolSpec
-		args map[string]any
-		want projectAssistantPermissionDecision
+		name             string
+		spec             projectAssistantToolSpec
+		args             map[string]any
+		initialAuthority bool
+		want             projectAssistantPermissionDecision
 	}{
 		{
-			name: "valid plan",
-			spec: projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
+			name: "valid initial execution plan",
+			spec: projectAssistantToolSpec{Name: projectToolDefineInitialProjectPlan, Risk: projectAssistantToolRiskPlan},
 			args: map[string]any{
-				"summary":     "Update the app",
-				"targetPaths": []any{"src"},
+				"summary":            "Update the app",
+				"targetPaths":        []any{"src"},
+				"acceptanceCriteria": []any{"The app starts"},
 			},
-			want: projectAssistantPermissionAllow,
+			initialAuthority: true,
+			want:             projectAssistantPermissionAllow,
 		},
 		{
 			name: "commit",
@@ -537,15 +495,10 @@ func TestProjectAssistantPermissionForApprovalModeAutoApproveNeverAsks(t *testin
 			want: projectAssistantPermissionAllow,
 		},
 		{
-			name: "workspace hydration",
-			spec: projectAssistantToolSpec{Name: projectToolHydrateWorkspace, Risk: projectAssistantToolRiskWrite},
+			name: "authorized Default source write",
+			spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+			args: map[string]any{"patch": projectAssistantTestAddPatch("src/App.tsx")},
 			want: projectAssistantPermissionAllow,
-		},
-		{
-			name: "unplanned source write denied without interrupt",
-			spec: projectAssistantToolSpec{Name: projectToolWriteFile, Risk: projectAssistantToolRiskWrite},
-			args: map[string]any{"path": "src/App.tsx"},
-			want: projectAssistantPermissionDeny,
 		},
 		{
 			name: "unknown risk denied",
@@ -555,11 +508,16 @@ func TestProjectAssistantPermissionForApprovalModeAutoApproveNeverAsks(t *testin
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := projectAssistantPermissionForApprovalMode(
+			state := newProjectEinoAssistantRunState()
+			if tt.initialAuthority {
+				state.ApprovePlan(projectAssistantInitialCreationPlan("Update the app"))
+			}
+			got := projectAssistantPermissionForV2(
 				tt.spec,
 				store.AssistantApprovalModeAutoApprove,
-				newProjectEinoAssistantRunState(),
+				state,
 				tt.args,
+				true,
 			)
 			if got != tt.want {
 				t.Fatalf("permission = %q, want %q", got, tt.want)
@@ -571,29 +529,27 @@ func TestProjectAssistantPermissionForApprovalModeAutoApproveNeverAsks(t *testin
 	}
 }
 
-func TestProjectAssistantAlwaysAskRequiresApproval(t *testing.T) {
+func TestProjectAssistantV2AlwaysAskRequiresApprovalForEffects(t *testing.T) {
 	tests := []struct {
 		name string
 		spec projectAssistantToolSpec
 		args map[string]any
 	}{
-		{
-			name: "plan",
-			spec: projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
-			args: map[string]any{"summary": "Update the app", "targetPaths": []any{"src"}},
-		},
+		{name: "write", spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}, args: map[string]any{"patch": projectAssistantTestAddPatch("src/App.tsx")}},
 		{
 			name: "runtime",
 			spec: projectAssistantToolSpec{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
 		},
+		{name: "commit", spec: projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := projectAssistantPermissionForApprovalMode(
+			got := projectAssistantPermissionForV2(
 				tt.spec,
 				store.AssistantApprovalModeAlwaysAsk,
 				newProjectEinoAssistantRunState(),
 				tt.args,
+				false,
 			)
 			if got != projectAssistantPermissionAsk {
 				t.Fatalf("permission = %q, want explicit user preference to ask", got)
@@ -612,6 +568,7 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			admitMutation := func(context.Context) error { return nil }
 			autoTool, err := tt.new(projectAssistantWorkflowRunContext{ApprovalMode: store.AssistantApprovalModeAutoApprove})
 			if err != nil {
 				t.Fatalf("create auto-approve tool: %v", err)
@@ -632,8 +589,9 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 				OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo",
 			}, "run-v2")
 			durableAuto, err := tt.new(projectAssistantWorkflowRunContext{
-				ApprovalMode: store.AssistantApprovalModeAutoApprove,
-				EventLedger:  ledger,
+				ApprovalMode:  store.AssistantApprovalModeAutoApprove,
+				EventLedger:   ledger,
+				AdmitMutation: admitMutation,
 			})
 			if err != nil {
 				t.Fatalf("create durable auto-approve tool: %v", err)
@@ -642,8 +600,9 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 				t.Fatalf("durable auto-approve tool = %T, want ledger wrapper", durableAuto)
 			}
 			durableAsk, err := tt.new(projectAssistantWorkflowRunContext{
-				ApprovalMode: store.AssistantApprovalModeAlwaysAsk,
-				EventLedger:  ledger,
+				ApprovalMode:  store.AssistantApprovalModeAlwaysAsk,
+				EventLedger:   ledger,
+				AdmitMutation: admitMutation,
 			})
 			if err != nil {
 				t.Fatalf("create durable always-ask tool: %v", err)
@@ -656,6 +615,18 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 				t.Fatalf("approval inner tool = %T, want ledger inside approval boundary", approval.InvokableTool)
 			}
 		})
+	}
+}
+
+func TestProjectAssistantDurableRuntimeGraphToolRejectsStoppedRun(t *testing.T) {
+	tool := projectAssistantDurableGraphTool{
+		spec: projectAssistantToolSpec{Name: projectToolRestartRuntime, Risk: projectAssistantToolRiskRuntime},
+		admitMutation: func(context.Context) error {
+			return store.ErrAssistantRunConflict
+		},
+	}
+	if _, err := tool.InvokableRun(context.Background(), `{}`); !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("InvokableRun error = %v, want stopped-run conflict", err)
 	}
 }
 

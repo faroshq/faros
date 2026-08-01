@@ -217,7 +217,7 @@ func initializeProjectAssistantRuntimeVerification(runCtx projectAssistantWorkfl
 					scheduled := runCtx.Server.scheduleDevelopmentSyncAfterMutationWithCompletion(
 						runCtx.Identity,
 						runCtx.Project,
-						projectToolHydrateWorkspace,
+						projectActionWorkspaceSync,
 						func(syncErr error) { runCtx.RunState.CompleteDevelopmentSync(retryRevision, syncErr) },
 					)
 					if !scheduled {
@@ -964,7 +964,7 @@ func newProjectAssistantRestartRuntimeGraphTool(runCtx projectAssistantWorkflowR
 		if !ok {
 			return nil, fmt.Errorf("project assistant workflow spec %q is not configured", projectToolRestartRuntime)
 		}
-		durable, err := newProjectAssistantDurableGraphTool(innerTool, spec, runCtx.EventLedger)
+		durable, err := newProjectAssistantDurableGraphTool(innerTool, spec, runCtx.EventLedger, runCtx.AdmitMutation)
 		if err != nil {
 			return nil, err
 		}
@@ -1066,7 +1066,7 @@ func newProjectAssistantSetRuntimeEnvGraphTool(runCtx projectAssistantWorkflowRu
 		if !ok {
 			return nil, fmt.Errorf("project assistant workflow spec %q is not configured", projectToolSetRuntimeEnv)
 		}
-		durable, err := newProjectAssistantDurableGraphTool(innerTool, spec, runCtx.EventLedger)
+		durable, err := newProjectAssistantDurableGraphTool(innerTool, spec, runCtx.EventLedger, runCtx.AdmitMutation)
 		if err != nil {
 			return nil, err
 		}

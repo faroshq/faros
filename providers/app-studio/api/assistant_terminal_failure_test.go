@@ -52,11 +52,11 @@ func TestProjectAssistantTerminalFailureContentExplainsNoProgress(t *testing.T) 
 	if !projectEinoAssistantNoProgressExceeded(err) {
 		t.Fatalf("projectEinoAssistantNoProgressExceeded(%v) = false", err)
 	}
-	if reason := projectAssistantWorkItemFailureReason(err); reason != "no_progress" {
-		t.Fatalf("WorkItem failure reason = %q, want no_progress", reason)
+	if reason := projectAssistantFailureReason(err); reason != "no_progress" {
+		t.Fatalf("failure reason = %q, want no_progress", reason)
 	}
-	if reason := projectAssistantWorkItemFailureReason(errors.New("provider failed")); reason != "failed" {
-		t.Fatalf("ordinary WorkItem failure reason = %q, want failed", reason)
+	if reason := projectAssistantFailureReason(errors.New("provider failed")); reason != "failed" {
+		t.Fatalf("ordinary failure reason = %q, want failed", reason)
 	}
 }
 

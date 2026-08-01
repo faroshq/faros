@@ -155,39 +155,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		},
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
-				Name:        projectToolRequestProjectPlanApproval,
-				Description: "Present a batch source-edit plan for user approval. After approval, App Studio may autonomously edit only the approved target paths until commit_project_files asks for final approval.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string","description":"Short summary of the intended source changes."},"steps":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":12,"description":"Concrete implementation steps."},"targetPaths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":50,"description":"Project-relative files or directories this plan is allowed to create or modify. Directories must end with /."},"acceptanceCriteria":{"type":"array","items":{"type":"string"},"maxItems":12,"description":"Checks or outcomes that should be true before requesting commit."}},"required":["summary","steps","targetPaths"]}`),
-				Risk:        projectAssistantToolRiskPlan,
-			},
-			call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
-				return "", errors.New("plan approval is handled by the assistant run state")
-			},
-		},
-		// Legacy engine-v1 compatibility only. New HTTP runs are stamped v2 and
-		// filter this whole-file primitive from both collaboration modes.
-		projectAssistantToolFunc{
-			spec: projectAssistantToolSpec{
-				Name:        projectToolWriteFile,
-				Description: "Create a complete UTF-8 project file in the App Studio workspace. Initial project builds may replace generated files; for later changes, write_file is create-only and existing files must be changed with apply_patch.",
-				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"path":{"type":"string","description":"Project-relative file path."},"content":{"type":"string","description":"Complete UTF-8 text content to write. Maximum %d bytes."}},"required":["path","content"]}`, workspace.MaxWriteBytes)),
-				Risk:        projectAssistantToolRiskWrite,
-			},
-			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
-				s, err := projectAssistantToolServer(server)
-				if err != nil {
-					return "", err
-				}
-				content, _ := projectToolRawString(req.Arguments["content"])
-				return projectAssistantToolJSONResult(s.workspaces.WriteFile(ctx, req.WorkspaceScope, workspace.WriteOptions{
-					Path:       projectToolString(req.Arguments["path"]),
-					Content:    content,
-					CreateOnly: req.EnforceMutationSafety && !req.InitialBuild,
-				}))
-			},
-		},
-		projectAssistantToolFunc{
-			spec: projectAssistantToolSpec{
 				Name:        projectToolApplyPatch,
 				Description: "Apply one atomic contextual patch to project-relative UTF-8 files. The patch must start with '*** Begin Patch' and end with '*** End Patch'. Use '*** Add File: <path>' with '+' content lines or '*** Update File: <path>' with one or more @@ hunks. Delete File and Move to are unavailable because the repository commit bridge cannot yet preserve deletions. Hunk lines start with space (context), '-' (remove), or '+' (add). Include at least three stable surrounding context lines and an @@ class/function anchor when needed to make every match unique. Parent directories are created automatically. A multi-file patch is fully preflighted before any mutation.",
 				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"patch":{"type":"string","minLength":1,"maxLength":%d,"description":"Codex-style contextual patch envelope using only project-relative paths."}},"required":["patch"],"additionalProperties":false}`, workspace.MaxUnifiedPatchBytes)),
@@ -199,25 +166,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					return "", err
 				}
 				patch, _ := projectToolRawString(req.Arguments["patch"])
-				// Engine-v1 checkpoints encoded exact replacement arguments. New v2
-				// model schemas expose only the contextual patch envelope above.
-				if strings.TrimSpace(patch) == "" && projectToolString(req.Arguments["path"]) != "" {
-					oldText, _ := projectToolRawString(req.Arguments["oldText"])
-					newText, _ := projectToolRawString(req.Arguments["newText"])
-					clean, err := workspace.CleanProjectPath(projectToolString(req.Arguments["path"]))
-					if err != nil {
-						return "", err
-					}
-					if req.EnforceMutationSafety && !projectAssistantPathWasObserved(clean, req.ObservedReadFiles) {
-						return "", fmt.Errorf("read_file must successfully read %q in this assistant turn before apply_patch can edit it", clean)
-					}
-					return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, workspace.PatchOptions{
-						Path:       clean,
-						OldText:    oldText,
-						NewText:    newText,
-						ReplaceAll: projectToolBool(req.Arguments["replaceAll"]),
-					}))
-				}
 				readPaths, err := workspace.PatchReadPaths(patch)
 				if err != nil {
 					return "", err
@@ -233,27 +181,7 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					}
 				}
 				return projectAssistantToolJSONResult(s.workspaces.ApplyPatch(ctx, req.WorkspaceScope, workspace.PatchOptions{
-					Patch:      patch,
-					SnapshotID: req.AssistantRunID,
-				}))
-			},
-		},
-		// Legacy engine-v1 compatibility only. Contextual apply_patch creates
-		// parent directories atomically for every new v2 source file.
-		projectAssistantToolFunc{
-			spec: projectAssistantToolSpec{
-				Name:        projectToolMkdir,
-				Description: "Create a directory in the App Studio project workspace for later file writes.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Project-relative directory path."}},"required":["path"]}`),
-				Risk:        projectAssistantToolRiskWrite,
-			},
-			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
-				s, err := projectAssistantToolServer(server)
-				if err != nil {
-					return "", err
-				}
-				return projectAssistantToolJSONResult(s.workspaces.Mkdir(ctx, req.WorkspaceScope, workspace.MkdirOptions{
-					Path: projectToolString(req.Arguments["path"]),
+					Patch: patch,
 				}))
 			},
 		},
@@ -293,28 +221,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 					"components": info.Components,
 					"note":       "development environment is re-provisioning in development mode; the workspace will be synced into it automatically. Each entry in `components` is binding: write that component's source under its `workspacePath` (files outside every component directory are never synced and cannot run) AND write it for that component's `toolchain` — the sandbox image contains that toolchain and no other, and runs the component with its `startCommand`, so source in another language, or missing the toolchain's manifest (package.json for node, go.mod for go, requirements.txt/pyproject.toml for python), will never start no matter how correct it is",
 				}, nil)
-			},
-		},
-		projectAssistantToolFunc{
-			spec: projectAssistantToolSpec{
-				Name:        projectToolHydrateWorkspace,
-				Description: "Replace-load the project workspace from the project's git repository (the durable source of truth): existing files are overwritten with the repository's text tree, workspace-only files stay. Use after a template switch, to recover a lost workspace, or when the user wants the repository state back. Uncommitted workspace changes to tracked files are lost — confirm with the user first.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"ref":{"type":"string","description":"Branch, tag, or commit SHA to hydrate from; defaults to the repository default branch."}}}`),
-				Risk:        projectAssistantToolRiskWrite,
-			},
-			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
-				s, err := projectAssistantToolServer(server)
-				if err != nil {
-					return "", err
-				}
-				if req.Project == nil {
-					return "", errors.New("no project on this run")
-				}
-				resp, err := s.hydrateWorkspaceFromRepository(ctx, req.Identity, req.Project, req.HTTPRequest, projectToolString(req.Arguments["ref"]))
-				if err != nil {
-					return "", err
-				}
-				return projectAssistantToolJSONResult(resp, nil)
 			},
 		},
 		projectAssistantToolFunc{

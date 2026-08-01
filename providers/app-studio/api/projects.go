@@ -69,16 +69,9 @@ type PatchProjectMemoryRequest struct {
 }
 
 type CreateProjectMessageRequest struct {
-	Role              string `json:"role,omitempty"`
 	Content           string `json:"content"`
 	ClientRequestID   string `json:"clientRequestID,omitempty"`
 	CollaborationMode string `json:"collaborationMode,omitempty"`
-
-	// Legacy v1 fields are decoded only so the server can fail explicitly
-	// instead of silently interpreting a stale portal request as a v2 turn.
-	AssistantAction  string `json:"assistantAction,omitempty"`
-	WorkItemID       string `json:"workItemID,omitempty"`
-	WorkItemRevision int64  `json:"workItemRevision,omitempty"`
 }
 
 func projectInitialBootstrapPromptDigest(content string) string {
@@ -110,17 +103,6 @@ const (
 	projectAssistantCollaborationModePlan    projectAssistantCollaborationMode = "plan"
 )
 
-// projectAssistantAction is retained only to decode and present engine-v1
-// routing audits. New requests reject this contract and never route through it.
-type projectAssistantAction string
-
-const (
-	projectAssistantActionAuto     projectAssistantAction = "auto"
-	projectAssistantActionAsk      projectAssistantAction = "ask"
-	projectAssistantActionBuild    projectAssistantAction = "build"
-	projectAssistantActionContinue projectAssistantAction = "continue"
-)
-
 func projectAssistantCollaborationModeForRun(run store.AssistantRun) (projectAssistantCollaborationMode, bool) {
 	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(string(run.Mode))))
 	switch mode {
@@ -131,25 +113,10 @@ func projectAssistantCollaborationModeForRun(run store.AssistantRun) (projectAss
 	}
 }
 
-func projectAssistantRunUsesV2(run *store.AssistantRun) bool {
-	if run == nil || strings.TrimSpace(run.EngineVersion) != store.AssistantEngineVersionV2 {
-		return false
-	}
-	_, ok := projectAssistantCollaborationModeForRun(*run)
-	return ok
-}
-
-func projectAssistantRequestUsesV2(req projectAssistantRunRequest) bool {
-	return projectAssistantRunUsesV2(req.AssistantRun)
-}
-
 // collaborationMode is the complete v2 turn-routing contract. It is selected
 // by the client and remains fixed for the run; prompt text and model output
 // cannot promote a Plan turn into a mutating turn.
 func (r CreateProjectMessageRequest) collaborationMode() (projectAssistantCollaborationMode, error) {
-	if strings.TrimSpace(r.AssistantAction) != "" || strings.TrimSpace(r.WorkItemID) != "" || r.WorkItemRevision != 0 {
-		return "", newValidationError("assistantAction, workItemID, and workItemRevision belong to the retired assistant engine; reload App Studio and start a fresh turn")
-	}
 	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(r.CollaborationMode)))
 	if mode == "" {
 		mode = projectAssistantCollaborationModeDefault
@@ -246,7 +213,6 @@ type projectAssistantMutation struct {
 }
 
 const projectAPIInitializingMessage = "App Studio is still initializing for this workspace. Try again shortly."
-const projectMessageMetadataStatus = "status"
 const projectMessageMetadataAssistantActionFeed = "assistantActionFeed"
 const projectMessageMetadataAssistantInterrupt = "assistantInterrupt"
 const projectMessageStatusInterrupted = "interrupted"
@@ -324,7 +290,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateProjectRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStrictJSON(w, r, &req) {
 		return
 	}
 	created, err := s.createProjectFromRequest(r.Context(), c, id, req, nil, r)
@@ -798,7 +764,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req projectAssistantResumeRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeStrictJSON(w, r, &req) {
 		return
 	}
 	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
@@ -820,10 +786,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		writeStatus(w, http.StatusNotFound, "NotFound", "assistant run not found")
 		return
 	}
-	if !projectAssistantRunUsesV2(&run) {
-		writeProjectError(w, newValidationError("this legacy assistant run is view-only; start a fresh Default or Plan turn"))
-		return
-	}
+	req.AssistantMessageID = run.ActiveMessageID
 	if _, _, err := preflightProjectAssistantResume(run, req); err != nil {
 		writeProjectError(w, err)
 		return
@@ -836,18 +799,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 	supervisor := s.projectAssistantSupervisor()
 	if err := supervisor.Start(r.Context(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 		transitionTerminal := func(status store.AssistantRunStatus, reason string, cause error) {
-			var transitionErr error
-			if run.WorkItemID == "" {
-				transitionErr = accumulator.SetStatus(context.Background(), status)
-			} else {
-				itemStatus := store.AssistantWorkItemStatusSuspended
-				if status == store.AssistantRunStatusCompleted {
-					itemStatus = store.AssistantWorkItemStatusCompleted
-				}
-				transitionErr = accumulator.TransitionWorkItemTerminal(context.Background(), status, itemStatus, reason, func(committed *store.AssistantRun, current *store.Message) {
-					current.Metadata = projectAssistantDurableMetadataFromExisting(*committed, projectAssistantRunDisplayStatus(status, "Working"), false, current.Metadata)
-				})
-			}
+			transitionErr := accumulator.SetStatus(context.Background(), status)
 			committed := run
 			if current, ok := accumulator.CommittedRun(); ok {
 				committed = current
@@ -877,7 +829,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if resumeErr != nil {
-			transitionTerminal(store.AssistantRunStatusFailed, projectAssistantWorkItemFailureReason(resumeErr), resumeErr)
+			transitionTerminal(store.AssistantRunStatusFailed, projectAssistantFailureReason(resumeErr), resumeErr)
 			return
 		}
 		_ = accumulator.SetStatus(context.Background(), resp.Status)
@@ -899,7 +851,7 @@ func (s *Server) stopProjectAssistant(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ClientRequestID string `json:"clientRequestID"`
 	}
-	if !decodeJSON(w, r, &request) {
+	if !decodeStrictJSON(w, r, &request) {
 		return
 	}
 	request.ClientRequestID = strings.TrimSpace(request.ClientRequestID)
@@ -958,8 +910,7 @@ func (s *Server) stopProjectAssistant(w http.ResponseWriter, r *http.Request) {
 }
 
 // reattachProjectAssistantPendingRun restores the in-memory lifecycle owner for
-// a durable checkpoint after a provider restart. Stop can then use the same
-// atomic run, WorkItem, and assistant-message transition as an in-process run.
+// a durable checkpoint after a provider restart.
 func (s *Server) reattachProjectAssistantPendingRun(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
 	if run.Status != store.AssistantRunStatusPendingPermission && run.Status != store.AssistantRunStatusPendingInput {
 		return newValidationError("assistant run is not waiting for input")
@@ -975,155 +926,12 @@ func (s *Server) reattachProjectAssistantPendingRun(ctx context.Context, scope s
 	return err
 }
 
-func (s *Server) authorizeProjectAssistantRunActor(ctx context.Context, scope store.Scope, run store.AssistantRun, actor string, requireActiveGrant bool) error {
+func (s *Server) authorizeProjectAssistantRunActor(ctx context.Context, scope store.Scope, run store.AssistantRun, actor string, _ bool) error {
 	origin, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
 	if err != nil || origin.ActorID != actor {
 		return store.ErrAssistantRunNotFound
 	}
-	if run.WorkItemID == "" {
-		return nil
-	}
-	item, err := s.store.GetAssistantWorkItem(ctx, scope, run.WorkItemID)
-	if err != nil || item.CreatedBy != actor {
-		return store.ErrAssistantWorkItemNotFound
-	}
-	if requireActiveGrant && (item.ActiveRunID != run.ID || item.Status != store.AssistantWorkItemStatusActive || item.GrantRevision != run.ExpectedGrantRevision) {
-		return store.ErrAssistantWorkItemConflict
-	}
 	return nil
-}
-
-func (s *Server) listProjectAssistantWorkItems(w http.ResponseWriter, r *http.Request) {
-	_, id, p, ok := s.requireProjectWithClient(w, r)
-	if !ok {
-		return
-	}
-	items, err := s.store.ListAssistantWorkItems(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p))
-	if err != nil {
-		writeProjectError(w, err)
-		return
-	}
-	owned := make([]projectAssistantWorkItemView, 0, len(items))
-	for _, item := range items {
-		if item.CreatedBy == id.user {
-			owned = append(owned, projectAssistantWorkItemToAPI(item))
-		}
-	}
-	writeJSON(w, http.StatusOK, owned)
-}
-
-func (s *Server) getProjectAssistantWorkItem(w http.ResponseWriter, r *http.Request) {
-	_, id, p, ok := s.requireProjectWithClient(w, r)
-	if !ok {
-		return
-	}
-	item, err := s.store.GetAssistantWorkItem(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, p), mux.Vars(r)["workItem"])
-	if errors.Is(err, store.ErrAssistantWorkItemNotFound) || (err == nil && item.CreatedBy != id.user) {
-		writeStatus(w, http.StatusNotFound, "NotFound", "assistant work item not found")
-		return
-	}
-	if err != nil {
-		writeProjectError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
-}
-
-func (s *Server) cancelProjectAssistantWorkItem(w http.ResponseWriter, r *http.Request) {
-	_, id, p, ok := s.requireProjectWithClient(w, r)
-	if !ok {
-		return
-	}
-	var request struct {
-		Revision        int64  `json:"revision"`
-		ClientRequestID string `json:"clientRequestID"`
-	}
-	if !decodeJSON(w, r, &request) {
-		return
-	}
-	request.ClientRequestID = strings.TrimSpace(request.ClientRequestID)
-	if request.ClientRequestID == "" {
-		writeProjectError(w, newValidationError("clientRequestID is required"))
-		return
-	}
-	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
-	item, err := s.store.GetAssistantWorkItem(r.Context(), scope, mux.Vars(r)["workItem"])
-	if errors.Is(err, store.ErrAssistantWorkItemNotFound) || (err == nil && item.CreatedBy != id.user) {
-		writeStatus(w, http.StatusNotFound, "NotFound", "assistant work item not found")
-		return
-	}
-	if err != nil {
-		writeProjectError(w, err)
-		return
-	}
-	if item.Status == store.AssistantWorkItemStatusCancelled && item.Revision == request.Revision+1 {
-		if err := validateProjectAssistantCancelReplay(item, id.user, request.ClientRequestID, request.Revision); err != nil {
-			writeProjectError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
-		return
-	}
-	if request.Revision != item.Revision || item.Status != store.AssistantWorkItemStatusSuspended || item.ActiveRunID != "" {
-		writeStatus(w, http.StatusConflict, "Conflict", "assistant work item is not cancellable at that revision")
-		return
-	}
-	item.Status = store.AssistantWorkItemStatusCancelled
-	item.StatusReason = "cancelled by user"
-	receipt, err := encodeProjectAssistantCancelReceipt(projectAssistantCancelRequestReceipt(id.user, item.ID, request.ClientRequestID, request.Revision))
-	if err != nil {
-		writeProjectError(w, err)
-		return
-	}
-	item.CancellationReceipt = receipt
-	item.PlanGrant = nil
-	item.GrantRevision = ""
-	item.Revision = request.Revision + 1
-	item.UpdatedAt = time.Now().UTC()
-	if err := s.store.CompareAndSwapAssistantWorkItem(r.Context(), scope, item, request.Revision); err != nil {
-		if errors.Is(err, store.ErrAssistantWorkItemConflict) {
-			current, getErr := s.store.GetAssistantWorkItem(r.Context(), scope, item.ID)
-			if getErr == nil && current.CreatedBy == id.user && current.Status == store.AssistantWorkItemStatusCancelled && current.Revision == request.Revision+1 &&
-				validateProjectAssistantCancelReplay(current, id.user, request.ClientRequestID, request.Revision) == nil {
-				writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(current))
-				return
-			}
-			writeStatus(w, http.StatusConflict, "Conflict", "assistant work item changed")
-			return
-		}
-		writeProjectError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, projectAssistantWorkItemToAPI(item))
-}
-
-// projectAssistantWorkItemView deliberately excludes the encrypted plan grant
-// and its internal revision token. Clients select work by the public WorkItem
-// revision; grant authorization remains entirely server-side.
-type projectAssistantWorkItemView struct {
-	ID            string                        `json:"id"`
-	RootMessageID string                        `json:"rootMessageID"`
-	CreatedBy     string                        `json:"createdBy"`
-	Status        store.AssistantWorkItemStatus `json:"status"`
-	StatusReason  string                        `json:"statusReason,omitempty"`
-	Revision      int64                         `json:"revision"`
-	ActiveRunID   string                        `json:"activeRunID,omitempty"`
-	CreatedAt     time.Time                     `json:"createdAt"`
-	UpdatedAt     time.Time                     `json:"updatedAt"`
-}
-
-func projectAssistantWorkItemToAPI(item store.AssistantWorkItem) projectAssistantWorkItemView {
-	return projectAssistantWorkItemView{
-		ID:            item.ID,
-		RootMessageID: item.RootMessageID,
-		CreatedBy:     item.CreatedBy,
-		Status:        item.Status,
-		StatusReason:  item.StatusReason,
-		Revision:      item.Revision,
-		ActiveRunID:   item.ActiveRunID,
-		CreatedAt:     item.CreatedAt,
-		UpdatedAt:     item.UpdatedAt,
-	}
 }
 
 func projectAssistantClearPendingInterruptMetadata(message *store.Message, runID string) {
@@ -1135,7 +943,6 @@ func projectAssistantClearPendingInterruptMetadata(message *store.Message, runID
 		return
 	}
 	metadata := cloneAnyMap(message.Metadata)
-	delete(metadata, projectMessageMetadataStatus)
 	delete(metadata, projectMessageMetadataAssistantInterrupt)
 	message.Metadata = metadata
 }
@@ -1152,19 +959,11 @@ func appendProjectUserMessage(ctx context.Context, msgStore store.Store, scope s
 }
 
 type projectAssistantStreamStart struct {
-	TurnDecision        *projectAssistantTurnDecision
 	InitialApprovedPlan *projectAssistantApprovedPlan
 }
 
 func ptrProjectAssistantApprovedPlan(plan projectAssistantApprovedPlan) *projectAssistantApprovedPlan {
 	return &plan
-}
-
-func projectAssistantTurnDecisionForStreamStart(ctx context.Context, router projectAssistantTurnRouter, req projectAssistantTurnRouteRequest, start *projectAssistantStreamStart) (projectAssistantTurnDecision, error) {
-	if start != nil && start.TurnDecision != nil {
-		return *start.TurnDecision, nil
-	}
-	return router(ctx, req)
 }
 
 func projectAssistantStoredContent(reply, streamed string) string {
@@ -1288,17 +1087,14 @@ func (s *Server) updateProjectAssistantPermissionMessage(
 		interrupt = projectAssistantUIInterruptRequestFromFollowUpCheckpoint("", *response.FollowUp, *response.Checkpoint)
 	}
 	if response.Status == store.AssistantRunStatusPendingPermission {
-		metadata[projectMessageMetadataStatus] = projectMessageStatusPendingPermission
 		if interrupt != nil {
 			metadata[projectMessageMetadataAssistantInterrupt] = interrupt
 		}
 	} else if response.Status == store.AssistantRunStatusPendingInput {
-		metadata[projectMessageMetadataStatus] = projectMessageStatusPendingInput
 		if interrupt != nil {
 			metadata[projectMessageMetadataAssistantInterrupt] = interrupt
 		}
 	} else {
-		delete(metadata, projectMessageMetadataStatus)
 		delete(metadata, projectMessageMetadataAssistantInterrupt)
 	}
 	if response.Progress != nil {
@@ -1331,7 +1127,7 @@ func (s *Server) updateProjectAssistantPermissionMessage(
 }
 
 func projectAssistantPermissionMessageMatchesResume(metadata map[string]any, interrupt *projectAssistantUIInterruptRequest, response projectAssistantResumeResponse) bool {
-	status := metadata[projectMessageMetadataStatus]
+	status := metadata[projectAssistantMetadataWorkingStatus]
 	if status != projectMessageStatusPendingPermission && status != projectMessageStatusPendingInput {
 		return false
 	}
@@ -1370,7 +1166,7 @@ func (s *Server) findProjectMessage(ctx context.Context, scope store.Scope, id s
 func projectAssistantMessageMetadata(status string, toolCalls []projectToolCallStreamEvent) map[string]any {
 	metadata := map[string]any{}
 	if status != "" {
-		metadata[projectMessageMetadataStatus] = status
+		metadata[projectAssistantMetadataWorkingStatus] = status
 	}
 	if actions := projectAssistantActionFeedFromToolCalls(toolCalls); len(actions) > 0 {
 		metadata[projectMessageMetadataAssistantActionFeed] = actions

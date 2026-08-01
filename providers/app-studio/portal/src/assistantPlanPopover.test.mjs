@@ -45,7 +45,8 @@ test('keeps action details, assistant progress prose, working status, and plan d
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   assert.match(appSource, /<AssistantActionLog[\s\S]*v-if="hasAssistantResponseContent\(message\)"/)
   assert.match(appSource, /Worked for \{\{ assistantWorkedLabel\(message\) \}\}/)
-  assert.match(appSource, /function projectMessageAssistantStatus\(message:[\s\S]*normalizeAssistantRunStatus\(message\.metadata\?\.assistantStatus\) \?\? normalizeAssistantRunStatus\(message\.metadata\?\.status\)/)
+  assert.match(appSource, /function projectMessageAssistantStatus\(message:[\s\S]*normalizeAssistantRunStatus\(message\.metadata\?\.assistantStatus\)/)
+  assert.doesNotMatch(appSource, /message\.metadata\?\.status/)
   assert.match(appSource, /function assistantProgressClosed\(message:[\s\S]*assistantRunTerminal\(projectMessageAssistantStatus\(message\)\)/)
   assert.match(appSource, /projectMessageAssistantStatus\(message\) === 'interrupted'/)
   assert.match(appSource, /v-if="message\.viewStatus === 'interrupted'"[\s\S]*role="status"[\s\S]*Interrupted before completion/)
@@ -63,9 +64,9 @@ test('keeps action details, assistant progress prose, working status, and plan d
   assert.doesNotMatch(appSource, /if \(activePlanMessage\.value\) return ''/)
 })
 
-test('offers an explicit Default-mode implementation turn after the latest completed v2 plan', async () => {
+test('offers an explicit Default-mode implementation turn after the latest completed plan', async () => {
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
-  assert.match(appSource, /function canImplementPlan\(message:[\s\S]*run\?\.engineVersion === 'v2'[\s\S]*run\.mode === 'plan'[\s\S]*=== 'completed'/)
+  assert.match(appSource, /function canImplementPlan\(message:[\s\S]*run\?\.mode === 'plan'[\s\S]*=== 'completed'/)
   assert.match(appSource, /function implementPlan\(message:[\s\S]*assistantIntent\.value = 'default'[\s\S]*prompt\.value = 'Implement the plan above\.'/)
   assert.match(appSource, /v-if="canImplementPlan\(message\)"[\s\S]*Implement plan/)
 })

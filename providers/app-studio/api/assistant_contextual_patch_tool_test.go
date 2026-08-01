@@ -22,6 +22,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cloudwego/eino/adk"
+	einotool "github.com/cloudwego/eino/components/tool"
 
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
@@ -29,11 +33,9 @@ import (
 
 func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing.T) {
 	registry := projectAssistantLocalToolRegistry(nil)
-	v2Tools := projectAssistantToolsForCollaborationMode(registry.Tools(false), projectAssistantCollaborationModeDefault)
-	for _, tool := range v2Tools {
-		switch projectToolBaseName(tool.Spec().Name) {
-		case projectToolWriteFile, projectToolMkdir, projectToolHydrateWorkspace:
-			t.Fatalf("%s remains model-visible in engine v2", tool.Spec().Name)
+	for _, retired := range []string{"write_file", "mkdir", "hydrate_workspace"} {
+		if registry.Has(retired) {
+			t.Fatalf("retired tool %s remains registered", retired)
 		}
 	}
 	spec, ok := registry.Spec(projectToolApplyPatch)
@@ -74,7 +76,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := store.AssistantRun{EngineVersion: store.AssistantEngineVersionV2, Mode: store.AssistantRunMode(tt.mode)}
+			run := store.AssistantRun{Mode: store.AssistantRunMode(tt.mode)}
 			req := projectAssistantRunRequest{
 				AssistantRun:      &run,
 				CollaborationMode: tt.mode,
@@ -98,7 +100,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 			if names[projectToolApplyPatch] != tt.wantPatch {
 				t.Fatalf("tools = %#v, apply_patch presence = %t, want %t", names, names[projectToolApplyPatch], tt.wantPatch)
 			}
-			for _, retired := range []string{projectToolWriteFile, projectToolMkdir, projectToolHydrateWorkspace, projectToolRequestProjectPlanApproval} {
+			for _, retired := range []string{"write_file", "mkdir", "hydrate_workspace", "request_project_plan_approval"} {
 				if names[retired] {
 					t.Fatalf("tools = %#v, retired %s remains model-visible", names, retired)
 				}
@@ -107,7 +109,6 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 				for _, effect := range []string{
 					projectToolApplyPatch,
 					projectToolSelectTemplate,
-					projectToolHydrateWorkspace,
 					projectToolRestartRuntime,
 					projectToolSetRuntimeEnv,
 					projectToolCommitProjectFiles,
@@ -118,6 +119,71 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAssistantV2MutationAdmissionRejectsStoppedRun(t *testing.T) {
+	ctx := context.Background()
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-1"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{
+		ID: "run-1", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning,
+		ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1",
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "actor-1", Content: "edit it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := messages.CreateAssistantRun(ctx, scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.projectAssistantSupervisor().Attach(scope, created, assistant); err != nil {
+		t.Fatal(err)
+	}
+	tool := projectEinoAssistantTool{
+		server: server,
+		req: projectAssistantRunRequest{
+			Identity: identity{user: user.ActorID}, MessageScope: scope,
+			CollaborationMode: projectAssistantCollaborationModeDefault, AssistantRun: &created,
+		},
+		runState: newProjectEinoAssistantRunState(),
+	}
+	spec := projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}
+	if err := tool.admitMutation(ctx, spec); err != nil {
+		t.Fatalf("admit running mutation: %v", err)
+	}
+	if _, stopped, err := server.projectAssistantSupervisor().Stop(scope, created.ID); err != nil || !stopped {
+		t.Fatalf("Stop = %v, %v", stopped, err)
+	}
+	if err := tool.admitMutation(ctx, spec); !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("admit stopped mutation = %v, want run conflict", err)
+	}
+}
+
+func TestAssistantV2LifecycleBlocksCommitBeforeCurrentVerification(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.RecordSourceMutation()
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{}, state).(*projectEinoAssistantLifecycle)
+	called := false
+	wrapped, err := lifecycle.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...einotool.Option) (string, error) {
+			called = true
+			return `{"status":"succeeded"}`, nil
+		},
+		&adk.ToolContext{Name: projectToolCommitProjectFiles},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := wrapped(context.Background(), `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called || !strings.Contains(result, "verify_development_runtime") {
+		t.Fatalf("commit result = %q, endpoint called = %v", result, called)
 	}
 }
 
@@ -153,7 +219,7 @@ func TestAssistantContextualPatchRejectsDeleteAndMoveUntilCommitBridgeSupportsTh
 	}
 }
 
-func TestAssistantContextualPatchRequiresReadsForExistingSourcesAndSnapshotsMutation(t *testing.T) {
+func TestAssistantContextualPatchRequiresReadsAndDoesNotCreateLegacySnapshot(t *testing.T) {
 	workspaces := workspace.NewFileStore(t.TempDir())
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "src/app.js", Content: "export const theme = 'light'\n"}}); err != nil {
@@ -192,15 +258,16 @@ func TestAssistantContextualPatchRequiresReadsForExistingSourcesAndSnapshotsMuta
 	if result.Operation != "apply_patch" || len(result.Files) != 2 || strings.Join(result.Paths, ",") != "src/app.js,src/new.js" {
 		t.Fatalf("mutation result = %#v", result)
 	}
-	if _, err := workspaces.RestoreSnapshot(context.Background(), scope, "run-patch"); err != nil {
-		t.Fatalf("RestoreSnapshot returned error: %v", err)
+	if _, err := workspaces.RestoreSnapshot(context.Background(), scope, "run-patch"); !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		t.Fatalf("RestoreSnapshot error = %v, want ErrSnapshotNotFound", err)
 	}
 	read, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "src/app.js"})
-	if err != nil || read.Content != "export const theme = 'light'\n" {
-		t.Fatalf("restored source = %#v, err = %v", read, err)
+	if err != nil || read.Content != "export const theme = 'dark'\n" {
+		t.Fatalf("patched source = %#v, err = %v", read, err)
 	}
-	if _, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "src/new.js"}); err == nil {
-		t.Fatal("restored Add File target still exists")
+	created, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "src/new.js"})
+	if err != nil || created.Content != "export const created = true\n" {
+		t.Fatalf("patched Add File target = %#v, err = %v", created, err)
 	}
 }
 

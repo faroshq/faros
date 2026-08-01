@@ -32,23 +32,21 @@ func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing
 	now := time.Now().UTC()
 	snapshot := projectAssistantRunSnapshot{
 		Run: store.AssistantRun{
-			ID:                    "run-1",
-			ProjectName:           "internal-project",
-			ProjectUID:            "internal-project-uid",
-			WorkItemID:            "work-item-1",
-			Mode:                  store.AssistantRunModeContinue,
-			ApprovalMode:          store.AssistantApprovalModeAlwaysAsk,
-			ExpectedGrantRevision: "secret-grant-revision",
-			Status:                store.AssistantRunStatusRunning,
-			ClientRequestID:       "request-1",
-			UserMessageID:         "user-1",
-			ActiveMessageID:       "assistant-1",
-			Revision:              7,
-			RequestID:             "permission-1",
-			Checkpoint:            json.RawMessage(`{"prompt":"secret prompt"}`),
-			Audit:                 json.RawMessage(`{"result":"secret result"}`),
-			CreatedAt:             now,
-			UpdatedAt:             now,
+			ID:              "run-1",
+			ProjectName:     "internal-project",
+			ProjectUID:      "internal-project-uid",
+			Mode:            store.AssistantRunModeDefault,
+			ApprovalMode:    store.AssistantApprovalModeAlwaysAsk,
+			Status:          store.AssistantRunStatusRunning,
+			ClientRequestID: "request-1",
+			UserMessageID:   "user-1",
+			ActiveMessageID: "assistant-1",
+			Revision:        7,
+			RequestID:       "permission-1",
+			Checkpoint:      json.RawMessage(`{"prompt":"secret prompt"}`),
+			Audit:           json.RawMessage(`{"result":"secret result"}`),
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		},
 		Message: store.Message{
 			ID:        "assistant-1",
@@ -72,7 +70,7 @@ func TestProjectAssistantPublicRunSnapshotsOmitInternalExecutionState(t *testing
 			t.Fatalf("public snapshot contains internal value %q: %s", forbidden, raw)
 		}
 	}
-	for _, required := range []string{`"id":"run-1"`, `"workItemID":"work-item-1"`, `"revision":7`, `"activeMessageID":"assistant-1"`} {
+	for _, required := range []string{`"id":"run-1"`, `"revision":7`, `"activeMessageID":"assistant-1"`} {
 		if !strings.Contains(string(raw), required) {
 			t.Fatalf("public snapshot is missing %s: %s", required, raw)
 		}
@@ -207,7 +205,7 @@ func TestProjectAssistantEffectAwareTerminalContentDisclosesSuccessfulNonSourceM
 			got := server.projectAssistantRunTerminalContent(
 				context.Background(),
 				scope,
-				store.AssistantRun{ID: runID, EngineVersion: store.AssistantEngineVersionV2, Mode: store.AssistantRunModeDefault},
+				store.AssistantRun{ID: runID, Mode: store.AssistantRunModeDefault},
 				"Updated the project configuration and confirmed the checkout flow works.",
 				"",
 				nil,
@@ -259,7 +257,7 @@ func TestProjectAssistantSuccessfulNonSourceRunEffectRejectsNonMutationsAndFaile
 		},
 		{
 			name:   "plan approval",
-			spec:   projectAssistantToolSpec{Name: projectToolRequestProjectPlanApproval, Risk: projectAssistantToolRiskPlan},
+			spec:   projectAssistantToolSpec{Name: projectToolDefineInitialProjectPlan, Risk: projectAssistantToolRiskPlan},
 			result: `{"status":"approved"}`,
 		},
 		{
@@ -320,13 +318,13 @@ func TestProjectAssistantTruthfulModelSummaryRejectsBehavioralOverclaims(t *test
 
 func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	now := time.Now().UTC()
-	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, Revision: 2, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, Revision: 2, CreatedAt: now, UpdatedAt: now}
 	plan := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
 		{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "completed"},
 		{Content: "Verify preview", ActiveForm: "Verifying preview", Status: "in_progress"},
 	}}
 	metadata := projectAssistantDurableMetadataForTransition(run, "Writing files", true, false, []projectToolCallStreamEvent{{
-		ID: "tool-1", Name: projectToolWriteFile, Status: "running", Arguments: `{"path":"src/App.tsx"}`,
+		ID: "tool-1", Name: projectToolApplyPatch, Status: "running", Arguments: `{"path":"src/App.tsx"}`,
 	}}, &plan)
 	if got := metadata[projectAssistantMetadataRevision]; got != int64(2) {
 		t.Fatalf("revision = %#v, want current run revision", got)
@@ -347,7 +345,7 @@ func TestProjectAssistantDurableMetadataTracksEveryTransition(t *testing.T) {
 	run.Status = store.AssistantRunStatusCompleted
 	run.Revision = 5
 	metadata = projectAssistantDurableMetadataForTransition(run, "Completed", false, true, []projectToolCallStreamEvent{{
-		ID: "tool-1", Name: projectToolWriteFile, Status: "succeeded", Arguments: `{"path":"src/App.tsx"}`,
+		ID: "tool-1", Name: projectToolApplyPatch, Status: "succeeded", Arguments: `{"path":"src/App.tsx"}`,
 	}}, &plan)
 	if got := metadata[projectAssistantMetadataRevision]; got != int64(5) {
 		t.Fatalf("terminal revision = %#v, want 5", got)
@@ -366,7 +364,7 @@ func TestProjectAssistantInitialCompletionSuspensionReason(t *testing.T) {
 		evidence projectAssistantCompletionEvidence
 		want     string
 	}{
-		{name: "legacy result is unchanged"},
+		{name: "no completion evidence is unchanged"},
 		{
 			name: "complete initial build",
 			evidence: projectAssistantCompletionEvidence{
@@ -758,28 +756,6 @@ func TestProjectAssistantProgressSnapshotKeepsHiddenActionSequenceWhenItFails(t 
 	}
 }
 
-func TestProjectAssistantProgressSnapshotFallsBackWhenOrderingIsExhausted(t *testing.T) {
-	state := &projectAssistantDurableMetadataState{nextTraceSequence: projectAssistantTraceMaxSequence}
-	if !state.appendProgress("The work update remains visible.") {
-		t.Fatal("progress update was not accepted at sequence exhaustion")
-	}
-	state.upsertToolCall(projectToolCallStreamEvent{
-		ID:     "call-after-limit",
-		Name:   projectToolReadFile,
-		Status: "succeeded",
-	})
-
-	progress := state.progressSnapshot(time.Now().UTC())
-	if progress == nil || !reflect.DeepEqual(progress.Messages, []string{"The work update remains visible."}) ||
-		len(progress.MessageSequences) != 0 {
-		t.Fatalf("progress = %#v, want preserved prose with legacy ordering fallback", progress)
-	}
-	actions := projectAssistantActionFeedFromToolCalls(state.toolCalls)
-	if len(actions) != 1 || actions[0].Sequence != 0 {
-		t.Fatalf("actions = %#v, want preserved unsequenced action", actions)
-	}
-}
-
 func TestProjectAssistantDurableMetadataFromExistingDecodesOnlyValidPlanSnapshots(t *testing.T) {
 	valid := projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect project", ActiveForm: "Inspecting project", Status: "in_progress"}}}
 	tooMany := projectAssistantPlanSnapshot{Steps: make([]projectAssistantPlanStep, projectEinoAssistantTodoProgressMaxItems+1)}
@@ -808,12 +784,11 @@ func TestProjectAssistantDurableMetadataFromExistingDecodesOnlyValidPlanSnapshot
 		{name: "too many steps", plan: tooMany},
 		{name: "long label", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: strings.Repeat("x", projectEinoAssistantTodoProgressMaxLabelBytes+1), Status: "pending"}}}},
 		{name: "uncanonical whitespace", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect\nproject", Status: "pending"}}}},
-		{name: "unredacted secret", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect token=raw-secret", Status: "pending"}}}},
 		{name: "invalid status", plan: projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{{Content: "Inspect project", Status: "running"}}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			metadata := projectAssistantDurableMetadataFromExisting(
-				store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, Revision: 3},
+				store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, Revision: 3},
 				"Working",
 				false,
 				map[string]any{projectAssistantMetadataPlan: tt.plan},
@@ -870,7 +845,7 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 	ctx := context.Background()
 	now := time.Now().UTC()
 	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1", ProjectUID: "test-project-uid-project-1"}
-	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "make it", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
 	msgStore := store.NewMemoryStore()
@@ -903,7 +878,7 @@ func TestProjectAssistantDurableMetadataSurvivesStatusToolProvisionalAndTerminal
 		}
 	}
 	persist(nil)
-	toolCalls = []projectToolCallStreamEvent{{ID: "tool-1", Name: projectToolWriteFile, Status: "running"}}
+	toolCalls = []projectToolCallStreamEvent{{ID: "tool-1", Name: projectToolApplyPatch, Status: "running"}}
 	persist(nil)
 	provisional = true
 	persist(nil)
@@ -950,7 +925,7 @@ func TestReconcileOrphanedProjectAssistantRunPersistsInterruptedMessageMetadata(
 	ctx := context.Background()
 	now := time.Now().UTC()
 	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1", ProjectUID: "test-project-uid-project-1"}
-	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDiscussion, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
 	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
 	msgStore := store.NewMemoryStore()

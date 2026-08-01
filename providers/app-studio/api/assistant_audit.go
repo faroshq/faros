@@ -31,7 +31,6 @@ import (
 
 const (
 	projectAssistantAuditVersion       = 1
-	projectAssistantAuditMaxPhases     = 32
 	projectAssistantAuditMaxTools      = 128
 	projectAssistantAuditMaxModelCalls = 32
 	projectAssistantAuditMaxToolNames  = 32
@@ -49,11 +48,6 @@ const (
 	projectAssistantAuditOutcomeAborted   projectAssistantAuditOutcome = "aborted"
 )
 
-type projectAssistantAuditPhase struct {
-	Phase      projectEinoAssistantPhase `json:"phase"`
-	AtOffsetMS int64                     `json:"atOffsetMs"`
-}
-
 type projectAssistantAuditTool struct {
 	ID             string `json:"id,omitempty"`
 	Name           string `json:"name"`
@@ -69,30 +63,28 @@ type projectAssistantAuditTool struct {
 }
 
 type projectAssistantAuditModelCall struct {
-	Phase                     projectEinoAssistantPhase `json:"phase"`
-	Ordinal                   int                       `json:"ordinal"`
-	SourceRevision            uint64                    `json:"sourceRevision,omitempty"`
-	VerifiedRevision          uint64                    `json:"verifiedRevision,omitempty"`
-	WarningInjected           bool                      `json:"warningInjected,omitempty"`
-	VisibleTools              []string                  `json:"visibleTools,omitempty"`
-	Outcome                   string                    `json:"outcome,omitempty"`
-	RequestedTools            []string                  `json:"requestedTools,omitempty"`
-	TransportErrorObserved    bool                      `json:"transportErrorObserved,omitempty"`
-	AtOffsetMS                int64                     `json:"atOffsetMs"`
-	FirstResponseAtOffsetMS   *int64                    `json:"firstResponseAtOffsetMs,omitempty"`
-	ToolCallStartedAtOffsetMS *int64                    `json:"toolCallStartedAtOffsetMs,omitempty"`
-	CompletedAtOffsetMS       *int64                    `json:"completedAtOffsetMs,omitempty"`
+	Ordinal                   int      `json:"ordinal"`
+	SourceRevision            uint64   `json:"sourceRevision,omitempty"`
+	VerifiedRevision          uint64   `json:"verifiedRevision,omitempty"`
+	WarningInjected           bool     `json:"warningInjected,omitempty"`
+	VisibleTools              []string `json:"visibleTools,omitempty"`
+	Outcome                   string   `json:"outcome,omitempty"`
+	RequestedTools            []string `json:"requestedTools,omitempty"`
+	TransportErrorObserved    bool     `json:"transportErrorObserved,omitempty"`
+	AtOffsetMS                int64    `json:"atOffsetMs"`
+	FirstResponseAtOffsetMS   *int64   `json:"firstResponseAtOffsetMs,omitempty"`
+	ToolCallStartedAtOffsetMS *int64   `json:"toolCallStartedAtOffsetMs,omitempty"`
+	CompletedAtOffsetMS       *int64   `json:"completedAtOffsetMs,omitempty"`
 }
 
 type projectAssistantAuditFailure struct {
-	Kind             string                    `json:"kind"`
-	Phase            projectEinoAssistantPhase `json:"phase,omitempty"`
-	ToolName         string                    `json:"toolName,omitempty"`
-	Summary          string                    `json:"summary,omitempty"`
-	Calls            int                       `json:"calls,omitempty"`
-	Limit            int                       `json:"limit,omitempty"`
-	SourceRevision   uint64                    `json:"sourceRevision,omitempty"`
-	VerifiedRevision uint64                    `json:"verifiedRevision,omitempty"`
+	Kind             string `json:"kind"`
+	ToolName         string `json:"toolName,omitempty"`
+	Summary          string `json:"summary,omitempty"`
+	Calls            int    `json:"calls,omitempty"`
+	Limit            int    `json:"limit,omitempty"`
+	SourceRevision   uint64 `json:"sourceRevision,omitempty"`
+	VerifiedRevision uint64 `json:"verifiedRevision,omitempty"`
 }
 
 type projectAssistantRunAuditRecorder struct {
@@ -133,18 +125,6 @@ func newProjectAssistantRunAuditRecorder(
 	if audit.Profile == "" {
 		audit.Profile = req.TurnProfile
 	}
-	if audit.RequestedAction == "" {
-		audit.RequestedAction = projectAssistantAuditString(req.RequestedAction, projectAssistantAuditMaxSummaryLen)
-	}
-	if audit.ResolvedAction == "" {
-		audit.ResolvedAction = projectAssistantAuditString(req.ResolvedAction, projectAssistantAuditMaxSummaryLen)
-	}
-	if audit.ClassificationReason == "" {
-		audit.ClassificationReason = projectAssistantAuditString(req.ClassificationReason, projectAssistantAuditMaxSummaryLen)
-	}
-	if audit.ClassificationConfidence == "" {
-		audit.ClassificationConfidence = req.ClassificationConfidence
-	}
 	recorder := &projectAssistantRunAuditRecorder{
 		run:     run,
 		started: audit.StartedAt,
@@ -152,41 +132,6 @@ func newProjectAssistantRunAuditRecorder(
 	}
 	recorder.updateRunLocked()
 	return recorder
-}
-
-func (r *projectAssistantRunAuditRecorder) recordPromotion(workItemID string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.audit.ResolvedAction = string(projectAssistantActionBuild)
-	r.audit.ResolutionReason = "plan_approval_requested"
-	r.audit.PromotedWorkItemID = projectAssistantAuditString(workItemID, projectAssistantAuditMaxSummaryLen)
-	r.updateRunLocked()
-}
-
-func (r *projectAssistantRunAuditRecorder) recordPhase(phase projectEinoAssistantPhase) {
-	r.recordPhaseAt(phase, time.Now().UTC())
-}
-
-func (r *projectAssistantRunAuditRecorder) recordPhaseAt(phase projectEinoAssistantPhase, at time.Time) {
-	if r == nil || phase == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if n := len(r.audit.PhaseTransitions); n > 0 && r.audit.PhaseTransitions[n-1].Phase == phase {
-		return
-	}
-	if len(r.audit.PhaseTransitions) >= projectAssistantAuditMaxPhases {
-		return
-	}
-	r.audit.PhaseTransitions = append(r.audit.PhaseTransitions, projectAssistantAuditPhase{
-		Phase:      phase,
-		AtOffsetMS: projectAssistantAuditOffsetMS(r.started, at),
-	})
-	r.updateRunLocked()
 }
 
 func (r *projectAssistantRunAuditRecorder) recordTool(event projectToolCallStreamEvent) {
@@ -249,7 +194,6 @@ func (r *projectAssistantRunAuditRecorder) recordToolAt(event projectToolCallStr
 
 func (r *projectAssistantRunAuditRecorder) recordModelCall(
 	ctx context.Context,
-	phase projectEinoAssistantPhase,
 	ordinal int,
 	sourceRevision uint64,
 	verifiedRevision uint64,
@@ -257,11 +201,10 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 	toolInfos []*schema.ToolInfo,
 	deferredToolInfos []*schema.ToolInfo,
 ) error {
-	if r == nil || phase == "" || ordinal <= 0 {
+	if r == nil || ordinal <= 0 {
 		return nil
 	}
 	entry := projectAssistantAuditModelCall{
-		Phase:            phase,
 		Ordinal:          ordinal,
 		SourceRevision:   sourceRevision,
 		VerifiedRevision: verifiedRevision,
@@ -285,11 +228,10 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 
 func (r *projectAssistantRunAuditRecorder) recordModelResult(
 	ctx context.Context,
-	phase projectEinoAssistantPhase,
 	ordinal int,
 	response *schema.Message,
 ) error {
-	if r == nil || phase == "" || ordinal <= 0 {
+	if r == nil || ordinal <= 0 {
 		return nil
 	}
 	outcome := "empty"
@@ -311,7 +253,7 @@ func (r *projectAssistantRunAuditRecorder) recordModelResult(
 	r.mu.Lock()
 	for i := len(r.audit.ModelCalls) - 1; i >= 0; i-- {
 		entry := &r.audit.ModelCalls[i]
-		if entry.Phase == phase && entry.Ordinal == ordinal && entry.Outcome == "" {
+		if entry.Ordinal == ordinal && entry.Outcome == "" {
 			entry.Outcome = outcome
 			entry.RequestedTools = requestedTools
 			completed := projectAssistantAuditOffsetMS(r.started, time.Now().UTC())
@@ -433,7 +375,7 @@ func (r *projectAssistantRunAuditRecorder) recordFailure(err error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.audit.Failure = projectAssistantAuditFailureForError(err, projectAssistantAuditLatestPhase(r.audit))
+	r.audit.Failure = projectAssistantAuditFailureForError(err)
 	r.updateRunLocked()
 }
 
@@ -470,25 +412,14 @@ func projectAssistantAuditNames(names []string) []string {
 	return out
 }
 
-func projectAssistantAuditLatestPhase(audit projectAssistantRunAudit) projectEinoAssistantPhase {
-	if len(audit.PhaseTransitions) == 0 {
-		return ""
-	}
-	return audit.PhaseTransitions[len(audit.PhaseTransitions)-1].Phase
-}
-
-func projectAssistantAuditFailureForError(err error, fallbackPhase projectEinoAssistantPhase) *projectAssistantAuditFailure {
+func projectAssistantAuditFailureForError(err error) *projectAssistantAuditFailure {
 	if err == nil {
 		return nil
 	}
-	failure := &projectAssistantAuditFailure{
-		Kind:  projectAssistantFailureKind(err),
-		Phase: fallbackPhase,
-	}
+	failure := &projectAssistantAuditFailure{Kind: projectAssistantFailureKind(err)}
 	failure.Summary = projectAssistantFailureSummary(err, failure.Kind)
 	var noProgress *projectEinoAssistantNoProgressError
 	if errors.As(err, &noProgress) {
-		failure.Phase = noProgress.Phase
 		failure.ToolName = projectAssistantAuditString(projectToolBaseName(noProgress.ToolName), projectAssistantAuditMaxSummaryLen)
 		failure.Calls = noProgress.Calls
 		failure.Limit = noProgress.Limit
@@ -554,7 +485,7 @@ func recordProjectAssistantRunAuditFailure(run store.AssistantRun, cause error) 
 	if audit.Version == 0 {
 		audit.Version = projectAssistantAuditVersion
 	}
-	audit.Failure = projectAssistantAuditFailureForError(cause, projectAssistantAuditLatestPhase(audit))
+	audit.Failure = projectAssistantAuditFailureForError(cause)
 	raw, err := json.Marshal(audit)
 	if err != nil {
 		return store.AssistantRun{}, err
@@ -624,8 +555,7 @@ func projectAssistantAuditToolPath(name, arguments string) string {
 	rawName := strings.TrimSpace(name)
 	base := projectToolBaseName(rawName)
 	switch base {
-	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep,
-		projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep, projectToolApplyPatch:
 	default:
 		return ""
 	}

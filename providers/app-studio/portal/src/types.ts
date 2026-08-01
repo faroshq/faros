@@ -25,8 +25,7 @@ export interface ProjectMessage {
 }
 
 export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
-export type ProjectAssistantRunMode = 'default' | 'plan' | 'adaptive' | 'discussion' | 'new' | 'continue'
-export type ProjectAssistantWorkItemStatus = 'active' | 'suspended' | 'completed' | 'cancelled'
+export type ProjectAssistantRunMode = 'default' | 'plan'
 export type ProjectAssistantApprovalMode = 'always_ask' | 'auto_approve'
 
 export interface ProjectAssistantApprovalPreference {
@@ -34,24 +33,9 @@ export interface ProjectAssistantApprovalPreference {
   updatedAt?: string
 }
 
-export interface ProjectAssistantWorkItem {
-  id: string
-  rootMessageID: string
-  createdBy: string
-  status: ProjectAssistantWorkItemStatus
-  statusReason?: string
-  revision: number
-  activeRunID?: string
-  createdAt: string
-  updatedAt: string
-}
-
 export interface ProjectAssistantRun {
   id: string
-  engineVersion?: 'v2'
-  /** Present only on legacy engine-v1 history. */
-  workItemID?: string
-  mode?: ProjectAssistantRunMode
+  mode: ProjectAssistantRunMode
   approvalMode?: ProjectAssistantApprovalMode
   status: ProjectAssistantRunStatus
   revision: number
@@ -81,12 +65,6 @@ export interface ProjectAssistantAbortResponse {
   decision?: 'allow' | 'deny'
 }
 
-export interface ProjectAssistantUndoResponse {
-  runID: string
-  fileCount: number
-  message: ProjectMessage
-}
-
 export type ProjectAssistantActionKind = 'inspect' | 'clarify' | 'edit' | 'run' | 'commit' | 'plan' | 'other'
 export type ProjectAssistantActionStatus = 'running' | 'waiting' | 'succeeded' | 'skipped' | 'failed' | 'rejected'
 export type ProjectAssistantActionSeverity = 'normal' | 'attention' | 'error'
@@ -109,7 +87,7 @@ export interface ProjectAssistantActionFeedItem {
   severity: ProjectAssistantActionSeverity
   groupKey?: string
   groupTitle?: string
-  sequence?: number
+  sequence: number
   diagnostic?: ProjectAssistantActionDiagnostic
 }
 

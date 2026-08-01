@@ -1,7 +1,7 @@
 export interface AssistantProgress {
   version: 1
   messages: string[]
-  messageSequences?: number[]
+  messageSequences: number[]
   workedDurationMs: number
 }
 
@@ -23,22 +23,19 @@ export function parseAssistantProgress(value: unknown): AssistantProgress | unde
     if (new TextEncoder().encode(message).length > MAX_MESSAGE_BYTES || /[\u0000-\u001f\u007f-\u009f]/u.test(message)) return undefined
     messages.push(message)
   }
-  let messageSequences: number[] | undefined
-  if (item.messageSequences !== undefined) {
-    if (!Array.isArray(item.messageSequences) || item.messageSequences.length !== messages.length) return undefined
-    let previous = 0
-    messageSequences = []
-    for (const sequence of item.messageSequences) {
-      if (!Number.isSafeInteger(sequence) || Number(sequence) < 1 || Number(sequence) > 10_000) return undefined
-      if (Number(sequence) <= previous) return undefined
-      previous = Number(sequence)
-      messageSequences.push(Number(sequence))
-    }
+  if (!Array.isArray(item.messageSequences) || item.messageSequences.length !== messages.length) return undefined
+  let previous = 0
+  const messageSequences: number[] = []
+  for (const sequence of item.messageSequences) {
+    if (!Number.isSafeInteger(sequence) || Number(sequence) < 1 || Number(sequence) > 10_000) return undefined
+    if (Number(sequence) <= previous) return undefined
+    previous = Number(sequence)
+    messageSequences.push(Number(sequence))
   }
   return {
     version: 1,
     messages,
-    ...(messageSequences ? { messageSequences } : {}),
+    messageSequences,
     workedDurationMs: item.workedDurationMs as number,
   }
 }

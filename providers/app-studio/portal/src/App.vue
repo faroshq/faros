@@ -20,7 +20,6 @@ import {
   PanelRight,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
   Send,
   Settings2,
@@ -56,7 +55,6 @@ import {
   acceptScopedConversationSnapshot,
   assistantRunStartPayload,
   assistantRunStartFingerprint,
-  assistantRunIsLegacyViewOnly,
   assistantRunMatchesStartRequest,
   assistantRunRequiresLiveControls,
   assistantRunTerminal,
@@ -168,12 +166,6 @@ interface PendingApprovalView {
 interface PendingFollowUpView {
   message: ProjectMessageView
   interrupt: ProjectAssistantUIInterruptRequest
-}
-
-interface ProjectAssistantUndoMetadata {
-  runID: string
-  status: 'workspace_restored'
-  fileCount?: number
 }
 
 interface ProjectDevelopmentPreviewAuthorization {
@@ -300,7 +292,6 @@ const providers = ref<ProviderItem[]>([])
 const selected = ref<Project | null>(null)
 const messages = ref<ProjectMessageView[]>([])
 const conversationMessages = computed(() => projectMessagesForConversation(messages.value))
-const legacyAssistantRunViewOnly = ref(false)
 const pendingApproval = computed<PendingApprovalView | null>(() => {
   const currentMessages = messages.value
   if (!assistantRunRequiresLiveControls(activeAssistantRun)) return null
@@ -549,7 +540,6 @@ watch(activePlanMessage, (current, previous) => {
 })
 const conversationWorkingLabel = computed(() => {
   const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
-  if (legacyAssistantRunViewOnly.value) return ''
   if (activeAssistantRun?.status === 'stopping') return 'Stopping'
   if (activeAssistantRun?.status === 'pending_permission') return 'Waiting for approval'
   if (activeAssistantRun?.status === 'pending_input') return 'Waiting for your answer'
@@ -1095,7 +1085,6 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
-      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1106,7 +1095,6 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
-      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1123,7 +1111,6 @@ async function load() {
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
-      legacyAssistantRunViewOnly.value = false
       messageStreaming.value = false
       selected.value = null
       messages.value = []
@@ -1899,7 +1886,6 @@ async function openProject(name: string, updateURL = true) {
     activeAssistantSubscription?.abort()
     activeAssistantRun = null
     activeAssistantProject = ''
-    legacyAssistantRunViewOnly.value = false
     messageStreaming.value = false
   }
   error.value = null
@@ -1973,8 +1959,7 @@ function canImplementPlan(message: ProjectMessageView): boolean {
   const lastConversationMessage = conversationMessages.value[conversationMessages.value.length - 1]
   return message.role === 'assistant' &&
     lastConversationMessage?.id === message.id &&
-    run?.engineVersion === 'v2' &&
-    run.mode === 'plan' &&
+    run?.mode === 'plan' &&
     normalizeAssistantRunStatus(run.status) === 'completed' &&
     !messageStreaming.value &&
     !busy.value &&
@@ -2004,7 +1989,6 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
   const acceptedTerminal = assistantRunTerminal(normalized.run.status) && (!previousRun || !assistantRunTerminal(previousRun.status) || normalized.run.revision > previousRun.revision)
   const requiresLiveControls = assistantRunRequiresLiveControls(normalized.run)
   activeAssistantRun = normalized.run
-  legacyAssistantRunViewOnly.value = assistantRunIsLegacyViewOnly(normalized.run)
   if (!assistantRunTerminal(normalized.run.status) && normalized.run.approvalMode) {
     approvalMode.value = normalized.run.approvalMode
   }
@@ -2534,7 +2518,6 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
     const response = await api.resumeAssistantRun(props.ctx, projectName, runID, {
       requestID,
       decision,
-      assistantMessageID: message.id,
     })
     const shouldRefreshPreview = applyPermissionResponse(projectName, interrupt, response)
     responseApplied = true
@@ -2579,7 +2562,6 @@ async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: Proj
     const response = await api.resumeAssistantRun(props.ctx, projectName, runID, {
       requestID,
       answer,
-      assistantMessageID: message.id,
     })
     const shouldRefreshPreview = applyPermissionResponse(projectName, interrupt, response)
     responseApplied = true
@@ -2688,7 +2670,7 @@ function projectMessageProgress(message: ProjectMessage): AssistantProgress | un
 }
 
 function projectMessageAssistantStatus(message: ProjectMessage): ReturnType<typeof normalizeAssistantRunStatus> {
-  return normalizeAssistantRunStatus(message.metadata?.assistantStatus) ?? normalizeAssistantRunStatus(message.metadata?.status)
+  return normalizeAssistantRunStatus(message.metadata?.assistantStatus)
 }
 
 function assistantProgressClosed(message: ProjectMessageView): boolean {
@@ -2742,14 +2724,6 @@ function projectMessageInterrupt(message: ProjectMessage): ProjectAssistantUIInt
   if (message.role !== 'assistant') return undefined
   const raw = message.metadata?.assistantInterrupt
   return isProjectAssistantInterrupt(raw) ? raw : undefined
-}
-
-function projectMessageUndo(message: ProjectMessage): ProjectAssistantUndoMetadata | undefined {
-  const raw = message.metadata?.assistantUndo
-  if (!raw || typeof raw !== 'object') return undefined
-  const item = raw as Partial<ProjectAssistantUndoMetadata>
-  if (item.status !== 'workspace_restored' || typeof item.runID !== 'string') return undefined
-  return { runID: item.runID, status: item.status, ...(typeof item.fileCount === 'number' ? { fileCount: item.fileCount } : {}) }
 }
 
 function isProjectAssistantInterrupt(value: unknown): value is ProjectAssistantUIInterruptRequest {
@@ -3719,10 +3693,6 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                   <TriangleAlert class="h-3 w-3" :stroke-width="2" aria-hidden="true" />
                   Interrupted before completion
                 </div>
-                <div v-if="projectMessageUndo(message)" class="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-text-muted">
-                  <RotateCcw class="h-3.5 w-3.5 text-success" :stroke-width="1.75" />
-                  Restored {{ projectMessageUndo(message)?.fileCount ?? 0 }} workspace file{{ projectMessageUndo(message)?.fileCount === 1 ? '' : 's' }}; Git history unchanged
-                </div>
               </div>
             </div>
             <div
@@ -3755,15 +3725,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
 
         <form class="shrink-0 border-t border-border-subtle p-3" @submit.prevent="sendMessage">
           <div
-            v-if="legacyAssistantRunViewOnly"
-            class="mb-2 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-subtle p-3 text-[12px] leading-5 text-text-secondary"
-            role="status"
-          >
-            <TriangleAlert class="mt-0.5 h-4 w-4 shrink-0 text-warning" :stroke-width="1.75" />
-            <span>This legacy run is view-only. Start a fresh turn in Default or Plan mode to continue.</span>
-          </div>
-          <div
-            v-else-if="pendingFollowUp"
+            v-if="pendingFollowUp"
             class="mb-2 rounded-lg border border-accent/30 bg-accent-subtle p-3 shadow-sm"
           >
             <div class="flex min-w-0 items-start gap-3">
@@ -3885,7 +3847,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               />
             </div>
             <button
-              v-if="messageStreaming && !legacyAssistantRunViewOnly && activeAssistantRun?.status !== 'stopping'"
+              v-if="messageStreaming && activeAssistantRun?.status !== 'stopping'"
               type="button"
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-danger/30 bg-danger-subtle text-danger transition hover:bg-danger-subtle/80"
               title="Stop generating"
@@ -3895,7 +3857,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               <Square class="h-4 w-4 fill-current" :stroke-width="2" />
             </button>
             <button
-              v-else-if="!legacyAssistantRunViewOnly && activeAssistantRun?.status === 'stopping'"
+              v-else-if="activeAssistantRun?.status === 'stopping'"
               type="button"
               disabled
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-hover text-text-muted"

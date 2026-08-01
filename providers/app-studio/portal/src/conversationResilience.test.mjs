@@ -4,12 +4,11 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const source = await readFile(new URL('./conversationResilience.ts', import.meta.url), 'utf8')
-const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } })
 const state = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 const message = (id, content) => ({ id, projectID: 'p', role: 'assistant', content, createdAt: '2026-01-01T00:00:00Z' })
-const snapshot = (revision, content, status = 'running') => ({ run: { id: 'run-1', status, revision, activeMessageID: 'a-1' }, message: message('a-1', content) })
+const snapshot = (revision, content, status = 'running') => ({ run: { id: 'run-1', mode: 'default', status, revision, activeMessageID: 'a-1' }, message: message('a-1', content) })
 
 test('assistantRunTerminal recognizes run and display forms of every closed outcome', () => {
   for (const status of ['completed', 'aborted', 'failed', 'interrupted', 'Completed', 'Aborted', 'Failed', 'Interrupted']) {
@@ -38,25 +37,24 @@ test('mergeConversationSnapshot keeps the stable assistant message ID and reject
   assert.strictEqual(duplicate, current)
 })
 
-test('a v2 collaboration mode remains fixed across revisions without duplicating its message', () => {
+test('a collaboration mode remains fixed across revisions without duplicating its message', () => {
   const startedSnapshot = {
     ...snapshot(1, 'Inspecting safely'),
-    run: { ...snapshot(1, 'Inspecting safely').run, engineVersion: 'v2', mode: 'plan' },
+    run: { ...snapshot(1, 'Inspecting safely').run, mode: 'plan' },
   }
   const revised = {
     ...snapshot(2, 'Plan ready'),
-    run: { ...snapshot(2, 'Plan ready').run, engineVersion: 'v2', mode: 'plan' },
+    run: { ...snapshot(2, 'Plan ready').run, mode: 'plan' },
   }
   const completed = {
     ...snapshot(3, 'Plan ready', 'completed'),
-    run: { ...snapshot(3, 'Plan ready', 'completed').run, engineVersion: 'v2', mode: 'plan' },
+    run: { ...snapshot(3, 'Plan ready', 'completed').run, mode: 'plan' },
   }
 
   const started = state.mergeConversationSnapshot({ messages: [], runs: {} }, startedSnapshot)
   const revisedState = state.mergeConversationSnapshot(started, revised)
   const terminal = state.mergeConversationSnapshot(revisedState, completed)
 
-  assert.equal(revisedState.runs['run-1'].engineVersion, 'v2')
   assert.equal(revisedState.runs['run-1'].mode, 'plan')
   assert.equal(terminal.runs['run-1'].status, 'completed')
   assert.equal(terminal.runs['run-1'].mode, 'plan')
@@ -120,11 +118,10 @@ test('message retry identity is bound to the requested operation', () => {
 
 test('conflict recovery only accepts the run created for the exact retry identity and operation', () => {
   const request = { content: 'continue', clientRequestID: 'request-1', collaborationMode: 'default' }
-  const run = { id: 'run-1', status: 'running', engineVersion: 'v2', mode: 'default', revision: 1, activeMessageID: 'a-1', clientRequestID: 'request-1' }
+  const run = { id: 'run-1', status: 'running', mode: 'default', revision: 1, activeMessageID: 'a-1', clientRequestID: 'request-1' }
   assert.equal(state.assistantRunMatchesStartRequest(run, request), true)
   assert.equal(state.assistantRunMatchesStartRequest({ ...run, clientRequestID: 'request-2' }, request), false)
   assert.equal(state.assistantRunMatchesStartRequest({ ...run, mode: 'plan' }, request), false)
-  assert.equal(state.assistantRunMatchesStartRequest({ ...run, engineVersion: undefined }, request), false)
 })
 
 test('first-project generation rejects late replies after navigation and a new attempt has a fresh key', () => {
@@ -142,23 +139,12 @@ test('equal revision rehydrates active controls but an older active snapshot can
   assert.equal(state.canHydrateConversationRun(terminal.run, active.run), false)
 })
 
-test('legacy nonterminal recovery is static and leaves the composer available for a fresh v2 turn', () => {
-  const legacyPending = snapshot(4, 'waiting', 'pending_input').run
-  const v2Pending = { ...legacyPending, engineVersion: 'v2', mode: 'default' }
-  const legacyCompleted = { ...legacyPending, status: 'completed' }
+test('nonterminal runs require live controls and terminal runs do not', () => {
+  const pending = snapshot(4, 'waiting', 'pending_input').run
+  const completed = { ...pending, status: 'completed' }
 
-  assert.equal(state.assistantRunIsLegacyViewOnly(legacyPending), true)
-  assert.equal(state.assistantRunRequiresLiveControls(legacyPending), false)
-  assert.equal(state.assistantRunIsLegacyViewOnly(v2Pending), false)
-  assert.equal(state.assistantRunRequiresLiveControls(v2Pending), true)
-  assert.equal(state.assistantRunIsLegacyViewOnly(legacyCompleted), false)
-  assert.equal(state.assistantRunRequiresLiveControls(legacyCompleted), false)
-
-  assert.match(appSource, /legacyAssistantRunViewOnly\.value = assistantRunIsLegacyViewOnly\(normalized\.run\)/)
-  assert.match(appSource, /messageStreaming\.value = requiresLiveControls/)
-  assert.match(appSource, /if \(applied\.accepted && assistantRunRequiresLiveControls\(applied\.current\)\)/)
-  assert.match(appSource, /if \(!assistantRunRequiresLiveControls\(activeAssistantRun\)\) return null/)
-  assert.match(appSource, /This legacy run is view-only\. Start a fresh turn in Default or Plan mode to continue\./)
+  assert.equal(state.assistantRunRequiresLiveControls(pending), true)
+  assert.equal(state.assistantRunRequiresLiveControls(completed), false)
 })
 
 test('a stale nonterminal snapshot is rejected and cannot be used to attach a subscription', () => {

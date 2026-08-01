@@ -253,6 +253,7 @@ type projectAssistantWorkflowRunContext struct {
 	RunState       *projectEinoAssistantRunState
 	ApprovalMode   store.AssistantApprovalMode
 	EventLedger    *projectAssistantRunEventLedger
+	AdmitMutation  func(context.Context) error
 	// Identity and Client carry the caller's tenant identity and project
 	// client so runtime/preview tools can query the live development
 	// runtime instead of returning a placeholder status.
@@ -261,6 +262,7 @@ type projectAssistantWorkflowRunContext struct {
 }
 
 func projectAssistantWorkflowRunContextForRequest(server *Server, req projectAssistantRunRequest, runState *projectEinoAssistantRunState) projectAssistantWorkflowRunContext {
+	authority := projectAssistantExecutionAuthorityFor(server, req)
 	return projectAssistantWorkflowRunContext{
 		Server:         server,
 		Project:        req.Project,
@@ -269,6 +271,7 @@ func projectAssistantWorkflowRunContextForRequest(server *Server, req projectAss
 		RunState:       runState,
 		ApprovalMode:   req.ApprovalMode,
 		EventLedger:    req.eventLedger,
+		AdmitMutation:  authority.AdmitMutation,
 		Identity:       req.Identity,
 		Client:         req.Client,
 	}
@@ -367,7 +370,7 @@ func newProjectAssistantGraphWorkflowTools(ctx context.Context, runCtx projectAs
 		// boundary. Read workflows have no interrupt boundary, so wrapping them
 		// here records the call before any live source is consulted.
 		if runCtx.EventLedger != nil && spec.Risk == projectAssistantToolRiskRead {
-			graphTool, err = newProjectAssistantDurableGraphTool(graphTool, spec, runCtx.EventLedger)
+			graphTool, err = newProjectAssistantDurableGraphTool(graphTool, spec, runCtx.EventLedger, runCtx.AdmitMutation)
 			if err != nil {
 				return nil, err
 			}
@@ -423,14 +426,16 @@ func annotateProjectAssistantGraphTool(ctx context.Context, graphTool einotool.B
 // a pending approval must not be recorded as though the backend may have run.
 type projectAssistantDurableGraphTool struct {
 	einotool.InvokableTool
-	spec   projectAssistantToolSpec
-	ledger *projectAssistantRunEventLedger
+	spec          projectAssistantToolSpec
+	ledger        *projectAssistantRunEventLedger
+	admitMutation func(context.Context) error
 }
 
 func newProjectAssistantDurableGraphTool(
 	graphTool einotool.BaseTool,
 	spec projectAssistantToolSpec,
 	ledger *projectAssistantRunEventLedger,
+	admitMutation func(context.Context) error,
 ) (einotool.BaseTool, error) {
 	invokable, ok := graphTool.(einotool.InvokableTool)
 	if !ok {
@@ -440,6 +445,7 @@ func newProjectAssistantDurableGraphTool(
 		InvokableTool: invokable,
 		spec:          spec,
 		ledger:        ledger,
+		admitMutation: admitMutation,
 	}, nil
 }
 
@@ -451,6 +457,15 @@ func (t projectAssistantDurableGraphTool) InvokableRun(
 	args, err := projectEinoToolArguments(argumentsInJSON)
 	if err != nil {
 		return "", fmt.Errorf("decode %s workflow arguments: %w", t.spec.Name, err)
+	}
+	switch t.spec.Risk {
+	case projectAssistantToolRiskPlan, projectAssistantToolRiskWrite, projectAssistantToolRiskCommit, projectAssistantToolRiskRuntime:
+		if t.admitMutation == nil {
+			return "", store.ErrAssistantRunConflict
+		}
+		if err := t.admitMutation(ctx); err != nil {
+			return "", err
+		}
 	}
 	decision, err := t.ledger.BeginToolCall(ctx, compose.GetToolCallID(ctx), t.spec, args)
 	if err != nil {

@@ -109,7 +109,7 @@ func projectEinoAssistantSuccessfulWorkspaceMutationGroup(toolCallMessage *schem
 
 func projectEinoAssistantWorkspaceMutationTool(name string) bool {
 	switch projectToolBaseName(name) {
-	case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+	case projectToolApplyPatch:
 		return true
 	default:
 		return false

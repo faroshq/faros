@@ -30,19 +30,15 @@ test('provides only explicit default and read-only plan choices in one responsiv
   assert.match(source, /produce a plan without changing the project/)
   assert.doesNotMatch(source, /chooseMode\('build'\)/)
   assert.doesNotMatch(source, /chooseMode\('auto'\)/)
-  assert.doesNotMatch(source, /Continue previous work/)
-  assert.doesNotMatch(source, /suspendedTasks/)
   assert.match(source, /if \(!open\.value \|\| event\.key !== 'Escape'\) return/)
   assert.match(source, /fixed inset-x-3 bottom-3/)
   assert.match(source, /overflow-y-auto/)
   assert.match(source, /md:absolute/)
 })
 
-test('composer mounts both settings without suspended-task controls', async () => {
+test('composer mounts both current settings', async () => {
   const source = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   assert.match(source, /<ResponseModePicker/)
   assert.match(source, /<ApprovalModePicker/)
-  assert.doesNotMatch(source, /suspendedAssistantTasks/)
-  assert.doesNotMatch(source, /selectedAssistantWorkItem/)
   assert.match(source, /right-12 flex min-w-0/)
 })

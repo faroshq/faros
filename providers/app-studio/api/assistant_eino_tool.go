@@ -32,7 +32,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
 
-	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
@@ -68,12 +67,8 @@ func newProjectEinoAssistantToolsFactory(server *Server) projectEinoAssistantToo
 		registry := server.projectAssistantToolRegistry()
 		discovery := projectEinoAssistantEnsureToolDiscovery(ctx, server, req, runState)
 		catalogPolicy := projectAssistantToolCatalogPolicy(req)
-		localTools := projectAssistantToolsForTurnPolicy(registry.Tools(discovery.IncludeCommitBridge), catalogPolicy)
-		mcpTools := projectAssistantToolsForTurnPolicy(discovery.MCPTools, catalogPolicy)
-		if projectAssistantRequestUsesV2(req) {
-			localTools = projectAssistantToolsForCollaborationMode(registry.Tools(discovery.IncludeCommitBridge), req.CollaborationMode)
-			mcpTools = projectAssistantToolsForCollaborationMode(discovery.MCPTools, req.CollaborationMode)
-		}
+		localTools := projectAssistantToolsForCollaborationMode(registry.Tools(discovery.IncludeCommitBridge), req.CollaborationMode)
+		mcpTools := projectAssistantToolsForCollaborationMode(discovery.MCPTools, req.CollaborationMode)
 		out := make([]einotool.BaseTool, 0, len(localTools)+len(mcpTools)+1)
 		if projectEinoAssistantProgressEnabled(req, runState) {
 			out = append(out, newProjectEinoAssistantProgressTool(req, runState))
@@ -108,7 +103,6 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	}
 	registry := server.projectAssistantToolRegistry()
 	policy := normalizeProjectAssistantTurnPolicy(req.TurnPolicy, req.TurnProfile)
-	catalogPolicy := projectAssistantToolCatalogPolicy(req)
 	chatTools := projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(registry.Tools(false)), policy))
 	if len(chatTools) == 0 {
 		return projectEinoAssistantToolDiscovery{}
@@ -116,22 +110,15 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	discovery := projectEinoAssistantToolDiscovery{
 		Prompt: projectMCPToolsPrompt(chatTools),
 	}
-	if req.ToolPort == nil || (!projectAssistantRequestUsesV2(req) && !projectAssistantTurnPolicyCanUseMCP(catalogPolicy, req)) {
+	if req.ToolPort == nil {
 		return discovery
 	}
 	mcpTools, includeCommitBridge, err := req.ToolPort.DiscoverMCP(ctx, req.Identity, req.LLM)
 	if err != nil {
-		// Inline-promotable adaptive runs load the implementation catalog up
-		// front, but their discovery prompt must remain bounded by the active
-		// adaptive policy until promotion. Do not advertise hidden mutation
-		// capabilities merely because their preregistration failed.
 		if projectAssistantTurnPolicyCanUseMCP(policy, req) {
 			discovery.Prompt = projectMCPToolsFailurePrompt(err)
 		}
 		return discovery
-	}
-	if !projectAssistantRequestUsesV2(req) {
-		mcpTools = projectAssistantFilterMCPToolsForTurn(mcpTools, req.History)
 	}
 	discovery.IncludeCommitBridge = includeCommitBridge
 	discovery.MCPTools = mcpTools
@@ -147,18 +134,7 @@ func projectAssistantToolsForCollaborationMode(tools []projectAssistantTool, mod
 			continue
 		}
 		spec := tool.Spec()
-		// Engine v2 has one contextual mutation primitive. Keep the old registry
-		// entries solely so persisted engine-v1 fixtures can still be decoded and
-		// inspected; never publish them to a new model turn.
-		if projectToolBaseName(spec.Name) == projectToolWriteFile ||
-			projectToolBaseName(spec.Name) == projectToolMkdir ||
-			projectToolBaseName(spec.Name) == projectToolHydrateWorkspace {
-			continue
-		}
 		if mode == projectAssistantCollaborationModePlan && projectAssistantToolHasEffect(spec) {
-			continue
-		}
-		if projectToolBaseName(spec.Name) == projectToolRequestProjectPlanApproval {
 			continue
 		}
 		out = append(out, tool)
@@ -166,13 +142,7 @@ func projectAssistantToolsForCollaborationMode(tools []projectAssistantTool, mod
 	return out
 }
 
-func projectAssistantTurnPolicyCanUseMCP(policy projectAssistantTurnPolicy, req projectAssistantRunRequest) bool {
-	if policy.AllowsTool(projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}) {
-		return true
-	}
-	if !projectAssistantTurnNeedsInfrastructureMCP(req.History) {
-		return false
-	}
+func projectAssistantTurnPolicyCanUseMCP(policy projectAssistantTurnPolicy, _ projectAssistantRunRequest) bool {
 	for _, name := range []string{
 		projectToolInfrastructureListTemplates,
 		projectToolInfrastructureDescribeTemplate,
@@ -186,62 +156,6 @@ func projectAssistantTurnPolicyCanUseMCP(policy projectAssistantTurnPolicy, req 
 		if ok && policy.AllowsTool(spec) {
 			return true
 		}
-	}
-	return false
-}
-
-func projectAssistantFilterMCPToolsForTurn(tools []projectAssistantTool, history []store.Message) []projectAssistantTool {
-	if projectAssistantTurnNeedsDatabricksMCP(history) {
-		return tools
-	}
-	out := tools[:0]
-	for _, tool := range tools {
-		switch tool.Spec().Name {
-		case projectToolDatabricksListTables, projectToolDatabricksDescribeTable:
-			continue
-		default:
-			out = append(out, tool)
-		}
-	}
-	return out
-}
-
-func projectAssistantTurnNeedsInfrastructureMCP(history []store.Message) bool {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != aiv1alpha1.ProjectMessageRoleUser {
-			continue
-		}
-		content := strings.ToLower(strings.TrimSpace(history[i].Content))
-		if containsProjectAssistantTurnKeyword(content, []string{
-			"infrastructure", "infra", "template", "templates", "provision",
-			"instance", "instances", "database", "postgres", "redis",
-			"supporting resource", "provider", "platform", "mcp",
-		}) {
-			return true
-		}
-		return projectAssistantTurnNeedsDatabricksMCP(history[i:])
-	}
-	return false
-}
-
-func projectAssistantTurnNeedsDatabricksMCP(history []store.Message) bool {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != aiv1alpha1.ProjectMessageRoleUser {
-			continue
-		}
-		content := strings.ToLower(strings.TrimSpace(history[i].Content))
-		if containsProjectAssistantTurnKeyword(content, []string{
-			"databricks", "table ref", "table refs", "imported table", "imported tables",
-			"kedge table", "kedge tables", "provider-databricks",
-		}) {
-			return true
-		}
-		if strings.Contains(content, "table") && containsProjectAssistantTurnKeyword(content, []string{
-			"query", "queries", "sample", "samples", "column", "columns", "schema", "metadata", "inspect", "data",
-		}) {
-			return true
-		}
-		return false
 	}
 	return false
 }
@@ -335,7 +249,7 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 		Status:    "requested",
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 	})
-	if projectAssistantRequestUsesV2(t.req) && projectEinoAssistantCommitTool(spec.Name) {
+	if projectEinoAssistantCommitTool(spec.Name) {
 		args, err = t.v2CommitArguments(args)
 		if err != nil {
 			return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, err.Error()), nil
@@ -348,8 +262,7 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 	if projectToolBaseName(spec.Name) == projectToolAskFollowUp {
 		return t.requestFollowUp(ctx, callID, spec, args)
 	}
-	if projectAssistantRequestUsesV2(t.req) &&
-		t.req.CollaborationMode == projectAssistantCollaborationModePlan &&
+	if t.req.CollaborationMode == projectAssistantCollaborationModePlan &&
 		projectAssistantToolHasEffect(spec) {
 		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "Plan mode is read-only; start a new Default turn to implement the plan"), nil
 	}
@@ -361,42 +274,25 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 			"invalid workspace approval scope: "+err.Error(),
 		), nil
 	}
-	if projectEinoAssistantTodoFileWriteMistake(spec, args, t.runState) {
-		return t.finishFailedToolCall(
-			callID,
-			spec.Name,
-			argumentsInJSON,
-			"todo tracking must use write_todos; do not create todo.md or todos.md in the project workspace",
-		), nil
-	}
-	if !projectAssistantRequestUsesV2(t.req) {
-		_, err = t.promoteAdaptiveRunForPlan(ctx, spec)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	decision := projectAssistantPermissionForApprovalMode(spec, t.req.ApprovalMode, t.runState, args)
-	if projectAssistantRequestUsesV2(t.req) {
-		decision = projectAssistantPermissionForV2(
-			spec,
-			t.req.ApprovalMode,
-			t.runState,
-			args,
-			projectEinoAssistantPhaseTemplateBootstrapAllowed(t.req.Project),
-		)
-	}
+	decision := projectAssistantPermissionForV2(
+		spec,
+		t.req.ApprovalMode,
+		t.runState,
+		args,
+		projectEinoAssistantTemplateBootstrapAllowed(t.req.Project),
+	)
 	switch decision {
 	case projectAssistantPermissionAllow:
 		if t.req.ApprovalMode == store.AssistantApprovalModeAutoApprove &&
-			projectAssistantPermissionForToolWithRunState(spec, false, t.runState, args) == projectAssistantPermissionAsk {
+			projectAssistantPermissionForV2(
+				spec,
+				store.AssistantApprovalModeAlwaysAsk,
+				t.runState,
+				args,
+				projectEinoAssistantTemplateBootstrapAllowed(t.req.Project),
+			) == projectAssistantPermissionAsk {
 			if t.req.auditRecorder != nil {
 				t.req.auditRecorder.recordAutomaticApproval(callID, spec.Name, t.req.Identity.user, t.req.ApprovalMode)
-			}
-		}
-		if !projectAssistantRequestUsesV2(t.req) && spec.Risk == projectAssistantToolRiskCommit && projectAssistantApprovedPlanActive(t.runState.ApprovedPlan()) {
-			if err := t.retireApprovedPlan(ctx); err != nil {
-				return "", fmt.Errorf("%w: retire approved plan before auto-approved commit: %v", errProjectAssistantPlanRetirement, err)
 			}
 		}
 		return t.invokeAllowedTool(ctx, callID, spec, args)
@@ -405,59 +301,10 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 			return projectEinoPermissionBarrierToolResult(), nil
 		}
 		return "", t.requestPermission(ctx, callID, spec, args, argumentsInJSON)
-	case projectAssistantPermissionReplan:
-		if activePlan := t.runState.ApprovedPlan(); activePlan != nil &&
-			activePlan.RunLocal &&
-			activePlan.ApprovalTool == projectToolDefineInitialProjectPlan {
-			return t.finishFailedToolCall(
-				callID,
-				spec.Name,
-				argumentsInJSON,
-				"initial execution plan revision required: requested write is outside the active target paths",
-			), nil
-		}
-		if err := t.retireApprovedPlan(ctx); err != nil {
-			return "", fmt.Errorf("%w: retire stale App Studio plan grant: %v", errProjectAssistantPlanRetirement, err)
-		}
-		return t.finishFailedToolCall(
-			callID,
-			spec.Name,
-			argumentsInJSON,
-			"plan approval required: requested write is outside the active approved plan",
-		), nil
 	case projectAssistantPermissionDeny:
 		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "permission denied: unknown tool risk"), nil
 	default:
 		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "permission denied"), nil
-	}
-}
-
-func projectEinoAssistantTodoFileWriteMistake(
-	spec projectAssistantToolSpec,
-	args map[string]any,
-	runState *projectEinoAssistantRunState,
-) bool {
-	if projectToolBaseName(spec.Name) != projectToolWriteFile || runState == nil {
-		return false
-	}
-	plan := runState.ApprovedPlan()
-	if plan == nil || (!plan.RunLocal && len(plan.Steps) <= 1) {
-		return false
-	}
-	target, err := projectAssistantWriteTargetPath(spec.Name, args)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(target) {
-	case "todo.md", "todos.md":
-		for _, approved := range plan.TargetPaths {
-			if projectAssistantPathWithinApprovedTarget(target, approved) {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
 	}
 }
 
@@ -468,19 +315,15 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 	if err := t.admitMutation(ctx, spec); err != nil {
 		return "", err
 	}
-	var ledgerDecision projectAssistantRunToolCallDecision
-	if projectAssistantRequestUsesV2(t.req) {
-		if t.req.eventLedger == nil {
-			return "", errors.New("assistant run event ledger is not configured")
-		}
-		decision, err := t.req.eventLedger.BeginToolCall(ctx, callID, spec, args)
-		if err != nil {
-			return "", err
-		}
-		ledgerDecision = decision
-		if ledgerDecision.Replay != nil {
-			return t.replayDurableToolCall(callID, spec, args, *ledgerDecision.Replay)
-		}
+	if t.req.eventLedger == nil {
+		return "", errors.New("assistant run event ledger is not configured")
+	}
+	ledgerDecision, err := t.req.eventLedger.BeginToolCall(ctx, callID, spec, args)
+	if err != nil {
+		return "", err
+	}
+	if ledgerDecision.Replay != nil {
+		return t.replayDurableToolCall(callID, spec, args, *ledgerDecision.Replay)
 	}
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
@@ -488,10 +331,6 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		Status:    "running",
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 	})
-	if projectToolBaseName(spec.Name) == projectToolRequestProjectPlanApproval {
-		result, err := t.invokeApprovedPlanTool(ctx, callID, spec, args)
-		return t.finishDurableToolCall(ctx, ledgerDecision, result, err)
-	}
 	if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
 		result, err := t.invokeInitialProjectPlanTool(ctx, callID, spec, args)
 		return t.finishDurableToolCall(ctx, ledgerDecision, result, err)
@@ -514,8 +353,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		Arguments:             args,
 	})
 	if err != nil {
-		if projectAssistantRequestUsesV2(t.req) &&
-			projectEinoAssistantWorkspaceMutationResultHasChanges(spec.Name, result) {
+		if projectEinoAssistantWorkspaceMutationResultHasChanges(spec.Name, result) {
 			// A contextual patch can fail after an I/O error and still leave a
 			// partial delta when rollback is incomplete. Treat the observed delta
 			// as a real source mutation even though the requested patch failed.
@@ -551,25 +389,21 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		return t.finishDurableToolCall(ctx, ledgerDecision, failed, nil)
 	}
 	modelResult := t.runState.RegisterTransientToolResult(spec.Name, result)
-	if projectAssistantRequestUsesV2(t.req) &&
-		projectEinoAssistantSuccessfulWorkspaceMutationResult(spec.Name, result) {
+	if projectEinoAssistantSuccessfulWorkspaceMutationResult(spec.Name, result) {
 		if recordErr := t.recordV2WorkspaceMutation(ctx, spec.Name, result); recordErr != nil {
 			return t.finishDurableToolCall(ctx, ledgerDecision, result, recordErr)
 		}
-	} else if projectAssistantRequestUsesV2(t.req) &&
-		projectToolBaseName(spec.Name) == projectToolSelectTemplate &&
-		projectEinoAssistantPhaseSuccessfulToolContent(result) && t.server != nil {
+	} else if projectToolBaseName(spec.Name) == projectToolSelectTemplate &&
+		projectEinoAssistantSuccessfulToolContent(result) && t.server != nil {
 		// Selecting a replacement development target must also populate it with
 		// the existing workspace, even when no source edit follows this call.
-		t.server.scheduleDevelopmentSyncAfterMutation(t.req.Identity, t.req.Project, spec.Name)
-	} else if !projectAssistantRequestUsesV2(t.req) && t.server != nil {
 		t.server.scheduleDevelopmentSyncAfterMutation(t.req.Identity, t.req.Project, spec.Name)
 	}
 	modelResult, err = t.finishDurableToolCall(ctx, ledgerDecision, modelResult, nil)
 	if err != nil {
 		return "", err
 	}
-	successful := projectEinoAssistantPhaseSuccessfulToolContent(modelResult)
+	successful := projectEinoAssistantSuccessfulToolContent(modelResult)
 	status := projectToolCallResultStatus(spec.Name, result)
 	if !successful {
 		status = "failed"
@@ -595,9 +429,6 @@ func (t projectEinoAssistantTool) finishDurableToolCall(
 	result string,
 	invokeErr error,
 ) (string, error) {
-	if !projectAssistantRequestUsesV2(t.req) {
-		return result, invokeErr
-	}
 	if t.req.eventLedger == nil || !decision.ShouldDispatch() {
 		return "", errors.New("assistant run event ledger dispatch token is missing")
 	}
@@ -618,7 +449,7 @@ func (t projectEinoAssistantTool) replayDurableToolCall(
 	if err != nil {
 		return result, err
 	}
-	successful := projectEinoAssistantPhaseSuccessfulToolContent(result)
+	successful := projectEinoAssistantSuccessfulToolContent(result)
 	status := projectToolCallResultStatus(spec.Name, result)
 	if !successful {
 		status = "failed"
@@ -639,7 +470,7 @@ func (t projectEinoAssistantTool) replayDurableToolCall(
 }
 
 func (t projectEinoAssistantTool) reopenV2FailedContextualPatchReads(spec projectAssistantToolSpec, args map[string]any) {
-	if !projectAssistantRequestUsesV2(t.req) || t.runState == nil || projectToolBaseName(spec.Name) != projectToolApplyPatch {
+	if t.runState == nil || projectToolBaseName(spec.Name) != projectToolApplyPatch {
 		return
 	}
 	patch, ok := projectToolRawString(args["patch"])
@@ -656,7 +487,7 @@ func (t projectEinoAssistantTool) reopenV2FailedContextualPatchReads(spec projec
 }
 
 func (t projectEinoAssistantTool) invalidateV2PartialPatchReads(spec projectAssistantToolSpec, args map[string]any) {
-	if !projectAssistantRequestUsesV2(t.req) || t.runState == nil || projectToolBaseName(spec.Name) != projectToolApplyPatch {
+	if t.runState == nil || projectToolBaseName(spec.Name) != projectToolApplyPatch {
 		return
 	}
 	patch, ok := projectToolRawString(args["patch"])
@@ -820,7 +651,7 @@ func (t projectEinoAssistantTool) invalidateV2CommitWorkspace(_ context.Context)
 	if t.server == nil || !t.server.scheduleDevelopmentSyncAfterMutationWithCompletion(
 		t.req.Identity,
 		t.req.Project,
-		projectToolHydrateWorkspace,
+		projectActionWorkspaceSync,
 		func(syncErr error) { t.runState.CompleteDevelopmentSync(revision, syncErr) },
 	) {
 		t.runState.CompleteDevelopmentSync(revision, errors.New("workspace synchronization was not scheduled"))
@@ -956,24 +787,11 @@ func projectAssistantInitialBuildActive(req projectAssistantRunRequest, runState
 	return runState != nil && runState.ApprovedPlan() != nil && runState.ApprovedPlan().RunLocal
 }
 
-func (t projectEinoAssistantTool) retireApprovedPlan(ctx context.Context) error {
+func (t projectEinoAssistantTool) retireApprovedPlan(_ context.Context) error {
 	if t.server == nil && t.req.executionAuthority == nil {
-		return store.ErrAssistantWorkItemConflict
+		return store.ErrAssistantRunConflict
 	}
-	persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
-	defer cancelPersist()
-
-	revision, err := t.executionAuthority().RetireApprovedPlan(
-		persistCtx,
-		t.runState.ApprovedPlanGrantRevision(),
-	)
-	if err != nil {
-		return err
-	}
-	// Do not revoke the in-memory authority until durable retirement succeeds.
-	// A failure must not emit a permission checkpoint or permit the commit.
 	t.runState.ClearApprovedPlan()
-	t.runState.SetApprovedPlanGrantRevision(revision)
 	return nil
 }
 
@@ -1031,54 +849,6 @@ func (t projectEinoAssistantTool) resumeFollowUp(ctx context.Context, callID str
 	return result, nil
 }
 
-func (t projectEinoAssistantTool) invokeApprovedPlanTool(ctx context.Context, callID string, spec projectAssistantToolSpec, args map[string]any) (string, error) {
-	plan, err := projectAssistantApprovedPlanFromArguments(args)
-	if err != nil {
-		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
-	}
-	if existing := t.runState.ApprovedPlan(); existing != nil {
-		if projectAssistantApprovedPlanCoversPlan(existing, &plan) {
-			plan = *existing
-		}
-	}
-	t.runState.ApprovePlan(plan)
-	// Persist the grant so it survives later turns until a commit request,
-	// cancellation, or an explicitly approved replacement scope.
-	// Best effort: a failed write only means the user is re-prompted next turn.
-	if stored := t.runState.ApprovedPlan(); stored != nil {
-		persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
-		defer cancelPersist()
-		revision, err := t.persistApprovedPlan(persistCtx, stored)
-		if err != nil {
-			t.runState.ClearApprovedPlan()
-			return "", fmt.Errorf("%w: persist approved App Studio plan: %v", errProjectAssistantPlanGrantPersistence, err)
-		} else {
-			t.runState.SetApprovedPlanGrantRevision(revision)
-		}
-	}
-	resultPayload := map[string]any{
-		"status":       "approved",
-		"summary":      plan.Summary,
-		"targetPaths":  plan.TargetPaths,
-		"capabilities": plan.Capabilities,
-	}
-	raw, err := json.Marshal(resultPayload)
-	if err != nil {
-		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
-	}
-	result := string(raw)
-	t.emitToolCall(projectToolCallStreamEvent{
-		ID:        callID,
-		Name:      spec.Name,
-		Status:    "succeeded",
-		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
-		Summary:   summarizeProjectToolResult(spec.Name, result),
-	})
-	t.recordToolMessage(callID, spec.Name, result)
-	t.appendBuilderEvent(projectBuilderEventPlanApproved)
-	return result, nil
-}
-
 func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	ctx context.Context,
 	callID string,
@@ -1093,7 +863,7 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	if err != nil {
 		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
 	}
-	if existing, _ := t.runState.ExecutionPlan(); existing != nil {
+	if existing := t.runState.ExecutionPlan(); existing != nil {
 		plan = mergeProjectAssistantInitialExecutionPlans(*existing, plan)
 	}
 
@@ -1108,13 +878,8 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	); err != nil {
 		return "", fmt.Errorf("%w: persist project memory: %v", errProjectAssistantInitialPlanPersistence, err)
 	}
-	revision, err := t.persistInitialExecutionPlan(persistCtx, &plan)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", errProjectAssistantInitialPlanPersistence, err)
-	}
-
 	t.runState.ApprovePlan(plan)
-	t.runState.SetExecutionPlan(plan, revision)
+	t.runState.SetExecutionPlan(plan)
 	initialProgress := projectAssistantPlanSnapshot{
 		Steps: make([]projectAssistantPlanStep, 0, len(plan.Steps)),
 	}
@@ -1139,7 +904,6 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 		"steps":              plan.Steps,
 		"targetPaths":        plan.TargetPaths,
 		"acceptanceCriteria": plan.AcceptanceCriteria,
-		"revision":           revision,
 	})
 	if err != nil {
 		return "", err
@@ -1156,94 +920,16 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	return result, nil
 }
 
-func (t projectEinoAssistantTool) persistInitialExecutionPlan(
-	ctx context.Context,
-	plan *projectAssistantApprovedPlan,
-) (string, error) {
-	return t.executionAuthority().PersistInitialExecutionPlan(ctx, plan)
-}
-
-// grantWriteUntilCommit records the exact path from a directly approved write
-// as a workspace-mutation grant. It merges only scopes that the user has
-// already approved and fails closed if the durable grant cannot be persisted.
-func (t projectEinoAssistantTool) grantWriteUntilCommit(ctx context.Context, toolName string, args map[string]any) error {
-	targetPaths, err := projectAssistantWriteTargetPaths(toolName, args)
-	if err != nil {
-		return fmt.Errorf("approved workspace write path is invalid: %w", err)
-	}
-	plan := normalizeProjectAssistantApprovedPlan(projectAssistantApprovedPlan{
-		Summary:      "User approved a workspace path for source edits until the next commit request.",
-		TargetPaths:  targetPaths,
-		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
-		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
-		ApprovalTool: "permission_allow_write",
-	})
-	if existing := t.runState.ApprovedPlan(); projectAssistantApprovedPlanActive(existing) {
-		plan = mergeProjectAssistantApprovedPlans(*existing, plan)
-	}
-	t.runState.ApprovePlan(plan)
-	stored := t.runState.ApprovedPlan()
-	if stored == nil {
-		return nil
-	}
-	persistCtx, cancelPersist := detachedProjectPersistenceContext(ctx)
-	defer cancelPersist()
-	revision, err := t.persistApprovedPlan(persistCtx, stored)
-	if err != nil {
-		t.runState.ClearApprovedPlan()
-		return fmt.Errorf("%w: persist direct App Studio write approval: %v", errProjectAssistantPlanGrantPersistence, err)
-	} else {
-		t.runState.SetApprovedPlanGrantRevision(revision)
-	}
-	return nil
-}
-
-func (t projectEinoAssistantTool) persistApprovedPlan(ctx context.Context, plan *projectAssistantApprovedPlan) (string, error) {
-	return t.executionAuthority().PersistApprovedPlan(ctx, plan, t.runState.ApprovedPlanGrantRevision())
-}
-
 func (t projectEinoAssistantTool) admitMutation(ctx context.Context, spec projectAssistantToolSpec) error {
 	switch spec.Risk {
 	case projectAssistantToolRiskPlan, projectAssistantToolRiskWrite, projectAssistantToolRiskCommit, projectAssistantToolRiskRuntime:
 	default:
 		return nil
 	}
-	if projectAssistantRequestUsesV2(t.req) {
-		if t.req.CollaborationMode != projectAssistantCollaborationModeDefault || t.req.AssistantRun == nil {
-			return store.ErrAssistantRunConflict
-		}
-		if t.server == nil || t.server.projectAssistantSupervisor().accumulatorFor(t.req.MessageScope, t.req.AssistantRun.ID) == nil {
-			return store.ErrAssistantRunConflict
-		}
-		return nil
+	if t.req.CollaborationMode != projectAssistantCollaborationModeDefault || t.req.AssistantRun == nil {
+		return store.ErrAssistantRunConflict
 	}
 	return t.executionAuthority().AdmitMutation(ctx)
-}
-
-func (t projectEinoAssistantTool) promoteAdaptiveRunForPlan(ctx context.Context, spec projectAssistantToolSpec) (bool, error) {
-	if projectToolBaseName(spec.Name) != projectToolRequestProjectPlanApproval ||
-		t.req.AssistantRun == nil ||
-		t.req.AssistantRun.WorkItemID != "" {
-		return false, nil
-	}
-	if t.req.AssistantRun.Mode != store.AssistantRunModeAdaptive {
-		return false, nil
-	}
-	promoted, err := t.executionAuthority().PromoteAdaptiveRun(ctx)
-	if err != nil {
-		return false, err
-	}
-	*t.req.AssistantRun = promoted
-	if t.req.ApprovalMode == store.AssistantApprovalModeAutoApprove {
-		t.runState.SetTurnPolicy(escalateProjectAssistantTurnPolicy(
-			t.runState.TurnPolicy(),
-			projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation),
-		))
-	}
-	if t.req.auditRecorder != nil {
-		t.req.auditRecorder.recordPromotion(promoted.WorkItemID)
-	}
-	return true, nil
 }
 
 func (t projectEinoAssistantTool) appendBuilderEvent(eventType string) {
@@ -1252,7 +938,7 @@ func (t projectEinoAssistantTool) appendBuilderEvent(eventType string) {
 
 func (t projectEinoAssistantTool) requestPermission(ctx context.Context, callID string, spec projectAssistantToolSpec, args map[string]any, argumentsInJSON string) error {
 	commitWorkspaceDigest := ""
-	if projectAssistantRequestUsesV2(t.req) && projectEinoAssistantCommitTool(spec.Name) {
+	if projectEinoAssistantCommitTool(spec.Name) {
 		var err error
 		commitWorkspaceDigest, err = t.v2CommitWorkspaceDigest(ctx, args)
 		if err != nil {
@@ -1316,7 +1002,7 @@ func (t projectEinoAssistantTool) resumePermission(ctx context.Context, callID s
 		if data.EditedArguments != nil {
 			args = cloneProjectAssistantToolArguments(data.EditedArguments)
 		}
-		if projectAssistantRequestUsesV2(t.req) && projectEinoAssistantCommitTool(spec.Name) {
+		if projectEinoAssistantCommitTool(spec.Name) {
 			normalized, normalizeErr := t.v2CommitArguments(args)
 			if normalizeErr != nil {
 				return t.finishFailedToolCall(callID, name, projectEinoToolArgumentsString(args), normalizeErr.Error()), nil
@@ -1337,14 +1023,6 @@ func (t projectEinoAssistantTool) resumePermission(ctx context.Context, callID s
 					projectEinoToolArgumentsString(args),
 					"workspace content changed after commit approval; rerun operational verification before requesting a new commit",
 				), nil
-			}
-		}
-		if !projectAssistantRequestUsesV2(t.req) && spec.Risk == projectAssistantToolRiskWrite &&
-			projectAssistantDirectApprovalGrantsWritePlan(spec.Name) {
-			// The user approved a source write directly. Remember its path
-			// as a source-mutation grant until the next commit.
-			if err := t.grantWriteUntilCommit(ctx, spec.Name, args); err != nil {
-				return "", err
 			}
 		}
 		return t.invokeAllowedTool(ctx, callID, spec, args)
@@ -1481,9 +1159,6 @@ func projectEinoPermissionBarrierToolResult() string {
 }
 
 func projectAssistantApprovedPlanFromArguments(args map[string]any) (projectAssistantApprovedPlan, error) {
-	if _, legacy := args["allowedOperations"]; legacy {
-		return projectAssistantApprovedPlan{}, errors.New("this plan approval predates workspace capabilities and must be requested again")
-	}
 	targetPaths, err := projectAssistantCanonicalGrantTargets(projectToolStringList(args["targetPaths"]))
 	if err != nil {
 		return projectAssistantApprovedPlan{}, err
@@ -1498,7 +1173,7 @@ func projectAssistantApprovedPlanFromArguments(args map[string]any) (projectAssi
 		Version:            projectAssistantApprovedPlanVersionWorkspaceMutation,
 		Capabilities:       []string{projectAssistantCapabilityWorkspaceMutate},
 		AcceptanceCriteria: projectToolStringList(args["acceptanceCriteria"]),
-		ApprovalTool:       projectToolRequestProjectPlanApproval,
+		ApprovalTool:       projectToolDefineInitialProjectPlan,
 	}), nil
 }
 
@@ -1543,10 +1218,7 @@ func projectAssistantValidateGrantBearingToolArguments(spec projectAssistantTool
 		// run-local initial-build authority. Argument shape is validated here.
 		_, err := projectAssistantInitialExecutionPlanFromArguments(activeGoal, args)
 		return err
-	case projectToolRequestProjectPlanApproval:
-		_, err := projectAssistantApprovedPlanFromArguments(args)
-		return err
-	case projectToolWriteFile, projectToolApplyPatch, projectToolMkdir:
+	case projectToolApplyPatch:
 		_, err := projectAssistantWriteTargetPaths(spec.Name, args)
 		return err
 	default:

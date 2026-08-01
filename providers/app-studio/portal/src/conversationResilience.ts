@@ -3,8 +3,7 @@ import type { ProjectAssistantRunMode, ProjectMessage } from './types'
 export interface AssistantRun {
   id: string
   status: 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'aborted' | 'failed' | 'interrupted'
-  engineVersion?: 'v2'
-  mode?: ProjectAssistantRunMode
+  mode: ProjectAssistantRunMode
   revision: number
   activeMessageID: string
   clientRequestID?: string
@@ -64,7 +63,7 @@ export function assistantRunStartFingerprint(projectName: string, request: Omit<
 
 export function assistantRunMatchesStartRequest(run: AssistantRun | undefined, request: AssistantRunStartRequest): boolean {
   if (!run || run.clientRequestID !== request.clientRequestID) return false
-  return run.engineVersion === 'v2' && run.mode === request.collaborationMode
+  return run.mode === request.collaborationMode
 }
 
 export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSubmission, user: Pick<ProjectMessage, 'id' | 'content'> | undefined): boolean {
@@ -111,11 +110,7 @@ export function assistantRunTerminal(status: unknown): boolean {
 }
 
 export function assistantRunRequiresLiveControls(run: AssistantRun | null | undefined): run is AssistantRun {
-  return Boolean(run?.engineVersion === 'v2' && !assistantRunTerminal(run.status))
-}
-
-export function assistantRunIsLegacyViewOnly(run: AssistantRun | null | undefined): boolean {
-  return Boolean(run && run.engineVersion !== 'v2' && !assistantRunTerminal(run.status))
+  return Boolean(run && !assistantRunTerminal(run.status))
 }
 
 // Control hydration is deliberately separate from message merge: a reload may

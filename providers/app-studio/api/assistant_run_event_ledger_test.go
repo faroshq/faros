@@ -310,11 +310,11 @@ func newAssistantRunEventLedgerTestStore(t *testing.T, runID string) (*store.Mem
 	}
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	if err := messageStore.SaveAssistantRun(context.Background(), scope, store.AssistantRun{
-		ID:            runID,
-		EngineVersion: store.AssistantEngineVersionV2,
-		Status:        store.AssistantRunStatusRunning,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:        runID,
+		Mode:      store.AssistantRunModeDefault,
+		Status:    store.AssistantRunStatusRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("SaveAssistantRun: %v", err)
 	}

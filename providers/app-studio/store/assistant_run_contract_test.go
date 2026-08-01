@@ -139,7 +139,7 @@ func TestMemoryAndEncryptedAssistantRunPreserveOriginatingUserMessageIDOnRetry(t
 	}
 }
 
-func TestMemoryStoreRejectsSecondNonterminalAssistantRun(t *testing.T) {
+func TestMemoryStoreSaveRejectsSecondNonterminalAssistantRun(t *testing.T) {
 	store := mustDurableAssistantRunStore(t, NewMemoryStore())
 	scope := testAssistantRunScope()
 	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
@@ -195,12 +195,13 @@ func TestMemoryStoreConcurrentCreateAllowsOneNonterminalRun(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreLegacyWritersRejectSecondNonterminalAssistantRun(t *testing.T) {
+func TestMemoryStoreRejectsSecondNonterminalAssistantRun(t *testing.T) {
 	store := NewMemoryStore()
 	scope := testAssistantRunScope()
 	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	if err := store.SaveAssistantRun(context.Background(), scope, AssistantRun{
-		ID:        "legacy-1",
+		ID:        "run-1",
+		Mode:      AssistantRunModeDefault,
 		Status:    AssistantRunStatusRunning,
 		CreatedAt: createdAt,
 		UpdatedAt: createdAt,
@@ -208,7 +209,8 @@ func TestMemoryStoreLegacyWritersRejectSecondNonterminalAssistantRun(t *testing.
 		t.Fatalf("first SaveAssistantRun: %v", err)
 	}
 	if err := store.SaveAssistantRun(context.Background(), scope, AssistantRun{
-		ID:        "legacy-2",
+		ID:        "run-2",
+		Mode:      AssistantRunModeDefault,
 		Status:    AssistantRunStatusPendingInput,
 		CreatedAt: createdAt.Add(time.Minute),
 		UpdatedAt: createdAt.Add(time.Minute),
@@ -217,7 +219,7 @@ func TestMemoryStoreLegacyWritersRejectSecondNonterminalAssistantRun(t *testing.
 	}
 }
 
-func TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID(t *testing.T) {
+func TestMemoryAndEncryptedStoresRejectDuplicateClientRequestID(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		new  func(*testing.T) Store
@@ -237,6 +239,7 @@ func TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID(t *testing
 			createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 			first := AssistantRun{
 				ID:              "run-1",
+				Mode:            AssistantRunModeDefault,
 				Status:          AssistantRunStatusCompleted,
 				ClientRequestID: "request-1",
 				Checkpoint:      json.RawMessage(`{"checkpoint":"first"}`),
@@ -249,6 +252,7 @@ func TestMemoryAndEncryptedStoresRejectDuplicateLegacyClientRequestID(t *testing
 			}
 			if err := store.SaveAssistantRun(context.Background(), scope, AssistantRun{
 				ID:              "run-2",
+				Mode:            AssistantRunModeDefault,
 				Status:          AssistantRunStatusCompleted,
 				ClientRequestID: first.ClientRequestID,
 				CreatedAt:       createdAt.Add(time.Minute),
@@ -377,7 +381,7 @@ func TestMemoryStoreFindsLatestRunAndClientRequest(t *testing.T) {
 	}
 }
 
-func TestMemoryAndEncryptedStoresKeepPausedLegacyRunsResumable(t *testing.T) {
+func TestMemoryAndEncryptedStoresKeepPausedRunsResumable(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		new  func(*testing.T) Store
@@ -396,23 +400,24 @@ func TestMemoryAndEncryptedStoresKeepPausedLegacyRunsResumable(t *testing.T) {
 			store := tt.new(t)
 			scope := testAssistantRunScope()
 			now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
-			legacy := AssistantRun{
-				ID:         "legacy-paused",
+			paused := AssistantRun{
+				ID:         "run-paused",
+				Mode:       AssistantRunModeDefault,
 				Status:     AssistantRunStatusPendingPermission,
 				RequestID:  "permission-1",
-				Checkpoint: json.RawMessage(`{"checkpoint":"legacy"}`),
+				Checkpoint: json.RawMessage(`{"checkpoint":"current"}`),
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
-			if err := store.SaveAssistantRun(ctx, scope, legacy); err != nil {
-				t.Fatalf("SaveAssistantRun legacy paused: %v", err)
+			if err := store.SaveAssistantRun(ctx, scope, paused); err != nil {
+				t.Fatalf("SaveAssistantRun paused: %v", err)
 			}
-			claimed, err := store.ClaimAssistantRun(ctx, scope, legacy.ID, legacy.RequestID, now.Add(time.Minute))
+			claimed, err := store.ClaimAssistantRun(ctx, scope, paused.ID, paused.RequestID, now.Add(time.Minute))
 			if err != nil {
-				t.Fatalf("ClaimAssistantRun legacy paused: %v", err)
+				t.Fatalf("ClaimAssistantRun paused: %v", err)
 			}
 			if claimed.Status != AssistantRunStatusRunning {
-				t.Fatalf("claimed legacy status = %q, want running", claimed.Status)
+				t.Fatalf("claimed status = %q, want running", claimed.Status)
 			}
 		})
 	}
@@ -620,7 +625,7 @@ func testAssistantRun(t *testing.T, id, clientRequestID, activeMessageID string,
 	t.Helper()
 	return withAssistantRunFields(t, AssistantRun{
 		ID:        id,
-		Mode:      AssistantRunModeDiscussion,
+		Mode:      AssistantRunModeDefault,
 		Status:    AssistantRunStatusRunning,
 		CreatedAt: createdAt,
 		UpdatedAt: createdAt,
@@ -632,64 +637,27 @@ func testAssistantRun(t *testing.T, id, clientRequestID, activeMessageID string,
 	})
 }
 
-func TestValidateNewAssistantRunRequiresOriginAndConsistentMode(t *testing.T) {
+func TestValidateNewAssistantRunRequiresV2OriginAndMode(t *testing.T) {
 	user := Message{ID: "user", Role: "user", ActorID: "actor-1"}
 	assistant := Message{ID: "assistant", Role: "assistant"}
-	base := AssistantRun{ID: "run", Mode: AssistantRunModeDiscussion, Status: AssistantRunStatusRunning, ClientRequestID: "request", UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1}
+	base := AssistantRun{ID: "run", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning, ClientRequestID: "request", UserMessageID: user.ID, ActiveMessageID: assistant.ID, Revision: 1}
 	if err := validateNewAssistantRun(user, assistant, base); err != nil {
-		t.Fatalf("valid discussion run: %v", err)
+		t.Fatalf("valid v2 run: %v", err)
 	}
-	for _, mode := range []AssistantRunMode{AssistantRunModeDefault, AssistantRunModePlan} {
-		v2 := base
-		v2.Mode = mode
-		v2.EngineVersion = AssistantEngineVersionV2
-		if err := validateNewAssistantRun(user, assistant, v2); err != nil {
-			t.Fatalf("valid v2 %s run: %v", mode, err)
-		}
+	plan := base
+	plan.Mode = AssistantRunModePlan
+	if err := validateNewAssistantRun(user, assistant, plan); err != nil {
+		t.Fatalf("valid plan run: %v", err)
 	}
 	for name, run := range map[string]AssistantRun{
-		"missing origin":        func() AssistantRun { r := base; r.UserMessageID = ""; return r }(),
-		"mismatched origin":     func() AssistantRun { r := base; r.UserMessageID = "other"; return r }(),
-		"missing mode":          func() AssistantRun { r := base; r.Mode = ""; return r }(),
-		"discussion work item":  func() AssistantRun { r := base; r.WorkItemID = "item"; return r }(),
-		"new without work item": func() AssistantRun { r := base; r.Mode = AssistantRunModeNew; return r }(),
-		"default without v2":    func() AssistantRun { r := base; r.Mode = AssistantRunModeDefault; return r }(),
-		"v2 legacy mode": func() AssistantRun {
-			r := base
-			r.EngineVersion = AssistantEngineVersionV2
-			return r
-		}(),
+		"missing origin":    func() AssistantRun { r := base; r.UserMessageID = ""; return r }(),
+		"mismatched origin": func() AssistantRun { r := base; r.UserMessageID = "other"; return r }(),
+		"missing mode":      func() AssistantRun { r := base; r.Mode = ""; return r }(),
+		"invalid mode":      func() AssistantRun { r := base; r.Mode = "legacy"; return r }(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateNewAssistantRun(user, assistant, run); err == nil {
 				t.Fatal("accepted invalid run")
-			}
-		})
-	}
-	for name, messages := range map[string]struct{ user, assistant Message }{
-		"user role":        {user: Message{ID: user.ID, Role: "assistant", ActorID: user.ActorID}, assistant: assistant},
-		"blank user actor": {user: Message{ID: user.ID, Role: "user", ActorID: "  "}, assistant: assistant},
-		"assistant role":   {user: user, assistant: Message{ID: assistant.ID, Role: "user"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := validateNewAssistantRun(messages.user, messages.assistant, base); err == nil {
-				t.Fatal("accepted invalid messages")
-			}
-		})
-	}
-	mutation := base
-	mutation.Mode, mutation.WorkItemID = AssistantRunModeNew, "item"
-	user.WorkItemID, assistant.WorkItemID = mutation.WorkItemID, mutation.WorkItemID
-	if err := validateNewAssistantRun(user, assistant, mutation); err != nil {
-		t.Fatalf("valid mutation run: %v", err)
-	}
-	for name, messages := range map[string]struct{ user, assistant Message }{
-		"user work item":      {user: Message{ID: user.ID, Role: "user", ActorID: user.ActorID}, assistant: assistant},
-		"assistant work item": {user: user, assistant: Message{ID: assistant.ID, Role: "assistant"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := validateNewAssistantRun(messages.user, messages.assistant, mutation); err == nil {
-				t.Fatal("accepted mutation messages with mismatched work item")
 			}
 		})
 	}

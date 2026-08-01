@@ -107,7 +107,7 @@ func TestSystemPromptCarriesComponentDirectoryContract(t *testing.T) {
 	p.Name = "demo"
 	p.Spec.Template = &aiv1alpha1.ProjectTemplateSpec{Name: "application"}
 
-	prompt := projectSystemPrompt(p, nil)
+	prompt := projectSystemPromptForMode(p, nil, projectAssistantCollaborationModeDefault, false)
 
 	for _, required := range []string{
 		"developmentComponents",
@@ -294,7 +294,7 @@ func TestDevelopmentSyncSchedulingPreservesMutationOrder(t *testing.T) {
 		case projectToolApplyPatch:
 			close(firstEntered)
 			<-releaseFirst
-		case projectToolHydrateWorkspace:
+		case projectToolSelectTemplate:
 			close(secondEntered)
 		}
 		return nil
@@ -305,7 +305,7 @@ func TestDevelopmentSyncSchedulingPreservesMutationOrder(t *testing.T) {
 	if !server.scheduleDevelopmentSyncAfterMutationWithCompletion(id, project, projectToolApplyPatch, func(err error) { firstDone <- err }) {
 		t.Fatal("first development sync was not scheduled")
 	}
-	if !server.scheduleDevelopmentSyncAfterMutationWithCompletion(id, project, projectToolHydrateWorkspace, func(err error) { secondDone <- err }) {
+	if !server.scheduleDevelopmentSyncAfterMutationWithCompletion(id, project, projectToolSelectTemplate, func(err error) { secondDone <- err }) {
 		t.Fatal("second development sync was not scheduled")
 	}
 

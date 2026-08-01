@@ -116,10 +116,14 @@ reconnects without adding another prompt.
 New assistant runs use one sticky collaboration mode: `Default` or `Plan`.
 `Plan` is read-only. `Default` follows the user's request directly and can use
 the current evidence tools and one contextual `apply_patch` source-mutation
-tool; the retired semantic action router, WorkItem promotion flow, whole-file
-write tools, and workspace hydration tool are not part of the current model
-contract. The portal's explicit **Implement plan** action starts a fresh Default
-turn rather than silently changing the mode of a running turn.
+tool. The semantic action router, WorkItem promotion flow, phase-driven inner
+loop, whole-file write tools, and model-facing workspace hydration tool have
+been removed. The portal's explicit **Implement plan** action starts a fresh
+Default turn rather than silently changing the mode of a running turn.
+
+The V2 schema cutover deliberately drops pre-V2 assistant messages, runs,
+events, and WorkItems the first time it is applied. This is a one-time reset of
+the new-product assistant history, not a compatibility migration.
 
 Every model response batch is admitted before dispatch. Tool-call IDs are
 deterministic, duplicate reads collapse, conflicting IDs or effects fail closed,

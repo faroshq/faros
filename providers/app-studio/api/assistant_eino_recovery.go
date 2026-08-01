@@ -410,7 +410,6 @@ type projectEinoAssistantSafeToolErrorMiddleware struct {
 }
 
 var errProjectAssistantPlanRetirement = errors.New("assistant plan retirement failed")
-var errProjectAssistantPlanGrantPersistence = errors.New("assistant plan grant persistence failed")
 
 func (m *projectEinoAssistantSafeToolErrorMiddleware) WrapInvokableToolCall(
 	_ context.Context,
@@ -466,14 +465,6 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 	recovery := ""
 	lowerReason := strings.ToLower(safeReason)
 	switch {
-	case toolName == projectToolWriteFile && strings.Contains(lowerReason, "create-only"):
-		recovery = " Recovery: do not retry write_file for an existing path. Use apply_patch with a small exact replacement after reading the current file."
-	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "oldtext was not found"):
-		recovery = " Recovery: reread the relevant target section, copy a small unique exact oldText anchor, and retry. Do not fall back to write_file."
-	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "matched") && strings.Contains(lowerReason, "times"):
-		recovery = " Recovery: add surrounding context so oldText is unique. Use replaceAll only when every match should change; do not fall back to write_file."
-	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "made no changes"):
-		recovery = " Recovery: provide newText that implements the requested behavior and differs from oldText. Do not verify an unchanged workspace."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorContextNotFound)):
 		recovery = " Recovery: reread the named file around the failed hunk, then retry one contextual patch with current unchanged lines and an @@ anchor when helpful."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorContextAmbiguous)):
@@ -496,7 +487,6 @@ func projectEinoAssistantPropagateToolError(err error) bool {
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, adk.ErrStreamCanceled) ||
 		errors.Is(err, errProjectAssistantPlanRetirement) ||
-		errors.Is(err, errProjectAssistantPlanGrantPersistence) ||
 		apierrors.IsForbidden(err) ||
 		apierrors.IsUnauthorized(err)
 }
