@@ -22,7 +22,7 @@ import (
 )
 
 // productionEnvironment is the environment name the promote API writes.
-const productionEnvironment = "production"
+const productionEnvironment = vibev1alpha1.ProductionEnvironment
 
 // mirrorPromotion converges the session's production checkpoint from the
 // Project's live status. Promotion itself needs no controller — the Project

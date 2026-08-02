@@ -28,7 +28,7 @@ const (
 // instanceClaimResources are the infrastructure instance resources the
 // Project reconciler lifecycles — the dev-capable templates' instanceCRD
 // plurals. Extend as the wizard's template vocabulary grows.
-var instanceClaimResources = []string{"applications", "simplewebapps", "workers"}
+var instanceClaimResources = []string{"applications", "simplewebapps", "workers", "searxngs"}
 
 // runInitCmd applies the provider's in-workspace objects (APIResourceSchemas,
 // APIExport, APIExportEndpointSlice, bind grant) using the workspace-admin

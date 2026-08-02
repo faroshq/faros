@@ -18,11 +18,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	vibev1alpha1 "github.com/faroshq/provider-vibe-studio/apis/vibe/v1alpha1"
 	"github.com/faroshq/provider-vibe-studio/client"
 	"github.com/faroshq/provider-vibe-studio/engine"
 	"github.com/faroshq/provider-vibe-studio/provision"
 	"github.com/faroshq/provider-vibe-studio/session"
 	"github.com/faroshq/provider-vibe-studio/store"
+	"github.com/faroshq/provider-vibe-studio/webtools"
 )
 
 // EinoEngine is the real model harness behind session.Engine: the intake turn
@@ -149,12 +151,16 @@ func (e *EinoEngine) StudioTurn(ctx context.Context, tc session.TurnContext, sta
 		info provision.DevInfo
 		ref  provision.Ref
 	)
+	var search webtools.SearchRef
 	if state.ProjectName != "" {
-		if p, err := cl.GetProject(ctx, state.ProjectName); err == nil && p.Spec.Template != nil {
-			if tmpl, err := cl.GetTemplate(ctx, p.Spec.Template.Name); err == nil {
-				if i, err := provision.ParseDevInfo(tmpl); err == nil {
-					info = i
-					ref = provision.Ref{Resource: i.Resource, Name: state.ProjectName}
+		if p, err := cl.GetProject(ctx, state.ProjectName); err == nil {
+			search = searchRefOf(p)
+			if p.Spec.Template != nil {
+				if tmpl, err := cl.GetTemplate(ctx, p.Spec.Template.Name); err == nil {
+					if i, err := provision.ParseDevInfo(tmpl); err == nil {
+						info = i
+						ref = provision.Ref{Resource: i.Resource, Name: state.ProjectName}
+					}
 				}
 			}
 		}
@@ -162,7 +168,9 @@ func (e *EinoEngine) StudioTurn(ctx context.Context, tc session.TurnContext, sta
 	scope := store.Scope{Tenant: tc.Tenant}
 
 	pc := provision.NewClient(hubBaseURL(), tc.ClusterID, tc.Token, hubInsecure())
-	tools := e.studioTools(scope, pc, tc.SessionID, info, ref)
+	// The web family is always on: looking things up is part of building,
+	// and the search backend is provisioned with the project.
+	tools := append(e.studioTools(scope, pc, tc.SessionID, info, ref), webtools.Tools(pc, search)...)
 
 	sys := "You are the vibe-studio build assistant working on the user's app"
 	if state.Blueprint != nil {
@@ -171,7 +179,10 @@ func (e *EinoEngine) StudioTurn(ctx context.Context, tc session.TurnContext, sta
 	sys += ". The workspace files are the source of truth; write_file/delete_file sync into the " +
 		"live dev sandbox automatically (hot reload). Always read a file before editing it. Keep " +
 		"changes minimal and verify with get_logs when behavior matters. Components and their " +
-		"workspace paths: " + provision.ComponentsText(info.Components) + ". Answer concisely."
+		"workspace paths: " + provision.ComponentsText(info.Components) + ". " +
+		"You have web access: web_search finds pages, web_fetch reads one — use them to check " +
+		"documentation, an API's shape, or a repository page rather than asking the user to paste it. " +
+		"Answer concisely."
 	msgs := []engine.Message{{Role: engine.RoleSystem, Content: sys}}
 	msgs = append(msgs, e.recentTranscript(scope, tc.SessionID, 20)...)
 	msgs = append(msgs, engine.Message{Role: engine.RoleUser, Content: input})
@@ -486,4 +497,19 @@ var blueprintToolSchema = map[string]any{
 			},
 		},
 	},
+}
+
+// searchRefOf finds the project's web-search backend among its bindings.
+func searchRefOf(p *vibev1alpha1.Project) webtools.SearchRef {
+	for _, env := range p.Spec.Environments {
+		if env.Name == vibev1alpha1.ProductionEnvironment {
+			continue
+		}
+		for _, b := range env.Bindings {
+			if b.Name == vibev1alpha1.BindingSearch && b.ResourceRef != nil {
+				return webtools.SearchRef{Resource: b.ResourceRef.Resource, Name: b.ResourceRef.Name}
+			}
+		}
+	}
+	return webtools.SearchRef{}
 }

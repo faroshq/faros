@@ -196,3 +196,46 @@ func TestPromotionViewReportsCurrentImages(t *testing.T) {
 		t.Errorf("component[0] = %+v, want api pinned to its current digest", view.Components[0])
 	}
 }
+
+func TestSearchRefIsFoundByBindingName(t *testing.T) {
+	p := testProject()
+	// A project binds its app and its search backend in the same environment;
+	// each lookup must address its own by name, not by position.
+	p.Spec.Environments[0].Bindings = append(p.Spec.Environments[0].Bindings,
+		vibev1alpha1.ProjectProviderBindingSpec{
+			Name:     vibev1alpha1.BindingSearch,
+			Provider: "infrastructure",
+			Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
+			ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{
+				Name: "shop-4fbc-search", APIVersion: "infrastructure.kedge.faros.sh/v1alpha1",
+				Kind: "Searxng", Resource: "searxngs",
+			},
+		})
+
+	if got := searchRefOf(p); got.Name != "shop-4fbc-search" || got.Resource != "searxngs" {
+		t.Errorf("searchRefOf = %+v, want the searxng instance", got)
+	}
+	// Promotion must still find the app, not the search backend.
+	if dev := developmentBinding(p); dev == nil || dev.ResourceRef.Name != "shop-4fbc" {
+		t.Errorf("developmentBinding = %+v, want the runtime binding", dev)
+	}
+	name, missing, err := promoteProject(p, map[string]string{
+		"web": "ghcr.io/acme/web@sha256:aaa", "api": "ghcr.io/acme/api@sha256:bbb",
+	}, "abc1234")
+	if err != nil || len(missing) > 0 {
+		t.Fatalf("promoteProject: %v missing=%v", err, missing)
+	}
+	if name != "shop-4fbc-prod" {
+		t.Errorf("promoted %q, want the app instance", name)
+	}
+}
+
+func TestSearchInstanceNameFitsNameBudget(t *testing.T) {
+	if got := searchInstanceName("shop"); got != "shop-search" {
+		t.Errorf("searchInstanceName = %q", got)
+	}
+	long := searchInstanceName(strings.Repeat("a", 70))
+	if len(long) > 63 || !strings.HasSuffix(long, "-search") {
+		t.Errorf("searchInstanceName(long) = %q (%d chars)", long, len(long))
+	}
+}

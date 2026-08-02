@@ -249,11 +249,16 @@ func (r *Reconciler) seedRepository(
 	})
 }
 
-// instanceRefOf finds the development runtime binding's instance.
+// instanceRefOf finds the development runtime binding's instance. A project
+// binds more than one instance (the app, its search backend), so the runtime
+// is addressed by binding name rather than by being first.
 func instanceRefOf(p *vibev1alpha1.Project) provision.Ref {
 	for _, env := range p.Spec.Environments {
+		if env.Name == vibev1alpha1.ProductionEnvironment {
+			continue
+		}
 		for _, b := range env.Bindings {
-			if b.Provider == "infrastructure" && b.ResourceRef != nil && b.ResourceRef.Resource != "" {
+			if b.Name == vibev1alpha1.BindingRuntime && b.ResourceRef != nil && b.ResourceRef.Resource != "" {
 				return provision.Ref{Resource: b.ResourceRef.Resource, Name: b.ResourceRef.Name}
 			}
 		}

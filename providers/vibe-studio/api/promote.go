@@ -39,7 +39,7 @@ import (
 // The development environment keeps running: production is a second
 // environment, not a mode flip.
 
-const productionEnvironment = "production"
+const productionEnvironment = vibev1alpha1.ProductionEnvironment
 
 // promoteRequest names the image to run for each buildable component. Keys
 // are component names ("web"), values are fully-qualified image references —
@@ -210,7 +210,7 @@ func promoteProject(p *vibev1alpha1.Project, images map[string]string, revision 
 	}
 
 	binding := vibev1alpha1.ProjectProviderBindingSpec{
-		Name:     "runtime",
+		Name:     vibev1alpha1.BindingRuntime,
 		Provider: "infrastructure",
 		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{
@@ -246,7 +246,9 @@ func developmentBinding(p *vibev1alpha1.Project) *vibev1alpha1.ProjectProviderBi
 			continue
 		}
 		for j, b := range env.Bindings {
-			if b.Provider == "infrastructure" && b.ResourceRef != nil {
+			// By name: a project also binds a search backend, and promoting
+			// that instead of the app would be a spectacular way to fail.
+			if b.Name == vibev1alpha1.BindingRuntime && b.ResourceRef != nil {
 				return &p.Spec.Environments[i].Bindings[j]
 			}
 		}

@@ -816,7 +816,7 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 		return fmt.Errorf("encoding instance values: %w", err)
 	}
 	binding := vibev1alpha1.ProjectProviderBindingSpec{
-		Name:     "runtime",
+		Name:     vibev1alpha1.BindingRuntime,
 		Provider: "infrastructure",
 		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{
@@ -826,6 +826,10 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 			Resource:   info.Resource,
 		},
 		Values: runtime.RawExtension{Raw: raw},
+	}
+	bindings := []vibev1alpha1.ProjectProviderBindingSpec{binding}
+	if search := s.searchBinding(ctx, cl, name); search != nil {
+		bindings = append(bindings, *search)
 	}
 
 	p := &vibev1alpha1.Project{}
@@ -875,9 +879,9 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 		Template:    &vibev1alpha1.ProjectTemplateSpec{Name: bp.Template.Name},
 		Environments: []vibev1alpha1.ProjectEnvironmentSpec{
 			{
-				Name:     "development",
+				Name:     vibev1alpha1.DevelopmentEnvironment,
 				Mode:     vibev1alpha1.ProjectEnvironmentModeLive,
-				Bindings: []vibev1alpha1.ProjectProviderBindingSpec{binding},
+				Bindings: bindings,
 			},
 		},
 	}
@@ -892,6 +896,61 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 	}
 	_, err = cl.ApplyProject(ctx, p)
 	return err
+}
+
+// searchTemplate is the infrastructure Template backing web search: a private
+// SearXNG instance with the JSON API on, reachable only over the data plane.
+const searchTemplate = "searxng"
+
+// searchBinding describes the project's web-search backend.
+//
+// It rides the SAME binding contract as the app, so no new lifecycle code
+// exists anywhere: the Project reconciler creates the instance, mirrors its
+// status, and deletes it with the project, exactly as it does the sandbox.
+// Every project gets one — a builder that cannot look anything up has to ask
+// the user to paste documentation into the chat.
+//
+// Returns nil when the catalog has no searxng template (an older
+// infrastructure provider): a project without search is worse than no
+// project, so this never blocks creation.
+func (s *Server) searchBinding(ctx context.Context, cl *client.Client, project string) *vibev1alpha1.ProjectProviderBindingSpec {
+	tmpl, err := cl.GetTemplate(ctx, searchTemplate)
+	if err != nil {
+		log.Printf("web search unavailable for %s: reading the %s template: %v", project, searchTemplate, err)
+		return nil
+	}
+	info, err := provision.ParseDevInfo(tmpl)
+	if err != nil || info.Resource == "" || info.Kind == "" {
+		log.Printf("web search unavailable for %s: %s template has no instanceCRD", project, searchTemplate)
+		return nil
+	}
+	name := searchInstanceName(project)
+	raw, err := json.Marshal(map[string]any{"name": name, "size": "small"})
+	if err != nil {
+		return nil
+	}
+	return &vibev1alpha1.ProjectProviderBindingSpec{
+		Name:     vibev1alpha1.BindingSearch,
+		Provider: "infrastructure",
+		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
+		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{
+			Name:       name,
+			APIVersion: info.Group + "/" + info.Version,
+			Kind:       info.Kind,
+			Resource:   info.Resource,
+		},
+		Values: runtime.RawExtension{Raw: raw},
+	}
+}
+
+// searchInstanceName keeps the backend beside its project within the
+// 63-character name budget.
+func searchInstanceName(project string) string {
+	const suffix = "-search"
+	if len(project)+len(suffix) <= 63 {
+		return project + suffix
+	}
+	return strings.TrimRight(project[:63-len(suffix)], "-") + suffix
 }
 
 // Instance kedgeMode contract (providers/infrastructure/apis: KedgeModeField).

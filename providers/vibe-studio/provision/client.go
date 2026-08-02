@@ -31,6 +31,9 @@ const (
 	VerbProcess = "process"
 	VerbLog     = "log"
 	VerbRestart = "restart"
+	// VerbProxy forwards a plain HTTP request to an instance's Service. It is
+	// how the studio reaches its private search backend.
+	VerbProxy = "proxy"
 
 	callTimeout = 30 * time.Second
 	maxResponse = 16 << 20
@@ -97,6 +100,37 @@ func (c *Client) dataPlaneURL(ref Ref, verb string) (string, error) {
 		u += "/components/" + url.PathEscape(ref.Component)
 	}
 	return u + "/" + url.PathEscape(verb), nil
+}
+
+// GetPath issues a GET through a data-plane verb that proxies raw HTTP:
+// subpath and query are appended to the verb, so a searxng instance's
+// /search?q=… is reachable without exposing it to the internet.
+func (c *Client) GetPath(ctx context.Context, ref Ref, verb, subpath string, query url.Values) ([]byte, int, error) {
+	u, err := c.dataPlaneURL(ref, verb)
+	if err != nil {
+		return nil, 0, err
+	}
+	if subpath != "" {
+		u += "/" + strings.TrimLeft(subpath, "/")
+	}
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	return body, resp.StatusCode, err
 }
 
 // Call issues one data-plane verb. A non-2xx status is returned, not an error

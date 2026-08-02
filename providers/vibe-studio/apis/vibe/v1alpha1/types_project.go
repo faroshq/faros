@@ -182,6 +182,26 @@ const (
 	ProjectBindingKindProviderResource ProjectBindingKind = "providerResource"
 )
 
+// Environment names vibe-studio writes. Development is created by the wizard;
+// production is appended by promotion.
+const (
+	DevelopmentEnvironment = "development"
+	ProductionEnvironment  = "production"
+)
+
+// Binding names an environment's bindings are addressed by. They are a
+// contract, not labels: the provisioning and promotion paths look the runtime
+// up by name, so a project may carry other bindings beside it.
+const (
+	// BindingRuntime is the app itself — the sandbox in development, the
+	// deployment in production.
+	BindingRuntime = "runtime"
+	// BindingSearch is the project's private web-search backend (a searxng
+	// instance). Every project gets one: a builder that cannot look anything
+	// up sends the user off to paste documentation into the chat.
+	BindingSearch = "search"
+)
+
 type ProjectEnvironmentSpec struct {
 	// Name is a stable environment identifier such as development or production.
 	// +kubebuilder:validation:Required
