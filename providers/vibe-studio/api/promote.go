@@ -108,7 +108,19 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 
 	s.backfillImageInputs(r.Context(), cl, p)
 
-	prodName, missing, err := promoteProject(p, req.Images, sess.Status.LastCommitSHA)
+	// The caller may name images explicitly; anything it leaves out comes
+	// from this project's own build of the committed revision.
+	images := map[string]string{}
+	for k, v := range resolveBuiltImages(r.Context(), cl, p, sess.Status.LastCommitSHA) {
+		images[k] = v
+	}
+	for k, v := range req.Images {
+		if strings.TrimSpace(v) != "" {
+			images[k] = v
+		}
+	}
+
+	prodName, missing, err := promoteProject(p, images, sess.Status.LastCommitSHA)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -116,7 +128,8 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if len(missing) > 0 {
 		// Say exactly what is needed rather than deploying a half-built app.
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":   "no image to promote for: " + strings.Join(missing, ", "),
+			"error": "no image built from " + shortSHA(sess.Status.LastCommitSHA) + " yet for: " +
+				strings.Join(missing, ", ") + " — wait for the build to publish, or name an image explicitly",
 			"missing": missing,
 		})
 		return
@@ -160,6 +173,14 @@ func (s *Server) backfillImageInputs(ctx context.Context, cl *client.Client, p *
 	for i, c := range p.Spec.Development.Components {
 		p.Spec.Development.Components[i].ImageInput = info.ImageInputs[c.Name]
 	}
+}
+
+// shortSHA abbreviates a commit the way git does.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // promoteProject mutates the Project spec so it declares a production
@@ -285,6 +306,9 @@ type promotionComponent struct {
 	Name       string `json:"name"`
 	ImageInput string `json:"imageInput"`
 	Image      string `json:"image,omitempty"`
+	// Built reports that Image came from this project's CI, built from the
+	// commit the workspace is on, rather than from what is already running.
+	Built bool `json:"built"`
 }
 
 // handleGetPromotion describes the project's production environment.
@@ -320,6 +344,15 @@ func (s *Server) handleGetPromotion(w http.ResponseWriter, r *http.Request) {
 		view.CommitSHA = sess.Status.LastCommitSHA
 		view.Committed = sess.Status.LastCommitSHA != "" &&
 			sess.Status.WorkspaceRevision == sess.Status.CommittedRevision
+		// Offer what CI actually built from this commit, so shipping is a
+		// button rather than a copy-paste exercise.
+		built := resolveBuiltImages(r.Context(), cl, p, sess.Status.LastCommitSHA)
+		for i, c := range view.Components {
+			if ref := built[c.Name]; ref != "" {
+				view.Components[i].Image = ref
+				view.Components[i].Built = true
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, view)
 }

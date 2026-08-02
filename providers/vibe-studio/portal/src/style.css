@@ -732,8 +732,8 @@ kedge-provider-vibe-studio .ship-field {
   display: grid;
   grid-template-columns: 5.5rem 1fr;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  gap: 0.15rem 0.5rem;
+  margin-bottom: 0.5rem;
 }
 kedge-provider-vibe-studio .ship-field span {
   font-family: var(--vibe-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -748,3 +748,11 @@ kedge-provider-vibe-studio .ship-msg {
   background: var(--vibe-surface-2);
   font-size: 0.85rem;
 }
+
+kedge-provider-vibe-studio .ship-origin {
+  grid-column: 2;
+  font-style: normal;
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+kedge-provider-vibe-studio .ship-origin.ok { color: var(--vibe-accent); opacity: 0.9; }

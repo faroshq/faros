@@ -387,3 +387,61 @@ func (c *Client) ApplyStudio(ctx context.Context, st *vibev1alpha1.Studio) (*vib
 	}
 	return fromUnstructured[vibev1alpha1.Studio](out)
 }
+
+// packageResource is the code provider's published-artifact record. The
+// PackageController crawls the git host and authors these, so vibe-studio
+// only ever reads them.
+var packageResource = tenant.Resource{
+	GVR:  schema.GroupVersionResource{Group: "code.kedge.faros.sh", Version: "v1alpha1", Resource: "packages"},
+	Kind: "Package", Plural: "Packages", Namespaced: false,
+}
+
+// PackageVersion is one published artifact version.
+type PackageVersion struct {
+	Digest string
+	Tags   []string
+}
+
+// Package is a published artifact stream for one repository component.
+type Package struct {
+	// Repository is the Repository CR the package belongs to.
+	Repository string
+	// Name is the package's name on the host, "<repo>/<component>".
+	Name string
+	// ImageRepository is the pullable registry path, without tag or digest.
+	ImageRepository string
+	Versions        []PackageVersion
+}
+
+// ListPackages returns the workspace's published packages. Reads ride the
+// caller's identity, so a user only ever sees their own workspace's.
+func (c *Client) ListPackages(ctx context.Context) ([]Package, error) {
+	items, err := c.scope.List(ctx, packageResource, "")
+	if unavailable(err) {
+		return nil, ErrResourceUnavailable
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Package, 0, len(items))
+	for i := range items {
+		u := items[i]
+		p := Package{Repository: u.GetLabels()["code.kedge.faros.sh/repository"]}
+		p.Name, _, _ = unstructured.NestedString(u.Object, "status", "packageName")
+		p.ImageRepository, _, _ = unstructured.NestedString(u.Object, "status", "imageRepository")
+		versions, _, _ := unstructured.NestedSlice(u.Object, "status", "versions")
+		for _, v := range versions {
+			vm, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			pv := PackageVersion{}
+			pv.Digest, _ = vm["digest"].(string)
+			tags, _, _ := unstructured.NestedStringSlice(vm, "tags")
+			pv.Tags = tags
+			p.Versions = append(p.Versions, pv)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}

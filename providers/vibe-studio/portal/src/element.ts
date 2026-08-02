@@ -70,6 +70,7 @@ interface PromotionComponent {
   name: string
   imageInput: string
   image?: string
+  built?: boolean
 }
 
 interface PromotionView {
@@ -1153,20 +1154,33 @@ export class VibeStudioElement extends HTMLElement {
     const p = this._promotion
     if (!p) return ''
     const shipped = !!p.instance
-    const blocked = !p.committed
+    const components = p.components || []
+    // Ready to ship when every component has an image to ship: built from
+    // this commit, already running, or typed in by hand.
+    const unresolved = components.filter((c) => !c.image).map((c) => c.name)
+    const blocked = !p.committed || unresolved.length > 0
+    const short = (p.commitSHA || '').slice(0, 7)
     const fields = (p.components || [])
       .map(
         (c) => `<label class="ship-field">
           <span>${esc(c.name)}</span>
           <input type="text" id="ship-image-${esc(cssID(c.name))}" value="${esc(c.image || '')}"
                  placeholder="ghcr.io/org/${esc(c.name)}@sha256:…">
+          <em class="ship-origin ${c.built ? 'ok' : ''}">${
+            c.built
+              ? `built from ${esc(short)}`
+              : p.committed
+                ? `no build for ${esc(short)} yet`
+                : 'waiting for the commit'
+          }</em>
         </label>`,
       )
       .join('')
     return `<section class="ship">
       <h3>Ship to production</h3>
-      <p class="muted">Production runs built images from your repository, alongside the
-      development sandbox. Name the image for each part of the app.</p>
+      <p class="muted">Production runs the images your repository's CI built from the
+      commit you are on, alongside the development sandbox. Override one only if you
+      want to ship something else.</p>
       ${fields || '<p class="muted">This template has nothing to build.</p>'}
       ${
         shipped
@@ -1178,15 +1192,15 @@ export class VibeStudioElement extends HTMLElement {
           : ''
       }
       <div class="row">
-        <button id="ship-go" ${this._busy || blocked || !(p.components || []).length ? 'disabled' : ''}>
+        <button id="ship-go" ${this._busy || blocked || !components.length ? 'disabled' : ''}>
           ${shipped ? 'Update production' : 'Ship it'}
         </button>
         ${
-          blocked
+          !p.committed
             ? '<span class="muted">Waiting for your latest changes to reach git — promotion always ships a commit.</span>'
-            : p.commitSHA
-              ? `<span class="muted">Ships <code>${esc(p.commitSHA.slice(0, 7))}</code></span>`
-              : ''
+            : unresolved.length
+              ? `<span class="muted">Waiting for CI to publish ${unresolved.map(esc).join(', ')} for <code>${esc(short)}</code>.</span>`
+              : `<span class="muted">Ships <code>${esc(short)}</code></span>`
         }
       </div>
       ${this._shipMsg ? `<p class="ship-msg">${esc(this._shipMsg)}</p>` : ''}
