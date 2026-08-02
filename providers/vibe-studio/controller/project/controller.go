@@ -100,6 +100,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Mint the registry credential BEFORE creating instances. Production
+	// pulls private images, and the infrastructure provider bridges the
+	// credential into the runtime namespace only while reconciling the
+	// instance — so a credential written afterwards would not be picked up
+	// until something else touched the instance. Re-derived every pass, so a
+	// rotated git token reaches production on its own.
+	if err := r.ensureRegistryPullSecret(ctx, c, &p); err != nil {
+		return ctrl.Result{}, fmt.Errorf("registry pull secret: %w", err)
+	}
+
 	// Converge: ensure each bound instance exists, then observe it.
 	observed := make(map[string]*unstructured.Unstructured, len(refs))
 	invalid := map[string]string{}
@@ -116,13 +126,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 			return ctrl.Result{}, fmt.Errorf("instance %s/%s: %w", ref.GVR.Resource, ref.Name, err)
 		}
 		observed[ref.Key()] = inst
-	}
-
-	// Production pulls private images: mint the registry credential the
-	// infrastructure provider bridges into the runtime namespace. Re-derived
-	// every pass, so a rotated git token reaches production on its own.
-	if err := r.ensureRegistryPullSecret(ctx, c, &p); err != nil {
-		return ctrl.Result{}, fmt.Errorf("registry pull secret: %w", err)
 	}
 
 	// Converge the code Repository from the spec binding (autoInit creates
