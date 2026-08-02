@@ -16,7 +16,7 @@ spec:
       crd: {}
   - group: agents.kedge.faros.sh
     name: schedules
-    schema: v260724-50c73a4.schedules.agents.kedge.faros.sh
+    schema: v260801-3863009e.schedules.agents.kedge.faros.sh
     storage:
       crd: {}
   - group: agents.kedge.faros.sh
