@@ -148,6 +148,119 @@ func TestContextualPatchUsesUniqueTieredMatchingAndPreservesLineEndings(t *testi
 	}
 }
 
+func TestContextualPatchNormalizesIndependentHunksIntoSourceOrder(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{
+		Path:    "app.txt",
+		Content: "header\nfirst old\nmiddle\nsecond old\nfooter\n",
+	}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.txt
+@@ middle
+-second old
++second new
+@@ header
+-first old
++first new
+*** End Patch`
+	result, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	if err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	if result.Replacements != 2 {
+		t.Fatalf("replacements = %d, want 2", result.Replacements)
+	}
+	assertWorkspaceContent(t, store, scope, "app.txt", "header\nfirst new\nmiddle\nsecond new\nfooter\n")
+}
+
+func TestContextualPatchNormalizesRepeatedAnchorAgainstOriginalSnapshot(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{
+		Path:    "app.jsx",
+		Content: "<header>\n  <h1>Operations Dashboard</h1>\n  <p>Old subtitle</p>\n</header>\n",
+	}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.jsx
+@@   <h1>Operations Dashboard</h1>
+-  <p>Old subtitle</p>
++  <p>New subtitle</p>
+@@   <h1>Operations Dashboard</h1>
++  <h1>Fleet Pulse</h1>
+-  <h1>Operations Dashboard</h1>
+*** End Patch`
+	result, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	if err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	if result.Replacements != 2 {
+		t.Fatalf("replacements = %d, want 2", result.Replacements)
+	}
+	assertWorkspaceContent(t, store, scope, "app.jsx", "<header>\n  <h1>Fleet Pulse</h1>\n  <p>New subtitle</p>\n</header>\n")
+}
+
+func TestContextualPatchNormalizesRepeatedAnchorInSingleHunk(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{
+		Path:    "app.jsx",
+		Content: "<header>\n  <h1>Fleet Pulse</h1>\n  <p>Old subtitle</p>\n</header>\n",
+	}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.jsx
+@@   <h1>Fleet Pulse</h1>
+-  <h1>Fleet Pulse</h1>
+-  <p>Old subtitle</p>
++  <h1>Fleet Command</h1>
++  <p>New subtitle</p>
+*** End Patch`
+	result, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	if err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	if result.Replacements != 1 {
+		t.Fatalf("replacements = %d, want 1", result.Replacements)
+	}
+	assertWorkspaceContent(t, store, scope, "app.jsx", "<header>\n  <h1>Fleet Command</h1>\n  <p>New subtitle</p>\n</header>\n")
+}
+
+func TestContextualPatchAcceptsUnprefixedExactContextLine(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{
+		Path:    "app.css",
+		Content: ".header-sub {\n  color: gray;\n  margin-top: 4px;\n}\n\n.kpi {\n  display: grid;\n}\n",
+	}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.css
+@@ .header-sub {
+   color: gray;
+   margin-top: 4px;
+}
++
++.header-badge {
++  color: blue;
++}
+*** End Patch`
+	if _, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch}); err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	assertWorkspaceContent(t, store, scope, "app.css", ".header-sub {\n  color: gray;\n  margin-top: 4px;\n}\n\n.header-badge {\n  color: blue;\n}\n\n.kpi {\n  display: grid;\n}\n")
+}
+
 func TestContextualPatchRejectsAmbiguousAndMissingContextWithTypedErrors(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
@@ -191,6 +304,12 @@ func TestContextualPatchRejectsAmbiguousAndMissingContextWithTypedErrors(t *test
 			}
 			if tt.wantCode == PatchErrorContextNotFound && !strings.Contains(patchErr.Message, "failed to find the expected lines after line 0:\nmissing") {
 				t.Fatalf("missing-context error did not preserve exact expected lines: %q", patchErr.Message)
+			}
+			if patchErr.ExpectedContext == "" || patchErr.ActualContext == "" {
+				t.Fatalf("patch context = expected %q actual %q, want bounded expected and current excerpts", patchErr.ExpectedContext, patchErr.ActualContext)
+			}
+			if len([]rune(patchErr.ExpectedContext)) > 2_001 || len([]rune(patchErr.ActualContext)) > 2_001 {
+				t.Fatalf("patch context was not bounded: expected=%d actual=%d", len([]rune(patchErr.ExpectedContext)), len([]rune(patchErr.ActualContext)))
 			}
 			assertWorkspaceContent(t, store, scope, "app.txt", "same\nsame\n")
 		})
@@ -371,7 +490,7 @@ func TestContextualPatchTreatsIndentedMarkerTextAsFileContent(t *testing.T) {
 	assertWorkspaceContent(t, store, scope, "README.md", strings.Replace(before, "old\n", "new\n", 1))
 }
 
-func TestValidateCommittablePatchRejectsDeletionSemantics(t *testing.T) {
+func TestValidateCommittablePatchAcceptsAllWorkspaceOperations(t *testing.T) {
 	for name, patch := range map[string]string{
 		"delete": `*** Begin Patch
 *** Delete File: old.txt
@@ -385,9 +504,8 @@ func TestValidateCommittablePatchRejectsDeletionSemantics(t *testing.T) {
 *** End Patch`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			var patchErr *PatchError
-			if err := ValidateCommittablePatch(patch); !errors.As(err, &patchErr) || patchErr.Code != PatchErrorInvalidPatch {
-				t.Fatalf("error = %#v, want invalid_patch", err)
+			if err := ValidateCommittablePatch(patch); err != nil {
+				t.Fatalf("ValidateCommittablePatch returned %v", err)
 			}
 		})
 	}
@@ -401,6 +519,22 @@ func TestValidateCommittablePatchRejectsDeletionSemantics(t *testing.T) {
 *** End Patch`); err != nil {
 		t.Fatalf("add/update patch rejected: %v", err)
 	}
+}
+
+func TestContextualPatchAcceptsUnprefixedAddFileContent(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	patch := `*** Begin Patch
+*** Add File: src/App.css
+:root {
+  --surface: white;
+}
+*** End Patch`
+
+	if _, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch}); err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	assertWorkspaceContent(t, store, scope, "src/App.css", ":root {\n  --surface: white;\n}\n")
 }
 
 func assertWorkspaceContent(t *testing.T, store *FileStore, scope Scope, path, want string) {

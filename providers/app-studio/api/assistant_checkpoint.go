@@ -68,6 +68,7 @@ type projectAssistantCheckpointState struct {
 	RepeatedActionToolName    string                                           `json:"repeatedActionToolName,omitempty"`
 	RepeatedActionCount       int                                              `json:"repeatedActionCount,omitempty"`
 	PatchFailureCount         int                                              `json:"patchFailureCount,omitempty"`
+	FailedPatchFingerprints   map[string]uint64                                `json:"failedPatchFingerprints,omitempty"`
 	PatchRecoveryPath         string                                           `json:"patchRecoveryPath,omitempty"`
 	PatchRecoveryReadComplete bool                                             `json:"patchRecoveryReadComplete,omitempty"`
 	RuntimeWarmupAttempts     int                                              `json:"runtimeWarmupAttempts,omitempty"`
@@ -104,11 +105,12 @@ type projectAssistantEinoCheckpointState struct {
 }
 
 type projectAssistantResumeRequest struct {
-	RequestID          string         `json:"requestID"`
-	Decision           string         `json:"decision,omitempty"`
-	Answer             string         `json:"answer,omitempty"`
-	AssistantMessageID string         `json:"-"`
-	EditedArguments    map[string]any `json:"editedArguments,omitempty"`
+	RequestID          string                                    `json:"requestID"`
+	Decision           string                                    `json:"decision,omitempty"`
+	Answer             string                                    `json:"answer,omitempty"`
+	Answers            map[string]projectAssistantFollowUpAnswer `json:"answers,omitempty"`
+	AssistantMessageID string                                    `json:"-"`
+	EditedArguments    map[string]any                            `json:"editedArguments,omitempty"`
 }
 
 type projectAssistantResumeResponse struct {
@@ -392,11 +394,11 @@ func projectAssistantFollowUpForEinoInterrupt(requestID string, info *projectEin
 	if info == nil {
 		return projectAssistantFollowUp{ID: requestID}
 	}
-	questions := normalizeProjectAssistantStringList(info.Questions)
+	questions := normalizeProjectAssistantFollowUpQuestions(info.Questions)
 	return projectAssistantFollowUp{
 		ID:         requestID,
 		ToolCallID: strings.TrimSpace(info.ToolCallID),
-		Questions:  questions,
+		Questions:  cloneProjectAssistantFollowUpQuestions(questions),
 		Prompt:     strings.TrimSpace(info.Prompt),
 	}
 }
@@ -538,7 +540,7 @@ func preflightProjectAssistantResume(
 		}
 	}
 	if state.Eino != nil && state.Eino.InterruptType == projectAssistantInterruptTypeFollowUp {
-		if strings.TrimSpace(req.Answer) == "" {
+		if strings.TrimSpace(req.Answer) == "" && len(req.Answers) == 0 {
 			return projectAssistantCheckpointState{}, "", newValidationError("answer is required")
 		}
 		return state, "", nil
@@ -958,7 +960,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	callbacksClosed = true
 	assistantText := assistantContent.String()
 	metadataToolCalls := append([]projectToolCallStreamEvent(nil), metadataState.toolCalls...)
-	out.Progress = metadataState.progressSnapshot(time.Now().UTC())
+	out.Progress = metadataState.progressSnapshot(time.Now().UTC(), len(projectAssistantActionFeedFromToolCalls(metadataToolCalls)) > 0)
 	callbackMu.Unlock()
 	persistMetadata(ctx, nil)
 	if persistErr := getSnapshotErr(); persistErr != nil {

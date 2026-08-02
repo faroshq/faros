@@ -314,11 +314,48 @@ func projectAssistantPreviewInspectionAssertions(value any) ([]projectAssistantP
 		return nil, err
 	}
 	var assertions []projectAssistantPreviewInspectionAssertion
-	if err := json.Unmarshal(raw, &assertions); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&assertions); err != nil {
 		return nil, errors.New("preview assertions are invalid")
 	}
 	if len(assertions) > 12 {
 		return nil, errors.New("preview inspection accepts at most 12 assertions")
+	}
+	for index := range assertions {
+		assertion := &assertions[index]
+		assertion.Kind = strings.TrimSpace(assertion.Kind)
+		assertion.Text = strings.TrimSpace(assertion.Text)
+		assertion.Role = strings.TrimSpace(assertion.Role)
+		assertion.Name = strings.TrimSpace(assertion.Name)
+		switch assertion.Kind {
+		case "text_present":
+			if assertion.Text == "" || assertion.Role != "" || assertion.Name != "" || assertion.Min != nil || assertion.Max != nil {
+				return nil, fmt.Errorf("preview assertion %d: text_present requires only text and optional exact", index+1)
+			}
+		case "role_present", "role_count":
+			if assertion.Role == "" {
+				return nil, fmt.Errorf("preview assertion %d: %s requires role", index+1, assertion.Kind)
+			}
+			// Models commonly call the accessible-name filter "text". Accept
+			// that unambiguous spelling at App Studio's boundary and send the
+			// browser worker its canonical `name` field.
+			if assertion.Name == "" && assertion.Text != "" {
+				assertion.Name = assertion.Text
+				assertion.Text = ""
+			}
+			if assertion.Text != "" {
+				return nil, fmt.Errorf("preview assertion %d: use name, not text, to filter a role", index+1)
+			}
+			if assertion.Kind == "role_present" && (assertion.Min != nil || assertion.Max != nil) {
+				return nil, fmt.Errorf("preview assertion %d: role_present does not accept min or max", index+1)
+			}
+			if assertion.Min != nil && assertion.Max != nil && *assertion.Min > *assertion.Max {
+				return nil, fmt.Errorf("preview assertion %d: min cannot exceed max", index+1)
+			}
+		default:
+			return nil, fmt.Errorf("preview assertion %d: unsupported kind %q", index+1, assertion.Kind)
+		}
 	}
 	return assertions, nil
 }

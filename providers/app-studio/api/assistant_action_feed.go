@@ -26,6 +26,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 // projectAssistantToolDisclosureMinimal keeps the action feed opaque: product
@@ -138,6 +140,10 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 	}
 	if status == projectAssistantActionFeedStatusFailed || status == projectAssistantActionFeedStatusRejected {
 		item.Diagnostic = projectAssistantActionFeedDiagnostic(id, errText)
+		if projectToolBaseName(name) == projectToolInspectDevelopmentPreview && strings.TrimSpace(errText) == "" {
+			item.Diagnostic.Category = "runtime"
+			item.Diagnostic.Message = "Browser inspection did not verify the preview. Review the rendered, console, and assertion evidence."
+		}
 	}
 	if projectAssistantToolDisclosureMinimal {
 		return item
@@ -422,7 +428,30 @@ func projectAssistantActionSafeTarget(value string) string {
 
 func projectAssistantActionFeedDiagnostic(id, rawError string) *projectAssistantActionDiagnostic {
 	category := projectAssistantActionDiagnosticCategory(rawError)
-	message := map[string]string{
+	message := projectAssistantActionDiagnosticMessage(category, rawError)
+	sum := sha256.Sum256([]byte(id))
+	return &projectAssistantActionDiagnostic{
+		Category:    category,
+		Message:     message,
+		ReferenceID: "action-" + hex.EncodeToString(sum[:6]),
+	}
+}
+
+func projectAssistantActionDiagnosticMessage(category, raw string) string {
+	value := strings.ToLower(raw)
+	if category == "validation" {
+		switch {
+		case strings.Contains(value, string(workspace.PatchErrorContextNotFound)):
+			return "The file changed or the patch context did not match. App Studio will reread it before retrying."
+		case strings.Contains(value, string(workspace.PatchErrorContextAmbiguous)):
+			return "The patch matched more than one location and needs more surrounding context."
+		case strings.Contains(value, string(workspace.PatchErrorStrategyChange)):
+			return "That patch already failed against this workspace version and must be revised before retrying."
+		case strings.Contains(value, "numeric unified-diff hunk headers"):
+			return "The patch used line-number hunk headers, which this contextual editor does not accept."
+		}
+	}
+	return map[string]string{
 		"timeout":    "The action did not finish before its time limit.",
 		"permission": "App Studio did not have permission to complete this action.",
 		"validation": "The action could not run because its input was not valid.",
@@ -430,12 +459,6 @@ func projectAssistantActionFeedDiagnostic(id, rawError string) *projectAssistant
 		"provider":   "A connected provider could not complete this action.",
 		"unknown":    "App Studio could not complete this action.",
 	}[category]
-	sum := sha256.Sum256([]byte(id))
-	return &projectAssistantActionDiagnostic{
-		Category:    category,
-		Message:     message,
-		ReferenceID: "action-" + hex.EncodeToString(sum[:6]),
-	}
 }
 
 func projectAssistantActionDiagnosticCategory(raw string) string {

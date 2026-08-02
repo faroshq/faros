@@ -52,8 +52,8 @@ test('inspects a real page and classifies page errors', async (t) => {
   assert.ok(broken.console.some((entry) => entry.level === 'pageerror' && entry.message.includes('render failed')))
 
   const socket = await inspector.inspect({ url: `http://127.0.0.1:${port}/socket` })
-  assert.equal(socket.status, 'failed')
-  assert.equal(socket.failureKind, 'application')
+  assert.equal(socket.status, 'succeeded')
+  assert.equal(socket.failureKind, undefined)
   assert.ok(socket.network.some((entry) => entry.method === 'WEBSOCKET' && entry.failure === 'blocked WebSocket connection'))
   assert.equal(socketUpgrades, 0)
 })

@@ -29,6 +29,9 @@ import (
 // local development. It must not be used as a silent production fallback.
 type MemoryStore struct {
 	mu                sync.RWMutex
+	assistantThreads  map[Scope]map[string]AssistantThread
+	assistantTurns    map[Scope]map[string]map[string]AssistantTurn
+	threadEvents      map[Scope]map[string][]AssistantThreadEvent
 	messages          map[Scope]map[string]Message
 	assistantRuns     map[Scope]map[string]AssistantRun
 	assistantEvents   map[Scope]map[string][]AssistantRunEvent
@@ -43,6 +46,9 @@ type projectBootstrapPermit struct {
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
+		assistantThreads:  map[Scope]map[string]AssistantThread{},
+		assistantTurns:    map[Scope]map[string]map[string]AssistantTurn{},
+		threadEvents:      map[Scope]map[string][]AssistantThreadEvent{},
 		messages:          map[Scope]map[string]Message{},
 		assistantRuns:     map[Scope]map[string]AssistantRun{},
 		assistantEvents:   map[Scope]map[string][]AssistantRunEvent{},
@@ -109,7 +115,7 @@ func (s *MemoryStore) GetAssistantApprovalPreference(_ context.Context, scope Sc
 	if preference, ok := s.approvalModes[scope][actor]; ok {
 		return preference, nil
 	}
-	return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeAutoApprove}, nil
+	return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeOnRequest}, nil
 }
 
 func (s *MemoryStore) SetAssistantApprovalPreference(_ context.Context, scope Scope, preference AssistantApprovalPreference) (AssistantApprovalPreference, error) {

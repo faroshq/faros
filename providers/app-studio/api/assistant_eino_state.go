@@ -38,6 +38,7 @@ const (
 )
 
 const projectEinoAssistantMaxTrackedReads = 128
+const projectEinoAssistantMaxFailedPatchFingerprints = 32
 
 type projectAssistantApprovedPlan struct {
 	Goal               string    `json:"goal,omitempty"`
@@ -103,6 +104,7 @@ type projectEinoAssistantRunState struct {
 	repeatedActionToolName    string
 	repeatedActionCount       int
 	patchFailureCount         int
+	failedPatchFingerprints   map[string]uint64
 	patchRecoveryPath         string
 	patchRecoveryReadComplete bool
 	runtimeWarmupAttempts     int
@@ -429,6 +431,10 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.repeatedActionToolName = projectToolBaseName(state.RepeatedActionToolName)
 	s.repeatedActionCount = min(max(state.RepeatedActionCount, 0), projectEinoAssistantRepeatedActionLimit)
 	s.patchFailureCount = min(max(state.PatchFailureCount, 0), projectEinoAssistantRepeatedActionLimit)
+	s.failedPatchFingerprints = projectEinoAssistantRestoreFailedPatchFingerprints(
+		state.FailedPatchFingerprints,
+		s.sourceMutationRevision,
+	)
 	if recoveryPath, err := workspace.CleanProjectPath(state.PatchRecoveryPath); err == nil {
 		s.patchRecoveryPath = recoveryPath
 		s.patchRecoveryReadComplete = state.PatchRecoveryReadComplete
@@ -591,7 +597,7 @@ func (s *projectEinoAssistantRunState) ExecutionPlanComplete() bool {
 	}
 	for index, step := range s.planProgress.Steps {
 		if step.Status != "completed" ||
-			strings.TrimSpace(step.Content) != strings.TrimSpace(s.executionPlan.Steps[index]) {
+			strings.TrimSpace(step.Content) != projectEinoAssistantTodoProgressLabel(s.executionPlan.Steps[index]) {
 			return false
 		}
 	}
@@ -612,7 +618,7 @@ func (s *projectEinoAssistantRunState) CompleteExecutionPlan() {
 	}
 	for _, content := range s.executionPlan.Steps {
 		completed.Steps = append(completed.Steps, projectAssistantPlanStep{
-			Content: strings.TrimSpace(content),
+			Content: projectEinoAssistantTodoProgressLabel(content),
 			Status:  "completed",
 		})
 	}
@@ -635,6 +641,7 @@ func (s *projectEinoAssistantRunState) RecordSourceMutation() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sourceMutationRevision++
+	s.failedPatchFingerprints = nil
 	if s.developmentSyncRevision != s.sourceMutationRevision {
 		s.developmentSyncRevision = s.sourceMutationRevision
 		s.developmentSyncStatus = "unknown"
@@ -881,7 +888,7 @@ func (s *projectEinoAssistantRunState) CompletionEvidence() projectAssistantComp
 	for index, step := range s.planProgress.Steps {
 		if !planComplete ||
 			step.Status != "completed" ||
-			strings.TrimSpace(step.Content) != strings.TrimSpace(s.executionPlan.Steps[index]) {
+			strings.TrimSpace(step.Content) != projectEinoAssistantTodoProgressLabel(s.executionPlan.Steps[index]) {
 			planComplete = false
 			break
 		}
@@ -1214,6 +1221,72 @@ func (s *projectEinoAssistantRunState) RecordPatchResult(successful bool) {
 		return
 	}
 	s.patchFailureCount = min(s.patchFailureCount+1, projectEinoAssistantRepeatedActionLimit)
+}
+
+func (s *projectEinoAssistantRunState) PatchFingerprint(patch string) (string, uint64, bool) {
+	if s == nil {
+		return "", 0, false
+	}
+	normalized := strings.TrimSpace(strings.ReplaceAll(patch, "\r\n", "\n"))
+	digest := sha256.Sum256([]byte(normalized))
+	fingerprint := hex.EncodeToString(digest[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revision := s.sourceMutationRevision
+	failedRevision, found := s.failedPatchFingerprints[fingerprint]
+	return fingerprint, revision, found && failedRevision == revision
+}
+
+func (s *projectEinoAssistantRunState) RecordFailedPatchFingerprint(fingerprint string, revision uint64) {
+	if s == nil || strings.TrimSpace(fingerprint) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revision != s.sourceMutationRevision {
+		return
+	}
+	if s.failedPatchFingerprints == nil {
+		s.failedPatchFingerprints = map[string]uint64{}
+	}
+	if _, exists := s.failedPatchFingerprints[fingerprint]; !exists && len(s.failedPatchFingerprints) >= projectEinoAssistantMaxFailedPatchFingerprints {
+		keys := make([]string, 0, len(s.failedPatchFingerprints))
+		for key := range s.failedPatchFingerprints {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		delete(s.failedPatchFingerprints, keys[0])
+	}
+	s.failedPatchFingerprints[fingerprint] = revision
+}
+
+func projectEinoAssistantRestoreFailedPatchFingerprints(values map[string]uint64, revision uint64) map[string]uint64 {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for fingerprint, failedRevision := range values {
+		fingerprint = strings.TrimSpace(fingerprint)
+		if len(fingerprint) != sha256.Size*2 || failedRevision != revision {
+			continue
+		}
+		if _, err := hex.DecodeString(fingerprint); err != nil {
+			continue
+		}
+		keys = append(keys, fingerprint)
+	}
+	sort.Strings(keys)
+	if len(keys) > projectEinoAssistantMaxFailedPatchFingerprints {
+		keys = keys[:projectEinoAssistantMaxFailedPatchFingerprints]
+	}
+	restored := make(map[string]uint64, len(keys))
+	for _, fingerprint := range keys {
+		restored[fingerprint] = revision
+	}
+	if len(restored) == 0 {
+		return nil
+	}
+	return restored
 }
 
 func (s *projectEinoAssistantRunState) StartPatchRecovery(path string) {
@@ -1558,6 +1631,7 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		RepeatedActionToolName:    s.repeatedActionToolName,
 		RepeatedActionCount:       s.repeatedActionCount,
 		PatchFailureCount:         s.patchFailureCount,
+		FailedPatchFingerprints:   projectEinoAssistantRestoreFailedPatchFingerprints(s.failedPatchFingerprints, s.sourceMutationRevision),
 		PatchRecoveryPath:         s.patchRecoveryPath,
 		PatchRecoveryReadComplete: s.patchRecoveryReadComplete,
 		RuntimeWarmupAttempts:     s.runtimeWarmupAttempts,

@@ -339,7 +339,7 @@ func TestMemoryStoreProjectBootstrapPermitIsSingleUseAndBound(t *testing.T) {
 		t.Fatalf("deleted permit authorized=%t err=%v", authorized, err)
 	}
 	preference, err := s.GetAssistantApprovalPreference(ctx, scope, "actor-a")
-	if err != nil || preference.Mode != AssistantApprovalModeAutoApprove {
+	if err != nil || preference.Mode != AssistantApprovalModeOnRequest {
 		t.Fatalf("deleted preference=%#v err=%v", preference, err)
 	}
 }

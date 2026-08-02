@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	projectAssistantRunToolCallEventType   = "tool_call"
-	projectAssistantRunToolResultEventType = "tool_result"
-	projectAssistantRunEventPageSize       = 500
+	projectAssistantRunToolRequestEventType = "tool_request"
+	projectAssistantRunToolCallEventType    = "tool_call"
+	projectAssistantRunToolResultEventType  = "tool_result"
+	projectAssistantRunEventPageSize        = 500
 )
 
 var (
@@ -62,13 +63,16 @@ type projectAssistantRunEventLedger struct {
 }
 
 type projectAssistantRunToolCallState struct {
-	ToolName   string
-	ArgsDigest string
-	Arguments  json.RawMessage
-	Read       bool
-	Effect     bool
-	Attempts   int
-	Outcome    *projectAssistantRunToolCallOutcome
+	ToolName          string
+	ArgsDigest        string
+	Arguments         json.RawMessage
+	RequestArgsDigest string
+	Read              bool
+	Effect            bool
+	Requested         bool
+	Dispatched        bool
+	Attempts          int
+	Outcome           *projectAssistantRunToolCallOutcome
 }
 
 // projectAssistantRunToolCallToken binds a post-dispatch result to the exact
@@ -146,6 +150,128 @@ func newProjectAssistantRunEventLedger(
 	}
 }
 
+// RecordToolRequest durably captures the model-authored call before argument,
+// policy, or permission validation. It does not authorize backend dispatch;
+// BeginToolCall records that separate admission boundary after validation.
+func (l *projectAssistantRunEventLedger) RecordToolRequest(
+	ctx context.Context,
+	callID string,
+	spec projectAssistantToolSpec,
+	args any,
+) (projectAssistantRunToolCallDecision, error) {
+	callID = strings.TrimSpace(callID)
+	toolName := projectAssistantToolKey(spec.Name)
+	if l == nil || l.store == nil || strings.TrimSpace(l.runID) == "" {
+		return projectAssistantRunToolCallDecision{}, fmt.Errorf("assistant run tool ledger is not configured")
+	}
+	if callID == "" || toolName == "" {
+		return projectAssistantRunToolCallDecision{}, fmt.Errorf("assistant run tool call id and name are required")
+	}
+	canonicalArgs, digest, err := projectAssistantRunToolCallDigest(toolName, args)
+	if err != nil {
+		return projectAssistantRunToolCallDecision{}, err
+	}
+	token := projectAssistantRunToolCallToken{
+		CallID:     callID,
+		ToolName:   toolName,
+		ArgsDigest: digest,
+		Read:       spec.Risk == projectAssistantToolRiskRead,
+		Effect:     projectAssistantToolHasEffect(spec),
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for {
+		if err := l.refreshLocked(ctx); err != nil {
+			return projectAssistantRunToolCallDecision{}, err
+		}
+		state := l.calls[callID]
+		if state != nil {
+			if err := projectAssistantRunToolRequestStateMatches(state, token); err != nil {
+				return projectAssistantRunToolCallDecision{}, err
+			}
+			if state.Outcome != nil {
+				outcome := *state.Outcome
+				if err := l.ensureToolConversationLocked(ctx, callID, toolName, canonicalArgs, max(state.Attempts, 1), &outcome); err != nil {
+					return projectAssistantRunToolCallDecision{}, err
+				}
+				return projectAssistantRunToolCallDecision{Replay: &outcome}, nil
+			}
+			if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, max(state.Attempts, 1)); err != nil {
+				return projectAssistantRunToolCallDecision{}, err
+			}
+			return projectAssistantRunToolCallDecision{Token: token}, nil
+		}
+
+		payload, err := json.Marshal(projectAssistantRunToolCallPayload{
+			Arguments: canonicalArgs,
+			Read:      token.Read,
+			Effect:    token.Effect,
+		})
+		if err != nil {
+			return projectAssistantRunToolCallDecision{}, fmt.Errorf("encode assistant run tool request event: %w", err)
+		}
+		if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, 1); err != nil {
+			return projectAssistantRunToolCallDecision{}, err
+		}
+		event := store.AssistantRunEvent{
+			RunID:      l.runID,
+			Type:       projectAssistantRunToolRequestEventType,
+			CallID:     callID,
+			ToolName:   toolName,
+			ArgsDigest: digest,
+			Payload:    payload,
+		}
+		saved, err := l.store.AppendAssistantRunEvent(ctx, l.scope, event, l.lastSequence)
+		if errors.Is(err, store.ErrAssistantRunEventConflict) {
+			continue
+		}
+		if err != nil {
+			return projectAssistantRunToolCallDecision{}, fmt.Errorf("append assistant run tool request event: %w", err)
+		}
+		if err := l.applyEventLocked(saved); err != nil {
+			return projectAssistantRunToolCallDecision{}, err
+		}
+		return projectAssistantRunToolCallDecision{Token: token}, nil
+	}
+}
+
+func projectAssistantRunToolRequestStateMatches(state *projectAssistantRunToolCallState, token projectAssistantRunToolCallToken) error {
+	digest := state.RequestArgsDigest
+	if digest == "" {
+		digest = state.ArgsDigest
+	}
+	if state.ToolName != token.ToolName || digest != token.ArgsDigest {
+		return fmt.Errorf(
+			"%w: call %q was already recorded as %s (%s)",
+			errProjectAssistantRunToolCallIDConflict,
+			token.CallID,
+			state.ToolName,
+			digest,
+		)
+	}
+	if state.Read != token.Read || state.Effect != token.Effect {
+		return fmt.Errorf("%w: call %q changed risk classification", errProjectAssistantRunToolCallIDConflict, token.CallID)
+	}
+	return nil
+}
+
+func projectAssistantRunToolCallStateMatches(state *projectAssistantRunToolCallState, token projectAssistantRunToolCallToken) error {
+	if state.ToolName != token.ToolName || state.ArgsDigest != token.ArgsDigest {
+		return fmt.Errorf(
+			"%w: call %q was already admitted as %s (%s)",
+			errProjectAssistantRunToolCallIDConflict,
+			token.CallID,
+			state.ToolName,
+			state.ArgsDigest,
+		)
+	}
+	if state.Read != token.Read || state.Effect != token.Effect {
+		return fmt.Errorf("%w: call %q changed risk classification", errProjectAssistantRunToolCallIDConflict, token.CallID)
+	}
+	return nil
+}
+
 // BeginToolCall durably records a call before dispatch. A completed exact call
 // is replayed. Reusing an ID for different input is rejected. An interrupted
 // read may be retried because it has no side effect; an interrupted effect is
@@ -184,28 +310,53 @@ func (l *projectAssistantRunEventLedger) BeginToolCall(
 		}
 		state := l.calls[callID]
 		if state != nil {
-			if state.ToolName != token.ToolName || state.ArgsDigest != token.ArgsDigest {
-				return projectAssistantRunToolCallDecision{}, fmt.Errorf(
-					"%w: call %q was already recorded as %s (%s)",
-					errProjectAssistantRunToolCallIDConflict,
-					callID,
-					state.ToolName,
-					state.ArgsDigest,
-				)
-			}
-			if state.Read != token.Read || state.Effect != token.Effect {
-				return projectAssistantRunToolCallDecision{}, fmt.Errorf(
-					"%w: call %q changed risk classification",
-					errProjectAssistantRunToolCallIDConflict,
-					callID,
-				)
+			if state.Requested && !state.Dispatched {
+				if state.ToolName != token.ToolName || state.Read != token.Read || state.Effect != token.Effect {
+					return projectAssistantRunToolCallDecision{}, fmt.Errorf(
+						"%w: call %q changed tool identity or risk classification",
+						errProjectAssistantRunToolCallIDConflict,
+						callID,
+					)
+				}
+			} else if err := projectAssistantRunToolCallStateMatches(state, token); err != nil {
+				return projectAssistantRunToolCallDecision{}, err
 			}
 			if state.Outcome != nil {
 				outcome := *state.Outcome
-				if err := l.ensureToolConversationLocked(ctx, callID, toolName, canonicalArgs, state.Attempts, &outcome); err != nil {
+				if err := l.ensureToolConversationLocked(ctx, callID, toolName, canonicalArgs, max(state.Attempts, 1), &outcome); err != nil {
 					return projectAssistantRunToolCallDecision{}, err
 				}
 				return projectAssistantRunToolCallDecision{Replay: &outcome}, nil
+			}
+			if state.Requested && !state.Dispatched {
+				payload, err := json.Marshal(projectAssistantRunToolCallPayload{
+					Arguments: canonicalArgs,
+					Read:      token.Read,
+					Effect:    token.Effect,
+					Attempt:   1,
+				})
+				if err != nil {
+					return projectAssistantRunToolCallDecision{}, fmt.Errorf("encode assistant run tool call event: %w", err)
+				}
+				event := store.AssistantRunEvent{
+					RunID:      l.runID,
+					Type:       projectAssistantRunToolCallEventType,
+					CallID:     callID,
+					ToolName:   toolName,
+					ArgsDigest: digest,
+					Payload:    payload,
+				}
+				saved, err := l.store.AppendAssistantRunEvent(ctx, l.scope, event, l.lastSequence)
+				if errors.Is(err, store.ErrAssistantRunEventConflict) {
+					continue
+				}
+				if err != nil {
+					return projectAssistantRunToolCallDecision{}, fmt.Errorf("append assistant run tool call event: %w", err)
+				}
+				if err := l.applyEventLocked(saved); err != nil {
+					return projectAssistantRunToolCallDecision{}, err
+				}
+				return projectAssistantRunToolCallDecision{Token: token}, nil
 			}
 			if err := l.appendToolCallConversationLocked(ctx, callID, toolName, canonicalArgs, state.Attempts); err != nil {
 				return projectAssistantRunToolCallDecision{}, err
@@ -463,7 +614,9 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 			event.Sequence,
 		)
 	}
-	if event.Type != projectAssistantRunToolCallEventType && event.Type != projectAssistantRunToolResultEventType {
+	if event.Type != projectAssistantRunToolRequestEventType &&
+		event.Type != projectAssistantRunToolCallEventType &&
+		event.Type != projectAssistantRunToolResultEventType {
 		l.lastSequence = event.Sequence
 		return nil
 	}
@@ -475,6 +628,32 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 	}
 	state := l.calls[callID]
 	switch event.Type {
+	case projectAssistantRunToolRequestEventType:
+		var payload projectAssistantRunToolCallPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || !json.Valid(payload.Arguments) || payload.Attempt != 0 {
+			return fmt.Errorf("%w: invalid tool request payload at sequence %d", errProjectAssistantRunToolLedgerCorrupt, event.Sequence)
+		}
+		_, persistedDigest, err := projectAssistantRunToolCallDigest(toolName, payload.Arguments)
+		if err != nil || persistedDigest != digest {
+			return fmt.Errorf("%w: tool request digest mismatch at sequence %d", errProjectAssistantRunToolLedgerCorrupt, event.Sequence)
+		}
+		if state == nil {
+			l.calls[callID] = &projectAssistantRunToolCallState{
+				ToolName:          toolName,
+				ArgsDigest:        digest,
+				Arguments:         append(json.RawMessage(nil), payload.Arguments...),
+				RequestArgsDigest: digest,
+				Read:              payload.Read,
+				Effect:            payload.Effect,
+				Requested:         true,
+			}
+		} else if state.ToolName != toolName ||
+			(state.RequestArgsDigest != "" && state.RequestArgsDigest != digest) ||
+			state.Read != payload.Read || state.Effect != payload.Effect {
+			return fmt.Errorf("%w: call %q has conflicting durable requests", errProjectAssistantRunToolLedgerCorrupt, callID)
+		} else {
+			state.Requested = true
+		}
 	case projectAssistantRunToolCallEventType:
 		var payload projectAssistantRunToolCallPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || !json.Valid(payload.Arguments) || payload.Attempt < 1 {
@@ -491,8 +670,17 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 				Arguments:  append(json.RawMessage(nil), payload.Arguments...),
 				Read:       payload.Read,
 				Effect:     payload.Effect,
+				Dispatched: true,
 				Attempts:   payload.Attempt,
 			}
+		} else if !state.Dispatched && state.Requested && state.Outcome == nil && payload.Attempt == 1 {
+			if state.ToolName != toolName || state.Read != payload.Read || state.Effect != payload.Effect {
+				return fmt.Errorf("%w: call %q changed tool identity or risk classification", errProjectAssistantRunToolLedgerCorrupt, callID)
+			}
+			state.ArgsDigest = digest
+			state.Arguments = append(json.RawMessage(nil), payload.Arguments...)
+			state.Dispatched = true
+			state.Attempts = payload.Attempt
 		} else if state.ToolName != toolName || state.ArgsDigest != digest || state.Read != payload.Read || state.Effect != payload.Effect {
 			return fmt.Errorf("%w: call %q has conflicting durable inputs", errProjectAssistantRunToolLedgerCorrupt, callID)
 		} else if state.Outcome != nil || !state.Read || payload.Attempt != state.Attempts+1 {

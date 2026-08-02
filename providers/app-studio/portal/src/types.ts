@@ -27,11 +27,56 @@ export interface ProjectMessage {
 export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'failed' | 'interrupted' | 'aborted'
 export type ProjectAssistantAbortReason = 'interrupted' | 'replaced' | 'budget_limited' | 'iteration_limited'
 export type ProjectAssistantRunMode = 'default' | 'plan'
-export type ProjectAssistantApprovalMode = 'always_ask' | 'auto_approve'
+export type ProjectAssistantApprovalMode = 'on_request' | 'always_ask' | 'never'
 
 export interface ProjectAssistantApprovalPreference {
   mode: ProjectAssistantApprovalMode
   updatedAt?: string
+}
+
+export type ProjectAssistantThreadStatus = 'idle' | 'active' | 'archived'
+export type ProjectAssistantTurnStatus = 'in_progress' | 'completed' | 'interrupted' | 'failed'
+
+export interface ProjectAssistantThread {
+  id: string
+  title?: string
+  status: ProjectAssistantThreadStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectAssistantTurn {
+  id: string
+  threadID: string
+  clientUserMessageID: string
+  mode: ProjectAssistantRunMode
+  approvalMode: ProjectAssistantApprovalMode
+  status: ProjectAssistantTurnStatus
+  createdAt: string
+  updatedAt: string
+  error?: { message?: string; errorInfo?: string }
+}
+
+export interface ProjectAssistantThreadEvent {
+  threadID: string
+  turnID?: string
+  sequence: number
+  type: string
+  itemID?: string
+  requestID?: string
+  payload?: Record<string, unknown>
+  createdAt: string
+}
+
+export interface ProjectAssistantThreadItem {
+  id: string
+  turnID?: string
+  type: 'userMessage' | 'agentMessage' | 'dynamicToolCall' | string
+  status: 'in_progress' | 'completed' | 'failed' | string
+  content?: string
+  data?: Record<string, unknown>
+  sequence: number
+  createdAt: string
 }
 
 export interface ProjectAssistantRun {
@@ -141,13 +186,30 @@ export interface ProjectAssistantUIInterruptRequest {
   kind?: 'permission' | 'follow_up'
   surfaceId?: string
   description?: string
-  questions?: string[]
+  questions?: Array<ProjectAssistantFollowUpQuestion | string>
   status?: 'pending' | 'resolved'
   action?: {
     runId: string
     requestId: string
     assistantMessageId?: string
   }
+}
+
+export interface ProjectAssistantFollowUpQuestion {
+  id: string
+  header?: string
+  question: string
+  isOther?: boolean
+  options?: ProjectAssistantFollowUpQuestionOption[]
+}
+
+export interface ProjectAssistantFollowUpQuestionOption {
+  label: string
+  description: string
+}
+
+export interface ProjectAssistantFollowUpAnswer {
+  answers: string[]
 }
 
 export interface ProjectAssistantResumeResponse {

@@ -87,7 +87,11 @@ const (
 )
 
 const (
-	AssistantApprovalModeAlwaysAsk   AssistantApprovalMode = "always_ask"
+	AssistantApprovalModeOnRequest AssistantApprovalMode = "on_request"
+	AssistantApprovalModeAlwaysAsk AssistantApprovalMode = "always_ask"
+	AssistantApprovalModeNever     AssistantApprovalMode = "never"
+	// AssistantApprovalModeAutoApprove is accepted only while the legacy run
+	// API remains during the Thread/Turn cutover. New Turns never persist it.
 	AssistantApprovalModeAutoApprove AssistantApprovalMode = "auto_approve"
 )
 
@@ -172,6 +176,18 @@ type Page struct {
 // Store is the App Studio message persistence boundary.
 type Store interface {
 	EnsureSchema(ctx context.Context) error
+	CreateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread, events []AssistantThreadEvent) (AssistantThread, error)
+	GetAssistantThread(ctx context.Context, scope Scope, threadID string) (AssistantThread, error)
+	ListAssistantThreads(ctx context.Context, scope Scope, actorID string, includeArchived bool, limit int, cursor string) (AssistantThreadPage, error)
+	UpdateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread) (AssistantThread, error)
+	CreateAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error)
+	GetAssistantTurn(ctx context.Context, scope Scope, threadID, turnID string) (AssistantTurn, error)
+	FindAssistantTurnByClientUserMessageID(ctx context.Context, scope Scope, threadID, clientUserMessageID string) (AssistantTurn, error)
+	ActiveAssistantTurn(ctx context.Context, scope Scope, threadID string) (AssistantTurn, error)
+	SaveAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn) error
+	SaveAssistantTurnWithEvent(ctx context.Context, scope Scope, turn AssistantTurn, event AssistantThreadEvent, expectedSequence int64) error
+	AppendAssistantThreadEvent(ctx context.Context, scope Scope, event AssistantThreadEvent, expectedSequence int64) (AssistantThreadEvent, error)
+	ListAssistantThreadEvents(ctx context.Context, scope Scope, threadID string, afterSequence int64, limit int) ([]AssistantThreadEvent, error)
 	AppendMessage(ctx context.Context, scope Scope, msg Message) error
 	ListMessages(ctx context.Context, scope Scope, limit int, cursor string) (Page, error)
 	LoadRecentMessages(ctx context.Context, scope Scope, limit int) ([]Message, error)
@@ -254,10 +270,10 @@ func canonicalAssistantConversationPayload(payload json.RawMessage) ([]byte, err
 func NormalizeAssistantApprovalMode(mode AssistantApprovalMode) (AssistantApprovalMode, error) {
 	mode = AssistantApprovalMode(strings.ToLower(strings.TrimSpace(string(mode))))
 	if mode == "" {
-		return AssistantApprovalModeAlwaysAsk, nil
+		return AssistantApprovalModeOnRequest, nil
 	}
 	switch mode {
-	case AssistantApprovalModeAlwaysAsk, AssistantApprovalModeAutoApprove:
+	case AssistantApprovalModeOnRequest, AssistantApprovalModeAlwaysAsk, AssistantApprovalModeNever, AssistantApprovalModeAutoApprove:
 		return mode, nil
 	default:
 		return "", fmt.Errorf("%w: %q", ErrAssistantApprovalModeInvalid, mode)

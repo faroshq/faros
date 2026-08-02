@@ -38,6 +38,8 @@ const assistantCodexTerminalParitySchemaVersion = "assistant-codex-terminal-v2"
 const assistantConversationSchemaVersion = "assistant-conversation-items-v1"
 const assistantConversationProjectStreamSchemaVersion = "assistant-conversation-project-stream-v1"
 const assistantConversationIdentitySchemaVersion = "assistant-conversation-identity-v2"
+const assistantThreadSchemaVersion = "assistant-thread-turn-item-v1"
+const assistantApprovalPolicySchemaVersion = "assistant-approval-policy-v2"
 
 const lockMessageSchemaMigrations = `SELECT pg_advisory_xact_lock(870408091945886937)`
 
@@ -134,10 +136,78 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := ensureSchemaVersion(ctx, tx, assistantConversationIdentitySchemaVersion, assistantConversationIdentitySchemaStatements()...); err != nil {
 		return err
 	}
+	if err := ensureSchemaVersion(ctx, tx, assistantThreadSchemaVersion, assistantThreadSchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantApprovalPolicySchemaVersion, assistantApprovalPolicySchemaStatements()...); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
 	return nil
+}
+
+func assistantApprovalPolicySchemaStatements() []string {
+	return []string{
+		`DROP TABLE IF EXISTS app_studio_assistant_approval_preferences`,
+		`CREATE TABLE app_studio_assistant_approval_preferences (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			actor_id text NOT NULL, approval_mode text NOT NULL CHECK (approval_mode IN ('on_request','always_ask','never')),
+			updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
+		)`,
+		`DO $$
+		DECLARE constraint_name text;
+		BEGIN
+			FOR constraint_name IN
+				SELECT conname FROM pg_constraint
+				WHERE conrelid = 'app_studio_assistant_runs'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%approval_mode%'
+			LOOP
+				EXECUTE format('ALTER TABLE app_studio_assistant_runs DROP CONSTRAINT %I', constraint_name);
+			END LOOP;
+			ALTER TABLE app_studio_assistant_runs ADD CONSTRAINT app_studio_assistant_runs_approval_mode_check
+				CHECK (approval_mode IN ('on_request','always_ask','never','auto_approve'));
+		END $$`,
+	}
+}
+
+func assistantThreadSchemaStatements() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_threads (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			thread_id text NOT NULL, title text NOT NULL DEFAULT '', status text NOT NULL CHECK (status IN ('idle','active','archived')),
+			actor_id text NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, thread_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS app_studio_assistant_threads_scope_updated_idx
+			ON app_studio_assistant_threads (org_uuid, workspace_uuid, project_name, project_uid, updated_at DESC, thread_id DESC)`,
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_turns (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			thread_id text NOT NULL, turn_id text NOT NULL, actor_id text NOT NULL, client_user_message_id text NOT NULL,
+			mode text NOT NULL CHECK (mode IN ('default','plan')),
+			approval_mode text NOT NULL CHECK (approval_mode IN ('on_request','always_ask','never')),
+			status text NOT NULL CHECK (status IN ('in_progress','completed','interrupted','failed')),
+			checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb, terminal_error jsonb NOT NULL DEFAULT '{}'::jsonb,
+			created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, thread_id, turn_id),
+			UNIQUE (org_uuid, workspace_uuid, project_name, project_uid, thread_id, client_user_message_id),
+			FOREIGN KEY (org_uuid, workspace_uuid, project_name, project_uid, thread_id)
+				REFERENCES app_studio_assistant_threads (org_uuid, workspace_uuid, project_name, project_uid, thread_id) ON DELETE CASCADE
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS app_studio_assistant_turns_active_idx
+			ON app_studio_assistant_turns (org_uuid, workspace_uuid, project_name, project_uid, thread_id)
+			WHERE status = 'in_progress'`,
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_thread_events (
+			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+			thread_id text NOT NULL, turn_id text NOT NULL DEFAULT '', sequence bigint NOT NULL CHECK (sequence > 0),
+			event_type text NOT NULL, item_id text NOT NULL DEFAULT '', request_id text NOT NULL DEFAULT '',
+			payload jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL,
+			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, thread_id, sequence),
+			FOREIGN KEY (org_uuid, workspace_uuid, project_name, project_uid, thread_id)
+				REFERENCES app_studio_assistant_threads (org_uuid, workspace_uuid, project_name, project_uid, thread_id) ON DELETE CASCADE
+		)`,
+	}
 }
 
 // assistantV2CutoverSchemaStatements intentionally discards pre-V2 assistant
@@ -486,7 +556,7 @@ func (s *PostgresStore) GetAssistantApprovalPreference(ctx context.Context, scop
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, actor,
 	).Scan(&preference.ActorID, &mode, &preference.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeAutoApprove}, nil
+		return AssistantApprovalPreference{ActorID: actor, Mode: AssistantApprovalModeOnRequest}, nil
 	}
 	if err != nil {
 		return AssistantApprovalPreference{}, fmt.Errorf("get assistant approval preference: %w", err)

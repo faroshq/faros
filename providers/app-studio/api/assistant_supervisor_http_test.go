@@ -121,6 +121,83 @@ func TestProjectAssistantTerminalContentPreservesFinalProse(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantTerminalContentDoesNotRewriteModelProse(t *testing.T) {
+	server := &Server{}
+	const want = "Committed and pushed the changes; CI is running."
+	got := server.projectAssistantRunTerminalContent(
+		context.Background(),
+		store.Scope{},
+		store.AssistantRun{},
+		want,
+		"",
+		nil,
+		projectAssistantCompletionEvidence{
+			SourceMutationRevision:  2,
+			CommitRequired:          true,
+			LatestMutationCommitted: false,
+		},
+		true,
+	)
+	if got != want {
+		t.Fatalf("terminal content = %q, want unmodified model prose", got)
+	}
+}
+
+func TestProjectAssistantPreviewEvidenceDoesNotRewriteModelProse(t *testing.T) {
+	const want = "The preview is verified."
+	got := projectAssistantGroundPreviewTerminalContent(
+		want,
+		[]projectToolCallStreamEvent{{
+			ID:     "inspect-1",
+			Name:   projectToolInspectDevelopmentPreview,
+			Status: "failed",
+		}},
+	)
+	if got != want {
+		t.Fatalf("terminal content = %q, want unmodified model prose", got)
+	}
+}
+
+func TestProjectAssistantSuccessfulPreviewDoesNotAppendBoilerplate(t *testing.T) {
+	const want = "The app is fully functional."
+	got := projectAssistantGroundPreviewTerminalContent(
+		want,
+		[]projectToolCallStreamEvent{{
+			ID:     "inspect-1",
+			Name:   projectToolInspectDevelopmentPreview,
+			Status: "succeeded",
+		}},
+	)
+	if got != want {
+		t.Fatalf("terminal content = %q, want unmodified model prose", got)
+	}
+}
+
+func TestProjectAssistantTerminalPlanUsesExplicitCompletionEvidence(t *testing.T) {
+	plan := &projectAssistantPlanSnapshot{Steps: []projectAssistantPlanStep{
+		{Content: "Verify development runtime and inspect preview", Status: "pending"},
+		{Content: "Commit finished files", Status: "pending"},
+	}}
+	evidence := projectAssistantCompletionEvidence{PlanComplete: false, LatestMutationVerified: true, LatestMutationCommitted: true}
+	failedInspection := []projectToolCallStreamEvent{{
+		ID: "inspect-1", Name: projectToolInspectDevelopmentPreview, Status: "failed",
+	}}
+	if projectAssistantTerminalPlanGrounded(plan, failedInspection, evidence) {
+		t.Fatal("plan completed without explicit completion evidence")
+	}
+	succeededInspection := append(failedInspection, projectToolCallStreamEvent{
+		ID: "inspect-2", Name: projectToolInspectDevelopmentPreview, Status: "succeeded",
+	})
+	evidence.PlanComplete = true
+	if !projectAssistantTerminalPlanGrounded(plan, succeededInspection, evidence) {
+		t.Fatal("explicitly completed plan was not accepted")
+	}
+	evidence.LatestMutationCommitted = false
+	if !projectAssistantTerminalPlanGrounded(plan, succeededInspection, evidence) {
+		t.Fatal("keyword-derived commit state overrode explicit completion evidence")
+	}
+}
+
 func TestProjectAssistantEffectAwareTerminalContentDisclosesSuccessfulNonSourceMutations(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -322,7 +399,7 @@ func TestProjectAssistantProgressMetadataIsBoundedAndPreserved(t *testing.T) {
 		}, want: true},
 		{name: "unknown version", progress: map[string]any{"version": 2, "messages": []any{"Update"}, "workedDurationMs": 1}},
 		{name: "unknown field", progress: map[string]any{"version": 1, "messages": []any{"Update"}, "workedDurationMs": 1, "raw": "secret"}},
-		{name: "empty messages", progress: map[string]any{"version": 1, "messages": []any{}, "workedDurationMs": 1}},
+		{name: "empty messages", progress: map[string]any{"version": 1, "messages": []any{}, "messageSequences": []any{}, "workedDurationMs": 1}, want: true},
 		{name: "control text", progress: map[string]any{"version": 1, "messages": []any{"unsafe\u0000text"}, "workedDurationMs": 1}},
 		{name: "oversized text", progress: map[string]any{"version": 1, "messages": []any{strings.Repeat("x", projectEinoAssistantProgressMaxBytes+1)}, "workedDurationMs": 1}},
 		{name: "oversized duration", progress: map[string]any{"version": 1, "messages": []any{"Update"}, "workedDurationMs": projectAssistantWorkedDurationMaxMS + 1}},
@@ -357,9 +434,84 @@ func TestProjectAssistantProgressSnapshotTracksActiveWorkOnly(t *testing.T) {
 		workedDuration:     40 * time.Second,
 		workSegmentStarted: started,
 	}
-	progress := state.progressSnapshot(started.Add(43*time.Second + 400*time.Millisecond))
+	progress := state.progressSnapshot(started.Add(43*time.Second+400*time.Millisecond), false)
 	if progress == nil || progress.Version != 1 || progress.WorkedDurationMS != 83_400 {
 		t.Fatalf("progress = %#v, want 83.4 seconds of active work", progress)
+	}
+}
+
+func TestProjectAssistantActionOnlyTerminalTurnPersistsWorkedDuration(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1", ProjectUID: "test-project-uid-project-1"}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModePlan, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "inspect it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
+	msgStore := store.NewMemoryStore()
+	if _, err := msgStore.CreateAssistantRun(ctx, scope, user, assistant, run); err != nil {
+		t.Fatalf("CreateAssistantRun: %v", err)
+	}
+	supervisor := newProjectAssistantSupervisor(ctx, msgStore)
+	accumulator, err := supervisor.Attach(scope, run, assistant)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	state := &projectAssistantDurableMetadataState{
+		status:         "Completed",
+		workedDuration: 2400 * time.Millisecond,
+	}
+	state.upsertToolCall(projectToolCallStreamEvent{ID: "call-read", Name: projectToolReadFile, Status: "succeeded"})
+	server := NewWithWorkspace(nil, msgStore, nil, "", false)
+	completed := store.AssistantRunStatusCompleted
+	if err := server.persistProjectAssistantDurableMetadata(ctx, accumulator, workspace.Scope{}, state, &completed); err != nil {
+		t.Fatalf("persist terminal metadata: %v", err)
+	}
+
+	page, err := msgStore.ListMessages(ctx, scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for _, message := range page.Items {
+		if message.ID != assistant.ID {
+			continue
+		}
+		progress, ok := projectAssistantProgressSnapshotFromMetadata(message.Metadata[projectAssistantMetadataProgress])
+		if !ok || len(progress.Messages) != 0 || len(progress.MessageSequences) != 0 || progress.WorkedDurationMS != 2400 {
+			t.Fatalf("action-only terminal progress = %#v, want empty trace prose and 2400ms worked duration", progress)
+		}
+		encoded, err := json.Marshal(progress)
+		if err != nil {
+			t.Fatalf("marshal action-only terminal progress: %v", err)
+		}
+		if !strings.Contains(string(encoded), `"messages":[]`) {
+			t.Fatalf("action-only terminal progress JSON = %s, want an empty message array", encoded)
+		}
+		if actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed]); len(actions) != 1 {
+			t.Fatalf("action-only terminal actions = %#v, want one durable action", actions)
+		}
+		return
+	}
+	t.Fatal("assistant message was not persisted")
+}
+
+func TestProjectAssistantWorkedDurationExcludesPendingPermissionPause(t *testing.T) {
+	firstSegmentStarted := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	pending := &projectAssistantDurableMetadataState{
+		workedDuration:     10 * time.Second,
+		workSegmentStarted: firstSegmentStarted,
+	}
+	pending.upsertToolCall(projectToolCallStreamEvent{ID: "call-read", Name: projectToolReadFile, Status: "succeeded"})
+	pendingSnapshot := pending.progressSnapshot(firstSegmentStarted.Add(5*time.Second), true)
+	if pendingSnapshot == nil || pendingSnapshot.WorkedDurationMS != 15_000 {
+		t.Fatalf("pending snapshot = %#v, want 15 seconds", pendingSnapshot)
+	}
+
+	resumeStarted := firstSegmentStarted.Add(2 * time.Hour)
+	resumed := &projectAssistantDurableMetadataState{workSegmentStarted: resumeStarted}
+	resumed.restoreTrace(pendingSnapshot, projectAssistantActionFeedFromToolCalls(pending.toolCalls))
+	completedSnapshot := resumed.progressSnapshot(resumeStarted.Add(3*time.Second), true)
+	if completedSnapshot == nil || completedSnapshot.WorkedDurationMS != 18_000 {
+		t.Fatalf("resumed snapshot = %#v, want 18 seconds without the permission pause", completedSnapshot)
 	}
 }
 
@@ -387,7 +539,7 @@ func TestProjectAssistantProgressSnapshotOrdersProseAndActionLifecycle(t *testin
 		Status: "succeeded",
 	})
 
-	progress := state.progressSnapshot(time.Now().UTC())
+	progress := state.progressSnapshot(time.Now().UTC(), false)
 	if progress == nil || !reflect.DeepEqual(progress.MessageSequences, []int{1, 3}) {
 		t.Fatalf("progress sequences = %#v, want [1 3]", progress)
 	}
@@ -429,7 +581,7 @@ func TestProjectAssistantProgressSnapshotContinuesOrderingAfterResume(t *testing
 		Status: "succeeded",
 	})
 
-	progress := state.progressSnapshot(time.Now().UTC())
+	progress := state.progressSnapshot(time.Now().UTC(), false)
 	if progress == nil || !reflect.DeepEqual(progress.MessageSequences, []int{1, 3}) {
 		t.Fatalf("resumed progress sequences = %#v, want [1 3]", progress)
 	}
@@ -463,7 +615,7 @@ func TestProjectAssistantProgressSnapshotKeepsHiddenActionSequenceWhenItFails(t 
 	if len(actions) != 1 || actions[0].Sequence != 1 || actions[0].Status != projectAssistantActionFeedStatusFailed {
 		t.Fatalf("failed custom action = %#v, want original sequence 1", actions)
 	}
-	progress := state.progressSnapshot(time.Now().UTC())
+	progress := state.progressSnapshot(time.Now().UTC(), false)
 	if progress == nil || !reflect.DeepEqual(progress.MessageSequences, []int{2}) {
 		t.Fatalf("progress sequences = %#v, want [2]", progress)
 	}

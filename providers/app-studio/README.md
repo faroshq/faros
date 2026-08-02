@@ -115,13 +115,14 @@ old throwaway behavior, set `APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true`.
 ## Resilient assistant conversations
 
 Once a Project and its first user message exist, App Studio owns assistant work
-on the provider lifecycle rather than on an HTTP request. `POST
-/api/projects/{project}/messages` creates durable user, assistant, and run
-records, and clients recover with `GET .../assistant/runs/latest` then subscribe
-to `GET .../assistant/{run}/stream`. Closing a stream only removes that
-subscriber; it never cancels the worker. The portal uses this contract for the
-first project turn as well as later messages, so a refresh during generation
-reconnects without adding another prompt.
+on the provider lifecycle rather than on an HTTP request. Its public contract is
+Thread → Turn → Item: clients create or select an assistant thread, `POST
+.../assistant/threads/{thread}/turns`, materialize the transcript with `GET
+.../threads/{thread}/items`, and follow typed events from `GET
+.../threads/{thread}/events`. Event sequence numbers and `Last-Event-ID` make
+reconnection incremental. Closing an SSE connection only removes that
+subscriber; it never cancels the Eino worker. The former `/messages`, latest-run,
+resume, stop, and snapshot-stream routes are no longer public.
 
 A message submitted while the current run is working is durable steering for
 that same run, not a replacement run. The request names the expected run and is
@@ -141,9 +142,10 @@ loop, whole-file write tools, and model-facing workspace hydration tool have
 been removed. The portal's explicit **Implement plan** action starts a fresh
 Default turn rather than silently changing the mode of a running turn.
 
-The V2 schema cutover deliberately drops pre-V2 assistant messages, runs,
-events, and WorkItems the first time it is applied. This is a one-time reset of
-the new-product assistant history, not a compatibility migration.
+The Thread/Turn/Item cutover intentionally starts with no canonical threads.
+Pre-cutover assistant history is not projected into the new public transcript.
+Legacy run/message rows remain an internal Eino persistence bridge during the
+cutover and are not exposed to clients.
 
 Every model response batch is admitted before dispatch. Tool-call IDs are
 deterministic, malformed calls and conflicting IDs fail closed, and the model's
@@ -157,14 +159,17 @@ also bind the visible tool contracts to a stable schema digest. The ledger
 provides idempotency within the active run and between concurrent workers; it
 is not a provider-restart continuation mechanism.
 
-An encrypted, append-only conversation-item stream separately records bounded
-user and assistant messages, tool calls/results, steering, compaction summaries,
-interruption markers, and optional conversation-scoped rollout-budget state. New turns reconstruct model context from the latest
-persisted compaction plus subsequent items instead of dropping tool evidence.
-Reasoning, secrets, and transient preview-console payloads are not stored there.
+The encrypted, append-only thread event stream records user and assistant items,
+tool calls, plans, steering, approval/input requests, and lifecycle transitions.
+Thread and turn rows are materialized projections; a turn's terminal projection
+and terminal event commit atomically. New turns reconstruct model context from
+the latest persisted compaction plus subsequent conversation evidence instead
+of dropping tool results. Reasoning, secrets, and transient preview-console
+payloads are not stored there.
 
-Source edits use contextual Add/Update patches only. Delete and move operations
-remain unavailable until the repository commit bridge can preserve deletions.
+Source edits use contextual Add/Update/Delete patches. Moves are represented as
+an add/update of the destination plus deletion of the source. The repository
+commit bridge carries the complete atomic upsert/delete bundle to provider-code.
 Failed contextual patches reopen only the affected read coverage so the model
 can reread current source and retry without rediscovering unrelated evidence.
 If rollback after an I/O failure is incomplete, the actual remaining paths are
@@ -198,29 +203,32 @@ owns the project, server-side reservations reject external workspace hydration,
 template switching, manual sync, and deletion; matching disabled portal controls
 are only the UX layer over that server boundary.
 
-This remains a single-replica design: execution cannot continue across a
-provider restart. On the next read, an orphaned running run becomes `interrupted`
-with `abortReason: interrupted` and an interruption marker, while permission
-and input checkpoints stay resumable. Stop
-first persists `stopping`, then asks Eino to
-cancel gracefully without retaining a terminal checkpoint. Assistant starts
-use the durable `POST /messages` boundary; the legacy POST-SSE project and
-message endpoints have been removed. Clients must not depend on token replay:
-the remaining GET stream provides complete revisioned snapshots, and a
-reconnect receives the latest one.
+This remains a single-replica execution design: work cannot continue across a
+provider restart. Recovery marks an orphaned active turn `interrupted`, while
+durable permission and input checkpoints remain resumable. Interrupt first
+persists the internal stopping transition, then asks Eino to cancel gracefully.
+Clients recover from the canonical item projection and resume the typed event
+stream after their last sequence; they do not depend on token replay.
 
 Every effect is re-admitted at the Stop-serialized supervisor boundary against
 the run's durable actor digest. The model-visible project/repository snapshot
 and executable tool adapters share one per-sample request snapshot, so a tool
 cannot execute against an older request view than the one shown to the model.
 
-The public run lifecycle is `pending_permission`, `pending_input`, `running`,
-`stopping`, `completed`, `failed`, and `interrupted` (`aborted` is accepted only
-for rows written before the Codex terminal-state cutover). Model, provider, and
-budget failures are `failed` with a structured `error`; explicit interruption,
-provider process loss, and replacement are `interrupted`. The portal renders
-terminal errors separately from real assistant prose and re-enables input for
-every terminal state.
+The public turn lifecycle is `in_progress`, `completed`, `failed`, and
+`interrupted`. Approval and structured-input waits are typed items/events within
+an in-progress turn, not extra public lifecycle states. Model, provider, and
+budget failures are `failed` with structured error data; explicit interruption
+and provider process loss are `interrupted`. The portal renders terminal errors
+separately from real assistant prose and re-enables input for every terminal
+state.
+
+Approval defaults to `on_request`: routine workspace work proceeds, while
+consequential external effects and repository commits ask. `always_ask` asks
+before every state-changing/external action, and `never` denies actions that
+need authority. A plan communicates intended work and progress; it never grants
+permission. Default collaboration mode has no structured follow-up tool, while
+Plan mode may request structured input and remains read-only.
 
 Lifecycle logs contain only organization, workspace, project, run, revision,
 and status fields. They intentionally omit prompt text, assistant content,
@@ -254,9 +262,11 @@ the directory; the binary defaults to a temp directory, while the Helm chart
 mounts a persistent volume at `/var/lib/kedge-app-studio/workspaces`.
 
 The assistant-facing workspace tools are App Studio local tools. Provider-code
-remains the git-source boundary: `commit_project_files` reads selected workspace
-files and delegates the actual commit to the Code provider's `code__commit_files`
-tool.
+remains the git-source boundary: `commit_project_files` reads changed workspace
+files, represents missing dirty paths as deletions, and delegates the atomic
+upsert/delete commit to the Code provider's `code__commit_files` tool. A
+workspace move is persisted as an upsert of the destination and deletion of the
+source in the same repository commit.
 
 ## Development runtime
 

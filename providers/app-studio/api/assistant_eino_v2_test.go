@@ -138,6 +138,109 @@ func TestEinoV2MutationReplayDispatchesExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestEinoV2RejectsIdenticalFailedPatchAtSameRevision(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-failed-patch-fingerprint")
+	var calls int
+	backend := projectAssistantToolFunc{
+		spec: projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite},
+		call: func(context.Context, projectAssistantToolCallRequest) (string, error) {
+			calls++
+			return "", &workspace.PatchError{
+				Code:            workspace.PatchErrorContextNotFound,
+				Path:            "src/App.tsx",
+				Hunk:            1,
+				Message:         "expected source was not found",
+				ExpectedContext: "old",
+				ActualContext:   "current",
+			}
+		},
+	}
+	runState := newProjectEinoAssistantRunState()
+	tool := projectEinoAssistantTool{server: h.server, tool: backend, req: h.req, runState: runState}
+	args := map[string]any{"patch": "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"}
+
+	first, err := tool.invokeAllowedTool(context.Background(), "call-first", backend.Spec(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstResult struct {
+		Status string               `json:"status"`
+		Error  workspace.PatchError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(first), &firstResult); err != nil {
+		t.Fatalf("decode first failure: %v; result=%q", err, first)
+	}
+	if firstResult.Status != "failed" || firstResult.Error.Code != workspace.PatchErrorContextNotFound || firstResult.Error.SourceMutationRevision != 0 {
+		t.Fatalf("first result = %#v", firstResult)
+	}
+	if !strings.Contains(first, `"sourceMutationRevision":0`) {
+		t.Fatalf("first result omitted the current source mutation revision: %s", first)
+	}
+
+	checkpoint := runState.CheckpointState()
+	restored := newProjectEinoAssistantRunState()
+	restored.RestoreCheckpointState(checkpoint)
+	tool.runState = restored
+	secondArgs := map[string]any{"patch": strings.ReplaceAll(projectToolString(args["patch"]), "\n", "\r\n") + "\r\n"}
+	second, err := tool.invokeAllowedTool(context.Background(), "call-second", backend.Spec(), secondArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondResult struct {
+		Status string               `json:"status"`
+		Error  workspace.PatchError `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(second), &secondResult); err != nil {
+		t.Fatalf("decode duplicate failure: %v; result=%q", err, second)
+	}
+	if secondResult.Error.Code != workspace.PatchErrorStrategyChange || calls != 1 {
+		t.Fatalf("second result = %#v, backend calls = %d; want strategy change without redispatch", secondResult, calls)
+	}
+
+	changedArgs := map[string]any{"patch": strings.Replace(projectToolString(args["patch"]), "+new", "+different", 1)}
+	if _, err := tool.invokeAllowedTool(context.Background(), "call-changed", backend.Spec(), changedArgs); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("backend calls after changed patch = %d, want 2", calls)
+	}
+	restored.RecordSourceMutation()
+	if _, err := tool.invokeAllowedTool(context.Background(), "call-new-revision", backend.Spec(), args); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("backend calls after revision advance = %d, want 3", calls)
+	}
+}
+
+func TestEinoV2MoveTracksSourceAndDestinationAsDirty(t *testing.T) {
+	h := newProjectAssistantV2ToolHarness(t, "v2-move-dirty-paths")
+	ctx := context.Background()
+	if err := h.workspaces.ApplyFiles(ctx, h.req.WorkspaceScope, []workspace.File{{Path: "src/old.ts", Content: "old\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	backend, ok := h.server.projectAssistantToolRegistry().Get(projectToolApplyPatch)
+	if !ok {
+		t.Fatal("apply_patch missing")
+	}
+	runState := newProjectEinoAssistantRunState()
+	tool := projectEinoAssistantTool{server: h.server, tool: backend, req: h.req, runState: runState}
+	args := map[string]any{"patch": "*** Begin Patch\n*** Update File: src/old.ts\n*** Move to: src/new.ts\n@@\n-old\n+new\n*** End Patch"}
+	if _, err := tool.invokeAllowedTool(ctx, "call-move", backend.Spec(), args); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := h.workspaces.UncommittedPaths(ctx, h.req.WorkspaceScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(dirty, ","); got != "src/new.ts,src/old.ts" {
+		t.Fatalf("dirty paths = %q", got)
+	}
+	if _, err := h.workspaces.WorkspaceDigest(ctx, h.req.WorkspaceScope, dirty); err != nil {
+		t.Fatalf("digest moved workspace: %v", err)
+	}
+}
+
 type projectAssistantIncompleteThenCompleteModel struct {
 	calls            int
 	partialToolCall  bool
@@ -489,6 +592,98 @@ func TestEinoV2CommitStateBindsVerifiedAndCommittedDigest(t *testing.T) {
 	}
 }
 
+func TestInitialProjectPlanProgressBoundsLabelsForDurablePresentation(t *testing.T) {
+	longStep := "Create backend server.js with PostgreSQL schema, horse seeding, and API routes (GET /api/horses, POST /api/swipe, GET /api/matches)"
+	if len(longStep) <= projectEinoAssistantTodoProgressMaxLabelBytes {
+		t.Fatalf("test step length = %d, want more than %d bytes", len(longStep), projectEinoAssistantTodoProgressMaxLabelBytes)
+	}
+	plan := projectAssistantApprovedPlan{Steps: []string{
+		"Create backend package.json with Express, pg, cors dependencies",
+		longStep,
+	}}
+	progress := projectAssistantInitialPlanProgress(plan)
+	if !projectAssistantPlanSnapshotValid(progress) {
+		t.Fatalf("initial plan progress = %#v, want valid durable metadata", progress)
+	}
+	if got := progress.Steps[1].Content; len(got) > projectEinoAssistantTodoProgressMaxLabelBytes || !strings.HasSuffix(got, "...") {
+		t.Fatalf("bounded plan label = %q (%d bytes)", got, len(got))
+	}
+	metadata := projectAssistantDurableMetadataForTransition(
+		store.AssistantRun{ID: "run-plan", Revision: 1},
+		"Building · 0 of 2 steps",
+		false,
+		false,
+		nil,
+		&progress,
+	)
+	if _, ok := metadata[projectAssistantMetadataPlan]; !ok {
+		t.Fatalf("durable metadata dropped bounded plan: %#v", metadata)
+	}
+
+	runState := newProjectEinoAssistantRunState()
+	runState.SetExecutionPlan(plan)
+	runState.SetPlanProgress(progress)
+	runState.CompleteExecutionPlan()
+	if !runState.ExecutionPlanComplete() || !runState.CompletionEvidence().PlanComplete {
+		t.Fatalf("bounded presentation labels broke execution-plan completion: %#v", runState.PlanProgress())
+	}
+}
+
+func TestInitialProjectPlanRequiresBoundTemplateAndPreservesAuthority(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.ApprovePlan(projectAssistantInitialCreationPlan("Build a storefront"))
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Project: &aiv1alpha1.Project{}},
+		runState: runState,
+	}
+	result, err := tool.invokeInitialProjectPlanTool(
+		context.Background(),
+		"call-plan",
+		projectAssistantToolSpec{Name: projectToolDefineInitialProjectPlan, Risk: projectAssistantToolRiskPlan},
+		map[string]any{
+			"summary":            "Build the storefront",
+			"steps":              []any{"Create the app"},
+			"targetPaths":        []any{"web/"},
+			"acceptanceCriteria": []any{"The storefront starts"},
+		},
+	)
+	if err != nil || !strings.Contains(result, "template_not_bound") {
+		t.Fatalf("plan before template = (%q, %v), want actionable rejection", result, err)
+	}
+	if authority := runState.ApprovedPlan(); authority == nil || !authority.AllowAllWrites || authority.ApprovalTool != "project_create_prompt" {
+		t.Fatalf("creation authority after rejected plan = %#v", authority)
+	}
+}
+
+func TestTemplateSelectionInvalidatesExecutionPlanAndRepairsLegacyAuthority(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	legacy := projectAssistantApprovedPlan{
+		Goal:         "Build a storefront",
+		TargetPaths:  []string{"web/"},
+		Version:      projectAssistantApprovedPlanVersionWorkspaceMutation,
+		Capabilities: []string{projectAssistantCapabilityWorkspaceMutate},
+		ApprovalTool: projectToolDefineInitialProjectPlan,
+		RunLocal:     true,
+	}
+	runState.ApprovePlan(legacy)
+	runState.SetExecutionPlan(legacy)
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Template: &aiv1alpha1.ProjectTemplateSpec{Name: "simple-webapp"},
+	}}
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Project: project},
+		runState: runState,
+	}
+	tool.refreshInitialBuildAfterTemplateSelection(context.Background())
+
+	if plan := runState.ExecutionPlan(); plan != nil {
+		t.Fatalf("execution plan survived template selection: %#v", plan)
+	}
+	if authority := runState.ApprovedPlan(); authority == nil || !authority.AllowAllWrites || authority.ApprovalTool != "project_create_prompt" {
+		t.Fatalf("repaired creation authority = %#v", authority)
+	}
+}
+
 func TestEinoV2CommitSettlementClearsCompleteDirtyBundleAtToolBoundary(t *testing.T) {
 	ctx := context.Background()
 	workspaces := workspace.NewFileStore(t.TempDir())
@@ -786,7 +981,7 @@ func TestEinoV2UsesPriorUncommittedPathsWithoutRestoringMutationRevision(t *test
 	}
 }
 
-func TestEinoV2ResumePreservesRunLocalMutationGrant(t *testing.T) {
+func TestEinoV2ResumeDoesNotTreatPlanAsMutationAuthority(t *testing.T) {
 	ctx := context.Background()
 	h := newProjectAssistantV2ToolHarness(t, "v2-resume-run-local-grant")
 	if err := h.workspaces.ApplyFiles(ctx, h.req.WorkspaceScope, []workspace.File{{
@@ -904,8 +1099,8 @@ func TestEinoV2ResumePreservesRunLocalMutationGrant(t *testing.T) {
 	if !errors.As(err, &secondPermission) {
 		t.Fatalf("ResumeProjectAssistant error = %v, want second permission interrupt", err)
 	}
-	if secondPermission.ToolName != projectToolRestartRuntime {
-		t.Fatalf("resumed permission tool = %q, want %q", secondPermission.ToolName, projectToolRestartRuntime)
+	if secondPermission.ToolName != projectToolApplyPatch {
+		t.Fatalf("resumed permission tool = %q, want %q", secondPermission.ToolName, projectToolApplyPatch)
 	}
 	if runtimeCalls != 1 {
 		t.Fatalf("approved runtime calls = %d, want one", runtimeCalls)
@@ -914,7 +1109,7 @@ func TestEinoV2ResumePreservesRunLocalMutationGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(read.Content, `const greeting = "hello again";`) {
-		t.Fatalf("workspace content after resume = %q, want approved patch applied", read.Content)
+	if strings.Contains(read.Content, `const greeting = "hello again";`) {
+		t.Fatalf("workspace content after resume = %q, plan unexpectedly authorized patch", read.Content)
 	}
 }

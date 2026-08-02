@@ -46,6 +46,8 @@ type projectEinoAssistantLifecycle struct {
 	steering         <-chan projectAssistantSteeringInput
 	activateSteering func(context.Context, []projectAssistantSteeringInput) error
 	managedToolNames map[string]struct{}
+	liveContext      string
+	liveContextReady bool
 }
 
 func projectEinoAssistantLifecycleMiddleware(
@@ -256,6 +258,46 @@ func (m *projectEinoAssistantLifecycle) rewriteLiveContext(ctx context.Context, 
 	if prompt := m.runState.ToolPrompt(); prompt != "" {
 		contextMessages = append(contextMessages, chatMessage{Role: "system", Content: projectEinoAssistantLiveContextPrefix + prompt})
 	}
+	digestParts := make([]string, 0, len(contextMessages))
+	for _, message := range contextMessages {
+		digestParts = append(digestParts, message.Role+"\x00"+message.Content)
+	}
+	digest := strings.Join(digestParts, "\x00")
+	if m.liveContextReady && digest == m.liveContext {
+		return nil
+	}
+	if m.liveContextReady {
+		projectUpdate := "Context update since the previous model sample:\nProject metadata:\n- Name: " + m.req.Project.Name +
+			"\n- Display name: " + m.req.Project.Spec.DisplayName +
+			"\n- Repository: " + projectEinoAssistantProjectRepositoryRef(m.req)
+		updates := []chatMessage{{Role: "system", Content: projectEinoAssistantLiveContextPrefix + projectUpdate}}
+		updates = append(updates, contextMessages[1:]...)
+		for index := range updates {
+			if index == 0 {
+				continue
+			}
+			updates[index].Content = strings.TrimPrefix(updates[index].Content, projectEinoAssistantLiveContextPrefix)
+			updates[index].Content = projectEinoAssistantLiveContextPrefix + "Context update since the previous model sample:\n" + updates[index].Content
+		}
+		live, err := projectChatMessagesToEino(updates)
+		if err != nil {
+			return err
+		}
+		boundary := len(state.Messages)
+		for index, message := range state.Messages {
+			if message == nil || !strings.HasPrefix(message.Content, projectEinoAssistantLiveContextPrefix) {
+				boundary = index
+				break
+			}
+		}
+		withUpdate := make([]*schema.Message, 0, len(state.Messages)+len(live))
+		withUpdate = append(withUpdate, state.Messages[:boundary]...)
+		withUpdate = append(withUpdate, live...)
+		withUpdate = append(withUpdate, state.Messages[boundary:]...)
+		state.Messages = withUpdate
+		m.liveContext = digest
+		return nil
+	}
 	live, err := projectChatMessagesToEino(contextMessages)
 	if err != nil {
 		return err
@@ -267,6 +309,8 @@ func (m *projectEinoAssistantLifecycle) rewriteLiveContext(ctx context.Context, 
 		return err
 	}
 	state.Messages = append(live, conversationMessages...)
+	m.liveContext = digest
+	m.liveContextReady = true
 	return nil
 }
 
@@ -394,7 +438,13 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 					}
 				}
 				if m.initialBuild && m.runState.SourceMutationVerified() {
-					m.runState.CompleteExecutionPlan()
+					m.completeExecutionPlan()
+				}
+			}
+		case name == projectToolInspectDevelopmentPreview && succeeded:
+			if m.initialBuild && m.runState != nil {
+				if revision, _ := m.runState.SourceMutationRevisions(); revision > 0 {
+					m.completeExecutionPlan()
 				}
 			}
 		}
@@ -405,6 +455,13 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 		}
 		return result, nil
 	}, nil
+}
+
+func (m *projectEinoAssistantLifecycle) completeExecutionPlan() {
+	if m == nil || m.runState == nil {
+		return
+	}
+	m.runState.CompleteExecutionPlan()
 }
 
 func (m *projectEinoAssistantLifecycle) WrapEnhancedInvokableToolCall(

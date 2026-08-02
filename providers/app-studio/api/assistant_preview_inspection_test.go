@@ -61,6 +61,33 @@ func TestProjectAssistantPreviewInspectionTargetURLConfinesOrigin(t *testing.T) 
 	}
 }
 
+func TestProjectAssistantPreviewInspectionAssertionsNormalizeRoleTextAlias(t *testing.T) {
+	assertions, err := projectAssistantPreviewInspectionAssertions([]any{map[string]any{
+		"kind": "role_present",
+		"role": "button",
+		"text": "Add Habit",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assertions) != 1 || assertions[0].Name != "Add Habit" || assertions[0].Text != "" {
+		t.Fatalf("assertions = %#v, want text normalized to accessible name", assertions)
+	}
+}
+
+func TestProjectAssistantPreviewInspectionAssertionsRejectInvalidShapes(t *testing.T) {
+	for _, value := range []any{
+		[]any{map[string]any{"kind": "role_present", "role": "button", "unknown": true}},
+		[]any{map[string]any{"kind": "text_present", "text": "Ready", "role": "button"}},
+		[]any{map[string]any{"kind": "role_present", "role": "button", "min": 1}},
+		[]any{map[string]any{"kind": "role_count", "role": "row", "min": 2, "max": 1}},
+	} {
+		if _, err := projectAssistantPreviewInspectionAssertions(value); err == nil {
+			t.Fatalf("invalid assertions were accepted: %#v", value)
+		}
+	}
+}
+
 func TestInspectProjectDevelopmentPreviewReturnsTypedFailure(t *testing.T) {
 	inspector := &fakeProjectAssistantPreviewInspector{result: projectAssistantPreviewInspectionResult{
 		Status:      "failed",

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,7 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 		"@@ -12,4 +12,5 @@",
 		"do not repeat the anchor in the hunk body",
 		"Use plain '@@' when changing the first line",
+		"Put multiple hunks for the same file in source order",
 		"*** Update File: src/App.jsx",
 	} {
 		if !strings.Contains(spec.Description, want) {
@@ -73,13 +75,16 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 	for _, want := range []string{
 		"Hunk headers are exactly '@@' or '@@ <literal source line>'",
 		"numeric unified-diff coordinates are forbidden",
+		"Move to cannot stand alone",
 	} {
 		if !strings.Contains(string(spec.Parameters), want) {
 			t.Fatalf("apply_patch parameter schema missing %q: %s", want, spec.Parameters)
 		}
 	}
-	if strings.Contains(spec.Description, "'*** Delete File:") || strings.Contains(spec.Description, "optional '*** Move to:") {
-		t.Fatalf("apply_patch still advertises repository-incompatible deletion semantics: %s", spec.Description)
+	for _, want := range []string{"*** Delete File: <path>", "*** Move to: <new path>", "Move to is not a standalone section"} {
+		if !strings.Contains(spec.Description, want) {
+			t.Fatalf("apply_patch description missing %q: %s", want, spec.Description)
+		}
 	}
 }
 
@@ -97,10 +102,14 @@ func TestAssistantNumericUnifiedDiffFailureReturnsTargetedRecovery(t *testing.T)
 }
 
 func TestAssistantAdvertisedContextualPatchExampleParses(t *testing.T) {
-	const marker = "Valid example:\n"
+	const marker = "Valid edit example:\n"
 	_, example, ok := strings.Cut(projectAssistantContextualPatchFormatInstruction, marker)
 	if !ok {
 		t.Fatalf("contextual patch instruction missing %q", marker)
+	}
+	example, _, ok = strings.Cut(example, "Valid move example:\n")
+	if !ok {
+		t.Fatal("contextual patch instruction is missing the move example")
 	}
 	example = strings.TrimSpace(example)
 	paths, err := workspace.PatchPaths(example)
@@ -112,10 +121,24 @@ func TestAssistantAdvertisedContextualPatchExampleParses(t *testing.T) {
 	}
 }
 
+func TestAssistantAdvertisedContextualMoveExampleParses(t *testing.T) {
+	_, example, ok := strings.Cut(projectAssistantContextualPatchFormatInstruction, "Valid move example:\n")
+	if !ok {
+		t.Fatal("contextual patch instruction is missing the move example")
+	}
+	paths, err := workspace.PatchPaths(strings.TrimSpace(example))
+	if err != nil {
+		t.Fatalf("advertised contextual move example is invalid: %v\n%s", err, example)
+	}
+	if got := strings.Join(paths, ","); got != "src/new.jsx,src/old.jsx" {
+		t.Fatalf("advertised move paths = %q, want old and new paths", got)
+	}
+}
+
 func TestAssistantGenericInvalidPatchRecoveryUsesSupportedOperations(t *testing.T) {
 	err := &workspace.PatchError{Code: workspace.PatchErrorInvalidPatch, Message: "the last line must be '*** End Patch'"}
 	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
-	for _, want := range []string{"using only Add File or Update File", "Delete File and Move to are unavailable"} {
+	for _, want := range []string{"Start with Add File, Update File, or Delete File", "put Move to immediately below Update File"} {
 		if !strings.Contains(result, want) {
 			t.Fatalf("recovery missing %q: %s", want, result)
 		}
@@ -190,6 +213,9 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 			}
 			if names[projectToolApplyPatch] != tt.wantPatch {
 				t.Fatalf("tools = %#v, apply_patch presence = %t, want %t", names, names[projectToolApplyPatch], tt.wantPatch)
+			}
+			if got, want := names[projectToolAskFollowUp], tt.mode == projectAssistantCollaborationModePlan; got != want {
+				t.Fatalf("tools = %#v, ask_follow_up presence = %t, want %t", names, got, want)
 			}
 			for _, retired := range []string{"write_file", "mkdir", "hydrate_workspace", "request_project_plan_approval"} {
 				if names[retired] {
@@ -281,33 +307,37 @@ func TestAssistantV2LifecycleDoesNotRequireVerificationBeforeCommit(t *testing.T
 	}
 }
 
-func TestAssistantContextualPatchRejectsDeleteAndMoveUntilCommitBridgeSupportsThem(t *testing.T) {
-	workspaces := workspace.NewFileStore(t.TempDir())
-	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
-	if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "old.txt", Content: "old\n"}}); err != nil {
-		t.Fatal(err)
-	}
-	tool, ok := projectAssistantLocalToolRegistry(&Server{workspaces: workspaces}).Get(projectToolApplyPatch)
-	if !ok {
-		t.Fatal("apply_patch tool was not registered")
-	}
+func TestAssistantContextualPatchSupportsDeleteAndMove(t *testing.T) {
 	for name, patch := range map[string]string{
 		"delete": "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch",
 		"move":   "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := tool.Call(context.Background(), projectAssistantToolCallRequest{
+			workspaces := workspace.NewFileStore(t.TempDir())
+			scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+			if err := workspaces.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "old.txt", Content: "old\n"}}); err != nil {
+				t.Fatal(err)
+			}
+			tool, ok := projectAssistantLocalToolRegistry(&Server{workspaces: workspaces}).Get(projectToolApplyPatch)
+			if !ok {
+				t.Fatal("apply_patch tool was not registered")
+			}
+			if _, err := tool.Call(context.Background(), projectAssistantToolCallRequest{
 				WorkspaceScope: scope,
 				Arguments:      map[string]any{"patch": patch},
-			})
-			if err == nil || !strings.Contains(err.Error(), "repository commits support deletions") {
-				t.Fatalf("error = %v, want repository deletion limitation", err)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "old.txt"}); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("old.txt still exists: %v", err)
+			}
+			if name == "move" {
+				read, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "new.txt"})
+				if err != nil || read.Content != "new\n" {
+					t.Fatalf("moved content = %q, err=%v", read.Content, err)
+				}
 			}
 		})
-	}
-	read, err := workspaces.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: "old.txt"})
-	if err != nil || read.Content != "old\n" {
-		t.Fatalf("source changed after rejected operations: content=%q err=%v", read.Content, err)
 	}
 }
 

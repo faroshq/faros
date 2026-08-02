@@ -29,7 +29,7 @@ import (
 	"github.com/faroshq/provider-app-studio/store"
 )
 
-func TestProjectEinoAssistantLifecycleRebuildsLiveContextForEveryModelSample(t *testing.T) {
+func TestProjectEinoAssistantLifecycleAppendsIncrementalLiveContextUpdates(t *testing.T) {
 	runState := newProjectEinoAssistantRunState()
 	runState.SetToolPrompt("tool contract v1")
 	req := projectAssistantRunRequest{
@@ -64,12 +64,27 @@ func TestProjectEinoAssistantLifecycleRebuildsLiveContextForEveryModelSample(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertProjectEinoAssistantLiveContext(t, second.Messages, "Updated project", "updated-repo", "tool contract v2")
-	assertProjectEinoAssistantConversationTail(t, second.Messages)
+	joinedSecond := ""
 	for _, message := range second.Messages {
-		if strings.Contains(message.Content, "Display name: Current project") || strings.Contains(message.Content, `"displayName":"Current project"`) || strings.Contains(message.Content, "current-repo") || strings.Contains(message.Content, "tool contract v1") || strings.Contains(message.Content, "stale project") || strings.Contains(message.Content, "stale snapshot") || strings.Contains(message.Content, "stale tool contract") {
-			t.Fatalf("stale context survived a later model sample: %#v", message)
+		joinedSecond += message.Content + "\n"
+	}
+	for _, want := range []string{"Updated project", "updated-repo", "tool contract v2"} {
+		if !strings.Contains(joinedSecond, want) {
+			t.Fatalf("incremental live context missing %q", want)
 		}
+	}
+	assertProjectEinoAssistantConversationTail(t, second.Messages)
+	var initialPromptCount, updateCount int
+	for _, message := range second.Messages {
+		if strings.Contains(message.Content, "Collaboration mode: default") {
+			initialPromptCount++
+		}
+		if strings.Contains(message.Content, "Context update since the previous model sample") {
+			updateCount++
+		}
+	}
+	if initialPromptCount != 1 || updateCount == 0 {
+		t.Fatalf("incremental context counts: initial=%d updates=%d", initialPromptCount, updateCount)
 	}
 }
 

@@ -313,10 +313,11 @@ local_resource(
 
 local_resource(
     'app-studio-browser-worker',
-    cmd='make build-app-studio-browser-worker',
-    serve_cmd='make run-app-studio-browser-worker',
+    cmd='APP_STUDIO_BROWSER_WORKER_IMAGE=kedge/app-studio-browser-worker:tilt make docker-build-app-studio-browser-worker',
+    serve_cmd='APP_STUDIO_BROWSER_WORKER_IMAGE=kedge/app-studio-browser-worker:tilt make run-app-studio-browser-worker',
     deps=[
         'Makefile',
+        'providers/app-studio/browser-worker/Dockerfile',
         'providers/app-studio/browser-worker/package.json',
         'providers/app-studio/browser-worker/package-lock.json',
         'providers/app-studio/browser-worker/tsconfig.json',
@@ -342,6 +343,7 @@ local_resource(
         'providers/app-studio/client',
         'providers/app-studio/store',
         'providers/app-studio/tenant',
+        'providers/app-studio/workspace',
         'providers/app-studio/go.mod',
         'providers/app-studio/go.sum',
         'providers/app-studio/portal/src',

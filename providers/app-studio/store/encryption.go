@@ -142,6 +142,181 @@ func (s *encryptedStore) EnsureSchema(ctx context.Context) error {
 	return s.inner.EnsureSchema(ctx)
 }
 
+func (s *encryptedStore) CreateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread, events []AssistantThreadEvent) (AssistantThread, error) {
+	encryptedEvents := make([]AssistantThreadEvent, len(events))
+	for index, event := range events {
+		event.ThreadID = thread.ID
+		var err error
+		encryptedEvents[index], err = s.encryptAssistantThreadEvent(scope, event)
+		if err != nil {
+			return AssistantThread{}, err
+		}
+	}
+	return s.inner.CreateAssistantThread(ctx, scope, thread, encryptedEvents)
+}
+
+func (s *encryptedStore) GetAssistantThread(ctx context.Context, scope Scope, threadID string) (AssistantThread, error) {
+	return s.inner.GetAssistantThread(ctx, scope, threadID)
+}
+
+func (s *encryptedStore) ListAssistantThreads(ctx context.Context, scope Scope, actorID string, includeArchived bool, limit int, cursor string) (AssistantThreadPage, error) {
+	return s.inner.ListAssistantThreads(ctx, scope, actorID, includeArchived, limit, cursor)
+}
+
+func (s *encryptedStore) UpdateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread) (AssistantThread, error) {
+	return s.inner.UpdateAssistantThread(ctx, scope, thread)
+}
+
+func (s *encryptedStore) CreateAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error) {
+	var err error
+	turn, err = s.encryptAssistantTurn(scope, turn)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	encryptedEvents := make([]AssistantThreadEvent, len(events))
+	for index, event := range events {
+		event.ThreadID, event.TurnID = turn.ThreadID, turn.ID
+		encryptedEvents[index], err = s.encryptAssistantThreadEvent(scope, event)
+		if err != nil {
+			return AssistantTurn{}, err
+		}
+	}
+	created, err := s.inner.CreateAssistantTurn(ctx, scope, turn, encryptedEvents)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	if err := s.decryptAssistantTurn(scope, &created); err != nil {
+		return AssistantTurn{}, err
+	}
+	return created, nil
+}
+
+func (s *encryptedStore) GetAssistantTurn(ctx context.Context, scope Scope, threadID, turnID string) (AssistantTurn, error) {
+	turn, err := s.inner.GetAssistantTurn(ctx, scope, threadID, turnID)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	if err := s.decryptAssistantTurn(scope, &turn); err != nil {
+		return AssistantTurn{}, err
+	}
+	return turn, nil
+}
+
+func (s *encryptedStore) FindAssistantTurnByClientUserMessageID(ctx context.Context, scope Scope, threadID, clientUserMessageID string) (AssistantTurn, error) {
+	turn, err := s.inner.FindAssistantTurnByClientUserMessageID(ctx, scope, threadID, clientUserMessageID)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	if err := s.decryptAssistantTurn(scope, &turn); err != nil {
+		return AssistantTurn{}, err
+	}
+	return turn, nil
+}
+
+func (s *encryptedStore) ActiveAssistantTurn(ctx context.Context, scope Scope, threadID string) (AssistantTurn, error) {
+	turn, err := s.inner.ActiveAssistantTurn(ctx, scope, threadID)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	if err := s.decryptAssistantTurn(scope, &turn); err != nil {
+		return AssistantTurn{}, err
+	}
+	return turn, nil
+}
+
+func (s *encryptedStore) SaveAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn) error {
+	encrypted, err := s.encryptAssistantTurn(scope, turn)
+	if err != nil {
+		return err
+	}
+	return s.inner.SaveAssistantTurn(ctx, scope, encrypted)
+}
+
+func (s *encryptedStore) SaveAssistantTurnWithEvent(ctx context.Context, scope Scope, turn AssistantTurn, event AssistantThreadEvent, expectedSequence int64) error {
+	var err error
+	turn, err = s.encryptAssistantTurn(scope, turn)
+	if err != nil {
+		return err
+	}
+	event.ThreadID, event.TurnID = turn.ThreadID, turn.ID
+	event, err = s.encryptAssistantThreadEvent(scope, event)
+	if err != nil {
+		return err
+	}
+	return s.inner.SaveAssistantTurnWithEvent(ctx, scope, turn, event, expectedSequence)
+}
+
+func (s *encryptedStore) AppendAssistantThreadEvent(ctx context.Context, scope Scope, event AssistantThreadEvent, expectedSequence int64) (AssistantThreadEvent, error) {
+	encrypted, err := s.encryptAssistantThreadEvent(scope, event)
+	if err != nil {
+		return AssistantThreadEvent{}, err
+	}
+	created, err := s.inner.AppendAssistantThreadEvent(ctx, scope, encrypted, expectedSequence)
+	if err != nil {
+		return AssistantThreadEvent{}, err
+	}
+	if err := s.decryptAssistantThreadEvent(scope, &created); err != nil {
+		return AssistantThreadEvent{}, err
+	}
+	return created, nil
+}
+
+func (s *encryptedStore) ListAssistantThreadEvents(ctx context.Context, scope Scope, threadID string, afterSequence int64, limit int) ([]AssistantThreadEvent, error) {
+	events, err := s.inner.ListAssistantThreadEvents(ctx, scope, threadID, afterSequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	for index := range events {
+		if err := s.decryptAssistantThreadEvent(scope, &events[index]); err != nil {
+			return nil, err
+		}
+	}
+	return events, nil
+}
+
+func (s *encryptedStore) encryptAssistantTurn(scope Scope, turn AssistantTurn) (AssistantTurn, error) {
+	run := AssistantRun{ID: turn.ThreadID + "/" + turn.ID}
+	var err error
+	turn.Checkpoint, err = s.encryptAssistantRunBlob(scope, run, "turn-checkpoint", turn.Checkpoint)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	turn.Error, err = s.encryptAssistantRunBlob(scope, run, "turn-error", turn.Error)
+	if err != nil {
+		return AssistantTurn{}, err
+	}
+	return turn, nil
+}
+
+func (s *encryptedStore) decryptAssistantTurn(scope Scope, turn *AssistantTurn) error {
+	if turn == nil {
+		return nil
+	}
+	run := AssistantRun{ID: turn.ThreadID + "/" + turn.ID}
+	if err := s.decryptAssistantRunBlob(scope, &run, "turn-checkpoint", &turn.Checkpoint); err != nil {
+		return err
+	}
+	return s.decryptAssistantRunBlob(scope, &run, "turn-error", &turn.Error)
+}
+
+func (s *encryptedStore) encryptAssistantThreadEvent(scope Scope, event AssistantThreadEvent) (AssistantThreadEvent, error) {
+	run := AssistantRun{ID: event.ThreadID + "/" + event.TurnID}
+	payload, err := s.encryptAssistantRunBlob(scope, run, "thread-event:"+event.Type+":"+event.ItemID+":"+event.RequestID, event.Payload)
+	if err != nil {
+		return AssistantThreadEvent{}, err
+	}
+	event.Payload = payload
+	return event, nil
+}
+
+func (s *encryptedStore) decryptAssistantThreadEvent(scope Scope, event *AssistantThreadEvent) error {
+	if event == nil {
+		return nil
+	}
+	run := AssistantRun{ID: event.ThreadID + "/" + event.TurnID}
+	return s.decryptAssistantRunBlob(scope, &run, "thread-event:"+event.Type+":"+event.ItemID+":"+event.RequestID, &event.Payload)
+}
+
 func (s *encryptedStore) AppendMessage(ctx context.Context, scope Scope, msg Message) error {
 	if err := scope.validate(); err != nil {
 		return err

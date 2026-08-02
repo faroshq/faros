@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 func TestProjectAssistantActionFeedReadHidesExecutionMechanics(t *testing.T) {
@@ -127,6 +129,31 @@ func TestProjectAssistantActionDiagnosticClassifiesReplanAsPermission(t *testing
 		if got := projectAssistantActionDiagnosticCategory(failure); got != "permission" {
 			t.Fatalf("diagnostic category for %q = %q, want permission", failure, got)
 		}
+	}
+}
+
+func TestProjectAssistantActionDiagnosticExplainsPatchRecoveryWithoutLeakingInput(t *testing.T) {
+	diagnostic := projectAssistantActionFeedDiagnostic(
+		"patch-call",
+		string(workspace.PatchErrorStrategyChange)+": secret source fragment",
+	)
+	if diagnostic == nil || diagnostic.Category != "validation" || !strings.Contains(diagnostic.Message, "must be revised") {
+		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "secret source fragment") {
+		t.Fatalf("diagnostic leaked raw input: %#v", diagnostic)
+	}
+}
+
+func TestProjectAssistantActionFeedExplainsTypedPreviewFailure(t *testing.T) {
+	item := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
+		ID:     "inspect-call",
+		Name:   projectToolInspectDevelopmentPreview,
+		Status: "failed",
+	})
+	if item.Diagnostic == nil || item.Diagnostic.Category != "runtime" ||
+		!strings.Contains(item.Diagnostic.Message, "did not verify the preview") {
+		t.Fatalf("diagnostic = %#v", item.Diagnostic)
 	}
 }
 

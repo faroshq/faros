@@ -43,6 +43,7 @@ const (
 	PatchErrorWorkspaceConflict PatchErrorCode = "workspace_conflict"
 	PatchErrorNoChanges         PatchErrorCode = "no_changes"
 	PatchErrorApplyFailed       PatchErrorCode = "apply_failed"
+	PatchErrorStrategyChange    PatchErrorCode = "strategy_change_required"
 )
 
 var standardUnifiedDiffHunkHeader = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@(?: .*)?$`)
@@ -50,12 +51,15 @@ var standardUnifiedDiffHunkHeader = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? 
 // PatchError is a typed, model-safe patch failure. ActualChanges is populated
 // only if an I/O failure could not be completely rolled back.
 type PatchError struct {
-	Code          PatchErrorCode   `json:"code"`
-	Path          string           `json:"path,omitempty"`
-	Hunk          int              `json:"hunk,omitempty"`
-	Matches       int              `json:"matches,omitempty"`
-	Message       string           `json:"message"`
-	ActualChanges []MutationResult `json:"actualChanges,omitempty"`
+	Code                   PatchErrorCode   `json:"code"`
+	Path                   string           `json:"path,omitempty"`
+	Hunk                   int              `json:"hunk,omitempty"`
+	Matches                int              `json:"matches,omitempty"`
+	Message                string           `json:"message"`
+	ExpectedContext        string           `json:"expectedContext,omitempty"`
+	ActualContext          string           `json:"actualContext,omitempty"`
+	SourceMutationRevision uint64           `json:"sourceMutationRevision"`
+	ActualChanges          []MutationResult `json:"actualChanges,omitempty"`
 }
 
 func (e *PatchError) Error() string {
@@ -87,6 +91,25 @@ func newPatchError(code PatchErrorCode, filePath string, hunk, matches int, form
 		Matches: matches,
 		Message: fmt.Sprintf(format, args...),
 	}
+}
+
+func withPatchErrorContext(err *PatchError, expected, actual string) *PatchError {
+	if err == nil {
+		return nil
+	}
+	err.ExpectedContext = boundedPatchContext(expected)
+	err.ActualContext = boundedPatchContext(actual)
+	return err
+}
+
+func boundedPatchContext(value string) string {
+	const maxRunes = 2_000
+	value = strings.Trim(value, "\r\n")
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 type patchOperationKind uint8
@@ -159,23 +182,12 @@ func PatchReadPaths(patch string) ([]string, error) {
 	return paths, nil
 }
 
-// ValidateCommittablePatch rejects workspace operations that the current
-// repository commit bridge cannot represent atomically. Keep Delete File and
-// Move to unavailable to assistants until provider-code accepts deletions.
+// ValidateCommittablePatch verifies that an assistant patch is syntactically
+// valid before it reaches the workspace mutation boundary. The repository
+// bridge supports every parsed operation, including deletion and move.
 func ValidateCommittablePatch(patch string) error {
-	parsed, err := parseUnifiedPatch(patch)
-	if err != nil {
-		return err
-	}
-	for _, operation := range parsed.operations {
-		if operation.kind == patchOperationDelete {
-			return newPatchError(PatchErrorInvalidPatch, operation.path, 0, 0, "Delete File is unavailable until repository commits support deletions")
-		}
-		if operation.movePath != "" {
-			return newPatchError(PatchErrorInvalidPatch, operation.path, 0, 0, "Move to is unavailable until repository commits support deletions")
-		}
-	}
-	return nil
+	_, err := parseUnifiedPatch(patch)
+	return err
 }
 
 func parseUnifiedPatch(raw string) (parsedPatch, error) {
@@ -219,14 +231,16 @@ func parseUnifiedPatch(raw string) (parsedPatch, error) {
 			lineIndex++
 			added := []string{}
 			for lineIndex < len(lines)-1 && !isPatchFileMarker(lines[lineIndex]) {
-				if !strings.HasPrefix(lines[lineIndex], "+") {
-					return parsedPatch{}, invalidPatchLine(lineIndex+1, "an Add File content line must start with '+'")
-				}
+				// An Add File body is unambiguous: every line until the next
+				// top-level marker is new content. Accept omitted '+' prefixes
+				// while preserving the canonical prefixed form. This mirrors the
+				// exact-context leniency used for Update File hunks and remains
+				// safe because Add File preflight rejects an existing target.
 				added = append(added, strings.TrimPrefix(lines[lineIndex], "+"))
 				lineIndex++
 			}
 			if len(added) == 0 {
-				return parsedPatch{}, invalidPatchLine(lineIndex+1, "Add File requires at least one '+' content line")
+				return parsedPatch{}, invalidPatchLine(lineIndex+1, "Add File requires at least one content line")
 			}
 			parsed.operations = append(parsed.operations, patchOperation{
 				kind:    patchOperationAdd,
@@ -322,7 +336,15 @@ func parseUpdateOperation(lines []string, start int) (patchOperation, int, error
 				current.oldLines = append(current.oldLines, text)
 			}
 		default:
-			return patchOperation{}, start, invalidPatchLine(lineIndex+1, "hunk lines must start with ' ', '+', or '-'")
+			// Be lenient with an omitted context marker. We still preflight
+			// this exact line against the immutable source snapshot before
+			// applying anything, so a model cannot turn invented text into
+			// a mutation by leaving off the leading space.
+			if current == nil {
+				current = &patchChunk{}
+			}
+			current.oldLines = append(current.oldLines, line)
+			current.newLines = append(current.newLines, line)
 		}
 		lineIndex++
 	}
@@ -482,7 +504,113 @@ func normalizePatchPunctuation(value string) string {
 	}, strings.TrimSpace(value))
 }
 
+// applyPatchChunks accepts independently matchable hunks in any order. Models
+// frequently group edits by concern instead of by source position; the patch
+// language does not carry numeric coordinates, so requiring the caller to
+// rediscover and reorder already-unique context only creates read/retry loops.
+// Try the authored order first to preserve dependent-hunk semantics, then make
+// one safe retry in source order when every hunk resolves uniquely against the
+// unchanged file.
 func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, int, error) {
+	next, changed, err := applyPatchChunksInOrder(filePath, content, chunks)
+	if err == nil {
+		return next, changed, err
+	}
+	next, changed, ok := applyIndependentPatchChunks(content, chunks)
+	if !ok {
+		return "", 0, err
+	}
+	return next, changed, nil
+}
+
+type locatedPatchChunk struct {
+	chunk patchChunk
+	start int
+	end   int
+	order int
+}
+
+func applyIndependentPatchChunks(content string, chunks []patchChunk) (string, int, bool) {
+	text := splitPatchText(content)
+	located := make([]locatedPatchChunk, 0, len(chunks))
+	normalizedContext := false
+	for index, chunk := range chunks {
+		start := 0
+		if chunk.anchor != "" {
+			anchorIndex, matches := findUniquePatchSequence(text.lines, []string{chunk.anchor}, 0, false)
+			if matches != 1 {
+				return "", 0, false
+			}
+			start = anchorIndex + 1
+		}
+		matchIndex := start
+		switch {
+		case len(chunk.oldLines) > 0:
+			var matches int
+			matchIndex, matches = findUniquePatchSequence(text.lines, chunk.oldLines, start, chunk.endOfFile)
+			if matches == 0 && chunk.anchor != "" && stringSliceContains(chunk.oldLines, chunk.anchor) {
+				// Some models repeat the literal anchor in the hunk body even
+				// though the contract says not to. The body is authoritative
+				// when it resolves uniquely against the original snapshot.
+				matchIndex, matches = findUniquePatchSequence(text.lines, chunk.oldLines, 0, chunk.endOfFile)
+				normalizedContext = matches == 1
+			}
+			if matches != 1 {
+				return "", 0, false
+			}
+		case chunk.endOfFile:
+			matchIndex = len(text.lines)
+		case chunk.anchor == "":
+			return "", 0, false
+		}
+		located = append(located, locatedPatchChunk{
+			chunk: chunk,
+			start: matchIndex,
+			end:   matchIndex + len(chunk.oldLines),
+			order: index,
+		})
+	}
+
+	sort.SliceStable(located, func(left, right int) bool {
+		return located[left].start < located[right].start
+	})
+	changedOrder := false
+	for index := range located {
+		if located[index].order != index {
+			changedOrder = true
+		}
+		if index > 0 && located[index-1].end > located[index].start {
+			return "", 0, false
+		}
+	}
+	if !changedOrder && !normalizedContext {
+		return "", 0, false
+	}
+	changedHunks := 0
+	for index := len(located) - 1; index >= 0; index-- {
+		item := located[index]
+		next := make([]string, 0, len(text.lines)-len(item.chunk.oldLines)+len(item.chunk.newLines))
+		next = append(next, text.lines[:item.start]...)
+		next = append(next, item.chunk.newLines...)
+		next = append(next, text.lines[item.end:]...)
+		if !equalStringSlices(item.chunk.oldLines, item.chunk.newLines) {
+			changedHunks++
+		}
+		text.lines = next
+	}
+	return text.string(), changedHunks, true
+}
+
+func stringSliceContains(values []string, candidate string) bool {
+	for _, value := range values {
+		if patchSequenceMatches([]string{value}, []string{candidate}, patchMatchUnicode) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyPatchChunksInOrder(filePath, content string, chunks []patchChunk) (string, int, error) {
 	text := splitPatchText(content)
 	cursor := 0
 	changedHunks := 0
@@ -492,9 +620,17 @@ func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, in
 			anchorIndex, matches := findUniquePatchSequence(text.lines, []string{chunk.anchor}, cursor, false)
 			switch {
 			case matches == 0:
-				return "", 0, newPatchError(PatchErrorContextNotFound, filePath, hunkNumber, 0, "hunk anchor %q was not found after line %d", chunk.anchor, cursor)
+				return "", 0, withPatchErrorContext(
+					newPatchError(PatchErrorContextNotFound, filePath, hunkNumber, 0, "hunk anchor %q was not found after line %d", chunk.anchor, cursor),
+					chunk.anchor,
+					patchActualLinesPreview(text.lines, cursor, 1),
+				)
 			case matches > 1:
-				return "", 0, newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk anchor %q is not unique; include more context", chunk.anchor)
+				return "", 0, withPatchErrorContext(
+					newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk anchor %q is not unique; include more context", chunk.anchor),
+					chunk.anchor,
+					patchActualLinesPreview(text.lines, cursor, 1),
+				)
 			}
 			cursor = anchorIndex + 1
 		}
@@ -517,7 +653,7 @@ func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, in
 		}
 		switch {
 		case matches == 0:
-			return "", 0, newPatchError(
+			return "", 0, withPatchErrorContext(newPatchError(
 				PatchErrorContextNotFound,
 				filePath,
 				hunkNumber,
@@ -525,9 +661,13 @@ func applyPatchChunks(filePath, content string, chunks []patchChunk) (string, in
 				"failed to find the expected lines after line %d:\n%s",
 				cursor,
 				patchExpectedLinesPreview(chunk.oldLines),
-			)
+			), patchExpectedLinesPreview(chunk.oldLines), patchActualLinesPreview(text.lines, cursor, len(chunk.oldLines)))
 		case matches > 1:
-			return "", 0, newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk context matched %d locations; include more surrounding context or an @@ anchor", matches)
+			return "", 0, withPatchErrorContext(
+				newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk context matched %d locations; include more surrounding context or an @@ anchor", matches),
+				patchExpectedLinesPreview(chunk.oldLines),
+				patchActualLinesPreview(text.lines, cursor, len(chunk.oldLines)),
+			)
 		}
 		next := make([]string, 0, len(text.lines)-len(chunk.oldLines)+len(chunk.newLines))
 		next = append(next, text.lines[:matchIndex]...)
@@ -563,6 +703,21 @@ func patchExpectedLinesPreview(lines []string) string {
 		preview = append(preview, fmt.Sprintf("… (%d more lines)", len(lines)-count))
 	}
 	return strings.Join(preview, "\n")
+}
+
+func patchActualLinesPreview(lines []string, cursor, expectedLines int) string {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(lines) {
+		cursor = len(lines)
+	}
+	count := max(expectedLines, 3)
+	if count > 12 {
+		count = 12
+	}
+	end := min(cursor+count, len(lines))
+	return patchExpectedLinesPreview(lines[cursor:end])
 }
 
 func equalStringSlices(left, right []string) bool {
@@ -807,7 +962,11 @@ func (s *FileStore) verifyPatchBaselines(ctx context.Context, scope Scope, state
 			return patchTargetError(ctx, state.path, err)
 		}
 		if existed != state.beforeExisted || !bytes.Equal(current, state.before) {
-			return newPatchError(PatchErrorWorkspaceConflict, state.path, 0, 0, "workspace changed after patch preflight; no patch operations were applied")
+			return withPatchErrorContext(
+				newPatchError(PatchErrorWorkspaceConflict, state.path, 0, 0, "workspace changed after patch preflight; no patch operations were applied"),
+				string(state.before),
+				string(current),
+			)
 		}
 	}
 	return nil

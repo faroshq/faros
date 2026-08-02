@@ -327,6 +327,15 @@ func (s *FileStore) workspaceDigest(ctx context.Context, scope Scope, paths []st
 		}
 		file, err := s.ReadFile(ctx, scope, ReadOptions{Path: clean, MaxBytes: MaxWriteBytes})
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				_, _ = hash.Write([]byte(clean))
+				_, _ = hash.Write([]byte{0})
+				// 0xff cannot occur in a valid UTF-8 workspace file, so a
+				// deletion cannot collide with an upsert of sentinel-like text.
+				_, _ = hash.Write([]byte{0xff})
+				_, _ = hash.Write([]byte{0})
+				continue
+			}
 			return "", err
 		}
 		if file.Binary || file.Truncated {

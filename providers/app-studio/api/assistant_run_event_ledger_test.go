@@ -63,6 +63,61 @@ func TestAssistantRunEventLedgerPersistsCallBeforeResultInOrder(t *testing.T) {
 	}
 }
 
+func TestAssistantRunEventLedgerPersistsRequestBeforeValidationAndReplaysRejection(t *testing.T) {
+	ctx := context.Background()
+	messageStore, scope := newAssistantRunEventLedgerTestStore(t, "run-preflight-rejection")
+	ledger := newProjectAssistantRunEventLedger(messageStore, scope, "run-preflight-rejection")
+	spec := projectAssistantToolSpec{Name: projectToolApplyPatch, Risk: projectAssistantToolRiskWrite}
+	args := map[string]any{"patch": "not a contextual patch"}
+
+	request, err := ledger.RecordToolRequest(ctx, "call-invalid-patch", spec, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := listAssistantRunEventLedgerEvents(t, messageStore, scope, "run-preflight-rejection")
+	if len(events) != 1 || events[0].Type != projectAssistantRunToolRequestEventType {
+		t.Fatalf("pre-validation events = %#v, want one durable request", events)
+	}
+	wantResult := "Tool call failed: invalid workspace approval scope: invalid_patch"
+	if _, err := ledger.FinishToolCall(ctx, request.Token, wantResult, errors.New("invalid_patch")); err != nil {
+		t.Fatal(err)
+	}
+	events = listAssistantRunEventLedgerEvents(t, messageStore, scope, "run-preflight-rejection")
+	if len(events) != 2 || events[1].Type != projectAssistantRunToolResultEventType {
+		t.Fatalf("rejected events = %#v, want request and result", events)
+	}
+
+	restarted := newProjectAssistantRunEventLedger(messageStore, scope, "run-preflight-rejection")
+	replay, err := restarted.RecordToolRequest(ctx, "call-invalid-patch", spec, args)
+	if err != nil || replay.Replay == nil || replay.Replay.Result != wantResult {
+		t.Fatalf("rejected request replay = %#v, err=%v", replay, err)
+	}
+}
+
+func TestAssistantRunEventLedgerSeparatesRequestedAndAdmittedArguments(t *testing.T) {
+	ctx := context.Background()
+	messageStore, scope := newAssistantRunEventLedgerTestStore(t, "run-normalized-admission")
+	ledger := newProjectAssistantRunEventLedger(messageStore, scope, "run-normalized-admission")
+	spec := projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}
+	original := map[string]any{"message": "Commit app"}
+	normalized := map[string]any{"message": "Commit app", "paths": []string{"package.json"}, "workspaceDigest": "sha256:workspace"}
+
+	if _, err := ledger.RecordToolRequest(ctx, "call-commit", spec, original); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := ledger.BeginToolCall(ctx, "call-commit", spec, normalized)
+	if err != nil || !admitted.ShouldDispatch() {
+		t.Fatalf("admitted normalized call = %#v, err=%v", admitted, err)
+	}
+	if _, err := ledger.FinishToolCall(ctx, admitted.Token, `{"status":"succeeded"}`, nil); err != nil {
+		t.Fatal(err)
+	}
+	events := listAssistantRunEventLedgerEvents(t, messageStore, scope, "run-normalized-admission")
+	if len(events) != 3 || events[0].Type != projectAssistantRunToolRequestEventType || events[1].Type != projectAssistantRunToolCallEventType || events[2].Type != projectAssistantRunToolResultEventType {
+		t.Fatalf("events = %#v, want request, admission, result", events)
+	}
+}
+
 func TestAssistantRunEventLedgerReplaysExactCompletedCall(t *testing.T) {
 	ctx := context.Background()
 	messageStore, scope := newAssistantRunEventLedgerTestStore(t, "run-replay")

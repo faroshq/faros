@@ -203,10 +203,10 @@ type projectAssistantPermission struct {
 }
 
 type projectAssistantFollowUp struct {
-	ID         string   `json:"id"`
-	ToolCallID string   `json:"toolCallID,omitempty"`
-	Questions  []string `json:"questions,omitempty"`
-	Prompt     string   `json:"prompt,omitempty"`
+	ID         string                             `json:"id"`
+	ToolCallID string                             `json:"toolCallID,omitempty"`
+	Questions  []projectAssistantFollowUpQuestion `json:"questions,omitempty"`
+	Prompt     string                             `json:"prompt,omitempty"`
 }
 
 type projectAssistantCheckpoint struct {

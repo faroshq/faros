@@ -136,6 +136,40 @@ func (s *Server) projectAssistantRunTerminalContent(
 	return projectAssistantDurableFinalContent(reply, streamed)
 }
 
+func projectAssistantGroundPreviewTerminalContent(content string, toolCalls []projectToolCallStreamEvent) string {
+	return content
+}
+
+func appendProjectAssistantAuthoritativeStatus(content, status string) string {
+	content = strings.TrimSpace(content)
+	status = strings.TrimSpace(status)
+	if status == "" || strings.Contains(content, status) {
+		return content
+	}
+	if content == "" {
+		return status
+	}
+	return content + "\n\n" + status
+}
+
+func projectAssistantTerminalPlanGrounded(
+	plan *projectAssistantPlanSnapshot,
+	toolCalls []projectToolCallStreamEvent,
+	evidence projectAssistantCompletionEvidence,
+) bool {
+	return plan != nil && evidence.PlanComplete
+}
+
+func projectAssistantLatestToolCallSucceeded(toolCalls []projectToolCallStreamEvent, name string) bool {
+	for index := len(toolCalls) - 1; index >= 0; index-- {
+		if projectToolBaseName(toolCalls[index].Name) != projectToolBaseName(name) {
+			continue
+		}
+		return projectAssistantActionFeedItemStatus(toolCalls[index].Status) == projectAssistantActionFeedStatusSucceeded
+	}
+	return false
+}
+
 type projectAssistantDurableTerminalEffectCall struct {
 	toolName   string
 	argsDigest string
@@ -378,7 +412,7 @@ const (
 type projectAssistantProgressSnapshot struct {
 	Version          int      `json:"version"`
 	Messages         []string `json:"messages"`
-	MessageSequences []int    `json:"messageSequences,omitempty"`
+	MessageSequences []int    `json:"messageSequences"`
 	WorkedDurationMS int64    `json:"workedDurationMs"`
 }
 
@@ -434,7 +468,6 @@ func projectAssistantProgressSnapshotFromMetadata(value any) (*projectAssistantP
 	var progress projectAssistantProgressSnapshot
 	if err := decoder.Decode(&progress); err != nil ||
 		progress.Version != 1 ||
-		len(progress.Messages) == 0 ||
 		len(progress.Messages) > projectAssistantProgressMaxMessages ||
 		progress.WorkedDurationMS < 0 ||
 		progress.WorkedDurationMS > projectAssistantWorkedDurationMaxMS {
@@ -658,8 +691,8 @@ func (s *projectAssistantDurableMetadataState) nextSequence() int {
 	return s.nextTraceSequence
 }
 
-func (s *projectAssistantDurableMetadataState) progressSnapshot(now time.Time) *projectAssistantProgressSnapshot {
-	if s == nil || len(s.progressMessages) == 0 {
+func (s *projectAssistantDurableMetadataState) progressSnapshot(now time.Time, hasActions bool) *projectAssistantProgressSnapshot {
+	if s == nil || (len(s.progressMessages) == 0 && !hasActions) {
 		return nil
 	}
 	duration := s.workedDuration
@@ -673,7 +706,7 @@ func (s *projectAssistantDurableMetadataState) progressSnapshot(now time.Time) *
 	if durationMS > projectAssistantWorkedDurationMaxMS {
 		durationMS = projectAssistantWorkedDurationMaxMS
 	}
-	messageSequences := append([]int(nil), s.progressSequences...)
+	messageSequences := append([]int{}, s.progressSequences...)
 	if len(messageSequences) != len(s.progressMessages) {
 		messageSequences = nil
 	} else {
@@ -686,7 +719,7 @@ func (s *projectAssistantDurableMetadataState) progressSnapshot(now time.Time) *
 	}
 	return &projectAssistantProgressSnapshot{
 		Version:          1,
-		Messages:         append([]string(nil), s.progressMessages...),
+		Messages:         append([]string{}, s.progressMessages...),
 		MessageSequences: messageSequences,
 		WorkedDurationMS: durationMS,
 	}
@@ -755,7 +788,7 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		} else if initialBuild, _ := message.Metadata[projectAssistantMetadataInitialBuild].(bool); initialBuild {
 			metadata[projectAssistantMetadataInitialBuild] = true
 		}
-		if progress := state.progressSnapshot(time.Now().UTC()); progress != nil {
+		if progress := state.progressSnapshot(time.Now().UTC(), len(actions) > 0); progress != nil {
 			metadata[projectAssistantMetadataProgress] = *progress
 		} else if progress, ok := projectAssistantProgressSnapshotFromMetadata(message.Metadata[projectAssistantMetadataProgress]); ok {
 			metadata[projectAssistantMetadataProgress] = *progress
@@ -1050,7 +1083,25 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	callbackMu.Unlock()
 	state.initialBuild = state.initialBuild || result.InitialBuild
 	reply := result.Content
-	finalContent := projectAssistantDurableFinalContent(reply, contentText)
+	if result.CompletionEvidence.PlanComplete && state.plan != nil {
+		completed := cloneProjectAssistantPlanSnapshot(*state.plan)
+		for index := range completed.Steps {
+			completed.Steps[index].Status = "completed"
+			completed.Steps[index].ActiveForm = ""
+		}
+		state.plan = &completed
+	}
+	engineCompleted := err == nil
+	finalContent := s.projectAssistantRunTerminalContent(
+		ctx,
+		projectMessageScope(id.orgUUID, id.workspaceUUID, project),
+		run,
+		reply,
+		contentText,
+		err,
+		result.CompletionEvidence,
+		engineCompleted,
+	)
 	recordSnapshotErr(accumulator.UpdateText(ctx, finalContent, true))
 	if persistErr := getSnapshotErr(); persistErr != nil {
 		accumulator.FailPersistence(persistErr)

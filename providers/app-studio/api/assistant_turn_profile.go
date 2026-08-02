@@ -88,6 +88,9 @@ func (p projectAssistantTurnPolicy) AllowsTool(spec projectAssistantToolSpec) bo
 	if normalizeProjectAssistantTurnProfile(p.profile) == projectAssistantTurnProfileImplementation {
 		return true
 	}
+	if spec.Risk == projectAssistantToolRiskInput || spec.Risk == projectAssistantToolRiskPlan {
+		return true
+	}
 	switch projectAssistantToolBundleForSpec(spec) {
 	case projectAssistantToolBundleWorkflow, projectAssistantToolBundleWorkspaceRead:
 		return spec.Risk == projectAssistantToolRiskRead

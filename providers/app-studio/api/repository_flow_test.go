@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -155,6 +156,32 @@ func TestProjectAssistantCanonicalWorkspaceReadSurface(t *testing.T) {
 	}
 	if !registry.Has(projectToolApplyPatch) {
 		t.Fatalf("App Studio mutation tool %q is missing", projectToolApplyPatch)
+	}
+	followUp, ok := registry.Get(projectToolAskFollowUp)
+	if !ok {
+		t.Fatalf("App Studio input tool %q is missing", projectToolAskFollowUp)
+	}
+	for _, want := range []string{
+		"Request user input for one to three short questions and wait for the response",
+		"make reasonable assumptions and continue",
+	} {
+		if !strings.Contains(followUp.Spec().Description, want) {
+			t.Fatalf("ask_follow_up description missing %q: %s", want, followUp.Spec().Description)
+		}
+	}
+}
+
+func TestProjectEinoFollowUpToolResultRequiresForwardProgress(t *testing.T) {
+	result := projectEinoFollowUpToolResult(map[string]projectAssistantFollowUpAnswer{
+		"scope": {Answers: []string{"Full storefront (Recommended)"}},
+	})
+	decoded := map[string]any{}
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"answers": map[string]any{"scope": map[string]any{"answers": []any{"Full storefront (Recommended)"}}}}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("follow-up result = %#v, want %#v", decoded, want)
 	}
 }
 
@@ -458,7 +485,8 @@ func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) 
 			t.Fatalf("prompt should not direct file inspection through provider-code tool %q:\n%s", unwanted, prompt)
 		}
 	}
-	if !strings.Contains(prompt, "brief natural-language progress updates") ||
+	if !strings.Contains(prompt, "use report_progress when it is available") ||
+		!strings.Contains(prompt, "brief natural-language progress updates") ||
 		!strings.Contains(prompt, "meaningful phase finishes") ||
 		!strings.Contains(prompt, "Do not name tools, expose hidden reasoning") ||
 		!strings.Contains(prompt, "Do not narrate each tool call") {
@@ -1169,6 +1197,20 @@ func generateRepositoryFlowBuildAssistantForTest(
 	callbacks projectAssistantStreamCallbacks,
 	start *projectAssistantStreamStart,
 ) (string, error) {
+	return generateRepositoryFlowAssistantForModeTest(t, server, r, id, client, project, callbacks, start, store.AssistantRunModeDefault)
+}
+
+func generateRepositoryFlowAssistantForModeTest(
+	t *testing.T,
+	server *Server,
+	r *http.Request,
+	id identity,
+	client *asclient.Client,
+	project *aiv1alpha1.Project,
+	callbacks projectAssistantStreamCallbacks,
+	start *projectAssistantStreamStart,
+	mode store.AssistantRunMode,
+) (string, error) {
 	t.Helper()
 	if strings.TrimSpace(id.user) == "" {
 		id.user = "user@example.com"
@@ -1185,7 +1227,7 @@ func generateRepositoryFlowBuildAssistantForTest(
 		id.user,
 		prompt,
 		"repository-flow-direct-"+newMessageID(),
-		store.AssistantRunModeDefault,
+		mode,
 		func(run store.AssistantRun, assistant store.Message, _ bool) error {
 			_, attachErr := server.projectAssistantSupervisor().Attach(scope, run, assistant)
 			return attachErr
@@ -1262,16 +1304,19 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 	client := asclient.NewFromDynamic(projectSettingsDynamicClient{secret: projectLLMSettingsSecret(settings)})
 	messages := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, messages, workspace.NewFileStore(t.TempDir()), "", false)
+	var resumedModelInput []*einoschema.Message
 	model := &repositoryFlowEinoChatModel{Steps: []repositoryFlowEinoModelStep{
 		{Message: einoschema.AssistantMessage("", []einoschema.ToolCall{{
 			ID:   "call-follow-up",
 			Type: "function",
 			Function: einoschema.FunctionCall{
 				Name:      projectToolAskFollowUp,
-				Arguments: `{"questions":["What audience should this app target?"]}`,
+				Arguments: `{"questions":[{"id":"audience","header":"Audience","question":"What audience should this app target?","options":[{"label":"Solo founders (Recommended)","description":"Optimize the first version for individual founders."},{"label":"Sales teams","description":"Include collaboration-oriented workflows."}]}]}`,
 			},
 		}})},
-		{Message: einoschema.AssistantMessage("Thanks, I can build that. ", []einoschema.ToolCall{{
+		{Inspect: func(input []*einoschema.Message) {
+			resumedModelInput = append([]*einoschema.Message(nil), input...)
+		}, Message: einoschema.AssistantMessage("Thanks, I can build that. ", []einoschema.ToolCall{{
 			ID:   "call-plan",
 			Type: "function",
 			Function: einoschema.FunctionCall{
@@ -1291,7 +1336,7 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 	}
 	var followUp projectAssistantFollowUp
 	var checkpoint projectAssistantCheckpoint
-	_, err := generateRepositoryFlowBuildAssistantForTest(t, server,
+	_, err := generateRepositoryFlowAssistantForModeTest(t, server,
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		id,
 		client,
@@ -1311,6 +1356,7 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 			},
 		},
 		nil,
+		store.AssistantRunModePlan,
 	)
 	var inputErr *projectAssistantInputRequiredError
 	if !errors.As(err, &inputErr) {
@@ -1318,6 +1364,9 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 	}
 	if inputErr.RunID == "" || inputErr.RequestID == "" || followUp.ID == "" || checkpoint.ID == "" {
 		t.Fatalf("input error=%#v followUp=%#v checkpoint=%#v, want resumable follow-up", inputErr, followUp, checkpoint)
+	}
+	if len(followUp.Questions) != 1 || followUp.Questions[0].ID != "audience" || len(followUp.Questions[0].Options) != 2 || !followUp.Questions[0].IsOther {
+		t.Fatalf("follow-up questions = %#v, want Codex-style structured question", followUp.Questions)
 	}
 	assistantMessageID := "msg-assistant-follow-up"
 	if err := appendProjectAssistantMessage(context.Background(), messages, messageScope, assistantMessageID, "", projectAssistantMessageMetadata(projectMessageStatusPendingInput, []projectToolCallStreamEvent{{
@@ -1347,13 +1396,29 @@ func TestResumeProjectAssistantRunAnswersFollowUpAndUpdatesMessage(t *testing.T)
 		&ProjectRepositoryView{Ref: "demo-repo", Name: "demo", Status: projectRepositoryStatusReady},
 		inputErr.RunID,
 		projectAssistantResumeRequest{
-			RequestID:          inputErr.RequestID,
-			Answer:             "Solo founders.",
+			RequestID: inputErr.RequestID,
+			Answers: map[string]projectAssistantFollowUpAnswer{
+				"audience": {Answers: []string{"Solo founders (Recommended)"}},
+			},
 			AssistantMessageID: assistantMessageID,
 		},
 	)
 	if err != nil {
 		t.Fatalf("resumeProjectAssistantRun returned error: %v", err)
+	}
+	var followUpResult map[string]any
+	for _, message := range resumedModelInput {
+		if message == nil || message.Role != einoschema.Tool || message.ToolCallID != "call-follow-up" || !json.Valid([]byte(message.Content)) {
+			continue
+		}
+		if err := json.Unmarshal([]byte(message.Content), &followUpResult); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	wantFollowUpResult := map[string]any{"answers": map[string]any{"audience": map[string]any{"answers": []any{"Solo founders (Recommended)"}}}}
+	if !reflect.DeepEqual(followUpResult, wantFollowUpResult) {
+		t.Fatalf("follow-up function output = %#v, want %#v", followUpResult, wantFollowUpResult)
 	}
 	if resp.Status != store.AssistantRunStatusCompleted || resp.AssistantMessage == nil || resp.AssistantContent != "Done." {
 		t.Fatalf("resume response = %#v, want completed V2 plan update after follow-up", resp)
@@ -1409,13 +1474,14 @@ func TestResumeProjectAssistantRunRejectsEmptyFollowUpBeforeClaimingRun(t *testi
 	if err := appendProjectUserMessage(context.Background(), messages, messageScope, "build an app"); err != nil {
 		t.Fatalf("appendProjectUserMessage returned error: %v", err)
 	}
-	_, err := generateRepositoryFlowBuildAssistantForTest(t, server,
+	_, err := generateRepositoryFlowAssistantForModeTest(t, server,
 		httptest.NewRequest(http.MethodPost, "/", nil),
 		id,
 		client,
 		project,
 		projectAssistantStreamCallbacks{},
 		nil,
+		store.AssistantRunModePlan,
 	)
 	var inputErr *projectAssistantInputRequiredError
 	if !errors.As(err, &inputErr) {
@@ -1520,8 +1586,13 @@ func TestResumeProjectAssistantRunClearsStaleFollowUpInterruptWhenRunAlreadyClai
 	followUp := projectAssistantFollowUp{
 		ID:         requestID,
 		ToolCallID: "call-follow-up",
-		Questions:  []string{"What audience should this app target?"},
-		Prompt:     "I need one detail before continuing.",
+		Questions: []projectAssistantFollowUpQuestion{{
+			ID:       "audience",
+			Header:   "Audience",
+			Question: "What audience should this app target?",
+			IsOther:  true,
+		}},
+		Prompt: "I need one detail before continuing.",
 	}
 	checkpoint := projectAssistantCheckpoint{ID: runID, Reason: "waiting_for_input"}
 	if err := appendProjectAssistantMessage(context.Background(), messages, messageScope, assistantMessageID, "", projectAssistantMessageMetadata(projectMessageStatusPendingInput, []projectToolCallStreamEvent{{
@@ -1795,6 +1866,66 @@ func TestCommitProjectWorkspaceFilesReportsProviderFailure(t *testing.T) {
 	}
 	if commitCalls != 1 {
 		t.Fatalf("commit call count = %d, want 1", commitCalls)
+	}
+}
+
+func TestCommitProjectWorkspaceFilesSendsDeletedPaths(t *testing.T) {
+	var gotFiles []map[string]string
+	var gotDeletePaths []string
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Method string `json:"method"`
+			Params struct {
+				Name      string `json:"name"`
+				Arguments struct {
+					Files       []map[string]string `json:"files"`
+					DeletePaths []string            `json:"deletePaths"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Method != "tools/call" || envelope.Params.Name != "code__commit_files" {
+			t.Fatalf("unexpected MCP request: %#v", envelope)
+		}
+		gotFiles = envelope.Params.Arguments.Files
+		gotDeletePaths = envelope.Params.Arguments.DeletePaths
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"phase":"Succeeded","files":["src/new.ts","src/old.ts"],"commitSHA":"abcdef"}}}`)
+	}))
+	defer mcp.Close()
+
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{
+		{Path: "src/old.ts", Content: "old\n"},
+		{Path: "src/new.ts", Content: "new\n"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.ApplyPatch(ctx, scope, workspace.PatchOptions{Patch: "*** Begin Patch\n*** Delete File: src/old.ts\n*** End Patch"}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewWithWorkspace(nil, nil, workspaces, mcp.URL, false)
+	if _, err := server.commitProjectWorkspaceFiles(
+		ctx,
+		identity{tenantPath: "root:org-a:ws-1", clusterID: "cluster-ws-1", orgUUID: "org-a", workspaceUUID: "ws-1"},
+		scope,
+		nil,
+		"demo-repo",
+		mcp.URL,
+		httptest.NewRequest(http.MethodPost, "/", nil),
+		map[string]any{"repositoryRef": "demo-repo", "paths": []any{"src/old.ts", "src/new.ts"}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotDeletePaths, []string{"src/old.ts"}) {
+		t.Fatalf("deletePaths = %v", gotDeletePaths)
+	}
+	if len(gotFiles) != 1 || gotFiles[0]["path"] != "src/new.ts" || gotFiles[0]["content"] != "new\n" {
+		t.Fatalf("files = %#v", gotFiles)
 	}
 }
 

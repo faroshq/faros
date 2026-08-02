@@ -1087,7 +1087,7 @@ func TestWriteProjectAssistantRunStartFindsOriginatingUserBeyondFirstFiveHundred
 	}
 }
 
-func TestProjectAssistantRunStartConsumesServerOwnedInitialBootstrap(t *testing.T) {
+func TestProjectAssistantRunStartDoesNotTurnInitialBootstrapIntoPlanAuthority(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
 	if err != nil {
@@ -1125,8 +1125,9 @@ func TestProjectAssistantRunStartConsumesServerOwnedInitialBootstrap(t *testing.
 	router := mux.NewRouter()
 	server.Register(router)
 
-	post := func(body string) {
-		request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(body))
+	post := func(threadID, body string) {
+		createAssistantThreadForHTTPTest(t, messages, scope, threadID, "test-user")
+		request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/threads/"+threadID+"/turns", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Authorization", "Bearer caller-token")
 		request.Header.Set("X-Kedge-User", "test-user")
@@ -1139,14 +1140,11 @@ func TestProjectAssistantRunStartConsumesServerOwnedInitialBootstrap(t *testing.
 		}
 	}
 
-	post(`{"content":"build a todo app","clientRequestID":"request-1"}`)
+	post("thread-1", `{"content":"build a todo app","clientUserMessageID":"request-1","collaborationMode":"default"}`)
 	select {
 	case request := <-engine.requests:
-		if request.InitialApprovedPlan == nil {
-			t.Fatal("first initial-project durable run did not receive its run-local approval grant")
-		}
-		if !request.InitialApprovedPlan.RunLocal {
-			t.Fatalf("first initial-project grant = %#v, want run-local", request.InitialApprovedPlan)
+		if request.InitialApprovedPlan != nil {
+			t.Fatalf("initial bootstrap became plan authority: %#v", request.InitialApprovedPlan)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first durable run did not reach assistant engine")
@@ -1163,7 +1161,7 @@ func TestProjectAssistantRunStartConsumesServerOwnedInitialBootstrap(t *testing.
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	post(`{"content":"continue","clientRequestID":"request-2"}`)
+	post("thread-2", `{"content":"continue","clientUserMessageID":"request-2","collaborationMode":"default"}`)
 	select {
 	case request := <-engine.requests:
 		if request.InitialApprovedPlan != nil {
@@ -1226,9 +1224,11 @@ func TestProjectAssistantSnapshotStreamReconcilesRestartedRunningRun(t *testing.
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
 	}
+	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-1", "test-user")
+	createAssistantTurnForHTTPTest(t, memoryStore, scope, "thread-1", run)
 	router := mux.NewRouter()
 	server.Register(router)
-	request := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/run-1/stream", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/projects/demo/assistant/threads/thread-1/events", nil)
 	request.Header.Set("Authorization", "Bearer caller-token")
 	request.Header.Set("X-Kedge-User", "test-user")
 	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
@@ -1242,12 +1242,16 @@ func TestProjectAssistantSnapshotStreamReconcilesRestartedRunningRun(t *testing.
 	if !found {
 		t.Fatalf("response did not contain an SSE snapshot: %s", recorder.Body.String())
 	}
-	var snapshot projectAssistantRunSnapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
+	var event store.AssistantThreadEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Run.Status != store.AssistantRunStatusInterrupted {
-		t.Fatalf("streamed status = %q, want interrupted", snapshot.Run.Status)
+	if event.Type != assistantThreadEventItemCompleted {
+		t.Fatalf("first streamed event = %q, want %q", event.Type, assistantThreadEventItemCompleted)
+	}
+	canonical, err := memoryStore.GetAssistantTurn(context.Background(), scope, "thread-1", run.ID)
+	if err != nil || canonical.Status != store.AssistantTurnStatusInterrupted {
+		t.Fatalf("reconciled turn = %#v err=%v, want interrupted", canonical, err)
 	}
 }
 
@@ -1284,9 +1288,11 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	}}
 	engine := &planStartRouteEngine{plans: []projectAssistantPlanSnapshot{firstPlan, latestPlan}, published: make(chan struct{}), release: make(chan struct{})}
 	server.assistantEngine = engine
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-1", "test-user")
 	router := mux.NewRouter()
 	server.Register(router)
-	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"finish the plan","clientRequestID":"plan-request"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/threads/thread-1/turns", strings.NewReader(`{"content":"finish the plan","clientUserMessageID":"plan-request","collaborationMode":"plan"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer caller-token")
 	request.Header.Set("X-Kedge-User", "test-user")
@@ -1302,12 +1308,11 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("worker did not publish plan")
 	}
-	var started projectAssistantRunStartResponse
+	var started assistantThreadTurnStartResponse
 	if err := json.NewDecoder(response.Body).Decode(&started); err != nil {
 		t.Fatal(err)
 	}
-	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
-	updates, unsubscribe, err := server.projectAssistantSupervisor().Subscribe(scope, started.Run.ID, 0)
+	updates, unsubscribe, err := server.projectAssistantSupervisor().Subscribe(scope, started.Turn.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1321,15 +1326,15 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	if got := live.Message.Metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, latestPlan) {
 		t.Fatalf("live plan = %#v, want latest %#v", got, latestPlan)
 	}
-	if live.Run.Revision <= started.Run.Revision {
-		t.Fatalf("live revision = %d, want greater than start revision %d", live.Run.Revision, started.Run.Revision)
+	if live.Run.Revision <= 1 {
+		t.Fatalf("live revision = %d, want greater than initial revision", live.Run.Revision)
 	}
 
 	close(engine.release)
 	var terminal store.AssistantRun
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		terminal, err = memoryStore.GetAssistantRun(context.Background(), scope, started.Run.ID)
+		terminal, err = memoryStore.GetAssistantRun(context.Background(), scope, started.Turn.ID)
 		if err == nil && terminal.Status == store.AssistantRunStatusCompleted {
 			break
 		}
@@ -1385,9 +1390,11 @@ func TestProjectAssistantWorkerPersistsCodexTerminalContract(t *testing.T) {
 			memoryStore := store.NewMemoryStore()
 			server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
 			server.assistantEngine = terminalStartRouteEngine{err: tt.err}
+			scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+			createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-1", "test-user")
 			router := mux.NewRouter()
 			server.Register(router)
-			request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/messages", strings.NewReader(`{"content":"answer this","clientRequestID":"terminal-request"}`))
+			request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/threads/thread-1/turns", strings.NewReader(`{"content":"answer this","clientUserMessageID":"terminal-request","collaborationMode":"default"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer caller-token")
 			request.Header.Set("X-Kedge-User", "test-user")
@@ -1399,7 +1406,6 @@ func TestProjectAssistantWorkerPersistsCodexTerminalContract(t *testing.T) {
 				t.Fatalf("start status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
 			}
 
-			scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
 			deadline := time.Now().Add(time.Second)
 			for {
 				run, getErr := memoryStore.LatestAssistantRun(context.Background(), scope)
@@ -1469,9 +1475,11 @@ func TestProjectAssistantSupervisorResumesFreeTextAndPersistsLatestPlanSnapshot(
 	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
 		t.Fatal(err)
 	}
+	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-1", "test-user")
+	createAssistantTurnForHTTPTest(t, memoryStore, scope, "thread-1", run)
 	router := mux.NewRouter()
 	server.Register(router)
-	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/run-1/resume", strings.NewReader(`{"requestID":"follow-up-1","answer":"Continue with the plan."}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/threads/thread-1/turns/run-1/input", strings.NewReader(`{"requestID":"follow-up-1","answer":"Continue with the plan."}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer caller-token")
 	request.Header.Set("X-Kedge-User", "test-user")
@@ -1657,4 +1665,25 @@ func (e *blockingStartRouteEngine) StreamProjectAssistant(ctx context.Context, _
 
 func (*blockingStartRouteEngine) ResumeProjectAssistant(context.Context, projectAssistantRunRequest, projectAssistantResumeRequest, projectAssistantCheckpointState) (projectAssistantRunResult, error) {
 	return projectAssistantRunResult{}, errors.New("unexpected resume")
+}
+
+func createAssistantThreadForHTTPTest(t *testing.T, messages store.Store, scope store.Scope, threadID, actor string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if _, err := messages.CreateAssistantThread(context.Background(), scope, store.AssistantThread{
+		ID: threadID, ActorID: actor, Status: store.AssistantThreadStatusIdle, CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("create assistant thread: %v", err)
+	}
+}
+
+func createAssistantTurnForHTTPTest(t *testing.T, messages store.Store, scope store.Scope, threadID string, run store.AssistantRun) {
+	t.Helper()
+	now := time.Now().UTC()
+	if _, err := messages.CreateAssistantTurn(context.Background(), scope, store.AssistantTurn{
+		ID: run.ID, ThreadID: threadID, ActorID: "test-user", ClientUserMessageID: run.ClientRequestID,
+		Mode: run.Mode, ApprovalMode: run.ApprovalMode, Status: store.AssistantTurnStatusInProgress, CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("create assistant turn: %v", err)
+	}
 }

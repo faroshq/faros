@@ -18,6 +18,7 @@ package api
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/faroshq/provider-app-studio/store"
@@ -56,30 +57,31 @@ func projectAssistantPermissionForV2(
 	case projectAssistantToolRiskRead, projectAssistantToolRiskInput:
 		return projectAssistantPermissionAllow
 	case projectAssistantToolRiskPlan:
-		if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
-			if runState != nil {
-				active := runState.ApprovedPlan()
-				if active != nil && active.RunLocal {
-					return projectAssistantPermissionAllow
-				}
-			}
-		}
-		return projectAssistantPermissionDeny
+		// Plans are presentation/progress state. They never confer authority.
+		return projectAssistantPermissionAllow
 	case projectAssistantToolRiskWrite:
-		if runState != nil {
-			if active := runState.ApprovedPlan(); active != nil && active.RunLocal {
-				if projectAssistantApprovedPlanAllowsWrite(active, spec.Name, args) ||
-					(projectToolBaseName(spec.Name) == projectToolSelectTemplate && templateBootstrapAllowed) {
-					return projectAssistantPermissionAllow
-				}
+		if mode == store.AssistantApprovalModeOnRequest || mode == store.AssistantApprovalModeAutoApprove {
+			return projectAssistantPermissionAllow
+		}
+		if mode == store.AssistantApprovalModeNever {
+			return projectAssistantPermissionDeny
+		}
+		return projectAssistantPermissionAsk
+	case projectAssistantToolRiskRuntime:
+		if projectAssistantOnRequestRequiresApproval(spec.Name) {
+			if mode == store.AssistantApprovalModeNever {
 				return projectAssistantPermissionDeny
 			}
+			return projectAssistantPermissionAsk
 		}
-		if mode == store.AssistantApprovalModeAutoApprove {
+		if mode == store.AssistantApprovalModeOnRequest || mode == store.AssistantApprovalModeAutoApprove || mode == store.AssistantApprovalModeNever {
 			return projectAssistantPermissionAllow
 		}
 		return projectAssistantPermissionAsk
-	case projectAssistantToolRiskRuntime, projectAssistantToolRiskCommit:
+	case projectAssistantToolRiskCommit:
+		if mode == store.AssistantApprovalModeNever {
+			return projectAssistantPermissionDeny
+		}
 		if mode == store.AssistantApprovalModeAutoApprove {
 			return projectAssistantPermissionAllow
 		}
@@ -87,6 +89,93 @@ func projectAssistantPermissionForV2(
 	default:
 		return projectAssistantPermissionDeny
 	}
+}
+
+func projectAssistantOnRequestRequiresApproval(name string) bool {
+	switch projectToolBaseName(name) {
+	case projectToolInfrastructureProvision, projectToolPrepareProjectDeployment:
+		return true
+	default:
+		return false
+	}
+}
+
+func projectAssistantPermissionDenialReason(
+	spec projectAssistantToolSpec,
+	runState *projectEinoAssistantRunState,
+	args map[string]any,
+	templateBootstrapAllowed bool,
+) string {
+	toolName := projectToolBaseName(spec.Name)
+	if toolName == projectToolApplyPatch {
+		paths, err := projectAssistantWriteTargetPaths(toolName, args)
+		if err != nil {
+			return "permission denied: invalid_patch_paths; recovery: repair the contextual patch syntax and retry"
+		}
+		if templateBootstrapAllowed {
+			return fmt.Sprintf(
+				"permission denied: template_not_bound; denied paths: %s; recovery: call select_project_template first, then define_initial_project_plan from the returned component contract before editing source",
+				strings.Join(paths, ", "),
+			)
+		}
+		approved := []string{}
+		if runState != nil {
+			if plan := runState.ApprovedPlan(); plan != nil {
+				if plan.AllowAllWrites {
+					approved = []string{"<project-workspace>"}
+				} else {
+					approved = append(approved, plan.TargetPaths...)
+				}
+			}
+		}
+		denied := make([]string, 0, len(paths))
+		for _, candidate := range paths {
+			covered := false
+			for _, allowed := range approved {
+				if allowed == "<project-workspace>" || projectAssistantPathWithinApprovedTarget(candidate, allowed) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				denied = append(denied, candidate)
+			}
+		}
+		componentRoots := projectAssistantDevelopmentComponentRoots(runState)
+		return fmt.Sprintf(
+			"permission denied: path_outside_approved_scope; denied paths: %s; approved paths: %s; development component roots: %s; recovery: use the bound template component roots and request direct user approval if broader authority is required",
+			projectAssistantPermissionPathList(denied),
+			projectAssistantPermissionPathList(approved),
+			projectAssistantPermissionPathList(componentRoots),
+		)
+	}
+	return fmt.Sprintf("permission denied: unsupported_tool_risk; tool: %s; risk: %s", toolName, spec.Risk)
+}
+
+func projectAssistantDevelopmentComponentRoots(runState *projectEinoAssistantRunState) []string {
+	if runState == nil {
+		return nil
+	}
+	snapshot := runState.SessionSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	roots := make([]string, 0, len(snapshot.DevelopmentComponents))
+	for _, component := range snapshot.DevelopmentComponents {
+		root := strings.TrimSpace(component.WorkspacePath)
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	sort.Strings(roots)
+	return normalizeProjectAssistantStringList(roots)
+}
+
+func projectAssistantPermissionPathList(paths []string) string {
+	if len(paths) == 0 {
+		return "<none>"
+	}
+	return strings.Join(paths, ", ")
 }
 
 func projectAssistantApprovedPlanActive(plan *projectAssistantApprovedPlan) bool {

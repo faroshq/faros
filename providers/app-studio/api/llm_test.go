@@ -299,6 +299,9 @@ func TestInitialCreationPromptUsesV2PatchAndVerificationContract(t *testing.T) {
 		"do not repeat the anchor in the hunk body",
 		"Use plain '@@' when changing the first line",
 		"The project-creation request is the one-time authorization for this initial source build",
+		"strongly prefer making reasonable assumptions and continuing",
+		"Use ask_follow_up only when the answer cannot be discovered",
+		"Never write multiple-choice clarification questions only in assistant prose",
 		"Never call commit_project_files unless the user explicitly requested repository persistence",
 	} {
 		if !strings.Contains(prompt, want) {

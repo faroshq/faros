@@ -483,8 +483,10 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 		recovery = " Recovery: revise the contextual patch so it makes the requested change; do not verify an unchanged workspace."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorWorkspaceConflict)):
 		recovery = " Recovery: reread every affected existing file because workspace contents changed during the edit, then build a new contextual patch from current evidence."
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorStrategyChange)):
+		recovery = " Recovery: reread the affected current source and submit a materially different patch; the same patch will not be dispatched again at this workspace revision."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorInvalidPatch)):
-		recovery = " Recovery: return one valid *** Begin Patch / *** End Patch envelope using only Add File or Update File sections. Delete File and Move to are unavailable."
+		recovery = " Recovery: return one valid *** Begin Patch / *** End Patch envelope. Start with Add File, Update File, or Delete File; for a move, put Move to immediately below Update File for the old path."
 	}
 	if recovery == "" {
 		return truncateProjectToolInfo(prefix + safeReason)
@@ -492,6 +494,23 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 	reasonLimit := projectToolInfoLimit - len(prefix) - len(recovery)
 	safeReason = projectEinoAssistantTruncateFailureReason(safeReason, reasonLimit)
 	return prefix + safeReason + recovery
+}
+
+func projectEinoAssistantPatchRecoveryInstruction(code workspace.PatchErrorCode) string {
+	switch code {
+	case workspace.PatchErrorContextNotFound:
+		return "Reread the named file around the failed hunk and build a new patch from the returned current source."
+	case workspace.PatchErrorContextAmbiguous:
+		return "Add stable unchanged lines or a literal class/function anchor so the hunk matches exactly one location."
+	case workspace.PatchErrorWorkspaceConflict:
+		return "Reread every affected existing file and rebuild the patch from current workspace contents."
+	case workspace.PatchErrorStrategyChange:
+		return "Reread the affected source and submit a materially different patch; this patch will not be dispatched again at the current revision."
+	case workspace.PatchErrorNoChanges:
+		return "Revise the patch so it makes the requested source change."
+	default:
+		return "Correct the patch using the typed error details before retrying."
+	}
 }
 
 func projectEinoAssistantTruncateFailureReason(value string, limit int) string {

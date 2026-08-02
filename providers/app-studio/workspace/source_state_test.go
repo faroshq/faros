@@ -170,3 +170,45 @@ func TestFileStoreCommitSettlementDoesNotClearNewerMutation(t *testing.T) {
 		t.Fatalf("dirty paths after stale settlement = %v, want newer mutation preserved", paths)
 	}
 }
+
+func TestFileStoreCommitSettlementTracksDeletedPath(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/old.ts", Content: "old\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyPatch(ctx, scope, PatchOptions{Patch: "*** Begin Patch\n*** Delete File: src/old.ts\n*** End Patch"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddUncommittedPaths(ctx, scope, []string{"src/old.ts"}); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.WorkspaceDigest(ctx, scope, []string{"src/old.ts"})
+	if err != nil || digest == "" {
+		t.Fatalf("deleted path digest = %q, err=%v", digest, err)
+	}
+	if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/old.ts", Content: "<deleted>"}}); err != nil {
+		t.Fatal(err)
+	}
+	upsertDigest, err := store.WorkspaceDigest(ctx, scope, []string{"src/old.ts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upsertDigest == digest {
+		t.Fatal("deleted path digest collided with sentinel-like file content")
+	}
+	if _, err := store.ApplyPatch(ctx, scope, PatchOptions{Patch: "*** Begin Patch\n*** Delete File: src/old.ts\n*** End Patch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCommitSettlement(ctx, scope, digest, []string{"src/old.ts"}); err != nil {
+		t.Fatal(err)
+	}
+	if reconciled, err := store.ReconcileCommitSettlement(ctx, scope); err != nil || !reconciled {
+		t.Fatalf("ReconcileCommitSettlement = %t, %v", reconciled, err)
+	}
+	paths, err := store.UncommittedPaths(ctx, scope)
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("uncommitted paths = %v, err=%v", paths, err)
+	}
+}

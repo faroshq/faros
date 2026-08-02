@@ -19,11 +19,9 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -756,11 +754,15 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 		cleanPaths = append(cleanPaths, clean)
 	}
 	files := make([]map[string]string, 0, len(cleanPaths))
+	deletePaths := make([]string, 0)
 	var totalBytes int64
-	workspaceHash := sha256.New()
 	for _, p := range cleanPaths {
 		read, err := s.workspaces.ReadFile(ctx, scope, workspace.ReadOptions{Path: p, MaxBytes: workspace.MaxWriteBytes})
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				deletePaths = append(deletePaths, p)
+				continue
+			}
 			return "", err
 		}
 		if read.Binary {
@@ -773,22 +775,25 @@ func (s *Server) commitProjectWorkspaceFiles(ctx context.Context, id identity, s
 		if totalBytes > projectCommitProjectFilesMaxSize {
 			return "", fmt.Errorf("commit_project_files payload is too large: %d > %d bytes", totalBytes, projectCommitProjectFilesMaxSize)
 		}
-		_, _ = workspaceHash.Write([]byte(read.Path))
-		_, _ = workspaceHash.Write([]byte{0})
-		_, _ = workspaceHash.Write([]byte(read.Content))
-		_, _ = workspaceHash.Write([]byte{0})
 		files = append(files, map[string]string{"path": read.Path, "content": read.Content})
 	}
-	if len(files) == 0 {
-		return "", errors.New("no files to commit")
+	if len(files) == 0 && len(deletePaths) == 0 {
+		return "", errors.New("no file changes to commit")
+	}
+	workspaceDigest, err := s.workspaces.WorkspaceDigest(ctx, scope, cleanPaths)
+	if err != nil {
+		return "", err
 	}
 	if expectedDigest := projectToolString(args["workspaceDigest"]); expectedDigest != "" &&
-		expectedDigest != hex.EncodeToString(workspaceHash.Sum(nil)) {
+		expectedDigest != workspaceDigest {
 		return "", errors.New("workspace content changed after commit approval; request approval again for the current content")
 	}
 	commitArgs := map[string]any{
 		"repositoryRef": projectRepositoryRef,
 		"files":         files,
+	}
+	if len(deletePaths) > 0 {
+		commitArgs["deletePaths"] = deletePaths
 	}
 	if message := projectToolString(args["message"]); message != "" {
 		commitArgs["message"] = message
@@ -899,8 +904,12 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 		}
 		return ""
 	case projectToolAskFollowUp:
-		if questions := projectToolStringList(args["questions"]); len(questions) > 0 {
-			return truncateProjectToolInfo(fmt.Sprintf("%d question(s): %s", len(questions), summarizeProjectToolList(questions, 3)))
+		if questions, err := projectAssistantFollowUpQuestionsFromArguments(args["questions"]); err == nil {
+			labels := make([]string, 0, len(questions))
+			for _, question := range questions {
+				labels = append(labels, question.Question)
+			}
+			return truncateProjectToolInfo(fmt.Sprintf("%d question(s): %s", len(labels), summarizeProjectToolList(labels, 3)))
 		}
 		return ""
 	case projectToolApplyPatch:
@@ -2112,7 +2121,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	var b strings.Builder
 	b.WriteString("You are the assistant for a persistent Kedge Project workspace. ")
 	b.WriteString("Help the user reason about and build the application represented by this Project. ")
-	b.WriteString("For longer tool-driven work, keep the user oriented with brief natural-language progress updates: one when you begin, then only when a meaningful phase finishes, new evidence changes the approach, you encounter a blocker, or a longer verification begins. ")
+	b.WriteString("For longer tool-driven work, use report_progress when it is available to keep the user oriented with brief natural-language progress updates: one when you begin, then only when a meaningful phase finishes, new evidence changes the approach, you encounter a blocker, or a longer verification begins. Continue working after each update. If report_progress is unavailable, continue without it. ")
 	b.WriteString("Keep each update to one or two sentences, grounded in evidence already available, and explain the outcome or next direction. ")
 	b.WriteString("Do not name tools, expose hidden reasoning, raw arguments, or raw results, repeat the plan or status UI, or narrate routine calls. ")
 	b.WriteString("Do not narrate each tool call or say what tool you will call next in assistant prose; App Studio shows detailed tool progress through its status and tool summary UI. ")
@@ -2125,7 +2134,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	b.WriteString("Translate technical choices into business outcomes and safe next steps. ")
 	b.WriteString("When a live development sandbox exists, assume App Studio source changes run in that sandbox; separate development sandbox guidance from production launch guidance. ")
 	b.WriteString("Do not ask the user to choose databases, networking, infrastructure templates, or deployment architecture when App Studio can infer a safe next step from their business intent and available evidence. ")
-	b.WriteString("When requirements are unclear, ask concise follow-up questions instead of guessing.\n\n")
+	b.WriteString("In Default mode, strongly prefer making reasonable assumptions and continuing instead of stopping for clarification. Use ask_follow_up only when the answer cannot be discovered and a reasonable assumption would materially change the result or make proceeding risky. Never write multiple-choice clarification questions only in assistant prose.\n\n")
 	b.WriteString("Collaboration mode: " + string(collaborationMode) + "\n")
 	b.WriteString("Project metadata:\n")
 	b.WriteString("- Name: " + p.Name + "\n")
@@ -2185,10 +2194,11 @@ func appendProjectAssistantV2ModePrompt(b *strings.Builder, mode projectAssistan
 
 	b.WriteString("Default mode follows the authority in the user's request: answer, explanation, review, status, and diagnosis requests authorize inspection only; change, build, fix, remove, and implementation requests authorize scoped action. Diagnose reported defects from current evidence before editing. Do not turn an explanatory question into an implementation task. ")
 	b.WriteString("Use the current project snapshot first, then bounded reads and searches for unanswered questions. Additional evidence must answer a new question rather than rediscover a result already returned. ")
-	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add new files or update existing files; include enough unchanged context for a unique match and group independent related changes in one patch. ")
+	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add, update, delete, or move files; include enough unchanged context for a unique match and group independent related changes in one patch. ")
 	b.WriteString(projectAssistantContextualPatchFormatInstruction)
-	b.WriteString("File deletion and rename are not currently supported, so state that limitation instead of attempting either operation. Do not assume a shell or host filesystem access. ")
+	b.WriteString("Delete File and Move to are supported within authorized workspace paths. Do not assume shell or host filesystem access. ")
 	b.WriteString("Workspace changes synchronize automatically. Rerun the original observation or use verify_development_runtime only when that evidence is relevant to the user's request. The verification tool proves operational synchronization, process/log health, and preview reachability only; it does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria. Dirty files do not create an obligation to verify or commit. ")
+	b.WriteString("After changing a dependency manifest, start command, or build/runtime configuration, call restart_runtime before verification because file synchronization does not reload process configuration. ")
 	if initialBuild {
 		b.WriteString("The project-creation request is the one-time authorization for this initial source build. It does not authorize unrelated infrastructure, production promotion, or repository replacement. ")
 	}

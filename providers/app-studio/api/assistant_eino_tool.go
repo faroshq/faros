@@ -166,6 +166,9 @@ func projectAssistantToolsForCollaborationMode(tools []projectAssistantTool, mod
 			continue
 		}
 		spec := tool.Spec()
+		if mode == projectAssistantCollaborationModeDefault && spec.Risk == projectAssistantToolRiskInput {
+			continue
+		}
 		if mode == projectAssistantCollaborationModePlan && projectAssistantToolHasEffect(spec) {
 			continue
 		}
@@ -270,7 +273,12 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 	} else {
 		spec := t.tool.Spec()
 		args := map[string]any{}
-		_ = json.Unmarshal([]byte(argumentsInJSON), &args)
+		durableArgs := any(args)
+		if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
+			durableArgs = map[string]any{"invalidArguments": argumentsInJSON}
+		} else {
+			durableArgs = args
+		}
 		result := "Tool call failed: tool is not available in the current capability snapshot"
 		t.emitToolCall(projectToolCallStreamEvent{
 			ID:        callID,
@@ -283,21 +291,62 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 			t.runState.RecordToolMessage(chatMessage{Role: "tool", Name: spec.Name, ToolCallID: callID, Content: result})
 			t.runState.RecordCompletedAction(spec.Name, projectEinoToolArgumentsString(args), false)
 		}
+		if t.req.eventLedger != nil {
+			decision, err := t.req.eventLedger.RecordToolRequest(ctx, callID, spec, durableArgs)
+			if err != nil {
+				return "", err
+			}
+			if decision.Replay != nil {
+				return t.replayDurableToolCall(ctx, callID, spec, args, *decision.Replay)
+			}
+			return t.finishDurableToolFailureForModel(ctx, decision, result, errors.New("tool is not available in the current capability snapshot"))
+		}
 		return result, nil
 	}
 	spec := t.tool.Spec()
+	args, argumentErr := projectEinoToolArguments(argumentsInJSON)
+	durableArgs := any(args)
+	if argumentErr != nil {
+		durableArgs = map[string]any{"invalidArguments": argumentsInJSON}
+	}
+	if t.req.eventLedger == nil {
+		return "", errors.New("assistant run event ledger is not configured")
+	}
+	requestDecision, err := t.req.eventLedger.RecordToolRequest(ctx, callID, spec, durableArgs)
+	if err != nil {
+		return "", err
+	}
+	if requestDecision.Replay != nil {
+		return t.replayDurableToolCall(ctx, callID, spec, args, *requestDecision.Replay)
+	}
+	if argumentErr != nil {
+		reason := "invalid arguments: " + truncateProjectToolInfo(argumentErr.Error())
+		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
+	}
 	if wasInterrupted, hasState, state := einotool.GetInterruptState[*projectEinoFollowUpInterruptState](ctx); wasInterrupted && hasState && state != nil {
-		return t.resumeFollowUp(ctx, callID, spec, state)
+		result, err := t.resumeFollowUp(ctx, callID, spec, state)
+		if err != nil {
+			return result, err
+		}
+		return t.finishDurableToolRequestResult(ctx, requestDecision, spec.Name, result)
 	}
 	if wasInterrupted, hasState, state := einotool.GetInterruptState[*projectEinoPermissionInterruptState](ctx); wasInterrupted && hasState && state != nil {
-		return t.resumePermission(ctx, callID, spec, state)
-	}
-	args, err := projectEinoToolArguments(argumentsInJSON)
-	if err != nil {
-		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "invalid arguments: "+truncateProjectToolInfo(err.Error())), nil
+		result, err := t.resumePermission(ctx, callID, spec, state)
+		if err != nil {
+			return result, err
+		}
+		if _, settled, outcomeErr := t.req.eventLedger.ToolCallOutcome(ctx, callID); outcomeErr != nil {
+			return "", outcomeErr
+		} else if settled {
+			return result, nil
+		}
+		return t.finishDurableToolRequestResult(ctx, requestDecision, spec.Name, result)
 	}
 	if t.runState.PermissionBarrierActive() {
-		return projectEinoPermissionBarrierToolResult(), nil
+		reason := projectEinoPermissionBarrierToolResult()
+		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	}
 	if projectEinoAssistantCommitTool(spec.Name) && t.req.eventLedger != nil {
 		durableArgs, outcome, replay, err := t.req.eventLedger.SettledToolCall(ctx, callID, spec.Name)
@@ -317,27 +366,37 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 	if projectEinoAssistantCommitTool(spec.Name) {
 		args, err = t.v2CommitArguments(ctx, args)
 		if err != nil {
-			return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, err.Error()), nil
+			failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, err.Error())
+			return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, err)
 		}
 		if err := t.validateV2CommitWorkspace(ctx, args); err != nil {
-			return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, err.Error()), nil
+			failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, err.Error())
+			return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, err)
 		}
 		argumentsInJSON = projectEinoToolArgumentsString(args)
 	}
 	if projectToolBaseName(spec.Name) == projectToolAskFollowUp {
-		return t.requestFollowUp(ctx, callID, spec, args)
+		result, err := t.requestFollowUp(ctx, callID, spec, args)
+		if err != nil {
+			return result, err
+		}
+		return t.finishDurableToolRequestResult(ctx, requestDecision, spec.Name, result)
 	}
 	if t.req.CollaborationMode == projectAssistantCollaborationModePlan &&
 		projectAssistantToolHasEffect(spec) {
-		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "Plan mode is read-only; start a new Default turn to implement the plan"), nil
+		reason := "Plan mode is read-only; start a new Default turn to implement the plan"
+		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	}
 	if err := projectAssistantValidateGrantBearingToolArguments(spec, args); err != nil {
-		return t.finishFailedToolCall(
+		reason := "invalid workspace approval scope: " + err.Error()
+		failed := t.finishFailedToolCall(
 			callID,
 			spec.Name,
 			argumentsInJSON,
-			"invalid workspace approval scope: "+err.Error(),
-		), nil
+			reason,
+		)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	}
 	decision := projectAssistantPermissionForV2(
 		spec,
@@ -367,9 +426,18 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 		}
 		return "", t.requestPermission(ctx, callID, spec, args, argumentsInJSON)
 	case projectAssistantPermissionDeny:
-		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "permission denied: unknown tool risk"), nil
+		reason := projectAssistantPermissionDenialReason(
+			spec,
+			t.runState,
+			args,
+			projectEinoAssistantTemplateBootstrapAllowed(t.req.Project),
+		)
+		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	default:
-		return t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, "permission denied"), nil
+		reason := "permission denied: unsupported permission decision"
+		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	}
 }
 
@@ -417,6 +485,22 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 	}
 	if ledgerDecision.Replay != nil {
 		return t.replayDurableToolCall(ctx, callID, spec, args, *ledgerDecision.Replay)
+	}
+	patchFingerprint := ""
+	patchRevision := uint64(0)
+	if projectToolBaseName(spec.Name) == projectToolApplyPatch {
+		patch, _ := projectToolRawString(args["patch"])
+		var duplicate bool
+		patchFingerprint, patchRevision, duplicate = t.runState.PatchFingerprint(patch)
+		if duplicate {
+			patchErr := &workspace.PatchError{
+				Code:                   workspace.PatchErrorStrategyChange,
+				Message:                "this identical patch already failed against the current workspace revision; reread the affected file and submit a materially different patch",
+				SourceMutationRevision: patchRevision,
+			}
+			failed := t.finishFailedPatchToolCall(callID, spec.Name, args, patchErr, patchRevision)
+			return t.finishDurableToolFailureForModel(ctx, ledgerDecision, failed, patchErr)
+		}
 	}
 	if projectEinoAssistantCommitTool(spec.Name) {
 		if err := t.validateV2CommitWorkspace(ctx, args); err != nil {
@@ -488,7 +572,14 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 			_ = t.recordV2CommitSettlement(ctx, spec, args, false)
 			return modelResult, durableErr
 		}
-		failed := t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error())
+		failed := ""
+		var patchErr *workspace.PatchError
+		if projectToolBaseName(spec.Name) == projectToolApplyPatch && errors.As(err, &patchErr) {
+			t.runState.RecordFailedPatchFingerprint(patchFingerprint, patchRevision)
+			failed = t.finishFailedPatchToolCall(callID, spec.Name, args, patchErr, patchRevision)
+		} else {
+			failed = t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error())
+		}
 		modelResult, durableErr := t.finishDurableToolFailureForModel(ctx, ledgerDecision, failed, err)
 		_ = t.recordV2CommitSettlement(ctx, spec, args, false)
 		return modelResult, durableErr
@@ -499,10 +590,13 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 			return t.finishDurableToolCall(ctx, ledgerDecision, result, recordErr)
 		}
 	} else if projectToolBaseName(spec.Name) == projectToolSelectTemplate &&
-		projectAssistantToolResultDisposition(spec.Name, result, nil) == projectAssistantToolDispositionSucceeded && t.server != nil {
+		projectAssistantToolResultDisposition(spec.Name, result, nil) == projectAssistantToolDispositionSucceeded {
+		t.refreshInitialBuildAfterTemplateSelection(ctx)
 		// Selecting a replacement development target must also populate it with
 		// the existing workspace, even when no source edit follows this call.
-		t.server.scheduleDevelopmentSyncAfterMutation(t.req.Identity, t.req.Project, spec.Name)
+		if t.server != nil {
+			t.server.scheduleDevelopmentSyncAfterMutation(t.req.Identity, t.req.Project, spec.Name)
+		}
 	}
 	modelResult, err = t.finishDurableToolCall(ctx, ledgerDecision, modelResult, nil)
 	if err != nil {
@@ -609,6 +703,18 @@ func (t projectEinoAssistantTool) finishDurableToolCall(
 		return "", err
 	}
 	return outcome.InvokeResult()
+}
+
+func (t projectEinoAssistantTool) finishDurableToolRequestResult(
+	ctx context.Context,
+	decision projectAssistantRunToolCallDecision,
+	toolName string,
+	result string,
+) (string, error) {
+	if projectAssistantToolResultDisposition(toolName, result, nil) == projectAssistantToolDispositionFailed {
+		return t.finishDurableToolFailureForModel(ctx, decision, result, errors.New(result))
+	}
+	return t.finishDurableToolCall(ctx, decision, result, nil)
 }
 
 func (t projectEinoAssistantTool) finishDurableToolFailureForModel(
@@ -942,12 +1048,9 @@ func (t projectEinoAssistantTool) retireApprovedPlan(_ context.Context) error {
 }
 
 func (t projectEinoAssistantTool) requestFollowUp(ctx context.Context, callID string, spec projectAssistantToolSpec, args map[string]any) (string, error) {
-	questions := normalizeProjectAssistantStringList(projectToolStringList(args["questions"]))
-	if len(questions) == 0 {
-		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), "follow-up requires at least one question"), nil
-	}
-	if len(questions) > 3 {
-		questions = questions[:3]
+	questions, err := projectAssistantFollowUpQuestionsFromArguments(args["questions"])
+	if err != nil {
+		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
 	}
 	prompt := projectAssistantFollowUpPrompt(questions)
 	t.emitToolCall(projectToolCallStreamEvent{
@@ -959,11 +1062,11 @@ func (t projectEinoAssistantTool) requestFollowUp(ctx context.Context, callID st
 	})
 	return "", einotool.StatefulInterrupt(ctx, &projectEinoFollowUpInterruptInfo{
 		ToolCallID: callID,
-		Questions:  append([]string(nil), questions...),
+		Questions:  cloneProjectAssistantFollowUpQuestions(questions),
 		Prompt:     prompt,
 	}, &projectEinoFollowUpInterruptState{
 		ToolCallID: callID,
-		Questions:  append([]string(nil), questions...),
+		Questions:  cloneProjectAssistantFollowUpQuestions(questions),
 	})
 }
 
@@ -971,19 +1074,23 @@ func (t projectEinoAssistantTool) resumeFollowUp(ctx context.Context, callID str
 	if strings.TrimSpace(callID) == "" {
 		callID = strings.TrimSpace(state.ToolCallID)
 	}
-	questions := normalizeProjectAssistantStringList(state.Questions)
+	questions := normalizeProjectAssistantFollowUpQuestions(state.Questions)
 	isResumeTarget, hasData, data := einotool.GetResumeContext[*projectEinoFollowUpResumeData](ctx)
 	if !isResumeTarget {
 		return "", einotool.StatefulInterrupt(ctx, &projectEinoFollowUpInterruptInfo{
 			ToolCallID: callID,
-			Questions:  append([]string(nil), questions...),
+			Questions:  cloneProjectAssistantFollowUpQuestions(questions),
 			Prompt:     projectAssistantFollowUpPrompt(questions),
 		}, state)
 	}
-	if !hasData || data == nil || strings.TrimSpace(data.Answer) == "" {
+	if !hasData {
 		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(map[string]any{"questions": questions}), "follow-up answer is required"), nil
 	}
-	result := projectEinoFollowUpToolResult(data.Answer)
+	answers, err := projectAssistantFollowUpResponse(questions, data)
+	if err != nil {
+		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(map[string]any{"questions": questions}), err.Error()), nil
+	}
+	result := projectEinoFollowUpToolResult(answers)
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
 		Name:      spec.Name,
@@ -1005,6 +1112,20 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	if authority == nil || !authority.RunLocal {
 		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), "initial project planning is unavailable outside the initial build"), nil
 	}
+	if t.req.Project == nil || t.req.Project.Spec.Template == nil || strings.TrimSpace(t.req.Project.Spec.Template.Name) == "" {
+		return t.finishFailedToolCall(
+			callID,
+			spec.Name,
+			projectEinoToolArgumentsString(args),
+			"template_not_bound: select a development template first, then define the execution plan from the returned component workspace paths and toolchains",
+		), nil
+	}
+	// Checkpoints created before execution plans were separated from authority
+	// may still contain a model-authored plan in the grant slot. Restore the
+	// original user-derived creation authority before accepting a new plan.
+	if authority.ApprovalTool == projectToolDefineInitialProjectPlan {
+		t.runState.ApprovePlan(projectAssistantInitialCreationPlan(authority.Goal))
+	}
 	plan, err := projectAssistantInitialExecutionPlanFromArguments(authority.Goal, args)
 	if err != nil {
 		return t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error()), nil
@@ -1024,18 +1145,8 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	); err != nil {
 		return "", fmt.Errorf("%w: persist project memory: %v", errProjectAssistantInitialPlanPersistence, err)
 	}
-	t.runState.ApprovePlan(plan)
 	t.runState.SetExecutionPlan(plan)
-	initialProgress := projectAssistantPlanSnapshot{
-		Steps: make([]projectAssistantPlanStep, 0, len(plan.Steps)),
-	}
-	for _, step := range plan.Steps {
-		initialProgress.Steps = append(initialProgress.Steps, projectAssistantPlanStep{
-			Content:    step,
-			ActiveForm: step,
-			Status:     "pending",
-		})
-	}
+	initialProgress := projectAssistantInitialPlanProgress(plan)
 	t.runState.SetPlanProgress(initialProgress)
 	if t.req.StreamCallbacks.OnPlan != nil {
 		t.req.StreamCallbacks.OnPlan(initialProgress)
@@ -1064,6 +1175,34 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	})
 	t.recordToolMessage(callID, spec.Name, result)
 	return result, nil
+}
+
+func (t projectEinoAssistantTool) refreshInitialBuildAfterTemplateSelection(ctx context.Context) {
+	if t.runState == nil {
+		return
+	}
+	if authority := t.runState.ApprovedPlan(); authority != nil && authority.RunLocal && authority.ApprovalTool == projectToolDefineInitialProjectPlan {
+		t.runState.ApprovePlan(projectAssistantInitialCreationPlan(authority.Goal))
+	}
+	// A template switch changes the authoritative workspacePath/toolchain
+	// contract. Never retain an execution plan created against the old contract.
+	t.runState.ClearExecutionPlan()
+	t.runState.SetSessionSnapshot(projectEinoAssistantSnapshot(ctx, t.req))
+}
+
+func projectAssistantInitialPlanProgress(plan projectAssistantApprovedPlan) projectAssistantPlanSnapshot {
+	progress := projectAssistantPlanSnapshot{
+		Steps: make([]projectAssistantPlanStep, 0, len(plan.Steps)),
+	}
+	for _, step := range plan.Steps {
+		label := projectEinoAssistantTodoProgressLabel(step)
+		progress.Steps = append(progress.Steps, projectAssistantPlanStep{
+			Content:    label,
+			ActiveForm: label,
+			Status:     "pending",
+		})
+	}
+	return progress
 }
 
 func (t projectEinoAssistantTool) admitMutation(ctx context.Context, spec projectAssistantToolSpec) error {
@@ -1212,6 +1351,37 @@ func (t projectEinoAssistantTool) finishFailedToolCall(callID, name, rawArgs, re
 	return result
 }
 
+func (t projectEinoAssistantTool) finishFailedPatchToolCall(
+	callID, name string,
+	args map[string]any,
+	patchErr *workspace.PatchError,
+	revision uint64,
+) string {
+	if patchErr == nil {
+		return t.finishFailedToolCall(callID, name, projectEinoToolArgumentsString(args), "patch failed")
+	}
+	safe := *patchErr
+	safe.SourceMutationRevision = revision
+	t.emitToolCall(projectToolCallStreamEvent{
+		ID:        callID,
+		Name:      name,
+		Status:    "failed",
+		Arguments: summarizeProjectToolArgumentsMap(name, args),
+		Error:     projectEinoAssistantSafeErrorText(&safe),
+	})
+	payload, err := json.Marshal(map[string]any{
+		"status":   "failed",
+		"error":    safe,
+		"recovery": projectEinoAssistantPatchRecoveryInstruction(safe.Code),
+	})
+	if err != nil {
+		return t.finishFailedToolCall(callID, name, projectEinoToolArgumentsString(args), safe.Error())
+	}
+	result := string(payload)
+	t.recordToolMessage(callID, name, result)
+	return result
+}
+
 func (t projectEinoAssistantTool) emitToolCall(event projectToolCallStreamEvent) {
 	if t.req.StreamCallbacks.OnToolCall == nil {
 		return
@@ -1245,12 +1415,10 @@ func projectEinoToolArguments(argumentsInJSON string) (map[string]any, error) {
 	return args, nil
 }
 
-func projectEinoFollowUpToolResult(answer string) string {
-	raw, err := json.Marshal(map[string]any{
-		"answer": strings.TrimSpace(answer),
-	})
+func projectEinoFollowUpToolResult(answers map[string]projectAssistantFollowUpAnswer) string {
+	raw, err := json.Marshal(map[string]any{"answers": answers})
 	if err != nil {
-		return strings.TrimSpace(answer)
+		return "{}"
 	}
 	return string(raw)
 }

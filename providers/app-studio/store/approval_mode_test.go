@@ -41,8 +41,8 @@ func TestMemoryStoreAssistantApprovalPreferenceIsActorAndProjectScoped(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaultPreference.Mode != AssistantApprovalModeAutoApprove {
-		t.Fatalf("default mode = %q, want %q", defaultPreference.Mode, AssistantApprovalModeAutoApprove)
+	if defaultPreference.Mode != AssistantApprovalModeOnRequest {
+		t.Fatalf("default mode = %q, want %q", defaultPreference.Mode, AssistantApprovalModeOnRequest)
 	}
 
 	saved, err := s.SetAssistantApprovalPreference(ctx, scope, AssistantApprovalPreference{
@@ -68,7 +68,7 @@ func TestMemoryStoreAssistantApprovalPreferenceIsActorAndProjectScoped(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Mode != AssistantApprovalModeAutoApprove {
+			if got.Mode != AssistantApprovalModeOnRequest {
 				t.Fatalf("mode = %q, want isolated default", got.Mode)
 			}
 		})
@@ -146,7 +146,7 @@ func TestMemoryStoreAssistantRunApprovalModeDefaultsAndValidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.ApprovalMode != AssistantApprovalModeAlwaysAsk {
+	if created.ApprovalMode != AssistantApprovalModeOnRequest {
 		t.Fatalf("default approval mode = %q", created.ApprovalMode)
 	}
 

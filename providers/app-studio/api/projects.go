@@ -853,6 +853,15 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.projectAssistantSupervisor().log("resume", scope, run)
+	if threadID := strings.TrimSpace(mux.Vars(r)["thread"]); threadID != "" {
+		turn, turnErr := s.store.GetAssistantTurn(r.Context(), scope, threadID, runID)
+		if turnErr != nil {
+			s.writeAssistantThreadError(w, turnErr)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, turn)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, projectAssistantRunSnapshotToAPI(projectAssistantRunSnapshot{Run: run, Message: message}))
 }
 
@@ -1665,7 +1674,8 @@ func slugifyProjectName(str string) string {
 const initialProjectMemoryUpdateAttempts = 3
 
 // persistInitialProjectMemory records the user's original creation goal and the
-// acceptance criteria from the auto-authorized initial execution plan. The
+// acceptance criteria from the initial execution plan. Write authority remains
+// the separate user-derived, run-local creation grant. The
 // update is additive: users may edit project memory independently, so conflicts
 // are resolved by re-reading and merging rather than overwriting their values.
 func persistInitialProjectPlanMemory(

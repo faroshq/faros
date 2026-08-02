@@ -87,7 +87,9 @@ export class PlaywrightInspector implements Inspector {
       await page.routeWebSocket(/.*/, async (socket) => {
         const failure = 'blocked WebSocket connection'
         pushBounded(networkEvidence, { url: safeDisplayURL(socket.url()), method: 'WEBSOCKET', failure }, MAX_NETWORK_EVENTS)
-        applicationFailures.push(failure)
+        // WebSockets are intentionally unavailable during read-only inspection.
+        // Vite opens one for HMR on every healthy development page, so the
+        // policy block is evidence, not proof that the application failed.
         await socket.close({ code: 1008, reason: 'read-only preview inspection' })
       })
 
@@ -135,7 +137,8 @@ export class PlaywrightInspector implements Inspector {
   }
 
   private async browser(): Promise<Browser> {
-    this.browserPromise ??= chromium.launch({ chromiumSandbox: true, headless: true }).catch((error: unknown) => {
+    const chromiumSandbox = process.env.BROWSER_WORKER_CHROMIUM_SANDBOX !== 'false'
+    this.browserPromise ??= chromium.launch({ chromiumSandbox, headless: true }).catch((error: unknown) => {
       this.browserPromise = undefined
       throw error
     })

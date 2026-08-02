@@ -188,11 +188,16 @@ build-app-studio-browser-worker: ## Build the App Studio Playwright browser work
 test-app-studio-browser-worker: ## Test the App Studio Playwright browser worker
 	cd providers/app-studio/browser-worker && npm ci --no-audit --no-fund && npm test
 
-run-app-studio-browser-worker: build-app-studio-browser-worker ## Run the App Studio browser worker on localhost
-	cd providers/app-studio/browser-worker && PORT=$(APP_STUDIO_BROWSER_WORKER_PORT) BROWSER_WORKER_IGNORE_HTTPS_ERRORS=true npm start
+run-app-studio-browser-worker: docker-build-app-studio-browser-worker ## Run the App Studio browser worker on localhost
+	-docker rm -f $(APP_STUDIO_BROWSER_WORKER_CONTAINER)
+	docker run --rm --init --name $(APP_STUDIO_BROWSER_WORKER_CONTAINER) --network host \
+		-e PORT=$(APP_STUDIO_BROWSER_WORKER_PORT) \
+		-e BROWSER_WORKER_CHROMIUM_SANDBOX=false \
+		-e BROWSER_WORKER_IGNORE_HTTPS_ERRORS=true \
+		$(APP_STUDIO_BROWSER_WORKER_IMAGE)
 
 docker-build-app-studio-browser-worker: ## Build the App Studio browser worker image
-	docker build --platform $(DOCKER_PLATFORM) -t ghcr.io/faroshq/kedge/app-studio-browser-worker:$(VERSION) providers/app-studio/browser-worker
+	docker build --platform $(DOCKER_PLATFORM) -t $(APP_STUDIO_BROWSER_WORKER_IMAGE) providers/app-studio/browser-worker
 
 build-agents-provider-portal: ## Build the agents provider's micro-frontend (Vite + TS → portal/dist)
 	cd providers/agents/portal && npm install --no-audit --no-fund && npm run build
@@ -423,9 +428,15 @@ endif
 dev-create-workload: ## Create a demo Workload targeting dev edges
 	kubectl apply -f hack/dev/examples/workload-nginx.yaml
 
--include .env
--include .env.edge.$(TYPE)
-export
+# Export only variables declared by the optional dotenv files. A bare `export`
+# also exports recursive Make variables containing $(shell ...); GNU Make 4.4.1
+# can segfault while expanding those variables for Tilt's local subprocesses.
+ENV_FILES := $(wildcard .env .env.edge.$(TYPE))
+ifneq ($(strip $(ENV_FILES)),)
+include $(ENV_FILES)
+ENV_EXPORTS := $(shell sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*[:?+]?=.*/\2/p' $(ENV_FILES))
+export $(ENV_EXPORTS)
+endif
 
 dev-infra: $(KCP) $(DEX) certs ## Run infra only (kcp + Dex)
 	hack/scripts/dev-infra.sh
@@ -1105,6 +1116,8 @@ KROMC_PROVIDER_MANIFEST ?= providers/infrastructure/provider.yaml
 # self-registration via ConfigMap.
 APP_STUDIO_PORT ?= 8085
 APP_STUDIO_BROWSER_WORKER_PORT ?= 8090
+APP_STUDIO_BROWSER_WORKER_IMAGE ?= ghcr.io/faroshq/kedge/app-studio-browser-worker:$(VERSION)
+APP_STUDIO_BROWSER_WORKER_CONTAINER ?= kedge-app-studio-browser-worker
 APP_STUDIO_BROWSER_WORKER_URL ?= http://127.0.0.1:$(APP_STUDIO_BROWSER_WORKER_PORT)
 APP_STUDIO_HUB_URL ?= https://localhost:9443
 APP_STUDIO_TOKEN ?= $(STATIC_AUTH_TOKEN)
