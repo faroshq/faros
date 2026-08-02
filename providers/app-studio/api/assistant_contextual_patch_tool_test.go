@@ -226,6 +226,9 @@ func TestAssistantV2MutationAdmissionRejectsStoppedRun(t *testing.T) {
 	}
 	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "actor-1", Content: "edit it", CreatedAt: now, UpdatedAt: now}
 	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	if err := bindProjectAssistantStartRequest(&run, user.ActorID, user.Content); err != nil {
+		t.Fatal(err)
+	}
 	created, err := messages.CreateAssistantRun(ctx, scope, user, assistant, run)
 	if err != nil {
 		t.Fatal(err)

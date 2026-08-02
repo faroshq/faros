@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
@@ -233,6 +234,10 @@ func (m *projectEinoAssistantLifecycle) refreshLiveRequestContext(ctx context.Co
 	if m.server != nil && m.runState.CurrentModelCallOrdinal() > 0 {
 		m.runState.SetToolDiscovery(projectEinoAssistantDiscoverTools(ctx, m.server, m.req))
 	}
+	// Publish only after every live field needed by prompt construction and
+	// dispatch has been refreshed. Tool wrappers read this same immutable copy
+	// when Eino starts executing the accepted model response.
+	m.req.publishExecutionRequest()
 	return nil
 }
 
@@ -351,10 +356,6 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 	}
 	name := projectToolBaseName(toolCtx.Name)
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
-		commitRevision := uint64(0)
-		if projectEinoAssistantCommitTool(name) && m.runState != nil {
-			commitRevision, _ = m.runState.SourceMutationRevisions()
-		}
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
 			if name == projectToolVerifyDevelopmentRuntime && m.runState != nil {
@@ -362,25 +363,30 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 			}
 			if m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) {
 				if _, interrupted := compose.IsInterruptRerunError(err); !interrupted {
-					if projectEinoAssistantCommitTool(name) {
-						m.runState.RecordSourceCommitAttempt(commitRevision)
+					if !projectEinoAssistantCommitTool(name) {
+						m.runState.RecordCompletedAction(name, projectEinoAssistantCanonicalActionArguments(argumentsInJSON), false)
 					}
-					m.runState.RecordCompletedAction(name, projectEinoAssistantCanonicalActionArguments(argumentsInJSON), false)
 				}
 			}
 			return result, err
 		}
+		succeeded := m.toolCallSucceeded(ctx, name, result)
 		switch {
 		case name == projectToolVerifyDevelopmentRuntime:
 			if m.runState != nil {
 				m.runState.RecordDevelopmentVerificationResult(result)
 				if m.runState.SourceMutationVerified() {
-					digest, digestErr := projectEinoAssistantWorkspaceDigest(
-						ctx,
-						m.workspace,
-						m.workspaceScope,
-						m.runState.SuccessfulMutationPaths(),
-					)
+					var dirtyPaths []string
+					var dirtyErr error
+					if m.workspace == nil {
+						dirtyErr = errors.New("project workspace store is not configured")
+					} else {
+						dirtyPaths, dirtyErr = m.workspace.UncommittedPaths(ctx, m.workspaceScope)
+					}
+					digest, digestErr := projectEinoAssistantWorkspaceDigest(ctx, m.workspace, m.workspaceScope, dirtyPaths)
+					if dirtyErr != nil {
+						digestErr = dirtyErr
+					}
 					if digestErr != nil {
 						m.runState.RecordVerificationBindingFailure("operational verification could not be bound to current workspace content: " + digestErr.Error())
 					} else {
@@ -391,36 +397,63 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 					m.runState.CompleteExecutionPlan()
 				}
 			}
-		case projectEinoAssistantCommitTool(name) &&
-			projectEinoAssistantSuccessfulToolContent(result) &&
-			projectToolCallResultStatus(name, result) == "succeeded":
-			if m.runState != nil {
-				m.runState.RecordSourceCommit()
-				m.runState.CompleteExecutionPlan()
-				if m.workspace != nil {
-					// The external commit already succeeded. Clearing local pending
-					// state is best-effort here: returning an error would encourage a
-					// duplicate repository commit after a completed side effect. The
-					// caller may be cancelled immediately after that side effect, so
-					// give this server-owned bookkeeping a bounded detached context.
-					clearCtx, cancelClear := detachedProjectPersistenceContext(ctx)
-					args, _ := projectEinoToolArguments(argumentsInJSON)
-					_ = m.workspace.RemoveUncommittedPaths(clearCtx, m.workspaceScope, projectToolStringList(args["paths"]))
-					cancelClear()
-				}
-			}
 		}
 		if m.runState != nil && !projectEinoAssistantFilesystemReadTool(name) &&
-			!projectEinoAssistantPendingPermissionResult(result) {
-			successful := projectEinoAssistantSuccessfulToolContent(result)
-			if projectEinoAssistantCommitTool(name) {
-				successful = successful && projectToolCallResultStatus(name, result) == "succeeded"
-				m.runState.RecordSourceCommitAttempt(commitRevision)
-			}
+			!projectEinoAssistantCommitTool(name) && !projectEinoAssistantPendingPermissionResult(result) {
+			successful := succeeded
 			m.runState.RecordCompletedAction(name, projectEinoAssistantCanonicalActionArguments(argumentsInJSON), successful)
 		}
 		return result, nil
 	}, nil
+}
+
+func (m *projectEinoAssistantLifecycle) WrapEnhancedInvokableToolCall(
+	_ context.Context,
+	endpoint adk.EnhancedInvokableToolCallEndpoint,
+	toolCtx *adk.ToolContext,
+) (adk.EnhancedInvokableToolCallEndpoint, error) {
+	if toolCtx == nil {
+		return endpoint, nil
+	}
+	name := projectToolBaseName(toolCtx.Name)
+	return func(ctx context.Context, argument *schema.ToolArgument, opts ...einotool.Option) (*schema.ToolResult, error) {
+		result, err := endpoint(ctx, argument, opts...)
+		if m.runState == nil || projectEinoAssistantFilesystemReadTool(name) || projectEinoAssistantCommitTool(name) {
+			return result, err
+		}
+		rawArguments := "{}"
+		if argument != nil && strings.TrimSpace(argument.Text) != "" {
+			rawArguments = argument.Text
+		}
+		succeeded := false
+		if err == nil {
+			succeeded = m.toolCallSucceeded(ctx, name, projectEinoAssistantEnhancedToolText(result))
+		} else if _, interrupted := compose.IsInterruptRerunError(err); interrupted {
+			return result, err
+		}
+		m.runState.RecordCompletedAction(name, projectEinoAssistantCanonicalActionArguments(rawArguments), succeeded)
+		return result, err
+	}, nil
+}
+
+func projectEinoAssistantEnhancedToolText(result *schema.ToolResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, part := range result.Parts {
+		if part.Type == schema.ToolPartTypeText {
+			return part.Text
+		}
+	}
+	return ""
+}
+
+func (m *projectEinoAssistantLifecycle) toolCallSucceeded(ctx context.Context, name, result string) bool {
+	if m != nil && m.req.eventLedger != nil {
+		outcome, ok, err := m.req.eventLedger.ToolCallOutcome(ctx, compose.GetToolCallID(ctx))
+		return err == nil && ok && outcome.Succeeded()
+	}
+	return projectAssistantToolResultDisposition(name, result, nil) == projectAssistantToolDispositionSucceeded
 }
 
 func projectEinoAssistantCanonicalActionArguments(raw string) string {

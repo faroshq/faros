@@ -87,3 +87,86 @@ func TestFileStoreUncommittedPathsPersistUnionClearAndProjectUIDIsolation(t *tes
 		t.Fatalf("paths after clear = %v, want empty", got)
 	}
 }
+
+func TestFileStoreCommitSettlementPersistsAndReconcilesAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	scope := Scope{
+		OrgUUID:       "org-a",
+		WorkspaceUUID: "ws-1",
+		ProjectName:   "demo",
+		ProjectUID:    "project-uid",
+	}
+	store := NewFileStore(root)
+	if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx", "src/theme.css"}); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.WorkspaceDigest(ctx, scope, []string{"src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCommitSettlement(ctx, scope, digest, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := NewFileStore(root)
+	gotDigest, paths, ok, err := reopened.PendingCommitSettlement(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || gotDigest != digest || !reflect.DeepEqual(paths, []string{"src/App.tsx"}) {
+		t.Fatalf("pending settlement = (%q, %v, %t), want persisted receipt", gotDigest, paths, ok)
+	}
+	if reconciled, err := reopened.ReconcileCommitSettlement(ctx, scope); err != nil || !reconciled {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := reopened.PendingCommitSettlement(ctx, scope); err != nil || ok {
+		t.Fatalf("pending settlement after reconcile = (%t, %v), want cleared", ok, err)
+	}
+	got, err := reopened.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"src/theme.css"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("uncommitted paths after reconcile = %v, want %v", got, want)
+	}
+}
+
+func TestFileStoreCommitSettlementDoesNotClearNewerMutation(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := store.ApplyFiles(ctx, scope, []File{{Path: "src/App.tsx", Content: "committed\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.WorkspaceDigest(ctx, scope, []string{"src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCommitSettlement(ctx, scope, digest, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteFile(ctx, scope, WriteOptions{Path: "src/App.tsx", Content: "newer mutation\n"}); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := store.ReconcileCommitSettlement(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled {
+		t.Fatal("reconciled stale commit settlement after a newer mutation")
+	}
+	paths, err := store.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(paths, []string{"src/App.tsx"}) {
+		t.Fatalf("dirty paths after stale settlement = %v, want newer mutation preserved", paths)
+	}
+}

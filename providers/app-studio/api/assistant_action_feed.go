@@ -179,6 +179,9 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 		item.Title = projectAssistantActionLifecycleTitle(status, "Checking development preview", "Checked development preview", "Preview check failed")
 	case projectToolGetPreviewURL:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Checking preview", "Checked preview", "Preview check failed")
+	case projectToolInspectDevelopmentPreview:
+		item.Target = projectAssistantActionSafeTarget(projectAssistantActionArgumentField(args, arguments, "path", "path"))
+		item.Title = projectAssistantActionLifecycleTitle(status, "Inspecting development preview", "Inspected development preview", "Preview inspection failed")
 	case projectToolCheckProjectReadiness:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Checking project readiness", "Checked project readiness", "Readiness check failed")
 	case projectToolPrepareProjectDeployment:
@@ -257,7 +260,7 @@ func projectAssistantActionFeedItemKind(name string) string {
 		return projectAssistantActionFeedItemPlan
 	case base == projectToolCheckProjectReadiness || base == projectToolPrepareProjectDeployment ||
 		base == projectToolVerifyDevelopmentRuntime || base == projectToolGetRuntimeStatus ||
-		base == projectToolGetPreviewURL || base == projectToolGetRuntimeLogs ||
+		base == projectToolGetPreviewURL || base == projectToolInspectDevelopmentPreview || base == projectToolGetRuntimeLogs ||
 		base == projectToolRestartRuntime || base == projectToolSetRuntimeEnv:
 		return projectAssistantActionFeedItemRun
 	case base == projectToolCommitProjectFiles || base == projectToolCommitFiles:
@@ -347,7 +350,7 @@ func projectAssistantActionFeedGrouping(item *projectAssistantActionFeedItem, ba
 		item.GroupTitle = "Updated files"
 	case projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment,
 		projectToolVerifyDevelopmentRuntime, projectToolGetRuntimeStatus,
-		projectToolGetPreviewURL, projectToolGetRuntimeLogs, projectToolRestartRuntime:
+		projectToolGetPreviewURL, projectToolInspectDevelopmentPreview, projectToolGetRuntimeLogs, projectToolRestartRuntime:
 		item.GroupKey = "run:checks"
 		item.GroupTitle = "Ran checks"
 	}

@@ -259,67 +259,96 @@ type projectAssistantWorkflowRunContext struct {
 	// runtime instead of returning a placeholder status.
 	Identity identity
 	Client   *asclient.Client
+	// ExecutionContext supplies the exact Project/Repository/identity snapshot
+	// that was also used to build the current model request.
+	ExecutionContext *projectAssistantExecutionContext
 }
 
 func projectAssistantWorkflowRunContextForRequest(server *Server, req projectAssistantRunRequest, runState *projectEinoAssistantRunState) projectAssistantWorkflowRunContext {
 	authority := projectAssistantExecutionAuthorityFor(server, req)
 	return projectAssistantWorkflowRunContext{
-		Server:         server,
-		Project:        req.Project,
-		Repository:     req.Repository,
-		WorkspaceScope: req.WorkspaceScope,
-		RunState:       runState,
-		ApprovalMode:   req.ApprovalMode,
-		EventLedger:    req.eventLedger,
-		AdmitMutation:  authority.AdmitMutation,
-		Identity:       req.Identity,
-		Client:         req.Client,
+		Server:           server,
+		Project:          req.Project,
+		Repository:       req.Repository,
+		WorkspaceScope:   req.WorkspaceScope,
+		RunState:         runState,
+		ApprovalMode:     req.ApprovalMode,
+		EventLedger:      req.eventLedger,
+		AdmitMutation:    authority.AdmitMutation,
+		Identity:         req.Identity,
+		Client:           req.Client,
+		ExecutionContext: req.executionContext,
 	}
+}
+
+func (c projectAssistantWorkflowRunContext) current() projectAssistantWorkflowRunContext {
+	if c.ExecutionContext == nil {
+		return c
+	}
+	c.ExecutionContext.snapshotMu.RLock()
+	req := c.ExecutionContext.req
+	c.ExecutionContext.snapshotMu.RUnlock()
+	c.Project = req.Project
+	c.Repository = req.Repository
+	c.WorkspaceScope = req.WorkspaceScope
+	c.ApprovalMode = req.ApprovalMode
+	c.EventLedger = req.eventLedger
+	c.Identity = req.Identity
+	c.Client = req.Client
+	c.AdmitMutation = projectAssistantExecutionAuthorityFor(c.Server, req).AdmitMutation
+	return c
 }
 
 func projectAssistantWorkflowToolSpecs() []projectAssistantToolSpec {
 	return []projectAssistantToolSpec{
 		{
-			Name:        projectToolPlanProjectChanges,
-			Description: "Create a deterministic read-only plan for project changes from project memory, repository status, and the current workspace file list.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolPlanProjectChanges,
+			Description:  "Create a deterministic read-only plan for project changes from project memory, repository status, and the current workspace file list.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolCheckProjectReadiness,
-			Description: "Check deterministic App Studio project readiness from memory, repository status, and workspace context before edits, verification, or commit.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolCheckProjectReadiness,
+			Description:  "Check deterministic App Studio project readiness from memory, repository status, and workspace context before edits, verification, or commit.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolPrepareProjectDeployment,
-			Description: "Prepare deterministic App Studio deployment handoff context from project memory, repository status, workspace files, build checks, and runtime handoff constraints.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolPrepareProjectDeployment,
+			Description:  "Prepare deterministic App Studio deployment handoff context from project memory, repository status, workspace files, build checks, and runtime handoff constraints.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{"includeFiles":{"type":"boolean","description":"Whether to include a bounded current workspace file list."},"maxFiles":{"type":"integer","minimum":1,"maximum":50,"description":"Maximum workspace file paths to include when includeFiles is true."}}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolInspectDevelopmentTemplates,
-			Description: "Inspect every development-capable infrastructure template available to this project in one read. Use this before choosing a template for a project that has none; it does not bind or change a template.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolInspectDevelopmentTemplates,
+			Description:  "Inspect every development-capable infrastructure template available to this project in one read. Use this before choosing a template for a project that has none; it does not bind or change a template.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolGetRuntimeStatus,
-			Description: "Return the live development runtime status for this project: whether the environment is provisioning, the preview edge is reachable, the status source is unavailable, or nothing is deployed.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolGetRuntimeStatus,
+			Description:  "Return the live development runtime status for this project: whether the environment is provisioning, the preview edge is reachable, the status source is unavailable, or nothing is deployed.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolGetPreviewURL,
-			Description: "Return the live development preview URL for this project when its public edge is reachable, or the reason it is not available yet.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolGetPreviewURL,
+			Description:  "Return the live development preview URL for this project when its public edge is reachable, or the reason it is not available yet.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
-			Name:        projectToolGetRuntimeLogs,
-			Description: "Return recent development runtime logs from the live sandbox so the assistant can diagnose why the app is not building or serving traffic.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"tailLines":{"type":"integer","minimum":1,"maximum":500,"description":"Maximum number of trailing log lines to return (default 200)."}}}`),
-			Risk:        projectAssistantToolRiskRead,
+			Name:         projectToolGetRuntimeLogs,
+			Description:  "Return recent development runtime logs from the live sandbox so the assistant can diagnose why the app is not building or serving traffic.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{"tailLines":{"type":"integer","minimum":1,"maximum":500,"description":"Maximum number of trailing log lines to return (default 200)."}}}`),
+			Risk:         projectAssistantToolRiskRead,
+			ParallelSafe: true,
 		},
 		{
 			Name:        projectToolVerifyDevelopmentRuntime,
@@ -417,6 +446,8 @@ func annotateProjectAssistantGraphTool(ctx context.Context, graphTool einotool.B
 	}
 	info.Extra["bundle"] = string(projectAssistantToolBundleForSpec(spec))
 	info.Extra["risk"] = string(spec.Risk)
+	info.Extra["parallelSafe"] = spec.Risk == projectAssistantToolRiskRead && spec.ParallelSafe
+	info.Extra[projectEinoToolParametersExtraKey] = string(spec.Parameters)
 	return nil
 }
 
@@ -574,15 +605,16 @@ func newProjectAssistantInspectDevelopmentTemplatesGraphTool(runCtx projectAssis
 
 func listProjectAssistantDevelopmentTemplates(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantTemplateInspectionToolInput) (*projectAssistantTemplateCatalog, error) {
 	return func(ctx context.Context, _ *projectAssistantTemplateInspectionToolInput) (*projectAssistantTemplateCatalog, error) {
+		currentRunCtx := runCtx.current()
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if runCtx.Client == nil {
+		if currentRunCtx.Client == nil {
 			return &projectAssistantTemplateCatalog{
 				UnavailableSummary: "Development template catalog is unavailable because no project client is configured for this run.",
 			}, nil
 		}
-		list, err := runCtx.Client.Resource(templateResource, "").List(ctx, metav1.ListOptions{})
+		list, err := currentRunCtx.Client.Resource(templateResource, "").List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return &projectAssistantTemplateCatalog{
 				UnavailableSummary: "Development template catalog is temporarily unavailable: " + truncateProjectToolInfo(err.Error()),
@@ -891,6 +923,7 @@ func normalizeProjectAssistantWorkflowInput(ctx context.Context, input projectAs
 
 func projectAssistantWorkflowInputFromTool(runCtx projectAssistantWorkflowRunContext, defaultIncludeFiles bool) func(context.Context, *projectAssistantWorkflowToolInput) (projectAssistantWorkflowInput, error) {
 	return func(ctx context.Context, args *projectAssistantWorkflowToolInput) (projectAssistantWorkflowInput, error) {
+		currentRunCtx := runCtx.current()
 		includeFiles := defaultIncludeFiles
 		maxFiles := 0
 		if args != nil {
@@ -900,10 +933,10 @@ func projectAssistantWorkflowInputFromTool(runCtx projectAssistantWorkflowRunCon
 			maxFiles = args.MaxFiles
 		}
 		return normalizeProjectAssistantWorkflowInput(ctx, projectAssistantWorkflowInput{
-			Server:         runCtx.Server,
-			Project:        runCtx.Project,
-			Repository:     runCtx.Repository,
-			WorkspaceScope: runCtx.WorkspaceScope,
+			Server:         currentRunCtx.Server,
+			Project:        currentRunCtx.Project,
+			Repository:     currentRunCtx.Repository,
+			WorkspaceScope: currentRunCtx.WorkspaceScope,
 			IncludeFiles:   includeFiles,
 			MaxFiles:       boundedWorkflowFileLimit(maxFiles),
 		})
@@ -923,20 +956,21 @@ func normalizeProjectAssistantRuntimeWorkflowInput(ctx context.Context, input pr
 
 func projectAssistantRuntimeWorkflowInputFromStatusTool(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantRuntimeStatusToolInput) (projectAssistantRuntimeWorkflowInput, error) {
 	return func(ctx context.Context, _ *projectAssistantRuntimeStatusToolInput) (projectAssistantRuntimeWorkflowInput, error) {
+		currentRunCtx := runCtx.current()
 		input := projectAssistantRuntimeWorkflowInput{
-			Project:    runCtx.Project,
-			Repository: runCtx.Repository,
+			Project:    currentRunCtx.Project,
+			Repository: currentRunCtx.Repository,
 		}
-		if runCtx.RunState != nil {
-			input.SessionSnapshot = runCtx.RunState.SessionSnapshot()
+		if currentRunCtx.RunState != nil {
+			input.SessionSnapshot = currentRunCtx.RunState.SessionSnapshot()
 		}
 		// Resolve the live development runtime so the status and
 		// preview tools report the real deployment state instead of a static
 		// not_configured placeholder. A nil client (e.g. background runs without
 		// a project client) leaves the input unresolved and the format functions
 		// fall back to the previous not_configured behaviour.
-		if runCtx.Server != nil && runCtx.Client != nil {
-			preview, hasBinding := runCtx.Server.resolveProjectSandboxRuntime(ctx, runCtx.Client, runCtx.Identity, runCtx.Project)
+		if currentRunCtx.Server != nil && currentRunCtx.Client != nil {
+			preview, hasBinding := currentRunCtx.Server.resolveProjectSandboxRuntime(ctx, currentRunCtx.Client, currentRunCtx.Identity, currentRunCtx.Project)
 			input.RuntimeResolved = true
 			input.RuntimeHasBinding = hasBinding
 			input.RuntimePreview = preview

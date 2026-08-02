@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -51,16 +52,22 @@ func (e *projectEinoAssistantInvalidToolBatchError) Unwrap() error {
 type projectEinoAssistantToolBatchMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 
-	runState *projectEinoAssistantRunState
+	runState         *projectEinoAssistantRunState
+	executionContext *projectAssistantExecutionContext
 }
 
 func projectEinoAssistantToolBatchAdmissionMiddleware(
 	runState *projectEinoAssistantRunState,
+	executionContexts ...*projectAssistantExecutionContext,
 ) adk.ChatModelAgentMiddleware {
-	return &projectEinoAssistantToolBatchMiddleware{
+	middleware := &projectEinoAssistantToolBatchMiddleware{
 		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		runState:                     runState,
 	}
+	if len(executionContexts) > 0 {
+		middleware.executionContext = executionContexts[0]
+	}
+	return middleware
 }
 
 // AfterModelRewriteState is the last admission boundary before Eino hands an
@@ -102,24 +109,68 @@ func (m *projectEinoAssistantToolBatchMiddleware) AfterModelRewriteState(
 	return ctx, state, nil
 }
 
-// WrapInvokableToolCall preserves Eino's native per-output-item scheduling.
-// Eino starts independent tool futures together and rejoins them in model
-// order, matching Codex's FuturesOrdered loop. Authorization and durable
-// idempotency remain enforced inside each endpoint.
+// WrapInvokableToolCall preserves Eino's native per-output-item scheduling but
+// applies a Codex-style reader/writer gate around every fixed executable tool,
+// including framework-provided filesystem reads. Only explicitly safe reads
+// overlap; effects and unknown contracts take exclusive ownership.
 func (m *projectEinoAssistantToolBatchMiddleware) WrapInvokableToolCall(
 	_ context.Context,
 	endpoint adk.InvokableToolCallEndpoint,
-	_ *adk.ToolContext,
+	toolCtx *adk.ToolContext,
 ) (adk.InvokableToolCallEndpoint, error) {
-	return endpoint, nil
+	if m.executionContext == nil || toolCtx == nil {
+		return endpoint, nil
+	}
+	parallelSafe := projectEinoAssistantToolParallelSafe(toolCtx.Name)
+	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+		if parallelSafe {
+			m.executionContext.toolMu.RLock()
+			defer m.executionContext.toolMu.RUnlock()
+		} else {
+			m.executionContext.toolMu.Lock()
+			defer m.executionContext.toolMu.Unlock()
+		}
+		return endpoint(ctx, argumentsInJSON, opts...)
+	}, nil
 }
 
 func (m *projectEinoAssistantToolBatchMiddleware) WrapEnhancedInvokableToolCall(
 	_ context.Context,
 	endpoint adk.EnhancedInvokableToolCallEndpoint,
-	_ *adk.ToolContext,
+	toolCtx *adk.ToolContext,
 ) (adk.EnhancedInvokableToolCallEndpoint, error) {
-	return endpoint, nil
+	if m.executionContext == nil || toolCtx == nil {
+		return endpoint, nil
+	}
+	parallelSafe := projectEinoAssistantToolParallelSafe(toolCtx.Name)
+	return func(ctx context.Context, argument *schema.ToolArgument, opts ...einotool.Option) (*schema.ToolResult, error) {
+		if parallelSafe {
+			m.executionContext.toolMu.RLock()
+			defer m.executionContext.toolMu.RUnlock()
+		} else {
+			m.executionContext.toolMu.Lock()
+			defer m.executionContext.toolMu.Unlock()
+		}
+		return endpoint(ctx, argument, opts...)
+	}, nil
+}
+
+func projectEinoAssistantToolParallelSafe(name string) bool {
+	name = projectToolBaseName(name)
+	if projectEinoAssistantFilesystemReadTool(name) || name == projectEinoAssistantToolSearchTool {
+		return true
+	}
+	if name == projectToolGetPreviewConsoleLogs {
+		return true
+	}
+	if spec, ok := projectAssistantWorkflowToolSpec(name); ok {
+		return spec.Risk == projectAssistantToolRiskRead && spec.ParallelSafe
+	}
+	if spec, ok := projectAssistantLocalToolRegistry(nil).Spec(name); ok {
+		return spec.Risk == projectAssistantToolRiskRead && spec.ParallelSafe
+	}
+	// MCP and unknown tools have no trusted server-owned concurrency contract.
+	return false
 }
 
 func projectEinoAssistantNormalizeToolBatch(

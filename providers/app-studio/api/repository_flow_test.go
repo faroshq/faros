@@ -171,6 +171,7 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 		"get_build_logs",
 		"rebuild_project",
 		"promote_project",
+		"inspect_development_preview",
 		"plan_project_changes",
 		"check_project_readiness",
 		"prepare_project_deployment",

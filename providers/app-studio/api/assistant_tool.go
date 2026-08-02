@@ -54,6 +54,9 @@ type projectAssistantToolSpec struct {
 	Description string
 	Parameters  json.RawMessage
 	Risk        projectAssistantToolRisk
+	// ParallelSafe is an explicit server-owned contract. The zero value is
+	// exclusive, and effectful tools remain exclusive even if misconfigured.
+	ParallelSafe bool
 }
 
 func (s projectAssistantToolSpec) chatTool() chatTool {
@@ -79,7 +82,7 @@ func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAss
 	switch projectToolBaseName(spec.Name) {
 	case projectToolPlanProjectChanges, projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment, projectToolInspectDevelopmentTemplates, projectToolCheckProjectBuild, projectToolGetBuildLogs:
 		return projectAssistantToolBundleWorkflow
-	case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolGetPreviewConsoleLogs,
+	case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolInspectDevelopmentPreview, projectToolGetPreviewConsoleLogs,
 		projectToolGetRuntimeLogs, projectToolVerifyDevelopmentRuntime, projectToolRestartRuntime, projectToolSetRuntimeEnv, projectToolPromoteProject, projectToolRebuildProject:
 		return projectAssistantToolBundleRuntime
 	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep:
@@ -125,6 +128,7 @@ type projectAssistantToolCallRequest struct {
 	SessionSnapshot      *projectEinoAssistantSessionSnapshot
 	AssistantRunID       string
 	InitialBuild         bool
+	RunState             *projectEinoAssistantRunState
 	Arguments            map[string]any
 }
 

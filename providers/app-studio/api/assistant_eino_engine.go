@@ -43,7 +43,7 @@ const (
 	projectEinoAssistantProjectPromptPrefix          = "You are the assistant for a persistent Kedge Project workspace. "
 	projectEinoAssistantSessionSnapshotPrefix        = "Current project snapshot (authoritative for the start of this turn;"
 	projectAssistantContextualPatchFormatInstruction = "A hunk header must be exactly '@@' or '@@ <literal source line copied from the file>'. Never emit Git/unified-diff line coordinates such as '@@ -12,4 +12,5 @@' because text after '@@' is searched literally in the file. A literal anchor is an unchanged line that positions the hunk after that line; do not repeat the anchor in the hunk body. Use plain '@@' when changing the first line or the anchor line itself. Valid example:\n*** Begin Patch\n*** Update File: src/App.jsx\n@@ function App() {\n-  const title = \"Old\";\n+  const title = \"New\";\n*** End Patch\n"
-	projectEinoAssistantV2DeepInstruction            = "You are the App Studio project assistant. Use only the tools exposed in this turn; do not assume shell, browser, host filesystem, or subagent access. " + projectAssistantBrowserConsoleTrustInstruction + "You cannot see, screenshot, navigate, or interact with the browser. The server-selected Default or Plan collaboration mode is fixed for this turn. Plan is read-only. In Default, infer inspection versus action authority from the user's request, diagnose reported defects from current evidence before editing, and keep changes narrowly scoped. When the user asks you to change, build, or fix the project, persist until the request is handled end-to-end whenever feasible: do not stop at analysis or a partial fix, and carry the work through implementation, relevant verification, and a clear explanation unless the user pauses, redirects, or required authority or input is missing. Tool calls continue the turn; a final assistant message ends it. You may call independent tools together when their arguments do not depend on one another. The only source-mutation tool is apply_patch; read existing sources before patching them and preserve unrelated workspace state. " + projectAssistantContextualPatchFormatInstruction + "File deletion and rename are not supported. Dirty files are workspace information, not an obligation to verify or commit. Use verify_development_runtime only when operational synchronization, process, log, or preview reachability evidence is relevant. Never call commit_project_files unless the user explicitly asked to persist changes to the repository. Do not claim rendered content, interactions, data flow, application behavior, or acceptance criteria were independently verified. Finish with the model response that directly answers the user; do not add status boilerplate."
+	projectEinoAssistantV2DeepInstruction            = "You are the App Studio project assistant. Use only the tools exposed in this turn; do not assume shell, browser, host filesystem, or subagent access. " + projectAssistantBrowserConsoleTrustInstruction + "Browser inspection is available only when inspect_development_preview is exposed; it is read-only and cannot click, type, or run arbitrary JavaScript. The server-selected Default or Plan collaboration mode is fixed for this turn. Plan is read-only. In Default, infer inspection versus action authority from the user's request, diagnose reported defects from current evidence before editing, and keep changes narrowly scoped. When the user asks you to change, build, or fix the project, persist until the request is handled end-to-end whenever feasible: do not stop at analysis or a partial fix, and carry the work through implementation, relevant verification, and a clear explanation unless the user pauses, redirects, or required authority or input is missing. Tool calls continue the turn; a final assistant message ends it. You may call independent tools together when their arguments do not depend on one another. The only source-mutation tool is apply_patch; read existing sources before patching them and preserve unrelated workspace state. " + projectAssistantContextualPatchFormatInstruction + "File deletion and rename are not supported. Dirty files are workspace information, not an obligation to verify or commit. Use verify_development_runtime only when operational synchronization, process, log, or preview reachability evidence is relevant. Never call commit_project_files unless the user explicitly asked to persist changes to the repository. Do not claim rendered content, interactions, data flow, application behavior, or acceptance criteria were independently verified unless inspect_development_preview actually observed them. Finish with the model response that directly answers the user; do not add status boilerplate."
 )
 
 var errProjectAssistantNoOutput = errors.New("assistant model produced no accepted output")
@@ -115,6 +115,9 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 	}
 	if e.server != nil && e.server.store != nil {
 		req.eventLedger = newProjectAssistantRunEventLedger(e.server.store, req.MessageScope, projectAssistantRunID(req))
+	}
+	if err := e.restoreProjectAssistantDirtyBundle(ctx, req, runState); err != nil {
+		return projectAssistantRunResult{}, err
 	}
 
 	checkpointID := newProjectAssistantRunID()
@@ -199,6 +202,9 @@ func (e projectEinoAssistantEngine) ResumeProjectAssistant(
 	if e.server != nil && e.server.store != nil {
 		resumeRunReq.eventLedger = newProjectAssistantRunEventLedger(e.server.store, req.MessageScope, projectAssistantRunID(req))
 	}
+	if err := e.restoreProjectAssistantDirtyBundle(ctx, resumeRunReq, runState); err != nil {
+		return projectAssistantRunResult{}, err
+	}
 	// Resume the exact sticky collaboration mode stored on the run. Prompt
 	// wording, checkpoint policy, and follow-up text cannot change it.
 	if req.AssistantRun == nil {
@@ -236,6 +242,47 @@ func (e projectEinoAssistantEngine) ResumeProjectAssistant(
 	}
 	result, runErr := e.runProjectAssistantTurnLoop(ctx, resumeRunReq, runState, checkpointStore, state.Eino.CheckpointID, []projectAssistantTurnItem{turn})
 	return result, e.finishProjectAssistantRunAudit(ctx, resumeRunReq, auditRecorder, runErr)
+}
+
+// restoreProjectAssistantDirtyBundle promotes project-scoped pending source
+// into the current run exactly once. A later turn can therefore synchronize,
+// verify, and commit an earlier turn's complete dirty bundle without inventing
+// a new edit or silently treating it as revision zero.
+func (e projectEinoAssistantEngine) restoreProjectAssistantDirtyBundle(
+	ctx context.Context,
+	req projectAssistantRunRequest,
+	runState *projectEinoAssistantRunState,
+) error {
+	if runState == nil || req.Workspace == nil || !projectAssistantTurnProfileAllowsMutation(runState.TurnPolicy().profile) {
+		return nil
+	}
+	if revision, _ := runState.SourceMutationRevisions(); revision > 0 {
+		return nil
+	}
+	if _, err := req.Workspace.ReconcileCommitSettlement(ctx, req.WorkspaceScope); err != nil {
+		return fmt.Errorf("restore project commit settlement: %w", err)
+	}
+	paths, err := req.Workspace.UncommittedPaths(ctx, req.WorkspaceScope)
+	if err != nil {
+		return fmt.Errorf("restore project dirty workspace bundle: %w", err)
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	for _, path := range paths {
+		runState.RecordSuccessfulMutationPath(path)
+	}
+	revision := runState.BeginDevelopmentSyncForNextMutation()
+	if e.server == nil || !e.server.scheduleDevelopmentSyncAfterMutationWithCompletion(
+		req.Identity,
+		req.Project,
+		projectActionWorkspaceSync,
+		func(syncErr error) { runState.CompleteDevelopmentSync(revision, syncErr) },
+	) {
+		runState.CompleteDevelopmentSync(revision, errors.New("workspace synchronization was not scheduled"))
+	}
+	runState.RecordSourceMutation()
+	return nil
 }
 
 func (e projectEinoAssistantEngine) resumeCurrentDevelopmentSync(
@@ -411,6 +458,7 @@ func projectEinoAssistantConfigureRolloutBudget(
 }
 
 func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAssistantRunRequest, runState *projectEinoAssistantRunState) (adk.Agent, error) {
+	req = projectAssistantRunRequestWithExecutionContext(req)
 	tools, err := e.newTools(ctx, req, runState)
 	if err != nil {
 		return nil, err
@@ -453,7 +501,7 @@ func (e projectEinoAssistantEngine) newAgent(ctx context.Context, req projectAss
 		handlers = append(handlers, filesystemMiddleware)
 	}
 	// Validate and normalize each completed model response before dispatch.
-	handlers = append(handlers, projectEinoAssistantToolBatchAdmissionMiddleware(runState))
+	handlers = append(handlers, projectEinoAssistantToolBatchAdmissionMiddleware(runState, req.executionContext))
 	// Eino makes the first registered tool wrapper outermost. Safe-error must
 	// therefore precede telemetry so telemetry observes backend errors before
 	// they are shaped for the model. Phase must also precede telemetry so a

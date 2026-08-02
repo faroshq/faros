@@ -84,6 +84,7 @@ type projectEinoAssistantRunState struct {
 	committedMutationRevision uint64
 	commitAttemptedRevision   uint64
 	verifiedWorkspaceDigest   string
+	committedWorkspaceDigest  string
 	checkedMutationRevision   uint64
 	verificationAttempted     bool
 	verificationOutcome       string
@@ -111,6 +112,7 @@ type projectEinoAssistantRunState struct {
 	actionBatchMadeProgress   bool
 	modelCallOrdinal          int
 	transientToolResults      map[string]string
+	transientPreviewImages    map[string]projectEinoAssistantTransientPreviewImage
 	transientToolResultCount  uint64
 	lastProgressMessage       string
 	deferSteeringOnce         bool
@@ -146,9 +148,41 @@ func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
 		readFileCoverage:        map[string][]projectEinoAssistantLineRange{},
 		successfulMutationPaths: map[string]struct{}{},
 		transientToolResults:    map[string]string{},
+		transientPreviewImages:  map[string]projectEinoAssistantTransientPreviewImage{},
 		developmentSyncChanged:  make(chan struct{}),
 		turnPolicy:              projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugging),
 	}
+}
+
+type projectEinoAssistantTransientPreviewImage struct {
+	Base64Data string
+	MIMEType   string
+}
+
+func (s *projectEinoAssistantRunState) RegisterTransientPreviewImage(result, base64Data, mimeType string) string {
+	persistent := projectEinoAssistantPersistentToolResult(projectToolInspectDevelopmentPreview, result)
+	if s == nil || strings.TrimSpace(base64Data) == "" || mimeType != "image/png" {
+		return persistent
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transientToolResultCount++
+	digest := sha256.Sum256([]byte(fmt.Sprintf("preview\x00%d\x00%s", s.transientToolResultCount, base64Data)))
+	reference := hex.EncodeToString(digest[:16])
+	if s.transientPreviewImages == nil || len(s.transientPreviewImages) >= 4 {
+		s.transientPreviewImages = map[string]projectEinoAssistantTransientPreviewImage{}
+	}
+	s.transientPreviewImages[reference] = projectEinoAssistantTransientPreviewImage{Base64Data: base64Data, MIMEType: mimeType}
+	var placeholder map[string]any
+	if err := json.Unmarshal([]byte(persistent), &placeholder); err != nil {
+		placeholder = map[string]any{"status": "unavailable", "summary": "transient preview image omitted from persistence"}
+	}
+	placeholder["transientImageReference"] = reference
+	encoded, err := json.Marshal(placeholder)
+	if err != nil {
+		return persistent
+	}
+	return string(encoded)
 }
 
 func (s *projectEinoAssistantRunState) AcceptProgressMessage(message string) bool {
@@ -207,7 +241,7 @@ func (s *projectEinoAssistantRunState) ExpandTransientToolMessages(input []*sche
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.transientToolResults) == 0 {
+	if len(s.transientToolResults) == 0 && len(s.transientPreviewImages) == 0 {
 		return input
 	}
 
@@ -220,16 +254,30 @@ func (s *projectEinoAssistantRunState) ExpandTransientToolMessages(input []*sche
 		if strings.TrimSpace(toolName) == "" {
 			toolName = message.Name
 		}
-		if projectToolBaseName(toolName) != projectToolGetPreviewConsoleLogs {
-			continue
-		}
 		var placeholder struct {
-			TransientReference string `json:"transientReference"`
+			TransientReference      string `json:"transientReference"`
+			TransientImageReference string `json:"transientImageReference"`
 		}
 		if err := json.Unmarshal([]byte(message.Content), &placeholder); err != nil {
 			continue
 		}
-		result, ok := s.transientToolResults[strings.TrimSpace(placeholder.TransientReference)]
+		if projectToolBaseName(toolName) == projectToolGetPreviewConsoleLogs {
+			result, ok := s.transientToolResults[strings.TrimSpace(placeholder.TransientReference)]
+			if !ok {
+				continue
+			}
+			if expanded == nil {
+				expanded = append([]*schema.Message(nil), input...)
+			}
+			cloned := *message
+			cloned.Content = result
+			expanded[index] = &cloned
+			continue
+		}
+		if projectToolBaseName(toolName) != projectToolInspectDevelopmentPreview {
+			continue
+		}
+		preview, ok := s.transientPreviewImages[strings.TrimSpace(placeholder.TransientImageReference)]
 		if !ok {
 			continue
 		}
@@ -237,7 +285,11 @@ func (s *projectEinoAssistantRunState) ExpandTransientToolMessages(input []*sche
 			expanded = append([]*schema.Message(nil), input...)
 		}
 		cloned := *message
-		cloned.Content = result
+		data := preview.Base64Data
+		cloned.UserInputMultiContent = []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: message.Content},
+			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{Base64Data: &data, MIMEType: preview.MIMEType}}},
+		}
 		expanded[index] = &cloned
 	}
 	if expanded == nil {
@@ -368,6 +420,7 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	s.committedMutationRevision = state.CommittedMutationRevision
 	s.commitAttemptedRevision = state.CommitAttemptedRevision
 	s.verifiedWorkspaceDigest = strings.TrimSpace(state.VerifiedWorkspaceDigest)
+	s.committedWorkspaceDigest = strings.TrimSpace(state.CommittedWorkspaceDigest)
 	s.verificationAttempted = state.VerificationAttempted
 	s.verificationOutcome = strings.TrimSpace(state.VerificationOutcome)
 	s.verificationSummary = strings.TrimSpace(state.VerificationSummary)
@@ -883,25 +936,29 @@ func (s *projectEinoAssistantRunState) ConfigureCommitRequirement(required bool)
 	}
 }
 
-func (s *projectEinoAssistantRunState) RecordSourceCommit() {
+func (s *projectEinoAssistantRunState) RecordSourceCommit(workspaceDigest string) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sourceMutationRevision > 0 && s.verifiedMutationRevision == s.sourceMutationRevision {
+	workspaceDigest = strings.TrimSpace(workspaceDigest)
+	if s.sourceMutationRevision > 0 && workspaceDigest != "" {
 		s.commitAttemptedRevision = s.sourceMutationRevision
 		s.committedMutationRevision = s.sourceMutationRevision
-		// A commit can remain at a permission checkpoint while the runtime
-		// changes independently. Require a new operational observation after
-		// the commit before the run can claim a current verified completion.
-		s.verifiedMutationRevision = 0
-		s.checkedMutationRevision = 0
-		s.verificationAttempted = false
-		s.verificationOutcome = ""
-		s.verificationSummary = ""
-		s.verificationBlockers = nil
-		s.verifiedWorkspaceDigest = ""
+		s.committedWorkspaceDigest = workspaceDigest
+		// Preserve a verification claim only when commit persisted the exact
+		// same workspace bundle. Otherwise fail closed instead of allowing two
+		// unrelated digests to appear as one completed state.
+		if s.verifiedWorkspaceDigest != workspaceDigest {
+			s.verifiedMutationRevision = 0
+			s.checkedMutationRevision = 0
+			s.verificationAttempted = false
+			s.verificationOutcome = ""
+			s.verificationSummary = ""
+			s.verificationBlockers = nil
+			s.verifiedWorkspaceDigest = ""
+		}
 	}
 }
 
@@ -1491,6 +1548,7 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		CommittedMutationRevision: s.committedMutationRevision,
 		CommitAttemptedRevision:   s.commitAttemptedRevision,
 		VerifiedWorkspaceDigest:   s.verifiedWorkspaceDigest,
+		CommittedWorkspaceDigest:  s.committedWorkspaceDigest,
 		CheckedMutationRevision:   s.checkedMutationRevision,
 		VerificationAttempted:     s.verificationAttempted,
 		VerificationOutcome:       strings.TrimSpace(s.verificationOutcome),

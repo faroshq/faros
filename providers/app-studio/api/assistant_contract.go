@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
@@ -75,6 +76,11 @@ type projectAssistantRunRequest struct {
 	executionAuthority projectAssistantExecutionAuthority
 	auditRecorder      *projectAssistantRunAuditRecorder
 	eventLedger        *projectAssistantRunEventLedger
+	// executionContext is the single request-scoped source used by both the
+	// model-facing context builder and executable tool wrappers. It prevents a
+	// refreshed Project/Repository view from being shown to the model while an
+	// older request copy is still used for dispatch.
+	executionContext *projectAssistantExecutionContext
 	// Steering carries user messages admitted into this durable run while the
 	// Eino loop is active. The supervisor persists each message before making it
 	// visible here; the loop drains it only at model-safe boundaries.
@@ -83,6 +89,44 @@ type projectAssistantRunRequest struct {
 	// ActivateSteering rotates the public assistant segment only when the Eino
 	// loop has reached the model-safe boundary that consumes these queued inputs.
 	ActivateSteering func(context.Context, []projectAssistantSteeringInput) error
+}
+
+// projectAssistantExecutionContext binds one run's current sampling snapshot
+// to its executable tools. snapshotMu protects replacement between model-safe
+// boundaries; toolMu is a Codex-style parallel-safety gate where proven reads
+// share the read lock and every other call takes exclusive ownership.
+type projectAssistantExecutionContext struct {
+	snapshotMu sync.RWMutex
+	toolMu     sync.RWMutex
+	req        projectAssistantRunRequest
+}
+
+func projectAssistantRunRequestWithExecutionContext(req projectAssistantRunRequest) projectAssistantRunRequest {
+	if req.executionContext != nil {
+		return req
+	}
+	executionContext := &projectAssistantExecutionContext{}
+	req.executionContext = executionContext
+	executionContext.req = req
+	return req
+}
+
+func (r projectAssistantRunRequest) currentExecutionRequest() projectAssistantRunRequest {
+	if r.executionContext == nil {
+		return r
+	}
+	r.executionContext.snapshotMu.RLock()
+	defer r.executionContext.snapshotMu.RUnlock()
+	return r.executionContext.req
+}
+
+func (r projectAssistantRunRequest) publishExecutionRequest() {
+	if r.executionContext == nil {
+		return
+	}
+	r.executionContext.snapshotMu.Lock()
+	r.executionContext.req = r
+	r.executionContext.snapshotMu.Unlock()
 }
 
 type projectAssistantSteeringInput struct {

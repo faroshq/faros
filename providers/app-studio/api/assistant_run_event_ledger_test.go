@@ -141,7 +141,7 @@ func TestAssistantToolPersistsFailureAndReturnsItToModel(t *testing.T) {
 		t.Fatalf("durable failure replay = %#v, err=%v", replay, err)
 	}
 	tool.req.eventLedger = restarted
-	result, err = tool.replayDurableToolCall("call-patch", spec, args, *replay.Replay)
+	result, err = tool.replayDurableToolCall(ctx, "call-patch", spec, args, *replay.Replay)
 	if err != nil || result != wantResult {
 		t.Fatalf("model failure replay = (%q, %v), want failed result returned to model", result, err)
 	}
@@ -318,6 +318,9 @@ func TestAssistantRunEventLedgerFinishesAfterCallerCancellation(t *testing.T) {
 	cancel()
 	if _, err := ledger.FinishToolCall(cancelled, success.Token, "read result", nil); err != nil {
 		t.Fatalf("persist successful result after cancellation: %v", err)
+	}
+	if outcome, ok, err := ledger.ToolCallOutcome(cancelled, success.Token.CallID); err != nil || !ok || !outcome.Succeeded() {
+		t.Fatalf("consume successful result after cancellation = (%#v, %v, %v), want settled success", outcome, ok, err)
 	}
 
 	failure, err := ledger.BeginToolCall(context.Background(), "call-failure", spec, map[string]any{"path": "missing.txt"})

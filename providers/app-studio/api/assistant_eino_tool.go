@@ -18,8 +18,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,9 +43,10 @@ var errProjectAssistantInitialPlanPersistence = errors.New("persist initial proj
 const projectAssistantMutationPatchMaxBytes = 16 << 10
 
 type projectEinoAssistantToolDiscovery struct {
-	IncludeCommitBridge bool
-	MCPTools            []projectAssistantTool
-	Prompt              string
+	IncludeCommitBridge      bool
+	IncludePreviewInspection bool
+	MCPTools                 []projectAssistantTool
+	Prompt                   string
 }
 
 type projectEinoAssistantTool struct {
@@ -82,6 +81,7 @@ func projectEinoAssistantToolsForDiscovery(
 	registry := server.projectAssistantToolRegistry()
 	catalogPolicy := projectAssistantToolCatalogPolicy(req)
 	localTools := projectAssistantToolsForCollaborationMode(projectAssistantToolsForTurnPolicy(registry.Tools(discovery.IncludeCommitBridge), catalogPolicy), req.CollaborationMode)
+	localTools = projectEinoAssistantFilterPreviewInspection(localTools, discovery.IncludePreviewInspection)
 	mcpTools := projectAssistantToolsForCollaborationMode(projectAssistantToolsForTurnPolicy(discovery.MCPTools, catalogPolicy), req.CollaborationMode)
 	out := make([]einotool.BaseTool, 0, len(localTools)+len(mcpTools)+1)
 	if projectEinoAssistantProgressEnabled(req, runState) {
@@ -93,6 +93,11 @@ func projectEinoAssistantToolsForDiscovery(
 	}
 	out = append(out, graphTools...)
 	for _, tool := range localTools {
+		if projectToolBaseName(tool.Spec().Name) == projectToolInspectDevelopmentPreview &&
+			projectAssistantCapabilitiesForModel(req.LLM).VisionToolResults {
+			out = append(out, newProjectEinoAssistantEnhancedPreviewTool(server, tool, req, runState))
+			continue
+		}
 		out = append(out, newProjectEinoAssistantServerTool(server, tool, req, runState))
 	}
 	for _, tool := range mcpTools {
@@ -116,12 +121,15 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	}
 	registry := server.projectAssistantToolRegistry()
 	policy := normalizeProjectAssistantTurnPolicy(req.TurnPolicy, req.TurnProfile)
-	chatTools := projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(registry.Tools(false)), policy))
+	includePreviewInspection := server.projectAssistantPreviewInspectionAvailable(ctx)
+	localTools := projectEinoAssistantFilterPreviewInspection(registry.Tools(false), includePreviewInspection)
+	chatTools := projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(localTools), policy))
 	if len(chatTools) == 0 {
 		return projectEinoAssistantToolDiscovery{}
 	}
 	discovery := projectEinoAssistantToolDiscovery{
-		Prompt: projectMCPToolsPrompt(chatTools),
+		IncludePreviewInspection: includePreviewInspection,
+		Prompt:                   projectMCPToolsPrompt(chatTools),
 	}
 	if req.ToolPort == nil {
 		return discovery
@@ -135,9 +143,20 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	}
 	discovery.IncludeCommitBridge = includeCommitBridge
 	discovery.MCPTools = mcpTools
-	allTools := append(registry.Tools(discovery.IncludeCommitBridge), discovery.MCPTools...)
+	allTools := append(projectEinoAssistantFilterPreviewInspection(registry.Tools(discovery.IncludeCommitBridge), includePreviewInspection), discovery.MCPTools...)
 	discovery.Prompt = projectMCPToolsPrompt(projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(allTools), policy)))
 	return discovery
+}
+
+func projectEinoAssistantFilterPreviewInspection(tools []projectAssistantTool, include bool) []projectAssistantTool {
+	out := make([]projectAssistantTool, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil || (!include && projectToolBaseName(tool.Spec().Name) == projectToolInspectDevelopmentPreview) {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 func projectAssistantToolsForCollaborationMode(tools []projectAssistantTool, mode projectAssistantCollaborationMode) []projectAssistantTool {
@@ -223,6 +242,7 @@ func (t projectEinoAssistantTool) Info(context.Context) (*schema.ToolInfo, error
 		Extra: map[string]any{
 			"bundle":                          string(projectAssistantToolBundleForSpec(spec)),
 			"risk":                            string(spec.Risk),
+			"parallelSafe":                    spec.Risk == projectAssistantToolRiskRead && spec.ParallelSafe,
 			projectEinoToolParametersExtraKey: string(spec.Parameters),
 		},
 	}
@@ -237,6 +257,7 @@ func (t projectEinoAssistantTool) Info(context.Context) (*schema.ToolInfo, error
 }
 
 func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...einotool.Option) (string, error) {
+	t.req = t.req.currentExecutionRequest()
 	if cause := context.Cause(ctx); cause != nil {
 		return "", cause
 	}
@@ -277,6 +298,15 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 	}
 	if t.runState.PermissionBarrierActive() {
 		return projectEinoPermissionBarrierToolResult(), nil
+	}
+	if projectEinoAssistantCommitTool(spec.Name) && t.req.eventLedger != nil {
+		durableArgs, outcome, replay, err := t.req.eventLedger.SettledToolCall(ctx, callID, spec.Name)
+		if err != nil {
+			return "", err
+		}
+		if replay {
+			return t.replayDurableToolCall(ctx, callID, spec, durableArgs, outcome)
+		}
 	}
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
@@ -386,7 +416,15 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		return "", err
 	}
 	if ledgerDecision.Replay != nil {
-		return t.replayDurableToolCall(callID, spec, args, *ledgerDecision.Replay)
+		return t.replayDurableToolCall(ctx, callID, spec, args, *ledgerDecision.Replay)
+	}
+	if projectEinoAssistantCommitTool(spec.Name) {
+		if err := t.validateV2CommitWorkspace(ctx, args); err != nil {
+			failed := t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error())
+			modelResult, durableErr := t.finishDurableToolFailureForModel(ctx, ledgerDecision, failed, err)
+			_ = t.recordV2CommitSettlement(ctx, spec, args, false)
+			return modelResult, durableErr
+		}
 	}
 	t.emitToolCall(projectToolCallStreamEvent{
 		ID:        callID,
@@ -399,7 +437,9 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		return t.finishDurableToolCall(ctx, ledgerDecision, result, err)
 	}
 	if t.req.ToolPort == nil {
-		return t.finishDurableToolCall(ctx, ledgerDecision, "", errors.New("App Studio tool port is not configured"))
+		modelResult, durableErr := t.finishDurableToolCall(ctx, ledgerDecision, "", errors.New("App Studio tool port is not configured"))
+		_ = t.recordV2CommitSettlement(ctx, spec, args, false)
+		return modelResult, durableErr
 	}
 	result, err := t.req.ToolPort.Invoke(ctx, t.tool, projectAssistantToolCallRequest{
 		Identity:             t.req.Identity,
@@ -411,6 +451,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		SessionSnapshot:      t.runState.SessionSnapshot(),
 		AssistantRunID:       projectAssistantRunID(t.req),
 		InitialBuild:         projectAssistantInitialBuildActive(t.req, t.runState),
+		RunState:             t.runState,
 		Arguments:            args,
 	})
 	if err != nil {
@@ -443,10 +484,14 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 			return modelResult, nil
 		}
 		if projectEinoAssistantPropagateToolError(err) {
-			return t.finishDurableToolCall(ctx, ledgerDecision, "", err)
+			modelResult, durableErr := t.finishDurableToolCall(ctx, ledgerDecision, "", err)
+			_ = t.recordV2CommitSettlement(ctx, spec, args, false)
+			return modelResult, durableErr
 		}
 		failed := t.finishFailedToolCall(callID, spec.Name, projectEinoToolArgumentsString(args), err.Error())
-		return t.finishDurableToolFailureForModel(ctx, ledgerDecision, failed, err)
+		modelResult, durableErr := t.finishDurableToolFailureForModel(ctx, ledgerDecision, failed, err)
+		_ = t.recordV2CommitSettlement(ctx, spec, args, false)
+		return modelResult, durableErr
 	}
 	modelResult := t.runState.RegisterTransientToolResult(spec.Name, result)
 	if projectEinoAssistantSuccessfulWorkspaceMutationResult(spec.Name, result) {
@@ -454,7 +499,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 			return t.finishDurableToolCall(ctx, ledgerDecision, result, recordErr)
 		}
 	} else if projectToolBaseName(spec.Name) == projectToolSelectTemplate &&
-		projectEinoAssistantSuccessfulToolContent(result) && t.server != nil {
+		projectAssistantToolResultDisposition(spec.Name, result, nil) == projectAssistantToolDispositionSucceeded && t.server != nil {
 		// Selecting a replacement development target must also populate it with
 		// the existing workspace, even when no source edit follows this call.
 		t.server.scheduleDevelopmentSyncAfterMutation(t.req.Identity, t.req.Project, spec.Name)
@@ -463,7 +508,10 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 	if err != nil {
 		return "", err
 	}
-	successful := projectEinoAssistantSuccessfulToolContent(modelResult)
+	successful := t.durableToolCallSucceeded(ctx, callID, spec.Name, modelResult)
+	if settlementErr := t.recordV2CommitSettlement(ctx, spec, args, successful); settlementErr != nil {
+		return "", settlementErr
+	}
 	status := projectToolCallResultStatus(spec.Name, result)
 	if !successful {
 		status = "failed"
@@ -481,6 +529,70 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		t.appendBuilderEvent(projectBuilderEventWorkspaceChanged)
 	}
 	return modelResult, nil
+}
+
+// recordV2CommitSettlement lives at the executable tool boundary because a
+// repository capability discovered after agent construction is dispatched by
+// Eino's unknown-tool handler and therefore bypasses ChatModel middleware.
+// The external commit result is already durably settled before this runs.
+func (t projectEinoAssistantTool) recordV2CommitSettlement(
+	ctx context.Context,
+	spec projectAssistantToolSpec,
+	args map[string]any,
+	succeeded bool,
+) error {
+	if t.runState == nil || !projectEinoAssistantCommitTool(spec.Name) {
+		return nil
+	}
+	if err := t.recoverV2CommitSettlement(ctx, spec, args, succeeded); err != nil {
+		return err
+	}
+	t.runState.RecordCompletedAction(spec.Name, projectEinoAssistantCanonicalActionArguments(projectEinoToolArgumentsString(args)), succeeded)
+	return nil
+}
+
+func (t projectEinoAssistantTool) recoverV2CommitSettlement(
+	ctx context.Context,
+	spec projectAssistantToolSpec,
+	args map[string]any,
+	succeeded bool,
+) error {
+	if t.runState == nil || !projectEinoAssistantCommitTool(spec.Name) {
+		return nil
+	}
+	revision, _ := t.runState.SourceMutationRevisions()
+	t.runState.RecordSourceCommitAttempt(revision)
+	if succeeded {
+		workspaceDigest := projectToolString(args["workspaceDigest"])
+		paths := projectToolStringList(args["paths"])
+		settlementBlocker := ""
+		if t.req.Workspace != nil {
+			// Persist the cleanup obligation before advancing run-local state. If
+			// cleanup is interrupted, the next turn reconciles this receipt by
+			// digest without repeating the already successful repository effect.
+			settlementCtx, cancelSettlement := detachedProjectPersistenceContext(ctx)
+			if err := t.req.Workspace.RecordCommitSettlement(
+				settlementCtx,
+				t.req.WorkspaceScope,
+				workspaceDigest,
+				paths,
+			); err != nil {
+				settlementBlocker = "repository commit succeeded but local workspace settlement could not be persisted"
+			} else if _, err := t.req.Workspace.ReconcileCommitSettlement(settlementCtx, t.req.WorkspaceScope); err != nil {
+				settlementBlocker = "repository commit succeeded but local workspace settlement is pending"
+			}
+			cancelSettlement()
+		}
+		t.runState.RecordSourceCommit(workspaceDigest)
+		t.runState.CompleteExecutionPlan()
+		if settlementBlocker != "" {
+			// The repository effect and durable ledger outcome remain successful,
+			// so never expose a tool error that could provoke a second commit ID.
+			// Keep the local reconciliation problem server-owned and checkpointed.
+			t.runState.RecordVerificationBindingFailure(settlementBlocker)
+		}
+	}
+	return nil
 }
 
 func (t projectEinoAssistantTool) finishDurableToolCall(
@@ -519,19 +631,26 @@ func (t projectEinoAssistantTool) finishDurableToolFailureForModel(
 }
 
 func (t projectEinoAssistantTool) replayDurableToolCall(
+	ctx context.Context,
 	callID string,
 	spec projectAssistantToolSpec,
 	args map[string]any,
 	outcome projectAssistantRunToolCallOutcome,
 ) (string, error) {
 	result, err := outcome.InvokeResult()
+	successful := outcome.Succeeded()
+	// Replay is also a post-effect recovery boundary. If the external commit
+	// was durably settled before process loss, repair only idempotent local
+	// state; do not count a replay as another completed model action.
+	if settlementErr := t.recoverV2CommitSettlement(ctx, spec, args, successful); settlementErr != nil {
+		return "", settlementErr
+	}
 	if err != nil {
 		if !outcome.Failed || strings.TrimSpace(outcome.Result) == "" {
 			return result, err
 		}
 		result = outcome.Result
 	}
-	successful := projectEinoAssistantSuccessfulToolContent(result)
 	status := projectToolCallResultStatus(spec.Name, result)
 	if !successful {
 		status = "failed"
@@ -549,6 +668,16 @@ func (t projectEinoAssistantTool) replayDurableToolCall(
 		t.appendBuilderEvent(projectBuilderEventWorkspaceChanged)
 	}
 	return result, nil
+}
+
+func (t projectEinoAssistantTool) durableToolCallSucceeded(ctx context.Context, callID, name, result string) bool {
+	if t.req.eventLedger != nil {
+		outcome, ok, err := t.req.eventLedger.ToolCallOutcome(ctx, callID)
+		if err == nil && ok {
+			return outcome.Succeeded()
+		}
+	}
+	return projectAssistantToolResultDisposition(name, result, nil) == projectAssistantToolDispositionSucceeded
 }
 
 func (t projectEinoAssistantTool) invalidateV2PartialPatchReads(spec projectAssistantToolSpec, args map[string]any) {
@@ -663,29 +792,7 @@ func (t projectEinoAssistantTool) v2CommitArguments(ctx context.Context, args ma
 	if len(dirtyPaths) == 0 {
 		return nil, errors.New("commit_project_files requires durable dirty workspace paths")
 	}
-	allowed := make(map[string]struct{}, len(dirtyPaths))
-	for _, path := range dirtyPaths {
-		allowed[path] = struct{}{}
-	}
-	requestedPaths := projectToolStringList(args["paths"])
-	if len(requestedPaths) == 0 {
-		requestedPaths = dirtyPaths
-	}
-	requestedSet := make(map[string]struct{}, len(requestedPaths))
-	for _, requested := range requestedPaths {
-		clean, err := workspace.CleanProjectPath(requested)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := allowed[clean]; !ok {
-			return nil, fmt.Errorf("commit path %q is not in the durable dirty workspace set", clean)
-		}
-		requestedSet[clean] = struct{}{}
-	}
-	normalizedPaths := make([]string, 0, len(requestedSet))
-	for path := range requestedSet {
-		normalizedPaths = append(normalizedPaths, path)
-	}
+	normalizedPaths := append([]string(nil), dirtyPaths...)
 	sort.Strings(normalizedPaths)
 	normalized := make(map[string]any, len(args))
 	for key, value := range args {
@@ -696,19 +803,35 @@ func (t projectEinoAssistantTool) v2CommitArguments(ctx context.Context, args ma
 	if err != nil {
 		return nil, fmt.Errorf("bind commit to current workspace: %w", err)
 	}
+	if verified := strings.TrimSpace(t.runState.VerifiedWorkspaceDigest()); verified != "" && !t.runState.VerifiedWorkspaceDigestMatches(digest) {
+		return nil, errors.New("workspace content no longer matches the verified workspace; run operational verification again before committing")
+	}
 	normalized["workspaceDigest"] = digest
 	return normalized, nil
 }
 
 func (t projectEinoAssistantTool) validateV2CommitWorkspace(ctx context.Context, args map[string]any) error {
+	dirtyPaths, err := t.req.Workspace.UncommittedPaths(ctx, t.req.WorkspaceScope)
+	if err != nil {
+		return fmt.Errorf("reload durable dirty paths: %w", err)
+	}
+	sort.Strings(dirtyPaths)
+	requestedPaths := projectToolStringList(args["paths"])
+	sort.Strings(requestedPaths)
+	if strings.Join(dirtyPaths, "\x00") != strings.Join(requestedPaths, "\x00") {
+		return errors.New("durable dirty workspace membership changed after commit approval; request approval again")
+	}
 	digest, err := t.v2CommitWorkspaceDigest(ctx, args)
 	if err != nil {
 		return fmt.Errorf("read commit workspace: %w", err)
 	}
-	if expected := strings.TrimSpace(projectToolString(args["workspaceDigest"])); expected != "" && expected == digest {
-		return nil
+	if expected := strings.TrimSpace(projectToolString(args["workspaceDigest"])); expected == "" || expected != digest {
+		return errors.New("workspace content changed after commit approval; request approval again for the current content")
 	}
-	return errors.New("workspace content changed after commit approval; request approval again for the current content")
+	if verified := strings.TrimSpace(t.runState.VerifiedWorkspaceDigest()); verified != "" && !t.runState.VerifiedWorkspaceDigestMatches(digest) {
+		return errors.New("workspace content no longer matches the verified workspace; run operational verification again before committing")
+	}
+	return nil
 }
 
 func (t projectEinoAssistantTool) v2CommitWorkspaceDigest(ctx context.Context, args map[string]any) (string, error) {
@@ -716,36 +839,7 @@ func (t projectEinoAssistantTool) v2CommitWorkspaceDigest(ctx context.Context, a
 }
 
 func projectEinoAssistantWorkspaceDigest(ctx context.Context, store *workspace.FileStore, scope workspace.Scope, paths []string) (string, error) {
-	if store == nil {
-		return "", errors.New("project workspace store is not configured")
-	}
-	if len(paths) == 0 {
-		return "", errors.New("commit paths are required")
-	}
-	paths = append([]string(nil), paths...)
-	sort.Strings(paths)
-	hash := sha256.New()
-	for _, path := range paths {
-		clean, err := workspace.CleanProjectPath(path)
-		if err != nil {
-			return "", err
-		}
-		file, err := store.ReadFile(ctx, scope, workspace.ReadOptions{
-			Path:     clean,
-			MaxBytes: workspace.MaxWriteBytes,
-		})
-		if err != nil {
-			return "", err
-		}
-		if file.Binary || file.Truncated {
-			return "", fmt.Errorf("file %q cannot be committed as bounded UTF-8 source", clean)
-		}
-		_, _ = hash.Write([]byte(clean))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write([]byte(file.Content))
-		_, _ = hash.Write([]byte{0})
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return store.WorkspaceDigest(ctx, scope, paths)
 }
 
 func projectAssistantMutationFromSuccessfulResult(name, result string, successful bool) *projectAssistantMutation {
@@ -1183,13 +1277,20 @@ func projectEinoUnknownToolHandler(server *Server, req projectAssistantRunReques
 		if runState.PermissionBarrierActive() {
 			return projectEinoPermissionBarrierToolResult(), nil
 		}
-		if tool, ok := projectEinoAssistantCurrentDynamicTool(server, req, runState, name); ok {
+		currentReq := req.currentExecutionRequest()
+		if currentReq.executionContext != nil {
+			// Dynamically discovered MCP/commit tools have no trusted parallel
+			// safety contract, so they default to exclusive execution.
+			currentReq.executionContext.toolMu.Lock()
+			defer currentReq.executionContext.toolMu.Unlock()
+		}
+		if tool, ok := projectEinoAssistantCurrentDynamicTool(server, currentReq, runState, name); ok {
 			return tool.InvokableRun(ctx, input)
 		}
 		callID := compose.GetToolCallID(ctx)
 		args := map[string]any{}
 		_ = json.Unmarshal([]byte(input), &args)
-		runState.EmitToolCall(req.StreamCallbacks.OnToolCall, projectToolCallStreamEvent{
+		runState.EmitToolCall(currentReq.StreamCallbacks.OnToolCall, projectToolCallStreamEvent{
 			ID:        callID,
 			Name:      name,
 			Status:    "rejected",

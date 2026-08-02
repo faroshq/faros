@@ -58,6 +58,7 @@ type projectAssistantCheckpointState struct {
 	CommittedMutationRevision uint64                                           `json:"committedMutationRevision,omitempty"`
 	CommitAttemptedRevision   uint64                                           `json:"commitAttemptedRevision,omitempty"`
 	VerifiedWorkspaceDigest   string                                           `json:"verifiedWorkspaceDigest,omitempty"`
+	CommittedWorkspaceDigest  string                                           `json:"committedWorkspaceDigest,omitempty"`
 	CheckedMutationRevision   uint64                                           `json:"checkedMutationRevision,omitempty"`
 	VerificationAttempted     bool                                             `json:"verificationAttempted,omitempty"`
 	VerificationOutcome       string                                           `json:"verificationOutcome,omitempty"`

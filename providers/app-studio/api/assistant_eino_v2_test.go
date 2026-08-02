@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -41,6 +44,19 @@ func (projectAssistantV2DirectToolPort) DiscoverMCP(context.Context, identity, p
 
 func (projectAssistantV2DirectToolPort) Invoke(ctx context.Context, tool projectAssistantTool, req projectAssistantToolCallRequest) (string, error) {
 	return tool.Call(ctx, req)
+}
+
+type projectAssistantV2CountingCommitPort struct {
+	calls int
+}
+
+func (*projectAssistantV2CountingCommitPort) DiscoverMCP(context.Context, identity, projectLLMSettings) ([]projectAssistantTool, bool, error) {
+	return nil, false, nil
+}
+
+func (p *projectAssistantV2CountingCommitPort) Invoke(context.Context, projectAssistantTool, projectAssistantToolCallRequest) (string, error) {
+	p.calls++
+	return `{"phase":"Succeeded","message":"committed"}`, nil
 }
 
 type projectAssistantV2ToolHarness struct {
@@ -404,6 +420,336 @@ func TestEinoV2CommitWorkspaceDigestRejectsPostApprovalChange(t *testing.T) {
 	}
 	if err := tool.validateV2CommitWorkspace(ctx, args); err == nil || !strings.Contains(err.Error(), "changed after commit approval") {
 		t.Fatalf("changed workspace error = %v", err)
+	}
+}
+
+func TestEinoV2CommitUsesCompleteDirtyBundleAndRejectsMembershipChange(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{
+		{Path: "src/App.tsx", Content: "app\n"},
+		{Path: "src/api.ts", Content: "api\n"},
+		{Path: "src/new.ts", Content: "new\n"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx", "src/api.ts"}); err != nil {
+		t.Fatal(err)
+	}
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope},
+		runState: newProjectEinoAssistantRunState(),
+	}
+	args, err := tool.v2CommitArguments(ctx, map[string]any{
+		"paths":   []any{"src/App.tsx"},
+		"message": "Commit the project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(projectToolStringList(args["paths"]), ","); got != "src/App.tsx,src/api.ts" {
+		t.Fatalf("server commit bundle = %q, want complete dirty set", got)
+	}
+	if err := tool.validateV2CommitWorkspace(ctx, args); err != nil {
+		t.Fatalf("unchanged complete bundle rejected: %v", err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/new.ts"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tool.validateV2CommitWorkspace(ctx, args); err == nil || !strings.Contains(err.Error(), "membership changed") {
+		t.Fatalf("changed membership error = %v, want approval invalidation", err)
+	}
+}
+
+func TestEinoV2CommitStateBindsVerifiedAndCommittedDigest(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordSourceMutation()
+	runState.RecordDevelopmentVerificationResult(`{"checkedMutationRevision":1,"status":"ready"}`)
+	runState.RecordVerifiedWorkspaceDigest("sha256:same")
+	runState.RecordSourceCommit("sha256:same")
+	checkpoint := runState.CheckpointState()
+	if checkpoint.VerifiedWorkspaceDigest != "sha256:same" || checkpoint.CommittedWorkspaceDigest != "sha256:same" {
+		t.Fatalf("checkpoint digests = verified %q committed %q, want same digest", checkpoint.VerifiedWorkspaceDigest, checkpoint.CommittedWorkspaceDigest)
+	}
+	evidence := runState.CompletionEvidence()
+	if !evidence.LatestMutationVerified || !evidence.LatestMutationCommitted {
+		t.Fatalf("completion evidence = %#v, want verified and committed for the same digest", evidence)
+	}
+
+	unverified := newProjectEinoAssistantRunState()
+	unverified.RecordSourceMutation()
+	unverified.RecordSourceCommit("sha256:commit-only")
+	checkpoint = unverified.CheckpointState()
+	if checkpoint.CommittedWorkspaceDigest != "sha256:commit-only" || checkpoint.VerifiedWorkspaceDigest != "" {
+		t.Fatalf("unverified commit checkpoint = %#v", checkpoint)
+	}
+	if evidence := unverified.CompletionEvidence(); evidence.LatestMutationVerified || !evidence.LatestMutationCommitted {
+		t.Fatalf("unverified commit evidence = %#v, want committed without verified", evidence)
+	}
+}
+
+func TestEinoV2CommitSettlementClearsCompleteDirtyBundleAtToolBoundary(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordSourceMutation()
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope},
+		runState: runState,
+	}
+	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, []string{"src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tool.recordV2CommitSettlement(ctx, projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}, map[string]any{
+		"paths":           []any{"src/App.tsx"},
+		"workspaceDigest": digest,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := workspaces.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("dirty paths after successful tool-boundary settlement = %#v, want cleared", paths)
+	}
+	if got := runState.CheckpointState().CommittedWorkspaceDigest; got != digest {
+		t.Fatalf("committed workspace digest = %q, want %q", got, digest)
+	}
+}
+
+func TestEinoV2SuccessfulCommitReplayRepairsLocalSettlement(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordSourceMutation()
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope},
+		runState: runState,
+	}
+	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, []string{"src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{
+		"paths":           []any{"src/App.tsx"},
+		"workspaceDigest": digest,
+	}
+	spec := projectAssistantToolSpec{Name: projectToolCommitProjectFiles, Risk: projectAssistantToolRiskCommit}
+	if err := tool.recordV2CommitSettlement(ctx, spec, args, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, count := runState.RepeatedCompletedAction(); count != 1 {
+		t.Fatalf("completed action count before replay = %d, want 1", count)
+	}
+	if _, err := tool.replayDurableToolCall(ctx, "call-commit", projectAssistantToolSpec{
+		Name: projectToolCommitProjectFiles,
+		Risk: projectAssistantToolRiskCommit,
+	}, args, projectAssistantRunToolCallOutcome{
+		Result:      `{"phase":"Succeeded"}`,
+		Disposition: projectAssistantToolDispositionSucceeded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, count := runState.RepeatedCompletedAction(); count != 1 {
+		t.Fatalf("completed action count after replay = %d, want unchanged at 1", count)
+	}
+	paths, err := workspaces.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("dirty paths after successful commit replay = %#v, want cleared", paths)
+	}
+	if got := runState.CheckpointState().CommittedWorkspaceDigest; got != digest {
+		t.Fatalf("replayed committed workspace digest = %q, want %q", got, digest)
+	}
+}
+
+func TestEinoV2UnknownHandlerDynamicCommitSettlesAndReplaysExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	h := newProjectAssistantV2ToolHarness(t, "v2-dynamic-commit-settlement")
+	defer h.server.Shutdown(ctx)
+	if err := h.workspaces.ApplyFiles(ctx, h.req.WorkspaceScope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.workspaces.AddUncommittedPaths(ctx, h.req.WorkspaceScope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	port := &projectAssistantV2CountingCommitPort{}
+	h.req.ToolPort = port
+	h.req.Repository = &ProjectRepositoryView{Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true}
+	h.req.ApprovalMode = store.AssistantApprovalModeAutoApprove
+	h.req.TurnProfile = projectAssistantTurnProfileImplementation
+	h.req.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetTurnPolicy(projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation))
+	runState.SetProjectRepositoryRef("demo-repo")
+	runState.RecordSourceMutation()
+	runState.SetToolDiscovery(projectEinoAssistantToolDiscovery{IncludeCommitBridge: true})
+
+	node, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+		UnknownToolsHandler: projectEinoUnknownToolHandler(h.server, h.req, runState),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-dynamic-commit",
+		Function: schema.FunctionCall{
+			Name:      projectToolCommitProjectFiles,
+			Arguments: `{"message":"commit the complete bundle"}`,
+		},
+	}})
+	for attempt := 0; attempt < 2; attempt++ {
+		messages, err := node.Invoke(ctx, input)
+		if err != nil {
+			t.Fatalf("dynamic commit attempt %d: %v", attempt+1, err)
+		}
+		if len(messages) != 1 || !strings.Contains(messages[0].Content, `"phase":"Succeeded"`) {
+			contents := make([]string, 0, len(messages))
+			for _, message := range messages {
+				contents = append(contents, message.Content)
+			}
+			t.Fatalf("dynamic commit attempt %d result = %#v, want typed success", attempt+1, contents)
+		}
+	}
+	if port.calls != 1 {
+		t.Fatalf("dynamic commit backend calls = %d, want exactly one", port.calls)
+	}
+	paths, err := h.workspaces.UncommittedPaths(ctx, h.req.WorkspaceScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("dirty paths after dynamic commit settlement = %#v, want cleared", paths)
+	}
+	if got := runState.CheckpointState().CommittedWorkspaceDigest; got == "" {
+		t.Fatal("dynamic commit did not record the committed workspace digest")
+	}
+	if _, count := runState.RepeatedCompletedAction(); count != 1 {
+		t.Fatalf("dynamic commit completed action count = %d, want replay excluded", count)
+	}
+}
+
+func TestEinoV2CommitSettlementFailureStopsAfterDurableCommitOutcome(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	workspaces := workspace.NewFileStore(root)
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	settlementPath := filepath.Join(root, ".assistant-snapshots", "org-a", "ws-1", "demo", "project-uid", "commit-settlement.json")
+	if err := os.Mkdir(settlementPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordSourceMutation()
+	tool := projectEinoAssistantTool{
+		req:      projectAssistantRunRequest{Workspace: workspaces, WorkspaceScope: scope},
+		runState: runState,
+	}
+	err := tool.recordV2CommitSettlement(ctx, projectAssistantToolSpec{
+		Name: projectToolCommitProjectFiles,
+		Risk: projectAssistantToolRiskCommit,
+	}, map[string]any{
+		"paths":           []any{"src/App.tsx"},
+		"workspaceDigest": "sha256:bundle",
+	}, true)
+	if err != nil {
+		t.Fatalf("model-visible settlement error = %v, want successful external outcome preserved", err)
+	}
+	checkpoint := runState.CheckpointState()
+	if checkpoint.CommittedWorkspaceDigest != "sha256:bundle" {
+		t.Fatalf("committed digest after failed local settlement = %q, want external success retained", checkpoint.CommittedWorkspaceDigest)
+	}
+	if len(checkpoint.VerificationBlockers) == 0 || !strings.Contains(checkpoint.VerificationBlockers[0], "local workspace settlement") {
+		t.Fatalf("settlement blockers = %#v, want server-owned blocker", checkpoint.VerificationBlockers)
+	}
+}
+
+func TestEinoV2RestoresDurableDirtyBundleIntoCurrentMutationRevision(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetTurnPolicy(projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation))
+	if err := (projectEinoAssistantEngine{}).restoreProjectAssistantDirtyBundle(ctx, projectAssistantRunRequest{
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo"}},
+		Workspace:      workspaces,
+		WorkspaceScope: scope,
+	}, runState); err != nil {
+		t.Fatal(err)
+	}
+	if revision, _ := runState.SourceMutationRevisions(); revision != 1 {
+		t.Fatalf("restored mutation revision = %d, want 1", revision)
+	}
+	if got := strings.Join(runState.SuccessfulMutationPaths(), ","); got != "src/App.tsx" {
+		t.Fatalf("restored paths = %q, want src/App.tsx", got)
+	}
+}
+
+func TestEinoV2RestoresCommitSettlementBeforeDirtyBundle(t *testing.T) {
+	ctx := context.Background()
+	workspaces := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "project-uid"}
+	if err := workspaces.ApplyFiles(ctx, scope, []workspace.File{{Path: "src/App.tsx", Content: "app\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspaces.AddUncommittedPaths(ctx, scope, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := projectEinoAssistantWorkspaceDigest(ctx, workspaces, scope, []string{"src/App.tsx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspaces.RecordCommitSettlement(ctx, scope, digest, []string{"src/App.tsx"}); err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetTurnPolicy(projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation))
+	if err := (projectEinoAssistantEngine{}).restoreProjectAssistantDirtyBundle(ctx, projectAssistantRunRequest{
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo"}},
+		Workspace:      workspaces,
+		WorkspaceScope: scope,
+	}, runState); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := workspaces.UncommittedPaths(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("dirty paths after settlement restoration = %#v, want cleared", paths)
+	}
+	if revision, _ := runState.SourceMutationRevisions(); revision != 0 {
+		t.Fatalf("settled commit restored mutation revision = %d, want 0", revision)
 	}
 }
 

@@ -31,6 +31,27 @@ type projectAssistantTurnPolicy struct {
 	profile projectAssistantTurnProfile
 }
 
+type projectAssistantModelCapabilities struct {
+	VisionToolResults bool
+}
+
+// projectAssistantModelCapabilityCatalog is the typed App Studio equivalent
+// of Codex's model-catalog capability flags. Unknown models fail closed.
+var projectAssistantModelCapabilityCatalog = map[string]projectAssistantModelCapabilities{
+	"openai-compatible/gpt-5.4":             {VisionToolResults: true},
+	"google-ai-studio/gemini-2.5-pro":       {VisionToolResults: true},
+	"google-ai-studio/gemini-3-pro-preview": {VisionToolResults: true},
+}
+
+func projectAssistantCapabilitiesForModel(settings projectLLMSettings) projectAssistantModelCapabilities {
+	provider := strings.ToLower(strings.TrimSpace(settings.Provider))
+	if provider == "" {
+		provider = defaultProjectLLMProvider
+	}
+	model := strings.ToLower(strings.TrimSpace(settings.Model))
+	return projectAssistantModelCapabilityCatalog[provider+"/"+model]
+}
+
 func projectAssistantTurnProfileAllowsMutation(profile projectAssistantTurnProfile) bool {
 	return normalizeProjectAssistantTurnProfile(profile) == projectAssistantTurnProfileImplementation
 }

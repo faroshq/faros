@@ -68,6 +68,7 @@ Environment variables consumed by the binary:
 | `APP_STUDIO_ASSISTANT_MAX_ITERATIONS` | Optional positive emergency model-call ceiling. The default is continuation-driven/unlimited, matching Codex; exhaustion fails with `budget_limited`. |
 | `APP_STUDIO_ASSISTANT_ROLLOUT_BUDGET_TOKENS` | Optional positive weighted-token budget for the Project conversation; disabled by default. Usage and reminders survive compaction and carry across runs. Exhaustion produces `failed` with `budget_limited`. |
 | `APP_STUDIO_ASSISTANT_MODEL_CONTEXT_TOKENS` | Active model context window used for token-pressure compaction (default `128000` when provider model metadata is unavailable). |
+| `APP_STUDIO_BROWSER_WORKER_URL` | Internal URL of the read-only Playwright worker. When unset or unhealthy, `inspect_development_preview` is not exposed to the model. |
 | `APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verify on MCP calls (dev) |
 | `APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verification only for preview readiness probes (local dev with a self-signed Gateway) |
 | `APP_STUDIO_PREVIEW_CONSOLE_ENABLED` | Automatically shares bounded browser-console evidence while the embedded preview is open; set `false` for a deployment-wide kill switch. |
@@ -83,6 +84,12 @@ default and passes `APP_STUDIO_DATABASE_URL` to the provider:
 make app-studio-db-up
 make run-provider-app-studio
 ```
+
+Tilt starts the browser worker as a separate resource. Outside Tilt, run
+`make run-app-studio-browser-worker`; the provider uses
+`http://127.0.0.1:8090` by default. The model can supply only a path within the
+server-resolved current preview plus bounded semantic assertions. It cannot
+select an origin, click, type, or execute arbitrary JavaScript.
 
 The database container is named `kedge-app-studio-postgres`, listens on
 `127.0.0.1:55432`, and stores data under `.kcp/app-studio-postgres/`. Both
@@ -140,12 +147,15 @@ the new-product assistant history, not a compatibility migration.
 
 Every model response batch is admitted before dispatch. Tool-call IDs are
 deterministic, malformed calls and conflicting IDs fail closed, and the model's
-call order and cardinality are preserved. Independent tool futures retain
-Eino's native concurrent execution and ordered rejoin, matching Codex's
-per-output-item scheduler. An append-only
+call order and cardinality are preserved. Eino retains native concurrent
+execution and ordered rejoin, while a run-scoped reader/writer gate permits
+only explicitly parallel-safe reads to overlap; effects, unknown tools, and
+MCP tools are exclusive. An append-only
 `AssistantRunEvent` ledger records each admitted call and exact model-visible
-result. It provides idempotency within the active run and between concurrent
-workers; it is not a provider-restart continuation mechanism.
+result together with its typed semantic disposition. Model-call audit entries
+also bind the visible tool contracts to a stable schema digest. The ledger
+provides idempotency within the active run and between concurrent workers; it
+is not a provider-restart continuation mechanism.
 
 An encrypted, append-only conversation-item stream separately records bounded
 user and assistant messages, tool calls/results, steering, compaction summaries,
@@ -161,9 +171,11 @@ If rollback after an I/O failure is incomplete, the actual remaining paths are
 reported as a partial failure and retained in the durable dirty-path set; stale
 reads for those paths are invalidated before another edit. Dirty paths are
 workspace information, not a hidden verification or commit obligation.
-Repository commits may use durable dirty paths from earlier turns. Unrelated
-paths are rejected, approval is bound to a current content digest, and only
-successfully committed paths are removed from the dirty set. The model is
+Repository commits use the complete server-owned durable dirty bundle,
+including paths from earlier turns; the model supplies commit prose rather
+than authoritative file scope. Approval is bound to the bundle's current path
+membership and content digest, and only successfully committed paths are
+removed from the dirty set. The model is
 instructed never to commit unless the user explicitly requests repository
 persistence.
 
@@ -177,9 +189,11 @@ assistant response.
 
 Mutation syncs are serialized in submission order per Project UID, and their
 revision, status, failure, and one bounded retry are checkpointed across
-permission or follow-up interrupts. A repository commit is bound to the exact
-approved paths and current workspace digest; runtime verification is not a
-commit prerequisite. While a run
+permission or follow-up interrupts. Runtime verification and commit both hash
+the complete dirty bundle. Verification remains optional, but when a run
+claims both verified and committed state they must refer to the same digest;
+membership or content changes invalidate approval and any stale verification
+binding. While a run
 owns the project, server-side reservations reject external workspace hydration,
 template switching, manual sync, and deletion; matching disabled portal controls
 are only the UX layer over that server boundary.
@@ -194,6 +208,11 @@ use the durable `POST /messages` boundary; the legacy POST-SSE project and
 message endpoints have been removed. Clients must not depend on token replay:
 the remaining GET stream provides complete revisioned snapshots, and a
 reconnect receives the latest one.
+
+Every effect is re-admitted at the Stop-serialized supervisor boundary against
+the run's durable actor digest. The model-visible project/repository snapshot
+and executable tool adapters share one per-sample request snapshot, so a tool
+cannot execute against an older request view than the one shown to the model.
 
 The public run lifecycle is `pending_permission`, `pending_input`, `running`,
 `stopping`, `completed`, `failed`, and `interrupted` (`aborted` is accepted only

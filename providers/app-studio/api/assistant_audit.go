@@ -18,8 +18,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +117,7 @@ type projectAssistantAuditModelCall struct {
 	VerifiedRevision          uint64   `json:"verifiedRevision,omitempty"`
 	RolloutBudgetRemaining    *int64   `json:"rolloutBudgetRemainingTokens,omitempty"`
 	VisibleTools              []string `json:"visibleTools,omitempty"`
+	ToolContractDigest        string   `json:"toolContractDigest,omitempty"`
 	Outcome                   string   `json:"outcome,omitempty"`
 	RequestedTools            []string `json:"requestedTools,omitempty"`
 	TransportErrorObserved    bool     `json:"transportErrorObserved,omitempty"`
@@ -256,6 +260,7 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 		VerifiedRevision:       verifiedRevision,
 		RolloutBudgetRemaining: rolloutBudgetRemaining,
 		VisibleTools:           projectAssistantAuditToolNames(toolInfos, deferredToolInfos),
+		ToolContractDigest:     projectAssistantAuditToolContractDigest(toolInfos, deferredToolInfos),
 		AtOffsetMS:             projectAssistantAuditOffsetMS(r.started, time.Now().UTC()),
 	}
 	r.mu.Lock()
@@ -270,6 +275,54 @@ func (r *projectAssistantRunAuditRecorder) recordModelCall(
 	raw := r.auditSnapshotLocked()
 	r.mu.Unlock()
 	return r.persistSnapshot(ctx, raw)
+}
+
+func projectAssistantAuditToolContractDigest(groups ...[]*schema.ToolInfo) string {
+	type contract struct {
+		Name         string `json:"name"`
+		Parameters   string `json:"parameters,omitempty"`
+		Risk         string `json:"risk,omitempty"`
+		ParallelSafe bool   `json:"parallelSafe,omitempty"`
+	}
+	contracts := make([]contract, 0)
+	seen := map[string]struct{}{}
+	for _, infos := range groups {
+		for _, info := range infos {
+			if info == nil {
+				continue
+			}
+			name := projectAssistantToolKey(info.Name)
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			item := contract{Name: name}
+			if info.Extra != nil {
+				item.Parameters, _ = info.Extra[projectEinoToolParametersExtraKey].(string)
+				item.Risk, _ = info.Extra["risk"].(string)
+				item.ParallelSafe, _ = info.Extra["parallelSafe"].(bool)
+			}
+			if item.Parameters == "" && info.ParamsOneOf != nil {
+				if raw, err := json.Marshal(info.ParamsOneOf); err == nil {
+					item.Parameters = string(raw)
+				}
+			}
+			contracts = append(contracts, item)
+		}
+	}
+	if len(contracts) == 0 {
+		return ""
+	}
+	sort.Slice(contracts, func(i, j int) bool { return contracts[i].Name < contracts[j].Name })
+	raw, err := json.Marshal(contracts)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (r *projectAssistantRunAuditRecorder) rolloutBudgetSnapshot() *projectAssistantRolloutBudgetState {

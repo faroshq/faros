@@ -92,6 +92,47 @@ func projectEinoAssistantSuccessfulToolContent(content string) bool {
 	return true
 }
 
+// projectAssistantToolResultDisposition is the single compatibility adapter
+// from provider/model text into App Studio's typed durable settlement. No
+// lifecycle, replay, or terminal consumer should reinterpret result prose.
+func projectAssistantToolResultDisposition(name, content string, invokeErr error) projectAssistantToolDisposition {
+	if invokeErr != nil || !projectEinoAssistantSuccessfulToolContent(content) {
+		return projectAssistantToolDispositionFailed
+	}
+	if projectEinoAssistantCommitTool(name) && projectToolCallResultStatus(name, content) != "succeeded" {
+		return projectAssistantToolDispositionFailed
+	}
+	decoded := map[string]any{}
+	if json.Unmarshal([]byte(strings.TrimSpace(content)), &decoded) == nil {
+		effectful := projectAssistantToolNameHasEffect(name)
+		for _, field := range []string{"status", "phase", "outcome"} {
+			switch strings.ToLower(projectToolString(decoded[field])) {
+			case "error", "failed", "failure", "partial_failure":
+				return projectAssistantToolDispositionFailed
+			case "blocked", "cancelled", "canceled", "denied", "not_configured", "not_ready", "rejected", "unavailable":
+				if effectful {
+					return projectAssistantToolDispositionFailed
+				}
+			}
+		}
+	}
+	return projectAssistantToolDispositionSucceeded
+}
+
+func projectAssistantToolNameHasEffect(name string) bool {
+	name = projectToolBaseName(name)
+	if spec, ok := projectAssistantWorkflowToolSpec(name); ok {
+		return projectAssistantToolHasEffect(spec)
+	}
+	if spec, ok := projectAssistantLocalToolRegistry(nil).Spec(name); ok {
+		return projectAssistantToolHasEffect(spec)
+	}
+	if spec, ok := projectAssistantMCPToolSpec(projectMCPTool{Name: name}); ok {
+		return projectAssistantToolHasEffect(spec)
+	}
+	return false
+}
+
 func projectEinoAssistantVerificationContentReady(content string) bool {
 	var result projectAssistantRuntimeVerificationResult
 	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &result); err != nil {

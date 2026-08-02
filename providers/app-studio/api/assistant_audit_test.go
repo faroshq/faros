@@ -125,6 +125,25 @@ func TestProjectAssistantRunAuditIsBoundedAndSanitized(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantAuditToolContractDigestIsStableAndSchemaBound(t *testing.T) {
+	first := []*schema.ToolInfo{
+		{Name: "b", Extra: map[string]any{projectEinoToolParametersExtraKey: `{"type":"object"}`, "risk": "read", "parallelSafe": true}},
+		{Name: "a", Extra: map[string]any{projectEinoToolParametersExtraKey: `{"type":"object","properties":{}}`, "risk": "write"}},
+	}
+	reordered := []*schema.ToolInfo{first[1], first[0]}
+	digest := projectAssistantAuditToolContractDigest(first)
+	if digest == "" || digest != projectAssistantAuditToolContractDigest(reordered) {
+		t.Fatalf("tool contract digest is not stable: %q", digest)
+	}
+	changed := []*schema.ToolInfo{
+		{Name: "a", Extra: map[string]any{projectEinoToolParametersExtraKey: `{"type":"object","required":["path"]}`, "risk": "write"}},
+		first[0],
+	}
+	if got := projectAssistantAuditToolContractDigest(changed); got == digest {
+		t.Fatalf("schema change retained digest %q", got)
+	}
+}
+
 func TestProjectAssistantRunAuditRecordsModelCallShapeWithoutPayloads(t *testing.T) {
 	started := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	run := &store.AssistantRun{ID: "run-model-call"}

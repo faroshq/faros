@@ -64,6 +64,7 @@ type projectAssistantRunEventLedger struct {
 type projectAssistantRunToolCallState struct {
 	ToolName   string
 	ArgsDigest string
+	Arguments  json.RawMessage
 	Read       bool
 	Effect     bool
 	Attempts   int
@@ -94,9 +95,21 @@ func (d projectAssistantRunToolCallDecision) ShouldDispatch() bool {
 // projectAssistantRunToolCallOutcome preserves the exact model-visible values.
 // Failed distinguishes a successful empty result from an error with empty text.
 type projectAssistantRunToolCallOutcome struct {
-	Result string
-	Error  string
-	Failed bool
+	Result      string
+	Error       string
+	Failed      bool
+	Disposition projectAssistantToolDisposition
+}
+
+type projectAssistantToolDisposition string
+
+const (
+	projectAssistantToolDispositionSucceeded projectAssistantToolDisposition = "succeeded"
+	projectAssistantToolDispositionFailed    projectAssistantToolDisposition = "failed"
+)
+
+func (o projectAssistantRunToolCallOutcome) Succeeded() bool {
+	return o.Disposition == projectAssistantToolDispositionSucceeded
 }
 
 func (o projectAssistantRunToolCallOutcome) InvokeResult() (string, error) {
@@ -114,9 +127,10 @@ type projectAssistantRunToolCallPayload struct {
 }
 
 type projectAssistantRunToolResultPayload struct {
-	Result string `json:"result"`
-	Error  string `json:"error"`
-	Failed bool   `json:"failed"`
+	Result      string                          `json:"result"`
+	Error       string                          `json:"error"`
+	Failed      bool                            `json:"failed"`
+	Disposition projectAssistantToolDisposition `json:"disposition,omitempty"`
 }
 
 func newProjectAssistantRunEventLedger(
@@ -265,7 +279,10 @@ func (l *projectAssistantRunEventLedger) FinishToolCall(
 	result string,
 	invokeErr error,
 ) (projectAssistantRunToolCallOutcome, error) {
-	outcome := projectAssistantRunToolCallOutcome{Result: result}
+	outcome := projectAssistantRunToolCallOutcome{
+		Result:      result,
+		Disposition: projectAssistantToolResultDisposition(token.ToolName, result, invokeErr),
+	}
 	if invokeErr != nil {
 		outcome.Error = invokeErr.Error()
 		outcome.Failed = true
@@ -306,9 +323,10 @@ func (l *projectAssistantRunEventLedger) FinishToolCall(
 			return persisted, nil
 		}
 		payload, err := json.Marshal(projectAssistantRunToolResultPayload{
-			Result: outcome.Result,
-			Error:  outcome.Error,
-			Failed: outcome.Failed,
+			Result:      outcome.Result,
+			Error:       outcome.Error,
+			Failed:      outcome.Failed,
+			Disposition: outcome.Disposition,
 		})
 		if err != nil {
 			return projectAssistantRunToolCallOutcome{}, fmt.Errorf("encode assistant run tool result event: %w", err)
@@ -470,6 +488,7 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 			l.calls[callID] = &projectAssistantRunToolCallState{
 				ToolName:   toolName,
 				ArgsDigest: digest,
+				Arguments:  append(json.RawMessage(nil), payload.Arguments...),
 				Read:       payload.Read,
 				Effect:     payload.Effect,
 				Attempts:   payload.Attempt,
@@ -493,9 +512,19 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 			return fmt.Errorf("%w: invalid tool result payload at sequence %d", errProjectAssistantRunToolLedgerCorrupt, event.Sequence)
 		}
 		outcome := projectAssistantRunToolCallOutcome{
-			Result: payload.Result,
-			Error:  payload.Error,
-			Failed: payload.Failed,
+			Result:      payload.Result,
+			Error:       payload.Error,
+			Failed:      payload.Failed,
+			Disposition: payload.Disposition,
+		}
+		// Events written before typed settlement are read compatibly, but every
+		// newly written result persists the semantic disposition explicitly.
+		if outcome.Disposition == "" {
+			var invokeErr error
+			if outcome.Failed {
+				invokeErr = errors.New(outcome.Error)
+			}
+			outcome.Disposition = projectAssistantToolResultDisposition(toolName, outcome.Result, invokeErr)
 		}
 		if state.Outcome != nil && *state.Outcome != outcome {
 			return fmt.Errorf("%w: call %q has conflicting durable results", errProjectAssistantRunToolLedgerCorrupt, callID)
@@ -507,6 +536,63 @@ func (l *projectAssistantRunEventLedger) applyEventLocked(event store.AssistantR
 	// this ledger fails closed instead of silently skipping past it.
 	l.lastSequence = event.Sequence
 	return nil
+}
+
+func (l *projectAssistantRunEventLedger) SettledToolCall(
+	ctx context.Context,
+	callID string,
+	toolName string,
+) (map[string]any, projectAssistantRunToolCallOutcome, bool, error) {
+	if l == nil {
+		return nil, projectAssistantRunToolCallOutcome{}, false, nil
+	}
+	callID = strings.TrimSpace(callID)
+	toolName = projectAssistantToolKey(toolName)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.refreshLocked(ctx); err != nil {
+		return nil, projectAssistantRunToolCallOutcome{}, false, err
+	}
+	state := l.calls[callID]
+	if state == nil || state.Outcome == nil {
+		return nil, projectAssistantRunToolCallOutcome{}, false, nil
+	}
+	if state.ToolName != toolName {
+		return nil, projectAssistantRunToolCallOutcome{}, false, fmt.Errorf(
+			"%w: call %q was already recorded as %s",
+			errProjectAssistantRunToolCallIDConflict,
+			callID,
+			state.ToolName,
+		)
+	}
+	args := map[string]any{}
+	if err := json.Unmarshal(state.Arguments, &args); err != nil {
+		return nil, projectAssistantRunToolCallOutcome{}, false, fmt.Errorf("%w: call %q arguments are invalid", errProjectAssistantRunToolLedgerCorrupt, callID)
+	}
+	return args, *state.Outcome, true, nil
+}
+
+func (l *projectAssistantRunEventLedger) ToolCallOutcome(ctx context.Context, callID string) (projectAssistantRunToolCallOutcome, bool, error) {
+	if l == nil {
+		return projectAssistantRunToolCallOutcome{}, false, nil
+	}
+	callID = strings.TrimSpace(callID)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// FinishToolCall applies the durable result to this ledger before returning.
+	// Consume that settled outcome without consulting a caller context that may
+	// already be cancelled immediately after the external side effect succeeds.
+	if state := l.calls[callID]; state != nil && state.Outcome != nil {
+		return *state.Outcome, true, nil
+	}
+	if err := l.refreshLocked(ctx); err != nil {
+		return projectAssistantRunToolCallOutcome{}, false, err
+	}
+	state := l.calls[callID]
+	if state == nil || state.Outcome == nil {
+		return projectAssistantRunToolCallOutcome{}, false, nil
+	}
+	return *state.Outcome, true, nil
 }
 
 func projectAssistantRunToolCallDigest(toolName string, args any) (json.RawMessage, string, error) {

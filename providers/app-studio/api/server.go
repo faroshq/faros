@@ -64,12 +64,14 @@ type Server struct {
 	developmentSyncFailures map[string]string
 	// previewEdgeProbe + edgeReadyURLs implement the preview edge-readiness
 	// gate (see preview_edge.go). Nil probe → the real HTTPS probe.
-	previewEdgeProbe      func(context.Context, string) error
-	edgeReadyURLs         edgeReadyURLsCache
-	previewConsoleEnabled bool
-	previewConsoleStore   *previewConsoleStore
-	previewConsoleSigner  *previewConsoleCapabilitySigner
-	mu                    sync.Mutex
+	previewEdgeProbe            func(context.Context, string) error
+	edgeReadyURLs               edgeReadyURLsCache
+	previewConsoleEnabled       bool
+	previewConsoleStore         *previewConsoleStore
+	previewConsoleSigner        *previewConsoleCapabilitySigner
+	previewInspector            projectAssistantPreviewInspector
+	previewInspectionResolveURL func(context.Context, identity, *aiv1alpha1.Project) (string, error)
+	mu                          sync.Mutex
 }
 
 // New constructs a Server.

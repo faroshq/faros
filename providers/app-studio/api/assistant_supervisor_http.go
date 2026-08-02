@@ -246,23 +246,14 @@ func projectAssistantTerminalEffectResultSucceeded(
 	name string,
 	payload projectAssistantRunToolResultPayload,
 ) bool {
-	if payload.Failed || !projectEinoAssistantSuccessfulToolContent(payload.Result) {
-		return false
+	if payload.Disposition != "" {
+		return payload.Disposition == projectAssistantToolDispositionSucceeded
 	}
-	if projectEinoAssistantCommitTool(name) && projectToolCallResultStatus(name, payload.Result) != "succeeded" {
-		return false
+	var invokeErr error
+	if payload.Failed {
+		invokeErr = errors.New(payload.Error)
 	}
-	decoded := map[string]any{}
-	if json.Unmarshal([]byte(strings.TrimSpace(payload.Result)), &decoded) != nil {
-		return true
-	}
-	for _, field := range []string{"status", "phase", "outcome"} {
-		switch strings.ToLower(projectToolString(decoded[field])) {
-		case "blocked", "cancelled", "canceled", "denied", "error", "failed", "failure", "not_configured", "not_ready", "rejected", "unavailable":
-			return false
-		}
-	}
-	return true
+	return projectAssistantToolResultDisposition(name, payload.Result, invokeErr) == projectAssistantToolDispositionSucceeded
 }
 
 // appendProjectAssistantStreamBlock keeps complete assistant updates readable

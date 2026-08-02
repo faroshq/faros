@@ -801,7 +801,8 @@ func (s *projectAssistantSupervisor) AdmitMutation(ctx context.Context, scope st
 	key := projectAssistantRunKey{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID, ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID}
 	s.mu.Lock()
 	active := s.runs[key]
-	if active == nil || active.run.ID != runID {
+	actor = strings.TrimSpace(actor)
+	if actor == "" || active == nil || active.run.ID != runID || !projectAssistantRunActorMatches(active.run, actor) {
 		s.mu.Unlock()
 		return store.ErrAssistantRunConflict
 	}
@@ -810,7 +811,7 @@ func (s *projectAssistantSupervisor) AdmitMutation(ctx context.Context, scope st
 	defer active.transitionMu.Unlock()
 
 	s.mu.Lock()
-	if current := s.runs[key]; current != active || active.run.ID != runID || active.run.Status != store.AssistantRunStatusRunning {
+	if current := s.runs[key]; current != active || active.run.ID != runID || active.run.Status != store.AssistantRunStatusRunning || !projectAssistantRunActorMatches(active.run, actor) {
 		s.mu.Unlock()
 		return store.ErrAssistantRunConflict
 	}
@@ -819,7 +820,7 @@ func (s *projectAssistantSupervisor) AdmitMutation(ctx context.Context, scope st
 	if err != nil {
 		return err
 	}
-	if run.Status != store.AssistantRunStatusRunning {
+	if run.Status != store.AssistantRunStatusRunning || !projectAssistantRunActorMatches(run, actor) {
 		return store.ErrAssistantRunConflict
 	}
 	return nil
