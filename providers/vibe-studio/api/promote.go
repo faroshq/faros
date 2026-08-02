@@ -107,6 +107,7 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.backfillImageInputs(r.Context(), cl, p)
+	s.backfillGitToken(r.Context(), cl, p)
 
 	// The caller may name images explicitly; anything it leaves out comes
 	// from this project's own build of the committed revision.
@@ -181,6 +182,25 @@ func shortSHA(sha string) string {
 		return sha[:7]
 	}
 	return sha
+}
+
+// backfillGitToken records where the project's git token lives, for projects
+// created before the field existed. Without it the reconciler cannot mint the
+// registry credential and production sits in ErrImagePull on private images.
+func (s *Server) backfillGitToken(ctx context.Context, cl *client.Client, p *vibev1alpha1.Project) {
+	repo := p.Spec.Repository
+	if repo == nil || repo.ConnectionRef == "" || repo.TokenSecret != nil {
+		return
+	}
+	ref, login, err := cl.GitToken(ctx, repo.ConnectionRef)
+	if err != nil {
+		log.Printf("resolving the git token for %s: %v", p.Name, err)
+		return
+	}
+	if ref != nil {
+		repo.TokenSecret = ref
+		repo.Login = login
+	}
 }
 
 // promoteProject mutates the Project spec so it declares a production
@@ -339,6 +359,7 @@ func (s *Server) handleGetPromotion(w http.ResponseWriter, r *http.Request) {
 	// Backfill in memory too (not just on promote), so a project created
 	// before image inputs were recorded still renders a usable ship panel.
 	s.backfillImageInputs(r.Context(), cl, p)
+	s.backfillGitToken(r.Context(), cl, p)
 	view := promotionViewOf(p)
 	if sess, err := cl.GetSession(r.Context(), r.PathValue("id")); err == nil {
 		view.CommitSHA = sess.Status.LastCommitSHA

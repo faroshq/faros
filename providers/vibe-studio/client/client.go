@@ -445,3 +445,27 @@ func (c *Client) ListPackages(ctx context.Context) ([]Package, error) {
 	}
 	return out, nil
 }
+
+// GitToken locates a Connection's git-host token and the account it belongs
+// to. Resolved as the CALLER: the Project reconciler has no claim on
+// Connections, so the answer is copied onto the Project spec instead.
+func (c *Client) GitToken(ctx context.Context, connection string) (ref *vibev1alpha1.SecretKeyReference, login string, err error) {
+	conn, err := c.scope.Get(ctx, connectionResource, "", connection)
+	if err != nil {
+		return nil, "", err
+	}
+	name, _, _ := unstructured.NestedString(conn.Object, "spec", "secretRef", "name")
+	if strings.TrimSpace(name) == "" {
+		return nil, "", nil
+	}
+	key, _, _ := unstructured.NestedString(conn.Object, "spec", "secretRef", "key")
+	namespace, _, _ := unstructured.NestedString(conn.Object, "spec", "secretRef", "namespace")
+	login, _, _ = unstructured.NestedString(conn.Object, "status", "login")
+	if key == "" {
+		key = "token"
+	}
+	if namespace == "" {
+		namespace = "default"
+	}
+	return &vibev1alpha1.SecretKeyReference{Name: name, Namespace: namespace, Key: key}, login, nil
+}

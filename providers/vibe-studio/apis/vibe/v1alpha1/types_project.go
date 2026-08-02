@@ -157,6 +157,36 @@ type ProjectRepositoryBinding struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	ConnectionRef string `json:"connectionRef,omitempty"`
+
+	// TokenSecret is where that Connection keeps its git-host token, copied
+	// here at approval time by resolving the Connection AS THE CALLER. The
+	// reconciler mints the registry pull credential from it and has no claim
+	// on Connections — the same self-contained-spec contract the instance
+	// bindings use.
+	// +optional
+	TokenSecret *SecretKeyReference `json:"tokenSecret,omitempty"`
+
+	// Login is the git-host account the token belongs to, used as the
+	// registry username.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Login string `json:"login,omitempty"`
+}
+
+// SecretKeyReference points at one key of one Secret in this workspace.
+type SecretKeyReference struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Namespace string `json:"namespace,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key,omitempty"`
 }
 
 type ProjectEnvironmentMode string

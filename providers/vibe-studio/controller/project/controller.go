@@ -118,6 +118,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		observed[ref.Key()] = inst
 	}
 
+	// Production pulls private images: mint the registry credential the
+	// infrastructure provider bridges into the runtime namespace. Re-derived
+	// every pass, so a rotated git token reaches production on its own.
+	if err := r.ensureRegistryPullSecret(ctx, c, &p); err != nil {
+		return ctrl.Result{}, fmt.Errorf("registry pull secret: %w", err)
+	}
+
 	// Converge the code Repository from the spec binding (autoInit creates
 	// the repo on the git host; the session flow seeds it). Repositories are
 	// deliberately NOT deleted on Project delete — they hold user code.

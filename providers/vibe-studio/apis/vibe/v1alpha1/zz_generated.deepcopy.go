@@ -88,7 +88,7 @@ func (in *ProjectSpec) DeepCopyInto(out *ProjectSpec) {
 	*out = *in
 	if in.Repository != nil {
 		out.Repository = new(ProjectRepositoryBinding)
-		*out.Repository = *in.Repository
+		in.Repository.DeepCopyInto(out.Repository)
 	}
 	if in.Template != nil {
 		out.Template = new(ProjectTemplateSpec)
@@ -120,6 +120,10 @@ func (in *ProjectSpec) DeepCopy() *ProjectSpec {
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 func (in *ProjectRepositoryBinding) DeepCopyInto(out *ProjectRepositoryBinding) {
 	*out = *in
+	if in.TokenSecret != nil {
+		out.TokenSecret = new(SecretKeyReference)
+		*out.TokenSecret = *in.TokenSecret
+	}
 }
 
 // DeepCopy is a deepcopy function, copying the receiver, creating a new ProjectRepositoryBinding.
@@ -684,4 +688,19 @@ func (in *StudioList) DeepCopyObject() runtime.Object {
 		return c
 	}
 	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *SecretKeyReference) DeepCopyInto(out *SecretKeyReference) {
+	*out = *in
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new SecretKeyReference.
+func (in *SecretKeyReference) DeepCopy() *SecretKeyReference {
+	if in == nil {
+		return nil
+	}
+	out := new(SecretKeyReference)
+	in.DeepCopyInto(out)
+	return out
 }

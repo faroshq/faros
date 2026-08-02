@@ -849,6 +849,15 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 		repoBinding = &vibev1alpha1.ProjectRepositoryBinding{
 			RepositoryRef: name, Name: name, ConnectionRef: connection,
 		}
+		// Where the connection keeps its token, resolved as the caller. The
+		// reconciler mints the registry pull credential from it — production
+		// runs private images and would otherwise sit in ErrImagePull.
+		if ref, login, err := cl.GitToken(ctx, connection); err != nil {
+			log.Printf("resolving the git token for %s: %v", name, err)
+		} else if ref != nil {
+			repoBinding.TokenSecret = ref
+			repoBinding.Login = login
+		}
 	}
 	// Copy the template's development contract onto the spec so the Session
 	// reconciler can provision without reading Templates (they ride virtual
