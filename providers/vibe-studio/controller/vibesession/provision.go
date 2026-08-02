@@ -233,7 +233,7 @@ func (r *Reconciler) seedRepository(
 	if err != nil {
 		return provisionResult{}, sessionlog.SetCheckpoint(ctx, r.Store, scope, id, session.Checkpoint{
 			Name: session.CheckpointGit, State: session.CheckpointError,
-			Reason: "seeding the repository failed: " + err.Error(),
+			Reason: "seeding the repository failed: " + explainGitError(err),
 		})
 	}
 	var commit struct {

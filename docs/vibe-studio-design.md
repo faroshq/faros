@@ -372,10 +372,31 @@ gate. app-studio stays untouched and running throughout.
   the code provider's `commit_files` MCP tool (bundle contents are
   code-provider-local, so CR-only seeding is impossible).
 - **Phase 3 — ship (medium). 🟡 IN PROGRESS.** Commit-from-workspace ✅,
-  promote ✅ (see 6c), build-config generation + build status ⬜ (the `ci`
-  checkpoint stays `pending` until that lands, and promotion currently takes
-  the image references from the user rather than from a build).
+  promote ✅ (see 6c), build ⬜ (the `ci` checkpoint stays `pending` until it
+  lands, and promotion currently takes image references from the user rather
+  than from a build).
   Exit criterion: prod URL serving the built digest; repeat-promotion works.
+
+  **No build-config generator is needed** (2026-08-02). Every scaffold already
+  ships `.github/workflows/build.yaml`: smoke test, then one Railpack image
+  per component pushed to `ghcr.io/<owner>/<repo>/<component>` tagged
+  `sha-<commit>` (component names match the template's, per the ONE NAME
+  RULE). vibe-studio was *dropping* it — `scaffoldSkippedPath` filtered
+  `.github/`, so seeded projects had no CI at all. Keeping it means the
+  pipeline arrives with the scaffold and the commit reconciler's pushes to the
+  default branch trigger it; app-studio's YAML generator does not get ported.
+  Requires the `workflow` OAuth scope on the Code connection — without it the
+  host rejects the *whole* commit, so the git checkpoint explains that in
+  those words (`explainGitError`).
+
+  What remains for build: resolve each component's digest from the Code
+  provider's `Package.status.versions[]` by the tag `sha-<committedRevision>`
+  into `Project.status.build`, mirror run state into the `ci` checkpoint via
+  `RepositoryBuildStatus` (including the failure-log tail, so the model can
+  fix its own build), and prefill/enforce promote from those digests. One more
+  gap: Actions-published ghcr packages are private, so production needs an
+  imagePullSecret minted from the connection token (app-studio's
+  cross-provider bridge pattern) before a promoted image will pull.
 - **Phase 4 — hardening + surfaces (medium). ⬜.** MCP surface (`vibe__*`
   tools so agents/CLI can drive the same flow — the Session CR makes a CLI
   attach trivial), approval preferences, retention, multi-replica soak,

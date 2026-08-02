@@ -149,9 +149,20 @@ func fetchScaffoldArchive(ctx context.Context, archiveURL string) ([]File, error
 	return files, nil
 }
 
+// scaffoldSkippedPath drops what belongs to the scaffold repository rather
+// than to the project seeded from it: its licence and its README (the git host
+// writes a fresh one on autoInit).
+//
+// `.github/` is deliberately KEPT. Every scaffold ships its own build workflow
+// — smoke test, then a Railpack image per component pushed to
+// ghcr.io/<owner>/<repo>/<component> tagged sha-<commit> — so a seeded project
+// has working CI from its first commit and promotion has digests to pin.
+// Committing under `.github/workflows/` requires the `workflow` scope on the
+// Code provider connection; without it the git host refuses the whole commit,
+// which the git checkpoint reports in those words.
 func scaffoldSkippedPath(p string) bool {
 	if p == "LICENSE" || p == "README.md" {
 		return true
 	}
-	return strings.HasPrefix(p, ".git/") || strings.HasPrefix(p, ".github/")
+	return strings.HasPrefix(p, ".git/")
 }

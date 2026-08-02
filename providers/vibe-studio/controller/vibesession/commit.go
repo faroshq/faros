@@ -97,7 +97,7 @@ func (r *Reconciler) commitWorkspace(
 		// Report it where the user is looking, and retry on the next pass.
 		return false, sessionlog.SetCheckpoint(ctx, r.Store, scope, sess.Name, session.Checkpoint{
 			Name: session.CheckpointGit, State: session.CheckpointError,
-			Reason: "committing the workspace failed: " + err.Error(),
+			Reason: "committing the workspace failed: " + explainGitError(err),
 		})
 	}
 	var commit struct {
