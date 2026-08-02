@@ -232,6 +232,11 @@ func writeProjectError(w http.ResponseWriter, err error) {
 		writeStatus(w, http.StatusServiceUnavailable, "ServiceUnavailable", projectAPIInitializingMessage)
 		return
 	}
+	if errors.Is(err, errProjectCreatePreflightUnavailable) {
+		w.Header().Set("Retry-After", "2")
+		writeStatus(w, http.StatusBadGateway, "BadGateway", "Project planning is temporarily unavailable. Retry project creation shortly, or choose a development template explicitly.")
+		return
+	}
 	writeError(w, err)
 }
 
@@ -1365,6 +1370,29 @@ func mergeProjectAssistantActionFeedItem(existing, next projectAssistantActionFe
 		next.Diagnostic = existing.Diagnostic
 	}
 	return next
+}
+
+// finalizeProjectAssistantActionFeed closes lifecycle entries left open by an
+// interrupted engine segment. A terminal turn must never publish an action as
+// still running or waiting for approval.
+func finalizeProjectAssistantActionFeed(actions []projectAssistantActionFeedItem, runStatus store.AssistantRunStatus) []projectAssistantActionFeedItem {
+	for i := range actions {
+		if actions[i].Status != projectAssistantActionFeedStatusRunning && actions[i].Status != projectAssistantActionFeedStatusWaiting {
+			continue
+		}
+		switch runStatus {
+		case store.AssistantRunStatusCompleted:
+			actions[i].Status = projectAssistantActionFeedStatusSucceeded
+			actions[i].Severity = projectAssistantActionFeedSeverityNormal
+			actions[i].Diagnostic = nil
+		default:
+			actions[i].Status = projectAssistantActionFeedStatusFailed
+			actions[i].Severity = projectAssistantActionFeedSeverityError
+			actions[i].Diagnostic = projectAssistantActionFeedDiagnostic(actions[i].ID, "")
+		}
+		actions[i].Title = projectAssistantActionFeedItemTitle(actions[i].Kind, actions[i].Status)
+	}
+	return filterProjectAssistantActionFeedItems(actions)
 }
 
 func sanitizeProjectToolCallStreamEventsForMetadata(events []projectToolCallStreamEvent) []projectToolCallStreamEvent {

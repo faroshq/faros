@@ -18,10 +18,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	einoschema "github.com/cloudwego/eino/schema"
 )
 
 func TestProjectLLMSettingsUseCodexStreamRecoveryDefaults(t *testing.T) {
@@ -258,6 +261,39 @@ func TestProjectCreatePreflightAcceptsOnlyExactCatalogTemplate(t *testing.T) {
 	}
 }
 
+func TestGenerateProjectCreatePreflightReplyRetriesTransientModelFailure(t *testing.T) {
+	calls := 0
+	reply, err := generateProjectCreatePreflightReply(context.Background(), projectLLMSettings{
+		MaxRetries: 2, MaxRetriesConfigured: true, RetryBackoff: time.Nanosecond,
+	}, func() (*einoschema.Message, error) {
+		calls++
+		if calls == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return einoschema.AssistantMessage(`{"displayName":"Task Desk","repositoryName":"task-desk","templateName":""}`, nil), nil
+	})
+	if err != nil {
+		t.Fatalf("generateProjectCreatePreflightReply returned error: %v", err)
+	}
+	if calls != 2 || reply == nil || !strings.Contains(reply.Content, "Task Desk") {
+		t.Fatalf("reply after %d calls = %#v, want recovered second response", calls, reply)
+	}
+}
+
+func TestGenerateProjectCreatePreflightReplyDoesNotRetrySemanticFailure(t *testing.T) {
+	calls := 0
+	want := errors.New("invalid request")
+	_, err := generateProjectCreatePreflightReply(context.Background(), projectLLMSettings{
+		MaxRetries: 5, MaxRetriesConfigured: true, RetryBackoff: time.Nanosecond,
+	}, func() (*einoschema.Message, error) {
+		calls++
+		return nil, want
+	})
+	if !errors.Is(err, want) || calls != 1 {
+		t.Fatalf("error after %d calls = %v, want one non-retryable failure", calls, err)
+	}
+}
+
 func TestProjectCreatePreflightPromptIncludesBoundedLiveCatalog(t *testing.T) {
 	prompt := projectCreatePreflightSystemPrompt([]projectDevelopmentTemplateView{{
 		Name:        "simple-webapp",
@@ -353,6 +389,19 @@ func TestDeepPromptForbidsNumericUnifiedDiffHunks(t *testing.T) {
 	} {
 		if !strings.Contains(projectEinoAssistantV2DeepInstruction, instruction) {
 			t.Fatalf("deep instruction missing %q", instruction)
+		}
+	}
+}
+
+func TestDeepPromptScopesStaticBrowserEvidence(t *testing.T) {
+	for _, instruction := range []string{
+		"cannot click, type, press keys",
+		"Static text and role assertions verify rendered state only",
+		"source-reviewed but not browser-exercised",
+		"never say it is live, working, or independently verified from static assertions",
+	} {
+		if !strings.Contains(projectEinoAssistantV2DeepInstruction, instruction) {
+			t.Fatalf("deep instruction missing browser evidence scope %q", instruction)
 		}
 	}
 }

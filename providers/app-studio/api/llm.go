@@ -139,8 +139,9 @@ const (
 )
 
 var (
-	errProjectLLMNotConfigured = errors.New("project LLM API key is not configured")
-	secretGVR                  = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	errProjectLLMNotConfigured           = errors.New("project LLM API key is not configured")
+	errProjectCreatePreflightUnavailable = errors.New("project planning model is temporarily unavailable")
+	secretGVR                            = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 )
 
 type ProjectLLMSettingsView struct {
@@ -522,21 +523,68 @@ func (s *Server) generateProjectCreatePreflight(ctx context.Context, c *asclient
 	if err != nil {
 		return projectCreatePreflight{}, err
 	}
-	reply, err := model.Generate(ctx, []*einoschema.Message{
+	messages := []*einoschema.Message{
 		einoschema.SystemMessage(projectCreatePreflightSystemPrompt(templates)),
 		einoschema.UserMessage("Prompt:\n" + prompt),
-	}, projectTemperatureOptions(settings.Model, 0.1)...)
+	}
+	reply, err := generateProjectCreatePreflightReply(ctx, settings, func() (*einoschema.Message, error) {
+		return model.Generate(ctx, messages, projectTemperatureOptions(settings.Model, 0.1)...)
+	})
 	if err != nil {
-		return projectCreatePreflight{}, err
+		if ctx.Err() != nil {
+			return projectCreatePreflight{}, ctx.Err()
+		}
+		return projectCreatePreflight{}, fmt.Errorf("%w: %v", errProjectCreatePreflightUnavailable, err)
 	}
 	if reply == nil {
-		return projectCreatePreflight{}, errors.New("LLM project create preflight response was empty")
+		return projectCreatePreflight{}, fmt.Errorf("%w: response was empty", errProjectCreatePreflightUnavailable)
 	}
 	preflight, err := parseProjectCreatePreflight(reply.Content)
 	if err != nil {
-		return projectCreatePreflight{}, err
+		return projectCreatePreflight{}, fmt.Errorf("%w: %v", errProjectCreatePreflightUnavailable, err)
 	}
-	return normalizeProjectCreatePreflight(preflight, prompt, templates)
+	preflight, err = normalizeProjectCreatePreflight(preflight, prompt, templates)
+	if err != nil {
+		return projectCreatePreflight{}, fmt.Errorf("%w: %v", errProjectCreatePreflightUnavailable, err)
+	}
+	return preflight, nil
+}
+
+func generateProjectCreatePreflightReply(
+	ctx context.Context,
+	settings projectLLMSettings,
+	generate func() (*einoschema.Message, error),
+) (*einoschema.Message, error) {
+	maxRetries := projectEinoAssistantModelMaxRetries(settings)
+	baseBackoff := settings.RetryBackoff
+	if baseBackoff <= 0 {
+		baseBackoff = 200 * time.Millisecond
+	}
+	for attempt := 0; ; attempt++ {
+		reply, err := generate()
+		if err == nil {
+			return reply, nil
+		}
+		if attempt >= maxRetries || !projectEinoAssistantShouldRetryModelError(err) {
+			return nil, err
+		}
+		delay := baseBackoff * time.Duration(1<<min(attempt, 6))
+		if delay > 10*time.Second {
+			delay = 10 * time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		}
+	}
 }
 
 func projectCreatePreflightSystemPrompt(templates []projectDevelopmentTemplateView) string {

@@ -470,7 +470,14 @@ func projectAssistantActionDiagnosticCategory(raw string) string {
 		strings.Contains(value, "plan approval required"), strings.Contains(value, "execution plan revision required"):
 		return "permission"
 	case strings.Contains(value, "validation"), strings.Contains(value, "invalid"), strings.Contains(value, "malformed"),
-		strings.Contains(value, "required"), strings.Contains(value, "repository binding"):
+		strings.Contains(value, "required"), strings.Contains(value, "repository binding"),
+		strings.Contains(value, string(workspace.PatchErrorContextNotFound)),
+		strings.Contains(value, string(workspace.PatchErrorContextAmbiguous)),
+		strings.Contains(value, string(workspace.PatchErrorTargetExists)),
+		strings.Contains(value, string(workspace.PatchErrorTargetNotFound)),
+		strings.Contains(value, string(workspace.PatchErrorWorkspaceConflict)),
+		strings.Contains(value, string(workspace.PatchErrorNoChanges)),
+		strings.Contains(value, string(workspace.PatchErrorStrategyChange)):
 		return "validation"
 	case strings.Contains(value, "runtime"), strings.Contains(value, "preview"), strings.Contains(value, "process exited"), strings.Contains(value, "server did not"):
 		return "runtime"

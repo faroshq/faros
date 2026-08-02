@@ -494,6 +494,51 @@ func TestProjectAssistantActionOnlyTerminalTurnPersistsWorkedDuration(t *testing
 	t.Fatal("assistant message was not persisted")
 }
 
+func TestProjectAssistantSetStatusClosesRestoredWaitingAction(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	scope := store.Scope{OrgUUID: "org-1", WorkspaceUUID: "workspace-1", ProjectName: "project-1", ProjectUID: "test-project-uid-project-1"}
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: "user-1", Role: "user", ActorID: "test-user", Content: "restart it", CreatedAt: now, UpdatedAt: now}
+	waiting := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{ID: "restart-1", Name: projectToolRestartRuntime, Status: "permission_required"})
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Metadata: projectAssistantDurableMetadataForTransition(run, "Working", false, false, nil, nil), CreatedAt: now, UpdatedAt: now}
+	assistant.Metadata[projectMessageMetadataAssistantActionFeed] = []projectAssistantActionFeedItem{waiting}
+	assistant.Metadata[projectMessageMetadataAssistantInterrupt] = projectAssistantUIInterruptRequest{InterruptID: "permission-1"}
+	msgStore := store.NewMemoryStore()
+	if _, err := msgStore.CreateAssistantRun(ctx, scope, user, assistant, run); err != nil {
+		t.Fatalf("CreateAssistantRun: %v", err)
+	}
+	supervisor := newProjectAssistantSupervisor(ctx, msgStore)
+	accumulator, err := supervisor.Attach(scope, run, assistant)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := accumulator.SetStatus(ctx, store.AssistantRunStatusCompleted); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	page, err := msgStore.ListMessages(ctx, scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var message store.Message
+	for _, candidate := range page.Items {
+		if candidate.ID == assistant.ID {
+			message = candidate
+			break
+		}
+	}
+	if message.ID == "" {
+		t.Fatal("terminal assistant message not found")
+	}
+	actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
+	if len(actions) != 1 || actions[0].Status != projectAssistantActionFeedStatusSucceeded || actions[0].Title != "Ran checks" {
+		t.Fatalf("terminal actions = %#v, want closed successful action", actions)
+	}
+	if interrupt := projectAssistantUIInterruptFromMetadata(message.Metadata[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
+		t.Fatalf("terminal interrupt = %#v, want cleared", interrupt)
+	}
+}
+
 func TestProjectAssistantWorkedDurationExcludesPendingPermissionPause(t *testing.T) {
 	firstSegmentStarted := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
 	pending := &projectAssistantDurableMetadataState{

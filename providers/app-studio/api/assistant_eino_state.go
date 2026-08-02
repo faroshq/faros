@@ -1549,6 +1549,29 @@ func (s *projectEinoAssistantRunState) RecordToolMessage(msg chatMessage) {
 	}
 }
 
+func (s *projectEinoAssistantRunState) ReadOnlyPreviewInspectionObserved() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := len(s.toolEvidence) - 1; index >= 0; index-- {
+		message := s.toolEvidence[index]
+		if projectToolBaseName(message.Name) != projectToolInspectDevelopmentPreview {
+			continue
+		}
+		var evidence struct {
+			EvidenceScope       string `json:"evidenceScope"`
+			InteractionEvidence bool   `json:"interactionEvidence"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(message.Content)), &evidence) == nil &&
+			evidence.EvidenceScope == "rendered_state_only" && !evidence.InteractionEvidence {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *projectEinoAssistantRunState) PermissionBarrierActive() bool {
 	if s == nil {
 		return false

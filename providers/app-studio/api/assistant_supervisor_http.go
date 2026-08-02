@@ -431,11 +431,17 @@ func projectAssistantDurableMetadataForTransition(run store.AssistantRun, status
 
 func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status string, provisional bool, existing map[string]any) map[string]any {
 	metadata := map[string]any{}
-	if actions := projectAssistantActionFeedFromMetadata(existing[projectMessageMetadataAssistantActionFeed]); len(actions) > 0 {
+	actions := projectAssistantActionFeedFromMetadata(existing[projectMessageMetadataAssistantActionFeed])
+	if assistantRunTerminal(run.Status) {
+		actions = finalizeProjectAssistantActionFeed(actions, run.Status)
+	}
+	if len(actions) > 0 {
 		metadata[projectMessageMetadataAssistantActionFeed] = actions
 	}
-	if interrupt := projectAssistantUIInterruptFromMetadata(existing[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
-		metadata[projectMessageMetadataAssistantInterrupt] = interrupt
+	if !assistantRunTerminal(run.Status) {
+		if interrupt := projectAssistantUIInterruptFromMetadata(existing[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
+			metadata[projectMessageMetadataAssistantInterrupt] = interrupt
+		}
 	}
 	if plan, ok := projectAssistantPlanSnapshotFromMetadata(existing[projectAssistantMetadataPlan]); ok {
 		metadata[projectAssistantMetadataPlan] = *plan
@@ -771,6 +777,9 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
 		for _, action := range projectAssistantActionFeedUpdatesFromToolCalls(state.toolCalls) {
 			actions = applyProjectAssistantActionFeedUpdate(actions, action)
+		}
+		if assistantRunTerminal(run.Status) {
+			actions = finalizeProjectAssistantActionFeed(actions, run.Status)
 		}
 		if len(actions) > 0 {
 			metadata[projectMessageMetadataAssistantActionFeed] = actions

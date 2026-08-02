@@ -1255,6 +1255,192 @@ func TestProjectAssistantSnapshotStreamReconcilesRestartedRunningRun(t *testing.
 	}
 }
 
+func TestProjectAssistantThreadInterruptReattachesPendingRun(t *testing.T) {
+	projectYAML := "apiVersion: ai.kedge.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\n  uid: test-project-uid-demo\nspec: {}\n"
+	graphQL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(request.Query, "ProjectYaml") {
+			t.Fatalf("unexpected GraphQL query: %s", request.Query)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+			"ai_kedge_faros_sh": map[string]any{"v1alpha1": map[string]any{"ProjectYaml": projectYAML}},
+		}})
+	}))
+	defer graphQL.Close()
+
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(tenant.NewGraphQLClient(graphQL.URL, false), memoryStore, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{
+		ID: "run-pending", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest,
+		Status: store.AssistantRunStatusPendingPermission, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1",
+		RequestID: "perm-1", Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := bindProjectAssistantStopRequest(&run, "test-user", "stop-1"); err != nil {
+		t.Fatal(err)
+	}
+	user := store.Message{ID: run.UserMessageID, ActorID: "test-user", Role: "user", Content: "restart it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", Content: "Waiting for approval", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-1", "test-user")
+	createAssistantTurnForHTTPTest(t, memoryStore, scope, "thread-1", run)
+	router := mux.NewRouter()
+	server.Register(router)
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/threads/thread-1/turns/run-pending/interrupt", strings.NewReader(`{"clientRequestID":"stop-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-User", "test-user")
+	request.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org-a:workspace-a")
+	request.Header.Set("X-Kedge-Cluster", "cluster-a")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+	}
+	stopped, err := memoryStore.GetAssistantRun(context.Background(), scope, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("run status = %q, want interrupted", stopped.Status)
+	}
+}
+
+func TestProjectAssistantThreadMirrorPublishesPendingApproval(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-uid"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{
+		ID: "run-approval", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest,
+		Status: store.AssistantRunStatusRunning, ClientRequestID: "client-request", UserMessageID: "user-1", ActiveMessageID: "assistant-1",
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	message := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "restart it", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, message, run); err != nil {
+		t.Fatal(err)
+	}
+	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-approval", "test-user")
+	createAssistantTurnForHTTPTest(t, memoryStore, scope, "thread-approval", run)
+	pendingPublished := make(chan struct{})
+	publishInterrupt := make(chan struct{})
+	if err := server.projectAssistantSupervisor().Start(context.Background(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
+		if err := accumulator.UpdateRun(ctx, func(current *store.AssistantRun) {
+			current.Status = store.AssistantRunStatusPendingPermission
+			current.RequestID = "perm-1"
+		}); err != nil {
+			t.Errorf("publish pending approval: %v", err)
+		}
+		if err := accumulator.UpdateText(ctx, "Waiting for approval", false); err != nil {
+			t.Errorf("publish pending approval text: %v", err)
+		}
+		close(pendingPublished)
+		<-publishInterrupt
+		if err := accumulator.UpdateSnapshot(ctx, func(_ *store.AssistantRun, current *store.Message) {
+			current.Metadata = map[string]any{
+				projectMessageMetadataAssistantInterrupt: projectAssistantUIInterruptRequest{
+					InterruptID: "perm-1",
+					Kind:        projectAssistantInterruptTypePermission,
+					Description: "Restart the development runtime.",
+					Status:      "pending",
+					Action: &projectAssistantUIInterruptAction{
+						RunID:              run.ID,
+						RequestID:          "perm-1",
+						AssistantMessageID: run.ActiveMessageID,
+					},
+				},
+			}
+		}); err != nil {
+			t.Errorf("publish pending approval interrupt: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	go server.mirrorAssistantRunIntoThread(scope, "thread-approval", store.AssistantTurn{ID: run.ID, ThreadID: "thread-approval"}, run)
+	select {
+	case <-pendingPublished:
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not publish pending approval")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		events, err := memoryStore.ListAssistantThreadEvents(context.Background(), scope, "thread-approval", 0, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		processedPendingSnapshot := false
+		for _, event := range events {
+			if event.Type == assistantThreadEventApprovalRequested {
+				t.Fatalf("approval published before its interrupt payload: %#v", event)
+			}
+			if event.Type == assistantThreadEventItemDelta && event.ItemID == run.ActiveMessageID {
+				processedPendingSnapshot = true
+			}
+		}
+		if processedPendingSnapshot {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mirror did not process pending snapshot without interrupt: %#v", events)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(publishInterrupt)
+	deadline = time.Now().Add(time.Second)
+	approvalPublished := false
+	for {
+		events, err := memoryStore.ListAssistantThreadEvents(context.Background(), scope, "thread-approval", 0, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type != assistantThreadEventApprovalRequested {
+				continue
+			}
+			if event.RequestID != "perm-1" || event.ItemID != "perm-1" {
+				t.Fatalf("approval event = %#v", event)
+			}
+			var envelope struct {
+				Interrupt *projectAssistantUIInterruptRequest `json:"interrupt"`
+			}
+			if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			interrupt := envelope.Interrupt
+			if interrupt == nil || interrupt.Action == nil || interrupt.Action.RunID != run.ID || interrupt.Action.RequestID != "perm-1" {
+				t.Fatalf("approval interrupt = %#v, want actionable request", interrupt)
+			}
+			items := materializeAssistantThreadItems(events)
+			for _, item := range items {
+				if item.ID == "perm-1" && item.Type == "approval" {
+					if item.Status == "completed" {
+						return
+					}
+					if item.Status == "in_progress" && !approvalPublished {
+						approvalPublished = true
+						if _, stopped, stopErr := server.projectAssistantSupervisor().Stop(scope, run.ID); stopErr != nil || !stopped {
+							t.Fatalf("stop pending approval: stopped=%v err=%v", stopped, stopErr)
+						}
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("canonical approval did not complete after terminal transition: %#v", events)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)

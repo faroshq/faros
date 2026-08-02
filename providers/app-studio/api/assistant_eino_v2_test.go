@@ -592,6 +592,29 @@ func TestEinoV2CommitStateBindsVerifiedAndCommittedDigest(t *testing.T) {
 	}
 }
 
+func TestProjectEinoAssistantFinalContentCarriesServerOwnedPreviewEvidenceScope(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordToolMessage(chatMessage{
+		Role:       "tool",
+		Name:       projectToolInspectDevelopmentPreview,
+		ToolCallID: "inspect-1",
+		Content:    `{"status":"succeeded","evidenceScope":"rendered_state_only","interactionEvidence":false}`,
+	})
+	result := projectEinoAssistantResultWithCompletion(projectAssistantRunResult{Content: "Everything is working."}, runState)
+	for _, want := range []string{
+		"Everything is working.",
+		"Verification scope: rendered state and accessibility assertions passed.",
+		"source-reviewed but not exercised by the read-only preview inspector",
+	} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("final content = %q, want %q", result.Content, want)
+		}
+	}
+	if duplicated := projectEinoAssistantFinalContentWithEvidenceScope(result.Content, runState); duplicated != result.Content {
+		t.Fatalf("evidence note duplicated: %q", duplicated)
+	}
+}
+
 func TestInitialProjectPlanProgressBoundsLabelsForDurablePresentation(t *testing.T) {
 	longStep := "Create backend server.js with PostgreSQL schema, horse seeding, and API routes (GET /api/horses, POST /api/swipe, GET /api/matches)"
 	if len(longStep) <= projectEinoAssistantTodoProgressMaxLabelBytes {

@@ -127,6 +127,9 @@ func TestInspectProjectDevelopmentPreviewReturnsTypedFailure(t *testing.T) {
 	if result.Status != "failed" || result.FailureKind != "assertion" {
 		t.Fatalf("result = %#v", result)
 	}
+	if result.EvidenceScope != "rendered_state_only" || result.InteractionEvidence || len(result.Limitations) != 1 || !strings.Contains(result.Limitations[0], "did not click, type, press keys") {
+		t.Fatalf("inspection evidence contract = %#v", result)
+	}
 	if result.Screenshot == nil || result.Screenshot.Base64 != "" || result.Screenshot.Bytes == 0 {
 		t.Fatalf("persistable screenshot metadata = %#v", result.Screenshot)
 	}

@@ -52,6 +52,7 @@ test('keeps action details, assistant progress prose, working status, and plan d
   assert.match(appSource, /v-if="assistantProgressClosed\(message\)"/)
   assert.match(appSource, /:aria-expanded="assistantProgressExpanded\(message\)"/)
   assert.match(appSource, /parseAssistantProgress\(message\.metadata\?\.assistantProgress\)/)
+  assert.match(appSource, /rawItem\.data\?\.assistantProgress[\s\S]*assistantProgress: rawItem\.data\.assistantProgress/)
   assert.match(appSource, /v-if="message\.actionFeed\?\.length && !message\.progress"/)
   assert.match(appSource, /v-show="assistantProgressExpanded\(message\)"[\s\S]*v-for="\(traceBlock, traceIndex\) in assistantTraceBlocks\(message\)"[\s\S]*traceBlock\.kind === 'actions'[\s\S]*renderMessageContent\(traceBlock\.message, 'assistant'\)/)
   assert.match(appSource, /:message-id="`\$\{message\.id\}-trace-\$\{traceIndex\}`"/)

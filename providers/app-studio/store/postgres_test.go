@@ -268,6 +268,38 @@ func TestPostgresStoreV2ContractExternalDSN(t *testing.T) {
 	if persisted.Status != AssistantRunStatusCompleted || persisted.Revision != 2 {
 		t.Fatalf("persisted run = %#v", persisted)
 	}
+
+	thread, err := s.CreateAssistantThread(ctx, scope, AssistantThread{ID: "thread-1", ActorID: "actor-1", CreatedAt: createdAt, UpdatedAt: createdAt}, []AssistantThreadEvent{
+		{Type: "thread.created", Payload: json.RawMessage(`{"thread":"thread-1"}`), CreatedAt: createdAt},
+	})
+	if err != nil {
+		t.Fatalf("CreateAssistantThread: %v", err)
+	}
+	turn, err := s.CreateAssistantTurn(ctx, scope, AssistantTurn{
+		ID: "turn-1", ThreadID: thread.ID, ActorID: "actor-1", ClientUserMessageID: "client-message-1",
+		Mode: AssistantRunModeDefault, ApprovalMode: AssistantApprovalModeOnRequest,
+		Status: AssistantTurnStatusInProgress, CreatedAt: createdAt, UpdatedAt: createdAt,
+	}, []AssistantThreadEvent{{Type: "turn.started", Payload: json.RawMessage(`{"turn":"turn-1"}`), CreatedAt: createdAt}})
+	if err != nil {
+		t.Fatalf("CreateAssistantTurn: %v", err)
+	}
+	approval, err := s.AppendAssistantThreadEvent(ctx, scope, AssistantThreadEvent{
+		ThreadID: thread.ID, TurnID: turn.ID, Type: "approval.requested", ItemID: "perm-1", RequestID: "perm-1",
+		Payload: json.RawMessage(`{"requestID":"perm-1"}`), CreatedAt: createdAt.Add(time.Second),
+	}, 2)
+	if err != nil {
+		t.Fatalf("AppendAssistantThreadEvent: %v", err)
+	}
+	if approval.Sequence != 3 {
+		t.Fatalf("approval sequence = %d, want 3", approval.Sequence)
+	}
+	turn.Status = AssistantTurnStatusCompleted
+	turn.UpdatedAt = createdAt.Add(2 * time.Second)
+	if err := s.SaveAssistantTurnWithEvent(ctx, scope, turn, AssistantThreadEvent{
+		Type: "turn.completed", Payload: json.RawMessage(`{"turn":"turn-1"}`), CreatedAt: turn.UpdatedAt,
+	}, approval.Sequence); err != nil {
+		t.Fatalf("SaveAssistantTurnWithEvent: %v", err)
+	}
 }
 
 func TestAssistantCodexTerminalMigrationExternalDSN(t *testing.T) {

@@ -538,10 +538,13 @@ func applyIndependentPatchChunks(content string, chunks []patchChunk) (string, i
 		start := 0
 		if chunk.anchor != "" {
 			anchorIndex, matches := findUniquePatchSequence(text.lines, []string{chunk.anchor}, 0, false)
-			if matches != 1 {
+			if matches == 1 {
+				start = anchorIndex + 1
+			} else if matches == 0 || len(chunk.oldLines) == 0 {
 				return "", 0, false
 			}
-			start = anchorIndex + 1
+			// A repeated literal anchor is only a navigation hint. Let the full
+			// unchanged hunk body disambiguate it against the immutable source.
 		}
 		matchIndex := start
 		switch {
@@ -625,14 +628,21 @@ func applyPatchChunksInOrder(filePath, content string, chunks []patchChunk) (str
 					chunk.anchor,
 					patchActualLinesPreview(text.lines, cursor, 1),
 				)
-			case matches > 1:
+			case matches > 1 && len(chunk.oldLines) == 0:
 				return "", 0, withPatchErrorContext(
 					newPatchError(PatchErrorContextAmbiguous, filePath, hunkNumber, matches, "hunk anchor %q is not unique; include more context", chunk.anchor),
 					chunk.anchor,
 					patchActualLinesPreview(text.lines, cursor, 1),
 				)
+			case matches > 1:
+				// Codex-style @@ anchors are navigation hints. When a literal
+				// anchor repeats, the full unchanged body below remains the
+				// authoritative, safely unique match.
+				anchorIndex = -1
 			}
-			cursor = anchorIndex + 1
+			if anchorIndex >= 0 {
+				cursor = anchorIndex + 1
+			}
 		}
 		if len(chunk.oldLines) == 0 && len(chunk.newLines) == 0 {
 			continue

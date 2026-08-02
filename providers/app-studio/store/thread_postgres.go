@@ -426,7 +426,20 @@ func (s *PostgresStore) AppendAssistantThreadEvent(ctx context.Context, scope Sc
 }
 
 func assistantThreadLockKey(scope Scope, threadID string) string {
-	return scope.OrgUUID + "\x00" + scope.WorkspaceUUID + "\x00" + scope.ProjectName + "\x00" + scope.ProjectUID + "\x00" + strings.TrimSpace(threadID)
+	// PostgreSQL text values cannot contain NUL bytes. Length-prefix every
+	// component instead: this remains unambiguous when identifiers contain the
+	// separator characters themselves and is safe to pass to hashtextextended.
+	var key strings.Builder
+	for _, component := range []string{
+		scope.OrgUUID,
+		scope.WorkspaceUUID,
+		scope.ProjectName,
+		scope.ProjectUID,
+		strings.TrimSpace(threadID),
+	} {
+		_, _ = fmt.Fprintf(&key, "%d:%s", len(component), component)
+	}
+	return key.String()
 }
 
 func (s *PostgresStore) ListAssistantThreadEvents(ctx context.Context, scope Scope, threadID string, afterSequence int64, limit int) ([]AssistantThreadEvent, error) {

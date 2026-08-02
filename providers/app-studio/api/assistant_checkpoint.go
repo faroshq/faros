@@ -953,7 +953,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		},
 	}
 	currentRequestID := run.RequestID
-	currentToolCallID := strings.TrimSpace(state.Eino.ToolCallID)
+	currentToolCallID := projectAssistantCheckpointToolCallID(state)
 	result, err := s.projectAssistantEngine().ResumeProjectAssistant(ctx, engineReq, resumeReq, state)
 	callbackMu.Lock()
 	syncSteeringSegment()
@@ -968,6 +968,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	}
 	run.Audit = append([]byte(nil), resumeRun.Audit...)
 	currentToolCall := projectAssistantResumeToolCall(metadataToolCalls, currentToolCallID)
+	currentToolName := projectAssistantResumeToolNameWithFallback(currentToolCall, projectAssistantCheckpointToolName(state))
 	out.ToolCall = currentToolCall
 	out.Result = projectAssistantResumeToolResult(result.Content, currentToolCall)
 	previewRefreshNeeded := s.projectAssistantPreviewRefreshNeeded(ctx, engineReq.WorkspaceScope, "", false, metadataToolCalls)
@@ -988,7 +989,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 					Decision:   decision,
 					Actor:      id.user,
 					ToolCallID: projectAssistantResumeToolCallID(currentToolCall, currentToolCallID),
-					ToolName:   projectAssistantResumeToolName(currentToolCall),
+					ToolName:   currentToolName,
 					Result:     out.Result,
 					Error:      projectAssistantResumeToolError(currentToolCall, out.Result),
 					ResolvedAt: time.Now().UTC(),
@@ -1033,7 +1034,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 			Decision:        decision,
 			Actor:           id.user,
 			ToolCallID:      projectAssistantResumeToolCallID(currentToolCall, currentToolCallID),
-			ToolName:        projectAssistantResumeToolName(currentToolCall),
+			ToolName:        currentToolName,
 			EditedArguments: cloneProjectAssistantToolArguments(resumeReq.EditedArguments),
 			Result:          out.Result,
 			Error:           projectAssistantResumeToolError(currentToolCall, out.Result),
@@ -1116,7 +1117,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		Decision:        decision,
 		Actor:           id.user,
 		ToolCallID:      projectAssistantResumeToolCallID(currentToolCall, currentToolCallID),
-		ToolName:        projectAssistantResumeToolName(currentToolCall),
+		ToolName:        currentToolName,
 		EditedArguments: cloneProjectAssistantToolArguments(resumeReq.EditedArguments),
 		Result:          out.Result,
 		Error:           projectAssistantResumeToolError(currentToolCall, out.Result),
@@ -1393,6 +1394,9 @@ func projectAssistantResumeToolCall(events []projectToolCallStreamEvent, id stri
 			copy := event
 			return &copy
 		}
+	}
+	if id != "" {
+		return nil
 	}
 	return fallback
 }

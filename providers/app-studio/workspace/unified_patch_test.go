@@ -316,6 +316,124 @@ func TestContextualPatchRejectsAmbiguousAndMissingContextWithTypedErrors(t *test
 	}
 }
 
+func TestContextualPatchBodyDisambiguatesRepeatedLiteralAnchor(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "app.txt", Content: "section\nfirst\nsection\nunique target\nafter\n"}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.txt
+@@ section
+ unique target
++inserted
+ after
+*** End Patch`
+	if _, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch}); err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	assertWorkspaceContent(t, store, scope, "app.txt", "section\nfirst\nsection\nunique target\ninserted\nafter\n")
+}
+
+func TestContextualPatchAppliesAllHunksWhenLaterAnchorRepeats(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	source := `function App() {
+  const toggleTheme = () => setDark((d) => !d);
+
+  const showStreak = streak.length >= 3;
+
+  return (
+    <main>
+      <section className="counter-section">
+        <span>Counter</span>
+      </section>
+
+      <section className="summary-section">
+        <span>Summary</span>
+      </section>
+
+      <section className="controls-section">
+        <button>Increment</button>
+      </section>
+    </main>
+  );
+}
+`
+	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "App.jsx", Content: source}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: App.jsx
+@@   const toggleTheme = () => setDark((d) => !d);
++  useEffect(() => {
++    document.addEventListener("keydown", handleKeyDown);
++    return () => document.removeEventListener("keydown", handleKeyDown);
++  }, [handleKeyDown]);
++
+   const showStreak = streak.length >= 3;
+@@         </section>
++      <div className="keyboard-hints">Keyboard shortcuts</div>
++
+       <section className="controls-section">
+*** End Patch`
+	if _, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch}); err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	expected := `function App() {
+  const toggleTheme = () => setDark((d) => !d);
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
+
+  const showStreak = streak.length >= 3;
+
+  return (
+    <main>
+      <section className="counter-section">
+        <span>Counter</span>
+      </section>
+
+      <section className="summary-section">
+        <span>Summary</span>
+      </section>
+
+      <div className="keyboard-hints">Keyboard shortcuts</div>
+
+      <section className="controls-section">
+        <button>Increment</button>
+      </section>
+    </main>
+  );
+}
+`
+	assertWorkspaceContent(t, store, scope, "App.jsx", expected)
+}
+
+func TestContextualPatchRejectsRepeatedLiteralAnchorWithoutBodyContext(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	if err := store.ApplyFiles(context.Background(), scope, []File{{Path: "app.txt", Content: "section\nfirst\nsection\nsecond\n"}}); err != nil {
+		t.Fatalf("ApplyFiles returned error: %v", err)
+	}
+
+	patch := `*** Begin Patch
+*** Update File: app.txt
+@@ section
++inserted
+*** End Patch`
+	_, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	var patchErr *PatchError
+	if !errors.As(err, &patchErr) || patchErr.Code != PatchErrorContextAmbiguous {
+		t.Fatalf("error = %#v, want repeated-anchor ambiguity", err)
+	}
+	assertWorkspaceContent(t, store, scope, "app.txt", "section\nfirst\nsection\nsecond\n")
+}
+
 func TestContextualPatchRejectsNumericUnifiedDiffHunkHeader(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}

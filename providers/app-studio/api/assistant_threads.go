@@ -169,12 +169,18 @@ func (s *Server) listProjectAssistantThreadItems(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	events, err := s.loadAllAssistantThreadEvents(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, project), thread.ID)
+	scope := projectMessageScope(id.orgUUID, id.workspaceUUID, project)
+	events, err := s.loadAllAssistantThreadEvents(r.Context(), scope, thread.ID)
 	if err != nil {
 		s.writeAssistantThreadError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": materializeAssistantThreadItems(events)})
+	items, err := s.attachAssistantThreadMessagePresentation(r.Context(), scope, materializeAssistantThreadItems(events))
+	if err != nil {
+		s.writeAssistantThreadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) startProjectAssistantThreadTurn(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +343,12 @@ func (s *Server) interruptProjectAssistantThreadTurn(w http.ResponseWriter, r *h
 		writeStatus(w, http.StatusNotFound, "NotFound", "assistant turn not found")
 		return
 	}
+	if run.Status == store.AssistantRunStatusPendingPermission || run.Status == store.AssistantRunStatusPendingInput {
+		if err := s.reattachProjectAssistantPendingRun(r.Context(), scope, run); err != nil {
+			s.writeAssistantThreadError(w, err)
+			return
+		}
+	}
 	if found, bindErr := s.projectAssistantSupervisor().BindStopRequest(r.Context(), scope, turn.ID, id.user, request.ClientRequestID); found {
 		if bindErr != nil {
 			s.writeAssistantThreadError(w, bindErr)
@@ -467,7 +479,7 @@ func (s *Server) reconcileProjectAssistantThreadTurn(ctx context.Context, scope 
 	if err != nil {
 		return err
 	}
-	item := assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: message.Content, CreatedAt: message.CreatedAt}
+	item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: message.Content, CreatedAt: message.CreatedAt}, message.Metadata)
 	payload, _ := json.Marshal(map[string]any{"item": item})
 	if _, err := s.appendAssistantThreadEvent(ctx, scope, store.AssistantThreadEvent{ThreadID: turn.ThreadID, TurnID: turn.ID, Type: assistantThreadEventItemCompleted, ItemID: item.ID, Payload: payload}); err != nil {
 		return err
@@ -614,6 +626,76 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 	return items
 }
 
+// assistantThreadItemWithMessagePresentation carries the durable presentation
+// fields needed to render an agent message through the canonical thread-item
+// transport. Keep this deliberately narrower than the internal message metadata
+// so the thread contract does not expose execution-only state.
+func assistantThreadItemWithMessagePresentation(item assistantThreadItem, metadata map[string]any) assistantThreadItem {
+	if item.Type != assistantThreadEventAssistantMessage {
+		return item
+	}
+	progress, ok := projectAssistantProgressSnapshotFromMetadata(metadata[projectAssistantMetadataProgress])
+	if !ok {
+		return item
+	}
+	data := map[string]any{}
+	if len(item.Data) > 0 {
+		_ = json.Unmarshal(item.Data, &data)
+	}
+	data[projectAssistantMetadataProgress] = *progress
+	encoded, err := json.Marshal(data)
+	if err == nil {
+		item.Data = encoded
+	}
+	return item
+}
+
+// attachAssistantThreadMessagePresentation is a compatibility bridge for
+// thread events written before agent-message presentation data became part of
+// the canonical item payload. It enriches the read model from the already
+// durable assistant message without rewriting historical events.
+func (s *Server) attachAssistantThreadMessagePresentation(ctx context.Context, scope store.Scope, items []assistantThreadItem) ([]assistantThreadItem, error) {
+	wanted := map[string][]int{}
+	for index, item := range items {
+		if item.Type != assistantThreadEventAssistantMessage {
+			continue
+		}
+		var data map[string]any
+		if len(item.Data) > 0 && json.Unmarshal(item.Data, &data) == nil {
+			if _, ok := projectAssistantProgressSnapshotFromMetadata(data[projectAssistantMetadataProgress]); ok {
+				continue
+			}
+		}
+		wanted[item.ID] = append(wanted[item.ID], index)
+	}
+	if len(wanted) == 0 {
+		return items, nil
+	}
+
+	cursor := ""
+	for len(wanted) > 0 {
+		page, err := s.store.ListMessages(ctx, scope, 250, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range page.Items {
+			indexes, ok := wanted[message.ID]
+			if !ok {
+				continue
+			}
+			for _, index := range indexes {
+				items[index] = assistantThreadItemWithMessagePresentation(items[index], message.Metadata)
+			}
+			delete(wanted, message.ID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return items, nil
+}
+
 func (s *Server) mirrorAssistantRunIntoThread(scope store.Scope, threadID string, turn store.AssistantTurn, run store.AssistantRun) {
 	updates, unsubscribe, err := s.projectAssistantSupervisor().Subscribe(scope, run.ID, 0)
 	if err != nil {
@@ -660,7 +742,10 @@ func (s *Server) mirrorAssistantRunIntoThread(scope store.Scope, threadID string
 				lastPlan = string(planData)
 			}
 		}
-		if lastRequestID != "" && snapshot.Run.RequestID != lastRequestID {
+		requestStillPending := snapshot.Run.RequestID == lastRequestID &&
+			((lastRequestType == assistantThreadEventApprovalRequested && snapshot.Run.Status == store.AssistantRunStatusPendingPermission) ||
+				(lastRequestType == assistantThreadEventUserInputRequested && snapshot.Run.Status == store.AssistantRunStatusPendingInput))
+		if lastRequestID != "" && !requestStillPending {
 			resolvedType := assistantThreadEventApprovalResolved
 			itemType := "approval"
 			if lastRequestType == assistantThreadEventUserInputRequested {
@@ -682,6 +767,9 @@ func (s *Server) mirrorAssistantRunIntoThread(scope store.Scope, threadID string
 			}
 			if eventType != "" {
 				interrupt := projectAssistantUIInterruptFromMetadata(snapshot.Message.Metadata[projectMessageMetadataAssistantInterrupt])
+				if !assistantThreadInterruptMatchesPendingRequest(interrupt, eventType, snapshot.Run.ID, snapshot.Run.RequestID) {
+					continue
+				}
 				interruptData, _ := json.Marshal(interrupt)
 				itemType := "approval"
 				if eventType == assistantThreadEventUserInputRequested {
@@ -701,7 +789,7 @@ func (s *Server) mirrorAssistantRunIntoThread(scope store.Scope, threadID string
 		if !assistantRunTerminal(snapshot.Run.Status) {
 			continue
 		}
-		item := assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: content, CreatedAt: snapshot.Message.CreatedAt}
+		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: content, CreatedAt: snapshot.Message.CreatedAt}, snapshot.Message.Metadata)
 		payload, _ := json.Marshal(map[string]any{"item": item})
 		_, _ = s.appendAssistantThreadEvent(context.Background(), scope, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: assistantThreadEventItemCompleted, ItemID: item.ID, Payload: payload})
 		turn.UpdatedAt = time.Now().UTC()
@@ -721,4 +809,15 @@ func (s *Server) mirrorAssistantRunIntoThread(scope store.Scope, threadID string
 		_ = s.saveAssistantTurnWithEvent(context.Background(), scope, turn, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: terminalType, Payload: turnPayload})
 		return
 	}
+}
+
+func assistantThreadInterruptMatchesPendingRequest(interrupt *projectAssistantUIInterruptRequest, eventType, runID, requestID string) bool {
+	if interrupt == nil || interrupt.Status != "pending" || interrupt.Action == nil ||
+		interrupt.Action.RunID != runID || interrupt.Action.RequestID != requestID {
+		return false
+	}
+	if eventType == assistantThreadEventUserInputRequested {
+		return interrupt.Kind == projectAssistantInterruptTypeFollowUp
+	}
+	return interrupt.Kind != projectAssistantInterruptTypeFollowUp
 }

@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -41,6 +42,17 @@ func TestProjectInitialBootstrapPromptDigestDoesNotExposePrompt(t *testing.T) {
 	digest := projectInitialBootstrapPromptDigest("Build a todo app")
 	if digest == projectInitialBootstrapPromptDigest("Build an unbounded platform") || digest == "Build a todo app" {
 		t.Fatalf("prompt digest did not distinguish or conceal the creation prompt: %q", digest)
+	}
+}
+
+func TestWriteProjectErrorMapsPreflightOutageToRetryableBadGateway(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeProjectError(recorder, fmt.Errorf("%w: upstream returned 500", errProjectCreatePreflightUnavailable))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	if recorder.Header().Get("Retry-After") != "2" || !strings.Contains(recorder.Body.String(), "temporarily unavailable") {
+		t.Fatalf("response headers/body = %#v %s", recorder.Header(), recorder.Body.String())
 	}
 }
 

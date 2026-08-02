@@ -118,6 +118,27 @@ func TestAssistantThreadListingIsActorScoped(t *testing.T) {
 	}
 }
 
+func TestAssistantThreadLockKeyIsPostgresTextSafeAndUnambiguous(t *testing.T) {
+	first := assistantThreadLockKey(
+		Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"},
+		"thread-1",
+	)
+	if bytes.IndexByte([]byte(first), 0) >= 0 {
+		t.Fatalf("assistant thread lock key contains a PostgreSQL-invalid NUL byte: %q", first)
+	}
+	second := assistantThreadLockKey(
+		Scope{OrgUUID: "org1", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"},
+		"thread-1",
+	)
+	third := assistantThreadLockKey(
+		Scope{OrgUUID: "org", WorkspaceUUID: "1workspace", ProjectName: "demo", ProjectUID: "uid"},
+		"thread-1",
+	)
+	if second == third {
+		t.Fatalf("length-prefixed assistant thread lock keys collided: %q", second)
+	}
+}
+
 func TestEncryptedAssistantThreadPayloadIsNotPlaintextAtRest(t *testing.T) {
 	base := NewMemoryStore()
 	wrapped, err := NewEncryptedStore(base, testEncryptionKeys(t))

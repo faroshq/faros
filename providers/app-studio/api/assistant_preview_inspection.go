@@ -86,16 +86,19 @@ type projectAssistantPreviewInspectionScreenshot struct {
 }
 
 type projectAssistantPreviewInspectionResult struct {
-	Status      string                                             `json:"status"`
-	FailureKind string                                             `json:"failureKind,omitempty"`
-	Summary     string                                             `json:"summary,omitempty"`
-	FinalURL    string                                             `json:"finalURL,omitempty"`
-	Title       string                                             `json:"title,omitempty"`
-	Snapshot    string                                             `json:"snapshot,omitempty"`
-	Assertions  []projectAssistantPreviewInspectionAssertionResult `json:"assertions,omitempty"`
-	Console     []projectAssistantPreviewInspectionConsoleEvent    `json:"console,omitempty"`
-	Network     []projectAssistantPreviewInspectionNetworkEvent    `json:"network,omitempty"`
-	Screenshot  *projectAssistantPreviewInspectionScreenshot       `json:"screenshot,omitempty"`
+	Status              string                                             `json:"status"`
+	FailureKind         string                                             `json:"failureKind,omitempty"`
+	Summary             string                                             `json:"summary,omitempty"`
+	EvidenceScope       string                                             `json:"evidenceScope,omitempty"`
+	InteractionEvidence bool                                               `json:"interactionEvidence"`
+	Limitations         []string                                           `json:"limitations,omitempty"`
+	FinalURL            string                                             `json:"finalURL,omitempty"`
+	Title               string                                             `json:"title,omitempty"`
+	Snapshot            string                                             `json:"snapshot,omitempty"`
+	Assertions          []projectAssistantPreviewInspectionAssertionResult `json:"assertions,omitempty"`
+	Console             []projectAssistantPreviewInspectionConsoleEvent    `json:"console,omitempty"`
+	Network             []projectAssistantPreviewInspectionNetworkEvent    `json:"network,omitempty"`
+	Screenshot          *projectAssistantPreviewInspectionScreenshot       `json:"screenshot,omitempty"`
 }
 
 type httpProjectAssistantPreviewInspector struct {
@@ -248,6 +251,11 @@ func (s *Server) inspectProjectDevelopmentPreviewResult(ctx context.Context, req
 	})
 	if err != nil {
 		return projectAssistantPreviewInspectionResult{}, err
+	}
+	result.EvidenceScope = "rendered_state_only"
+	result.InteractionEvidence = false
+	result.Limitations = []string{
+		"This inspection did not click, type, press keys, submit forms, or execute application interactions. Static text and role assertions do not verify interaction behavior.",
 	}
 	return result, nil
 }
