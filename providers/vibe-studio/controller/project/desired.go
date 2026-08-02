@@ -138,6 +138,7 @@ func MirrorStatus(p *vibev1alpha1.Project, observed map[string]*unstructured.Uns
 		status.Environments = append(status.Environments, vibev1alpha1.ProjectEnvironmentStatus{
 			Name:     env.Name,
 			Mode:     env.Mode,
+			Revision: env.Revision,
 			Phase:    envPhase,
 			Bindings: bindings,
 		})

@@ -143,6 +143,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		}
 	}
 
+	// Report where a promotion got to (the Project reconciler does the work).
+	if err := r.mirrorPromotion(ctx, c, &s, scope, state); err != nil {
+		return ctrl.Result{}, fmt.Errorf("mirroring promotion: %w", err)
+	}
+
 	// Provisioning is this controller's work, not the API server's: it runs
 	// as the session's own ServiceAccount and retries on its own schedule.
 	if session.NextAction(state) == session.ActionRunProvision {

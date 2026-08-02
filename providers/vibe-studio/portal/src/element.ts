@@ -66,6 +66,22 @@ interface SessionView {
   lastOrdinal: number
 }
 
+interface PromotionComponent {
+  name: string
+  imageInput: string
+  image?: string
+}
+
+interface PromotionView {
+  components?: PromotionComponent[]
+  instance?: string
+  phase?: string
+  url?: string
+  revision?: string
+  committed?: boolean
+  commitSHA?: string
+}
+
 interface SessionEvent {
   ordinal: number
   type: string
@@ -145,6 +161,10 @@ export class VibeStudioElement extends HTMLElement {
   private _pollTimer: number | null = null
   private _tab: Tab = 'preview'
   private _filePaths: string[] = []
+  private _promotion: PromotionView | null = null
+  private _promotionFor = ''
+  private _promotionAt = -1
+  private _shipMsg = ''
   private _filesLoadedAt = 0
   private _activeFile: { path: string; content: string } | null = null
   private _sessionModel = ''
@@ -356,6 +376,48 @@ export class VibeStudioElement extends HTMLElement {
     void this._loadSessions()
   }
 
+  // Promotion (the ship panel). Loaded lazily with the Status tab; the
+  // reconcilers own the deployment, so this is a report plus one button.
+  private async _loadPromotion(force = false): Promise<void> {
+    if (!this._view?.projectName) return
+    if (!force && this._promotionFor === this._view.id && this._promotionAt >= this._view.lastOrdinal) return
+    this._promotionFor = this._view.id
+    this._promotionAt = this._view.lastOrdinal
+    try {
+      const r = await this._call('GET', `/sessions/${this._view.id}/promotion`)
+      if (r.ok) {
+        this._promotion = (await r.json()) as PromotionView
+        this._render()
+      } else {
+        this._promotionAt = -1 // try again on the next render
+      }
+    } catch {
+      this._promotionAt = -1
+    }
+  }
+
+  private async _promote(): Promise<void> {
+    if (!this._view || !this._promotion) return
+    const images: Record<string, string> = {}
+    for (const c of this._promotion.components || []) {
+      images[c.name] = this.querySelector<HTMLInputElement>(`#ship-image-${cssID(c.name)}`)?.value.trim() || ''
+    }
+    this._shipMsg = ''
+    this._busy = true
+    this._render()
+    try {
+      const r = await this._call('POST', `/sessions/${this._view.id}/promote`, { images })
+      const j = (await r.json().catch(() => ({}))) as { error?: string; instance?: string }
+      this._shipMsg = r.ok ? `Shipping to ${j.instance || 'production'}…` : j.error || `Promotion failed (${r.status})`
+    } catch (e) {
+      this._shipMsg = String(e)
+    } finally {
+      this._busy = false
+      await this._loadPromotion(true)
+      this._render()
+    }
+  }
+
   private async _loadFiles(force = false): Promise<void> {
     if (!this._view) return
     // Refresh the tree when stale (new events mean the model may have
@@ -482,6 +544,8 @@ export class VibeStudioElement extends HTMLElement {
       this._tab,
       this._filePaths.length,
       this._activeFile?.path,
+      this._promotion ? [this._promotion.phase, this._promotion.url, this._promotion.revision, this._promotion.committed] : null,
+      this._shipMsg,
       this._turnElapsedSec(),
     ])
   }
@@ -1082,6 +1146,53 @@ export class VibeStudioElement extends HTMLElement {
     </div>`
   }
 
+  // The ship panel. Production is a second environment on the same Project,
+  // so promoting is one write and the Project reconciler does the rest.
+  private _renderShip(v: SessionView): string {
+    if (!v.projectName) return ''
+    const p = this._promotion
+    if (!p) return ''
+    const shipped = !!p.instance
+    const blocked = !p.committed
+    const fields = (p.components || [])
+      .map(
+        (c) => `<label class="ship-field">
+          <span>${esc(c.name)}</span>
+          <input type="text" id="ship-image-${esc(cssID(c.name))}" value="${esc(c.image || '')}"
+                 placeholder="ghcr.io/org/${esc(c.name)}@sha256:…">
+        </label>`,
+      )
+      .join('')
+    return `<section class="ship">
+      <h3>Ship to production</h3>
+      <p class="muted">Production runs built images from your repository, alongside the
+      development sandbox. Name the image for each part of the app.</p>
+      ${fields || '<p class="muted">This template has nothing to build.</p>'}
+      ${
+        shipped
+          ? `<dl class="facts">
+              <dt>Deployment</dt><dd><code>${esc(p.instance || '')}</code>${p.phase ? ` — ${esc(p.phase)}` : ''}</dd>
+              ${p.revision ? `<dt>Revision</dt><dd><code>${esc(p.revision.slice(0, 7))}</code></dd>` : ''}
+              ${p.url ? `<dt>Address</dt><dd><a href="${esc(p.url)}" target="_blank" rel="noreferrer">${esc(p.url)}</a></dd>` : ''}
+            </dl>`
+          : ''
+      }
+      <div class="row">
+        <button id="ship-go" ${this._busy || blocked || !(p.components || []).length ? 'disabled' : ''}>
+          ${shipped ? 'Update production' : 'Ship it'}
+        </button>
+        ${
+          blocked
+            ? '<span class="muted">Waiting for your latest changes to reach git — promotion always ships a commit.</span>'
+            : p.commitSHA
+              ? `<span class="muted">Ships <code>${esc(p.commitSHA.slice(0, 7))}</code></span>`
+              : ''
+        }
+      </div>
+      ${this._shipMsg ? `<p class="ship-msg">${esc(this._shipMsg)}</p>` : ''}
+    </section>`
+  }
+
   private _renderTab(v: SessionView): string {
     switch (this._tab) {
       case 'preview':
@@ -1116,8 +1227,10 @@ export class VibeStudioElement extends HTMLElement {
         </div>`
       }
       case 'status':
+        void this._loadPromotion()
         return `<div class="pad">
           ${this._renderCheckpoints(v.checkpoints)}
+          ${this._renderShip(v)}
           <dl class="facts">
             ${v.projectName ? `<dt>Project</dt><dd><code>${esc(v.projectName)}</code></dd>` : ''}
             ${v.blueprint ? `<dt>Template</dt><dd><code>${esc(v.blueprint.template.name)}</code></dd>` : ''}
@@ -1220,6 +1333,9 @@ export class VibeStudioElement extends HTMLElement {
             : chosen.value
       })
       void this._submit({ kind: 'answers', answers })
+    })
+    this.querySelector<HTMLButtonElement>('#ship-go')?.addEventListener('click', () => {
+      void this._promote()
     })
     this.querySelector<HTMLButtonElement>('#approve-go')?.addEventListener('click', () => {
       void this._submit({ kind: 'approve' })
@@ -1330,6 +1446,11 @@ function md(s: string): string {
   out = out.replace(/^⚙ (.+)…$/gm, '<span class="tool-chip">⚙ $1</span>')
   out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
   return out.replace(/\n/g, '<br>')
+}
+
+// cssID makes a component name safe for an element id / querySelector.
+function cssID(s: string): string {
+  return s.replace(/[^a-zA-Z0-9_-]/g, '-')
 }
 
 function esc(s: string): string {

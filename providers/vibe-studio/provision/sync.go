@@ -34,6 +34,9 @@ type DevInfo struct {
 	Kind     string
 	// Components maps component name → workspacePath.
 	Components map[string]string
+	// ImageInputs maps component name → the production schema input its
+	// built image lands in (empty when a component is not buildable).
+	ImageInputs map[string]string
 	// Scaffold repo pin; empty Repository means no scaffold.
 	ScaffoldRepository string
 	ScaffoldRef        string
@@ -41,7 +44,7 @@ type DevInfo struct {
 
 // ParseDevInfo extracts the fields from an unstructured Template.
 func ParseDevInfo(tmpl *unstructured.Unstructured) (DevInfo, error) {
-	info := DevInfo{Components: map[string]string{}}
+	info := DevInfo{Components: map[string]string{}, ImageInputs: map[string]string{}}
 	var ok bool
 	info.Group, _, _ = unstructured.NestedString(tmpl.Object, "spec", "instanceCRD", "group")
 	info.Version, _, _ = unstructured.NestedString(tmpl.Object, "spec", "instanceCRD", "version")
@@ -71,6 +74,9 @@ func ParseDevInfo(tmpl *unstructured.Unstructured) (DevInfo, error) {
 				wp = name
 			}
 			info.Components[name] = wp
+			if ii, _ := cm["imageInput"].(string); ii != "" {
+				info.ImageInputs[name] = ii
+			}
 		}
 	}
 	info.ScaffoldRepository, _, _ = unstructured.NestedString(tmpl.Object, "spec", "development", "scaffold", "repository")

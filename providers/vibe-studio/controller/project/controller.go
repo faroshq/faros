@@ -275,7 +275,7 @@ func statusEqual(a, b vibev1alpha1.ProjectStatus) bool {
 	}
 	for i := range a.Environments {
 		ae, be := a.Environments[i], b.Environments[i]
-		if ae.Name != be.Name || ae.Mode != be.Mode || ae.Phase != be.Phase || len(ae.Bindings) != len(be.Bindings) {
+		if ae.Name != be.Name || ae.Mode != be.Mode || ae.Phase != be.Phase || ae.Revision != be.Revision || len(ae.Bindings) != len(be.Bindings) {
 			return false
 		}
 		for j := range ae.Bindings {

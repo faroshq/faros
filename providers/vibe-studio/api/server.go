@@ -155,6 +155,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/models/{name}/default", s.handleSetDefaultModel)
 	mux.HandleFunc("GET /api/sessions/{id}/model", s.handleGetSessionModel)
 	mux.HandleFunc("PUT /api/sessions/{id}/model", s.handleSetSessionModel)
+	mux.HandleFunc("GET /api/sessions/{id}/promotion", s.handleGetPromotion)
+	mux.HandleFunc("POST /api/sessions/{id}/promote", s.handlePromote)
 }
 
 // handleDeleteSession deletes the conversation KRM-first: remove the Session
@@ -837,7 +839,9 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 		development = &vibev1alpha1.ProjectDevelopment{}
 		for _, name := range sortedComponentNames(info.Components) {
 			development.Components = append(development.Components,
-				vibev1alpha1.ProjectComponent{Name: name, Path: info.Components[name]})
+				vibev1alpha1.ProjectComponent{
+					Name: name, Path: info.Components[name], ImageInput: info.ImageInputs[name],
+				})
 		}
 		if info.ScaffoldRepository != "" {
 			development.Scaffold = &vibev1alpha1.ProjectScaffold{
@@ -859,6 +863,15 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 			},
 		},
 	}
+	// A re-apply must never un-ship a promoted app: carry any production
+	// environment forward untouched (promote owns it, the wizard doesn't).
+	if existing, gerr := cl.GetProject(ctx, name); gerr == nil {
+		for _, env := range existing.Spec.Environments {
+			if env.Name == productionEnvironment {
+				p.Spec.Environments = append(p.Spec.Environments, env)
+			}
+		}
+	}
 	_, err = cl.ApplyProject(ctx, p)
 	return err
 }
@@ -867,6 +880,7 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 const (
 	templateKedgeModeField       = "kedgeMode"
 	templateKedgeModeDevelopment = "development"
+	templateKedgeModeProduction  = "production"
 )
 
 // sortedComponentNames keeps the Project spec's component order stable so a

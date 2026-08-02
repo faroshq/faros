@@ -5,7 +5,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260801-003.projects.vibe.kedge.faros.sh
+  name: v260801-004.projects.vibe.kedge.faros.sh
 spec:
   group: vibe.kedge.faros.sh
   names:
@@ -78,6 +78,7 @@ spec:
                       properties:
                         name: { type: string, minLength: 1, maxLength: 63 }
                         path: { type: string, maxLength: 256 }
+                        imageInput: { type: string, maxLength: 253 }
                   scaffold:
                     type: object
                     properties:
@@ -96,6 +97,7 @@ spec:
                     promotion:
                       type: string
                       enum: [manual, auto]
+                    revision: { type: string, maxLength: 64 }
                     bindings:
                       type: array
                       items:
@@ -135,6 +137,7 @@ spec:
                     name: { type: string }
                     mode: { type: string }
                     phase: { type: string }
+                    revision: { type: string }
                     bindings:
                       type: array
                       items:

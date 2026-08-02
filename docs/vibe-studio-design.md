@@ -371,11 +371,11 @@ gate. app-studio stays untouched and running throughout.
   (autoInit) and the provision flow seeds it once with the scaffold through
   the code provider's `commit_files` MCP tool (bundle contents are
   code-provider-local, so CR-only seeding is impossible).
-- **Phase 3 — ship (medium). ⬜ NEXT.** Commit-from-workspace (studio edits
-  currently stop at the sandbox after the seed commit), build-config
-  generation + build status, promote (with the digest-tether fix), ShipPanel.
+- **Phase 3 — ship (medium). 🟡 IN PROGRESS.** Commit-from-workspace ✅,
+  promote ✅ (see 6c), build-config generation + build status ⬜ (the `ci`
+  checkpoint stays `pending` until that lands, and promotion currently takes
+  the image references from the user rather than from a build).
   Exit criterion: prod URL serving the built digest; repeat-promotion works.
-  The `ci` and `production` checkpoints stay `pending` until this lands.
 - **Phase 4 — hardening + surfaces (medium). ⬜.** MCP surface (`vibe__*`
   tools so agents/CLI can drive the same flow — the Session CR makes a CLI
   attach trivial), approval preferences, retention, multi-replica soak,
@@ -470,7 +470,7 @@ Migration steps: (A) Session CRD + status-mirror reconciler + sessionRef/
 ownerRef wiring; (B) move provisioning into the Session reconciler behind the
 per-project SA; (C) delete the HTTP-side provision/preview/seed backfills.
 
-**Status (2026-08-01): (A) ✅ done, (B) and (C) ⬜ outstanding.**
+**Status (2026-08-02): (A) ✅ done, (B) ✅ done, (C) ⬜ outstanding.**
 
 (A) landed as `Session` (cluster-scoped, `vsess`): `spec.intent`,
 `spec.projectRef`, `spec.modelRef`; `status` mirrors phase / active turn /
@@ -483,12 +483,57 @@ project → instances → sandbox, with the repository deliberately surviving.
 `kubectl get sessions.vibe` now tells the conversation's whole story, and the
 UI's delete actions go through the same CR deletion — no UI-only path.
 
-(B) is the remaining architectural debt: provisioning convergence still runs
-in the HTTP layer (`runProvision` + view-triggered re-kicks for preview and
-seed retries) using the approving caller's bearer, rather than in the Session
-reconciler under a per-project ServiceAccount. Everything it does is
-idempotent and resumable, so this is a refactor, not a rescue — but until it
-moves, background work depends on a request-scoped credential.
+(B) landed: provisioning convergence runs in the Session reconciler under a
+per-session ServiceAccount (`kedge-vibe-<hash>`, minted with its ClusterRole,
+binding, and legacy token Secret as children of the Session — kcp has no
+TokenRequest). The caller's bearer is now used exactly once, at approve, to
+write the Session/Project pair. Git commits converge on the same loop: the
+reconciler compares `status.workspaceRevision` against
+`status.committedRevision` and commits whatever the last turn changed, with a
+message derived from the events since `committedOrdinal`.
+
+(C) is what is left — the HTTP layer still carries backfill paths that the
+reconciler now duplicates.
+
+## 6c. Promotion (2026-08-02)
+
+Promotion is a **spec write**, and that is the whole design. The Project
+reconciler already converges every binding in every environment, so appending
+a `production` environment to `Project.spec.environments` — same template,
+`kedgeMode: production`, images pinned into the inputs the template declares —
+is enough to get a production instance created, updated, and torn down by
+exactly the machinery that runs the development sandbox. There is no
+promotion controller, no promotion pipeline, and re-promoting a newer image is
+another write to the same environment.
+
+What makes this work is the **development contract on the Project spec**:
+`spec.development.components[].imageInput` records which template input each
+component's image belongs in (copied from the Template at approve time, so no
+reconciler ever has to read Templates — they ride virtual storage with a
+separate identity). Promote reads that contract, so it stays template-agnostic.
+
+Two guards, both deliberate:
+
+- **The digest tether.** Promotion refuses while
+  `status.workspaceRevision != status.committedRevision`, and refuses when no
+  commit exists at all. Production runs a git revision — the promoted
+  environment records it in `spec.environments[].revision` and mirrors it into
+  status — so what is running is always traceable to a tree. This is the
+  app-studio bug (§2) that vibe-studio does not inherit.
+- **No partial ships.** A component with an `imageInput` and no image fails
+  the whole promotion with the component named, rather than deploying half an
+  app on scaffold defaults.
+
+The development environment keeps running throughout: production is a second
+environment, not a mode flip, and the two instances get distinct names
+(`<project>-prod`) and addresses. The Session reconciler mirrors the
+production environment's status into the `production` checkpoint, so the
+Status tab reports "live on 2613af6 — https://…" without the API server
+watching anything.
+
+The remaining gap is where the image references come from: until build lands
+they are typed into the ship panel. The API shape does not change when builds
+arrive — the build status simply fills the same map.
 
 ## 7. Risks
 

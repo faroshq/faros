@@ -115,6 +115,12 @@ type ProjectComponent struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=256
 	Path string `json:"path,omitempty"`
+
+	// ImageInput is the production schema input this component's built image
+	// is promoted into. Empty means the component ships no image.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	ImageInput string `json:"imageInput,omitempty"`
 }
 
 type ProjectScaffold struct {
@@ -192,6 +198,12 @@ type ProjectEnvironmentSpec struct {
 	// +optional
 	Promotion ProjectPromotion `json:"promotion,omitempty"`
 
+	// Revision is the git commit this environment was promoted from. It is
+	// the audit tether between what is running and what is in the repository.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	Revision string `json:"revision,omitempty"`
+
 	// Bindings connect this environment to provider capabilities.
 	// +optional
 	Bindings []ProjectProviderBindingSpec `json:"bindings,omitempty"`
@@ -257,9 +269,11 @@ type ProjectRepositoryStatus struct {
 }
 
 type ProjectEnvironmentStatus struct {
-	Name     string                         `json:"name,omitempty"`
-	Mode     ProjectEnvironmentMode         `json:"mode,omitempty"`
-	Phase    string                         `json:"phase,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Mode  ProjectEnvironmentMode `json:"mode,omitempty"`
+	Phase string                 `json:"phase,omitempty"`
+	// Revision is the git commit running in this environment.
+	Revision string                         `json:"revision,omitempty"`
 	Bindings []ProjectProviderBindingStatus `json:"bindings,omitempty"`
 }
 
