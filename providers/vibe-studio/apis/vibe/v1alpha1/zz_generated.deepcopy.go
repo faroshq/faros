@@ -568,3 +568,120 @@ func (in *ProjectScaffold) DeepCopy() *ProjectScaffold {
 	in.DeepCopyInto(out)
 	return out
 }
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *StudioSearch) DeepCopyInto(out *StudioSearch) {
+	*out = *in
+	if in.ResourceRef != nil {
+		out.ResourceRef = new(ProjectProviderResourceReference)
+		*out.ResourceRef = *in.ResourceRef
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new StudioSearch.
+func (in *StudioSearch) DeepCopy() *StudioSearch {
+	if in == nil {
+		return nil
+	}
+	out := new(StudioSearch)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *StudioSpec) DeepCopyInto(out *StudioSpec) {
+	*out = *in
+	in.Search.DeepCopyInto(&out.Search)
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new StudioSpec.
+func (in *StudioSpec) DeepCopy() *StudioSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(StudioSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *StudioStatus) DeepCopyInto(out *StudioStatus) {
+	*out = *in
+	if in.Search != nil {
+		out.Search = new(StudioServiceStatus)
+		*out.Search = *in.Search
+	}
+	if in.UpdatedAt != nil {
+		in, out := &in.UpdatedAt, &out.UpdatedAt
+		*out = (*in).DeepCopy()
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new StudioStatus.
+func (in *StudioStatus) DeepCopy() *StudioStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(StudioStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *Studio) DeepCopyInto(out *Studio) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new Studio.
+func (in *Studio) DeepCopy() *Studio {
+	if in == nil {
+		return nil
+	}
+	out := new(Studio)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *Studio) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *StudioList) DeepCopyInto(out *StudioList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		l := make([]Studio, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&l[i])
+		}
+		out.Items = l
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new StudioList.
+func (in *StudioList) DeepCopy() *StudioList {
+	if in == nil {
+		return nil
+	}
+	out := new(StudioList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *StudioList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}

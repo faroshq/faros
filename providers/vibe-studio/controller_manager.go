@@ -38,6 +38,7 @@ import (
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	"github.com/faroshq/provider-vibe-studio/controller/project"
+	"github.com/faroshq/provider-vibe-studio/controller/studio"
 	"github.com/faroshq/provider-vibe-studio/controller/vibesession"
 	vibescheme "github.com/faroshq/provider-vibe-studio/scheme"
 	"github.com/faroshq/provider-vibe-studio/store"
@@ -71,6 +72,9 @@ func startControllerManager(ctx context.Context, config *rest.Config, st store.S
 		return fmt.Errorf("creating multicluster manager: %w", err)
 	}
 
+	if err := (&studio.Reconciler{}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setting up the studio controller: %w", err)
+	}
 	if err := (&project.Reconciler{}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("project controller: %w", err)
 	}

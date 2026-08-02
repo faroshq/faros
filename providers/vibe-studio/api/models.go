@@ -67,7 +67,12 @@ func (s *Server) callerClient(w http.ResponseWriter, r *http.Request) *client.Cl
 		writeError(w, err)
 		return nil
 	}
-	return client.New(tenantScope)
+	cl := client.New(tenantScope)
+	// First authenticated request from a workspace brings its Studio into
+	// being, so the shared services are warm before the first project. At
+	// most one extra read per process per workspace.
+	go s.ensureStudio(context.WithoutCancel(r.Context()), cl, auth.clusterID)
+	return cl
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {

@@ -351,3 +351,39 @@ func fromUnstructured[T any](u *unstructured.Unstructured) (*T, error) {
 	}
 	return &obj, nil
 }
+
+// studioResource is the workspace's Studio singleton.
+var studioResource = tenant.Resource{
+	GVR:  schema.GroupVersionResource{Group: vibev1alpha1.GroupName, Version: vibev1alpha1.Version, Resource: "studios"},
+	Kind: "Studio", Plural: "Studios", Namespaced: false,
+}
+
+// GetStudio fetches the workspace's Studio.
+func (c *Client) GetStudio(ctx context.Context, name string) (*vibev1alpha1.Studio, error) {
+	u, err := c.scope.Get(ctx, studioResource, "", name)
+	if unavailable(err) {
+		return nil, ErrResourceUnavailable
+	}
+	if err != nil {
+		return nil, err
+	}
+	return fromUnstructured[vibev1alpha1.Studio](u)
+}
+
+// ApplyStudio create-or-updates the workspace's Studio.
+func (c *Client) ApplyStudio(ctx context.Context, st *vibev1alpha1.Studio) (*vibev1alpha1.Studio, error) {
+	st.APIVersion = vibev1alpha1.SchemeGroupVersion.String()
+	st.Kind = "Studio"
+	u, err := toUnstructured(st)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.scope.Apply(ctx, u)
+	if unavailable(err) {
+		return nil, ErrResourceUnavailable
+	}
+	if err != nil {
+		return nil, err
+	}
+	return fromUnstructured[vibev1alpha1.Studio](out)
+}

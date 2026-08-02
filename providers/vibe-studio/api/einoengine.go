@@ -18,7 +18,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	vibev1alpha1 "github.com/faroshq/provider-vibe-studio/apis/vibe/v1alpha1"
 	"github.com/faroshq/provider-vibe-studio/client"
 	"github.com/faroshq/provider-vibe-studio/engine"
 	"github.com/faroshq/provider-vibe-studio/provision"
@@ -151,10 +150,14 @@ func (e *EinoEngine) StudioTurn(ctx context.Context, tc session.TurnContext, sta
 		info provision.DevInfo
 		ref  provision.Ref
 	)
+	// Web search is a WORKSPACE service: one backend, shared by every
+	// project, resolved from the Studio singleton.
 	var search webtools.SearchRef
+	if resource, name := e.server.searchBackend(ctx, cl); name != "" {
+		search = webtools.SearchRef{Resource: resource, Name: name}
+	}
 	if state.ProjectName != "" {
 		if p, err := cl.GetProject(ctx, state.ProjectName); err == nil {
-			search = searchRefOf(p)
 			if p.Spec.Template != nil {
 				if tmpl, err := cl.GetTemplate(ctx, p.Spec.Template.Name); err == nil {
 					if i, err := provision.ParseDevInfo(tmpl); err == nil {
@@ -497,19 +500,4 @@ var blueprintToolSchema = map[string]any{
 			},
 		},
 	},
-}
-
-// searchRefOf finds the project's web-search backend among its bindings.
-func searchRefOf(p *vibev1alpha1.Project) webtools.SearchRef {
-	for _, env := range p.Spec.Environments {
-		if env.Name == vibev1alpha1.ProductionEnvironment {
-			continue
-		}
-		for _, b := range env.Bindings {
-			if b.Name == vibev1alpha1.BindingSearch && b.ResourceRef != nil {
-				return webtools.SearchRef{Resource: b.ResourceRef.Resource, Name: b.ResourceRef.Name}
-			}
-		}
-	}
-	return webtools.SearchRef{}
 }
