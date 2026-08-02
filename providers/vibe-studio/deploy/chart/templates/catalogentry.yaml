@@ -44,6 +44,12 @@ data:
             group: infrastructure.kedge.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+          # Web search: every project binds a private searxng instance so the
+          # assistant can look things up instead of asking the user to paste.
+          - resource: searxngs
+            group: infrastructure.kedge.faros.sh
+            verbs: [get, list, watch, create, update, patch, delete]
+            tenantScoped: true
           - resource: repositories
             group: code.kedge.faros.sh
             verbs: [get, list, watch, create, update, patch]
