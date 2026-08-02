@@ -149,9 +149,15 @@ func TestDesiredInstanceAttributesItsOwnTemplate(t *testing.T) {
 	if got := DesiredInstance(p, runtime).GetLabels()[templateLabel]; got != "application" {
 		t.Errorf("runtime instance template label = %q, want application", got)
 	}
-	// Bindings written before the field existed fall back to the project's.
+	// Bindings written before the field existed: the runtime falls back to
+	// the Project's template, anything else goes unlabelled rather than
+	// wrongly labelled.
 	legacy := InstanceRef{Environment: "development", Binding: "runtime", Name: "shop"}
 	if got := DesiredInstance(p, legacy).GetLabels()[templateLabel]; got != "application" {
-		t.Errorf("legacy binding label = %q, want the project's template", got)
+		t.Errorf("legacy runtime label = %q, want the project's template", got)
+	}
+	legacySearch := InstanceRef{Environment: "development", Binding: "search", Name: "shop-search"}
+	if got, ok := DesiredInstance(p, legacySearch).GetLabels()[templateLabel]; ok {
+		t.Errorf("legacy search label = %q, want no label rather than a wrong one", got)
 	}
 }

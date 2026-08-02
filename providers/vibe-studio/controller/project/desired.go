@@ -87,7 +87,11 @@ func DesiredInstance(p *vibev1alpha1.Project, ref InstanceRef) *unstructured.Uns
 	// infrastructure provider lists instances by this label.
 	if ref.Template != "" {
 		labels[templateLabel] = ref.Template
-	} else if p.Spec.Template != nil && p.Spec.Template.Name != "" {
+	} else if ref.Binding == vibev1alpha1.BindingRuntime && p.Spec.Template != nil && p.Spec.Template.Name != "" {
+		// Bindings written before the field existed: only the runtime is
+		// known to come from the Project's template. Guessing for the others
+		// is what produced a searxng instance labelled "application", so an
+		// unlabelled instance is the better answer.
 		labels[templateLabel] = p.Spec.Template.Name
 	}
 	inst := &unstructured.Unstructured{Object: map[string]any{
