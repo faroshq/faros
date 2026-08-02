@@ -344,6 +344,15 @@ spec:
   # platform preview-console plugin when trusted keys are installed. Missing
   # plugin/config fails open and leaves the ordinary preview intact.
   development:
+    # Starter source new projects are seeded from: a working web+api+Postgres
+    # hello-world honoring the full platform contract (PORT, same-origin
+    # /api/*, DATABASE_URL with startup retry, dev+start scripts). Locked by
+    # git tag: changing the scaffold repo does nothing until a new tag is cut
+    # AND this ref (plus the sampleValues image tags above) is bumped to
+    # match. Without this block a new project gets an EMPTY sandbox.
+    scaffold:
+      repository: https://github.com/faroshq/kedge-scaffold-application
+      ref: v0.1.1
     components:
       web:
         workspacePath: web

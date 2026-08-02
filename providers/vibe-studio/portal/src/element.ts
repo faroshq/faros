@@ -152,6 +152,11 @@ export class VibeStudioElement extends HTMLElement {
   private _saveState = ''
   private _renderedSig = ''
   private _appliedRoute = ''
+  // When the user last scrolled the conversation, and whether the scroll we
+  // are seeing is our own. Renders rebuild the transcript DOM, so touching
+  // scroll mid-gesture fights the user; we defer instead.
+  private _userScrollAt = 0
+  private _programmaticScroll = false
   private _models: ModelRecord[] = []
   private _homeView: HomeView = 'projects'
   private _addingModel = false
@@ -501,14 +506,43 @@ export class VibeStudioElement extends HTMLElement {
     ).forEach((el) => {
       if (el.id) saved[el.id] = el.value
     })
+    // Rebuilding innerHTML resets scrollTop to 0, which reads as the view
+    // jumping to the top every time the assistant emits an event. Capture
+    // the position (and which ledgers are expanded) to restore after.
     const prevScroll = this.querySelector<HTMLElement>('#chat-scroll')
     const stickBottom =
       !prevScroll || prevScroll.scrollHeight - prevScroll.scrollTop - prevScroll.clientHeight < 60
+    const savedTop = prevScroll ? prevScroll.scrollTop : 0
+
+    // Reading history while events stream in: leave the DOM alone entirely
+    // until the gesture settles. The signature is not consumed, so the next
+    // poll renders. (Following at the bottom is unaffected.)
+    if (!stickBottom && Date.now() - this._userScrollAt < 1200) return
+    const openLedgers = new Set<number>()
+    this.querySelectorAll<HTMLDetailsElement>('.ledger').forEach((d, i) => {
+      if (d.open) openLedgers.add(i)
+    })
 
     this._renderDOM()
 
+    // Restore what the user was looking at: pinned to the newest message if
+    // they were already there, otherwise exactly where they left off.
     const nextScroll = this.querySelector<HTMLElement>('#chat-scroll')
-    if (nextScroll && stickBottom) nextScroll.scrollTop = nextScroll.scrollHeight
+    if (nextScroll) {
+      const want = stickBottom ? nextScroll.scrollHeight : savedTop
+      // Assign only when it actually differs: a redundant write still fires
+      // a scroll event and can nudge an in-flight gesture.
+      if (Math.abs(nextScroll.scrollTop - want) > 1) {
+        this._programmaticScroll = true
+        nextScroll.scrollTop = want
+      }
+      nextScroll.addEventListener('scroll', this._onChatScroll, { passive: true })
+    }
+    if (openLedgers.size > 0) {
+      this.querySelectorAll<HTMLDetailsElement>('.ledger').forEach((d, i) => {
+        if (openLedgers.has(i)) d.open = true
+      })
+    }
     this._mountEditor()
     for (const [id, value] of Object.entries(saved)) {
       const el = this.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(`#${id}`)
@@ -526,6 +560,16 @@ export class VibeStudioElement extends HTMLElement {
         }
       }
     }
+  }
+
+  // _onChatScroll records genuine user scrolling; our own restores set a
+  // flag first so they don't count as the user reading.
+  private _onChatScroll = (): void => {
+    if (this._programmaticScroll) {
+      this._programmaticScroll = false
+      return
+    }
+    this._userScrollAt = Date.now()
   }
 
   private _renderDOM(): void {

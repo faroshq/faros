@@ -228,35 +228,86 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-// AllowedInputs returns the input names a template's instance schema
-// declares. The wizard filters proposed values through this: a model asked
-// for a blueprint will happily invent app-requirement fields ("features",
-// "pages"), and those belong in the conversation, not in infrastructure
-// spec — where they are noise at best and pruned silently at worst.
-func AllowedInputs(tmpl *unstructured.Unstructured) map[string]bool {
+// InputSchemas returns a template's declared instance inputs, name → its
+// JSON-schema fragment. The wizard filters proposed values through these.
+func InputSchemas(tmpl *unstructured.Unstructured) map[string]any {
 	props, ok, _ := unstructured.NestedMap(tmpl.Object, "spec", "schema", "properties")
 	if !ok {
 		return nil
 	}
-	out := make(map[string]bool, len(props))
-	for k := range props {
-		out[k] = true
+	return props
+}
+
+// InputNames lists the declared input names with their types, for prompts.
+func InputNames(tmpl *unstructured.Unstructured) []string {
+	props := InputSchemas(tmpl)
+	out := make([]string, 0, len(props))
+	for k, v := range props {
+		t := "any"
+		if m, ok := v.(map[string]any); ok {
+			if s, ok := m["type"].(string); ok {
+				t = s
+			}
+		}
+		out = append(out, k+" ("+t+")")
 	}
+	sort.Strings(out)
 	return out
 }
 
-// FilterValues keeps only the values a template actually declares. A nil
-// allowed set means "schema unknown" — pass everything through rather than
-// silently emptying the spec.
-func FilterValues(values map[string]any, allowed map[string]bool) map[string]any {
-	if allowed == nil {
+// FilterValues keeps only values the template declares AND whose type matches
+// the declared one. Name-only filtering is not enough: a model will happily
+// send `expose: true` for an object-typed input, and the API server rejects
+// the whole instance — which a controller can only retry, forever. A nil
+// schema set means "unknown", so values pass through untouched.
+func FilterValues(values map[string]any, schemas map[string]any) map[string]any {
+	if schemas == nil {
 		return values
 	}
 	out := make(map[string]any, len(values))
 	for k, v := range values {
-		if allowed[k] {
-			out[k] = v
+		spec, ok := schemas[k]
+		if !ok {
+			continue
 		}
+		if !typeMatches(v, spec) {
+			continue
+		}
+		out[k] = v
 	}
 	return out
+}
+
+// typeMatches reports whether a value fits the declared JSON-schema type.
+// An undeclared type accepts anything.
+func typeMatches(v, spec any) bool {
+	m, ok := spec.(map[string]any)
+	if !ok {
+		return true
+	}
+	want, ok := m["type"].(string)
+	if !ok || want == "" {
+		return true
+	}
+	switch want {
+	case "object":
+		_, ok := v.(map[string]any)
+		return ok
+	case "array":
+		_, ok := v.([]any)
+		return ok
+	case "string":
+		_, ok := v.(string)
+		return ok
+	case "boolean":
+		_, ok := v.(bool)
+		return ok
+	case "integer", "number":
+		switch v.(type) {
+		case float64, float32, int, int32, int64:
+			return true
+		}
+		return false
+	}
+	return true
 }

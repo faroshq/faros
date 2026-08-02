@@ -103,6 +103,24 @@ type SessionStatus struct {
 	// +optional
 	Checkpoints []SessionCheckpointStatus `json:"checkpoints,omitempty"`
 
+	// WorkspaceRevision is the store's current workspace revision, and
+	// CommittedRevision the one last pushed to git. When they differ the
+	// Session reconciler commits — desired vs observed, like any other
+	// controller.
+	// +optional
+	WorkspaceRevision int64 `json:"workspaceRevision,omitempty"`
+	// +optional
+	CommittedRevision int64 `json:"committedRevision,omitempty"`
+	// CommittedOrdinal is the event-log position at the last commit. The
+	// reconciler reads the events after it to describe the change — which
+	// request drove it and which files it touched.
+	// +optional
+	CommittedOrdinal int64 `json:"committedOrdinal,omitempty"`
+
+	// LastCommitSHA is the newest commit the reconciler pushed.
+	// +optional
+	LastCommitSHA string `json:"lastCommitSHA,omitempty"`
+
 	// UpdatedAt is when the reconciler last refreshed this projection.
 	// +optional
 	UpdatedAt *metav1.Time `json:"updatedAt,omitempty"`

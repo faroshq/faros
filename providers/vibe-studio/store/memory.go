@@ -25,9 +25,10 @@ type MemoryStore struct {
 }
 
 type memorySession struct {
-	record SessionRecord
-	events []session.Event
-	files  map[string]string // path → content
+	record   SessionRecord
+	events   []session.Event
+	files    map[string]string // path → content
+	revision int64             // bumped on every file mutation
 }
 
 // NewMemoryStore returns an empty in-memory store.
@@ -148,6 +149,7 @@ func (m *MemoryStore) PutWorkspaceFiles(_ context.Context, scope Scope, sessionI
 	for _, f := range files {
 		s.files[f.Path] = f.Content
 	}
+	s.revision++
 	return nil
 }
 
@@ -215,7 +217,21 @@ func (m *MemoryStore) DeleteWorkspaceFile(_ context.Context, scope Scope, sessio
 		return ErrNotFound
 	}
 	delete(s.files, path)
+	s.revision++
 	return nil
+}
+
+func (m *MemoryStore) WorkspaceRevision(_ context.Context, scope Scope, sessionID string) (int64, error) {
+	if err := scope.validate(); err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.session(scope, sessionID)
+	if s == nil {
+		return 0, ErrNotFound
+	}
+	return s.revision, nil
 }
 
 func (m *MemoryStore) PurgeSession(_ context.Context, scope Scope, sessionID string) error {

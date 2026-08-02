@@ -117,10 +117,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	}
 	state := session.Fold(events)
 	next := ProjectStatus(state, metav1.Now())
+	// The commit bookkeeping is the controller's own, not a projection of
+	// the log — carry it across the mirror.
+	next.WorkspaceRevision = s.Status.WorkspaceRevision
+	next.CommittedRevision = s.Status.CommittedRevision
+	next.LastCommitSHA = s.Status.LastCommitSHA
+	next.CommittedOrdinal = s.Status.CommittedOrdinal
+	if rev, err := r.Store.WorkspaceRevision(ctx, scope, s.Name); err == nil {
+		next.WorkspaceRevision = rev
+	}
 	if !statusEqual(s.Status, next) {
 		s.Status = next
 		if err := c.Status().Update(ctx, &s); err != nil {
 			return ctrl.Result{}, err
+		}
+	}
+
+	// Keep git in step with the sandbox: commit once the workspace has moved
+	// on and the turn that moved it has finished.
+	if state.Phase == session.PhaseStudio && state.ActiveTurnID == "" {
+		if committed, err := r.commitWorkspace(ctx, c, &s, scope, state); err != nil {
+			return ctrl.Result{}, err
+		} else if committed {
+			return ctrl.Result{RequeueAfter: mirrorInterval}, nil
 		}
 	}
 
@@ -162,6 +181,8 @@ func ProjectStatus(st session.SessionState, now metav1.Time) vibev1alpha1.Sessio
 // statusEqual ignores UpdatedAt so quiet mirrors don't churn resourceVersion.
 func statusEqual(a, b vibev1alpha1.SessionStatus) bool {
 	if a.Phase != b.Phase || a.ActiveTurnID != b.ActiveTurnID || a.LastOrdinal != b.LastOrdinal ||
+		a.WorkspaceRevision != b.WorkspaceRevision || a.CommittedRevision != b.CommittedRevision ||
+		a.LastCommitSHA != b.LastCommitSHA || a.CommittedOrdinal != b.CommittedOrdinal ||
 		len(a.Checkpoints) != len(b.Checkpoints) {
 		return false
 	}

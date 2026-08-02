@@ -55,10 +55,12 @@ var vibeSchema = []string{
 		id TEXT NOT NULL,
 		preview TEXT NOT NULL DEFAULT '',
 		phase TEXT NOT NULL DEFAULT 'intake',
+		workspace_revision BIGINT NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (tenant, id)
 	)`,
+	`ALTER TABLE vibe_sessions ADD COLUMN IF NOT EXISTS workspace_revision BIGINT NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS vibe_sessions_activity_idx
 		ON vibe_sessions (tenant, updated_at DESC)`,
 	// The append-only event log. Ordinals are per-session, dense from 1; the
@@ -259,6 +261,11 @@ func (p *PostgresStore) PutWorkspaceFiles(ctx context.Context, scope Scope, sess
 			return fmt.Errorf("put file %s: %w", f.Path, err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vibe_sessions SET workspace_revision = workspace_revision + 1 WHERE tenant = $1 AND id = $2`,
+		scope.Tenant, sessionID); err != nil {
+		return fmt.Errorf("bump workspace revision: %w", err)
+	}
 	return tx.Commit()
 }
 
@@ -328,10 +335,29 @@ func (p *PostgresStore) DeleteWorkspaceFile(ctx context.Context, scope Scope, se
 	if err := scope.validate(); err != nil {
 		return err
 	}
-	_, err := p.db.ExecContext(ctx,
+	if _, err := p.db.ExecContext(ctx,
 		`DELETE FROM vibe_workspace_files WHERE tenant = $1 AND session_id = $2 AND path = $3`,
-		scope.Tenant, sessionID, path)
+		scope.Tenant, sessionID, path); err != nil {
+		return err
+	}
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE vibe_sessions SET workspace_revision = workspace_revision + 1 WHERE tenant = $1 AND id = $2`,
+		scope.Tenant, sessionID)
 	return err
+}
+
+func (p *PostgresStore) WorkspaceRevision(ctx context.Context, scope Scope, sessionID string) (int64, error) {
+	if err := scope.validate(); err != nil {
+		return 0, err
+	}
+	var rev int64
+	err := p.db.QueryRowContext(ctx,
+		`SELECT workspace_revision FROM vibe_sessions WHERE tenant = $1 AND id = $2`,
+		scope.Tenant, sessionID).Scan(&rev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return rev, err
 }
 
 func (p *PostgresStore) PurgeSession(ctx context.Context, scope Scope, sessionID string) error {

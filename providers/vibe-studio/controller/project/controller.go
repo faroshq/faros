@@ -102,8 +102,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 
 	// Converge: ensure each bound instance exists, then observe it.
 	observed := make(map[string]*unstructured.Unstructured, len(refs))
+	invalid := map[string]string{}
 	for _, ref := range refs {
 		inst, err := r.ensureInstance(ctx, c, &p, ref)
+		if apierrors.IsInvalid(err) {
+			// The spec is rejected by the API server: retrying cannot help,
+			// only a spec change can. Record it where the user will see it
+			// and stop hammering (this used to loop several times a second).
+			invalid[ref.Key()] = err.Error()
+			continue
+		}
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("instance %s/%s: %w", ref.GVR.Resource, ref.Name, err)
 		}
@@ -120,11 +128,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 
 	next := MirrorStatus(&p, observed, metav1.Now())
 	next.Repository = repositoryStatus(&p, repo)
+	for i, env := range next.Environments {
+		for j, b := range env.Bindings {
+			if reason, bad := invalid[env.Name+"/"+b.Name]; bad {
+				next.Environments[i].Bindings[j].Phase = "Invalid"
+				next.Environments[i].Bindings[j].Outputs = map[string]string{"error": reason}
+			}
+		}
+	}
 	if !statusEqual(p.Status, next) {
 		p.Status = next
 		if err := c.Status().Update(ctx, &p); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+	if len(invalid) > 0 {
+		// Nothing to converge until the spec changes; a spec change wakes us.
+		return ctrl.Result{}, nil
 	}
 	if next.Phase != vibev1alpha1.ProjectPhaseReady {
 		return ctrl.Result{RequeueAfter: requeueInterval}, nil

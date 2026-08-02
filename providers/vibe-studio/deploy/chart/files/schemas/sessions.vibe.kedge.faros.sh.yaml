@@ -4,7 +4,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260801-002.sessions.vibe.kedge.faros.sh
+  name: v260801-003.sessions.vibe.kedge.faros.sh
 spec:
   group: vibe.kedge.faros.sh
   names:
@@ -59,6 +59,10 @@ spec:
               phase: { type: string }
               activeTurnID: { type: string }
               lastOrdinal: { type: integer, format: int64 }
+              workspaceRevision: { type: integer, format: int64 }
+              committedRevision: { type: integer, format: int64 }
+              committedOrdinal: { type: integer, format: int64 }
+              lastCommitSHA: { type: string }
               updatedAt: { type: string, format: date-time }
               checkpoints:
                 type: array

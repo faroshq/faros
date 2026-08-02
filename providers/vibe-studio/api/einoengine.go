@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -104,7 +103,7 @@ func (e *EinoEngine) IntakeTurn(ctx context.Context, tc session.TurnContext, sta
 
 	sys := "You are the vibe-studio intake wizard. From the user's intent, draft a blueprint " +
 		"grounded in the infrastructure template catalog below. `values` MUST use ONLY that " +
-		"template's listed inputs — app requirements (features, pages, entities) belong in the " +
+		"template's listed inputs, using the declared TYPE (an object-typed input needs an object, never true/false) — app requirements (features, pages, entities) belong in the " +
 		"summary and success criteria, never in values. Ask at most 3 clarifying questions " +
 		"and only when decision-blocking; prefer good assumptions over questions (a simple request " +
 		"gets zero questions and sensible defaults). Success criteria must be user-visible and testable. " +
@@ -413,12 +412,10 @@ func intakeCatalog(ctx context.Context, cl *client.Client) ([]catalogEntry, erro
 	out := make([]catalogEntry, 0, len(items))
 	for i := range items {
 		desc, _, _ := unstructured.NestedString(items[i].Object, "spec", "description")
-		inputs := make([]string, 0, 8)
-		for k := range provision.AllowedInputs(&items[i]) {
-			inputs = append(inputs, k)
-		}
-		sort.Strings(inputs)
-		out = append(out, catalogEntry{Name: items[i].GetName(), Description: desc, Inputs: inputs})
+		out = append(out, catalogEntry{
+			Name: items[i].GetName(), Description: desc,
+			Inputs: provision.InputNames(&items[i]),
+		})
 	}
 	return out, nil
 }

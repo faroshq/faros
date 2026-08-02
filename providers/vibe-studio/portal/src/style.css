@@ -177,7 +177,6 @@ kedge-provider-vibe-studio .spinner.tiny { width: 12px; height: 12px; border-wid
 
 @media (prefers-reduced-motion: reduce) {
   kedge-provider-vibe-studio .spinner { animation-duration: 2.4s; }
-  kedge-provider-vibe-studio .chat-scroll { scroll-behavior: auto; }
 }
 
 kedge-provider-vibe-studio .center-panel {
@@ -438,8 +437,8 @@ kedge-provider-vibe-studio .chat-scroll {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
-  scroll-behavior: smooth;
   min-height: 0;
+  overscroll-behavior: contain;
 }
 
 kedge-provider-vibe-studio .chat-empty { margin: auto; text-align: center; max-width: 34ch; }

@@ -88,6 +88,12 @@ type Store interface {
 	ListWorkspaceContents(ctx context.Context, scope Scope, sessionID string) ([]WorkspaceFile, error)
 	DeleteWorkspaceFile(ctx context.Context, scope Scope, sessionID, path string) error
 
+	// WorkspaceRevision is a monotonic counter bumped on every workspace
+	// mutation. The Session reconciler compares it against the revision it
+	// last committed to git: desired vs observed, converge — no change
+	// feed, no hooks, and a burst of edits collapses into one commit.
+	WorkspaceRevision(ctx context.Context, scope Scope, sessionID string) (int64, error)
+
 	// PurgeSession removes EVERYTHING the store holds for one session —
 	// events, workspace files, the listing row. Called by the Session
 	// reconciler's finalizer when the Session CR is deleted. Idempotent:

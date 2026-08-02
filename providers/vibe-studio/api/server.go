@@ -1026,7 +1026,7 @@ func (s *Server) recordApproval(ctx context.Context, scope store.Scope, id strin
 	// blueprint invents app-requirement fields ("features", "pages") that
 	// are meaningful to the conversation but are not infrastructure inputs;
 	// the full draft stays in the blueprint event, the spec stays honest.
-	bp.Values = provision.FilterValues(bp.Values, provision.AllowedInputs(tmpl))
+	bp.Values = provision.FilterValues(bp.Values, provision.InputSchemas(tmpl))
 
 	name := projectName(bp.Title, id)
 	sessCR := s.ensureSessionCR(scope, auth, id, bp.Summary)
