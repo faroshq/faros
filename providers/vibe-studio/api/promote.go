@@ -309,6 +309,9 @@ func (s *Server) handleGetPromotion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// Backfill in memory too (not just on promote), so a project created
+	// before image inputs were recorded still renders a usable ship panel.
+	s.backfillImageInputs(r.Context(), cl, p)
 	view := promotionViewOf(p)
 	if sess, err := cl.GetSession(r.Context(), r.PathValue("id")); err == nil {
 		view.CommitSHA = sess.Status.LastCommitSHA
