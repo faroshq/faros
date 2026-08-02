@@ -319,10 +319,20 @@ func Apply(state SessionState, cmd Command, now time.Time) ([]Event, error) {
 		if state.Phase != PhaseProvisioning {
 			return nil, conflictf("provisioning is not in progress")
 		}
-		return []Event{
+		events := []Event{
 			NewEvent(state.ID, "", EventProvisionDone, now, nil),
 			NewEvent(state.ID, "", EventPhaseChanged, now, PhaseChangedData{Phase: PhaseStudio}),
-		}, nil
+		}
+		// Start building immediately. The wizard already asked what to build
+		// and the user already approved the answer, so waiting for them to
+		// type "build it" asks for the same decision twice — and until they
+		// do, the sandbox serves the scaffold's hello-world. Emitting the
+		// opening instruction as an event (rather than as engine-side special
+		// casing) keeps it in the transcript and replayable like any turn.
+		if kickoff := KickoffInput(state.Blueprint); kickoff != "" {
+			events = append(events, NewEvent(state.ID, "", EventUserMessage, now, MessageData{Text: kickoff}))
+		}
+		return events, nil
 
 	default:
 		return nil, fmt.Errorf("unknown command %T", cmd)

@@ -565,7 +565,18 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// Provisioning, preview backfill, and seed retries are the Session
 	// reconciler's job now — it runs as the session's own ServiceAccount and
-	// retries on its own schedule, so a view is just a read.
+	// retries on its own schedule, so a view is mostly a read.
+	//
+	// The exception is a turn the session already owes: the reconciler queues
+	// the first build turn when provisioning finishes (and a crashed replica
+	// can leave input pending), but only this process runs the engine. Kick
+	// it from the view so owed work starts without the user having to type
+	// something to wake it. Single-flighted, and advance() CASes on
+	// turn.started anyway, so a poll every couple of seconds is harmless.
+	switch session.NextAction(state) {
+	case session.ActionRunStudioTurn, session.ActionRunIntakeTurn:
+		s.advanceAsync(scope, state.ID, callerAuthFromRequest(r))
+	}
 	view := viewOf(state)
 	if state.ActiveTurnID != "" {
 		view.Partial = s.partialFor(state.ID)
@@ -633,7 +644,14 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 // advanceAsync executes owed work off the request goroutine. auth is the
 // triggering caller's identity — provisioning acts as that user.
 func (s *Server) advanceAsync(scope store.Scope, id string, auth callerAuth) {
+	// Single-flighted per session: the view kicks this on every poll, and one
+	// runner per session is all the log's turn CAS would let through anyway.
+	key := "advance/" + id
+	if !s.begin(key) {
+		return
+	}
 	go func() {
+		defer s.end(key)
 		// Detached from the request context: turns outlive the HTTP call.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()

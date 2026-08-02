@@ -408,6 +408,19 @@ gate. app-studio stays untouched and running throughout.
 
 ### 6a. Landed beyond the original plan
 
+- **The first build turn starts itself** (2026-08-02). Entering studio used to
+  leave the session idle: the sandbox served the scaffold's hello-world until
+  the user typed something like "build it" — asking them to state an intent
+  the wizard had already collected and they had already approved.
+  `CmdProvisionCompleted` now also emits the opening instruction (title,
+  summary, success criteria, "edit the scaffold, don't re-bootstrap") as a
+  user message, so `NextAction` returns `run-studio-turn` and the normal turn
+  machinery takes it. Emitting an event rather than special-casing the engine
+  keeps it in the transcript and replayable. The session view kicks owed turns
+  (single-flighted), because only the API process runs the engine while
+  provisioning finishes in the reconciler — so the first turn starts when
+  someone has the studio open, which is when it was created.
+
 - **Models are CRs** (`Model` + `Session.spec.modelRef`): keys in Secrets,
   never in the CR; a Models menu configures them, and each project picks its
   model from a picker, changeable mid-project. Resolution: session's model →

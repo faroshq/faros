@@ -11,6 +11,7 @@ package session
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,6 +112,17 @@ func TestWizardHappyPath(t *testing.T) {
 	if s.Phase != PhaseStudio {
 		t.Fatalf("after provision: phase=%s", s.Phase)
 	}
+	// Entering studio starts building on its own: the wizard already
+	// collected the intent and the user already approved it.
+	if got := NextAction(s); got != ActionRunStudioTurn {
+		t.Fatalf("NextAction on entering studio = %s, want %s", got, ActionRunStudioTurn)
+	}
+	if !strings.Contains(s.PendingInput, "Build the first working version") {
+		t.Fatalf("kickoff input = %q, want the blueprint restated", s.PendingInput)
+	}
+	// Once that first turn has run, studio idles waiting for the user.
+	s = step(t, s, CmdTurnStarted{SubmissionID: "kickoff", TurnID: "turn-kickoff"})
+	s = step(t, s, CmdTurnCompleted{TurnID: "turn-kickoff"})
 	if got := NextAction(s); got != ActionAwaitUser {
 		t.Fatalf("NextAction in idle studio = %s", got)
 	}

@@ -126,6 +126,14 @@ func TestWizardFlowOverHTTP(t *testing.T) {
 		return v["phase"] == string(session.PhaseStudio)
 	}, "studio phase")
 
+	// Entering studio queues the first build turn from the approved
+	// blueprint, and the view kicks it: the user never has to type "build it"
+	// to get the app they just described. Wait it out before chatting — the
+	// portal disables the composer for exactly this window.
+	waitFor(id, func(v map[string]any) bool {
+		return v["nextAction"] == string(session.ActionAwaitUser)
+	}, "the automatic first build turn")
+
 	// 4. Studio chat round-trips through the scripted engine.
 	post("/api/sessions/"+id+"/submissions", map[string]any{"kind": "input", "text": "add dark mode"})
 	waitFor(id, func(v map[string]any) bool {
