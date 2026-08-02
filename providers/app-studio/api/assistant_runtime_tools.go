@@ -973,10 +973,18 @@ func newProjectAssistantRestartRuntimeGraphTool(runCtx projectAssistantWorkflowR
 		}
 		approvedTool = durable.(einotool.InvokableTool)
 	}
-	if runCtx.ApprovalMode == store.AssistantApprovalModeAutoApprove {
+	if !projectAssistantRuntimeGraphToolRequiresApproval(projectToolRestartRuntime, runCtx.ApprovalMode) {
 		return approvedTool, nil
 	}
 	return approvaltool.InvokableApprovableTool{InvokableTool: approvedTool}, nil
+}
+
+func projectAssistantRuntimeGraphToolRequiresApproval(name string, mode store.AssistantApprovalMode) bool {
+	spec, ok := projectAssistantWorkflowToolSpec(name)
+	if !ok {
+		return true
+	}
+	return projectAssistantPermissionForV2(spec, mode, nil, nil, false) == projectAssistantPermissionAsk
 }
 
 func restartProjectAssistantRuntime(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantRuntimeRestartToolInput) (*projectAssistantRuntimeWorkflowResult, error) {
@@ -1076,7 +1084,7 @@ func newProjectAssistantSetRuntimeEnvGraphTool(runCtx projectAssistantWorkflowRu
 		}
 		approvedTool = durable.(einotool.InvokableTool)
 	}
-	if runCtx.ApprovalMode == store.AssistantApprovalModeAutoApprove {
+	if !projectAssistantRuntimeGraphToolRequiresApproval(projectToolSetRuntimeEnv, runCtx.ApprovalMode) {
 		return approvedTool, nil
 	}
 	return approvaltool.InvokableApprovableTool{InvokableTool: approvedTool}, nil

@@ -641,12 +641,18 @@ func TestProjectAssistantRuntimeGraphToolsRespectApprovalMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			admitMutation := func(context.Context) error { return nil }
-			autoTool, err := tt.new(projectAssistantWorkflowRunContext{ApprovalMode: store.AssistantApprovalModeAutoApprove})
-			if err != nil {
-				t.Fatalf("create auto-approve tool: %v", err)
-			}
-			if _, wrapped := autoTool.(approvaltool.InvokableApprovableTool); wrapped {
-				t.Fatal("auto-approve runtime tool retained an unconditional approval wrapper")
+			for _, mode := range []store.AssistantApprovalMode{
+				store.AssistantApprovalModeOnRequest,
+				store.AssistantApprovalModeAutoApprove,
+				store.AssistantApprovalModeNever,
+			} {
+				autoTool, err := tt.new(projectAssistantWorkflowRunContext{ApprovalMode: mode})
+				if err != nil {
+					t.Fatalf("create %s tool: %v", mode, err)
+				}
+				if _, wrapped := autoTool.(approvaltool.InvokableApprovableTool); wrapped {
+					t.Fatalf("%s runtime tool retained an approval wrapper", mode)
+				}
 			}
 
 			askTool, err := tt.new(projectAssistantWorkflowRunContext{ApprovalMode: store.AssistantApprovalModeAlwaysAsk})
