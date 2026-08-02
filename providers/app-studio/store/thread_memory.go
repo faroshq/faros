@@ -143,6 +143,39 @@ func (s *MemoryStore) UpdateAssistantThread(_ context.Context, scope Scope, thre
 	return prepared, nil
 }
 
+func (s *MemoryStore) UpdateAssistantThreadWithEvent(_ context.Context, scope Scope, thread AssistantThread, event AssistantThreadEvent, expectedSequence int64) (AssistantThread, AssistantThreadEvent, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	prepared, err := prepareAssistantThread(thread)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	event.ThreadID = prepared.ID
+	preparedEvent, err := prepareAssistantThreadEvent(event)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.assistantThreads[scope][prepared.ID]
+	if !ok {
+		return AssistantThread{}, AssistantThreadEvent{}, ErrAssistantThreadNotFound
+	}
+	if existing.ActorID != prepared.ActorID {
+		return AssistantThread{}, AssistantThreadEvent{}, ErrAssistantThreadConflict
+	}
+	events := s.threadEvents[scope][prepared.ID]
+	if int64(len(events)) != expectedSequence {
+		return AssistantThread{}, AssistantThreadEvent{}, ErrAssistantThreadEventConflict
+	}
+	prepared.CreatedAt = existing.CreatedAt
+	s.assistantThreads[scope][prepared.ID] = prepared
+	preparedEvent.Sequence = expectedSequence + 1
+	s.threadEvents[scope][prepared.ID] = append(events, cloneAssistantThreadEvent(preparedEvent))
+	return prepared, cloneAssistantThreadEvent(preparedEvent), nil
+}
+
 func (s *MemoryStore) CreateAssistantTurn(_ context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error) {
 	if err := scope.validate(); err != nil {
 		return AssistantTurn{}, err

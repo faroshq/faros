@@ -41,8 +41,8 @@ func TestAssistantSchemaIsV2Only(t *testing.T) {
 			t.Fatalf("assistant schema still contains retired contract %q", retired)
 		}
 	}
-	if !strings.Contains(statements, "CHECK (mode IN ('default', 'plan'))") {
-		t.Fatal("assistant schema does not constrain runs to default and plan modes")
+	if !strings.Contains(statements, "CHECK (mode IN ('default', 'plan', 'review'))") {
+		t.Fatal("assistant schema does not constrain runs to supported collaboration modes")
 	}
 	if messageSchemaVersion != "assistant-v2-only-v1" {
 		t.Fatalf("message schema version = %q", messageSchemaVersion)
@@ -62,7 +62,7 @@ func TestAssistantV2CutoverDropsRetiredStorageBeforeRecreate(t *testing.T) {
 			t.Fatalf("cutover does not drop %s", table)
 		}
 	}
-	if !strings.Contains(joined, "CHECK (mode IN ('default', 'plan'))") ||
+	if !strings.Contains(joined, "CHECK (mode IN ('default', 'plan', 'review'))") ||
 		!strings.Contains(joined, "CREATE TABLE IF NOT EXISTS app_studio_assistant_run_events") {
 		t.Fatal("cutover does not recreate the complete V2 assistant schema")
 	}

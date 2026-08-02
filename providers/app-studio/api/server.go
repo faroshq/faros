@@ -52,6 +52,7 @@ type Server struct {
 	assistantEngine              projectAssistantEngine
 	assistantRunManager          *projectAssistantRunManager
 	assistantSupervisor          *projectAssistantSupervisor
+	assistantProjectionLocks     map[string]*assistantThreadProjectionLockEntry
 	developmentSyncLocks         map[string]*sync.Mutex
 	developmentSyncTails         map[string]chan struct{}
 	developmentSyncAfterMutation func(identity, *aiv1alpha1.Project, string) error
@@ -163,6 +164,7 @@ func (s *Server) Register(r *mux.Router) {
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/items", s.listProjectAssistantThreadItems).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/events", s.streamProjectAssistantThreadEvents).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/turns", s.startProjectAssistantThreadTurn).Methods(http.MethodPost)
+	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/reviews", s.startProjectAssistantThreadReview).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/turns/active", s.activeProjectAssistantThreadTurn).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/turns/{turn}/steer", s.steerProjectAssistantThreadTurn).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/{project}/assistant/threads/{thread}/turns/{turn}/interrupt", s.interruptProjectAssistantThreadTurn).Methods(http.MethodPost)

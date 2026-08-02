@@ -21,6 +21,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/faroshq/provider-app-studio/store"
 )
 
 func TestCreateProjectMessageCollaborationModeDefaultsToDefault(t *testing.T) {
@@ -33,7 +35,7 @@ func TestCreateProjectMessageCollaborationModeDefaultsToDefault(t *testing.T) {
 	}
 }
 
-func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
+func TestCreateProjectMessageCollaborationModeAcceptsOnlyLegacyPublicModes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		req  CreateProjectMessageRequest
@@ -42,6 +44,7 @@ func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
 	}{
 		{name: "default", req: CreateProjectMessageRequest{CollaborationMode: "default"}, want: projectAssistantCollaborationModeDefault, ok: true},
 		{name: "plan", req: CreateProjectMessageRequest{CollaborationMode: "plan"}, want: projectAssistantCollaborationModePlan, ok: true},
+		{name: "review requires dedicated route", req: CreateProjectMessageRequest{CollaborationMode: "review"}},
 		{name: "unknown", req: CreateProjectMessageRequest{CollaborationMode: "adaptive"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,6 +59,28 @@ func TestCreateProjectMessageCollaborationModeAcceptsOnlyV2Modes(t *testing.T) {
 				t.Fatalf("collaborationMode = %q, nil; want validation error", got)
 			}
 		})
+	}
+}
+
+func TestAssistantThreadTurnPublicModeRejectsReview(t *testing.T) {
+	for _, mode := range []string{"review", " REVIEW "} {
+		_, err := (assistantThreadTurnCreateRequest{CollaborationMode: store.AssistantRunMode(mode)}).publicAssistantThreadTurnMode()
+		if err == nil || !strings.Contains(err.Error(), projectAssistantReviewDedicatedRouteMessage) {
+			t.Fatalf("public thread mode %q error = %v, want dedicated-review validation", mode, err)
+		}
+	}
+	for _, mode := range []store.AssistantRunMode{store.AssistantRunModeDefault, store.AssistantRunModePlan} {
+		got, err := (assistantThreadTurnCreateRequest{CollaborationMode: mode}).publicAssistantThreadTurnMode()
+		if err != nil || got != mode {
+			t.Fatalf("public thread mode %q = %q, %v; want accepted", mode, got, err)
+		}
+	}
+}
+
+func TestAssistantCollaborationModeForRunAcceptsPersistedReview(t *testing.T) {
+	got, ok := projectAssistantCollaborationModeForRun(store.AssistantRun{Mode: store.AssistantRunModeReview})
+	if !ok || got != projectAssistantCollaborationModeReview {
+		t.Fatalf("persisted review mode = %q, %v; want review, true", got, ok)
 	}
 }
 

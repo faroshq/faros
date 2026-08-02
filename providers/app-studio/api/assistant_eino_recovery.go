@@ -43,6 +43,11 @@ import (
 const (
 	projectEinoAssistantDefaultModelStreamIdleTimeout = 300 * time.Second
 	projectEinoAssistantDefaultModelMaxRetries        = 5
+	// Keep execution bounded even when settings bypass the HTTP/Secret parser.
+	// The normal App Studio configuration surface remains narrower, but retry
+	// policy must also be safe for internal callers that construct settings
+	// directly.
+	projectEinoAssistantMaxModelRetries = 100
 )
 
 type projectEinoAssistantModelTimeoutError struct {
@@ -386,6 +391,9 @@ func projectEinoAssistantModelMaxRetries(settings projectLLMSettings) int {
 	if maxRetries < 0 {
 		return 0
 	}
+	if maxRetries > projectEinoAssistantMaxModelRetries {
+		return projectEinoAssistantMaxModelRetries
+	}
 	return maxRetries
 }
 
@@ -473,6 +481,8 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 	recovery := ""
 	lowerReason := strings.ToLower(safeReason)
 	switch {
+	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "add file content cannot contain hunk headers or nested patch envelopes"):
+		recovery = " Recovery: return one outer *** Begin Patch / *** End Patch envelope. Put each Add File, Update File, or Delete File section directly inside it. Under Add File, emit only the new file content—no @@ lines and no nested Begin/End markers unless they are literal content lines prefixed with '+'. Every content line must begin with '+' (the parser strips it); encode literal marker-looking content as '+ *** Update File: example'."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, "numeric unified-diff hunk headers are not supported"):
 		recovery = " Recovery: this tool treats text after @@ as a literal source anchor. Retry with exactly @@ or @@ followed by an exact class/function line copied from the file; never use line coordinates such as @@ -12,4 +12,5 @@."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorContextNotFound)):
@@ -486,7 +496,7 @@ func projectEinoAssistantSafeToolFailureResult(toolName string, err error) strin
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorStrategyChange)):
 		recovery = " Recovery: reread the affected current source and submit a materially different patch; the same patch will not be dispatched again at this workspace revision."
 	case toolName == projectToolApplyPatch && strings.Contains(lowerReason, string(workspace.PatchErrorInvalidPatch)):
-		recovery = " Recovery: return one valid *** Begin Patch / *** End Patch envelope. Start with Add File, Update File, or Delete File; for a move, put Move to immediately below Update File for the old path."
+		recovery = " Recovery: return one valid *** Begin Patch / *** End Patch envelope. Every Add File content line must begin with '+' (the parser strips it); encode literal marker-looking content as '+ *** Update File: example'. Start with Add File, Update File, or Delete File; for a move, put Move to immediately below Update File for the old path."
 	}
 	if recovery == "" {
 		return truncateProjectToolInfo(prefix + safeReason)

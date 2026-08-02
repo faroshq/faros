@@ -20,7 +20,7 @@ export interface AssistantSnapshot {
 export interface AssistantRunStartRequest {
   content: string
   clientRequestID: string
-  collaborationMode: 'default' | 'plan'
+  collaborationMode: ProjectAssistantRunMode
   expectedRunID?: string
 }
 
@@ -52,7 +52,7 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
   }
 }
 
-export function assistantRunStartPayload(content: string, clientRequestID: string, collaborationMode: 'default' | 'plan' = 'default') {
+export function assistantRunStartPayload(content: string, clientRequestID: string, collaborationMode: ProjectAssistantRunMode = 'default') {
   return { content, clientRequestID, collaborationMode }
 }
 

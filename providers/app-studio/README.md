@@ -134,13 +134,17 @@ Admission and the terminal boundary share one lock, so late input is either
 queued or rejected for the next run, never acknowledged and lost. The active
 collaboration mode remains sticky.
 
-New assistant runs use one sticky collaboration mode: `Default` or `Plan`.
-`Plan` is read-only. `Default` follows the user's request directly and can use
-the current evidence tools and one contextual `apply_patch` source-mutation
-tool. The semantic action router, WorkItem promotion flow, phase-driven inner
-loop, whole-file write tools, and model-facing workspace hydration tool have
-been removed. The portal's explicit **Implement plan** action starts a fresh
-Default turn rather than silently changing the mode of a running turn.
+New assistant runs use one sticky collaboration mode: `Default`, `Plan`, or
+`Review`. `Plan` is read-only. `Review` is an explicitly started, independently
+durable read-only turn over the `current_workspace` target; clients start one
+with `POST .../assistant/threads/{thread}/reviews` and may provide bounded review
+instructions. It reports evidence-backed findings and is never an automatic
+completion gate. `Default` follows the user's request directly and can use the
+current evidence tools and one contextual `apply_patch` source-mutation tool.
+The semantic action router, WorkItem promotion flow, phase-driven inner loop,
+whole-file write tools, and model-facing workspace hydration tool have been
+removed. The portal's explicit **Implement plan** action starts a fresh Default
+turn rather than silently changing the mode of a running turn.
 
 The Thread/Turn/Item cutover intentionally starts with no canonical threads.
 Pre-cutover assistant history is not projected into the new public transcript.
@@ -158,6 +162,12 @@ result together with its typed semantic disposition. Model-call audit entries
 also bind the visible tool contracts to a stable schema digest. The ledger
 provides idempotency within the active run and between concurrent workers; it
 is not a provider-restart continuation mechanism.
+
+Transient setup failures and incomplete model streams retry from the current
+accepted turn history. Partial responses are discarded before tools can be
+dispatched or prose published. The configured retry count is bounded at the
+execution boundary with a hard maximum of 100, independently of HTTP settings
+validation; exhaustion returns the original classified stream failure.
 
 The encrypted, append-only thread event stream records user and assistant items,
 tool calls, plans, steering, approval/input requests, and lifecycle transitions.

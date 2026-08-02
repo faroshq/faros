@@ -167,6 +167,22 @@ func (s *encryptedStore) UpdateAssistantThread(ctx context.Context, scope Scope,
 	return s.inner.UpdateAssistantThread(ctx, scope, thread)
 }
 
+func (s *encryptedStore) UpdateAssistantThreadWithEvent(ctx context.Context, scope Scope, thread AssistantThread, event AssistantThreadEvent, expectedSequence int64) (AssistantThread, AssistantThreadEvent, error) {
+	event.ThreadID = thread.ID
+	encrypted, err := s.encryptAssistantThreadEvent(scope, event)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	updated, created, err := s.inner.UpdateAssistantThreadWithEvent(ctx, scope, thread, encrypted, expectedSequence)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	if err := s.decryptAssistantThreadEvent(scope, &created); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	return updated, created, nil
+}
+
 func (s *encryptedStore) CreateAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error) {
 	var err error
 	turn, err = s.encryptAssistantTurn(scope, turn)

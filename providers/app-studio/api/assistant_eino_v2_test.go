@@ -628,6 +628,9 @@ func TestInitialProjectPlanProgressBoundsLabelsForDurablePresentation(t *testing
 	if !projectAssistantPlanSnapshotValid(progress) {
 		t.Fatalf("initial plan progress = %#v, want valid durable metadata", progress)
 	}
+	if progress.Steps[0].Status != "in_progress" || progress.Steps[1].Status != "pending" {
+		t.Fatalf("initial plan statuses = %#v, want first step active", progress.Steps)
+	}
 	if got := progress.Steps[1].Content; len(got) > projectEinoAssistantTodoProgressMaxLabelBytes || !strings.HasSuffix(got, "...") {
 		t.Fatalf("bounded plan label = %q (%d bytes)", got, len(got))
 	}

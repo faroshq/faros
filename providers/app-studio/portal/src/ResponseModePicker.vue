@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { Check, ChevronDown, ClipboardList, Sparkles } from 'lucide-vue-next'
+import { Check, ChevronDown, ClipboardList, SearchCheck, Sparkles } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-export type AssistantResponseMode = 'default' | 'plan'
+export type AssistantResponseMode = 'default' | 'plan' | 'review'
 
 const props = defineProps<{
   mode: AssistantResponseMode
@@ -17,6 +17,7 @@ const root = ref<HTMLElement | null>(null)
 const open = ref(false)
 const modeLabel = computed(() => {
   if (props.mode === 'plan') return 'Plan'
+  if (props.mode === 'review') return 'Review'
   return 'Default'
 })
 
@@ -58,6 +59,7 @@ onBeforeUnmount(() => {
       @click="open = !open"
     >
       <ClipboardList v-if="mode === 'plan'" class="h-3.5 w-3.5 shrink-0" :stroke-width="1.75" />
+      <SearchCheck v-else-if="mode === 'review'" class="h-3.5 w-3.5 shrink-0" :stroke-width="1.75" />
       <Sparkles v-else class="h-3.5 w-3.5 shrink-0" :stroke-width="1.75" />
       <span class="truncate">{{ modeLabel }}</span>
       <ChevronDown class="h-3 w-3 shrink-0 transition" :class="{ 'rotate-180': open }" :stroke-width="1.75" />
@@ -96,6 +98,19 @@ onBeforeUnmount(() => {
           <span class="mt-0.5 block text-[12px] leading-4 text-text-muted">Investigate and produce a plan without changing the project.</span>
         </span>
         <Check v-if="mode === 'plan'" class="mt-0.5 h-4 w-4 shrink-0 text-text-secondary" :stroke-width="1.75" />
+      </button>
+      <button
+        type="button"
+        :aria-pressed="mode === 'review'"
+        class="flex w-full items-start gap-3 rounded-xl px-2 py-2 text-left transition hover:bg-surface-hover"
+        @click="chooseMode('review')"
+      >
+        <SearchCheck class="mt-0.5 h-4 w-4 shrink-0 text-text-secondary" :stroke-width="1.75" />
+        <span class="min-w-0 flex-1">
+          <span class="block text-[13px] font-medium text-text-primary">Review</span>
+          <span class="mt-0.5 block text-[12px] leading-4 text-text-muted">Inspect the current workspace and report prioritized findings without changing it.</span>
+        </span>
+        <Check v-if="mode === 'review'" class="mt-0.5 h-4 w-4 shrink-0 text-text-secondary" :stroke-width="1.75" />
       </button>
     </div>
   </div>

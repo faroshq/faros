@@ -72,6 +72,7 @@ type projectAssistantSupervisedRun struct {
 	// Production leaves it nil.
 	beforeTextFlushPersist func()
 	workerStarted          bool
+	queuedContinuation     func(context.Context, *projectAssistantSnapshotAccumulator)
 	steering               chan projectAssistantSteeringInput
 	steeringReceipts       map[string]store.Message
 	acceptingSteering      bool
@@ -655,6 +656,19 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 	s.mu.Lock()
 	active := s.runs[acc.key]
 	if active.workerStarted {
+		// A permission/input snapshot becomes externally actionable as soon as
+		// it is durable, just before the segment goroutine runs its deferred
+		// finish. An approval arriving in that narrow handoff window must not be
+		// rejected as a duplicate worker: reserve exactly one continuation and
+		// let finish transfer ownership without overlapping the Eino segments.
+		if active.queuedContinuation == nil &&
+			(active.run.Status == store.AssistantRunStatusPendingPermission || active.run.Status == store.AssistantRunStatusPendingInput) {
+			active.queuedContinuation = worker
+			queuedRun := active.run
+			s.mu.Unlock()
+			s.log("resume_queued", scope, queuedRun)
+			return nil
+		}
 		s.mu.Unlock()
 		return store.ErrAssistantRunConflict
 	}
@@ -675,16 +689,37 @@ func (s *projectAssistantSupervisor) Start(_ context.Context, scope store.Scope,
 
 func (s *projectAssistantSupervisor) finish(key projectAssistantRunKey, runID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if active := s.runs[key]; active != nil && active.run.ID == runID {
-		// Permission/input checkpoints deliberately retain the in-memory
-		// snapshot, but no worker owns them once the Eino segment returns.
-		active.workerStarted = false
-		active.acceptingSteering = false
-		if assistantRunTerminal(active.run.Status) {
-			delete(s.runs, key)
-		}
+	active := s.runs[key]
+	if active == nil || active.run.ID != runID {
+		s.mu.Unlock()
+		return
 	}
+	if continuation := active.queuedContinuation; continuation != nil &&
+		(active.run.Status == store.AssistantRunStatusPendingPermission || active.run.Status == store.AssistantRunStatusPendingInput) {
+		active.queuedContinuation = nil
+		active.acceptingSteering = true
+		workerCtx, cancel := context.WithCancelCause(s.ctx)
+		active.cancel = cancel
+		acc := &projectAssistantSnapshotAccumulator{supervisor: s, key: key, runID: runID}
+		run := active.run
+		scope := active.scope
+		s.mu.Unlock()
+		s.log("resume_start", scope, run)
+		go func() {
+			defer s.finish(key, runID)
+			continuation(workerCtx, acc)
+		}()
+		return
+	}
+	// Permission/input checkpoints deliberately retain the in-memory
+	// snapshot, but no worker owns them once the Eino segment returns.
+	active.queuedContinuation = nil
+	active.workerStarted = false
+	active.acceptingSteering = false
+	if assistantRunTerminal(active.run.Status) {
+		delete(s.runs, key)
+	}
+	s.mu.Unlock()
 }
 
 func assistantRunTerminal(status store.AssistantRunStatus) bool {

@@ -167,6 +167,58 @@ func (s *PostgresStore) UpdateAssistantThread(ctx context.Context, scope Scope, 
 	return prepared, nil
 }
 
+func (s *PostgresStore) UpdateAssistantThreadWithEvent(ctx context.Context, scope Scope, thread AssistantThread, event AssistantThreadEvent, expectedSequence int64) (AssistantThread, AssistantThreadEvent, error) {
+	if err := scope.validate(); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	prepared, err := prepareAssistantThread(thread)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	event.ThreadID = prepared.ID
+	preparedEvent, err := prepareAssistantThreadEvent(event)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("begin update assistant thread with event: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, assistantThreadLockKey(scope, prepared.ID)); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("lock assistant thread projection: %w", err)
+	}
+	var current int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM app_studio_assistant_thread_events
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND thread_id=$5`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, prepared.ID).Scan(&current); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("read assistant thread projection sequence: %w", err)
+	}
+	if current != expectedSequence {
+		return AssistantThread{}, AssistantThreadEvent{}, ErrAssistantThreadEventConflict
+	}
+	row := tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_threads SET title=$6,status=$7,updated_at=$8
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND thread_id=$5 AND actor_id=$9
+		RETURNING created_at`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, prepared.ID,
+		prepared.Title, prepared.Status, prepared.UpdatedAt, prepared.ActorID)
+	if err := row.Scan(&prepared.CreatedAt); errors.Is(err, sql.ErrNoRows) {
+		return AssistantThread{}, AssistantThreadEvent{}, ErrAssistantThreadNotFound
+	} else if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("update assistant thread with event: %w", err)
+	}
+	prepared.CreatedAt = prepared.CreatedAt.UTC()
+	preparedEvent.Sequence = current + 1
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_thread_events (
+		org_uuid,workspace_uuid,project_name,project_uid,thread_id,turn_id,sequence,event_type,item_id,request_id,payload,created_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		preparedEvent.ThreadID, preparedEvent.TurnID, preparedEvent.Sequence, preparedEvent.Type, preparedEvent.ItemID, preparedEvent.RequestID, preparedEvent.Payload, preparedEvent.CreatedAt); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("append assistant thread projection event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, fmt.Errorf("commit assistant thread projection: %w", err)
+	}
+	return prepared, preparedEvent, nil
+}
+
 func (s *PostgresStore) CreateAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error) {
 	if err := scope.validate(); err != nil {
 		return AssistantTurn{}, err

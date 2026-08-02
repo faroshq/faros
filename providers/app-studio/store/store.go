@@ -84,6 +84,7 @@ type AssistantApprovalMode string
 const (
 	AssistantRunModeDefault AssistantRunMode = "default"
 	AssistantRunModePlan    AssistantRunMode = "plan"
+	AssistantRunModeReview  AssistantRunMode = "review"
 )
 
 const (
@@ -180,6 +181,10 @@ type Store interface {
 	GetAssistantThread(ctx context.Context, scope Scope, threadID string) (AssistantThread, error)
 	ListAssistantThreads(ctx context.Context, scope Scope, actorID string, includeArchived bool, limit int, cursor string) (AssistantThreadPage, error)
 	UpdateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread) (AssistantThread, error)
+	// UpdateAssistantThreadWithEvent commits a thread projection change and its
+	// canonical event in one store transaction. expectedSequence protects the
+	// append-only stream from a concurrent writer.
+	UpdateAssistantThreadWithEvent(ctx context.Context, scope Scope, thread AssistantThread, event AssistantThreadEvent, expectedSequence int64) (AssistantThread, AssistantThreadEvent, error)
 	CreateAssistantTurn(ctx context.Context, scope Scope, turn AssistantTurn, events []AssistantThreadEvent) (AssistantTurn, error)
 	GetAssistantTurn(ctx context.Context, scope Scope, threadID, turnID string) (AssistantTurn, error)
 	FindAssistantTurnByClientUserMessageID(ctx context.Context, scope Scope, threadID, clientUserMessageID string) (AssistantTurn, error)

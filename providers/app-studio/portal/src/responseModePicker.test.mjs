@@ -22,12 +22,14 @@ test('renders the current response mode as an accessible composer control', asyn
   assert.match(html, />Default</)
 })
 
-test('provides only explicit default and read-only plan choices in one responsive popover', async () => {
+test('provides explicit default, plan, and review choices in one responsive popover', async () => {
   const source = await readFile(new URL('./ResponseModePicker.vue', import.meta.url), 'utf8')
   assert.match(source, /How should App Studio respond\?/)
   assert.match(source, /chooseMode\('default'\)/)
   assert.match(source, /chooseMode\('plan'\)/)
+	assert.match(source, /chooseMode\('review'\)/)
   assert.match(source, /produce a plan without changing the project/)
+	assert.match(source, /report prioritized findings without changing it/)
   assert.doesNotMatch(source, /chooseMode\('build'\)/)
   assert.doesNotMatch(source, /chooseMode\('auto'\)/)
   assert.match(source, /if \(!open\.value \|\| event\.key !== 'Escape'\) return/)

@@ -128,7 +128,9 @@ test('first-project pending submission matches the project/message handoff into 
 test('message retry identity is bound to the requested operation', () => {
   const normal = { content: 'ship it', collaborationMode: 'default' }
   const plan = { content: 'ship it', collaborationMode: 'plan' }
+  const review = { content: 'check it', collaborationMode: 'review' }
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', plan))
+  assert.notEqual(state.assistantRunStartFingerprint('demo', plan), state.assistantRunStartFingerprint('demo', review))
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('other', normal))
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', { ...normal, content: 'different' }))
 })

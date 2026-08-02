@@ -26,7 +26,12 @@ export interface ProjectMessage {
 
 export type ProjectAssistantRunStatus = 'pending_permission' | 'pending_input' | 'running' | 'stopping' | 'completed' | 'failed' | 'interrupted' | 'aborted'
 export type ProjectAssistantAbortReason = 'interrupted' | 'replaced' | 'budget_limited' | 'iteration_limited'
-export type ProjectAssistantRunMode = 'default' | 'plan'
+export type ProjectAssistantRunMode = 'default' | 'plan' | 'review'
+
+export interface ProjectAssistantReviewTarget {
+  type: 'current_workspace'
+  instructions?: string
+}
 export type ProjectAssistantApprovalMode = 'on_request' | 'always_ask' | 'never'
 
 export interface ProjectAssistantApprovalPreference {

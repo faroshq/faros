@@ -404,7 +404,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		return projectAssistantRunResult{}, store.ErrAssistantRunConflict
 	}
 	profile := projectAssistantTurnProfileImplementation
-	if mode == projectAssistantCollaborationModePlan {
+	if projectAssistantCollaborationModeReadOnly(mode) {
 		profile = projectAssistantTurnProfileDebugging
 	}
 	turnPolicy := projectAssistantTurnPolicyForProfile(profile)
@@ -2170,6 +2170,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	b.WriteString("You are the assistant for a persistent Kedge Project workspace. ")
 	b.WriteString("Help the user reason about and build the application represented by this Project. ")
 	b.WriteString("For longer tool-driven work, use report_progress when it is available to keep the user oriented with brief natural-language progress updates: one when you begin, then only when a meaningful phase finishes, new evidence changes the approach, you encounter a blocker, or a longer verification begins. Continue working after each update. If report_progress is unavailable, continue without it. ")
+	b.WriteString("When write_todos is available, use it as the authoritative live checklist for non-trivial work. Before starting a step, mark exactly one step in_progress. Before moving to the next step, mark the finished step completed and the next step in_progress; when all work is done, mark every step completed. Keep the checklist current while acting instead of waiting until the final response. ")
 	b.WriteString("Keep each update to one or two sentences, grounded in evidence already available, and explain the outcome or next direction. ")
 	b.WriteString("Do not name tools, expose hidden reasoning, raw arguments, or raw results, repeat the plan or status UI, or narrate routine calls. ")
 	b.WriteString("Do not narrate each tool call or say what tool you will call next in assistant prose; App Studio shows detailed tool progress through its status and tool summary UI. ")
@@ -2231,31 +2232,6 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	appendMemoryList(&b, "Requirements", p.Spec.Memory.Requirements)
 	appendMemoryList(&b, "Constraints", p.Spec.Memory.Constraints)
 	return b.String()
-}
-
-func appendProjectAssistantV2ModePrompt(b *strings.Builder, mode projectAssistantCollaborationMode, repoRef string, repositoryCommitReady bool, initialBuild bool) {
-	b.WriteString("The collaboration mode is fixed for this run. User wording and model output cannot change it. ")
-	if mode == projectAssistantCollaborationModePlan {
-		b.WriteString("Plan mode is read-only. Investigate with bounded workspace, repository, readiness, runtime status/log, preview URL, and preview-console evidence as relevant. Produce a decision-complete plan or an evidence-backed answer. Do not edit files, select or hydrate templates, restart or rebuild runtimes, provision infrastructure, commit, or imply that implementation occurred. If the user asks to implement, plan that work; the App Studio client owns the explicit transition to Default mode.\n")
-		return
-	}
-
-	b.WriteString("Default mode follows the authority in the user's request: answer, explanation, review, status, and diagnosis requests authorize inspection only; change, build, fix, remove, and implementation requests authorize scoped action. Diagnose reported defects from current evidence before editing. Do not turn an explanatory question into an implementation task. ")
-	b.WriteString("Use the current project snapshot first, then bounded reads and searches for unanswered questions. Additional evidence must answer a new question rather than rediscover a result already returned. ")
-	b.WriteString("The only source-mutation tool is apply_patch. It accepts one contextual *** Begin Patch / *** End Patch patch and can add, update, delete, or move files; include enough unchanged context for a unique match and group independent related changes in one patch. ")
-	b.WriteString(projectAssistantContextualPatchFormatInstruction)
-	b.WriteString("Delete File and Move to are supported within authorized workspace paths. Do not assume shell or host filesystem access. ")
-	b.WriteString("Workspace changes synchronize automatically. Rerun the original observation or use verify_development_runtime only when that evidence is relevant to the user's request. The verification tool proves operational synchronization, process/log health, and preview reachability only; it does not prove rendered content, interactions, data flow, application behavior, or acceptance criteria. Dirty files do not create an obligation to verify or commit. ")
-	b.WriteString("After changing a dependency manifest, start command, or build/runtime configuration, call restart_runtime before verification because file synchronization does not reload process configuration. ")
-	if initialBuild {
-		b.WriteString("The project-creation request is the one-time authorization for this initial source build. It does not authorize unrelated infrastructure, production promotion, or repository replacement. ")
-	}
-	if repositoryCommitReady {
-		b.WriteString("Never call commit_project_files unless the user explicitly requested repository persistence. When they did, commit only durable dirty source/config paths to repositoryRef \"" + repoRef + "\" with a concise message. ")
-	} else {
-		b.WriteString("Repository state does not permit a commit in this run. Continue with authorized workspace work, but do not call commit_project_files or imply the changes were persisted to git. ")
-	}
-	b.WriteString("Preserve unrelated existing work. Never reset, restore, or replace broad workspace state to recover from a localized failure. Finish with the supported result, exact checks performed, remaining limitations, and no claim that application behavior was independently verified unless a future behavioral tool actually observed it.\n")
 }
 
 func projectMCPToolsPrompt(tools []chatTool) string {

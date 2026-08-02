@@ -400,6 +400,14 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 	}
 	name := projectToolBaseName(toolCtx.Name)
 	return func(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+		var planProgress projectAssistantPlanSnapshot
+		if name == projectEinoAssistantWriteTodosTool {
+			var planErr error
+			planProgress, planErr = projectEinoAssistantPlanProgressFromWriteTodos(argumentsInJSON)
+			if planErr != nil {
+				return "", planErr
+			}
+		}
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
 			if name == projectToolVerifyDevelopmentRuntime && m.runState != nil {
@@ -415,6 +423,9 @@ func (m *projectEinoAssistantLifecycle) WrapInvokableToolCall(
 			return result, err
 		}
 		succeeded := m.toolCallSucceeded(ctx, name, result)
+		if name == projectEinoAssistantWriteTodosTool && succeeded {
+			projectEinoAssistantPublishPlanProgress(m.runState, m.req.StreamCallbacks, planProgress)
+		}
 		switch {
 		case name == projectToolVerifyDevelopmentRuntime:
 			if m.runState != nil {
@@ -461,7 +472,7 @@ func (m *projectEinoAssistantLifecycle) completeExecutionPlan() {
 	if m == nil || m.runState == nil {
 		return
 	}
-	m.runState.CompleteExecutionPlan()
+	projectEinoAssistantPublishCompletedExecutionPlan(m.runState, m.req.StreamCallbacks)
 }
 
 func (m *projectEinoAssistantLifecycle) WrapEnhancedInvokableToolCall(

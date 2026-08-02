@@ -142,6 +142,9 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	if err := ensureSchemaVersion(ctx, tx, assistantApprovalPolicySchemaVersion, assistantApprovalPolicySchemaStatements()...); err != nil {
 		return err
 	}
+	if err := ensureSchemaVersion(ctx, tx, assistantReviewModeSchemaVersion, assistantReviewModeSchemaStatements()...); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
@@ -185,7 +188,7 @@ func assistantThreadSchemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS app_studio_assistant_turns (
 			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
 			thread_id text NOT NULL, turn_id text NOT NULL, actor_id text NOT NULL, client_user_message_id text NOT NULL,
-			mode text NOT NULL CHECK (mode IN ('default','plan')),
+			mode text NOT NULL CHECK (mode IN ('default','plan','review')),
 			approval_mode text NOT NULL CHECK (approval_mode IN ('on_request','always_ask','never')),
 			status text NOT NULL CHECK (status IN ('in_progress','completed','interrupted','failed')),
 			checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb, terminal_error jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -239,7 +242,7 @@ func assistantSchemaStatements() []string {
 		`CREATE INDEX IF NOT EXISTS app_studio_messages_created_idx ON app_studio_messages (created_at)`,
 		`CREATE TABLE IF NOT EXISTS app_studio_assistant_runs (
 			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
-			run_id text NOT NULL, mode text NOT NULL CHECK (mode IN ('default', 'plan')),
+			run_id text NOT NULL, mode text NOT NULL CHECK (mode IN ('default', 'plan', 'review')),
 			approval_mode text NOT NULL DEFAULT 'auto_approve' CHECK (approval_mode IN ('always_ask', 'auto_approve')),
 			status text NOT NULL, client_request_id text NOT NULL DEFAULT '', user_message_id text NOT NULL DEFAULT '',
 			active_message_id text NOT NULL DEFAULT '', revision bigint NOT NULL DEFAULT 0, request_id text NOT NULL DEFAULT '',

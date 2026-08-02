@@ -89,7 +89,11 @@ import {
   type WorkbenchTabDropPlacement,
   type WorkbenchTabDescriptor,
 } from './workbench'
-import { developmentPreviewDisplayPhase, developmentPreviewSyncStatus } from './previewState'
+import {
+  developmentPreviewDisplayPhase,
+  developmentPreviewShouldRefreshOnWake,
+  developmentPreviewSyncStatus,
+} from './previewState'
 import { PreviewConsoleController } from './previewConsole'
 import type {
   DevelopmentTemplate,
@@ -2259,12 +2263,15 @@ async function authorizeDevelopmentPreview(options: { force?: boolean } = {}) {
   } catch (e) {
     if (serial !== developmentPreviewAuthorizationSerial || selected.value?.name !== projectName) return
     developmentPreviewOverrideURL.value = null
-    developmentPreviewAuthorizationKey.value = ''
+    developmentPreviewAuthorizationKey.value = key
     developmentPreviewTokenExpiresAt.value = ''
     developmentPreviewReadinessMessage.value = null
     clearDevelopmentPreviewAuthorizationRetry()
     clearDevelopmentPreviewAuthorizationRenewal()
     developmentPreviewAuthorizationError.value = e instanceof Error ? e.message : String(e)
+    if (developmentPreviewAuthorizationRetryable(e)) {
+      scheduleDevelopmentPreviewAuthorizationRetry(projectName, key)
+    }
   } finally {
     if (serial === developmentPreviewAuthorizationSerial) developmentPreviewAuthorizing.value = false
   }
@@ -2353,7 +2360,7 @@ function projectDevelopmentPreviewString(result: unknown, key: 'message' | 'reas
 }
 
 function handleDevelopmentPreviewFrameLoad() {
-  refreshDevelopmentPreviewAuthorizationIfExpiring()
+  refreshDevelopmentPreviewAuthorizationIfNeeded()
   const projectName = selected.value?.name
   if (projectName) void previewConsoleController.connect(projectName)
 }
@@ -2363,20 +2370,23 @@ function handleDevelopmentPreviewVisibilityChange() {
 }
 
 function handleDevelopmentPreviewAuthorizationWake() {
-  refreshDevelopmentPreviewAuthorizationIfExpiring()
+  refreshDevelopmentPreviewAuthorizationIfNeeded()
 }
 
-function refreshDevelopmentPreviewAuthorizationIfExpiring() {
+function refreshDevelopmentPreviewAuthorizationIfNeeded() {
   const projectName = selected.value?.name
-  const key = developmentPreviewAuthorizationKey.value
-  if (!projectName || !key || !developmentPreviewNeedsAuthorization.value || developmentPreviewAuthorizing.value) return
-  if (!developmentPreviewTokenExpiresSoon()) return
+  if (!projectName || !developmentPreviewShouldRefreshOnWake({
+    needsAuthorization: developmentPreviewNeedsAuthorization.value,
+    authorizing: developmentPreviewAuthorizing.value,
+    previewURL: developmentPreviewURL.value,
+    authorizationError: developmentPreviewAuthorizationError.value || '',
+    tokenExpiresAt: developmentPreviewTokenExpiresAt.value,
+  }, Date.now(), DEVELOPMENT_PREVIEW_AUTH_RENEWAL_SKEW_MS)) return
   void authorizeDevelopmentPreview({ force: true })
 }
 
-function developmentPreviewTokenExpiresSoon(): boolean {
-  const expiresMs = Date.parse(developmentPreviewTokenExpiresAt.value)
-  return Number.isFinite(expiresMs) && expiresMs <= Date.now() + DEVELOPMENT_PREVIEW_AUTH_RENEWAL_SKEW_MS
+function developmentPreviewAuthorizationRetryable(error: unknown): boolean {
+  return !(error instanceof ProjectAPIRequestError) || error.status === 408 || error.status === 429 || error.status >= 500
 }
 
 function resetWorkbench() {
@@ -2575,11 +2585,16 @@ async function sendMessage() {
         assistantThreads.value = [thread, ...assistantThreads.value]
         activeAssistantThreadID.value = thread.id
       }
-      const canonical = await api.startAssistantTurn(props.ctx, projectName, thread.id, {
-        content,
-        clientUserMessageID: clientRequestID,
-        collaborationMode: startOperation.collaborationMode,
-      })
+      const canonical = startOperation.collaborationMode === 'review'
+        ? await api.startAssistantReview(props.ctx, projectName, thread.id, {
+            clientUserMessageID: clientRequestID,
+            target: { type: 'current_workspace', instructions: content },
+          })
+        : await api.startAssistantTurn(props.ctx, projectName, thread.id, {
+            content,
+            clientUserMessageID: clientRequestID,
+            collaborationMode: startOperation.collaborationMode,
+          })
       const items = await api.listAssistantThreadItems(props.ctx, projectName, thread.id)
       activeAssistantThreadSequence = maxAssistantThreadSequence(items)
       const userItem = [...items].reverse().find((item) => item.turnID === canonical.turn.id && item.type === 'userMessage')

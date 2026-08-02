@@ -806,6 +806,58 @@ func TestProjectAssistantSupervisorQueuesSteeringWhilePermissionIsPending(t *tes
 	}
 }
 
+func TestProjectAssistantSupervisorQueuesApprovalDuringPendingWorkerHandoff(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "test-project-uid-demo"}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-1", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusRunning, ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "test-user", Content: "restart it", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	created, err := memoryStore.CreateAssistantRun(context.Background(), scope, user, assistant, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pendingPublished := make(chan struct{})
+	releasePendingWorker := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
+		if err := accumulator.UpdateRun(ctx, func(current *store.AssistantRun) {
+			current.Status = store.AssistantRunStatusPendingPermission
+			current.RequestID = "perm-1"
+		}); err != nil {
+			t.Errorf("publish pending approval: %v", err)
+		}
+		close(pendingPublished)
+		<-releasePendingWorker
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-pendingPublished
+
+	resumed := make(chan struct{})
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(context.Context, *projectAssistantSnapshotAccumulator) {
+		close(resumed)
+	}); err != nil {
+		t.Fatalf("queue approval during worker handoff: %v", err)
+	}
+	select {
+	case <-resumed:
+		t.Fatal("resumed worker overlapped the pending worker")
+	default:
+	}
+	if err := supervisor.Start(context.Background(), scope, created, assistant, func(context.Context, *projectAssistantSnapshotAccumulator) {}); !errors.Is(err, store.ErrAssistantRunConflict) {
+		t.Fatalf("duplicate queued approval error = %v, want conflict", err)
+	}
+
+	close(releasePendingWorker)
+	select {
+	case <-resumed:
+	case <-time.After(time.Second):
+		t.Fatal("queued approval did not acquire worker ownership")
+	}
+}
+
 func TestProjectAssistantSupervisorClaimPublishesRunningRevision(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	supervisor := newProjectAssistantSupervisor(context.Background(), memoryStore)
@@ -1087,7 +1139,7 @@ func TestWriteProjectAssistantRunStartFindsOriginatingUserBeyondFirstFiveHundred
 	}
 }
 
-func TestProjectAssistantRunStartDoesNotTurnInitialBootstrapIntoPlanAuthority(t *testing.T) {
+func TestProjectAssistantThreadStartConsumesServerOwnedInitialBootstrap(t *testing.T) {
 	settings := projectLLMSettings{Provider: defaultProjectLLMProvider, BaseURL: defaultProjectLLMBaseURL, Model: "test-model", APIKey: "test-key"}
 	secret, err := json.Marshal(projectLLMSettingsSecret(settings).Object)
 	if err != nil {
@@ -1143,8 +1195,11 @@ func TestProjectAssistantRunStartDoesNotTurnInitialBootstrapIntoPlanAuthority(t 
 	post("thread-1", `{"content":"build a todo app","clientUserMessageID":"request-1","collaborationMode":"default"}`)
 	select {
 	case request := <-engine.requests:
-		if request.InitialApprovedPlan != nil {
-			t.Fatalf("initial bootstrap became plan authority: %#v", request.InitialApprovedPlan)
+		if request.InitialApprovedPlan == nil ||
+			!request.InitialApprovedPlan.RunLocal ||
+			request.InitialApprovedPlan.ApprovalTool != "project_create_prompt" ||
+			request.InitialApprovedPlan.Goal != "build a todo app" {
+			t.Fatalf("initial bootstrap authority = %#v", request.InitialApprovedPlan)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first durable run did not reach assistant engine")
@@ -1331,6 +1386,10 @@ func TestProjectAssistantThreadMirrorPublishesPendingApproval(t *testing.T) {
 	}
 	createAssistantThreadForHTTPTest(t, memoryStore, scope, "thread-approval", "test-user")
 	createAssistantTurnForHTTPTest(t, memoryStore, scope, "thread-approval", run)
+	canonicalTurn, err := memoryStore.GetAssistantTurn(context.Background(), scope, "thread-approval", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pendingPublished := make(chan struct{})
 	publishInterrupt := make(chan struct{})
 	if err := server.projectAssistantSupervisor().Start(context.Background(), scope, run, message, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
@@ -1365,7 +1424,7 @@ func TestProjectAssistantThreadMirrorPublishesPendingApproval(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	go server.mirrorAssistantRunIntoThread(scope, "thread-approval", store.AssistantTurn{ID: run.ID, ThreadID: "thread-approval"}, run)
+	go server.mirrorAssistantRunIntoThread(scope, "thread-approval", canonicalTurn, run)
 	select {
 	case <-pendingPublished:
 	case <-time.After(time.Second):
@@ -1511,6 +1570,9 @@ func TestProjectAssistantSupervisorWorkerPersistsPlanSnapshots(t *testing.T) {
 	}
 	if got := live.Message.Metadata[projectAssistantMetadataPlan]; !reflect.DeepEqual(got, latestPlan) {
 		t.Fatalf("live plan = %#v, want latest %#v", got, latestPlan)
+	}
+	if got := live.Message.Metadata[projectAssistantMetadataWorkingStatus]; got != "Building · 1 of 2 steps" {
+		t.Fatalf("live plan status = %#v, want synchronized completed count", got)
 	}
 	if live.Run.Revision <= 1 {
 		t.Fatalf("live revision = %d, want greater than initial revision", live.Run.Revision)
@@ -1694,6 +1756,9 @@ func TestProjectAssistantSupervisorResumesFreeTextAndPersistsLatestPlanSnapshot(
 	}
 	if !reflect.DeepEqual(live.Message.Metadata[projectAssistantMetadataPlan], latestPlan) {
 		t.Fatalf("live plan = %#v, want latest %#v", live.Message.Metadata[projectAssistantMetadataPlan], latestPlan)
+	}
+	if got := live.Message.Metadata[projectAssistantMetadataWorkingStatus]; got != "Building · 1 of 2 steps" {
+		t.Fatalf("resumed live plan status = %#v, want synchronized completed count", got)
 	}
 	if live.Run.Revision <= run.Revision {
 		t.Fatalf("live revision = %d, want greater than initial revision %d", live.Run.Revision, run.Revision)

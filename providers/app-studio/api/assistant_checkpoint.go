@@ -937,6 +937,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				}
 				syncSteeringSegment()
 				metadataState.plan = &plan
+				metadataState.status = projectEinoAssistantPlanProgressStatus(plan)
 				persistMetadata(ctx, nil)
 			},
 			OnToolCall: func(toolCall projectToolCallStreamEvent) {

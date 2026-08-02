@@ -159,24 +159,6 @@ func projectEinoAssistantFilterPreviewInspection(tools []projectAssistantTool, i
 	return out
 }
 
-func projectAssistantToolsForCollaborationMode(tools []projectAssistantTool, mode projectAssistantCollaborationMode) []projectAssistantTool {
-	out := make([]projectAssistantTool, 0, len(tools))
-	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		spec := tool.Spec()
-		if mode == projectAssistantCollaborationModeDefault && spec.Risk == projectAssistantToolRiskInput {
-			continue
-		}
-		if mode == projectAssistantCollaborationModePlan && projectAssistantToolHasEffect(spec) {
-			continue
-		}
-		out = append(out, tool)
-	}
-	return out
-}
-
 func projectAssistantTurnPolicyCanUseMCP(policy projectAssistantTurnPolicy, _ projectAssistantRunRequest) bool {
 	for _, name := range []string{
 		projectToolInfrastructureListTemplates,
@@ -382,9 +364,9 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 		}
 		return t.finishDurableToolRequestResult(ctx, requestDecision, spec.Name, result)
 	}
-	if t.req.CollaborationMode == projectAssistantCollaborationModePlan &&
+	if projectAssistantCollaborationModeReadOnly(t.req.CollaborationMode) &&
 		projectAssistantToolHasEffect(spec) {
-		reason := "Plan mode is read-only; start a new Default turn to implement the plan"
+		reason := "this collaboration mode is read-only; start a new Default turn to make changes"
 		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
 		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
 	}
@@ -678,7 +660,7 @@ func (t projectEinoAssistantTool) recoverV2CommitSettlement(
 			cancelSettlement()
 		}
 		t.runState.RecordSourceCommit(workspaceDigest)
-		t.runState.CompleteExecutionPlan()
+		projectEinoAssistantPublishCompletedExecutionPlan(t.runState, t.req.StreamCallbacks)
 		if settlementBlocker != "" {
 			// The repository effect and durable ledger outcome remain successful,
 			// so never expose a tool error that could provoke a second commit ID.
@@ -1147,13 +1129,7 @@ func (t projectEinoAssistantTool) invokeInitialProjectPlanTool(
 	}
 	t.runState.SetExecutionPlan(plan)
 	initialProgress := projectAssistantInitialPlanProgress(plan)
-	t.runState.SetPlanProgress(initialProgress)
-	if t.req.StreamCallbacks.OnPlan != nil {
-		t.req.StreamCallbacks.OnPlan(initialProgress)
-	}
-	if t.req.StreamCallbacks.OnStatus != nil {
-		t.req.StreamCallbacks.OnStatus("Building · 0 of " + fmt.Sprintf("%d", len(plan.Steps)) + " steps")
-	}
+	projectEinoAssistantPublishPlanProgress(t.runState, t.req.StreamCallbacks, initialProgress)
 
 	raw, err := json.Marshal(map[string]any{
 		"status":             "defined",
@@ -1194,12 +1170,16 @@ func projectAssistantInitialPlanProgress(plan projectAssistantApprovedPlan) proj
 	progress := projectAssistantPlanSnapshot{
 		Steps: make([]projectAssistantPlanStep, 0, len(plan.Steps)),
 	}
-	for _, step := range plan.Steps {
+	for index, step := range plan.Steps {
 		label := projectEinoAssistantTodoProgressLabel(step)
+		status := "pending"
+		if index == 0 {
+			status = "in_progress"
+		}
 		progress.Steps = append(progress.Steps, projectAssistantPlanStep{
 			Content:    label,
 			ActiveForm: label,
-			Status:     "pending",
+			Status:     status,
 		})
 	}
 	return progress

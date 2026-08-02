@@ -718,8 +718,8 @@ func validateNewAssistantRun(user, assistant Message, run AssistantRun) error {
 }
 
 func validateAssistantRunMode(run AssistantRun) error {
-	if run.Mode != AssistantRunModeDefault && run.Mode != AssistantRunModePlan {
-		return fmt.Errorf("assistant run mode must be default or plan")
+	if !assistantRunModeValid(run.Mode) {
+		return fmt.Errorf("assistant run mode must be default, plan, or review")
 	}
 	return nil
 }

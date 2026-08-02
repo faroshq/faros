@@ -488,6 +488,8 @@ func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) 
 	if !strings.Contains(prompt, "use report_progress when it is available") ||
 		!strings.Contains(prompt, "brief natural-language progress updates") ||
 		!strings.Contains(prompt, "meaningful phase finishes") ||
+		!strings.Contains(prompt, "use it as the authoritative live checklist") ||
+		!strings.Contains(prompt, "Before moving to the next step, mark the finished step completed") ||
 		!strings.Contains(prompt, "Do not name tools, expose hidden reasoning") ||
 		!strings.Contains(prompt, "Do not narrate each tool call") {
 		t.Fatalf("prompt missing milestone and per-tool narration guidance:\n%s", prompt)

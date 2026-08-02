@@ -97,39 +97,6 @@ func (s *Server) consumeProjectInitialBootstrap(ctx context.Context, scope store
 	)
 }
 
-type projectAssistantCollaborationMode string
-
-const (
-	projectAssistantCollaborationModeDefault projectAssistantCollaborationMode = "default"
-	projectAssistantCollaborationModePlan    projectAssistantCollaborationMode = "plan"
-)
-
-func projectAssistantCollaborationModeForRun(run store.AssistantRun) (projectAssistantCollaborationMode, bool) {
-	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(string(run.Mode))))
-	switch mode {
-	case projectAssistantCollaborationModeDefault, projectAssistantCollaborationModePlan:
-		return mode, true
-	default:
-		return "", false
-	}
-}
-
-// collaborationMode is the complete v2 turn-routing contract. It is selected
-// by the client and remains fixed for the run; prompt text and model output
-// cannot promote a Plan turn into a mutating turn.
-func (r CreateProjectMessageRequest) collaborationMode() (projectAssistantCollaborationMode, error) {
-	mode := projectAssistantCollaborationMode(strings.ToLower(strings.TrimSpace(r.CollaborationMode)))
-	if mode == "" {
-		mode = projectAssistantCollaborationModeDefault
-	}
-	switch mode {
-	case projectAssistantCollaborationModeDefault, projectAssistantCollaborationModePlan:
-		return mode, nil
-	default:
-		return "", newValidationError("collaborationMode must be default or plan")
-	}
-}
-
 type ProjectView struct {
 	Name         string                        `json:"name"`
 	DisplayName  string                        `json:"displayName"`

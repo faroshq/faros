@@ -128,7 +128,7 @@ func prepareAssistantTurn(turn AssistantTurn) (AssistantTurn, error) {
 	if turn.Mode == "" {
 		turn.Mode = AssistantRunModeDefault
 	}
-	if turn.Mode != AssistantRunModeDefault && turn.Mode != AssistantRunModePlan {
+	if !assistantRunModeValid(turn.Mode) {
 		return AssistantTurn{}, fmt.Errorf("invalid assistant turn mode %q", turn.Mode)
 	}
 	mode, err := NormalizeAssistantApprovalMode(turn.ApprovalMode)

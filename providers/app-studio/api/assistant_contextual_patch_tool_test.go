@@ -60,6 +60,10 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 		}
 	}
 	for _, want := range []string{
+		"Use exactly one outer *** Begin Patch / *** End Patch envelope",
+		"Inside an Add File section, write only the new file content",
+		"every content line must begin with '+'",
+		"A leading '+' disambiguates literal lines that look like protocol markers",
 		"must be exactly '@@' or '@@ <literal source line copied from the file>'",
 		"Never emit Git/unified-diff line coordinates",
 		"@@ -12,4 +12,5 @@",
@@ -73,6 +77,7 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 		}
 	}
 	for _, want := range []string{
+		"Every Add File content line must begin with '+'",
 		"Hunk headers are exactly '@@' or '@@ <literal source line>'",
 		"numeric unified-diff coordinates are forbidden",
 		"Move to cannot stand alone",
@@ -84,6 +89,18 @@ func TestAssistantRegistryExposesOnlyContextualWorkspacePatchMutation(t *testing
 	for _, want := range []string{"*** Delete File: <path>", "*** Move to: <new path>", "Move to is not a standalone section"} {
 		if !strings.Contains(spec.Description, want) {
 			t.Fatalf("apply_patch description missing %q: %s", want, spec.Description)
+		}
+	}
+}
+
+func TestAssistantDeepInstructionIncludesAddFilePrefixGrammar(t *testing.T) {
+	for _, want := range []string{
+		"Inside an Add File section, write only the new file content",
+		"every content line must begin with '+'",
+		"A leading '+' disambiguates literal lines that look like protocol markers",
+	} {
+		if !strings.Contains(projectEinoAssistantV2DeepInstruction, want) {
+			t.Fatalf("deep assistant instruction missing %q: %s", want, projectEinoAssistantV2DeepInstruction)
 		}
 	}
 }
@@ -145,6 +162,21 @@ func TestAssistantGenericInvalidPatchRecoveryUsesSupportedOperations(t *testing.
 	}
 }
 
+func TestAssistantNestedAddFileProtocolRecoveryIsTargeted(t *testing.T) {
+	err := &workspace.PatchError{Code: workspace.PatchErrorInvalidPatch, Message: "line 4: Add File content cannot contain hunk headers or nested patch envelopes"}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
+	for _, want := range []string{
+		"return one outer *** Begin Patch / *** End Patch envelope",
+		"Under Add File, emit only the new file content",
+		"no @@ lines and no nested Begin/End markers",
+		"Every content line must begin with '+'",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("recovery missing %q: %s", want, result)
+		}
+	}
+}
+
 func TestAssistantMissingContextRecoveryExplainsAnchorCursor(t *testing.T) {
 	err := &workspace.PatchError{Code: workspace.PatchErrorContextNotFound, Path: "src/App.jsx", Hunk: 1, Message: "hunk context was not found after line 1"}
 	result := projectEinoAssistantSafeToolFailureResult(projectToolApplyPatch, err)
@@ -187,6 +219,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 	}{
 		{name: "default", mode: projectAssistantCollaborationModeDefault, profile: projectAssistantTurnProfileImplementation, wantPatch: true},
 		{name: "plan", mode: projectAssistantCollaborationModePlan, profile: projectAssistantTurnProfileDebugging},
+		{name: "review", mode: projectAssistantCollaborationModeReview, profile: projectAssistantTurnProfileDebugging},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -214,7 +247,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 			if names[projectToolApplyPatch] != tt.wantPatch {
 				t.Fatalf("tools = %#v, apply_patch presence = %t, want %t", names, names[projectToolApplyPatch], tt.wantPatch)
 			}
-			if got, want := names[projectToolAskFollowUp], tt.mode == projectAssistantCollaborationModePlan; got != want {
+			if got, want := names[projectToolAskFollowUp], projectAssistantCollaborationModeReadOnly(tt.mode); got != want {
 				t.Fatalf("tools = %#v, ask_follow_up presence = %t, want %t", names, got, want)
 			}
 			for _, retired := range []string{"write_file", "mkdir", "hydrate_workspace", "request_project_plan_approval"} {
@@ -222,7 +255,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 					t.Fatalf("tools = %#v, retired %s remains model-visible", names, retired)
 				}
 			}
-			if tt.mode == projectAssistantCollaborationModePlan {
+			if projectAssistantCollaborationModeReadOnly(tt.mode) {
 				for _, effect := range []string{
 					projectToolApplyPatch,
 					projectToolSelectTemplate,
@@ -231,7 +264,7 @@ func TestAssistantV2ToolCatalogIsStableForCollaborationMode(t *testing.T) {
 					projectToolCommitProjectFiles,
 				} {
 					if names[effect] {
-						t.Fatalf("Plan tools = %#v, effect %s remains visible", names, effect)
+						t.Fatalf("read-only tools = %#v, effect %s remains visible", names, effect)
 					}
 				}
 			}

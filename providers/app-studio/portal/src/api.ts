@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectHydrateResult,
   ProjectAssistantRunMode,
+  ProjectAssistantReviewTarget,
   ProjectAssistantRunStatus,
   ProjectAssistantApprovalMode,
   ProjectAssistantApprovalPreference,
@@ -310,6 +311,10 @@ export const api = {
 
   async startAssistantTurn(ctx: KedgeContext | null, name: string, threadID: string, body: { content: string; clientUserMessageID: string; collaborationMode: ProjectAssistantRunMode }): Promise<{ thread: ProjectAssistantThread; turn: ProjectAssistantTurn }> {
     return request<{ thread: ProjectAssistantThread; turn: ProjectAssistantTurn }>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/threads/${encodeURIComponent(threadID)}/turns`, body)
+  },
+
+  async startAssistantReview(ctx: KedgeContext | null, name: string, threadID: string, body: { target: ProjectAssistantReviewTarget; clientUserMessageID: string }): Promise<{ thread: ProjectAssistantThread; turn: ProjectAssistantTurn }> {
+    return request<{ thread: ProjectAssistantThread; turn: ProjectAssistantTurn }>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/threads/${encodeURIComponent(threadID)}/reviews`, body)
   },
 
   async getActiveAssistantTurn(ctx: KedgeContext | null, name: string, threadID: string): Promise<ProjectAssistantTurn | undefined> {

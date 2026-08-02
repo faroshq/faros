@@ -322,8 +322,8 @@ func (s *Server) startProjectAssistantRunDurablyWithMode(ctx context.Context, sc
 	if content == "" || clientRequestID == "" || actor == "" {
 		return projectAssistantDurableStartResult{}, newValidationError("content, clientRequestID, and actor are required")
 	}
-	if mode != store.AssistantRunModeDefault && mode != store.AssistantRunModePlan {
-		return projectAssistantDurableStartResult{}, newValidationError("collaborationMode must be default or plan")
+	if mode != store.AssistantRunModeDefault && mode != store.AssistantRunModePlan && mode != store.AssistantRunModeReview {
+		return projectAssistantDurableStartResult{}, newValidationError("collaborationMode must be default, plan, or review")
 	}
 	if err := s.reconcileOrphanedProjectAssistantRun(ctx, scope); err != nil {
 		return projectAssistantDurableStartResult{}, err
@@ -1050,6 +1050,7 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 			}
 			syncSteeringSegment()
 			state.plan = &plan
+			state.status = projectEinoAssistantPlanProgressStatus(plan)
 			recordSnapshotErr(persistMetadata(ctx, nil))
 		},
 		OnToolCall: func(event projectToolCallStreamEvent) {

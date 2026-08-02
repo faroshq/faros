@@ -19,6 +19,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -608,6 +609,29 @@ func TestContextualPatchTreatsIndentedMarkerTextAsFileContent(t *testing.T) {
 	assertWorkspaceContent(t, store, scope, "README.md", strings.Replace(before, "old\n", "new\n", 1))
 }
 
+func TestContextualPatchPreservesIndentedMarkerLookingAddFileContent(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	patch := `*** Begin Patch
+*** Add File: notes.txt
++first line
++ *** Update File: example
++last line
+*** End Patch`
+
+	result, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	if err != nil {
+		t.Fatalf("ApplyPatch returned error: %v", err)
+	}
+	if result.Operation != "apply_patch" || len(result.Files) != 1 {
+		t.Fatalf("patch result = %#v, want one Add File operation", result)
+	}
+	assertWorkspaceContent(t, store, scope, "notes.txt", "first line\n *** Update File: example\nlast line\n")
+	if _, err := store.ReadFile(context.Background(), scope, ReadOptions{Path: "example"}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("marker-looking content created an unexpected operation target: %v", err)
+	}
+}
+
 func TestValidateCommittablePatchAcceptsAllWorkspaceOperations(t *testing.T) {
 	for name, patch := range map[string]string{
 		"delete": `*** Begin Patch
@@ -639,7 +663,7 @@ func TestValidateCommittablePatchAcceptsAllWorkspaceOperations(t *testing.T) {
 	}
 }
 
-func TestContextualPatchAcceptsUnprefixedAddFileContent(t *testing.T) {
+func TestContextualPatchRejectsUnprefixedAddFileContent(t *testing.T) {
 	store := NewFileStore(t.TempDir())
 	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
 	patch := `*** Begin Patch
@@ -649,10 +673,34 @@ func TestContextualPatchAcceptsUnprefixedAddFileContent(t *testing.T) {
 }
 *** End Patch`
 
-	if _, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch}); err != nil {
+	_, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	var patchErr *PatchError
+	if !errors.As(err, &patchErr) || patchErr.Code != PatchErrorInvalidPatch ||
+		!strings.Contains(patchErr.Message, "Add File content lines must begin with '+'") {
+		t.Fatalf("ApplyPatch error = %#v, want invalid unprefixed Add File content", err)
+	}
+	if _, readErr := store.ReadFile(context.Background(), scope, ReadOptions{Path: "src/App.css"}); !errors.Is(readErr, fs.ErrNotExist) {
+		t.Fatalf("rejected Add File mutated workspace: %v", readErr)
+	}
+}
+
+func TestContextualPatchPreservesPrefixedProtocolLookingAddFileContent(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-1", ProjectName: "demo", ProjectUID: "test-project-uid"}
+	patch := "*** Begin Patch\n*** Add File: src/App.jsx\n" +
+		"+@@ import React from 'react';\n" +
+		"+*** Begin Patch\n" +
+		"+*** End Patch\n" +
+		"+*** Update File: example\n*** End Patch"
+
+	result, err := store.ApplyPatch(context.Background(), scope, PatchOptions{Patch: patch})
+	if err != nil {
 		t.Fatalf("ApplyPatch returned error: %v", err)
 	}
-	assertWorkspaceContent(t, store, scope, "src/App.css", ":root {\n  --surface: white;\n}\n")
+	if result.Operation != "apply_patch" || len(result.Files) != 1 {
+		t.Fatalf("patch result = %#v, want one Add File operation", result)
+	}
+	assertWorkspaceContent(t, store, scope, "src/App.jsx", "@@ import React from 'react';\n*** Begin Patch\n*** End Patch\n*** Update File: example\n")
 }
 
 func assertWorkspaceContent(t *testing.T, store *FileStore, scope Scope, path, want string) {

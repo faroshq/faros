@@ -118,6 +118,44 @@ func TestAssistantThreadListingIsActorScoped(t *testing.T) {
 	}
 }
 
+func TestUpdateAssistantThreadWithEventIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	thread, err := s.CreateAssistantThread(ctx, scope, AssistantThread{ID: "thread-atomic", ActorID: "alice", Title: "before", CreatedAt: now, UpdatedAt: now}, []AssistantThreadEvent{{Type: "thread.created", CreatedAt: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread.Title = "after"
+	thread.UpdatedAt = now.Add(time.Second)
+	_, _, err = s.UpdateAssistantThreadWithEvent(ctx, scope, thread, AssistantThreadEvent{Type: "thread.updated", Payload: json.RawMessage(`{"title":"after"}`)}, 0)
+	if !errors.Is(err, ErrAssistantThreadEventConflict) {
+		t.Fatalf("wrong sequence error = %v, want conflict", err)
+	}
+	unchanged, err := s.GetAssistantThread(ctx, scope, thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Title != "before" {
+		t.Fatalf("thread title after failed transaction = %q, want before", unchanged.Title)
+	}
+	events, err := s.ListAssistantThreadEvents(ctx, scope, thread.ID, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events after failed transaction = %d, want 1", len(events))
+	}
+	updated, created, err := s.UpdateAssistantThreadWithEvent(ctx, scope, thread, AssistantThreadEvent{Type: "thread.updated", Payload: json.RawMessage(`{"title":"after"}`)}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Title != "after" || created.Sequence != 2 {
+		t.Fatalf("successful projection = %#v event=%#v", updated, created)
+	}
+}
+
 func TestAssistantThreadLockKeyIsPostgresTextSafeAndUnambiguous(t *testing.T) {
 	first := assistantThreadLockKey(
 		Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"},
