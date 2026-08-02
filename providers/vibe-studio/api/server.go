@@ -817,6 +817,7 @@ func (s *Server) applyProject(ctx context.Context, cl *client.Client, sessionID 
 	}
 	binding := vibev1alpha1.ProjectProviderBindingSpec{
 		Name:     vibev1alpha1.BindingRuntime,
+		Template: bp.Template.Name,
 		Provider: "infrastructure",
 		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{
@@ -931,6 +932,7 @@ func (s *Server) searchBinding(ctx context.Context, cl *client.Client, project s
 	}
 	return &vibev1alpha1.ProjectProviderBindingSpec{
 		Name:     vibev1alpha1.BindingSearch,
+		Template: searchTemplate,
 		Provider: "infrastructure",
 		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{

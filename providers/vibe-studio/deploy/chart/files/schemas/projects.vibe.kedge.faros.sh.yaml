@@ -5,7 +5,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260801-004.projects.vibe.kedge.faros.sh
+  name: v260801-005.projects.vibe.kedge.faros.sh
 spec:
   group: vibe.kedge.faros.sh
   names:
@@ -105,6 +105,7 @@ spec:
                         required: [name, provider, kind]
                         properties:
                           name: { type: string, minLength: 1, maxLength: 63 }
+                          template: { type: string, maxLength: 253 }
                           provider: { type: string, minLength: 1, maxLength: 63 }
                           kind:
                             type: string

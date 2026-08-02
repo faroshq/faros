@@ -211,6 +211,7 @@ func promoteProject(p *vibev1alpha1.Project, images map[string]string, revision 
 
 	binding := vibev1alpha1.ProjectProviderBindingSpec{
 		Name:     vibev1alpha1.BindingRuntime,
+		Template: dev.Template,
 		Provider: "infrastructure",
 		Kind:     vibev1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &vibev1alpha1.ProjectProviderResourceReference{

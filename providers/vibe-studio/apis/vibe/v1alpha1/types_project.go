@@ -235,6 +235,14 @@ type ProjectProviderBindingSpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
+	// Template names the infrastructure Template this binding's instance is
+	// provisioned from. A project binds instances of several templates — its
+	// app, its search backend — so attribution belongs on the binding, not on
+	// the Project. Empty falls back to the Project's own template.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Template string `json:"template,omitempty"`
+
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63

@@ -26,10 +26,12 @@ import (
 type InstanceRef struct {
 	Environment string
 	Binding     string
-	GVR         schema.GroupVersionResource
-	Kind        string
-	Name        string
-	Values      map[string]any
+	// Template is the infrastructure Template this instance comes from.
+	Template string
+	GVR      schema.GroupVersionResource
+	Kind     string
+	Name     string
+	Values   map[string]any
 }
 
 // Key identifies the ref within one Project (environment/binding).
@@ -64,6 +66,7 @@ func InstanceRefs(p *vibev1alpha1.Project) []InstanceRef {
 			out = append(out, InstanceRef{
 				Environment: env.Name,
 				Binding:     b.Name,
+				Template:    b.Template,
 				GVR:         gv.WithResource(ref.Resource),
 				Kind:        ref.Kind,
 				Name:        ref.Name,
@@ -79,7 +82,12 @@ func InstanceRefs(p *vibev1alpha1.Project) []InstanceRef {
 // template attribution label, plus the Project back-reference.
 func DesiredInstance(p *vibev1alpha1.Project, ref InstanceRef) *unstructured.Unstructured {
 	labels := map[string]any{projectLabel: p.Name}
-	if p.Spec.Template != nil && p.Spec.Template.Name != "" {
+	// Attribution is per binding: a project's search backend is a searxng
+	// instance, not an instance of the app's template, and the
+	// infrastructure provider lists instances by this label.
+	if ref.Template != "" {
+		labels[templateLabel] = ref.Template
+	} else if p.Spec.Template != nil && p.Spec.Template.Name != "" {
 		labels[templateLabel] = p.Spec.Template.Name
 	}
 	inst := &unstructured.Unstructured{Object: map[string]any{

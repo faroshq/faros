@@ -133,3 +133,25 @@ func TestMirrorStatus(t *testing.T) {
 		t.Fatalf("empty project phase = %s", st.Phase)
 	}
 }
+
+func TestDesiredInstanceAttributesItsOwnTemplate(t *testing.T) {
+	p := &vibev1alpha1.Project{}
+	p.Name = "shop"
+	p.Spec.Template = &vibev1alpha1.ProjectTemplateSpec{Name: "application"}
+
+	// The search backend is a searxng instance: labelling it with the app's
+	// template files it under the wrong thing in the infrastructure listings.
+	search := InstanceRef{Environment: "development", Binding: "search", Template: "searxng", Name: "shop-search"}
+	if got := DesiredInstance(p, search).GetLabels()[templateLabel]; got != "searxng" {
+		t.Errorf("search instance template label = %q, want searxng", got)
+	}
+	runtime := InstanceRef{Environment: "development", Binding: "runtime", Template: "application", Name: "shop"}
+	if got := DesiredInstance(p, runtime).GetLabels()[templateLabel]; got != "application" {
+		t.Errorf("runtime instance template label = %q, want application", got)
+	}
+	// Bindings written before the field existed fall back to the project's.
+	legacy := InstanceRef{Environment: "development", Binding: "runtime", Name: "shop"}
+	if got := DesiredInstance(p, legacy).GetLabels()[templateLabel]; got != "application" {
+		t.Errorf("legacy binding label = %q, want the project's template", got)
+	}
+}
