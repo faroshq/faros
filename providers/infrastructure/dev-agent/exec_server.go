@@ -365,11 +365,20 @@ func cleanExecPath(raw string) (string, error) {
 }
 
 func cleanExecWorkDir(raw string) (string, error) {
-	if strings.TrimSpace(raw) == "" {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return ".", nil
 	}
 	if len([]byte(raw)) > execMaxWorkDirBytes {
 		return "", fmt.Errorf("workdir exceeds %d bytes", execMaxWorkDirBytes)
+	}
+	if path.Clean(raw) == "." {
+		for _, part := range strings.Split(raw, "/") {
+			if part == ".." {
+				return "", errExecPathEscape
+			}
+		}
+		return ".", nil
 	}
 	return cleanExecPath(raw)
 }

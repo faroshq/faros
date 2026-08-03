@@ -60,8 +60,9 @@ func TestExecServerRunsDirectArgvWithSanitizedEnvironmentAndChangedPaths(t *test
 	}
 	srv := newExecAgentServer(context.Background(), &agentConfig{WorkDir: workdir, ControlToken: "secret"})
 	reqBody := execRequest{
-		Files: []execSourceFile{{Path: "staged.txt", Content: "staged\n"}},
-		Argv:  []string{"/bin/sh", "-c", "test -z \"$ONLY_EXPLICIT\"; touch added.txt; rm before.txt"},
+		Files:   []execSourceFile{{Path: "staged.txt", Content: "staged\n"}},
+		Argv:    []string{"/bin/sh", "-c", "test -z \"$ONLY_EXPLICIT\"; touch added.txt; rm before.txt"},
+		WorkDir: ".",
 	}
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
