@@ -146,6 +146,60 @@ func cloneProjectAssistantExecMetadata(src *projectAssistantExecMetadata) *proje
 	return &out
 }
 
+// mergeProjectAssistantExecMetadata keeps the original, server-authored
+// command request fields when an intermediate checkpoint/update only carries
+// lifecycle data, while allowing a terminal result to replace status and
+// outcome fields. This is deliberately field-wise instead of choosing one
+// whole pointer: permission/checkpoint events and terminal events carry
+// different subsets of the disclosure.
+func mergeProjectAssistantExecMetadata(existing, next *projectAssistantExecMetadata) *projectAssistantExecMetadata {
+	if existing == nil {
+		return cloneProjectAssistantExecMetadata(next)
+	}
+	if next == nil {
+		return cloneProjectAssistantExecMetadata(existing)
+	}
+	out := cloneProjectAssistantExecMetadata(next)
+	if out.Component == "" {
+		out.Component = existing.Component
+	}
+	if len(out.Argv) == 0 {
+		out.Argv = append([]string(nil), existing.Argv...)
+	}
+	if out.Workdir == "" {
+		out.Workdir = existing.Workdir
+	}
+	if out.TimeoutSeconds == 0 {
+		out.TimeoutSeconds = existing.TimeoutSeconds
+	}
+	if out.NetworkProfile == "" {
+		out.NetworkProfile = existing.NetworkProfile
+	}
+	if out.AuthorityProfile == "" {
+		out.AuthorityProfile = existing.AuthorityProfile
+	}
+	if out.WritebackPolicy == "" {
+		out.WritebackPolicy = existing.WritebackPolicy
+	}
+	if out.Status == "" {
+		out.Status = existing.Status
+	}
+	if out.Summary == "" {
+		out.Summary = existing.Summary
+	}
+	if out.ExitCode == nil && existing.ExitCode != nil {
+		code := *existing.ExitCode
+		out.ExitCode = &code
+	}
+	if out.DurationMS == 0 {
+		out.DurationMS = existing.DurationMS
+	}
+	if !out.OutputTruncated {
+		out.OutputTruncated = existing.OutputTruncated
+	}
+	return out
+}
+
 // projectAssistantExecMetadataForToolArguments projects only the execution
 // contract that the portal needs. It never carries environment values or raw
 // stdout/stderr, and masks argv tokens that look like credential material.

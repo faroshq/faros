@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
@@ -304,5 +305,106 @@ func TestProjectAssistantExecApprovalMetadataSurvivesMultiCallCheckpoint(t *test
 		if permission.Exec.Status != "permission_required" {
 			t.Fatalf("checkpoint call %d permission status = %q", index, permission.Exec.Status)
 		}
+	}
+}
+
+func TestProjectAssistantExecActionFeedMergesTerminalResultsAcrossCheckpoints(t *testing.T) {
+	calls := []struct {
+		id        string
+		component string
+		argv      []string
+		result    string
+		exitCode  int
+		duration  int64
+	}{
+		{
+			id:        "exec-install",
+			component: "frontend",
+			argv:      []string{"npm", "install"},
+			result:    `{"status":"succeeded","summary":"Command succeeded in component \"frontend\".","exitCode":0,"durationMs":742,"outputTruncated":true}`,
+			exitCode:  0,
+			duration:  742,
+		},
+		{
+			id:        "exec-test",
+			component: "backend",
+			argv:      []string{"go", "test", "./..."},
+			result:    `{"status":"failed","summary":"Command failed in component \"backend\".","exitCode":1,"durationMs":1834}`,
+			exitCode:  1,
+			duration:  1834,
+		},
+	}
+	var events []projectToolCallStreamEvent
+	for _, call := range calls {
+		args := map[string]any{"component": call.component, "argv": call.argv}
+		permission := projectToolCallStreamEvent{
+			ID:        call.id,
+			Name:      projectToolExecCommand,
+			Status:    "permission_required",
+			Arguments: projectEinoToolArgumentsString(args),
+			Exec:      projectAssistantExecMetadataForToolArguments(projectToolExecCommand, args, "", "permission_required"),
+		}
+		events = upsertProjectToolCallStreamEvent(events, permission)
+		// The checkpoint callback intentionally carries only lifecycle data.
+		events = upsertProjectToolCallStreamEvent(events, projectToolCallStreamEvent{
+			ID:         call.id,
+			Status:     "permission_required",
+			Checkpoint: &projectAssistantCheckpoint{ID: "checkpoint-" + call.id},
+		})
+		terminal := projectToolCallStreamEvent{
+			ID:        call.id,
+			Name:      projectToolExecCommand,
+			Status:    map[bool]string{true: "succeeded", false: "failed"}[call.exitCode == 0],
+			Arguments: projectEinoToolArgumentsString(args),
+			Summary:   "terminal result",
+			Exec:      projectAssistantExecMetadataForToolArguments(projectToolExecCommand, args, call.result, map[bool]string{true: "succeeded", false: "failed"}[call.exitCode == 0]),
+		}
+		events = upsertProjectToolCallStreamEvent(events, terminal)
+	}
+	actions := projectAssistantActionFeedFromToolCalls(events)
+	if len(actions) != len(calls) {
+		t.Fatalf("actions = %#v, want %d terminal exec actions", actions, len(calls))
+	}
+	for index, call := range calls {
+		action := actions[index]
+		if action.Status != map[bool]string{true: "succeeded", false: "failed"}[call.exitCode == 0] {
+			t.Fatalf("action %d status = %q, want terminal status", index, action.Status)
+		}
+		if action.Exec == nil {
+			t.Fatalf("action %d lost exec metadata: %#v", index, action)
+		}
+		if action.Exec.Component != call.component || action.Exec.AuthorityProfile != "application-container" ||
+			action.Exec.NetworkProfile != "application-runtime" || action.Exec.WritebackPolicy != "runtime-workspace-only" {
+			t.Fatalf("action %d request disclosure = %#v", index, action.Exec)
+		}
+		if action.Exec.Status != map[bool]string{true: "succeeded", false: "failed"}[call.exitCode == 0] ||
+			action.Exec.ExitCode == nil || *action.Exec.ExitCode != call.exitCode || action.Exec.DurationMS != call.duration {
+			t.Fatalf("action %d terminal disclosure = %#v", index, action.Exec)
+		}
+		if call.exitCode == 0 && !action.Exec.OutputTruncated {
+			t.Fatalf("action %d lost output truncation flag", index)
+		}
+	}
+
+	// A terminal outer action must never leave a stale permission lifecycle in
+	// the nested disclosure when an older checkpoint did not produce a fresh
+	// terminal callback.
+	stale := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
+		ID:     "exec-stale",
+		Name:   projectToolExecCommand,
+		Status: "permission_required",
+		Exec:   projectAssistantExecMetadataForToolArguments(projectToolExecCommand, map[string]any{"component": "backend", "argv": []string{"go", "test"}}, "", "permission_required"),
+	})
+	stale.Status = projectAssistantActionFeedStatusSucceeded
+	final := finalizeProjectAssistantActionFeed([]projectAssistantActionFeedItem{stale}, store.AssistantRunStatusCompleted)
+	if len(final) != 1 || final[0].Exec == nil || final[0].Exec.Status != "succeeded" {
+		t.Fatalf("finalized stale exec action = %#v, want succeeded nested status", final)
+	}
+	preserved := stale
+	preserved.Exec = cloneProjectAssistantExecMetadata(stale.Exec)
+	preserved.Exec.Status = "timed_out"
+	final = finalizeProjectAssistantActionFeed([]projectAssistantActionFeedItem{preserved}, store.AssistantRunStatusCompleted)
+	if len(final) != 1 || final[0].Exec == nil || final[0].Exec.Status != "timed_out" {
+		t.Fatalf("finalized terminal exec action = %#v, want explicit timed_out status preserved", final)
 	}
 }

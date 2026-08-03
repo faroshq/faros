@@ -1337,6 +1337,7 @@ func mergeProjectAssistantActionFeedItem(existing, next projectAssistantActionFe
 	if next.Diagnostic == nil {
 		next.Diagnostic = existing.Diagnostic
 	}
+	next.Exec = mergeProjectAssistantExecMetadata(existing.Exec, next.Exec)
 	return next
 }
 
@@ -1360,7 +1361,35 @@ func finalizeProjectAssistantActionFeed(actions []projectAssistantActionFeedItem
 		}
 		actions[i].Title = projectAssistantActionFeedItemTitle(actions[i].Kind, actions[i].Status)
 	}
+	if assistantRunTerminal(runStatus) {
+		for i := range actions {
+			if actions[i].Exec == nil {
+				continue
+			}
+			if projectAssistantExecStatusTerminal(actions[i].Exec.Status) {
+				continue
+			}
+			switch actions[i].Status {
+			case projectAssistantActionFeedStatusSucceeded:
+				actions[i].Exec.Status = "succeeded"
+			case projectAssistantActionFeedStatusFailed, projectAssistantActionFeedStatusRejected:
+				// The public exec contract intentionally uses failed for both a
+				// command failure and a user rejection; "rejected" is not a
+				// terminal process state exposed by the portal disclosure parser.
+				actions[i].Exec.Status = "failed"
+			}
+		}
+	}
 	return filterProjectAssistantActionFeedItems(actions)
+}
+
+func projectAssistantExecStatusTerminal(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "succeeded", "failed", "timed_out", "canceled", "cancelled", "blocked", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeProjectToolCallStreamEventsForMetadata(events []projectToolCallStreamEvent) []projectToolCallStreamEvent {
@@ -1420,6 +1449,10 @@ func mergeProjectToolCallStreamEvent(existing, next projectToolCallStreamEvent) 
 	if next.Error == "" {
 		next.Error = existing.Error
 	}
+	// Permission/checkpoint callbacks and terminal callbacks carry different
+	// subsets of exec metadata. Preserve the server-authored request/authority
+	// fields while allowing a terminal result to replace its lifecycle fields.
+	next.Exec = mergeProjectAssistantExecMetadata(existing.Exec, next.Exec)
 	if next.Permission == nil {
 		next.Permission = existing.Permission
 	}
