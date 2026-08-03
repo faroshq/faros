@@ -19,7 +19,7 @@ const execDisclosureKeys = new Set([
   'detail',
   'detailURL',
 ])
-const execStatuses = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'cancelled', 'blocked', 'error', 'running'])
+const execStatuses = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'cancelled', 'blocked', 'error', 'running', 'permission_required'])
 const maxOutputBytes = 1 << 20
 
 function isRecord(value: unknown): value is Record<string, unknown> {

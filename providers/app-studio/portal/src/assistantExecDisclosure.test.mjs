@@ -11,6 +11,18 @@ test.before(async () => {
 })
 test.after(async () => vite?.close())
 
+test('parses approval disclosures while rejecting unknown statuses and fields', async () => {
+  const { parseAssistantExecDisclosure } = await vite.ssrLoadModule('/src/assistantExecDisclosure.ts')
+  const exec = {
+    component: 'backend',
+    argv: ['go', 'test'],
+    status: 'permission_required',
+  }
+  assert.deepEqual(parseAssistantExecDisclosure(exec), exec)
+  assert.equal(parseAssistantExecDisclosure({ ...exec, status: 'unknown_status' }), undefined)
+  assert.equal(parseAssistantExecDisclosure({ ...exec, rawArguments: 'token=secret' }), undefined)
+})
+
 test('renders approval metadata and bounded command output', async () => {
   const { default: AssistantExecDetails } = await vite.ssrLoadModule('/src/AssistantExecDetails.vue')
   const html = await renderToString(createSSRApp(AssistantExecDetails, {
@@ -23,6 +35,7 @@ test('renders approval metadata and bounded command output', async () => {
       authorityProfile: 'application-container',
       networkProfile: 'application-runtime',
       writebackPolicy: 'runtime-workspace-only',
+      status: 'permission_required',
     },
   }))
   assert.match(html, /Command execution/)

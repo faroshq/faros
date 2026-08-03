@@ -832,6 +832,7 @@ func (s *Server) resumeProjectAssistant(w http.ResponseWriter, r *http.Request) 
 			s.writeAssistantThreadError(w, turnErr)
 			return
 		}
+		s.startAssistantThreadMirror(scope, threadID, turn, run)
 		writeJSON(w, http.StatusAccepted, turn)
 		return
 	}
