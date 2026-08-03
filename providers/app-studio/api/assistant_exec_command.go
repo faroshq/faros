@@ -483,7 +483,32 @@ func projectAssistantExecSyncEvidence(ctx context.Context, runCtx projectAssista
 	}
 	revision, _ := runCtx.RunState.SourceMutationRevisions()
 	if revision == 0 {
-		return 0, "succeeded", ""
+		// A newly-created project can already have source in the FileStore while
+		// its creation/hydration sync is still queued.  There is no positive
+		// development-sync receipt in a fresh run state, so treating revision zero
+		// as succeeded would let exec race that first sync and run against an
+		// empty or stale live workspace.  Promote this one-time bootstrap into
+		// the same durable revision/evidence state used by normal mutations.
+		if runCtx.Server == nil || runCtx.Project == nil {
+			return 0, "unknown", "initial workspace synchronization has not been scheduled"
+		}
+		revision = runCtx.RunState.BeginDevelopmentSyncForNextMutation()
+		if revision == 0 {
+			return 0, "unknown", "initial workspace synchronization revision is unavailable"
+		}
+		scheduled := runCtx.Server.scheduleDevelopmentSyncAfterMutationWithCompletion(
+			runCtx.Identity,
+			runCtx.Project,
+			projectActionWorkspaceSync,
+			func(syncErr error) { runCtx.RunState.CompleteDevelopmentSync(revision, syncErr) },
+		)
+		// Keep the synthetic bootstrap revision aligned with the run state's
+		// source revision even when scheduling fails, so a repeated tool call
+		// observes the failed evidence rather than creating another bootstrap.
+		runCtx.RunState.RecordSourceMutation()
+		if !scheduled {
+			runCtx.RunState.CompleteDevelopmentSync(revision, errors.New("initial workspace synchronization was not scheduled"))
+		}
 	}
 	status, failure := runCtx.RunState.WaitForDevelopmentSync(ctx, revision, dataPlaneCallTimeout)
 	return revision, status, failure

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
@@ -113,6 +114,62 @@ func TestProjectAssistantExecSnapshotRoutesSelectedComponent(t *testing.T) {
 	wantDigest := projectSandboxSyncDigest([]projectSandboxSyncFile{{Path: "main.go", Content: "package main\n"}})
 	if digest != wantDigest {
 		t.Fatalf("snapshot digest = %q, component source digest = %q", digest, wantDigest)
+	}
+}
+
+func TestProjectAssistantExecSyncEvidenceBootstrapsFreshProject(t *testing.T) {
+	// A fresh App Studio project has source in the FileStore before the
+	// assistant run state has observed a mutation. There is no runtime manifest
+	// in this store; the provider-owned sync hook is the authority that must be
+	// awaited before exec can address the live component workspace.
+	files := workspace.NewFileStore(t.TempDir())
+	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "project", ProjectUID: "uid"}
+	if err := files.ApplyFiles(context.Background(), scope, []workspace.File{{Path: "frontend/index.html", Content: "<!doctype html>\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := make(chan string, 1)
+	server := &Server{
+		workspaces: files,
+		developmentSyncAfterMutation: func(_ identity, _ *aiv1alpha1.Project, name string) error {
+			calls <- name
+			return nil
+		},
+	}
+	state := newProjectEinoAssistantRunState()
+	project := &aiv1alpha1.Project{}
+	runCtx := projectAssistantWorkflowRunContext{
+		Server:         server,
+		Project:        project,
+		RunState:       state,
+		Workspace:      files,
+		WorkspaceScope: scope,
+	}
+
+	revision, status, failure := projectAssistantExecSyncEvidence(context.Background(), runCtx)
+	if revision != 1 || status != "succeeded" || failure != "" {
+		t.Fatalf("fresh-project sync evidence = (%d, %q, %q), want (1, succeeded, empty)", revision, status, failure)
+	}
+	select {
+	case name := <-calls:
+		if name != projectActionWorkspaceSync {
+			t.Fatalf("bootstrap sync tool = %q, want %q", name, projectActionWorkspaceSync)
+		}
+	default:
+		t.Fatal("fresh-project exec evidence did not schedule initial workspace sync")
+	}
+	if sourceRevision, _ := state.SourceMutationRevisions(); sourceRevision != 1 {
+		t.Fatalf("synthetic bootstrap source revision = %d, want 1", sourceRevision)
+	}
+
+	// Once the synthetic bootstrap is settled, another exec preparation in the
+	// same run must reuse its evidence rather than enqueueing another sync.
+	if revision, status, failure := projectAssistantExecSyncEvidence(context.Background(), runCtx); revision != 1 || status != "succeeded" || failure != "" {
+		t.Fatalf("reused fresh-project sync evidence = (%d, %q, %q), want (1, succeeded, empty)", revision, status, failure)
+	}
+	select {
+	case name := <-calls:
+		t.Fatalf("fresh-project exec evidence enqueued duplicate sync %q", name)
+	default:
 	}
 }
 
