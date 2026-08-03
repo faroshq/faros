@@ -139,11 +139,7 @@ func (s *FileStore) applyUnifiedPatch(ctx context.Context, scope Scope, opts Pat
 	if err != nil {
 		return MutationResult{}, err
 	}
-	if err := s.prepareUnifiedPatchSnapshots(ctx, scope, opts.SnapshotID, states); err != nil {
-		return MutationResult{}, err
-	}
 	if err := s.verifyPatchBaselines(ctx, scope, states); err != nil {
-		s.resetPatchSnapshotStates(scope, opts.SnapshotID, states)
 		return MutationResult{}, err
 	}
 	// Reserve the next durable source revision before applying any bytes. A
@@ -159,7 +155,7 @@ func (s *FileStore) applyUnifiedPatch(ctx context.Context, scope Scope, opts Pat
 	for _, operation := range prepared {
 		for _, state := range operation.states {
 			if err := s.applyPatchFileState(ctx, scope, state); err != nil {
-				result, patchErr := s.rollbackUnifiedPatch(ctx, scope, opts.SnapshotID, states, applied, state, err)
+				result, patchErr := s.rollbackUnifiedPatch(ctx, scope, states, applied, state, err)
 				return result, patchErr
 			}
 			applied = append(applied, state)
@@ -320,29 +316,6 @@ func (s *FileStore) readPatchTarget(ctx context.Context, scope Scope, clean stri
 	return content, true, info.Mode().Perm(), nil
 }
 
-func (s *FileStore) prepareUnifiedPatchSnapshots(ctx context.Context, scope Scope, snapshotID string, states []*patchFileState) error {
-	prepared := make([]*patchFileState, 0, len(states))
-	for _, state := range states {
-		if err := s.prepareSnapshotFileWithModes(
-			ctx,
-			scope,
-			snapshotID,
-			state.path,
-			state.before,
-			state.beforeExisted,
-			state.beforeMode,
-			state.after,
-			state.afterExisted,
-			state.afterMode,
-		); err != nil {
-			s.resetPatchSnapshotStates(scope, snapshotID, prepared)
-			return err
-		}
-		prepared = append(prepared, state)
-	}
-	return nil
-}
-
 func (s *FileStore) verifyPatchBaselines(ctx context.Context, scope Scope, states []*patchFileState) error {
 	for _, state := range states {
 		current, existed, err := s.readMutationTarget(ctx, scope, state.path)
@@ -388,7 +361,11 @@ func (s *FileStore) writePatchFile(ctx context.Context, scope Scope, clean strin
 	if mode == 0 {
 		mode = 0o644
 	}
-	err = writeFileAtomically(filepath.Dir(target), target, content, mode, createOnly)
+	writeFile := s.patchWriteFile
+	if writeFile == nil {
+		writeFile = writeFileAtomically
+	}
+	err = writeFile(filepath.Dir(target), target, content, mode, createOnly)
 	if errors.Is(err, fs.ErrExist) {
 		return newPatchError(PatchErrorWorkspaceConflict, clean, 0, 0, "target appeared after patch preflight")
 	}
@@ -401,7 +378,6 @@ func (s *FileStore) writePatchFile(ctx context.Context, scope Scope, clean strin
 func (s *FileStore) rollbackUnifiedPatch(
 	ctx context.Context,
 	scope Scope,
-	snapshotID string,
 	allStates []*patchFileState,
 	applied []*patchFileState,
 	failed *patchFileState,
@@ -417,7 +393,6 @@ func (s *FileStore) rollbackUnifiedPatch(
 		}
 	}
 	actual := s.currentPatchDeltas(rollbackCtx, scope, allStates)
-	s.resetPatchSnapshotStates(scope, snapshotID, allStates)
 	patchErr := newPatchError(PatchErrorApplyFailed, failed.path, 0, 0, "patch application failed: %v", applyErr)
 	patchErr.ActualChanges = append([]MutationResult(nil), actual...)
 	if len(rollbackErrs) > 0 {
@@ -450,32 +425,6 @@ func (s *FileStore) currentPatchDeltas(ctx context.Context, scope Scope, states 
 		actual = append(actual, result)
 	}
 	return actual
-}
-
-func (s *FileStore) resetPatchSnapshotStates(scope Scope, snapshotID string, states []*patchFileState) {
-	if strings.TrimSpace(snapshotID) == "" {
-		return
-	}
-	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, state := range states {
-		current, existed, mode, err := s.readPatchTarget(resetCtx, scope, state.path)
-		if err != nil {
-			continue
-		}
-		_ = s.prepareSnapshotFileWithModes(
-			resetCtx,
-			scope,
-			snapshotID,
-			state.path,
-			state.before,
-			state.beforeExisted,
-			state.beforeMode,
-			current,
-			existed,
-			mode,
-		)
-	}
 }
 
 func aggregatePatchMutationResults(prepared []preparedPatchOperation) MutationResult {

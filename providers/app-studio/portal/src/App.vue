@@ -195,7 +195,6 @@ interface PendingFollowUpView {
 interface ProjectDevelopmentPreviewAuthorization {
   ready: boolean
   previewURL: string
-  previewTokenExpiresAt: string
   message: string
   reason: string
 }
@@ -214,9 +213,6 @@ const CODE_CONNECTIONS_URL = '/ui/providers/code/connections'
 const CODE_REPOSITORIES_URL = '/ui/providers/code/repositories'
 const PUBLISHING_DOMAIN_SUFFIX = '.kedge.app'
 const DEVELOPMENT_PREVIEW_AUTH_RETRY_MS = 2000
-const DEVELOPMENT_PREVIEW_AUTH_RENEWAL_SKEW_MS = 5 * 60 * 1000
-const DEVELOPMENT_PREVIEW_AUTH_RENEWAL_MIN_MS = 1000
-const DEVELOPMENT_PREVIEW_AUTH_RENEWAL_MAX_MS = 60 * 60 * 1000
 const PROJECT_TOOL_CATEGORIES = new Set(['developer', 'workloads'])
 const assistantMarkdown = new MarkdownIt({
   html: false,
@@ -377,7 +373,6 @@ const developmentPreviewAuthorizationError = ref<string | null>(null)
 const developmentPreviewReadinessMessage = ref<string | null>(null)
 const developmentPreviewOverrideURL = ref<string | null>(null)
 const developmentPreviewAuthorizationKey = ref('')
-const developmentPreviewTokenExpiresAt = ref('')
 const developmentPreviewFrameKey = ref(0)
 const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
 const publishingAccess = ref<'public' | 'members' | 'private'>('members')
@@ -436,7 +431,6 @@ let landingPlaceholderTypingTimer: number | undefined
 let landingPlaceholderIndex = 0
 let developmentPreviewAuthorizationSerial = 0
 let developmentPreviewAuthorizationRetryTimer: number | undefined
-let developmentPreviewAuthorizationRenewalTimer: number | undefined
 const previewConsoleController = new PreviewConsoleController({
   api: {
     createSession: (project, generation) => api.createPreviewConsoleSession(props.ctx, project, generation),
@@ -668,8 +662,8 @@ const publishingAvailability = computed(() => {
   if (!publishingProjectName.value) return 'Unavailable'
   if (!developmentBinding.value) return 'Needs preview binding'
   if (!publishingPreviewSummary.value) return 'Preview unavailable'
-  if (developmentPreviewNeedsAuthorization.value) return `Sandbox ${developmentPreviewPhase.value}`
-  return 'Sandbox ready'
+  if (developmentPreviewNeedsAuthorization.value) return `Development ${developmentPreviewPhase.value}`
+  return 'Development ready'
 })
 const publishingSummaryTarget = computed(() => {
   const previewURL = publishingPreviewSummary.value
@@ -994,8 +988,8 @@ const developmentPreviewUnavailableTitle = computed(() => (
     : 'Preview unavailable'
 ))
 const developmentPreviewUnavailableMessage = computed(() => {
-  if (developmentPreviewAuthorizing.value) return 'Checking the sandbox runtime.'
-  return developmentPreviewReadinessMessage.value || 'Sandbox binding is not ready.'
+  if (developmentPreviewAuthorizing.value) return 'Checking the development runtime.'
+  return developmentPreviewReadinessMessage.value || 'Development instance is not ready.'
 })
 
 onMounted(() => {
@@ -1043,9 +1037,7 @@ watch(
     developmentPreviewReadinessMessage.value = null
     developmentPreviewOverrideURL.value = null
     developmentPreviewAuthorizationKey.value = ''
-    developmentPreviewTokenExpiresAt.value = ''
     clearDevelopmentPreviewAuthorizationRetry()
-    clearDevelopmentPreviewAuthorizationRenewal()
     developmentPreviewFrameKey.value += 1
   },
 )
@@ -1139,7 +1131,6 @@ onBeforeUnmount(() => {
   previewConsoleController.destroy()
   clearInitializationRetry()
   clearDevelopmentPreviewAuthorizationRetry()
-  clearDevelopmentPreviewAuthorizationRenewal()
   clearLandingPlaceholderRotation()
   assistantRunController.disconnect()
   activeAssistantSubscription?.abort()
@@ -1239,12 +1230,6 @@ function clearDevelopmentPreviewAuthorizationRetry() {
   if (developmentPreviewAuthorizationRetryTimer === undefined) return
   window.clearTimeout(developmentPreviewAuthorizationRetryTimer)
   developmentPreviewAuthorizationRetryTimer = undefined
-}
-
-function clearDevelopmentPreviewAuthorizationRenewal() {
-  if (developmentPreviewAuthorizationRenewalTimer === undefined) return
-  window.clearTimeout(developmentPreviewAuthorizationRenewalTimer)
-  developmentPreviewAuthorizationRenewalTimer = undefined
 }
 
 async function loadProviders() {
@@ -2321,16 +2306,13 @@ async function authorizeDevelopmentPreview(options: { force?: boolean } = {}) {
     developmentPreviewReadinessMessage.value = null
     developmentPreviewOverrideURL.value = null
     developmentPreviewAuthorizationKey.value = ''
-    developmentPreviewTokenExpiresAt.value = ''
     clearDevelopmentPreviewAuthorizationRetry()
-    clearDevelopmentPreviewAuthorizationRenewal()
     return
   }
   const key = developmentPreviewKey(projectName, rawURL)
   if (!options.force && developmentPreviewOverrideURL.value && developmentPreviewAuthorizationKey.value === key) return
 
   clearDevelopmentPreviewAuthorizationRetry()
-  clearDevelopmentPreviewAuthorizationRenewal()
   const serial = ++developmentPreviewAuthorizationSerial
   developmentPreviewAuthorizing.value = true
   developmentPreviewAuthorizationError.value = null
@@ -2341,23 +2323,19 @@ async function authorizeDevelopmentPreview(options: { force?: boolean } = {}) {
     if (!authorization.ready) {
       developmentPreviewOverrideURL.value = null
       developmentPreviewAuthorizationKey.value = key
-      developmentPreviewTokenExpiresAt.value = ''
-      developmentPreviewReadinessMessage.value = authorization.message || 'Preview is getting ready. The sandbox runtime is not serving traffic yet.'
+      developmentPreviewReadinessMessage.value = authorization.message || 'Preview is getting ready. The development instance is not serving traffic yet.'
       scheduleDevelopmentPreviewAuthorizationRetry(projectName, key)
-      clearDevelopmentPreviewAuthorizationRenewal()
       return
     }
     const previewURL = authorization.previewURL
-    if (!previewURL) throw new Error('sandbox preview authorization returned no preview URL')
+    if (!previewURL) throw new Error('development preview authorization returned no preview URL')
     applyDevelopmentPreviewAuthorization(projectName, authorization)
   } catch (e) {
     if (serial !== developmentPreviewAuthorizationSerial || selected.value?.name !== projectName) return
     developmentPreviewOverrideURL.value = null
     developmentPreviewAuthorizationKey.value = key
-    developmentPreviewTokenExpiresAt.value = ''
     developmentPreviewReadinessMessage.value = null
     clearDevelopmentPreviewAuthorizationRetry()
-    clearDevelopmentPreviewAuthorizationRenewal()
     developmentPreviewAuthorizationError.value = e instanceof Error ? e.message : String(e)
     if (developmentPreviewAuthorizationRetryable(e)) {
       scheduleDevelopmentPreviewAuthorizationRetry(projectName, key)
@@ -2371,10 +2349,8 @@ function applyDevelopmentPreviewAuthorization(projectName: string, authorization
   const key = developmentPreviewKey(projectName, developmentPreviewRawURL.value)
   developmentPreviewOverrideURL.value = authorization.previewURL
   developmentPreviewAuthorizationKey.value = key
-  developmentPreviewTokenExpiresAt.value = authorization.previewTokenExpiresAt
   developmentPreviewReadinessMessage.value = null
   clearDevelopmentPreviewAuthorizationRetry()
-  scheduleDevelopmentPreviewAuthorizationRenewal(projectName, key, authorization.previewTokenExpiresAt)
   developmentPreviewFrameKey.value += 1
 }
 
@@ -2385,24 +2361,6 @@ function scheduleDevelopmentPreviewAuthorizationRetry(projectName: string, key: 
     if (selected.value?.name !== projectName || developmentPreviewAuthorizationKey.value !== key) return
     void authorizeDevelopmentPreview()
   }, DEVELOPMENT_PREVIEW_AUTH_RETRY_MS)
-}
-
-function scheduleDevelopmentPreviewAuthorizationRenewal(projectName: string, key: string, expiresAt: string) {
-  clearDevelopmentPreviewAuthorizationRenewal()
-  const expiresMs = Date.parse(expiresAt)
-  if (!Number.isFinite(expiresMs)) return
-  const delay = Math.min(
-    DEVELOPMENT_PREVIEW_AUTH_RENEWAL_MAX_MS,
-    Math.max(
-      DEVELOPMENT_PREVIEW_AUTH_RENEWAL_MIN_MS,
-      expiresMs - Date.now() - DEVELOPMENT_PREVIEW_AUTH_RENEWAL_SKEW_MS,
-    ),
-  )
-  developmentPreviewAuthorizationRenewalTimer = window.setTimeout(() => {
-    developmentPreviewAuthorizationRenewalTimer = undefined
-    if (selected.value?.name !== projectName || developmentPreviewAuthorizationKey.value !== key) return
-    void authorizeDevelopmentPreview({ force: true })
-  }, delay)
 }
 
 function developmentPreviewKey(projectName: string, rawURL: string): string {
@@ -2420,7 +2378,7 @@ function projectDevelopmentPreviewURL(result: unknown): string {
 }
 
 function projectDevelopmentPreviewAuthorization(result: unknown): ProjectDevelopmentPreviewAuthorization {
-  if (!result || typeof result !== 'object') return { ready: false, previewURL: '', previewTokenExpiresAt: '', message: '', reason: '' }
+  if (!result || typeof result !== 'object') return { ready: false, previewURL: '', message: '', reason: '' }
   const previewURL = projectDevelopmentPreviewURL(result)
   const ready = typeof (result as { ready?: unknown }).ready === 'boolean'
     ? Boolean((result as { ready?: unknown }).ready)
@@ -2428,7 +2386,6 @@ function projectDevelopmentPreviewAuthorization(result: unknown): ProjectDevelop
   return {
     ready,
     previewURL,
-    previewTokenExpiresAt: projectDevelopmentPreviewString(result, 'previewTokenExpiresAt'),
     message: projectDevelopmentPreviewString(result, 'message'),
     reason: projectDevelopmentPreviewString(result, 'reason'),
   }
@@ -2439,7 +2396,7 @@ function projectBindingPreviewURL(binding: ProjectProviderBinding | null | undef
   return binding.previewURL || binding.outputs?.previewURL || binding.url || binding.outputs?.url || ''
 }
 
-function projectDevelopmentPreviewString(result: unknown, key: 'message' | 'reason' | 'previewTokenExpiresAt'): string {
+function projectDevelopmentPreviewString(result: unknown, key: 'message' | 'reason'): string {
   if (!result || typeof result !== 'object') return ''
   const direct = (result as Record<string, unknown>)[key]
   if (typeof direct === 'string') return direct
@@ -2470,8 +2427,7 @@ function refreshDevelopmentPreviewAuthorizationIfNeeded() {
     authorizing: developmentPreviewAuthorizing.value,
     previewURL: developmentPreviewURL.value,
     authorizationError: developmentPreviewAuthorizationError.value || '',
-    tokenExpiresAt: developmentPreviewTokenExpiresAt.value,
-  }, Date.now(), DEVELOPMENT_PREVIEW_AUTH_RENEWAL_SKEW_MS)) return
+  })) return
   void authorizeDevelopmentPreview({ force: true })
 }
 
@@ -4617,7 +4573,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
               <div class="min-w-0">
                 <div class="text-[13px] font-semibold text-text-primary">Publish your app</div>
                 <div class="text-[12px] leading-5 text-text-muted">
-                  Prepare a production URL and review what App Studio needs before this sandbox app is ready to share.
+                  Prepare a production URL and review what App Studio needs before this development project is ready to share.
                 </div>
               </div>
               <StatusBadge :status="publishingAvailability" />
@@ -4655,7 +4611,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 <dd class="font-medium text-text-primary">{{ publishingProjectName || 'No project selected' }}</dd>
               </div>
               <div class="grid gap-1 md:grid-cols-[150px_minmax(0,1fr)]">
-                <dt class="text-text-muted">Sandbox preview</dt>
+                <dt class="text-text-muted">Development preview</dt>
                 <dd class="truncate text-text-primary">{{ publishingSummaryTarget }}</dd>
               </div>
             </dl>
@@ -4772,7 +4728,7 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
 
           <div class="flex flex-wrap items-center justify-between gap-2 border-t border-border-subtle pt-1">
             <div class="text-[12px] text-text-muted">
-              Promotion creates a production deployment alongside your sandbox; the sandbox keeps running. You can redeploy any time.
+              Promotion creates a production deployment alongside your development instance; the development instance keeps running. You can redeploy any time.
             </div>
             <div class="flex items-center gap-2">
               <button
