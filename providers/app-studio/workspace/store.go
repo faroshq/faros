@@ -158,6 +158,11 @@ type SearchResult struct {
 type FileStore struct {
 	root       string
 	mutationMu sync.Mutex
+	// migrationMu serializes the one-time compatibility transition from the
+	// pre-ProjectUID layout. It is intentionally separate from mutationMu so
+	// path resolution can safely migrate data before a caller takes the
+	// workspace mutation lock.
+	migrationMu sync.Mutex
 }
 
 // NewFileStore returns a filesystem-backed project workspace store.
@@ -489,6 +494,9 @@ func (s *FileStore) scopeDir(scope Scope) (string, error) {
 		if err := validateScopeSegment(part); err != nil {
 			return "", err
 		}
+	}
+	if err := s.migrateLegacyWorkspace(scope); err != nil {
+		return "", err
 	}
 	return filepath.Join(s.root, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID), nil
 }

@@ -203,6 +203,88 @@ func TestMemoryStoreAssistantRunContractAndEventRetention(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRetentionProtectsActiveTranscriptAndCleansEveryTerminalState(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	for _, messageID := range []string{"active-user", "active-assistant", "completed-message", "failed-message", "interrupted-message", "aborted-message"} {
+		if err := memory.AppendMessage(ctx, scope, Message{ID: messageID, Role: "assistant", CreatedAt: old, UpdatedAt: old}); err != nil {
+			t.Fatalf("AppendMessage %s: %v", messageID, err)
+		}
+	}
+	if err := memory.SaveAssistantRun(ctx, scope, AssistantRun{
+		ID: "run-active", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning,
+		UserMessageID: "active-user", ActiveMessageID: "active-assistant", CreatedAt: old, UpdatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	terminal := []struct {
+		status    AssistantRunStatus
+		runID     string
+		messageID string
+	}{
+		{AssistantRunStatusCompleted, "run-completed", "completed-message"},
+		{AssistantRunStatusFailed, "run-failed", "failed-message"},
+		{AssistantRunStatusInterrupted, "run-interrupted", "interrupted-message"},
+		{AssistantRunStatusAborted, "run-aborted", "aborted-message"},
+	}
+	for _, item := range terminal {
+		if err := memory.SaveAssistantRun(ctx, scope, AssistantRun{
+			ID: item.runID, Mode: AssistantRunModeDefault, Status: item.status,
+			CreatedAt: old, UpdatedAt: old,
+		}); err != nil {
+			t.Fatalf("SaveAssistantRun %s: %v", item.status, err)
+		}
+		if _, err := memory.AppendAssistantRunEvent(ctx, scope, AssistantRunEvent{RunID: item.runID, Type: "terminal", CreatedAt: old}, 0); err != nil {
+			t.Fatalf("AppendAssistantRunEvent %s: %v", item.status, err)
+		}
+		if _, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+			ID: item.runID + "-item", RunID: item.runID, Type: "assistant_message", CreatedAt: old,
+		}); err != nil {
+			t.Fatalf("AppendAssistantConversationItem %s: %v", item.status, err)
+		}
+	}
+	if _, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "active-item", RunID: "run-active", Type: "assistant_message", CreatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := memory.DeleteMessagesOlderThan(ctx, old.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != int64(len(terminal))*2 {
+		t.Fatalf("deleted = %d, want stale terminal messages and terminal runs", deleted)
+	}
+	page, err := memory.ListMessages(ctx, scope, 50, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 || page.Items[0].ID != "active-assistant" || page.Items[1].ID != "active-user" {
+		t.Fatalf("active transcript messages = %#v, want both active messages", page.Items)
+	}
+	if _, err := memory.GetAssistantRun(ctx, scope, "run-active"); err != nil {
+		t.Fatalf("active run was removed: %v", err)
+	}
+	for _, item := range terminal {
+		if _, err := memory.GetAssistantRun(ctx, scope, item.runID); !errors.Is(err, ErrAssistantRunNotFound) {
+			t.Fatalf("terminal run %s after retention = %v, want not found", item.status, err)
+		}
+		if _, err := memory.ListAssistantRunEvents(ctx, scope, item.runID, 0, 10); !errors.Is(err, ErrAssistantRunNotFound) {
+			t.Fatalf("terminal event stream %s after retention = %v, want not found", item.status, err)
+		}
+	}
+	items, err := memory.ListAssistantConversationItems(ctx, scope, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].RunID != "run-active" {
+		t.Fatalf("conversation items after retention = %#v, want active item only", items)
+	}
+}
+
 func TestEncryptedStoreEncryptsAssistantRunEventPayload(t *testing.T) {
 	ctx := context.Background()
 	base := NewMemoryStore()
@@ -314,6 +396,103 @@ func TestMemoryStoreConversationItemIdentityIsRunScopedAndReplayChecked(t *testi
 	items, err := memory.ListAssistantConversationItems(ctx, scope, 0, 10)
 	if err != nil || len(items) != 2 || items[0].RunID != "run-1" || items[1].RunID != "run-2" {
 		t.Fatalf("stored items = %#v, err=%v", items, err)
+	}
+}
+
+func TestMemoryStoreConversationSequenceUsesHighWaterMarkAfterRetentionGap(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := memory.SaveAssistantRun(ctx, scope, AssistantRun{
+		ID: "run-old", Mode: AssistantRunModeDefault, Status: AssistantRunStatusCompleted,
+		UpdatedAt: old, CreatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memory.SaveAssistantRun(ctx, scope, AssistantRun{
+		ID: "run-active", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning,
+		UpdatedAt: old, CreatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "old-item", RunID: "run-old", Type: "assistant_message", CreatedAt: old,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Sequence != 1 {
+		t.Fatalf("first sequence = %d, want 1", first.Sequence)
+	}
+	second, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "active-item", RunID: "run-active", Type: "assistant_message", CreatedAt: old,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Sequence != 2 {
+		t.Fatalf("second sequence = %d, want 2", second.Sequence)
+	}
+	if _, err := memory.DeleteMessagesOlderThan(ctx, old.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	third, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "new-item", RunID: "run-active", Type: "tool_result", CreatedAt: old.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Sequence != 3 {
+		t.Fatalf("sequence after retention gap = %d, want 3", third.Sequence)
+	}
+}
+
+func TestMemoryStoreConversationSequenceSurvivesAllItemsRetention(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	scope := Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-a"}
+	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := memory.SaveAssistantRun(ctx, scope, AssistantRun{
+		ID: "run-old", Mode: AssistantRunModeDefault, Status: AssistantRunStatusCompleted,
+		CreatedAt: old, UpdatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "old-item", RunID: "run-old", Type: "assistant_message", CreatedAt: old,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Sequence != 1 {
+		t.Fatalf("first sequence = %d, want 1", first.Sequence)
+	}
+	if _, err := memory.DeleteMessagesOlderThan(ctx, old.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := memory.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("conversation items after retention = %#v, want empty", items)
+	}
+	second, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "new-item", RunID: "run-new", Type: "assistant_message", CreatedAt: old.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Sequence != 2 {
+		t.Fatalf("sequence after all-items retention = %d, want 2", second.Sequence)
+	}
+	items, err = memory.ListAssistantConversationItems(ctx, scope, first.Sequence, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Sequence != 2 {
+		t.Fatalf("items after old cursor = %#v, want sequence 2", items)
 	}
 }
 

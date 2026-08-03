@@ -504,6 +504,135 @@ func TestCommitFilesRetriesWhenConcurrentUpdateAlreadyAppliedSameTreeWithoutProo
 	}
 }
 
+func TestRecoverConcurrentCommitReevaluatesDeletionWhenRacedBaseAddedPath(t *testing.T) {
+	const (
+		concurrentSHA  = "commit-concurrent"
+		concurrentTree = "tree-concurrent"
+		retryTree      = "tree-retry"
+		retrySHA       = "commit-retry"
+	)
+	var createTreeCalls, createCommitCalls, updateRefCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/ref/heads/main" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"ref":"refs/heads/main","object":{"type":"commit","sha":%q}}`, concurrentSHA)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits/"+concurrentSHA && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"tree":{"sha":%q}}`, concurrentSHA, concurrentTree)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/trees/"+concurrentTree && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sha":"tree-concurrent","tree":[{"path":"race.txt","type":"blob","sha":"blob-race"}]}`))
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/trees" && r.Method == http.MethodPost {
+			createTreeCalls++
+			body := mustReadRequestBody(t, r)
+			if !strings.Contains(body, "race.txt") || !strings.Contains(body, `"sha":null`) {
+				t.Fatalf("retry tree omitted original deletion intent: %s", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q}`, retryTree)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits" && r.Method == http.MethodPost {
+			createCommitCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"tree":{"sha":%q}}`, retrySHA, retryTree)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/refs/heads/main" && r.Method == http.MethodPatch {
+			updateRefCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"ref":"refs/heads/main","object":{"type":"commit","sha":%q}}`, retrySHA)
+			return
+		}
+		t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	client := gogithub.NewClient(nil)
+	baseURL := srv.URL + "/api/v3/"
+	client.BaseURL, _ = client.BaseURL.Parse(baseURL)
+	client.UploadURL, _ = client.UploadURL.Parse(baseURL)
+	entries, files, err := gitTreeEntries([]backend.RepositoryCommitFile{
+		{Path: "new.txt", Content: "new"},
+		{Path: "race.txt", Delete: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok, err := recoverOrRetryConcurrentCommit(
+		context.Background(), client, "acme", &codev1alpha1.Repository{Spec: codev1alpha1.RepositorySpec{Name: "widgets"}},
+		"main", "orphan", "", "Update", entries, files,
+	)
+	if err != nil || !ok {
+		t.Fatalf("recover result = %#v, ok=%t, err=%v", result, ok, err)
+	}
+	if result.CommitSHA != retrySHA || createTreeCalls != 1 || createCommitCalls != 1 || updateRefCalls != 1 {
+		t.Fatalf("result=%#v calls=(tree=%d commit=%d ref=%d), want retried commit", result, createTreeCalls, createCommitCalls, updateRefCalls)
+	}
+}
+
+func TestRecoverConcurrentCommitReturnsHeadWhenRacedBaseRemovedDeletion(t *testing.T) {
+	const (
+		concurrentSHA  = "commit-concurrent"
+		concurrentTree = "tree-concurrent"
+	)
+	var createTreeCalls, createCommitCalls, updateRefCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/ref/heads/main" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"ref":"refs/heads/main","object":{"type":"commit","sha":%q}}`, concurrentSHA)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits/"+concurrentSHA && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"tree":{"sha":%q}}`, concurrentSHA, concurrentTree)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/trees/"+concurrentTree && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sha":"tree-concurrent","tree":[]}`))
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/trees" && r.Method == http.MethodPost {
+			createTreeCalls++
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits" && r.Method == http.MethodPost {
+			createCommitCalls++
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/refs/heads/main" && r.Method == http.MethodPatch {
+			updateRefCalls++
+		}
+		t.Fatalf("unexpected retry mutation request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	client := gogithub.NewClient(nil)
+	baseURL := srv.URL + "/api/v3/"
+	client.BaseURL, _ = client.BaseURL.Parse(baseURL)
+	client.UploadURL, _ = client.UploadURL.Parse(baseURL)
+	entries, files, err := gitTreeEntries([]backend.RepositoryCommitFile{{Path: "race.txt", Delete: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, ok, err := recoverOrRetryConcurrentCommit(
+		context.Background(), client, "acme", &codev1alpha1.Repository{Spec: codev1alpha1.RepositorySpec{Name: "widgets"}},
+		"main", "orphan", "", "Update", entries, files,
+	)
+	if err != nil || !ok {
+		t.Fatalf("recover result = %#v, ok=%t, err=%v", result, ok, err)
+	}
+	if result.CommitSHA != concurrentSHA || len(result.Files) != 0 {
+		t.Fatalf("result = %#v, want current head with zero effective files", result)
+	}
+	if createTreeCalls != 0 || createCommitCalls != 0 || updateRefCalls != 0 {
+		t.Fatalf("retry mutation calls = tree=%d commit=%d ref=%d, want zero", createTreeCalls, createCommitCalls, updateRefCalls)
+	}
+}
+
 func TestCommitFilesRecoversWhenConcurrentCreateRefAlreadyAppliedDesiredTree(t *testing.T) {
 	const (
 		desiredTreeSHA = "tree-desired"

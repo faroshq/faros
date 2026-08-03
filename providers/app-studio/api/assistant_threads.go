@@ -262,13 +262,81 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 	}
 	if !started.Started {
 		canonicalTurn, err = s.store.FindAssistantTurnByClientUserMessageID(r.Context(), scope, thread.ID, request.ClientUserMessageID)
+		if errors.Is(err, store.ErrAssistantTurnNotFound) {
+			canonicalTurn, err = s.repairProjectAssistantThreadTurn(r.Context(), scope, thread, request, started.Run)
+		}
 		if err != nil {
 			s.writeAssistantThreadError(w, err)
 			return
 		}
+		if canonicalTurn.Status == store.AssistantTurnStatusInProgress && assistantRunTerminal(started.Run.Status) {
+			if err := s.reconcileProjectAssistantThreadTurn(r.Context(), scope, canonicalTurn); err != nil {
+				s.writeAssistantThreadError(w, err)
+				return
+			}
+			canonicalTurn, err = s.store.GetAssistantTurn(r.Context(), scope, thread.ID, canonicalTurn.ID)
+			if err != nil {
+				s.writeAssistantThreadError(w, err)
+				return
+			}
+		}
 	}
 	thread, _ = s.store.GetAssistantThread(r.Context(), scope, thread.ID)
 	writeJSON(w, http.StatusAccepted, assistantThreadTurnStartResponse{Thread: thread, Turn: canonicalTurn})
+}
+
+// repairProjectAssistantThreadTurn reconstructs the canonical thread boundary
+// when generic run creation committed but provider-specific turn creation did
+// not. It is intentionally idempotent: CreateAssistantTurn returns an
+// existing turn for the same client message, and a terminal run is projected
+// through the normal mirror/reconciliation path before the replay responds.
+func (s *Server) repairProjectAssistantThreadTurn(ctx context.Context, scope store.Scope, thread store.AssistantThread, request assistantThreadTurnCreateRequest, run store.AssistantRun) (store.AssistantTurn, error) {
+	if strings.TrimSpace(run.ID) == "" {
+		return store.AssistantTurn{}, store.ErrAssistantTurnNotFound
+	}
+	user, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
+	if err != nil {
+		return store.AssistantTurn{}, err
+	}
+	assistant, err := s.findProjectMessage(ctx, scope, run.ActiveMessageID)
+	if err != nil {
+		return store.AssistantTurn{}, err
+	}
+	now := run.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	turn := store.AssistantTurn{
+		ID:                  run.ID,
+		ThreadID:            thread.ID,
+		ActorID:             thread.ActorID,
+		ClientUserMessageID: request.ClientUserMessageID,
+		Mode:                run.Mode,
+		ApprovalMode:        run.ApprovalMode,
+		Status:              store.AssistantTurnStatusInProgress,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	turnPayload, _ := json.Marshal(map[string]any{"turn": turn})
+	userItem := assistantThreadItem{ID: user.ID, TurnID: turn.ID, Type: assistantThreadEventUserMessage, Status: "completed", Content: user.Content, CreatedAt: user.CreatedAt}
+	userPayload, _ := json.Marshal(map[string]any{"item": userItem})
+	assistantItem := assistantThreadItem{ID: assistant.ID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "in_progress", Content: assistant.Content, CreatedAt: assistant.CreatedAt}
+	assistantPayload, _ := json.Marshal(map[string]any{"item": assistantItem})
+	created, err := s.store.CreateAssistantTurn(ctx, scope, turn, []store.AssistantThreadEvent{
+		{Type: assistantThreadEventTurnStarted, Payload: turnPayload, CreatedAt: now},
+		{Type: assistantThreadEventItemCompleted, ItemID: userItem.ID, Payload: userPayload, CreatedAt: user.CreatedAt},
+		{Type: assistantThreadEventItemStarted, ItemID: assistantItem.ID, Payload: assistantPayload, CreatedAt: assistant.CreatedAt},
+	})
+	if err != nil {
+		return store.AssistantTurn{}, err
+	}
+	if assistantRunTerminal(run.Status) && created.Status == store.AssistantTurnStatusInProgress {
+		if err := s.reconcileProjectAssistantThreadTurn(ctx, scope, created); err != nil {
+			return store.AssistantTurn{}, err
+		}
+		return s.store.GetAssistantTurn(ctx, scope, thread.ID, created.ID)
+	}
+	return created, nil
 }
 
 func (s *Server) activeProjectAssistantThreadTurn(w http.ResponseWriter, r *http.Request) {
@@ -460,7 +528,7 @@ func (s *Server) streamProjectAssistantThreadEvents(w http.ResponseWriter, r *ht
 				return
 			}
 			after = event.Sequence
-			if event.Type == assistantThreadEventTurnCompleted || event.Type == assistantThreadEventTurnFailed || event.Type == assistantThreadEventTurnInterrupted {
+			if s.assistantThreadTerminalEventEndsStream(r.Context(), scope, thread.ID, event) {
 				flusher.Flush()
 				return
 			}
@@ -480,6 +548,23 @@ func (s *Server) streamProjectAssistantThreadEvents(w http.ResponseWriter, r *ht
 			return
 		}
 	}
+}
+
+// assistantThreadTerminalEventEndsStream keeps a historical turn's terminal
+// event from closing a thread stream while a newer turn is still active. The
+// event log is shared by every turn, so terminality is only a stream boundary
+// when the store confirms there is no different in-progress turn.
+func (s *Server) assistantThreadTerminalEventEndsStream(ctx context.Context, scope store.Scope, threadID string, event store.AssistantThreadEvent) bool {
+	switch event.Type {
+	case assistantThreadEventTurnCompleted, assistantThreadEventTurnFailed, assistantThreadEventTurnInterrupted:
+	default:
+		return false
+	}
+	active, err := s.store.ActiveAssistantTurn(ctx, scope, threadID)
+	if err == nil {
+		return active.ID == event.TurnID
+	}
+	return errors.Is(err, store.ErrAssistantTurnNotFound)
 }
 
 // reconcileProjectAssistantThreadTurn closes the canonical projection when a
@@ -506,6 +591,9 @@ func (s *Server) reconcileProjectAssistantThreadTurn(ctx context.Context, scope 
 	}
 	state, err := s.loadAssistantThreadMirrorState(ctx, scope, turn.ThreadID, run.ActiveMessageID, turn.ID)
 	if err != nil {
+		return err
+	}
+	if err := s.closeStaleAssistantThreadMessages(ctx, scope, turn.ThreadID, turn.ID, run.ActiveMessageID, &state); err != nil {
 		return err
 	}
 	if state.lastRequestID != "" {
@@ -637,27 +725,39 @@ func (s *Server) loadAllAssistantThreadEvents(ctx context.Context, scope store.S
 
 func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assistantThreadItem {
 	items := make([]assistantThreadItem, 0)
-	indexes := map[string]int{}
+	type assistantThreadItemKey struct {
+		turnID string
+		itemID string
+	}
+	indexes := map[assistantThreadItemKey]int{}
 	terminalTurns := map[string]struct{}{}
 	for _, event := range events {
-		if event.Type == assistantThreadEventTurnCompleted || event.Type == assistantThreadEventTurnFailed || event.Type == assistantThreadEventTurnInterrupted {
-			terminalTurns[event.TurnID] = struct{}{}
-		}
-		if event.ItemID == "" {
-			continue
-		}
-		index, exists := indexes[event.ItemID]
-		if !exists {
-			index = len(items)
-			indexes[event.ItemID] = index
-			items = append(items, assistantThreadItem{ID: event.ItemID, TurnID: event.TurnID, Status: "in_progress", Sequence: event.Sequence, CreatedAt: event.CreatedAt})
-		}
 		var envelope struct {
 			Item  assistantThreadItem `json:"item"`
 			Delta string              `json:"delta"`
 		}
 		_ = json.Unmarshal(event.Payload, &envelope)
+		turnID := event.TurnID
+		if turnID == "" {
+			turnID = envelope.Item.TurnID
+		}
+		if event.Type == assistantThreadEventTurnCompleted || event.Type == assistantThreadEventTurnFailed || event.Type == assistantThreadEventTurnInterrupted {
+			terminalTurns[turnID] = struct{}{}
+		}
+		if event.ItemID == "" {
+			continue
+		}
+		key := assistantThreadItemKey{turnID: turnID, itemID: event.ItemID}
+		index, exists := indexes[key]
+		if !exists {
+			index = len(items)
+			indexes[key] = index
+			items = append(items, assistantThreadItem{ID: event.ItemID, TurnID: turnID, Status: "in_progress", Sequence: event.Sequence, CreatedAt: event.CreatedAt})
+		}
 		if envelope.Item.ID != "" {
+			if envelope.Item.TurnID == "" {
+				envelope.Item.TurnID = turnID
+			}
 			// Item creation time is stable across subsequent delta/completion
 			// events. Event creation time remains available on the event itself.
 			if !items[index].CreatedAt.IsZero() {
@@ -675,10 +775,11 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 	}
 	// A terminal turn cannot have an actionable request. This also repairs the
 	// read projection for streams written by older restart recovery code that
-	// terminalized an orphaned turn without first emitting request.resolved.
+	// terminalized an orphaned turn without first emitting request.resolved or
+	// item.completed for every steered assistant message segment.
 	for index := range items {
 		if _, terminal := terminalTurns[items[index].TurnID]; terminal &&
-			(items[index].Type == "approval" || items[index].Type == "input") && items[index].Status == "in_progress" {
+			(items[index].Type == "approval" || items[index].Type == "input" || items[index].Type == assistantThreadEventAssistantMessage) && items[index].Status == "in_progress" {
 			items[index].Status = "completed"
 		}
 	}

@@ -203,3 +203,108 @@ func TestEncryptedAssistantThreadPayloadIsNotPlaintextAtRest(t *testing.T) {
 		t.Fatalf("decrypted payload = %s", clear[0].Payload)
 	}
 }
+
+func TestEncryptedAssistantThreadTitleIsProtectedAcrossAllProjectionPaths(t *testing.T) {
+	ctx := context.Background()
+	base := NewMemoryStore()
+	wrapper, err := NewEncryptedStore(base, testEncryptionKeys(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	created, err := wrapper.CreateAssistantThread(ctx, scope, AssistantThread{
+		ID: "thread-title", ActorID: "alice", Title: "private title",
+	}, []AssistantThreadEvent{{Type: "thread.created"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Title != "private title" {
+		t.Fatalf("created title = %q, want clear title", created.Title)
+	}
+	assertEncryptedAssistantThreadTitle(t, base, scope, "private title")
+	got, err := wrapper.GetAssistantThread(ctx, scope, created.ID)
+	if err != nil || got.Title != "private title" {
+		t.Fatalf("GetAssistantThread = %#v, %v", got, err)
+	}
+	page, err := wrapper.ListAssistantThreads(ctx, scope, "alice", false, 10, "")
+	if err != nil || len(page.Items) != 1 || page.Items[0].Title != "private title" {
+		t.Fatalf("ListAssistantThreads = %#v, %v", page, err)
+	}
+
+	updated := created
+	updated.Title = "private update"
+	updated.UpdatedAt = created.UpdatedAt.Add(time.Second)
+	if _, err := wrapper.UpdateAssistantThread(ctx, scope, updated); err != nil {
+		t.Fatal(err)
+	}
+	assertEncryptedAssistantThreadTitle(t, base, scope, "private update")
+	got, err = wrapper.GetAssistantThread(ctx, scope, created.ID)
+	if err != nil || got.Title != "private update" {
+		t.Fatalf("updated GetAssistantThread = %#v, %v", got, err)
+	}
+
+	updated.Title = "private event update"
+	updated.UpdatedAt = updated.UpdatedAt.Add(time.Second)
+	if got, _, err := wrapper.UpdateAssistantThreadWithEvent(ctx, scope, updated, AssistantThreadEvent{
+		Type: "thread.updated", Payload: json.RawMessage(`{"title":"private event update"}`),
+	}, 1); err != nil || got.Title != "private event update" {
+		t.Fatalf("UpdateAssistantThreadWithEvent = %#v, %v", got, err)
+	}
+	assertEncryptedAssistantThreadTitle(t, base, scope, "private event update")
+}
+
+func assertEncryptedAssistantThreadTitle(t *testing.T, base *MemoryStore, scope Scope, plaintext string) {
+	t.Helper()
+	raw, err := base.GetAssistantThread(context.Background(), scope, "thread-title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Title == plaintext || bytes.Contains([]byte(raw.Title), []byte(plaintext)) {
+		t.Fatalf("thread title persisted in plaintext: %q", raw.Title)
+	}
+}
+
+func TestMemoryStoreDeleteProjectMessagesRemovesCanonicalAssistantTranscript(t *testing.T) {
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	scope := Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	thread, err := memory.CreateAssistantThread(ctx, scope, AssistantThread{ID: "thread-delete", ActorID: "alice"}, []AssistantThreadEvent{{Type: "thread.created"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := memory.CreateAssistantTurn(ctx, scope, AssistantTurn{
+		ID: "turn-delete", ThreadID: thread.ID, ActorID: "alice", ClientUserMessageID: "client-delete",
+	}, []AssistantThreadEvent{{Type: "turn.started"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.AppendAssistantThreadEvent(ctx, scope, AssistantThreadEvent{ThreadID: thread.ID, TurnID: turn.ID, Type: "item.completed"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{ID: "item-delete", RunID: "run-delete", Type: "assistant_message"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := memory.DeleteProjectMessages(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.GetAssistantThread(ctx, scope, thread.ID); !errors.Is(err, ErrAssistantThreadNotFound) {
+		t.Fatalf("GetAssistantThread after delete = %v, want not found", err)
+	}
+	if _, err := memory.GetAssistantTurn(ctx, scope, thread.ID, turn.ID); !errors.Is(err, ErrAssistantTurnNotFound) {
+		t.Fatalf("GetAssistantTurn after delete = %v, want not found", err)
+	}
+	if _, err := memory.ListAssistantThreadEvents(ctx, scope, thread.ID, 0, 10); !errors.Is(err, ErrAssistantThreadNotFound) {
+		t.Fatalf("ListAssistantThreadEvents after delete = %v, want not found", err)
+	}
+	items, err := memory.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("conversation items after delete = %#v, %v; want empty", items, err)
+	}
+	created, err := memory.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{ID: "item-after-delete", RunID: "run-after-delete", Type: "assistant_message"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Sequence != 1 {
+		t.Fatalf("sequence after project deletion = %d, want reset to 1", created.Sequence)
+	}
+}

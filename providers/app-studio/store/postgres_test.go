@@ -18,6 +18,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -89,6 +91,22 @@ func TestAssistantConversationIdentityIsRunScopedAndMigratesExistingProjects(t *
 	}
 	if assistantConversationIdentitySchemaVersion != "assistant-conversation-identity-v2" {
 		t.Fatalf("conversation identity schema version = %q", assistantConversationIdentitySchemaVersion)
+	}
+}
+
+func TestAssistantConversationSequenceSchemaPreservesProjectHighWaterMark(t *testing.T) {
+	statements := strings.Join(assistantConversationSequenceSchemaStatements(), "\n")
+	for _, want := range []string{
+		"app_studio_assistant_conversation_sequences",
+		"last_sequence bigint NOT NULL DEFAULT 0",
+		"PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid)",
+	} {
+		if !strings.Contains(statements, want) {
+			t.Fatalf("conversation sequence schema missing %q", want)
+		}
+	}
+	if assistantConversationSequenceSchemaVersion != "assistant-conversation-sequence-v1" {
+		t.Fatalf("conversation sequence schema version = %q", assistantConversationSequenceSchemaVersion)
 	}
 }
 
@@ -369,6 +387,112 @@ func TestAssistantCodexTerminalMigrationExternalDSN(t *testing.T) {
 	}
 	if failed != 2 {
 		t.Fatalf("migrated failed runs = %d, want 2", failed)
+	}
+}
+
+func TestPostgresRetentionProtectsActiveMessagesAndConversationHighWaterMark(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("APP_STUDIO_TEST_POSTGRES_DSN is not set")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+
+	schemaName := fmt.Sprintf("app_studio_retention_seq_%d", time.Now().UTC().UnixNano())
+	if _, err := db.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schemaName)); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupDB, openErr := sql.Open("postgres", dsn)
+		if openErr != nil {
+			return
+		}
+		defer cleanupDB.Close()
+		_, _ = cleanupDB.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schemaName)+" CASCADE")
+	})
+
+	store, err := OpenPostgres(ctx, postgresDSNWithSearchPath(t, dsn, schemaName))
+	if err != nil {
+		t.Fatalf("OpenPostgres: %v", err)
+	}
+	defer store.Close()
+
+	scope := Scope{OrgUUID: "org-retention", WorkspaceUUID: "workspace-retention", ProjectName: "demo", ProjectUID: "project-retention"}
+	old := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	activeRun, err := store.CreateAssistantRun(ctx, scope,
+		Message{ID: "active-user", Role: "user", ActorID: "alice", Content: "active prompt", CreatedAt: old, UpdatedAt: old},
+		Message{ID: "active-assistant", Role: "assistant", Content: "active response", CreatedAt: old, UpdatedAt: old},
+		AssistantRun{ID: "run-active", Mode: AssistantRunModeDefault, Status: AssistantRunStatusRunning,
+			ClientRequestID: "request-active", UserMessageID: "active-user", ActiveMessageID: "active-assistant",
+			Revision: 1, CreatedAt: old, UpdatedAt: old},
+	)
+	if err != nil {
+		t.Fatalf("CreateAssistantRun: %v", err)
+	}
+	if activeRun.ID != "run-active" {
+		t.Fatalf("active run = %#v", activeRun)
+	}
+	if err := store.SaveAssistantRun(ctx, scope, AssistantRun{ID: "run-terminal", Mode: AssistantRunModeDefault,
+		Status: AssistantRunStatusCompleted, CreatedAt: old, UpdatedAt: old}); err != nil {
+		t.Fatalf("SaveAssistantRun terminal: %v", err)
+	}
+	first, err := store.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "terminal-item", RunID: "run-terminal", Type: "assistant_message", Payload: json.RawMessage(`{"content":"terminal"}`), CreatedAt: old,
+	})
+	if err != nil {
+		t.Fatalf("AppendAssistantConversationItem terminal: %v", err)
+	}
+	if first.Sequence != 1 {
+		t.Fatalf("terminal item sequence = %d, want 1", first.Sequence)
+	}
+
+	deleted, err := store.DeleteMessagesOlderThan(ctx, old.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteMessagesOlderThan: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want terminal run only (active messages are protected)", deleted)
+	}
+	if _, err := store.GetAssistantRun(ctx, scope, "run-terminal"); !errors.Is(err, ErrAssistantRunNotFound) {
+		t.Fatalf("terminal run after retention = %v, want not found", err)
+	}
+	if _, err := store.GetAssistantRun(ctx, scope, "run-active"); err != nil {
+		t.Fatalf("active run after retention = %v, want present", err)
+	}
+	page, err := store.ListMessages(ctx, scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages after retention: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("active messages after retention = %#v, want both messages", page.Items)
+	}
+	items, err := store.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil {
+		t.Fatalf("ListAssistantConversationItems after retention: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("terminal conversation items after retention = %#v, want empty", items)
+	}
+
+	second, err := store.AppendAssistantConversationItem(ctx, scope, AssistantConversationItem{
+		ID: "active-item", RunID: "run-active", Type: "assistant_message", Payload: json.RawMessage(`{"content":"active"}`), CreatedAt: old.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("AppendAssistantConversationItem after retention: %v", err)
+	}
+	if second.Sequence != 2 {
+		t.Fatalf("next sequence after all-items retention = %d, want 2", second.Sequence)
+	}
+	items, err = store.ListAssistantConversationItems(ctx, scope, first.Sequence, 10)
+	if err != nil {
+		t.Fatalf("ListAssistantConversationItems after old cursor: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != second.ID || items[0].Sequence != second.Sequence {
+		t.Fatalf("items after old cursor = %#v, want active item at sequence 2", items)
 	}
 }
 

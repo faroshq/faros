@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,7 +39,11 @@ const (
 // already committed delta, item, request, plan, or terminal event.
 type assistantThreadMirrorState struct {
 	lastContent     string
+	activeMessageID string
 	actionStatuses  map[string]string
+	openMessages    map[string]struct{}
+	messageContent  map[string]string
+	messageCreated  map[string]time.Time
 	lastPlan        string
 	lastRequestID   string
 	lastRequestType string
@@ -49,12 +54,27 @@ type assistantThreadMirrorState struct {
 	terminalEvent   bool
 }
 
+// assistantThreadDynamicToolItemID scopes a provider action ID to the
+// assistant message segment that emitted it. Providers may reuse a call ID
+// after steering rotates the active assistant message; the thread item ID must
+// remain distinct while the action payload retains the raw provider ID.
+func assistantThreadDynamicToolItemID(activeMessageID, actionID string) string {
+	return "tool-" + strings.TrimSpace(activeMessageID) + "-" + strings.TrimSpace(actionID)
+}
+
 func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store.Scope, threadID, activeMessageID, turnID string) (assistantThreadMirrorState, error) {
 	events, err := s.loadAllAssistantThreadEvents(ctx, scope, threadID)
 	if err != nil {
 		return assistantThreadMirrorState{}, err
 	}
-	state := assistantThreadMirrorState{actionStatuses: map[string]string{}, reconstructed: true}
+	state := assistantThreadMirrorState{
+		activeMessageID: activeMessageID,
+		actionStatuses:  map[string]string{},
+		openMessages:    map[string]struct{}{},
+		messageContent:  map[string]string{},
+		messageCreated:  map[string]time.Time{},
+		reconstructed:   true,
+	}
 	for _, event := range events {
 		if event.Sequence > state.lastSequence {
 			state.lastSequence = event.Sequence
@@ -65,12 +85,40 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 		if event.Type == assistantThreadEventTurnCompleted || event.Type == assistantThreadEventTurnFailed || event.Type == assistantThreadEventTurnInterrupted {
 			state.terminalEvent = true
 		}
-		if event.ItemID == activeMessageID {
-			var envelope struct {
-				Item  assistantThreadItem `json:"item"`
-				Delta string              `json:"delta"`
+		var envelope struct {
+			Item  assistantThreadItem `json:"item"`
+			Delta string              `json:"delta"`
+		}
+		envelopeDecoded := json.Unmarshal(event.Payload, &envelope) == nil
+		if event.ItemID != "" {
+			messageID := event.ItemID
+			if envelopeDecoded && envelope.Item.ID != "" {
+				messageID = envelope.Item.ID
 			}
-			if json.Unmarshal(event.Payload, &envelope) == nil {
+			if event.Type == assistantThreadEventItemDelta {
+				state.messageContent[messageID] += envelope.Delta
+				state.openMessages[messageID] = struct{}{}
+				if _, exists := state.messageCreated[messageID]; !exists {
+					state.messageCreated[messageID] = event.CreatedAt
+				}
+			}
+			if envelopeDecoded && envelope.Item.Type == assistantThreadEventAssistantMessage {
+				if !envelope.Item.CreatedAt.IsZero() {
+					state.messageCreated[messageID] = envelope.Item.CreatedAt
+				} else if _, exists := state.messageCreated[messageID]; !exists {
+					state.messageCreated[messageID] = event.CreatedAt
+				}
+				switch event.Type {
+				case assistantThreadEventItemStarted:
+					state.openMessages[messageID] = struct{}{}
+				case assistantThreadEventItemCompleted:
+					state.messageContent[messageID] = envelope.Item.Content
+					delete(state.openMessages, messageID)
+				}
+			}
+		}
+		if event.ItemID == activeMessageID {
+			if envelopeDecoded {
 				switch event.Type {
 				case assistantThreadEventItemDelta:
 					state.lastContent += envelope.Delta
@@ -83,21 +131,16 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 			}
 		}
 		if event.Type == assistantThreadEventItemCompleted && event.ItemID == "plan-"+turnID {
-			var envelope struct {
-				Item assistantThreadItem `json:"item"`
-			}
-			if json.Unmarshal(event.Payload, &envelope) == nil {
+			if envelopeDecoded {
 				state.lastPlan = string(envelope.Item.Data)
 			}
 		}
 		if event.ItemID != "" && (event.Type == assistantThreadEventItemStarted || event.Type == assistantThreadEventItemCompleted) {
-			var envelope struct {
-				Item assistantThreadItem `json:"item"`
-			}
-			if json.Unmarshal(event.Payload, &envelope) == nil && envelope.Item.Type == assistantThreadEventDynamicToolCall {
+			if envelopeDecoded && envelope.Item.Type == assistantThreadEventDynamicToolCall {
 				var action projectAssistantActionFeedItem
-				if json.Unmarshal(envelope.Item.Data, &action) == nil && action.ID != "" {
-					state.actionStatuses[action.ID] = action.Status
+				if json.Unmarshal(envelope.Item.Data, &action) == nil && action.ID != "" &&
+					event.ItemID == assistantThreadDynamicToolItemID(activeMessageID, action.ID) {
+					state.actionStatuses[event.ItemID] = action.Status
 				}
 			}
 		}
@@ -159,6 +202,73 @@ func (s *Server) loadAssistantThreadMirrorStateWithRetry(ctx context.Context, sc
 	return assistantThreadMirrorState{}, fmt.Errorf("load assistant thread mirror state after %d attempts: %w", assistantThreadMirrorPersistMaxAttempts, lastErr)
 }
 
+// closeStaleAssistantThreadMessages retires assistant message segments that
+// were left open when steering rotated the active message or when a provider
+// restart interrupted mirror delivery. The event stream is the source of
+// truth, so writing an item.completed event makes both live and reload
+// projections agree without mutating the old segment's identity.
+func (s *Server) closeStaleAssistantThreadMessages(ctx context.Context, scope store.Scope, threadID, turnID, activeMessageID string, state *assistantThreadMirrorState) error {
+	if state == nil {
+		return errors.New("assistant thread mirror state is required")
+	}
+	if state.openMessages == nil {
+		state.openMessages = map[string]struct{}{}
+	}
+	if state.messageContent == nil {
+		state.messageContent = map[string]string{}
+	}
+	if state.messageCreated == nil {
+		state.messageCreated = map[string]time.Time{}
+	}
+	stale := make([]string, 0, len(state.openMessages))
+	for messageID := range state.openMessages {
+		if messageID != "" && messageID != activeMessageID {
+			stale = append(stale, messageID)
+		}
+	}
+	sort.Strings(stale)
+	for _, messageID := range stale {
+		content := state.messageContent[messageID]
+		createdAt := state.messageCreated[messageID]
+		var metadata map[string]any
+		if message, err := s.findProjectMessage(ctx, scope, messageID); err == nil {
+			if content == "" {
+				content = message.Content
+			}
+			if createdAt.IsZero() {
+				createdAt = message.CreatedAt
+			}
+			metadata = message.Metadata
+		}
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
+		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{
+			ID:        messageID,
+			TurnID:    turnID,
+			Type:      assistantThreadEventAssistantMessage,
+			Status:    "completed",
+			Content:   content,
+			CreatedAt: createdAt,
+		}, metadata)
+		payload, err := json.Marshal(map[string]any{"item": item})
+		if err != nil {
+			return fmt.Errorf("encode stale assistant thread terminal item: %w", err)
+		}
+		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{
+			ThreadID: threadID,
+			TurnID:   turnID,
+			Type:     assistantThreadEventItemCompleted,
+			ItemID:   messageID,
+			Payload:  payload,
+		}); err != nil {
+			return fmt.Errorf("persist stale assistant thread terminal item %q: %w", messageID, err)
+		}
+		delete(state.openMessages, messageID)
+	}
+	return nil
+}
+
 // projectAssistantThreadSnapshotWithRetry is the mirror's persistence barrier.
 // After every failed attempt, reload state from the durable stream before
 // retrying. This resolves ambiguous commit errors: if the write committed but
@@ -175,7 +285,11 @@ func (s *Server) projectAssistantThreadSnapshotWithRetry(ctx context.Context, sc
 	var lastErr error
 	for attempt := 0; attempt < assistantThreadMirrorPersistMaxAttempts; attempt++ {
 		if !state.reconstructed || state.needsReload {
-			durableState, err := s.loadAssistantThreadMirrorState(ctx, scope, threadID, run.ActiveMessageID, turn.ID)
+			activeMessageID := strings.TrimSpace(snapshot.Run.ActiveMessageID)
+			if activeMessageID == "" {
+				activeMessageID = strings.TrimSpace(run.ActiveMessageID)
+			}
+			durableState, err := s.loadAssistantThreadMirrorState(ctx, scope, threadID, activeMessageID, turn.ID)
 			if err != nil {
 				lastErr = errors.Join(lastErr, fmt.Errorf("reload assistant thread projection state: %w", err))
 				if attempt+1 == assistantThreadMirrorPersistMaxAttempts {
@@ -226,15 +340,51 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 	if state == nil {
 		return errors.New("assistant thread mirror state is required")
 	}
+	activeMessageID := strings.TrimSpace(snapshot.Run.ActiveMessageID)
+	if activeMessageID == "" {
+		activeMessageID = strings.TrimSpace(run.ActiveMessageID)
+	}
 	if !state.reconstructed || state.needsReload {
-		durableState, err := s.loadAssistantThreadMirrorState(ctx, scope, threadID, run.ActiveMessageID, turn.ID)
+		durableMessageID := activeMessageID
+		if durableMessageID == "" {
+			durableMessageID = run.ActiveMessageID
+		}
+		durableState, err := s.loadAssistantThreadMirrorState(ctx, scope, threadID, durableMessageID, turn.ID)
 		if err != nil {
 			return fmt.Errorf("reconstruct assistant thread mirror state: %w", err)
 		}
 		*state = durableState
 	}
+	if activeMessageID == "" {
+		activeMessageID = state.activeMessageID
+	}
+	if state.openMessages == nil {
+		state.openMessages = map[string]struct{}{}
+	}
+	if state.messageContent == nil {
+		state.messageContent = map[string]string{}
+	}
+	if state.messageCreated == nil {
+		state.messageCreated = map[string]time.Time{}
+	}
+	if err := s.closeStaleAssistantThreadMessages(ctx, scope, threadID, turn.ID, activeMessageID, state); err != nil {
+		return err
+	}
 	if state.terminalEvent {
 		return nil
+	}
+	if activeMessageID != "" && state.activeMessageID != activeMessageID {
+		// Steering rotates the durable assistant target while preserving the
+		// prior segment. Start deltas and terminalization against the snapshot's
+		// target so repeated provider call IDs/content cannot bleed across
+		// assistant segments within one turn.
+		state.activeMessageID = activeMessageID
+		state.lastContent = ""
+		state.terminalItem = false
+		state.actionStatuses = map[string]string{}
+	}
+	if state.actionStatuses == nil {
+		state.actionStatuses = map[string]string{}
 	}
 	content := snapshot.Message.Content
 	if strings.HasPrefix(content, state.lastContent) && len(content) > len(state.lastContent) {
@@ -243,10 +393,12 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		if err != nil {
 			return fmt.Errorf("encode assistant thread message delta: %w", err)
 		}
-		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: assistantThreadEventItemDelta, ItemID: run.ActiveMessageID, Payload: payload}); err != nil {
+		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: assistantThreadEventItemDelta, ItemID: activeMessageID, Payload: payload}); err != nil {
 			return fmt.Errorf("persist assistant thread message delta: %w", err)
 		}
 		state.lastContent = content
+		state.messageContent[activeMessageID] = content
+		state.openMessages[activeMessageID] = struct{}{}
 	} else if content == state.lastContent {
 		// The snapshot did not add durable content. Keep the state unchanged.
 	} else if state.lastContent == "" && content == "" {
@@ -254,7 +406,8 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 	}
 
 	for _, action := range projectAssistantActionFeedFromMetadata(snapshot.Message.Metadata[projectMessageMetadataAssistantActionFeed]) {
-		if state.actionStatuses[action.ID] == action.Status {
+		itemID := assistantThreadDynamicToolItemID(activeMessageID, action.ID)
+		if state.actionStatuses[itemID] == action.Status {
 			continue
 		}
 		status := "in_progress"
@@ -269,15 +422,15 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		if err != nil {
 			return fmt.Errorf("encode assistant thread action: %w", err)
 		}
-		item := assistantThreadItem{ID: action.ID, TurnID: turn.ID, Type: assistantThreadEventDynamicToolCall, Status: status, Content: action.Title, Data: data, CreatedAt: time.Now().UTC()}
+		item := assistantThreadItem{ID: itemID, TurnID: turn.ID, Type: assistantThreadEventDynamicToolCall, Status: status, Content: action.Title, Data: data, CreatedAt: time.Now().UTC()}
 		payload, err := json.Marshal(map[string]any{"item": item})
 		if err != nil {
 			return fmt.Errorf("encode assistant thread action item: %w", err)
 		}
-		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: eventType, ItemID: action.ID, Payload: payload}); err != nil {
+		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: eventType, ItemID: itemID, Payload: payload}); err != nil {
 			return fmt.Errorf("persist assistant thread action %q: %w", action.ID, err)
 		}
-		state.actionStatuses[action.ID] = action.Status
+		state.actionStatuses[itemID] = action.Status
 	}
 
 	if planValue, exists := snapshot.Message.Metadata[projectAssistantMetadataPlan]; exists {
@@ -351,7 +504,7 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		return nil
 	}
 	if !state.terminalItem {
-		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: content, CreatedAt: snapshot.Message.CreatedAt}, snapshot.Message.Metadata)
+		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: activeMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: content, CreatedAt: snapshot.Message.CreatedAt}, snapshot.Message.Metadata)
 		payload, err := json.Marshal(map[string]any{"item": item})
 		if err != nil {
 			return fmt.Errorf("encode assistant thread terminal item: %w", err)
@@ -360,6 +513,9 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 			return fmt.Errorf("persist assistant thread terminal item: %w", err)
 		}
 		state.terminalItem = true
+		state.messageContent[activeMessageID] = content
+		state.messageCreated[activeMessageID] = item.CreatedAt
+		delete(state.openMessages, activeMessageID)
 	}
 	if state.terminalEvent {
 		return nil

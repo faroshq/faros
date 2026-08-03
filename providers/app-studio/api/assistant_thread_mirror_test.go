@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -147,6 +148,131 @@ func TestProjectAssistantThreadSnapshotDoesNotAdvanceStateOnAppendFailure(t *tes
 	}
 	if len(events) != 1 || events[0].Type != assistantThreadEventItemDelta {
 		t.Fatalf("events after successful retry = %#v", events)
+	}
+}
+
+func TestProjectAssistantThreadSnapshotTracksSteeringActiveMessage(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	thread := store.AssistantThread{ID: "thread-steering-segments", ActorID: "alice", CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, thread, nil); err != nil {
+		t.Fatal(err)
+	}
+	turn := store.AssistantTurn{ID: "turn-steering-segments", ThreadID: thread.ID, ActorID: "alice", ClientUserMessageID: "client", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest, Status: store.AssistantTurnStatusInProgress, CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantTurn(context.Background(), scope, turn, nil); err != nil {
+		t.Fatal(err)
+	}
+	firstRun := store.AssistantRun{ID: turn.ID, ActiveMessageID: "assistant-first", Status: store.AssistantRunStatusRunning}
+	state := assistantThreadMirrorState{actionStatuses: map[string]string{}}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, firstRun, &state, projectAssistantRunSnapshot{
+		Run: firstRun, Message: store.Message{ID: firstRun.ActiveMessageID, Content: "first segment"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondRun := firstRun
+	secondRun.ActiveMessageID = "assistant-second"
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, firstRun, &state, projectAssistantRunSnapshot{
+		Run: secondRun, Message: store.Message{ID: secondRun.ActiveMessageID, Content: "second segment"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if state.activeMessageID != secondRun.ActiveMessageID || state.lastContent != "second segment" {
+		t.Fatalf("steering mirror state = %#v, want active second segment", state)
+	}
+	secondRun.Status = store.AssistantRunStatusCompleted
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, firstRun, &state, projectAssistantRunSnapshot{
+		Run: secondRun, Message: store.Message{ID: secondRun.ActiveMessageID, Content: "second segment done"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemDelta, firstRun.ActiveMessageID); got != 1 {
+		t.Fatalf("first segment deltas = %d, want one: %#v", got, events)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemDelta, secondRun.ActiveMessageID); got != 2 {
+		t.Fatalf("second segment deltas = %d, want initial and final updates: %#v", got, events)
+	}
+	var terminal assistantThreadItem
+	for _, event := range events {
+		if event.Type != assistantThreadEventItemCompleted || event.ItemID != secondRun.ActiveMessageID {
+			continue
+		}
+		var envelope struct {
+			Item assistantThreadItem `json:"item"`
+		}
+		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		terminal = envelope.Item
+	}
+	if terminal.ID != secondRun.ActiveMessageID || terminal.Content != "second segment done" {
+		t.Fatalf("terminal assistant item = %#v, want second segment content", terminal)
+	}
+	items := materializeAssistantThreadItems(events)
+	if len(items) != 2 {
+		t.Fatalf("materialized segments = %#v, want two distinct assistant items", items)
+	}
+	for _, item := range items {
+		if item.Type != assistantThreadEventAssistantMessage || item.Status != "completed" {
+			t.Fatalf("steered assistant segment remained open: %#v", items)
+		}
+	}
+}
+
+func TestProjectAssistantThreadSnapshotScopesReusedActionIDPerSegment(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	thread := store.AssistantThread{ID: "thread-steering-actions", ActorID: "alice", CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, thread, nil); err != nil {
+		t.Fatal(err)
+	}
+	action := projectAssistantActionFeedItem{ID: "call-reused", Kind: projectAssistantActionFeedItemRun, Status: projectAssistantActionFeedStatusRunning, Title: "Running command", Severity: projectAssistantActionFeedSeverityNormal}
+	state := assistantThreadMirrorState{actionStatuses: map[string]string{}}
+	firstRun := store.AssistantRun{ID: "turn-steering-actions", ActiveMessageID: "assistant-first", Status: store.AssistantRunStatusRunning}
+	firstSnapshot := projectAssistantRunSnapshot{Run: firstRun, Message: store.Message{ID: firstRun.ActiveMessageID, Metadata: map[string]any{projectMessageMetadataAssistantActionFeed: []projectAssistantActionFeedItem{action}}}}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, store.AssistantTurn{ID: firstRun.ID}, firstRun, &state, firstSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	secondRun := firstRun
+	secondRun.ActiveMessageID = "assistant-second"
+	secondSnapshot := projectAssistantRunSnapshot{Run: secondRun, Message: store.Message{ID: secondRun.ActiveMessageID, Metadata: map[string]any{projectMessageMetadataAssistantActionFeed: []projectAssistantActionFeedItem{action}}}}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, store.AssistantTurn{ID: firstRun.ID}, firstRun, &state, secondSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemStarted, assistantThreadDynamicToolItemID(firstRun.ActiveMessageID, action.ID)); got != 1 {
+		t.Fatalf("first segment action events = %d, want one: %#v", got, events)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemStarted, assistantThreadDynamicToolItemID(secondRun.ActiveMessageID, action.ID)); got != 1 {
+		t.Fatalf("second segment action events = %d, want one: %#v", got, events)
+	}
+	for _, event := range events {
+		if event.Type != assistantThreadEventItemStarted {
+			continue
+		}
+		var envelope struct {
+			Item assistantThreadItem `json:"item"`
+		}
+		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		var persistedAction projectAssistantActionFeedItem
+		if err := json.Unmarshal(envelope.Item.Data, &persistedAction); err != nil {
+			t.Fatal(err)
+		}
+		if persistedAction.ID != action.ID {
+			t.Fatalf("scoped action item %q changed raw provider ID to %q", event.ItemID, persistedAction.ID)
+		}
 	}
 }
 
@@ -357,6 +483,143 @@ func TestReconcileOrphanedAssistantTurnResolvesPendingApproval(t *testing.T) {
 	}
 }
 
+func TestReconcileProjectAssistantThreadTurnClosesStaleSteeredMessage(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	threadID := "thread-reload-steering"
+	turnID := "turn-reload-steering"
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, store.AssistantThread{ID: threadID, ActorID: "alice", CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	turn := store.AssistantTurn{ID: turnID, ThreadID: threadID, ActorID: "alice", ClientUserMessageID: "client", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest, Status: store.AssistantTurnStatusInProgress, CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantTurn(context.Background(), scope, turn, nil); err != nil {
+		t.Fatal(err)
+	}
+	user := store.Message{ID: "user-reload-steering", Role: "user", ActorID: "alice", CreatedAt: now}
+	current := store.Message{ID: "assistant-reload-current", Role: "assistant", Content: "final segment", CreatedAt: now}
+	run := store.AssistantRun{ID: turnID, Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest, ClientRequestID: "client", UserMessageID: user.ID, ActiveMessageID: current.ID, Status: store.AssistantRunStatusCompleted, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantRun(context.Background(), scope, user, current, run); err != nil {
+		t.Fatal(err)
+	}
+	appendEvent := func(event store.AssistantThreadEvent, expected int64) {
+		t.Helper()
+		if _, err := inner.AppendAssistantThreadEvent(context.Background(), scope, event, expected); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent(store.AssistantThreadEvent{
+		ThreadID: threadID,
+		TurnID:   turnID,
+		Type:     assistantThreadEventItemDelta,
+		ItemID:   "assistant-reload-stale",
+		Payload:  []byte(`{"delta":"stale segment"}`),
+	}, 0)
+	appendEvent(store.AssistantThreadEvent{
+		ThreadID: threadID,
+		TurnID:   turnID,
+		Type:     assistantThreadEventItemDelta,
+		ItemID:   current.ID,
+		Payload:  []byte(`{"delta":"final segment"}`),
+	}, 1)
+
+	if err := server.reconcileProjectAssistantThreadTurn(context.Background(), scope, turn); err != nil {
+		t.Fatal(err)
+	}
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, threadID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemCompleted, "assistant-reload-stale"); got != 1 {
+		t.Fatalf("stale segment terminal events = %d, want one: %#v", got, events)
+	}
+	items := materializeAssistantThreadItems(events)
+	if len(items) != 2 {
+		t.Fatalf("reloaded assistant segments = %#v, want two", items)
+	}
+	for _, item := range items {
+		if item.Type != assistantThreadEventAssistantMessage || item.Status != "completed" {
+			t.Fatalf("reloaded assistant segment remained open: %#v", items)
+		}
+	}
+	eventCount := len(events)
+	if err := server.reconcileProjectAssistantThreadTurn(context.Background(), scope, turn); err != nil {
+		t.Fatal(err)
+	}
+	events, err = inner.ListAssistantThreadEvents(context.Background(), scope, threadID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != eventCount {
+		t.Fatalf("reloaded stale segment reconciliation was not idempotent: before=%d after=%d events=%#v", eventCount, len(events), events)
+	}
+}
+
+func TestProjectAssistantThreadSnapshotClosesStaleMessageAfterTerminalReload(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	threadID := "thread-terminal-reload"
+	turnID := "turn-terminal-reload"
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, store.AssistantThread{ID: threadID, ActorID: "alice", CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldID := "assistant-terminal-stale"
+	activeID := "assistant-terminal-active"
+	assistantItem := func(id string) []byte {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{"item": assistantThreadItem{ID: id, TurnID: turnID, Type: assistantThreadEventAssistantMessage, Status: "in_progress", CreatedAt: now}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	appendEvent := func(event store.AssistantThreadEvent, expected int64) {
+		t.Helper()
+		if _, err := inner.AppendAssistantThreadEvent(context.Background(), scope, event, expected); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent(store.AssistantThreadEvent{ThreadID: threadID, TurnID: turnID, Type: assistantThreadEventItemStarted, ItemID: oldID, Payload: assistantItem(oldID)}, 0)
+	appendEvent(store.AssistantThreadEvent{ThreadID: threadID, TurnID: turnID, Type: assistantThreadEventItemDelta, ItemID: oldID, Payload: []byte(`{"delta":"stale response"}`)}, 1)
+	appendEvent(store.AssistantThreadEvent{ThreadID: threadID, TurnID: turnID, Type: assistantThreadEventItemStarted, ItemID: activeID, Payload: assistantItem(activeID)}, 2)
+	appendEvent(store.AssistantThreadEvent{ThreadID: threadID, TurnID: turnID, Type: assistantThreadEventTurnCompleted}, 3)
+
+	run := store.AssistantRun{ID: turnID, ActiveMessageID: activeID, Status: store.AssistantRunStatusCompleted}
+	turn := store.AssistantTurn{ID: turnID, ThreadID: threadID, Status: store.AssistantTurnStatusCompleted}
+	state := assistantThreadMirrorState{}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, threadID, turn, run, &state, projectAssistantRunSnapshot{Run: run, Message: store.Message{ID: activeID}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, threadID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemCompleted, oldID); got != 1 {
+		t.Fatalf("terminal reload stale completions = %d, want one: %#v", got, events)
+	}
+	items := materializeAssistantThreadItems(events)
+	for _, item := range items {
+		if item.Type == assistantThreadEventAssistantMessage && item.Status != "completed" {
+			t.Fatalf("terminal reload assistant segment remained open: %#v", items)
+		}
+	}
+	eventCount := len(events)
+	state = assistantThreadMirrorState{}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, threadID, turn, run, &state, projectAssistantRunSnapshot{Run: run, Message: store.Message{ID: activeID}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err = inner.ListAssistantThreadEvents(context.Background(), scope, threadID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != eventCount {
+		t.Fatalf("terminal reload stale completion was not idempotent: before=%d after=%d events=%#v", eventCount, len(events), events)
+	}
+}
+
 func TestMaterializeAssistantThreadItemsRetiresLegacyTerminalApproval(t *testing.T) {
 	events := []store.AssistantThreadEvent{
 		{
@@ -369,6 +632,82 @@ func TestMaterializeAssistantThreadItemsRetiresLegacyTerminalApproval(t *testing
 	items := materializeAssistantThreadItems(events)
 	if len(items) != 1 || items[0].ID != "approval-legacy" || items[0].Status != "completed" {
 		t.Fatalf("legacy terminal approval items = %#v, want completed approval", items)
+	}
+}
+
+func TestMaterializeAssistantThreadItemsRetiresTerminalAssistantSegments(t *testing.T) {
+	events := []store.AssistantThreadEvent{
+		{TurnID: "turn-terminal-segments", Sequence: 1, Type: assistantThreadEventItemStarted, ItemID: "assistant-stale", Payload: []byte(`{"item":{"id":"assistant-stale","turnID":"turn-terminal-segments","type":"agentMessage","status":"in_progress"}}`)},
+		{TurnID: "turn-terminal-segments", Sequence: 2, Type: assistantThreadEventItemDelta, ItemID: "assistant-stale", Payload: []byte(`{"delta":"stale"}`)},
+		{TurnID: "turn-terminal-segments", Sequence: 3, Type: assistantThreadEventItemStarted, ItemID: "assistant-final", Payload: []byte(`{"item":{"id":"assistant-final","turnID":"turn-terminal-segments","type":"agentMessage","status":"in_progress"}}`)},
+		{TurnID: "turn-terminal-segments", Sequence: 4, Type: assistantThreadEventItemDelta, ItemID: "assistant-final", Payload: []byte(`{"delta":"final"}`)},
+		{TurnID: "turn-terminal-segments", Sequence: 5, Type: assistantThreadEventTurnCompleted},
+	}
+	items := materializeAssistantThreadItems(events)
+	if len(items) != 2 {
+		t.Fatalf("terminal assistant segments = %#v, want two", items)
+	}
+	for _, item := range items {
+		if item.Status != "completed" {
+			t.Fatalf("terminal assistant segment remained open: %#v", items)
+		}
+	}
+}
+
+func TestMaterializeAssistantThreadItemsScopesIdentityByTurn(t *testing.T) {
+	events := []store.AssistantThreadEvent{
+		{TurnID: "turn-one", Sequence: 1, Type: assistantThreadEventItemStarted, ItemID: "call-1", Payload: []byte(`{"item":{"id":"call-1","turnID":"turn-one","type":"dynamicToolCall","status":"in_progress","content":"one"}}`)},
+		{TurnID: "turn-two", Sequence: 2, Type: assistantThreadEventItemStarted, ItemID: "call-1", Payload: []byte(`{"item":{"id":"call-1","turnID":"turn-two","type":"dynamicToolCall","status":"in_progress","content":"two"}}`)},
+	}
+	items := materializeAssistantThreadItems(events)
+	if len(items) != 2 {
+		t.Fatalf("repeated provider call ID collapsed across turns: %#v", items)
+	}
+	if items[0].TurnID != "turn-one" || items[0].Content != "one" || items[1].TurnID != "turn-two" || items[1].Content != "two" {
+		t.Fatalf("materialized repeated call IDs = %#v", items)
+	}
+}
+
+func TestProjectAssistantStartFailureCompensatesAndRepairsCanonicalTurn(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	thread := store.AssistantThread{ID: "thread-repair", ActorID: "alice", CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, thread, nil); err != nil {
+		t.Fatal(err)
+	}
+	startErr := errors.New("canonical turn startup failed")
+	started, err := server.startProjectAssistantRunDurablyWithMode(context.Background(), scope, "alice", "build it", "client-repair", store.AssistantRunModeDefault, func(store.AssistantRun, store.Message, bool) error {
+		return startErr
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("start error = %v, want %v", err, startErr)
+	}
+	if started.Run.Status != store.AssistantRunStatusFailed {
+		t.Fatalf("compensated run status = %q, want failed", started.Run.Status)
+	}
+	persisted, err := inner.GetAssistantRun(context.Background(), scope, started.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !assistantRunTerminal(persisted.Status) {
+		t.Fatalf("persisted run remains nonterminal: %#v", persisted)
+	}
+	request := assistantThreadTurnCreateRequest{Content: "build it", ClientUserMessageID: "client-repair", CollaborationMode: store.AssistantRunModeDefault}
+	turn, err := server.repairProjectAssistantThreadTurn(context.Background(), scope, thread, request, persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.ID != persisted.ID || turn.Status != store.AssistantTurnStatusFailed {
+		t.Fatalf("repaired turn = %#v, want failed turn %s", turn, persisted.ID)
+	}
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventTurnFailed, ""); got != 1 {
+		t.Fatalf("repaired terminal events = %d, want one: %#v", got, events)
 	}
 }
 

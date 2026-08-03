@@ -92,3 +92,39 @@ func TestAttachAssistantThreadMessagePresentationRepairsHistoricalItems(t *testi
 		t.Fatalf("historical progress = %#v, want duration %d", data, progress.WorkedDurationMS)
 	}
 }
+
+func TestAssistantThreadTerminalEventDoesNotEndStreamForNewerTurn(t *testing.T) {
+	memoryStore := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, memoryStore, nil, "", false)
+	scope := store.Scope{OrgUUID: "org-a", WorkspaceUUID: "workspace-a", ProjectName: "demo", ProjectUID: "project-uid"}
+	now := time.Now().UTC()
+	thread := store.AssistantThread{ID: "thread-stream-turns", ActorID: "alice", CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantThread(context.Background(), scope, thread, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := store.AssistantTurn{ID: "turn-old", ThreadID: thread.ID, ActorID: "alice", ClientUserMessageID: "client-old", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest, Status: store.AssistantTurnStatusInProgress, CreatedAt: now, UpdatedAt: now}
+	if _, err := memoryStore.CreateAssistantTurn(context.Background(), scope, first, nil); err != nil {
+		t.Fatal(err)
+	}
+	first.Status = store.AssistantTurnStatusCompleted
+	first.UpdatedAt = now.Add(time.Second)
+	if err := memoryStore.SaveAssistantTurnWithEvent(context.Background(), scope, first, store.AssistantThreadEvent{Type: assistantThreadEventTurnCompleted}, 0); err != nil {
+		t.Fatal(err)
+	}
+	second := store.AssistantTurn{ID: "turn-new", ThreadID: thread.ID, ActorID: "alice", ClientUserMessageID: "client-new", Mode: store.AssistantRunModeDefault, ApprovalMode: store.AssistantApprovalModeOnRequest, Status: store.AssistantTurnStatusInProgress, CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second)}
+	if _, err := memoryStore.CreateAssistantTurn(context.Background(), scope, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldTerminal := store.AssistantThreadEvent{ThreadID: thread.ID, TurnID: first.ID, Type: assistantThreadEventTurnCompleted}
+	if server.assistantThreadTerminalEventEndsStream(context.Background(), scope, thread.ID, oldTerminal) {
+		t.Fatal("older turn terminal event ended stream while newer turn was active")
+	}
+	second.Status = store.AssistantTurnStatusCompleted
+	second.UpdatedAt = now.Add(3 * time.Second)
+	if err := memoryStore.SaveAssistantTurnWithEvent(context.Background(), scope, second, store.AssistantThreadEvent{Type: assistantThreadEventTurnCompleted}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !server.assistantThreadTerminalEventEndsStream(context.Background(), scope, thread.ID, store.AssistantThreadEvent{ThreadID: thread.ID, TurnID: second.ID, Type: assistantThreadEventTurnCompleted}) {
+		t.Fatal("current turn terminal event did not end stream")
+	}
+}

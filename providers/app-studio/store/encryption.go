@@ -143,31 +143,86 @@ func (s *encryptedStore) EnsureSchema(ctx context.Context) error {
 }
 
 func (s *encryptedStore) CreateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread, events []AssistantThreadEvent) (AssistantThread, error) {
+	var err error
+	thread, err = prepareAssistantThread(thread)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	thread, err = s.encryptAssistantThread(scope, thread)
+	if err != nil {
+		return AssistantThread{}, err
+	}
 	encryptedEvents := make([]AssistantThreadEvent, len(events))
 	for index, event := range events {
 		event.ThreadID = thread.ID
-		var err error
 		encryptedEvents[index], err = s.encryptAssistantThreadEvent(scope, event)
 		if err != nil {
 			return AssistantThread{}, err
 		}
 	}
-	return s.inner.CreateAssistantThread(ctx, scope, thread, encryptedEvents)
+	created, err := s.inner.CreateAssistantThread(ctx, scope, thread, encryptedEvents)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	if err := s.decryptAssistantThread(scope, &created); err != nil {
+		return AssistantThread{}, err
+	}
+	return created, nil
 }
 
 func (s *encryptedStore) GetAssistantThread(ctx context.Context, scope Scope, threadID string) (AssistantThread, error) {
-	return s.inner.GetAssistantThread(ctx, scope, threadID)
+	thread, err := s.inner.GetAssistantThread(ctx, scope, threadID)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	if err := s.decryptAssistantThread(scope, &thread); err != nil {
+		return AssistantThread{}, err
+	}
+	return thread, nil
 }
 
 func (s *encryptedStore) ListAssistantThreads(ctx context.Context, scope Scope, actorID string, includeArchived bool, limit int, cursor string) (AssistantThreadPage, error) {
-	return s.inner.ListAssistantThreads(ctx, scope, actorID, includeArchived, limit, cursor)
+	page, err := s.inner.ListAssistantThreads(ctx, scope, actorID, includeArchived, limit, cursor)
+	if err != nil {
+		return AssistantThreadPage{}, err
+	}
+	for index := range page.Items {
+		if err := s.decryptAssistantThread(scope, &page.Items[index]); err != nil {
+			return AssistantThreadPage{}, err
+		}
+	}
+	return page, nil
 }
 
 func (s *encryptedStore) UpdateAssistantThread(ctx context.Context, scope Scope, thread AssistantThread) (AssistantThread, error) {
-	return s.inner.UpdateAssistantThread(ctx, scope, thread)
+	prepared, err := prepareAssistantThread(thread)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	prepared, err = s.encryptAssistantThread(scope, prepared)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	updated, err := s.inner.UpdateAssistantThread(ctx, scope, prepared)
+	if err != nil {
+		return AssistantThread{}, err
+	}
+	if err := s.decryptAssistantThread(scope, &updated); err != nil {
+		return AssistantThread{}, err
+	}
+	return updated, nil
 }
 
 func (s *encryptedStore) UpdateAssistantThreadWithEvent(ctx context.Context, scope Scope, thread AssistantThread, event AssistantThreadEvent, expectedSequence int64) (AssistantThread, AssistantThreadEvent, error) {
+	var err error
+	thread, err = prepareAssistantThread(thread)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	thread, err = s.encryptAssistantThread(scope, thread)
+	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
 	event.ThreadID = thread.ID
 	encrypted, err := s.encryptAssistantThreadEvent(scope, event)
 	if err != nil {
@@ -175,6 +230,9 @@ func (s *encryptedStore) UpdateAssistantThreadWithEvent(ctx context.Context, sco
 	}
 	updated, created, err := s.inner.UpdateAssistantThreadWithEvent(ctx, scope, thread, encrypted, expectedSequence)
 	if err != nil {
+		return AssistantThread{}, AssistantThreadEvent{}, err
+	}
+	if err := s.decryptAssistantThread(scope, &updated); err != nil {
 		return AssistantThread{}, AssistantThreadEvent{}, err
 	}
 	if err := s.decryptAssistantThreadEvent(scope, &created); err != nil {
@@ -288,6 +346,42 @@ func (s *encryptedStore) ListAssistantThreadEvents(ctx context.Context, scope Sc
 		}
 	}
 	return events, nil
+}
+
+// Thread titles are part of the user-authored transcript and must follow the
+// same at-rest protection as thread event payloads.  The title column remains
+// text for compatibility with existing schemas; an encrypted assistant-run
+// envelope is serialized into that column and transparently decoded on reads.
+func (s *encryptedStore) encryptAssistantThread(scope Scope, thread AssistantThread) (AssistantThread, error) {
+	if thread.Title == "" {
+		return thread, nil
+	}
+	run := AssistantRun{ID: strings.TrimSpace(thread.ID)}
+	payload, err := s.encryptAssistantRunBlob(scope, run, "thread-title", []byte(thread.Title))
+	if err != nil {
+		return AssistantThread{}, fmt.Errorf("encrypt assistant thread title: %w", err)
+	}
+	thread.Title = string(payload)
+	return thread, nil
+}
+
+func (s *encryptedStore) decryptAssistantThread(scope Scope, thread *AssistantThread) error {
+	if thread == nil || thread.Title == "" {
+		return nil
+	}
+	payload := json.RawMessage(thread.Title)
+	var envelope encryptedAssistantRunCheckpoint
+	if err := json.Unmarshal(payload, &envelope); err != nil || !envelope.Encrypted {
+		// Titles written before envelope encryption remain readable and are
+		// migrated to ciphertext on the next create/update.
+		return nil
+	}
+	run := AssistantRun{ID: strings.TrimSpace(thread.ID)}
+	if err := s.decryptAssistantRunBlob(scope, &run, "thread-title", &payload); err != nil {
+		return fmt.Errorf("decrypt assistant thread title: %w", err)
+	}
+	thread.Title = string(payload)
+	return nil
 }
 
 func (s *encryptedStore) encryptAssistantTurn(scope Scope, turn AssistantTurn) (AssistantTurn, error) {

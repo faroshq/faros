@@ -28,6 +28,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "appstudio.serviceAccountName" . }}
+      # The provider uses the explicitly mounted workspace-admin kubeconfig;
+      # neither the provider nor its browser-worker sidecar should receive an
+      # ambient Kubernetes ServiceAccount token.
+      automountServiceAccountToken: false
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

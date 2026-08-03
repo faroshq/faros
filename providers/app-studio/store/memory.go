@@ -36,8 +36,12 @@ type MemoryStore struct {
 	assistantRuns     map[Scope]map[string]AssistantRun
 	assistantEvents   map[Scope]map[string][]AssistantRunEvent
 	conversationItems map[Scope][]AssistantConversationItem
-	approvalModes     map[Scope]map[string]AssistantApprovalPreference
-	bootstrapPermits  map[Scope]projectBootstrapPermit
+	// conversationSequences stores the project stream high-water mark.  It
+	// intentionally outlives retention deletions so a client resuming from an
+	// old sequence can never observe a later item with a reused sequence.
+	conversationSequences map[Scope]int64
+	approvalModes         map[Scope]map[string]AssistantApprovalPreference
+	bootstrapPermits      map[Scope]projectBootstrapPermit
 }
 
 type projectBootstrapPermit struct {
@@ -46,15 +50,16 @@ type projectBootstrapPermit struct {
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		assistantThreads:  map[Scope]map[string]AssistantThread{},
-		assistantTurns:    map[Scope]map[string]map[string]AssistantTurn{},
-		threadEvents:      map[Scope]map[string][]AssistantThreadEvent{},
-		messages:          map[Scope]map[string]Message{},
-		assistantRuns:     map[Scope]map[string]AssistantRun{},
-		assistantEvents:   map[Scope]map[string][]AssistantRunEvent{},
-		conversationItems: map[Scope][]AssistantConversationItem{},
-		approvalModes:     map[Scope]map[string]AssistantApprovalPreference{},
-		bootstrapPermits:  map[Scope]projectBootstrapPermit{},
+		assistantThreads:      map[Scope]map[string]AssistantThread{},
+		assistantTurns:        map[Scope]map[string]map[string]AssistantTurn{},
+		threadEvents:          map[Scope]map[string][]AssistantThreadEvent{},
+		messages:              map[Scope]map[string]Message{},
+		assistantRuns:         map[Scope]map[string]AssistantRun{},
+		assistantEvents:       map[Scope]map[string][]AssistantRunEvent{},
+		conversationItems:     map[Scope][]AssistantConversationItem{},
+		conversationSequences: map[Scope]int64{},
+		approvalModes:         map[Scope]map[string]AssistantApprovalPreference{},
+		bootstrapPermits:      map[Scope]projectBootstrapPermit{},
 	}
 }
 
@@ -519,7 +524,17 @@ func (s *MemoryStore) AppendAssistantConversationItem(_ context.Context, scope S
 			return cloneAssistantConversationItem(existing), nil
 		}
 	}
-	prepared.Sequence = int64(len(s.conversationItems[scope]) + 1)
+	// Retention can remove every surviving item.  Keep the high-water mark in
+	// a separate map so a later append does not reuse sequence 1.
+	nextSequence := s.conversationSequences[scope]
+	for _, existing := range s.conversationItems[scope] {
+		if existing.Sequence > nextSequence {
+			nextSequence = existing.Sequence
+		}
+	}
+	nextSequence++
+	s.conversationSequences[scope] = nextSequence
+	prepared.Sequence = nextSequence
 	s.conversationItems[scope] = append(s.conversationItems[scope], cloneAssistantConversationItem(prepared))
 	return cloneAssistantConversationItem(prepared), nil
 }
@@ -554,6 +569,10 @@ func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) erro
 	delete(s.assistantRuns, scope)
 	delete(s.assistantEvents, scope)
 	delete(s.conversationItems, scope)
+	delete(s.conversationSequences, scope)
+	delete(s.assistantThreads, scope)
+	delete(s.assistantTurns, scope)
+	delete(s.threadEvents, scope)
 	delete(s.bootstrapPermits, scope)
 	delete(s.approvalModes, scope)
 	return nil
@@ -563,9 +582,34 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var deleted int64
+	// A message is part of the durable execution transcript when a
+	// non-terminal run points at it.  Retention may remove old standalone
+	// messages, but it must not break a resumable run by deleting either its
+	// originating user message or active assistant placeholder.
+	protectedMessages := make(map[Scope]map[string]struct{})
+	for scope, runs := range s.assistantRuns {
+		for _, run := range runs {
+			if assistantRunStatusTerminal(run.Status) {
+				continue
+			}
+			if protectedMessages[scope] == nil {
+				protectedMessages[scope] = map[string]struct{}{}
+			}
+			if run.UserMessageID != "" {
+				protectedMessages[scope][run.UserMessageID] = struct{}{}
+			}
+			if run.ActiveMessageID != "" {
+				protectedMessages[scope][run.ActiveMessageID] = struct{}{}
+			}
+		}
+	}
 	for scope, messages := range s.messages {
+		protected := protectedMessages[scope]
 		for id, message := range messages {
 			if message.CreatedAt.Before(before) {
+				if _, keep := protected[id]; keep {
+					continue
+				}
 				delete(messages, id)
 				deleted++
 			}
@@ -597,6 +641,38 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 		}
 		if len(s.conversationItems[scope]) == 0 {
 			delete(s.conversationItems, scope)
+		}
+	}
+	// Canonical thread projections are retained until their thread is old and
+	// no turn is still in progress.  Deleting the projection also removes all
+	// of its turns and events, matching the Postgres foreign-key cascade.
+	for scope, threads := range s.assistantThreads {
+		for threadID, thread := range threads {
+			if !thread.UpdatedAt.Before(before) || thread.Status == AssistantThreadStatusActive {
+				continue
+			}
+			active := false
+			for _, turn := range s.assistantTurns[scope][threadID] {
+				if !assistantTurnStatusTerminal(turn.Status) {
+					active = true
+					break
+				}
+			}
+			if active {
+				continue
+			}
+			delete(threads, threadID)
+			delete(s.assistantTurns[scope], threadID)
+			delete(s.threadEvents[scope], threadID)
+		}
+		if len(threads) == 0 {
+			delete(s.assistantThreads, scope)
+		}
+		if len(s.assistantTurns[scope]) == 0 {
+			delete(s.assistantTurns, scope)
+		}
+		if len(s.threadEvents[scope]) == 0 {
+			delete(s.threadEvents, scope)
 		}
 	}
 	return deleted, nil

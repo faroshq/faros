@@ -43,33 +43,56 @@ func (s *PostgresStore) AppendAssistantConversationItem(ctx context.Context, sco
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
 		return AssistantConversationItem{}, fmt.Errorf("lock assistant conversation stream: %w", err)
 	}
-	row := tx.QueryRowContext(ctx, `INSERT INTO app_studio_assistant_conversation_items (
-		org_uuid, workspace_uuid, project_name, project_uid, item_id, run_id, sequence, item_type, payload, created_at
-	) SELECT $1,$2,$3,$4,$5,$6,COALESCE(MAX(sequence),0)+1,$7,$8,$9
-	  FROM app_studio_assistant_conversation_items
-	 WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
-	 ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid, run_id, item_id) DO NOTHING
-	 RETURNING sequence`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
-		prepared.ID, prepared.RunID, prepared.Type, string(payload), prepared.CreatedAt)
-	if err := row.Scan(&prepared.Sequence); err == sql.ErrNoRows {
-		var existing AssistantConversationItem
-		err = tx.QueryRowContext(ctx, `SELECT sequence, run_id, item_type, payload, created_at
-			FROM app_studio_assistant_conversation_items
-			WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5 AND item_id=$6`,
-			scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, prepared.RunID, prepared.ID,
-		).Scan(&existing.Sequence, &existing.RunID, &existing.Type, &existing.Payload, &existing.CreatedAt)
-		if err == nil {
-			existing.ID = prepared.ID
-			existing.ProjectName, existing.ProjectUID = scope.ProjectName, scope.ProjectUID
-			existing.CreatedAt = existing.CreatedAt.UTC()
-			if !assistantConversationItemsMatch(existing, prepared) {
-				return AssistantConversationItem{}, ErrAssistantConversationItemConflict
-			}
-			prepared = existing
+	// Check idempotent replay before advancing the project sequence.  The
+	// advisory lock serializes this lookup with every append for the scope.
+	var existing AssistantConversationItem
+	err = tx.QueryRowContext(ctx, `SELECT sequence, run_id, item_type, payload, created_at
+		FROM app_studio_assistant_conversation_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND run_id=$5 AND item_id=$6`,
+		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, prepared.RunID, prepared.ID,
+	).Scan(&existing.Sequence, &existing.RunID, &existing.Type, &existing.Payload, &existing.CreatedAt)
+	if err == nil {
+		existing.ID = prepared.ID
+		existing.ProjectName, existing.ProjectUID = scope.ProjectName, scope.ProjectUID
+		existing.CreatedAt = existing.CreatedAt.UTC()
+		if !assistantConversationItemsMatch(existing, prepared) {
+			return AssistantConversationItem{}, ErrAssistantConversationItemConflict
 		}
+		if err := tx.Commit(); err != nil {
+			return AssistantConversationItem{}, fmt.Errorf("commit assistant conversation replay: %w", err)
+		}
+		existing.Payload = cloneRawMessage(existing.Payload)
+		return existing, nil
 	}
-	if err != nil {
-		return AssistantConversationItem{}, fmt.Errorf("append assistant conversation item: %w", err)
+	if err != sql.ErrNoRows {
+		return AssistantConversationItem{}, fmt.Errorf("check existing assistant conversation item: %w", err)
+	}
+
+	// The sequence row is initialized from existing conversation rows on its
+	// first use.  GREATEST also repairs a row created by an interrupted or old
+	// migration that is behind the existing stream high-water mark.
+	var initializedSequence int64
+	if err := tx.QueryRowContext(ctx, `INSERT INTO app_studio_assistant_conversation_sequences (
+		org_uuid, workspace_uuid, project_name, project_uid, last_sequence
+	) SELECT $1,$2,$3,$4,COALESCE(MAX(sequence),0)
+		FROM app_studio_assistant_conversation_items
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+		ON CONFLICT (org_uuid, workspace_uuid, project_name, project_uid) DO UPDATE
+		SET last_sequence = GREATEST(app_studio_assistant_conversation_sequences.last_sequence, EXCLUDED.last_sequence)
+		RETURNING last_sequence`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID).Scan(&initializedSequence); err != nil {
+		return AssistantConversationItem{}, fmt.Errorf("initialize assistant conversation sequence: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `UPDATE app_studio_assistant_conversation_sequences
+		SET last_sequence = last_sequence + 1
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+		RETURNING last_sequence`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID).Scan(&prepared.Sequence); err != nil {
+		return AssistantConversationItem{}, fmt.Errorf("advance assistant conversation sequence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO app_studio_assistant_conversation_items (
+		org_uuid, workspace_uuid, project_name, project_uid, item_id, run_id, sequence, item_type, payload, created_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,
+		prepared.ID, prepared.RunID, prepared.Sequence, prepared.Type, string(payload), prepared.CreatedAt); err != nil {
+		return AssistantConversationItem{}, fmt.Errorf("insert assistant conversation item: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return AssistantConversationItem{}, fmt.Errorf("commit assistant conversation item: %w", err)

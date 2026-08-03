@@ -289,11 +289,15 @@ func patchTargetError(ctx context.Context, filePath string, err error) error {
 	if errors.As(err, &patchErr) {
 		return patchErr
 	}
+	var tooLarge *workspaceFileTooLargeError
+	if errors.As(err, &tooLarge) {
+		return newPatchError(PatchErrorInvalidPatch, filePath, 0, 0, "%v", tooLarge)
+	}
 	return newPatchError(PatchErrorWorkspaceConflict, filePath, 0, 0, "workspace target is not safely accessible: %v", err)
 }
 
 func (s *FileStore) readPatchTarget(ctx context.Context, scope Scope, clean string) ([]byte, bool, fs.FileMode, error) {
-	content, existed, err := s.readMutationTarget(ctx, scope, clean)
+	content, existed, err := s.readMutationTargetLimited(ctx, scope, clean, MaxWriteBytes)
 	if err != nil || !existed {
 		return content, existed, 0, err
 	}

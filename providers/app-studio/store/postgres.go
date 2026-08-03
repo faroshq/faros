@@ -38,6 +38,7 @@ const assistantCodexTerminalParitySchemaVersion = "assistant-codex-terminal-v2"
 const assistantConversationSchemaVersion = "assistant-conversation-items-v1"
 const assistantConversationProjectStreamSchemaVersion = "assistant-conversation-project-stream-v1"
 const assistantConversationIdentitySchemaVersion = "assistant-conversation-identity-v2"
+const assistantConversationSequenceSchemaVersion = "assistant-conversation-sequence-v1"
 const assistantThreadSchemaVersion = "assistant-thread-turn-item-v1"
 const assistantApprovalPolicySchemaVersion = "assistant-approval-policy-v2"
 
@@ -134,6 +135,9 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureSchemaVersion(ctx, tx, assistantConversationIdentitySchemaVersion, assistantConversationIdentitySchemaStatements()...); err != nil {
+		return err
+	}
+	if err := ensureSchemaVersion(ctx, tx, assistantConversationSequenceSchemaVersion, assistantConversationSequenceSchemaStatements()...); err != nil {
 		return err
 	}
 	if err := ensureSchemaVersion(ctx, tx, assistantThreadSchemaVersion, assistantThreadSchemaStatements()...); err != nil {
@@ -357,6 +361,18 @@ func assistantConversationIdentitySchemaStatements() []string {
 		ALTER TABLE app_studio_assistant_conversation_items
 			ADD PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, run_id, item_id);
 	END $$`}
+}
+
+// assistantConversationSequenceSchemaStatements stores a project-scoped
+// high-water mark separately from conversation rows.  Conversation retention
+// may remove every row in a project, but sequence values remain monotonic
+// until the project itself is deleted.
+func assistantConversationSequenceSchemaStatements() []string {
+	return []string{`CREATE TABLE IF NOT EXISTS app_studio_assistant_conversation_sequences (
+		org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
+		last_sequence bigint NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+		PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid)
+	)`}
 }
 
 func ensureSchemaVersion(ctx context.Context, tx *sql.Tx, version string, stmts ...string) error {
@@ -1142,35 +1158,73 @@ func (s *PostgresStore) DeleteProjectMessages(ctx context.Context, scope Scope) 
 	if err := scope.validate(); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete project assistant data: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_assistant_approval_preferences
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project assistant approval preferences: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_project_bootstrap_permits
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project bootstrap permit: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_assistant_run_events
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project assistant run events: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_conversation_items
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant conversation items: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_conversation_sequences
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant conversation sequence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_thread_events
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant thread events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_turns
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant turns: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM app_studio_assistant_threads
+		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
+		return fmt.Errorf("delete project assistant threads: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_messages
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project messages: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_assistant_runs
 		WHERE org_uuid = $1 AND workspace_uuid = $2 AND project_name = $3 AND project_uid = $4
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
 		return fmt.Errorf("delete project assistant runs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete project assistant data: %w", err)
 	}
 	return nil
 }
@@ -1179,7 +1233,22 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("postgres store is nil")
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_messages WHERE created_at < $1`, before.UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin delete stale assistant data: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `DELETE FROM app_studio_messages AS message
+		WHERE message.created_at < $1
+		  AND NOT EXISTS (
+			SELECT 1 FROM app_studio_assistant_runs AS active_run
+			WHERE active_run.org_uuid = message.org_uuid
+			  AND active_run.workspace_uuid = message.workspace_uuid
+			  AND active_run.project_name = message.project_name
+			  AND active_run.project_uid = message.project_uid
+			  AND active_run.status NOT IN ('completed','failed','interrupted','aborted')
+			  AND (active_run.user_message_id = message.message_id OR active_run.active_message_id = message.message_id)
+		  )`, before.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete stale messages: %w", err)
 	}
@@ -1187,21 +1256,49 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	if err != nil {
 		return 0, fmt.Errorf("count deleted messages: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_run_events AS event
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_run_events AS event
 		USING app_studio_assistant_runs AS run
 		WHERE event.org_uuid=run.org_uuid AND event.workspace_uuid=run.workspace_uuid
 			AND event.project_name=run.project_name AND event.project_uid=run.project_uid AND event.run_id=run.run_id
-			AND run.status IN ('completed', 'aborted') AND run.updated_at < $1`, before.UTC()); err != nil {
+			AND run.status IN ('completed','failed','interrupted','aborted') AND run.updated_at < $1`, before.UTC()); err != nil {
 		return 0, fmt.Errorf("delete stale assistant run events: %w", err)
 	}
-	runRes, err := s.db.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs
-		WHERE status IN ('completed', 'aborted') AND updated_at < $1`, before.UTC())
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_conversation_items AS item
+		USING app_studio_assistant_runs AS run
+		WHERE item.org_uuid=run.org_uuid AND item.workspace_uuid=run.workspace_uuid
+			AND item.project_name=run.project_name AND item.project_uid=run.project_uid AND item.run_id=run.run_id
+			AND run.status IN ('completed','failed','interrupted','aborted') AND run.updated_at < $1`, before.UTC()); err != nil {
+		return 0, fmt.Errorf("delete stale assistant conversation items: %w", err)
+	}
+	runRes, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_runs
+		WHERE status IN ('completed','failed','interrupted','aborted') AND updated_at < $1`, before.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("delete stale assistant runs: %w", err)
 	}
 	runN, err := runRes.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("count deleted assistant runs: %w", err)
+	}
+	// A thread projection is one canonical transcript.  Remove old idle or
+	// archived projections only when no in-progress turn remains; active turns
+	// must survive retention so a refresh can still resume them.  The FK
+	// cascade removes the associated turns and thread events atomically.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_threads AS thread
+		WHERE thread.updated_at < $1
+		  AND thread.status <> 'active'
+		  AND NOT EXISTS (
+			SELECT 1 FROM app_studio_assistant_turns AS active_turn
+			WHERE active_turn.org_uuid = thread.org_uuid
+			  AND active_turn.workspace_uuid = thread.workspace_uuid
+			  AND active_turn.project_name = thread.project_name
+			  AND active_turn.project_uid = thread.project_uid
+			  AND active_turn.thread_id = thread.thread_id
+			  AND active_turn.status = 'in_progress'
+		  )`, before.UTC()); err != nil {
+		return 0, fmt.Errorf("delete stale assistant threads: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit delete stale assistant data: %w", err)
 	}
 	return n + runN, nil
 }

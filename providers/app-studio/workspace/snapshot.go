@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -64,7 +65,25 @@ type workspaceSnapshotRestorePlan struct {
 	restored bool
 }
 
+type workspaceFileTooLargeError struct {
+	path  string
+	size  int64
+	limit int
+}
+
+func (e *workspaceFileTooLargeError) Error() string {
+	return fmt.Sprintf("file %q is too large to edit: %d > %d bytes", e.path, e.size, e.limit)
+}
+
 func (s *FileStore) readMutationTarget(ctx context.Context, scope Scope, clean string) ([]byte, bool, error) {
+	return s.readMutationTargetLimited(ctx, scope, clean, 0)
+}
+
+// readMutationTargetLimited reads one regular workspace file while bounding
+// the amount of content retained in memory. A non-zero limit rejects the file
+// once the limit is exceeded; this is used by unified patches, including
+// Delete File, so a deletion cannot force an unbounded snapshot/read.
+func (s *FileStore) readMutationTargetLimited(ctx context.Context, scope Scope, clean string, limit int) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -92,9 +111,24 @@ func (s *FileStore) readMutationTarget(ctx context.Context, scope Scope, clean s
 	if !info.Mode().IsRegular() {
 		return nil, false, fmt.Errorf("path %q is not a regular file", clean)
 	}
-	content, err := os.ReadFile(target)
+	if limit > 0 && info.Size() > int64(limit) {
+		return nil, true, &workspaceFileTooLargeError{path: clean, size: info.Size(), limit: limit}
+	}
+	f, err := os.Open(target)
+	if err != nil {
+		return nil, false, fmt.Errorf("open %q: %w", clean, err)
+	}
+	defer func() { _ = f.Close() }()
+	var reader io.Reader = f
+	if limit > 0 {
+		reader = io.LimitReader(f, int64(limit)+1)
+	}
+	content, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, false, fmt.Errorf("read %q: %w", clean, err)
+	}
+	if limit > 0 && len(content) > limit {
+		return nil, true, &workspaceFileTooLargeError{path: clean, size: int64(len(content)), limit: limit}
 	}
 	return content, true, nil
 }
@@ -366,6 +400,9 @@ func (s *FileStore) snapshotProjectDir(scope Scope) (string, error) {
 		if err := validateScopeSegment(part); err != nil {
 			return "", err
 		}
+	}
+	if err := s.migrateLegacySnapshots(scope); err != nil {
+		return "", err
 	}
 	return filepath.Join(
 		s.root,

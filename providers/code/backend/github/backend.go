@@ -183,6 +183,11 @@ func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection
 	if err != nil {
 		return backend.RepositoryCommitResult{}, err
 	}
+	// Keep the caller's complete intent separate from the initial filtered
+	// entries. A ref race can change whether a deletion is effective, so the
+	// retry must evaluate the original deletion against the new branch base.
+	requestedEntries := entries
+	requestedFiles := files
 
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
@@ -275,7 +280,7 @@ func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection
 	}
 	if err != nil {
 		if isRecoverableRefRace(resp, err) {
-			if res, ok, retryErr := recoverOrRetryConcurrentCommit(ctx, c, org, repo, branch, commit.GetSHA(), input.IdempotencyKey, message, entries, files); retryErr != nil {
+			if res, ok, retryErr := recoverOrRetryConcurrentCommit(ctx, c, org, repo, branch, commit.GetSHA(), input.IdempotencyKey, message, requestedEntries, requestedFiles); retryErr != nil {
 				return backend.RepositoryCommitResult{}, retryErr
 			} else if ok {
 				return res, nil
@@ -366,6 +371,22 @@ func recoverOrRetryConcurrentCommit(ctx context.Context, c *gogithub.Client, org
 		baseTree = head.GetTree().GetSHA()
 	}
 	if concurrentHeadMatchesCommitRequest(head, attemptedCommitSHA, idempotencyKey) {
+		return backend.RepositoryCommitResult{
+			CommitSHA: head.GetSHA(),
+			CommitURL: commitURL(org, repo, head),
+			Branch:    branch,
+			Files:     files,
+		}, true, nil
+	}
+	// Re-evaluate the original request against the raced branch head. In
+	// particular, an originally-absent deletion must be retained when another
+	// writer added the path, while an originally-present deletion becomes a
+	// no-op when that writer removed it first.
+	entries, files, err = filterNoopGitTreeDeletions(ctx, c, org, repo.Spec.Name, baseTree, entries, files)
+	if err != nil {
+		return backend.RepositoryCommitResult{}, false, err
+	}
+	if len(entries) == 0 {
 		return backend.RepositoryCommitResult{
 			CommitSHA: head.GetSHA(),
 			CommitURL: commitURL(org, repo, head),

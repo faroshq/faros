@@ -388,9 +388,37 @@ func (s *Server) startProjectAssistantRunDurablyWithMode(ctx context.Context, sc
 		return projectAssistantDurableStartResult{Run: failedRun, User: user, Assistant: failedMessage}, persistErr
 	}
 	if err := start(created, assistant, transcriptEmpty); err != nil {
-		return projectAssistantDurableStartResult{Run: created, User: user, Assistant: assistant}, err
+		failedRun, failedMessage, compensateErr := s.compensateProjectAssistantStartFailure(ctx, scope, created, assistant, err)
+		if compensateErr != nil {
+			return projectAssistantDurableStartResult{Run: failedRun, User: user, Assistant: failedMessage}, errors.Join(err, compensateErr)
+		}
+		return projectAssistantDurableStartResult{Run: failedRun, User: user, Assistant: failedMessage}, err
 	}
 	return projectAssistantDurableStartResult{Run: created, User: user, Assistant: assistant, Started: true}, nil
+}
+
+// compensateProjectAssistantStartFailure closes a generic assistant run when
+// its caller cannot complete the provider-specific startup boundary (for
+// example, before a canonical thread turn or worker is attached). Without
+// this transition the retry identity would point at a permanently running
+// orphan until a later reconciliation pass happened to observe it.
+func (s *Server) compensateProjectAssistantStartFailure(ctx context.Context, scope store.Scope, run store.AssistantRun, message store.Message, startErr error) (store.AssistantRun, store.Message, error) {
+	if assistantRunTerminal(run.Status) {
+		return run, message, nil
+	}
+	if startErr == nil {
+		startErr = errors.New("assistant run startup failed")
+	}
+	run.Status = store.AssistantRunStatusFailed
+	run.Error = projectAssistantRunErrorJSON(startErr, "internal_server_error")
+	run.Revision++
+	run.UpdatedAt = time.Now().UTC()
+	message.UpdatedAt = run.UpdatedAt
+	message.Metadata = projectAssistantDurableMetadataForTransition(run, "Failed", false, false, nil, nil)
+	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
+		return run, message, fmt.Errorf("compensate assistant start failure: %w", err)
+	}
+	return run, message, nil
 }
 
 type projectAssistantSupervisorRunContextKey struct{}
