@@ -157,13 +157,31 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 
 func assistantApprovalPolicySchemaStatements() []string {
 	return []string{
-		`DROP TABLE IF EXISTS app_studio_assistant_approval_preferences`,
-		`CREATE TABLE app_studio_assistant_approval_preferences (
+		`CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences (
 			org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
 			actor_id text NOT NULL, approval_mode text NOT NULL CHECK (approval_mode IN ('on_request','always_ask','never')),
 			updated_at timestamptz NOT NULL,
 			PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
 		)`,
+		`DO $$
+		DECLARE constraint_name text;
+		BEGIN
+			FOR constraint_name IN
+				SELECT conname FROM pg_constraint
+				WHERE conrelid = 'app_studio_assistant_approval_preferences'::regclass
+					AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%approval_mode%'
+			LOOP
+				EXECUTE format('ALTER TABLE app_studio_assistant_approval_preferences DROP CONSTRAINT %I', constraint_name);
+			END LOOP;
+			-- The preference table previously stored auto_approve. Preserve every
+			-- row, but make the retired value explicit in the new policy model.
+			UPDATE app_studio_assistant_approval_preferences
+			SET approval_mode = 'never'
+			WHERE approval_mode = 'auto_approve';
+			ALTER TABLE app_studio_assistant_approval_preferences
+				ADD CONSTRAINT app_studio_assistant_approval_preferences_approval_mode_check
+				CHECK (approval_mode IN ('on_request','always_ask','never'));
+		END $$`,
 		`DO $$
 		DECLARE constraint_name text;
 		BEGIN
@@ -293,7 +311,7 @@ func assistantCodexTerminalSchemaStatements() []string {
 func approvalModeSchemaStatements() []string {
 	return []string{`CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences (
 		org_uuid text NOT NULL, workspace_uuid text NOT NULL, project_name text NOT NULL, project_uid text NOT NULL,
-		actor_id text NOT NULL, approval_mode text NOT NULL CHECK (approval_mode IN ('always_ask', 'auto_approve')),
+		actor_id text NOT NULL, approval_mode text NOT NULL CHECK (approval_mode IN ('on_request', 'always_ask', 'never')),
 		updated_at timestamptz NOT NULL,
 		PRIMARY KEY (org_uuid, workspace_uuid, project_name, project_uid, actor_id)
 	)`}

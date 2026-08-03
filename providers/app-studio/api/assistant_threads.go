@@ -84,14 +84,57 @@ type assistantThreadInterruptRequest struct {
 }
 
 type assistantThreadItem struct {
-	ID        string          `json:"id"`
-	TurnID    string          `json:"turnID,omitempty"`
-	Type      string          `json:"type"`
-	Status    string          `json:"status"`
-	Content   string          `json:"content,omitempty"`
-	Data      json.RawMessage `json:"data,omitempty"`
-	Sequence  int64           `json:"sequence"`
-	CreatedAt time.Time       `json:"createdAt"`
+	ID                 string                 `json:"id"`
+	TurnID             string                 `json:"turnID,omitempty"`
+	Type               string                 `json:"type"`
+	Status             string                 `json:"status"`
+	Content            string                 `json:"content,omitempty"`
+	Data               json.RawMessage        `json:"data,omitempty"`
+	AssistantMessageID string                 `json:"assistantMessageID,omitempty"`
+	Mode               store.AssistantRunMode `json:"mode,omitempty"`
+	Revision           int64                  `json:"revision,omitempty"`
+	Error              json.RawMessage        `json:"error,omitempty"`
+	Sequence           int64                  `json:"sequence"`
+	CreatedAt          time.Time              `json:"createdAt"`
+}
+
+// assistantThreadRunItemStatus translates the provider run state into the
+// stable thread-item terminal vocabulary. In particular, an old aborted run
+// is presented as interrupted so consumers do not need to understand the
+// legacy provider-only state.
+func assistantThreadRunItemStatus(status store.AssistantRunStatus) string {
+	switch status {
+	case store.AssistantRunStatusCompleted:
+		return "completed"
+	case store.AssistantRunStatusFailed:
+		return "failed"
+	case store.AssistantRunStatusInterrupted, store.AssistantRunStatusAborted:
+		return "interrupted"
+	default:
+		return "in_progress"
+	}
+}
+
+func assistantThreadAgentMessageItem(turn store.AssistantTurn, run store.AssistantRun, status, content string, createdAt time.Time, metadata map[string]any) assistantThreadItem {
+	mode := run.Mode
+	if mode == "" {
+		mode = turn.Mode
+	}
+	item := assistantThreadItem{
+		ID:                 run.ActiveMessageID,
+		TurnID:             turn.ID,
+		Type:               assistantThreadEventAssistantMessage,
+		Status:             status,
+		Content:            content,
+		AssistantMessageID: run.ActiveMessageID,
+		Mode:               mode,
+		Revision:           run.Revision,
+		CreatedAt:          createdAt,
+	}
+	if status == "failed" && len(run.Error) > 0 {
+		item.Error = append(json.RawMessage(nil), run.Error...)
+	}
+	return assistantThreadItemWithMessagePresentation(item, metadata)
 }
 
 func (s *Server) createProjectAssistantThread(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +280,7 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 			turnPayload, _ := json.Marshal(map[string]any{"turn": canonicalTurn})
 			userItem := assistantThreadItem{ID: created.UserMessageID, TurnID: created.ID, Type: assistantThreadEventUserMessage, Status: "completed", Content: request.Content, CreatedAt: now}
 			userPayload, _ := json.Marshal(map[string]any{"item": userItem})
-			assistantItem := assistantThreadItem{ID: created.ActiveMessageID, TurnID: created.ID, Type: assistantThreadEventAssistantMessage, Status: "in_progress", CreatedAt: now}
+			assistantItem := assistantThreadAgentMessageItem(canonicalTurn, created, "in_progress", "", now, nil)
 			assistantPayload, _ := json.Marshal(map[string]any{"item": assistantItem})
 			createdTurn, createErr := s.store.CreateAssistantTurn(r.Context(), scope, canonicalTurn, []store.AssistantThreadEvent{
 				{Type: assistantThreadEventTurnStarted, Payload: turnPayload, CreatedAt: now},
@@ -320,7 +363,7 @@ func (s *Server) repairProjectAssistantThreadTurn(ctx context.Context, scope sto
 	turnPayload, _ := json.Marshal(map[string]any{"turn": turn})
 	userItem := assistantThreadItem{ID: user.ID, TurnID: turn.ID, Type: assistantThreadEventUserMessage, Status: "completed", Content: user.Content, CreatedAt: user.CreatedAt}
 	userPayload, _ := json.Marshal(map[string]any{"item": userItem})
-	assistantItem := assistantThreadItem{ID: assistant.ID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "in_progress", Content: assistant.Content, CreatedAt: assistant.CreatedAt}
+	assistantItem := assistantThreadAgentMessageItem(turn, run, "in_progress", assistant.Content, assistant.CreatedAt, assistant.Metadata)
 	assistantPayload, _ := json.Marshal(map[string]any{"item": assistantItem})
 	created, err := s.store.CreateAssistantTurn(ctx, scope, turn, []store.AssistantThreadEvent{
 		{Type: assistantThreadEventTurnStarted, Payload: turnPayload, CreatedAt: now},
@@ -608,7 +651,7 @@ func (s *Server) reconcileProjectAssistantThreadTurn(ctx context.Context, scope 
 		state.lastRequestID, state.lastRequestType = "", ""
 	}
 	if !state.terminalItem {
-		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: run.ActiveMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: message.Content, CreatedAt: message.CreatedAt}, message.Metadata)
+		item := assistantThreadAgentMessageItem(turn, run, assistantThreadRunItemStatus(run.Status), message.Content, message.CreatedAt, message.Metadata)
 		payload, _ := json.Marshal(map[string]any{"item": item})
 		if _, err := s.appendAssistantThreadEvent(ctx, scope, store.AssistantThreadEvent{ThreadID: turn.ThreadID, TurnID: turn.ID, Type: assistantThreadEventItemCompleted, ItemID: item.ID, Payload: payload}); err != nil {
 			return err
@@ -730,10 +773,13 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 		itemID string
 	}
 	indexes := map[assistantThreadItemKey]int{}
-	terminalTurns := map[string]struct{}{}
+	turnModes := map[string]store.AssistantRunMode{}
+	terminalTurns := map[string]string{}
+	terminalTurnErrors := map[string]json.RawMessage{}
 	for _, event := range events {
 		var envelope struct {
 			Item  assistantThreadItem `json:"item"`
+			Turn  store.AssistantTurn `json:"turn"`
 			Delta string              `json:"delta"`
 		}
 		_ = json.Unmarshal(event.Payload, &envelope)
@@ -741,8 +787,22 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 		if turnID == "" {
 			turnID = envelope.Item.TurnID
 		}
-		if event.Type == assistantThreadEventTurnCompleted || event.Type == assistantThreadEventTurnFailed || event.Type == assistantThreadEventTurnInterrupted {
-			terminalTurns[turnID] = struct{}{}
+		if turnID == "" {
+			turnID = envelope.Turn.ID
+		}
+		if envelope.Turn.Mode != "" {
+			turnModes[turnID] = envelope.Turn.Mode
+		}
+		switch event.Type {
+		case assistantThreadEventTurnCompleted:
+			terminalTurns[turnID] = "completed"
+		case assistantThreadEventTurnFailed:
+			terminalTurns[turnID] = "failed"
+			if len(envelope.Turn.Error) > 0 {
+				terminalTurnErrors[turnID] = append(json.RawMessage(nil), envelope.Turn.Error...)
+			}
+		case assistantThreadEventTurnInterrupted:
+			terminalTurns[turnID] = "interrupted"
 		}
 		if event.ItemID == "" {
 			continue
@@ -778,9 +838,19 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 	// terminalized an orphaned turn without first emitting request.resolved or
 	// item.completed for every steered assistant message segment.
 	for index := range items {
-		if _, terminal := terminalTurns[items[index].TurnID]; terminal &&
-			(items[index].Type == "approval" || items[index].Type == "input" || items[index].Type == assistantThreadEventAssistantMessage) && items[index].Status == "in_progress" {
-			items[index].Status = "completed"
+		if items[index].Type == assistantThreadEventAssistantMessage && items[index].Mode == "" {
+			items[index].Mode = turnModes[items[index].TurnID]
+		}
+		if terminalStatus, terminal := terminalTurns[items[index].TurnID]; terminal && items[index].Status == "in_progress" {
+			switch items[index].Type {
+			case "approval", "input":
+				items[index].Status = "completed"
+			case assistantThreadEventAssistantMessage:
+				items[index].Status = terminalStatus
+				if terminalStatus == "failed" && len(items[index].Error) == 0 {
+					items[index].Error = append(json.RawMessage(nil), terminalTurnErrors[items[index].TurnID]...)
+				}
+			}
 		}
 	}
 	return items

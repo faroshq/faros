@@ -32,6 +32,24 @@ func TestApprovalModeSchemaMigrationIsAdditive(t *testing.T) {
 	}
 }
 
+func TestAssistantApprovalPolicySchemaMigrationPreservesLegacyPreferences(t *testing.T) {
+	joined := strings.Join(assistantApprovalPolicySchemaStatements(), "\n")
+	if strings.Contains(strings.ToUpper(joined), "DROP TABLE") {
+		t.Fatalf("approval policy migration drops existing data: %q", joined)
+	}
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS app_studio_assistant_approval_preferences",
+		"UPDATE app_studio_assistant_approval_preferences",
+		"SET approval_mode = 'never'",
+		"WHERE approval_mode = 'auto_approve'",
+		"CHECK (approval_mode IN ('on_request','always_ask','never'))",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("approval policy migration missing %q: %q", want, joined)
+		}
+	}
+}
+
 func TestMemoryStoreAssistantApprovalPreferenceIsActorAndProjectScoped(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore()

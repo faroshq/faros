@@ -49,6 +49,35 @@ func TestAssistantThreadAgentMessageCarriesWorkedDuration(t *testing.T) {
 	}
 }
 
+func TestAssistantThreadAgentMessageCarriesRunTerminalContract(t *testing.T) {
+	now := time.Now().UTC()
+	turn := store.AssistantTurn{ID: "turn-contract", Mode: store.AssistantRunModePlan}
+	for _, test := range []struct {
+		status     store.AssistantRunStatus
+		wantStatus string
+		wantError  bool
+	}{
+		{status: store.AssistantRunStatusCompleted, wantStatus: "completed"},
+		{status: store.AssistantRunStatusFailed, wantStatus: "failed", wantError: true},
+		{status: store.AssistantRunStatusInterrupted, wantStatus: "interrupted"},
+		{status: store.AssistantRunStatusAborted, wantStatus: "interrupted"},
+	} {
+		t.Run(string(test.status), func(t *testing.T) {
+			run := store.AssistantRun{
+				ID: "turn-contract", Mode: turn.Mode, ActiveMessageID: "assistant-contract",
+				Revision: 7, Status: test.status, Error: json.RawMessage(`{"message":"failed"}`),
+			}
+			item := assistantThreadAgentMessageItem(turn, run, assistantThreadRunItemStatus(run.Status), "answer", now, nil)
+			if item.AssistantMessageID != run.ActiveMessageID || item.Mode != run.Mode || item.Revision != run.Revision || item.Status != test.wantStatus {
+				t.Fatalf("item = %#v, want segment metadata/status", item)
+			}
+			if test.wantError != (len(item.Error) > 0) {
+				t.Fatalf("item error = %s, wantError=%v", item.Error, test.wantError)
+			}
+		})
+	}
+}
+
 func TestAttachAssistantThreadMessagePresentationRepairsHistoricalItems(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, memoryStore, nil, "", false)

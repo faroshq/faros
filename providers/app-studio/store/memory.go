@@ -271,6 +271,12 @@ func (s *MemoryStore) CreateAssistantRun(_ context.Context, scope Scope, user Me
 	user, assistant, run = prepareMessage(scope, user), prepareMessage(scope, assistant), prepareAssistantRun(scope, run)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if existing, ok := s.assistantRuns[scope][run.ID]; ok {
+		if existing.ClientRequestID != run.ClientRequestID {
+			return AssistantRun{}, fmt.Errorf("%w: assistant run %q already belongs to client request %q", ErrAssistantRunConflict, run.ID, existing.ClientRequestID)
+		}
+		return cloneAssistantRun(existing), nil
+	}
 	for _, existing := range s.assistantRuns[scope] {
 		if existing.ClientRequestID == run.ClientRequestID {
 			return cloneAssistantRun(existing), nil

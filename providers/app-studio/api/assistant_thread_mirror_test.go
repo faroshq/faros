@@ -164,7 +164,7 @@ func TestProjectAssistantThreadSnapshotTracksSteeringActiveMessage(t *testing.T)
 	if _, err := inner.CreateAssistantTurn(context.Background(), scope, turn, nil); err != nil {
 		t.Fatal(err)
 	}
-	firstRun := store.AssistantRun{ID: turn.ID, ActiveMessageID: "assistant-first", Status: store.AssistantRunStatusRunning}
+	firstRun := store.AssistantRun{ID: turn.ID, Mode: store.AssistantRunModeDefault, ActiveMessageID: "assistant-first", Revision: 1, Status: store.AssistantRunStatusRunning}
 	state := assistantThreadMirrorState{actionStatuses: map[string]string{}}
 	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, firstRun, &state, projectAssistantRunSnapshot{
 		Run: firstRun, Message: store.Message{ID: firstRun.ActiveMessageID, Content: "first segment"},
@@ -173,6 +173,7 @@ func TestProjectAssistantThreadSnapshotTracksSteeringActiveMessage(t *testing.T)
 	}
 	secondRun := firstRun
 	secondRun.ActiveMessageID = "assistant-second"
+	secondRun.Revision = 2
 	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, firstRun, &state, projectAssistantRunSnapshot{
 		Run: secondRun, Message: store.Message{ID: secondRun.ActiveMessageID, Content: "second segment"},
 	}); err != nil {
@@ -198,7 +199,23 @@ func TestProjectAssistantThreadSnapshotTracksSteeringActiveMessage(t *testing.T)
 		t.Fatalf("second segment deltas = %d, want initial and final updates: %#v", got, events)
 	}
 	var terminal assistantThreadItem
+	var segmentStartSequence, segmentDeltaSequence int64
 	for _, event := range events {
+		if event.ItemID == secondRun.ActiveMessageID && event.Type == assistantThreadEventItemStarted {
+			segmentStartSequence = event.Sequence
+			var envelope struct {
+				Item assistantThreadItem `json:"item"`
+			}
+			if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Item.Type != assistantThreadEventAssistantMessage || envelope.Item.AssistantMessageID != secondRun.ActiveMessageID || envelope.Item.Mode != secondRun.Mode || envelope.Item.Revision != secondRun.Revision {
+				t.Fatalf("steered segment start item = %#v, want durable segment metadata", envelope.Item)
+			}
+		}
+		if event.ItemID == secondRun.ActiveMessageID && event.Type == assistantThreadEventItemDelta && segmentDeltaSequence == 0 {
+			segmentDeltaSequence = event.Sequence
+		}
 		if event.Type != assistantThreadEventItemCompleted || event.ItemID != secondRun.ActiveMessageID {
 			continue
 		}
@@ -210,8 +227,14 @@ func TestProjectAssistantThreadSnapshotTracksSteeringActiveMessage(t *testing.T)
 		}
 		terminal = envelope.Item
 	}
+	if segmentStartSequence == 0 || segmentDeltaSequence == 0 || segmentStartSequence >= segmentDeltaSequence {
+		t.Fatalf("steered segment item.started sequence=%d delta sequence=%d, want start before delta", segmentStartSequence, segmentDeltaSequence)
+	}
 	if terminal.ID != secondRun.ActiveMessageID || terminal.Content != "second segment done" {
 		t.Fatalf("terminal assistant item = %#v, want second segment content", terminal)
+	}
+	if terminal.AssistantMessageID != secondRun.ActiveMessageID || terminal.Mode != secondRun.Mode || terminal.Revision != secondRun.Revision || terminal.Status != "completed" {
+		t.Fatalf("terminal assistant metadata = %#v, want completed steered segment", terminal)
 	}
 	items := materializeAssistantThreadItems(events)
 	if len(items) != 2 {
@@ -265,6 +288,9 @@ func TestProjectAssistantThreadSnapshotScopesReusedActionIDPerSegment(t *testing
 		}
 		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
 			t.Fatal(err)
+		}
+		if envelope.Item.Type != assistantThreadEventDynamicToolCall {
+			continue
 		}
 		var persistedAction projectAssistantActionFeedItem
 		if err := json.Unmarshal(envelope.Item.Data, &persistedAction); err != nil {
@@ -651,6 +677,30 @@ func TestMaterializeAssistantThreadItemsRetiresTerminalAssistantSegments(t *test
 		if item.Status != "completed" {
 			t.Fatalf("terminal assistant segment remained open: %#v", items)
 		}
+	}
+}
+
+func TestMaterializeAssistantThreadItemsBackfillsLegacyAgentModeFromTurn(t *testing.T) {
+	events := []store.AssistantThreadEvent{
+		{
+			TurnID: "turn-legacy-plan", Sequence: 1, Type: assistantThreadEventTurnStarted,
+			Payload: []byte(`{"turn":{"id":"turn-legacy-plan","mode":"plan"}}`),
+		},
+		{
+			TurnID: "turn-legacy-plan", Sequence: 2, Type: assistantThreadEventItemStarted, ItemID: "assistant-legacy-plan",
+			Payload: []byte(`{"item":{"id":"assistant-legacy-plan","turnID":"turn-legacy-plan","type":"agentMessage","status":"in_progress"}}`),
+		},
+		{
+			TurnID: "turn-legacy-plan", Sequence: 3, Type: assistantThreadEventItemCompleted, ItemID: "assistant-legacy-plan",
+			Payload: []byte(`{"item":{"id":"assistant-legacy-plan","turnID":"turn-legacy-plan","type":"agentMessage","status":"completed","content":"Plan complete"}}`),
+		},
+	}
+	items := materializeAssistantThreadItems(events)
+	if len(items) != 1 {
+		t.Fatalf("legacy plan items = %#v, want one agent item", items)
+	}
+	if items[0].Mode != store.AssistantRunModePlan || items[0].Status != "completed" {
+		t.Fatalf("legacy plan item = %#v, want plan mode/completed status", items[0])
 	}
 }
 

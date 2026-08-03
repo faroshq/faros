@@ -42,8 +42,11 @@ type assistantThreadMirrorState struct {
 	activeMessageID string
 	actionStatuses  map[string]string
 	openMessages    map[string]struct{}
+	messageStarted  map[string]bool
 	messageContent  map[string]string
 	messageCreated  map[string]time.Time
+	messageMode     map[string]store.AssistantRunMode
+	messageRevision map[string]int64
 	lastPlan        string
 	lastRequestID   string
 	lastRequestType string
@@ -71,10 +74,14 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 		activeMessageID: activeMessageID,
 		actionStatuses:  map[string]string{},
 		openMessages:    map[string]struct{}{},
+		messageStarted:  map[string]bool{},
 		messageContent:  map[string]string{},
 		messageCreated:  map[string]time.Time{},
+		messageMode:     map[string]store.AssistantRunMode{},
+		messageRevision: map[string]int64{},
 		reconstructed:   true,
 	}
+	durableActiveMessageID := ""
 	for _, event := range events {
 		if event.Sequence > state.lastSequence {
 			state.lastSequence = event.Sequence
@@ -103,6 +110,15 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 				}
 			}
 			if envelopeDecoded && envelope.Item.Type == assistantThreadEventAssistantMessage {
+				if event.Type == assistantThreadEventItemStarted || event.Type == assistantThreadEventItemDelta {
+					durableActiveMessageID = messageID
+				}
+				if envelope.Item.Mode != "" {
+					state.messageMode[messageID] = envelope.Item.Mode
+				}
+				if envelope.Item.Revision != 0 {
+					state.messageRevision[messageID] = envelope.Item.Revision
+				}
 				if !envelope.Item.CreatedAt.IsZero() {
 					state.messageCreated[messageID] = envelope.Item.CreatedAt
 				} else if _, exists := state.messageCreated[messageID]; !exists {
@@ -110,6 +126,7 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 				}
 				switch event.Type {
 				case assistantThreadEventItemStarted:
+					state.messageStarted[messageID] = true
 					state.openMessages[messageID] = struct{}{}
 				case assistantThreadEventItemCompleted:
 					state.messageContent[messageID] = envelope.Item.Content
@@ -153,6 +170,9 @@ func (s *Server) loadAssistantThreadMirrorState(ctx context.Context, scope store
 				state.lastRequestID, state.lastRequestType = "", ""
 			}
 		}
+	}
+	if durableActiveMessageID != "" {
+		state.activeMessageID = durableActiveMessageID
 	}
 	return state, nil
 }
@@ -214,11 +234,20 @@ func (s *Server) closeStaleAssistantThreadMessages(ctx context.Context, scope st
 	if state.openMessages == nil {
 		state.openMessages = map[string]struct{}{}
 	}
+	if state.messageStarted == nil {
+		state.messageStarted = map[string]bool{}
+	}
 	if state.messageContent == nil {
 		state.messageContent = map[string]string{}
 	}
 	if state.messageCreated == nil {
 		state.messageCreated = map[string]time.Time{}
+	}
+	if state.messageMode == nil {
+		state.messageMode = map[string]store.AssistantRunMode{}
+	}
+	if state.messageRevision == nil {
+		state.messageRevision = map[string]int64{}
 	}
 	stale := make([]string, 0, len(state.openMessages))
 	for messageID := range state.openMessages {
@@ -243,13 +272,23 @@ func (s *Server) closeStaleAssistantThreadMessages(ctx context.Context, scope st
 		if createdAt.IsZero() {
 			createdAt = time.Now().UTC()
 		}
+		revision := state.messageRevision[messageID]
+		if revision == 0 && metadata != nil {
+			encodedRevision, marshalErr := json.Marshal(metadata[projectAssistantMetadataRevision])
+			if marshalErr == nil {
+				_ = json.Unmarshal(encodedRevision, &revision)
+			}
+		}
 		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{
-			ID:        messageID,
-			TurnID:    turnID,
-			Type:      assistantThreadEventAssistantMessage,
-			Status:    "completed",
-			Content:   content,
-			CreatedAt: createdAt,
+			ID:                 messageID,
+			TurnID:             turnID,
+			Type:               assistantThreadEventAssistantMessage,
+			Status:             "completed",
+			Content:            content,
+			AssistantMessageID: messageID,
+			Mode:               state.messageMode[messageID],
+			Revision:           revision,
+			CreatedAt:          createdAt,
 		}, metadata)
 		payload, err := json.Marshal(map[string]any{"item": item})
 		if err != nil {
@@ -265,6 +304,7 @@ func (s *Server) closeStaleAssistantThreadMessages(ctx context.Context, scope st
 			return fmt.Errorf("persist stale assistant thread terminal item %q: %w", messageID, err)
 		}
 		delete(state.openMessages, messageID)
+		state.messageStarted[messageID] = true
 	}
 	return nil
 }
@@ -361,11 +401,20 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 	if state.openMessages == nil {
 		state.openMessages = map[string]struct{}{}
 	}
+	if state.messageStarted == nil {
+		state.messageStarted = map[string]bool{}
+	}
 	if state.messageContent == nil {
 		state.messageContent = map[string]string{}
 	}
 	if state.messageCreated == nil {
 		state.messageCreated = map[string]time.Time{}
+	}
+	if state.messageMode == nil {
+		state.messageMode = map[string]store.AssistantRunMode{}
+	}
+	if state.messageRevision == nil {
+		state.messageRevision = map[string]int64{}
 	}
 	if err := s.closeStaleAssistantThreadMessages(ctx, scope, threadID, turn.ID, activeMessageID, state); err != nil {
 		return err
@@ -373,7 +422,8 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 	if state.terminalEvent {
 		return nil
 	}
-	if activeMessageID != "" && state.activeMessageID != activeMessageID {
+	segmentRotated := activeMessageID != "" && state.activeMessageID != activeMessageID
+	if segmentRotated {
 		// Steering rotates the durable assistant target while preserving the
 		// prior segment. Start deltas and terminalization against the snapshot's
 		// target so repeated provider call IDs/content cannot bleed across
@@ -382,6 +432,24 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		state.lastContent = ""
 		state.terminalItem = false
 		state.actionStatuses = map[string]string{}
+	}
+	if segmentRotated && !state.messageStarted[activeMessageID] {
+		item := assistantThreadAgentMessageItem(turn, snapshot.Run, "in_progress", "", snapshot.Message.CreatedAt, snapshot.Message.Metadata)
+		if item.CreatedAt.IsZero() {
+			item.CreatedAt = time.Now().UTC()
+		}
+		payload, err := json.Marshal(map[string]any{"item": item})
+		if err != nil {
+			return fmt.Errorf("encode assistant thread segment item: %w", err)
+		}
+		if _, err := s.appendAssistantThreadMirrorEvent(ctx, scope, state, store.AssistantThreadEvent{ThreadID: threadID, TurnID: turn.ID, Type: assistantThreadEventItemStarted, ItemID: activeMessageID, Payload: payload}); err != nil {
+			return fmt.Errorf("persist assistant thread segment item: %w", err)
+		}
+		state.messageStarted[activeMessageID] = true
+		state.messageCreated[activeMessageID] = item.CreatedAt
+		state.messageMode[activeMessageID] = item.Mode
+		state.messageRevision[activeMessageID] = item.Revision
+		state.openMessages[activeMessageID] = struct{}{}
 	}
 	if state.actionStatuses == nil {
 		state.actionStatuses = map[string]string{}
@@ -422,7 +490,16 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		if err != nil {
 			return fmt.Errorf("encode assistant thread action: %w", err)
 		}
-		item := assistantThreadItem{ID: itemID, TurnID: turn.ID, Type: assistantThreadEventDynamicToolCall, Status: status, Content: action.Title, Data: data, CreatedAt: time.Now().UTC()}
+		item := assistantThreadItem{
+			ID:                 itemID,
+			TurnID:             turn.ID,
+			Type:               assistantThreadEventDynamicToolCall,
+			Status:             status,
+			Content:            action.Title,
+			Data:               data,
+			AssistantMessageID: activeMessageID,
+			CreatedAt:          time.Now().UTC(),
+		}
 		payload, err := json.Marshal(map[string]any{"item": item})
 		if err != nil {
 			return fmt.Errorf("encode assistant thread action item: %w", err)
@@ -439,7 +516,7 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 			return fmt.Errorf("encode assistant thread plan: %w", err)
 		}
 		if string(planData) != state.lastPlan {
-			item := assistantThreadItem{ID: "plan-" + turn.ID, TurnID: turn.ID, Type: assistantThreadEventPlan, Status: "in_progress", Data: planData, CreatedAt: time.Now().UTC()}
+			item := assistantThreadItem{ID: "plan-" + turn.ID, TurnID: turn.ID, Type: assistantThreadEventPlan, Status: "in_progress", Data: planData, AssistantMessageID: activeMessageID, CreatedAt: time.Now().UTC()}
 			payload, err := json.Marshal(map[string]any{"item": item})
 			if err != nil {
 				return fmt.Errorf("encode assistant thread plan item: %w", err)
@@ -487,7 +564,7 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 			if eventType == assistantThreadEventUserInputRequested {
 				itemType = "input"
 			}
-			item := assistantThreadItem{ID: snapshot.Run.RequestID, TurnID: turn.ID, Type: itemType, Status: "in_progress", Data: interruptData, CreatedAt: time.Now().UTC()}
+			item := assistantThreadItem{ID: snapshot.Run.RequestID, TurnID: turn.ID, Type: itemType, Status: "in_progress", Data: interruptData, AssistantMessageID: activeMessageID, CreatedAt: time.Now().UTC()}
 			payload, err := json.Marshal(map[string]any{"requestID": snapshot.Run.RequestID, "interrupt": interrupt, "item": item})
 			if err != nil {
 				return fmt.Errorf("encode assistant thread pending request item: %w", err)
@@ -504,7 +581,8 @@ func (s *Server) projectAssistantThreadSnapshot(ctx context.Context, scope store
 		return nil
 	}
 	if !state.terminalItem {
-		item := assistantThreadItemWithMessagePresentation(assistantThreadItem{ID: activeMessageID, TurnID: turn.ID, Type: assistantThreadEventAssistantMessage, Status: "completed", Content: content, CreatedAt: snapshot.Message.CreatedAt}, snapshot.Message.Metadata)
+		terminalItem := assistantThreadAgentMessageItem(turn, snapshot.Run, assistantThreadRunItemStatus(snapshot.Run.Status), content, snapshot.Message.CreatedAt, snapshot.Message.Metadata)
+		item := terminalItem
 		payload, err := json.Marshal(map[string]any{"item": item})
 		if err != nil {
 			return fmt.Errorf("encode assistant thread terminal item: %w", err)
@@ -551,7 +629,7 @@ func assistantThreadPendingRequestResolution(turnID string, state assistantThrea
 		resolvedType = assistantThreadEventUserInputResolved
 		itemType = "input"
 	}
-	item := assistantThreadItem{ID: state.lastRequestID, TurnID: turnID, Type: itemType, Status: "completed", CreatedAt: time.Now().UTC()}
+	item := assistantThreadItem{ID: state.lastRequestID, TurnID: turnID, Type: itemType, Status: "completed", AssistantMessageID: state.activeMessageID, CreatedAt: time.Now().UTC()}
 	payload, err := json.Marshal(map[string]any{"requestID": state.lastRequestID, "item": item})
 	if err != nil {
 		return store.AssistantThreadEvent{}, err

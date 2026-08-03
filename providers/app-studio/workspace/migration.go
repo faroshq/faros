@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // The ProjectUID scope was added after the initial workspace store shipped.
@@ -31,13 +33,19 @@ import (
 // current data lives below an additional UID directory. Keep the marker out
 // of either tree so it can never become a source file or assistant snapshot.
 const (
-	workspaceMigrationMarkerRoot = ".workspace-migrations"
-	workspaceMigrationVersion    = 1
-	workspaceMigrationStage      = ".legacy-migrating"
+	workspaceMigrationMarkerRoot          = ".workspace-migrations"
+	workspaceMigrationVersion             = 1
+	workspaceMigrationStage               = ".legacy-migrating"
+	workspaceMigrationDispositionMigrate  = "migrate"
+	workspaceMigrationDispositionPreserve = "preserve"
 )
 
 type workspaceMigrationMarker struct {
 	Version int `json:"version"`
+	// Disposition is shared by the workspace and snapshot halves. A preserve
+	// disposition is durable fail-closed state: one ambiguous half prevents
+	// either half from importing markerless data into a new project UID.
+	Disposition string `json:"disposition,omitempty"`
 	// ProjectUID binds both halves of the legacy transition to one project
 	// incarnation. The per-half fields remain for explaining/completing a
 	// partially migrated marker written by an older build.
@@ -90,6 +98,9 @@ func (s *FileStore) migrateLegacyTree(scope Scope, snapshots bool) error {
 	if err != nil {
 		return err
 	}
+	if marker.Disposition != "" && marker.Disposition != workspaceMigrationDispositionMigrate && marker.Disposition != workspaceMigrationDispositionPreserve {
+		return fmt.Errorf("unsupported workspace migration disposition %q", marker.Disposition)
+	}
 	if marker.Version == workspaceMigrationVersion && marker.done(snapshots) {
 		return nil
 	}
@@ -104,6 +115,33 @@ func (s *FileStore) migrateLegacyTree(scope Scope, snapshots bool) error {
 	}
 	if err := validateScopeSegment(boundUID); err != nil {
 		return fmt.Errorf("invalid workspace migration project UID: %w", err)
+	}
+	if marker.Disposition == "" {
+		disposition, err := s.initialMigrationDisposition(scope, boundUID, marker)
+		if err != nil {
+			return err
+		}
+		marker.Version = workspaceMigrationVersion
+		marker.ProjectUID = boundUID
+		marker.Disposition = disposition
+		if disposition == workspaceMigrationDispositionPreserve {
+			// Bind both halves to the fail-closed disposition so later calls do
+			// not independently reconsider and migrate the other half.
+			marker.WorkspaceProjectUID = boundUID
+			marker.SnapshotsProjectUID = boundUID
+			if err := writeWorkspaceMigrationMarker(markerPath, marker); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Persist the shared migrate disposition before either half can stage
+		// direct legacy data. This also binds an interrupted stage to boundUID.
+		if err := writeWorkspaceMigrationMarker(markerPath, marker); err != nil {
+			return err
+		}
+	}
+	if marker.Disposition == workspaceMigrationDispositionPreserve {
+		return nil
 	}
 	migrationScope := scope
 	migrationScope.ProjectUID = boundUID
@@ -121,11 +159,27 @@ func (s *FileStore) migrateLegacyTree(scope Scope, snapshots bool) error {
 	if stageErr != nil && !errors.Is(stageErr, fs.ErrNotExist) {
 		return fmt.Errorf("stat workspace migration staging path %q: %w", stage, stageErr)
 	}
+	preserveLegacyTree := false
+	if legacyErr == nil {
+		if !legacyInfo.IsDir() {
+			return fmt.Errorf("legacy workspace path %q is not a directory", legacy)
+		}
+		preserveLegacyTree, err = preserveUnmarkedScopedTree(legacy, snapshots)
+		if err != nil {
+			return err
+		}
+	}
 
 	switch {
 	case stageErr == nil:
 		// A previous process renamed the legacy tree but did not finish moving
 		// its entries. Resume that operation into the same deterministic UID.
+		if marker.boundUID() == "" {
+			// An unbound staging directory cannot safely be attributed to this
+			// caller after a project recreation. Leave it untouched rather than
+			// importing another incarnation's files.
+			return fmt.Errorf("workspace migration staging path %q has no bound project UID", stage)
+		}
 		if !stageInfo.IsDir() {
 			return fmt.Errorf("workspace migration staging path %q is not a directory", stage)
 		}
@@ -153,8 +207,25 @@ func (s *FileStore) migrateLegacyTree(scope Scope, snapshots bool) error {
 		}
 
 	case legacyErr == nil:
-		if !legacyInfo.IsDir() {
-			return fmt.Errorf("legacy workspace path %q is not a directory", legacy)
+		if preserveLegacyTree {
+			// A markerless base containing scoped or otherwise ambiguous
+			// children is left completely unchanged. This can be discovered
+			// after the global preflight if an older process writes concurrently;
+			// upgrade the shared disposition so the other half cannot migrate.
+			marker.Disposition = workspaceMigrationDispositionPreserve
+			marker.WorkspaceProjectUID = boundUID
+			marker.SnapshotsProjectUID = boundUID
+			if err := writeWorkspaceMigrationMarker(markerPath, marker); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Bind the first observed UID before staging. If the process stops
+		// after the rename, a later UID can resume only into this incarnation.
+		marker.Version = workspaceMigrationVersion
+		marker.ProjectUID = boundUID
+		if err := writeWorkspaceMigrationMarker(markerPath, marker); err != nil {
+			return err
 		}
 		// Rename the whole legacy tree out of the way before creating the
 		// UID directory. This is atomic on one filesystem and leaves a
@@ -224,6 +295,99 @@ func (s *FileStore) legacyAndCurrentPaths(scope Scope, snapshots bool) (legacy, 
 	return base, filepath.Join(base, scope.ProjectUID), filepath.Join(filepath.Dir(base), scope.ProjectName+workspaceMigrationStage)
 }
 
+type workspaceMigrationBaseLayout int
+
+const (
+	workspaceMigrationBaseAbsent workspaceMigrationBaseLayout = iota
+	workspaceMigrationBaseLegacy
+	workspaceMigrationBasePreserve
+)
+
+func (s *FileStore) initialMigrationDisposition(scope Scope, boundUID string, marker workspaceMigrationMarker) (string, error) {
+	markerBound := marker.boundUID() != ""
+	for _, snapshots := range []bool{false, true} {
+		layout, err := s.classifyMigrationBase(scope, boundUID, snapshots, markerBound)
+		if err != nil {
+			return "", err
+		}
+		if layout == workspaceMigrationBasePreserve {
+			return workspaceMigrationDispositionPreserve, nil
+		}
+	}
+	return workspaceMigrationDispositionMigrate, nil
+}
+
+func (s *FileStore) classifyMigrationBase(scope Scope, boundUID string, snapshots, markerBound bool) (workspaceMigrationBaseLayout, error) {
+	migrationScope := scope
+	migrationScope.ProjectUID = boundUID
+	legacy, target, stage := s.legacyAndCurrentPaths(migrationScope, snapshots)
+	stageInfo, stageErr := os.Lstat(stage)
+	if stageErr != nil && !errors.Is(stageErr, fs.ErrNotExist) {
+		return 0, fmt.Errorf("stat workspace migration staging path %q: %w", stage, stageErr)
+	}
+	if stageErr == nil {
+		if !markerBound {
+			return 0, fmt.Errorf("workspace migration staging path %q has no bound project UID", stage)
+		}
+		if !stageInfo.IsDir() {
+			return 0, fmt.Errorf("workspace migration staging path %q is not a directory", stage)
+		}
+		return workspaceMigrationBaseLegacy, nil
+	}
+
+	targetInfo, targetErr := os.Lstat(target)
+	if targetErr != nil && !errors.Is(targetErr, fs.ErrNotExist) {
+		return 0, fmt.Errorf("stat current workspace path %q: %w", target, targetErr)
+	}
+	if targetErr == nil {
+		if !targetInfo.IsDir() {
+			return 0, fmt.Errorf("current workspace path %q is not a directory", target)
+		}
+		// A target plus any other direct entry is a mixed layout. Do not let
+		// either half import those entries into the bound UID.
+		hasOtherEntries, err := hasWorkspaceEntriesExcept(legacy, filepath.Base(target))
+		if err != nil {
+			return 0, err
+		}
+		if hasOtherEntries {
+			return workspaceMigrationBasePreserve, nil
+		}
+		return workspaceMigrationBaseAbsent, nil
+	}
+
+	legacyInfo, legacyErr := os.Lstat(legacy)
+	if errors.Is(legacyErr, fs.ErrNotExist) {
+		return workspaceMigrationBaseAbsent, nil
+	}
+	if legacyErr != nil {
+		return 0, fmt.Errorf("stat legacy workspace path %q: %w", legacy, legacyErr)
+	}
+	if !legacyInfo.IsDir() {
+		return 0, fmt.Errorf("legacy workspace path %q is not a directory", legacy)
+	}
+	preserve, err := preserveUnmarkedScopedTree(legacy, snapshots)
+	if err != nil {
+		return 0, err
+	}
+	if preserve {
+		return workspaceMigrationBasePreserve, nil
+	}
+	return workspaceMigrationBaseLegacy, nil
+}
+
+func hasWorkspaceEntriesExcept(dir, ignoredName string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read workspace migration base %q: %w", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != ignoredName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *FileStore) migrationMarkerPath(scope Scope) (string, error) {
 	for _, part := range []string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName} {
 		if err := validateScopeSegment(part); err != nil {
@@ -284,4 +448,64 @@ func moveWorkspaceEntries(stage, target string) error {
 		}
 	}
 	return nil
+}
+
+func preserveUnmarkedScopedTree(dir string, snapshots bool) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("read workspace migration legacy path: %w", err)
+	}
+	if len(entries) == 0 {
+		return false, nil
+	}
+	hasDirectFile := false
+	for _, entry := range entries {
+		if isProjectUIDDirectory(entry) {
+			return true, nil
+		}
+		if !entry.IsDir() {
+			hasDirectFile = true
+		}
+	}
+	if !hasDirectFile {
+		// A directory-only base cannot be distinguished safely from a
+		// current UID-scoped layout. Keep the existing tree untouched.
+		return true, nil
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if snapshots {
+			if !strings.HasPrefix(entry.Name(), "run-") {
+				return true, nil
+			}
+			continue
+		}
+		if !isLegacyWorkspaceDirectory(entry.Name()) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isLegacyWorkspaceDirectory(name string) bool {
+	switch strings.ToLower(name) {
+	case ".git", "app", "assets", "client", "cmd", "components", "config", "dist", "docs", "internal", "lib", "node_modules", "pkg", "public", "scripts", "server", "src", "static", "styles", "test", "tests", "vendor", "web":
+		return true
+	default:
+		return false
+	}
+}
+
+// Project UIDs are Kubernetes object UIDs and therefore canonical UUIDs in
+// production. Canonical UUID names are a strong scoped-layout signal; the
+// surrounding structural checks also fail closed for arbitrary UID strings
+// accepted by Scope when a marker is missing.
+func isProjectUIDDirectory(entry fs.DirEntry) bool {
+	if !entry.IsDir() {
+		return false
+	}
+	parsed, err := uuid.Parse(entry.Name())
+	return err == nil && strings.EqualFold(parsed.String(), entry.Name())
 }

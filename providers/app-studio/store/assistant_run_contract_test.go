@@ -100,6 +100,45 @@ func TestMemoryStoreCreateAssistantRunIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreCreateAssistantRunRejectsRunIDReuseWithDifferentClientRequest(t *testing.T) {
+	store := mustDurableAssistantRunStore(t, NewMemoryStore())
+	scope := testAssistantRunScope()
+	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	if _, err := store.CreateAssistantRun(
+		context.Background(), scope,
+		Message{ID: "user-1", Role: "user", ActorID: "actor-1", Content: "first", CreatedAt: createdAt, UpdatedAt: createdAt},
+		Message{ID: "assistant-1", Role: "assistant", Content: "", CreatedAt: createdAt.Add(time.Microsecond), UpdatedAt: createdAt.Add(time.Microsecond)},
+		testAssistantRun(t, "run-1", "request-1", "assistant-1", createdAt),
+	); err != nil {
+		t.Fatalf("first CreateAssistantRun: %v", err)
+	}
+
+	_, err := store.CreateAssistantRun(
+		context.Background(), scope,
+		Message{ID: "user-2", Role: "user", ActorID: "actor-1", Content: "replacement", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
+		Message{ID: "assistant-2", Role: "assistant", Content: "replacement", CreatedAt: createdAt.Add(time.Minute), UpdatedAt: createdAt.Add(time.Minute)},
+		testAssistantRun(t, "run-1", "request-2", "assistant-2", createdAt.Add(time.Minute)),
+	)
+	if !errors.Is(err, ErrAssistantRunConflict) {
+		t.Fatalf("run-ID reuse error = %v, want conflict", err)
+	}
+
+	persisted, err := store.GetAssistantRun(context.Background(), scope, "run-1")
+	if err != nil {
+		t.Fatalf("GetAssistantRun after rejected reuse: %v", err)
+	}
+	if persisted.ClientRequestID != "request-1" || persisted.UserMessageID != "user-1" || persisted.ActiveMessageID != "assistant-1" {
+		t.Fatalf("run was replaced after rejected reuse: %#v", persisted)
+	}
+	page, err := store.ListMessages(context.Background(), scope, 10, "")
+	if err != nil {
+		t.Fatalf("ListMessages after rejected reuse: %v", err)
+	}
+	if len(page.Items) != 2 || page.Items[0].ID != "user-1" || page.Items[1].ID != "assistant-1" {
+		t.Fatalf("replacement messages were written: %#v", page.Items)
+	}
+}
+
 func TestMemoryAndEncryptedAssistantRunPreserveOriginatingUserMessageIDOnRetry(t *testing.T) {
 	for _, tt := range []struct {
 		name string

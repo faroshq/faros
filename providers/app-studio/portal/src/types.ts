@@ -80,6 +80,17 @@ export interface ProjectAssistantThreadItem {
   status: 'in_progress' | 'completed' | 'failed' | string
   content?: string
   data?: Record<string, unknown>
+  /**
+   * Assistant message segment that owns this item. The field was added after
+   * the first thread mirror shipped, so projections must retain their
+   * event-order fallback when it is absent on historical items.
+   */
+  assistantMessageID?: string
+  /** Run presentation fields are carried on agent messages (and mirrored on
+   * activity items for live/reload association). */
+  mode?: ProjectAssistantRunMode
+  revision?: number
+  error?: { message?: string; errorInfo?: string }
   sequence: number
   createdAt: string
 }

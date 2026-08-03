@@ -45,7 +45,14 @@ import AssistantActionLog from './AssistantActionLog.vue'
 import { activeAssistantPlanMessage, assistantPlanProgress, parseAssistantPlan, type AssistantPlan } from './assistantPlan'
 import { formatAssistantWorkedDuration, parseAssistantProgress, type AssistantProgress } from './assistantProgress'
 import { buildAssistantTrace, type AssistantTraceBlock } from './assistantTrace'
-import { assistantThreadItemsToMessages, maxAssistantThreadSequence } from './assistantThreadProjection'
+import {
+  assistantThreadItemIdentity,
+  assistantThreadItemToRun,
+  assistantThreadItemsToMessages,
+  assistantThreadItemsToRuns,
+  mergeAssistantThreadMessages,
+  maxAssistantThreadSequence,
+} from './assistantThreadProjection'
 import AssistantPlanPopover from './AssistantPlanPopover.vue'
 import ApprovalModePicker from './ApprovalModePicker.vue'
 import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
@@ -450,6 +457,66 @@ function clearPendingFirstProjectSubmission() {
   pendingFirstProjectSubmission = null
 }
 const assistantRunRevisions: Record<string, AssistantRun> = {}
+
+function hydrateAssistantRuns(items: ProjectAssistantThreadItem[]) {
+  const incoming = assistantThreadItemsToRuns(items) as Record<string, AssistantRun>
+  for (const [runID, run] of Object.entries(incoming)) {
+    const current = assistantRunRevisions[runID]
+    // A list response can race the mirror's latest event. Never let an older
+    // response move the run back to its pre-steering segment/revision.
+    if (!current || run.revision >= current.revision) assistantRunRevisions[runID] = run
+  }
+}
+
+function projectAssistantThreadItems(
+  items: ProjectAssistantThreadItem[],
+  projectName: string,
+  preserveLiveMessages = false,
+): ProjectMessageView[] {
+  hydrateAssistantRuns(items)
+  const projected = assistantThreadItemsToMessages(items, projectName)
+  const messagesToUse = preserveLiveMessages
+    ? mergeAssistantThreadMessages(messages.value, projected)
+    : projected
+  return messagesToUse.map(toProjectMessageView)
+}
+
+function latestAssistantThreadRun(items: ProjectAssistantThreadItem[], turnID = ''): AssistantRun | undefined {
+  const item = items
+    .filter((candidate) => candidate.type === 'agentMessage' && candidate.turnID && (!turnID || candidate.turnID === turnID))
+    .reduce<ProjectAssistantThreadItem | undefined>((current, candidate) => {
+      if (!current) return candidate
+      const candidateRevision = typeof candidate.revision === 'number' && Number.isFinite(candidate.revision) ? candidate.revision : candidate.sequence
+      const currentRevision = typeof current.revision === 'number' && Number.isFinite(current.revision) ? current.revision : current.sequence
+      return candidateRevision > currentRevision || (candidateRevision === currentRevision && candidate.sequence > current.sequence)
+        ? candidate
+        : current
+    }, undefined)
+  return item ? assistantThreadItemToRun(item) as AssistantRun | undefined : undefined
+}
+
+function rebindAssistantRunFromThreadItems(items: ProjectAssistantThreadItem[], projectName: string, runID: string): boolean {
+  const current = activeAssistantRun
+  if (!current || current.id !== runID) return false
+  const replacement = latestAssistantThreadRun(items, runID)
+  if (!replacement) return false
+  const message = messages.value.find((candidate) =>
+    candidate.role === 'assistant' && (candidate.id === replacement.activeMessageID || candidate.metadata?.assistantMessageID === replacement.activeMessageID),
+  )
+  if (!message) return false
+  const nextRun: AssistantRun = {
+    ...current,
+    ...replacement,
+    id: runID,
+    clientRequestID: current.clientRequestID,
+    userMessageID: current.userMessageID,
+  }
+  const applied = applyAssistantSnapshot({ run: nextRun, message }, projectName, 'stream')
+  if (!applied.accepted || !applied.current) return false
+  if (assistantRunRequiresLiveControls(applied.current)) assistantRunController.start(applied.current.id, applied.current.revision)
+  return true
+}
+
 const assistantRunController = new ConversationRunController({
   connect: async (runID, _afterRevision, setDisconnect) => {
     const projectName = selected.value?.name
@@ -1949,7 +2016,7 @@ async function openProject(name: string, updateURL = true) {
     activeAssistantThreadID.value = threads[0]?.id ?? ''
     const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, name, activeAssistantThreadID.value) : []
     activeAssistantThreadSequence = maxAssistantThreadSequence(threadItems)
-    messages.value = assistantThreadItemsToMessages(threadItems, name).map(toProjectMessageView)
+    messages.value = projectAssistantThreadItems(threadItems, name)
     approvalMode.value = preference?.mode ?? 'on_request'
     await recoverAssistantConversation(name)
     if (updateURL) props.navigate(encodeURIComponent(name))
@@ -1992,7 +2059,7 @@ async function refreshSelectedProjectConversation(projectName: string) {
   if (!threads.some((thread) => thread.id === activeAssistantThreadID.value)) activeAssistantThreadID.value = threads[0]?.id ?? ''
   const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, projectName, activeAssistantThreadID.value) : []
   activeAssistantThreadSequence = maxAssistantThreadSequence(threadItems)
-  messages.value = assistantThreadItemsToMessages(threadItems, projectName).map(toProjectMessageView)
+  messages.value = projectAssistantThreadItems(threadItems, projectName)
   projects.value = projectList
   await recoverAssistantConversation(projectName)
 }
@@ -2011,7 +2078,7 @@ async function selectAssistantThread(threadID: string) {
   activeAssistantThreadID.value = threadID
   const items = await api.listAssistantThreadItems(props.ctx, projectName, threadID)
   activeAssistantThreadSequence = maxAssistantThreadSequence(items)
-  messages.value = assistantThreadItemsToMessages(items, projectName).map(toProjectMessageView)
+  messages.value = projectAssistantThreadItems(items, projectName)
   messageStreaming.value = false
 }
 
@@ -2029,7 +2096,13 @@ async function createAssistantThread() {
 }
 
 function assistantRunForMessage(messageID: string): AssistantRun | undefined {
-  return Object.values(assistantRunRevisions).find((run) => run.activeMessageID === messageID)
+  const message = messages.value.find((candidate) => candidate.id === messageID)
+  const assistantMessageID = typeof message?.metadata?.assistantMessageID === 'string'
+    ? message.metadata.assistantMessageID
+    : ''
+  return Object.values(assistantRunRevisions).find((run) =>
+    run.activeMessageID === messageID || (!!assistantMessageID && run.activeMessageID === assistantMessageID),
+  )
 }
 
 function assistantRunErrorForMessage(messageID: string): string {
@@ -2098,25 +2171,31 @@ async function recoverAssistantConversation(projectName: string): Promise<{ acce
   if (!turn || selected.value?.name !== projectName) return undefined
   const items = await api.listAssistantThreadItems(props.ctx, projectName, activeAssistantThreadID.value)
   activeAssistantThreadSequence = maxAssistantThreadSequence(items)
-  messages.value = assistantThreadItemsToMessages(items, projectName).map(toProjectMessageView)
+  messages.value = projectAssistantThreadItems(items, projectName, true)
   const assistantItem = [...items].reverse().find((item) => item.turnID === turn.id && item.type === 'agentMessage')
   const userItem = [...items].reverse().find((item) => item.turnID === turn.id && item.type === 'userMessage')
-  const message = assistantItem ? messages.value.find((candidate) => candidate.id === assistantItem.id) : undefined
+  const message = assistantItem
+    ? messages.value.find((candidate) => candidate.role === 'assistant' && (
+      candidate.id === (assistantItem.assistantMessageID || assistantItem.id) ||
+      candidate.metadata?.assistantMessageID === (assistantItem.assistantMessageID || assistantItem.id)
+    ))
+    : undefined
   if (!assistantItem || !message) return undefined
   const pending = [...items].reverse().find((item) => item.turnID === turn.id && (item.type === 'approval' || item.type === 'input') && item.status === 'in_progress')
+  const itemRun = assistantThreadItemToRun(assistantItem)
   const snapshot: ProjectAssistantSnapshot = {
     run: {
       id: turn.id,
-      mode: turn.mode,
+      mode: itemRun?.mode ?? turn.mode,
       approvalMode: turn.approvalMode,
-      status: pending?.type === 'approval' ? 'pending_permission' : pending?.type === 'input' ? 'pending_input' : 'running',
-      revision: Math.max(activeAssistantThreadSequence, 1),
-      activeMessageID: assistantItem.id,
+      status: pending?.type === 'approval' ? 'pending_permission' : pending?.type === 'input' ? 'pending_input' : itemRun?.status ?? 'running',
+      revision: itemRun?.revision ?? Math.max(activeAssistantThreadSequence, 1),
+      activeMessageID: itemRun?.activeMessageID ?? assistantItem.id,
       userMessageID: userItem?.id,
       clientRequestID: turn.clientUserMessageID,
       createdAt: turn.createdAt,
       updatedAt: turn.updatedAt,
-      error: turn.error?.message ? { message: turn.error.message, errorInfo: turn.error.errorInfo } : undefined,
+      error: itemRun?.error ?? (turn.error?.message ? { message: turn.error.message, errorInfo: turn.error.errorInfo } : undefined),
     },
     message,
   }
@@ -2132,7 +2211,7 @@ function reloadActiveAssistantConversation() {
   if (projectName) void recoverAssistantConversation(projectName)
 }
 
-function ensureAssistantMessage(projectName: string, assistantMessageID: string): number {
+function ensureAssistantMessage(projectName: string, assistantMessageID: string, turnID = ''): number {
   const idx = messages.value.findIndex((message) => message.id === assistantMessageID && message.role === 'assistant')
   if (idx !== -1) return idx
   messages.value = [...messages.value, {
@@ -2140,6 +2219,11 @@ function ensureAssistantMessage(projectName: string, assistantMessageID: string)
     projectID: projectName,
     role: 'assistant',
     content: '',
+    metadata: {
+      assistantStatus: 'running',
+      assistantMessageID,
+      ...(turnID ? { assistantTurnID: turnID } : {}),
+    },
     createdAt: new Date().toISOString(),
   }]
   return messages.value.length - 1
@@ -2575,7 +2659,14 @@ async function sendMessage() {
       })
       const items = await api.listAssistantThreadItems(props.ctx, projectName, activeAssistantThreadID.value)
       activeAssistantThreadSequence = maxAssistantThreadSequence(items)
-      messages.value = assistantThreadItemsToMessages(items, projectName).map(toProjectMessageView)
+      messages.value = projectAssistantThreadItems(items, projectName, true)
+      // Steering rotates the durable assistant segment while retaining the
+      // turn ID. Rebind the run to that replacement before reconnecting from
+      // the list's sequence; otherwise the old segment remains active and the
+      // first replacement delta can be applied to (or dropped from) it.
+      if (!rebindAssistantRunFromThreadItems(items, projectName, activeAssistantRun!.id)) {
+        await recoverAssistantConversation(projectName)
+      }
       pendingMessageSubmission = null
       return
     } else {
@@ -2813,45 +2904,105 @@ function projectMessagesForConversation(source: ProjectMessageView[]): ProjectMe
   return orderConversationMessages(source)
 }
 
+function assistantMessageIDForThreadItem(item: ProjectAssistantThreadItem, turnID = ''): string {
+  const explicit = item.assistantMessageID?.trim()
+  if (explicit) return explicit
+  if (item.type === 'agentMessage') return item.id
+  const scopedTurnID = item.turnID || turnID
+  const scoped = messages.value.filter((message) => {
+    if (message.role !== 'assistant') return false
+    return !scopedTurnID || message.metadata?.assistantTurnID === scopedTurnID
+  })
+  return scoped[scoped.length - 1]?.id
+    || (activeAssistantRun?.id === scopedTurnID ? activeAssistantRun.activeMessageID : '')
+}
+
+function assistantMessageIndexForThreadItem(item: ProjectAssistantThreadItem, turnID = ''): number {
+  const messageID = assistantMessageIDForThreadItem(item, turnID)
+  if (!messageID) return -1
+  return messages.value.findIndex((message) =>
+    message.role === 'assistant' && (message.id === messageID || message.metadata?.assistantMessageID === messageID),
+  )
+}
+
+function updateActiveRunFromAssistantItem(item: ProjectAssistantThreadItem, runID: string) {
+  const itemRun = assistantThreadItemToRun(item)
+  const current = activeAssistantRun
+  if (!itemRun || !current || current.id !== runID) return
+  const isCurrentSegment = itemRun.activeMessageID === current.activeMessageID
+  const isReplacementSegment = itemRun.revision > current.revision
+  if (!isCurrentSegment && !isReplacementSegment) return
+  const next: AssistantRun = {
+    ...current,
+    ...itemRun,
+    id: runID,
+    clientRequestID: current.clientRequestID,
+    userMessageID: current.userMessageID,
+  }
+  activeAssistantRun = next
+  assistantRunRevisions[runID] = next
+  activeAssistantProject = selected.value?.name ?? activeAssistantProject
+  assistantRunController.setRevision(next.revision)
+  messageStreaming.value = assistantRunRequiresLiveControls(next)
+}
+
 function applyAssistantThreadEvent(event: ProjectAssistantThreadEvent, projectName: string, runID: string) {
   const payload = event.payload ?? {}
   const rawItem = payload.item as ProjectAssistantThreadItem | undefined
   if (event.type === 'item.delta' && event.itemID) {
-    const index = messages.value.findIndex((message) => message.id === event.itemID)
     const delta = typeof payload.delta === 'string' ? payload.delta : ''
-    if (index >= 0 && delta) {
+    if (delta) {
+      let index = messages.value.findIndex((message) =>
+        message.role === 'assistant' && (message.id === event.itemID || message.metadata?.assistantMessageID === event.itemID),
+      )
+      // The mirror guarantees item.started before item.delta, but creating a
+      // placeholder here makes the stream lossless across reconnect races and
+      // old servers that did not persist the started event.
+      if (index < 0) index = ensureAssistantMessage(projectName, event.itemID, event.turnID || runID)
       const next = [...messages.value]
       next[index] = { ...next[index], content: next[index].content + delta }
       messages.value = next
     }
   } else if (rawItem?.id && (rawItem.type === 'userMessage' || rawItem.type === 'agentMessage')) {
     const role = rawItem.type === 'userMessage' ? 'user' : 'assistant'
-    const existing = messages.value.find((message) => message.id === rawItem.id)
+    const messageID = role === 'assistant' ? assistantMessageIDForThreadItem(rawItem, event.turnID || runID) : rawItem.id
+    const existing = messages.value.find((message) => message.id === messageID || message.id === rawItem.id)
+    const itemRun = role === 'assistant' ? assistantThreadItemToRun(rawItem) : undefined
+    const itemContent = rawItem.content ?? ''
+    const existingContent = existing?.content ?? ''
     const metadata = {
       ...(existing?.metadata ?? {}),
-      ...(role === 'assistant' ? { assistantStatus: rawItem.status === 'failed' ? 'failed' : rawItem.status === 'completed' ? 'completed' : 'running' } : {}),
+      ...(role === 'assistant' ? {
+        assistantStatus: itemRun?.status ?? 'running',
+        assistantMessageID: messageID,
+        ...(rawItem.turnID ? { assistantTurnID: rawItem.turnID } : {}),
+        ...(itemRun ? { assistantMode: itemRun.mode, assistantRevision: itemRun.revision } : {}),
+        ...(rawItem.error ? { assistantError: rawItem.error } : {}),
+      } : {}),
       ...(role === 'assistant' && rawItem.data?.assistantProgress ? { assistantProgress: rawItem.data.assistantProgress } : {}),
     }
     const projected = toProjectMessageView({
-      id: rawItem.id,
+      id: messageID,
       projectID: projectName,
       role,
-      content: rawItem.content ?? existing?.content ?? '',
+      content: existingContent.length >= itemContent.length && existingContent.startsWith(itemContent) ? existingContent : itemContent,
       metadata,
       createdAt: event.createdAt,
     })
     messages.value = existing
-      ? messages.value.map((message) => message.id === rawItem.id ? projected : message)
+      ? messages.value.map((message) => message.id === existing.id ? projected : message)
       : [...messages.value, projected]
+    if (role === 'assistant') updateActiveRunFromAssistantItem(rawItem, runID)
   } else if (rawItem?.id && event.turnID) {
-    const assistantIndex = lastAssistantMessageIndex(messages.value)
+    const assistantIndex = assistantMessageIndexForThreadItem(rawItem, event.turnID)
     if (assistantIndex >= 0) {
       const next = [...messages.value]
       const assistant = next[assistantIndex]
       const metadata = { ...(assistant.metadata ?? {}) }
       if (rawItem.type === 'dynamicToolCall' && rawItem.data) {
         const actions = Array.isArray(metadata.assistantActionFeed) ? [...metadata.assistantActionFeed] : []
-        const actionIndex = actions.findIndex((action) => typeof action === 'object' && action !== null && (action as { id?: string }).id === rawItem.id)
+        const identity = assistantThreadItemIdentity(rawItem)
+        const actionIndex = actions.findIndex((action) => typeof action === 'object' && action !== null && (action as { id?: string }).id === identity)
         if (actionIndex >= 0) actions[actionIndex] = rawItem.data
         else actions.push(rawItem.data)
         metadata.assistantActionFeed = actions
@@ -2863,12 +3014,17 @@ function applyAssistantThreadEvent(event: ProjectAssistantThreadEvent, projectNa
     }
   }
 
-  if ((event.type === 'approval.requested' || event.type === 'input.requested') && payload.interrupt) {
-    const index = lastAssistantMessageIndex(messages.value)
+  const interrupt = payload.interrupt as ProjectAssistantUIInterruptRequest | undefined
+  if ((event.type === 'approval.requested' || event.type === 'input.requested') && interrupt) {
+    const assistantMessageID = interrupt.action?.assistantMessageId
+      || activeAssistantRun?.activeMessageID
+    const index = assistantMessageID
+      ? messages.value.findIndex((message) => message.role === 'assistant' && (message.id === assistantMessageID || message.metadata?.assistantMessageID === assistantMessageID))
+      : lastAssistantMessageIndex(messages.value)
     if (index >= 0) {
       const next = [...messages.value]
       const message = next[index]
-      next[index] = toProjectMessageView({ ...message, metadata: { ...(message.metadata ?? {}), assistantInterrupt: payload.interrupt } })
+      next[index] = toProjectMessageView({ ...message, metadata: { ...(message.metadata ?? {}), assistantInterrupt: interrupt } })
       messages.value = next
       if (activeAssistantRun?.id === runID) {
         activeAssistantRun = {
@@ -2887,7 +3043,13 @@ function applyAssistantThreadEvent(event: ProjectAssistantThreadEvent, projectNa
   if ((event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.interrupted') && activeAssistantRun?.id === runID) {
     const status = event.type === 'turn.completed' ? 'completed' : event.type === 'turn.interrupted' ? 'interrupted' : 'failed'
     const message = messages.value.find((candidate) => candidate.id === activeAssistantRun?.activeMessageID)
-    if (message) applyAssistantSnapshot({ run: { ...activeAssistantRun, status, revision: activeAssistantRun.revision + 1 }, message }, projectName, 'stream')
+    if (message) {
+      const rawError = message.metadata?.assistantError
+      const error = activeAssistantRun.error || (rawError && typeof rawError === 'object' && typeof (rawError as { message?: unknown }).message === 'string'
+        ? { message: (rawError as { message: string }).message, errorInfo: typeof (rawError as { errorInfo?: unknown }).errorInfo === 'string' ? (rawError as { errorInfo: string }).errorInfo : undefined }
+        : undefined)
+      applyAssistantSnapshot({ run: { ...activeAssistantRun, status, revision: activeAssistantRun.revision + 1, error }, message }, projectName, 'stream')
+    }
   }
 }
 
