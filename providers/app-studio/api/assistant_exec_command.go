@@ -73,17 +73,18 @@ type projectAssistantExecSnapshotEntry struct {
 }
 
 // projectSandboxExecRequest is the typed infrastructure data-plane protocol.
-// The executor receives an immutable source snapshot and no App Studio
-// credentials, environment, image, network, PTY, or writeback capability.
+// Normal execution targets the already-synchronized live development
+// workspace. App Studio sends the expected durable source revision/digest,
+// never a second source snapshot or any credentials/environment.
 type projectSandboxExecRequest struct {
-	Action         string                   `json:"action"`
-	SessionID      string                   `json:"sessionID,omitempty"`
-	RequestID      string                   `json:"requestID,omitempty"`
-	Argv           []string                 `json:"argv,omitempty"`
-	Workdir        string                   `json:"workdir,omitempty"`
-	TimeoutSeconds int                      `json:"timeoutSeconds,omitempty"`
-	SourceDigest   string                   `json:"sourceDigest,omitempty"`
-	Files          []projectSandboxExecFile `json:"files,omitempty"`
+	Action         string   `json:"action"`
+	SessionID      string   `json:"sessionID,omitempty"`
+	RequestID      string   `json:"requestID,omitempty"`
+	Argv           []string `json:"argv,omitempty"`
+	Workdir        string   `json:"workdir,omitempty"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	SourceRevision uint64   `json:"sourceRevision,omitempty"`
+	SourceDigest   string   `json:"sourceDigest,omitempty"`
 }
 
 type projectSandboxExecResponse struct {
@@ -112,6 +113,130 @@ type projectAssistantExecCommandResult struct {
 	Blockers        []string `json:"blockers,omitempty"`
 }
 
+// projectAssistantExecMetadata is the allowlisted, public execution contract
+// shared by approval interrupts and action-feed items. It intentionally omits
+// environment, credentials, image, and raw process output; command output can
+// contain application secrets and remains available only to the model/tool
+// boundary under the existing bounded result contract.
+type projectAssistantExecMetadata struct {
+	Component        string   `json:"component,omitempty"`
+	Argv             []string `json:"argv,omitempty"`
+	Workdir          string   `json:"workdir,omitempty"`
+	TimeoutSeconds   int      `json:"timeoutSeconds,omitempty"`
+	NetworkProfile   string   `json:"networkProfile,omitempty"`
+	AuthorityProfile string   `json:"authorityProfile,omitempty"`
+	WritebackPolicy  string   `json:"writebackPolicy,omitempty"`
+	Status           string   `json:"status,omitempty"`
+	Summary          string   `json:"summary,omitempty"`
+	ExitCode         *int     `json:"exitCode,omitempty"`
+	DurationMS       int64    `json:"durationMs,omitempty"`
+	OutputTruncated  bool     `json:"outputTruncated,omitempty"`
+}
+
+func cloneProjectAssistantExecMetadata(src *projectAssistantExecMetadata) *projectAssistantExecMetadata {
+	if src == nil {
+		return nil
+	}
+	out := *src
+	out.Argv = append([]string(nil), src.Argv...)
+	if src.ExitCode != nil {
+		code := *src.ExitCode
+		out.ExitCode = &code
+	}
+	return &out
+}
+
+// projectAssistantExecMetadataForToolArguments projects only the execution
+// contract that the portal needs. It never carries environment values or raw
+// stdout/stderr, and masks argv tokens that look like credential material.
+func projectAssistantExecMetadataForToolArguments(name string, args map[string]any, result string, status string) *projectAssistantExecMetadata {
+	if projectToolBaseName(name) != projectToolExecCommand {
+		return nil
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil
+	}
+	var input projectAssistantExecCommandInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil
+	}
+	normalized, _ := normalizeProjectAssistantExecCommandInput(&input)
+	if normalized == nil {
+		return nil
+	}
+	metadata := &projectAssistantExecMetadata{
+		Component:        normalized.Component,
+		Argv:             projectAssistantExecPublicArgv(normalized.Argv),
+		Workdir:          normalized.Workdir,
+		TimeoutSeconds:   normalized.TimeoutSeconds,
+		NetworkProfile:   "application-runtime",
+		AuthorityProfile: "application-container",
+		WritebackPolicy:  "runtime-workspace-only",
+		Status:           strings.TrimSpace(status),
+	}
+	if strings.TrimSpace(result) == "" {
+		return metadata
+	}
+	var commandResult projectAssistantExecCommandResult
+	if err := json.Unmarshal([]byte(result), &commandResult); err != nil {
+		return metadata
+	}
+	if commandResult.Status != "" {
+		metadata.Status = commandResult.Status
+	}
+	metadata.Summary = trimProjectAssistantWorkflowString(commandResult.Summary, 240)
+	metadata.ExitCode = commandResult.ExitCode
+	metadata.DurationMS = commandResult.DurationMS
+	metadata.OutputTruncated = commandResult.OutputTruncated
+	return metadata
+}
+
+func projectAssistantExecPublicArgv(argv []string) []string {
+	out := append([]string(nil), argv...)
+	redactNext := false
+	for index, token := range out {
+		lower := strings.ToLower(strings.TrimSpace(token))
+		if redactNext {
+			out[index] = "[redacted]"
+			redactNext = false
+			continue
+		}
+		if projectAssistantExecSensitiveArg(lower) {
+			if strings.Contains(token, "=") {
+				out[index] = token[:strings.IndexByte(token, '=')+1] + "[redacted]"
+			} else {
+				out[index] = token
+				redactNext = true
+			}
+			continue
+		}
+		if projectAssistantExecSensitiveValue(lower) {
+			out[index] = "[redacted]"
+		}
+	}
+	return out
+}
+
+func projectAssistantExecSensitiveArg(value string) bool {
+	value = strings.TrimLeft(value, "-")
+	for _, marker := range []string{"token", "password", "passwd", "secret", "apikey", "api-key", "authorization", "credential", "private-key", "cookie"} {
+		if value == marker || strings.HasPrefix(value, marker+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func projectAssistantExecSensitiveValue(value string) bool {
+	for _, marker := range []string{"secret=", "password=", "token=", "bearer "} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func newProjectAssistantExecCommandGraphTool(runCtx projectAssistantWorkflowRunContext) (einotool.BaseTool, error) {
 	workflow := compose.NewWorkflow[*projectAssistantExecCommandInput, *projectAssistantExecCommandResult]()
 	workflow.AddLambdaNode("exec-command", compose.InvokableLambda(execProjectAssistantCommand(runCtx))).
@@ -120,7 +245,7 @@ func newProjectAssistantExecCommandGraphTool(runCtx projectAssistantWorkflowRunC
 	inner, err := graphtool.NewInvokableGraphTool(
 		workflow,
 		projectToolExecCommand,
-		"Run one approved compiler, test, or lint argv in an isolated executor for one development component. The executor receives an exact synced source snapshot and cannot access project secrets, network, PTY, or write back to the workspace.",
+		"Run one approved compiler, test, or lint argv in the synchronized development runtime for one component. App Studio sends an expected source revision/digest rather than a second source snapshot; no App Studio credentials or environment overrides are forwarded, and the command cannot write back to App Studio source.",
 		compose.WithGraphName("app-studio-exec-command"),
 	)
 	if err != nil {
@@ -162,7 +287,7 @@ func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func
 		var (
 			revision                uint64
 			syncStatus, syncFailure string
-			files                   []projectSandboxExecFile
+			sourceRevision          uint64
 			digest                  string
 		)
 		for attempt := 0; attempt < projectAssistantExecSnapshotAttempts; attempt++ {
@@ -170,7 +295,7 @@ func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func
 			if syncStatus != "succeeded" {
 				break
 			}
-			files, digest, err = projectAssistantExecSnapshot(ctx, current, componentInfo, revision)
+			_, digest, sourceRevision, err = projectAssistantExecSnapshot(ctx, current, componentInfo, revision)
 			if !errors.Is(err, errProjectAssistantExecRevisionChanged) {
 				break
 			}
@@ -184,14 +309,17 @@ func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func
 		if err != nil {
 			return &projectAssistantExecCommandResult{Status: "blocked", Summary: "Command execution was blocked because an exact workspace snapshot could not be prepared.", Component: component, SourceRevision: revision, SyncStatus: syncStatus, Blockers: []string{err.Error()}}, nil
 		}
+		if sourceRevision == 0 {
+			return &projectAssistantExecCommandResult{Status: "blocked", Summary: "Command execution was blocked because the durable workspace revision could not be read.", Component: component, SourceRevision: revision, SourceDigest: digest, SyncStatus: syncStatus, Blockers: []string{"project workspace source revision is unavailable"}}, nil
+		}
 		requestID := projectAssistantExecRequestID(current.AssistantRunID, compose.GetToolCallID(ctx))
-		start := projectSandboxExecRequest{Action: "start", RequestID: requestID, Argv: args.Argv, Workdir: args.Workdir, TimeoutSeconds: args.TimeoutSeconds, SourceDigest: digest, Files: files}
+		start := projectSandboxExecRequest{Action: "start", RequestID: requestID, Argv: args.Argv, Workdir: args.Workdir, TimeoutSeconds: args.TimeoutSeconds, SourceRevision: sourceRevision, SourceDigest: digest}
 		started, err := projectAssistantExecCall(ctx, server, id, target.dataPlaneRefFor(component), start)
 		if err != nil {
-			return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution could not start: " + err.Error(), Component: component, SourceRevision: revision, SourceDigest: digest, SyncStatus: syncStatus}, nil
+			return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution could not start: " + err.Error(), Component: component, SourceRevision: sourceRevision, SourceDigest: digest, SyncStatus: syncStatus}, nil
 		}
 		if started.SessionID == "" {
-			return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution returned no session ID.", Component: component, SourceRevision: revision, SourceDigest: digest, SyncStatus: syncStatus}, nil
+			return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution returned no session ID.", Component: component, SourceRevision: sourceRevision, SourceDigest: digest, SyncStatus: syncStatus}, nil
 		}
 		startedAt := time.Now()
 		result := started
@@ -219,22 +347,22 @@ func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func
 			select {
 			case <-ctx.Done():
 				cancelSession()
-				return projectAssistantExecResult(result, component, revision, digest, syncStatus, time.Since(startedAt), "canceled"), nil
+				return projectAssistantExecResult(result, component, sourceRevision, digest, syncStatus, time.Since(startedAt), "canceled"), nil
 			case <-deadline.C:
 				cancelSession()
-				return projectAssistantExecResult(result, component, revision, digest, syncStatus, time.Since(startedAt), "timed_out"), nil
+				return projectAssistantExecResult(result, component, sourceRevision, digest, syncStatus, time.Since(startedAt), "timed_out"), nil
 			case <-time.After(projectAssistantExecPollInterval):
 			}
 			result, err = projectAssistantExecCall(ctx, server, id, target.dataPlaneRefFor(component), projectSandboxExecRequest{Action: "poll", SessionID: started.SessionID, RequestID: requestID})
 			if err != nil {
 				if ctx.Err() != nil {
 					cancelSession()
-					return projectAssistantExecResult(result, component, revision, digest, syncStatus, time.Since(startedAt), "canceled"), nil
+					return projectAssistantExecResult(result, component, sourceRevision, digest, syncStatus, time.Since(startedAt), "canceled"), nil
 				}
-				return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution polling failed: " + err.Error(), Component: component, SessionID: started.SessionID, SourceRevision: revision, SourceDigest: digest, SyncStatus: syncStatus}, nil
+				return &projectAssistantExecCommandResult{Status: "error", Summary: "Command execution polling failed: " + err.Error(), Component: component, SessionID: started.SessionID, SourceRevision: sourceRevision, SourceDigest: digest, SyncStatus: syncStatus}, nil
 			}
 		}
-		return projectAssistantExecResult(result, component, revision, digest, syncStatus, time.Since(startedAt), ""), nil
+		return projectAssistantExecResult(result, component, sourceRevision, digest, syncStatus, time.Since(startedAt), ""), nil
 	}
 }
 
@@ -361,21 +489,25 @@ func projectAssistantExecSyncEvidence(ctx context.Context, runCtx projectAssista
 	return revision, status, failure
 }
 
-func projectAssistantExecSnapshot(ctx context.Context, runCtx projectAssistantWorkflowRunContext, component projectTemplateComponent, expectedRevision uint64) ([]projectSandboxExecFile, string, error) {
+func projectAssistantExecSnapshot(ctx context.Context, runCtx projectAssistantWorkflowRunContext, component projectTemplateComponent, expectedRevision uint64) ([]projectSandboxExecFile, string, uint64, error) {
 	if runCtx.Workspace == nil {
-		return nil, "", errors.New("project workspace store is not configured")
+		return nil, "", 0, errors.New("project workspace store is not configured")
 	}
 	root := path.Clean(strings.TrimSpace(component.WorkspacePath))
 	if root == "" {
 		root = "."
 	}
 	for attempt := 0; attempt < projectAssistantExecSnapshotAttempts; attempt++ {
+		sourceRevisionBefore, err := runCtx.Workspace.SourceRevision(ctx, runCtx.WorkspaceScope)
+		if err != nil {
+			return nil, "", 0, err
+		}
 		list, err := runCtx.Workspace.ListFiles(ctx, runCtx.WorkspaceScope, workspace.ListOptions{Limit: workspace.MaxListLimit})
 		if err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		if list.Truncated {
-			return nil, "", fmt.Errorf("workspace snapshot exceeds the %d-file limit", workspace.MaxListLimit)
+			return nil, "", 0, fmt.Errorf("workspace snapshot exceeds the %d-file limit", workspace.MaxListLimit)
 		}
 		paths := projectAssistantExecComponentPaths(list, root)
 		entries := make([]projectAssistantExecSnapshotEntry, 0, len(paths))
@@ -392,14 +524,14 @@ func projectAssistantExecSnapshot(ctx context.Context, runCtx projectAssistantWo
 					retry = true
 					break
 				}
-				return nil, "", readErr
+				return nil, "", 0, readErr
 			}
 			if read.Binary || read.Truncated {
-				return nil, "", fmt.Errorf("workspace file %q is not bounded UTF-8 source", clean)
+				return nil, "", 0, fmt.Errorf("workspace file %q is not bounded UTF-8 source", clean)
 			}
 			total += len([]byte(read.Content))
 			if total > projectAssistantExecMaxSnapshot {
-				return nil, "", fmt.Errorf("component snapshot exceeds %d bytes", projectAssistantExecMaxSnapshot)
+				return nil, "", 0, fmt.Errorf("component snapshot exceeds %d bytes", projectAssistantExecMaxSnapshot)
 			}
 			entries = append(entries, projectAssistantExecSnapshotEntry{path: clean, file: projectSandboxExecFile{Path: relative, Content: read.Content}})
 		}
@@ -414,21 +546,21 @@ func projectAssistantExecSnapshot(ctx context.Context, runCtx projectAssistantWo
 		// the executor with bytes from one revision and a digest from another.
 		confirm, err := runCtx.Workspace.ListFiles(ctx, runCtx.WorkspaceScope, workspace.ListOptions{Limit: workspace.MaxListLimit})
 		if err != nil {
-			return nil, "", err
+			return nil, "", 0, err
 		}
 		if confirm.Truncated {
-			return nil, "", fmt.Errorf("workspace snapshot exceeds the %d-file limit", workspace.MaxListLimit)
+			return nil, "", 0, fmt.Errorf("workspace snapshot exceeds the %d-file limit", workspace.MaxListLimit)
 		}
 		if !projectAssistantExecStringSlicesEqual(paths, projectAssistantExecComponentPaths(confirm, root)) {
 			continue
 		}
 		if len(paths) > 0 {
-			currentDigest, err := runCtx.Workspace.WorkspaceDigest(ctx, runCtx.WorkspaceScope, paths)
+			currentDigest, err := projectAssistantExecWorkspaceDigest(ctx, runCtx, paths, root)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					continue
 				}
-				return nil, "", err
+				return nil, "", 0, err
 			}
 			if currentDigest != digest {
 				continue
@@ -441,12 +573,42 @@ func projectAssistantExecSnapshot(ctx context.Context, runCtx projectAssistantWo
 		if runCtx.RunState != nil {
 			currentRevision, _ := runCtx.RunState.SourceMutationRevisions()
 			if currentRevision != expectedRevision {
-				return nil, "", errProjectAssistantExecRevisionChanged
+				return nil, "", 0, errProjectAssistantExecRevisionChanged
 			}
 		}
-		return files, digest, nil
+		sourceRevisionAfter, err := runCtx.Workspace.SourceRevision(ctx, runCtx.WorkspaceScope)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		if sourceRevisionBefore == 0 || sourceRevisionBefore != sourceRevisionAfter {
+			continue
+		}
+		return files, digest, sourceRevisionBefore, nil
 	}
-	return nil, "", errors.New("workspace changed while preparing the execution snapshot")
+	return nil, "", 0, errors.New("workspace changed while preparing the execution snapshot")
+}
+
+func projectAssistantExecWorkspaceDigest(ctx context.Context, runCtx projectAssistantWorkflowRunContext, paths []string, root string) (string, error) {
+	entries := make([]projectAssistantExecSnapshotEntry, 0, len(paths))
+	for _, clean := range paths {
+		read, err := runCtx.Workspace.ReadFile(ctx, runCtx.WorkspaceScope, workspace.ReadOptions{Path: clean, MaxBytes: workspace.MaxWriteBytes})
+		if err != nil {
+			return "", err
+		}
+		if read.Binary || read.Truncated {
+			return "", fmt.Errorf("workspace file %q is not bounded UTF-8 source", clean)
+		}
+		relative := clean
+		if root != "." {
+			relative = strings.TrimPrefix(clean, root+"/")
+		}
+		entries = append(entries, projectAssistantExecSnapshotEntry{
+			path: clean,
+			file: projectSandboxExecFile{Path: relative, Content: read.Content},
+		})
+	}
+	_, digest := projectAssistantExecSnapshotDigest(entries)
+	return digest, nil
 }
 
 func projectAssistantExecComponentPaths(list workspace.FileList, root string) []string {
@@ -468,7 +630,10 @@ func projectAssistantExecSnapshotDigest(entries []projectAssistantExecSnapshotEn
 	hash := sha256.New()
 	files := make([]projectSandboxExecFile, 0, len(entries))
 	for _, entry := range entries {
-		_, _ = hash.Write([]byte(entry.path))
+		// entry.file.Path is component-relative and matches the development
+		// agent's managed-manifest digest. The full workspace path is still
+		// used by the caller's FileStore digest confirmation below.
+		_, _ = hash.Write([]byte(entry.file.Path))
 		_, _ = hash.Write([]byte{0})
 		_, _ = hash.Write([]byte(entry.file.Content))
 		_, _ = hash.Write([]byte{0})

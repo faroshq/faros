@@ -497,6 +497,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		Name:      spec.Name,
 		Status:    "running",
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
+		Exec:      projectAssistantExecMetadataForToolArguments(spec.Name, args, "", "running"),
 	})
 	if projectToolBaseName(spec.Name) == projectToolDefineInitialProjectPlan {
 		result, err := t.invokeInitialProjectPlanTool(ctx, callID, spec, args)
@@ -543,6 +544,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 				Status:    "failed",
 				Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 				Summary:   summarizeProjectToolResult(spec.Name, modelResult),
+				Exec:      projectAssistantExecMetadataForToolArguments(spec.Name, args, modelResult, "failed"),
 				Mutation:  projectAssistantMutationFromResult(spec.Name, modelResult),
 			})
 			t.recordToolMessage(callID, spec.Name, modelResult)
@@ -598,6 +600,7 @@ func (t projectEinoAssistantTool) invokeAllowedTool(ctx context.Context, callID 
 		Status:    status,
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 		Summary:   summarizeProjectToolResult(spec.Name, modelResult),
+		Exec:      projectAssistantExecMetadataForToolArguments(spec.Name, args, modelResult, status),
 		Mutation:  projectAssistantMutationFromSuccessfulResult(spec.Name, modelResult, successful),
 	})
 	t.recordToolMessage(callID, spec.Name, modelResult)
@@ -749,6 +752,7 @@ func (t projectEinoAssistantTool) replayDurableToolCall(
 		Status:    status,
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 		Summary:   summarizeProjectToolResult(spec.Name, result),
+		Exec:      projectAssistantExecMetadataForToolArguments(spec.Name, args, result, status),
 		Mutation:  projectAssistantMutationFromSuccessfulResult(spec.Name, result, successful),
 	})
 	t.recordToolMessage(callID, spec.Name, result)
@@ -1222,6 +1226,7 @@ func (t projectEinoAssistantTool) requestPermission(ctx context.Context, callID 
 		Status:    "permission_required",
 		Arguments: summarizeProjectToolArgumentsMap(spec.Name, args),
 		Summary:   reason,
+		Exec:      projectAssistantExecMetadataForToolArguments(spec.Name, args, "", "permission_required"),
 	})
 	return einotool.StatefulInterrupt(ctx, &projectEinoPermissionInterruptInfo{
 		ToolCallID:      callID,
@@ -1229,6 +1234,7 @@ func (t projectEinoAssistantTool) requestPermission(ctx context.Context, callID 
 		ArgumentsInJSON: argumentsInJSON,
 		Reason:          reason,
 		Risk:            spec.Risk,
+		Exec:            projectAssistantExecMetadataForToolArguments(spec.Name, args, "", "permission_required"),
 	}, &projectEinoPermissionInterruptState{
 		ToolCallID:            callID,
 		ToolName:              spec.Name,
@@ -1257,6 +1263,7 @@ func (t projectEinoAssistantTool) resumePermission(ctx context.Context, callID s
 			ArgumentsInJSON: state.ArgumentsInJSON,
 			Reason:          projectAssistantPermissionReason(spec),
 			Risk:            spec.Risk,
+			Exec:            projectAssistantExecMetadataForToolArguments(name, args, "", "permission_required"),
 		}, state)
 	}
 	if !hasData || data == nil {

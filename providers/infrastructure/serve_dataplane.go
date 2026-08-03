@@ -64,11 +64,21 @@ func buildDataPlaneHandler(kcpConfig *rest.Config) *dataplane.Handler {
 
 	factory := tenant.NewClientFactory(kcpConfig)
 	options := []dataplane.HandlerOption{}
-	agentImage := strings.TrimSpace(os.Getenv("KEDGE_DEV_AGENT_IMAGE"))
-	if agentImage == "" {
-		agentImage = kro.DefaultDevAgentImage
+	var executor dataplane.Executor
+	var execErr error
+	// Persistent component execution is the default: the live dev-agent owns
+	// the component PVC/toolchain, so no disposable source-only pod is created.
+	// KubernetesExecutor remains an explicit emergency fallback for operators
+	// that have not rolled out the normal agent yet.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("KEDGE_INFRA_EXECUTOR")), "kubernetes") {
+		agentImage := strings.TrimSpace(os.Getenv("KEDGE_DEV_AGENT_IMAGE"))
+		if agentImage == "" {
+			agentImage = kro.DefaultDevAgentImage
+		}
+		executor, execErr = dataplane.NewKubernetesExecutor(runtimeCfg, agentImage)
+	} else {
+		executor, execErr = dataplane.NewPersistentExecutor(runtime)
 	}
-	executor, execErr := dataplane.NewKubernetesExecutor(runtimeCfg, agentImage)
 	if execErr != nil {
 		log.Printf("data plane exec: disabled: %v", execErr)
 	} else {

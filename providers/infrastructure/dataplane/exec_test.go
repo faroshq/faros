@@ -92,16 +92,18 @@ func execContract() *infrav1alpha1.TemplateDataPlane {
 func execRequest(t *testing.T, action ExecAction) *http.Request {
 	t.Helper()
 	body := ExecRequest{
-		Action:       action,
-		SessionID:    "session-1",
-		SourceDigest: "sha256:source",
-		Argv:         []string{"go", "test", "./..."},
-		Files:        []ExecFile{{Path: "main.go", Content: "package main\n"}},
+		Action:         action,
+		SessionID:      "session-1",
+		SourceRevision: 1,
+		SourceDigest:   "sha256:source",
+		Argv:           []string{"go", "test", "./..."},
+		Files:          []ExecFile{{Path: "main.go", Content: "package main\n"}},
 	}
 	if action == ExecActionStart {
 		body.SessionID = ""
 		body.RequestID = "run-1"
 	} else {
+		body.SourceRevision = 0
 		body.SourceDigest = ""
 		body.Argv = nil
 		body.Files = nil
@@ -198,7 +200,7 @@ func TestDecodeExecRequestRejectsDuplicateAndEscapingFiles(t *testing.T) {
 		{{Path: "a/../main.go", Content: "x"}, {Path: "main.go", Content: "y"}},
 		{{Path: "../secret", Content: "x"}},
 	} {
-		body, err := json.Marshal(ExecRequest{Action: ExecActionStart, RequestID: "key", Argv: []string{"true"}, SourceDigest: "sha", Files: files})
+		body, err := json.Marshal(ExecRequest{Action: ExecActionStart, RequestID: "key", Argv: []string{"true"}, SourceRevision: 1, SourceDigest: "sha", Files: files})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -208,6 +210,19 @@ func TestDecodeExecRequestRejectsDuplicateAndEscapingFiles(t *testing.T) {
 		if _, _, err := decodeExecRequest(w, r, capability); err == nil {
 			t.Fatal("expected invalid file path error")
 		}
+	}
+}
+
+func TestDecodeExecRequestRequiresSourceRevision(t *testing.T) {
+	body, err := json.Marshal(ExecRequest{Action: ExecActionStart, RequestID: "key", Argv: []string{"true"}, SourceDigest: "sha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+	r.Header.Set("Idempotency-Key", "key")
+	w := httptest.NewRecorder()
+	if _, _, err := decodeExecRequest(w, r, &infrav1alpha1.TemplateDataPlaneExec{}); err == nil || !strings.Contains(err.Error(), "sourceRevision is required") {
+		t.Fatalf("decodeExecRequest error = %v, want missing sourceRevision", err)
 	}
 }
 

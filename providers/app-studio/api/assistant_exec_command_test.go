@@ -17,7 +17,10 @@ limitations under the License.
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -97,22 +100,19 @@ func TestProjectAssistantExecSnapshotRoutesSelectedComponent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, digest, err := projectAssistantExecSnapshot(context.Background(), projectAssistantWorkflowRunContext{
+	got, digest, revision, err := projectAssistantExecSnapshot(context.Background(), projectAssistantWorkflowRunContext{
 		Workspace:      files,
 		WorkspaceScope: scope,
 	}, projectTemplateComponent{WorkspacePath: "backend"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest == "" || len(got) != 1 || got[0].Path != "main.go" || got[0].Content != "package main\n" {
-		t.Fatalf("snapshot = %#v, digest = %q", got, digest)
+	if digest == "" || revision == 0 || len(got) != 1 || got[0].Path != "main.go" || got[0].Content != "package main\n" {
+		t.Fatalf("snapshot = %#v, digest = %q, revision=%d", got, digest, revision)
 	}
-	wantDigest, err := files.WorkspaceDigest(context.Background(), scope, []string{"backend/main.go"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	wantDigest := projectSandboxSyncDigest([]projectSandboxSyncFile{{Path: "main.go", Content: "package main\n"}})
 	if digest != wantDigest {
-		t.Fatalf("snapshot digest = %q, FileStore digest = %q", digest, wantDigest)
+		t.Fatalf("snapshot digest = %q, component source digest = %q", digest, wantDigest)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestProjectAssistantExecSnapshotRejectsChangedMutationRevision(t *testing.T
 	}
 	runState := newProjectEinoAssistantRunState()
 	runState.RecordSourceMutation()
-	_, _, err := projectAssistantExecSnapshot(context.Background(), projectAssistantWorkflowRunContext{
+	_, _, _, err := projectAssistantExecSnapshot(context.Background(), projectAssistantWorkflowRunContext{
 		Workspace:      files,
 		WorkspaceScope: scope,
 		RunState:       runState,
@@ -153,5 +153,99 @@ func TestProjectAssistantExecRequestIDStable(t *testing.T) {
 	}
 	if anonymous := projectAssistantExecRequestID("", ""); anonymous == "" || anonymous != projectAssistantExecRequestID("", "") {
 		t.Fatalf("anonymous request ID = %q", anonymous)
+	}
+}
+
+func TestProjectAssistantExecCommandInputCheckpointRegistration(t *testing.T) {
+	var encoded bytes.Buffer
+	original := any(&projectAssistantExecCommandInput{Component: "backend", Argv: []string{"go", "test"}})
+	if err := gob.NewEncoder(&encoded).Encode(&original); err != nil {
+		t.Fatalf("encode registered exec input: %v", err)
+	}
+	var decoded any
+	if err := gob.NewDecoder(&encoded).Decode(&decoded); err != nil {
+		t.Fatalf("decode registered exec input: %v", err)
+	}
+	got, ok := decoded.(*projectAssistantExecCommandInput)
+	if !ok || got.Component != "backend" || len(got.Argv) != 2 {
+		t.Fatalf("decoded exec input = %#v (%T)", decoded, decoded)
+	}
+}
+
+func TestProjectAssistantExecMetadataIsStructuredAndDoesNotExposeSecrets(t *testing.T) {
+	metadata := projectAssistantExecMetadataForToolArguments(projectToolExecCommand, map[string]any{
+		"component":      "backend",
+		"argv":           []any{"go", "test", "--token", "super-secret"},
+		"workdir":        "internal",
+		"timeoutSeconds": float64(42),
+	}, `{"status":"failed","summary":"Command failed in component \"backend\".","exitCode":2,"durationMs":123}`, "failed")
+	if metadata == nil || metadata.Component != "backend" || metadata.Workdir != "internal" || metadata.TimeoutSeconds != 42 ||
+		metadata.NetworkProfile != "application-runtime" || metadata.AuthorityProfile != "application-container" || metadata.WritebackPolicy != "runtime-workspace-only" || metadata.ExitCode == nil || *metadata.ExitCode != 2 {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+	if len(metadata.Argv) != 4 || metadata.Argv[3] != "[redacted]" {
+		t.Fatalf("metadata argv = %#v, want credential value redacted", metadata.Argv)
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "super-secret") {
+		t.Fatalf("metadata leaked argv secret: %s", raw)
+	}
+}
+
+func TestProjectAssistantExecRequestUsesPersistentWorkspaceAuthority(t *testing.T) {
+	raw, err := json.Marshal(projectSandboxExecRequest{
+		Action:         "start",
+		RequestID:      "request-1",
+		Argv:           []string{"go", "test", "./..."},
+		Workdir:        "internal",
+		TimeoutSeconds: 30,
+		SourceRevision: 7,
+		SourceDigest:   "digest-7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wire["files"]; ok {
+		t.Fatalf("persistent exec request unexpectedly carries source files: %s", raw)
+	}
+	if got, ok := wire["sourceRevision"].(float64); !ok || got != 7 {
+		t.Fatalf("sourceRevision = %#v, want 7", wire["sourceRevision"])
+	}
+	if got, ok := wire["sourceDigest"].(string); !ok || got != "digest-7" {
+		t.Fatalf("sourceDigest = %#v, want digest-7", wire["sourceDigest"])
+	}
+}
+
+func TestProjectAssistantExecApprovalMetadataSurvivesMultiCallCheckpoint(t *testing.T) {
+	state := projectAssistantCheckpointState{
+		ToolCalls: []chatToolCall{
+			{ID: "exec-1", Type: "function", Function: chatToolCallFunction{Name: projectToolExecCommand, Arguments: `{"component":"backend","argv":["go","test"]}`}},
+			{ID: "exec-2", Type: "function", Function: chatToolCallFunction{Name: projectToolExecCommand, Arguments: `{"component":"frontend","argv":["npm","test"]}`}},
+		},
+		CurrentIndex: 1,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored projectAssistantCheckpointState
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	for index, call := range restored.ToolCalls {
+		permission := projectAssistantPermissionForCall("permission-"+string(rune('1'+index)), call, projectAssistantToolSpec{Name: projectToolExecCommand})
+		if permission.Exec == nil || permission.Exec.Component == "" || permission.Exec.AuthorityProfile != "application-container" || permission.Exec.NetworkProfile != "application-runtime" {
+			t.Fatalf("checkpoint call %d permission metadata = %#v", index, permission)
+		}
+		if permission.Exec.Status != "permission_required" {
+			t.Fatalf("checkpoint call %d permission status = %q", index, permission.Exec.Status)
+		}
 	}
 }

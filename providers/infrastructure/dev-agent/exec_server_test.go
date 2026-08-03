@@ -174,6 +174,48 @@ func TestExecServerRejectsProcessTimeoutAboveMaximum(t *testing.T) {
 	}
 }
 
+func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *testing.T) {
+	workdir := t.TempDir()
+	srv := newTestAgent(t, &agentConfig{WorkDir: workdir, ControlToken: "test-token"})
+	files := []syncFile{{Path: "main.sh", Content: "#!/bin/sh\nprintf '%s\\n' \"$ONLY_EXPLICIT\"\n"}}
+	digest, err := digestSyncFiles(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := doSync(t, srv, syncRequest{Files: files, SourceRevision: 7, SourceDigest: digest}); rec.Code != http.StatusOK {
+		t.Fatalf("sync status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	t.Setenv("ONLY_EXPLICIT", "must-not-inherit")
+	raw, err := json.Marshal(persistentExecRequest{
+		Argv: []string{"/bin/sh", "main.sh"}, WorkDir: ".", SourceRevision: 7, SourceDigest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader(raw))
+	req.Header.Set(controlTokenHeader, "test-token")
+	res := httptest.NewRecorder()
+	srv.handlePersistentExec(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("persistent exec status = %d body=%s", res.Code, res.Body.String())
+	}
+	var got execResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ExitCode != 0 || got.Stdout != "\n" || got.SourceRevision != 7 || got.SourceDigest != digest {
+		t.Fatalf("persistent exec response = %+v", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":7,"sourceDigest":"sha256:bad"}`)))
+	req.Header.Set(controlTokenHeader, "test-token")
+	res = httptest.NewRecorder()
+	srv.handlePersistentExec(res, req)
+	if res.Code != http.StatusConflict {
+		t.Fatalf("digest mismatch status = %d body=%s, want 409", res.Code, res.Body.String())
+	}
+}
+
 func TestExecServerCancellationKillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan execResponse, 1)

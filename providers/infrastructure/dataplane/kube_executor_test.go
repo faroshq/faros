@@ -352,7 +352,7 @@ func kubeExecTestCall() ExecCall {
 		Capability: &infrav1alpha1.TemplateDataPlaneExec{MaxTimeoutSeconds: 120, MaxOutputBytes: 256 << 10, MaxFiles: 512, MaxFileBytes: 1 << 20},
 		DevImage:   "registry.example/node@sha256:def", WorkingDir: "/workspace", WorkspacePath: "api", CallerKey: execCallerKey("caller-token"), RuntimeNamespace: "tenant-demo",
 		IdempotencyKey: "run-call", Request: ExecRequest{
-			Action: ExecActionStart, RequestID: "run-call", Argv: []string{"node", "--version"}, Workdir: ".", TimeoutSeconds: 30,
+			Action: ExecActionStart, RequestID: "run-call", SourceRevision: 1, Argv: []string{"node", "--version"}, Workdir: ".", TimeoutSeconds: 30,
 			Files: []ExecFile{{Path: "package.json", Content: "{}\n"}},
 		},
 	}

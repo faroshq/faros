@@ -256,6 +256,20 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Exec is routed to the live dev-agent control Service. The endpoint is
+	// deliberately not caller-selectable: resolve the platform-required sync
+	// endpoint and replace only its upstream path with the fixed /exec operation.
+	controlTarget := ResolvedTarget{}
+	if target, targetErr := ResolveComponentExecTarget(contract, instance, req.component); targetErr != nil {
+		// Legacy/fallback executors may not need a live control Service, but the
+		// default persistent executor must fail closed before it starts a session.
+		if _, persistent := h.executor.(*PersistentExecutor); persistent {
+			http.Error(w, targetErr.Error(), http.StatusConflict)
+			return
+		}
+	} else {
+		controlTarget = target
+	}
 	authorization := ExecAuthorization{
 		Workspace:   req.workspace,
 		Resource:    req.resource,
@@ -283,6 +297,7 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		WorkspacePath:    strings.TrimSpace(dev.WorkspacePath),
 		CallerKey:        execCallerKey(id.token),
 		RuntimeNamespace: runtimeNamespace,
+		ControlTarget:    controlTarget,
 		Request:          reqBody,
 		IdempotencyKey:   idempotencyKey,
 	}

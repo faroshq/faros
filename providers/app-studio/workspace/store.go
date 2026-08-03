@@ -196,6 +196,7 @@ func (s *FileStore) applyFiles(ctx context.Context, scope Scope, files []File) e
 	if err != nil {
 		return err
 	}
+	planned := make([]File, 0, len(files))
 	for _, f := range files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -204,6 +205,40 @@ func (s *FileStore) applyFiles(ctx context.Context, scope Scope, files []File) e
 		if err != nil {
 			return err
 		}
+		target := filepath.Join(dir, filepath.FromSlash(clean))
+		if err := ensureWithin(dir, target); err != nil {
+			return err
+		}
+		if err := mkdirAllForFile(dir, clean); err != nil {
+			return fmt.Errorf("create parent directory for %q: %w", clean, err)
+		}
+		if err := rejectSymlink(target, clean); err != nil {
+			return err
+		}
+		before, existed, err := s.readMutationTarget(ctx, scope, clean)
+		if err != nil {
+			return err
+		}
+		if existed && bytes.Equal(before, []byte(f.Content)) {
+			continue
+		}
+		planned = append(planned, File{Path: clean, Content: f.Content})
+	}
+	if len(planned) == 0 {
+		return nil
+	}
+	// Advance the durable authority before writing bytes. If a later write
+	// fails (or the process stops mid-batch), the revision gap is safe: the
+	// next sync/exec must reconcile the current live workspace rather than
+	// trusting a stale revision.
+	if err := s.bumpSourceRevision(ctx, scope); err != nil {
+		return err
+	}
+	for _, f := range planned {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		clean := f.Path
 		target := filepath.Join(dir, filepath.FromSlash(clean))
 		if err := ensureWithin(dir, target); err != nil {
 			return err

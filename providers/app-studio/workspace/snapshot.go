@@ -295,6 +295,21 @@ func (s *FileStore) RestoreSnapshot(ctx context.Context, scope Scope, snapshotID
 			restored: matchesBefore,
 		})
 	}
+	changed := false
+	for _, plan := range plans {
+		if !plan.restored {
+			changed = true
+			break
+		}
+	}
+	if changed {
+		// Reserve the revision before restoring any file. If an individual
+		// restore fails, rollback (even when incomplete) cannot leave bytes
+		// associated with the previous source authority.
+		if err := s.bumpSourceRevision(ctx, scope); err != nil {
+			return SnapshotRestoreResult{}, err
+		}
+	}
 	for index, plan := range plans {
 		if !plan.restored {
 			if err := s.restoreFileStateWithMode(ctx, scope, plan.path, plan.entry.Content, plan.entry.Existed, fs.FileMode(plan.entry.Mode)); err != nil {

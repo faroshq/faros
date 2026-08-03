@@ -63,13 +63,16 @@ const (
 	execMaxIdentifierBytes = 128
 )
 
-// ExecRequest is the JSON body accepted by the component /exec route.
-// Start carries a complete, bounded source snapshot; the executor must not
-// mount the live application PVC. Poll and cancel carry only a session ID.
+// ExecRequest is the JSON body accepted by the component /exec route. Start
+// carries the durable source revision/digest applied by /sync; the default
+// persistent executor runs against that live component workspace. Files are
+// retained only for the explicit KubernetesExecutor fallback. Poll and cancel
+// carry only a session ID.
 type ExecRequest struct {
 	Action         ExecAction `json:"action"`
 	SessionID      string     `json:"sessionID,omitempty"`
 	RequestID      string     `json:"requestID,omitempty"`
+	SourceRevision uint64     `json:"sourceRevision,omitempty"`
 	Argv           []string   `json:"argv,omitempty"`
 	Workdir        string     `json:"workdir,omitempty"`
 	TimeoutSeconds int32      `json:"timeoutSeconds,omitempty"`
@@ -77,9 +80,9 @@ type ExecRequest struct {
 	Files          []ExecFile `json:"files,omitempty"`
 }
 
-// ExecFile is one file in the source snapshot sent with a start request.
-// Path is workspace-relative and Content must be valid UTF-8. Executable is
-// retained so a runner can reproduce scripts without accepting chmod paths.
+// ExecFile is one file in the optional source snapshot accepted by the
+// KubernetesExecutor fallback. Persistent execution rejects Files and relies
+// on the manifest written by /sync.
 type ExecFile struct {
 	Path       string `json:"path"`
 	Content    string `json:"content"`
@@ -124,8 +127,12 @@ type ExecCall struct {
 	// RuntimeNamespace is read from the instance status at the contract's
 	// RuntimeNamespacePath. It is provider-resolved and never request supplied.
 	RuntimeNamespace string
-	Request          ExecRequest
-	IdempotencyKey   string
+	// ControlTarget is the live development component's control Service. It is
+	// resolved from the platform-owned instance status and contract; callers
+	// cannot select or override it. PersistentExecutor uses it for /exec.
+	ControlTarget  ResolvedTarget
+	Request        ExecRequest
+	IdempotencyKey string
 }
 
 func execCallerKey(token string) string {
@@ -279,6 +286,9 @@ func decodeExecRequest(w http.ResponseWriter, r *http.Request, capability *infra
 		if req.SourceDigest == "" {
 			return ExecRequest{}, "", fmt.Errorf("sourceDigest is required for start")
 		}
+		if req.SourceRevision == 0 {
+			return ExecRequest{}, "", fmt.Errorf("sourceRevision is required for start")
+		}
 		if req.TimeoutSeconds < 0 || req.TimeoutSeconds > limits.timeoutSeconds {
 			return ExecRequest{}, "", fmt.Errorf("timeoutSeconds must be between 0 and %d", limits.timeoutSeconds)
 		}
@@ -309,7 +319,7 @@ func decodeExecRequest(w http.ResponseWriter, r *http.Request, capability *infra
 		if req.SessionID == "" {
 			return ExecRequest{}, "", fmt.Errorf("sessionID is required for %s", action)
 		}
-		if len(req.Argv) != 0 || req.Workdir != "" || req.TimeoutSeconds != 0 || req.SourceDigest != "" || len(req.Files) != 0 {
+		if len(req.Argv) != 0 || req.Workdir != "" || req.TimeoutSeconds != 0 || req.SourceRevision != 0 || req.SourceDigest != "" || len(req.Files) != 0 {
 			return ExecRequest{}, "", fmt.Errorf("%s accepts only sessionID and optional requestID", action)
 		}
 		if key == "" {

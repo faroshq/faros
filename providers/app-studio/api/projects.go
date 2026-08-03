@@ -157,17 +157,18 @@ type ProjectMessagesResponse struct {
 }
 
 type projectToolCallStreamEvent struct {
-	ID         string                      `json:"id"`
-	Name       string                      `json:"name,omitempty"`
-	Status     string                      `json:"status"`
-	Arguments  string                      `json:"arguments,omitempty"`
-	Summary    string                      `json:"summary,omitempty"`
-	Error      string                      `json:"error,omitempty"`
-	Permission *projectAssistantPermission `json:"permission,omitempty"`
-	FollowUp   *projectAssistantFollowUp   `json:"followUp,omitempty"`
-	Checkpoint *projectAssistantCheckpoint `json:"checkpoint,omitempty"`
-	Mutation   *projectAssistantMutation   `json:"mutation,omitempty"`
-	Sequence   int                         `json:"sequence,omitempty"`
+	ID         string                        `json:"id"`
+	Name       string                        `json:"name,omitempty"`
+	Status     string                        `json:"status"`
+	Arguments  string                        `json:"arguments,omitempty"`
+	Summary    string                        `json:"summary,omitempty"`
+	Error      string                        `json:"error,omitempty"`
+	Exec       *projectAssistantExecMetadata `json:"exec,omitempty"`
+	Permission *projectAssistantPermission   `json:"permission,omitempty"`
+	FollowUp   *projectAssistantFollowUp     `json:"followUp,omitempty"`
+	Checkpoint *projectAssistantCheckpoint   `json:"checkpoint,omitempty"`
+	Mutation   *projectAssistantMutation     `json:"mutation,omitempty"`
+	Sequence   int                           `json:"sequence,omitempty"`
 }
 
 type projectAssistantMutation struct {

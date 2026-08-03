@@ -494,6 +494,8 @@ type execAgentRequest struct {
 	WorkDir        string     `json:"workDir,omitempty"`
 	TimeoutMS      int        `json:"timeoutMs,omitempty"`
 	MaxOutputBytes int        `json:"maxOutputBytes,omitempty"`
+	SourceRevision uint64     `json:"sourceRevision,omitempty"`
+	SourceDigest   string     `json:"sourceDigest,omitempty"`
 }
 
 type execAgentResponse struct {
@@ -595,9 +597,10 @@ func execSourceDigest(call ExecCall) (string, error) {
 func execCallFingerprint(call ExecCall) (string, error) {
 	payload, err := json.Marshal(struct {
 		Namespace, Resource, Name, Component, Image, WorkingDir, WorkspacePath, Digest, RequestWorkdir string
+		Revision                                                                                       uint64
 		Argv                                                                                           []string
 		Timeout                                                                                        int32
-	}{call.RuntimeNamespace, call.Resource, call.Name, call.Component, call.DevImage, call.WorkingDir, call.WorkspacePath, call.Request.SourceDigest, call.Request.Workdir, call.Request.Argv, call.Request.TimeoutSeconds})
+	}{call.RuntimeNamespace, call.Resource, call.Name, call.Component, call.DevImage, call.WorkingDir, call.WorkspacePath, call.Request.SourceDigest, call.Request.Workdir, call.Request.SourceRevision, call.Request.Argv, call.Request.TimeoutSeconds})
 	if err != nil {
 		return "", err
 	}

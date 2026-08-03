@@ -1101,6 +1101,7 @@ func projectEinoPermissionInterruptInfoForApproval(info *approvaltool.ApprovalIn
 		ArgumentsInJSON: strings.TrimSpace(info.ArgumentsInJSON),
 		Reason:          projectAssistantPermissionReasonForArguments(spec, args),
 		Risk:            spec.Risk,
+		Exec:            projectAssistantExecMetadataForToolArguments(spec.Name, args, "", "permission_required"),
 	}
 }
 

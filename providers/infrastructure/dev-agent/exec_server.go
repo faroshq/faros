@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,8 +91,22 @@ type execResponse struct {
 	Changed           []string `json:"changed,omitempty"`
 	Deleted           []string `json:"deleted,omitempty"`
 	SnapshotTruncated bool     `json:"snapshotTruncated,omitempty"`
+	SourceRevision    uint64   `json:"sourceRevision,omitempty"`
+	SourceDigest      string   `json:"sourceDigest,omitempty"`
 	DurationMS        int64    `json:"durationMs"`
 	Error             string   `json:"error,omitempty"`
+}
+
+// persistentExecRequest is the normal dev-agent protocol. Source files are
+// deliberately absent: /sync owns the persistent workspace and this endpoint
+// verifies the platform-applied revision/digest before launching argv.
+type persistentExecRequest struct {
+	Argv           []string `json:"argv"`
+	WorkDir        string   `json:"workDir,omitempty"`
+	TimeoutMS      int      `json:"timeoutMs,omitempty"`
+	MaxOutputBytes int      `json:"maxOutputBytes,omitempty"`
+	SourceRevision uint64   `json:"sourceRevision"`
+	SourceDigest   string   `json:"sourceDigest"`
 }
 
 type execFileState struct {
@@ -147,6 +162,183 @@ func (s *agentServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *agentServer) handlePersistentExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeExec(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, execRequestMaxBytes)
+	var req persistentExecRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		http.Error(w, "request body must contain one JSON object", http.StatusBadRequest)
+		return
+	}
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+	result, err := runPersistentExec(r.Context(), s.config.WorkDir, req)
+	if err != nil {
+		// Revision/digest mismatch is a conflict: the caller must wait for the
+		// authoritative sync evidence rather than retrying the same command.
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "source revision") || strings.Contains(err.Error(), "source digest") || strings.Contains(err.Error(), "workspace manifest") {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func runPersistentExec(parent context.Context, workspace string, req persistentExecRequest) (execResponse, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if err := validatePersistentExecRequest(req); err != nil {
+		return execResponse{}, err
+	}
+	rootPath, err := filepath.Abs(strings.TrimSpace(workspace))
+	if err != nil || strings.TrimSpace(workspace) == "" {
+		return execResponse{}, errors.New("execution workspace is required")
+	}
+	if err := rejectRootSymlink(rootPath); err != nil {
+		return execResponse{}, err
+	}
+	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+		return execResponse{}, fmt.Errorf("create execution workspace: %w", err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return execResponse{}, fmt.Errorf("open execution workspace: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	workDir, err := cleanExecWorkDir(req.WorkDir)
+	if err != nil {
+		return execResponse{}, err
+	}
+	if err := ensureExecDirectory(root, workDir); err != nil {
+		return execResponse{}, err
+	}
+	manifest, found, err := readWorkspaceManifest(root)
+	if err != nil {
+		return execResponse{}, fmt.Errorf("read workspace manifest: %w", err)
+	}
+	if !found {
+		return execResponse{}, errors.New("source revision is not synchronized: workspace manifest is missing")
+	}
+	if manifest.SourceRevision != req.SourceRevision {
+		return execResponse{}, fmt.Errorf("source revision %d is not the applied source revision %d", req.SourceRevision, manifest.SourceRevision)
+	}
+	if normalizeSourceDigest(manifest.SourceDigest) != normalizeSourceDigest(req.SourceDigest) {
+		return execResponse{}, errors.New("source digest does not match the applied workspace manifest")
+	}
+	if err := verifyWorkspaceManifest(root, manifest); err != nil {
+		return execResponse{}, fmt.Errorf("workspace manifest verification failed: %w", err)
+	}
+
+	workPath := filepath.Join(rootPath, filepath.FromSlash(workDir))
+	env := sanitizedExecEnvironment(workPath)
+	executable, err := resolveExecExecutable(req.Argv[0], env, workPath)
+	if err != nil {
+		return execResponse{}, err
+	}
+	outputLimit := boundedExecOutput(req.MaxOutputBytes)
+	started := time.Now()
+	stdout := newExecOutputBuffer(outputLimit)
+	stderr := newExecOutputBuffer(outputLimit)
+	cmd := exec.Command(executable, req.Argv[1:]...)
+	cmd.Dir = workPath
+	cmd.Env = env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Start(); err != nil {
+		return execResponse{}, fmt.Errorf("start %q: %w", req.Argv[0], err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	timer := time.NewTimer(boundedExecTimeout(req.TimeoutMS))
+	defer timer.Stop()
+	response := execResponse{
+		Phase: "completed", Argv: append([]string(nil), req.Argv...), WorkDir: workDir,
+		ExitCode: -1, SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest,
+	}
+	var waitErr error
+	select {
+	case waitErr = <-waitCh:
+	case <-timer.C:
+		response.Phase = "timed_out"
+		response.TimedOut = true
+		killExecProcessGroup(cmd.Process.Pid)
+		waitErr = <-waitCh
+	case <-parent.Done():
+		response.Phase = "cancelled"
+		response.Cancelled = true
+		killExecProcessGroup(cmd.Process.Pid)
+		waitErr = <-waitCh
+	}
+	response.DurationMS = time.Since(started).Milliseconds()
+	response.Stdout = stdout.String()
+	response.Stderr = stderr.String()
+	response.StdoutTruncated = stdout.Truncated()
+	response.StderrTruncated = stderr.Truncated()
+	if exitCode, ok := execExitCode(waitErr); ok {
+		response.ExitCode = exitCode
+	}
+	if waitErr != nil && !response.TimedOut && !response.Cancelled {
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			response.Error = waitErr.Error()
+		}
+	}
+	return response, nil
+}
+
+func validatePersistentExecRequest(req persistentExecRequest) error {
+	if len(req.Argv) == 0 || strings.TrimSpace(req.Argv[0]) == "" {
+		return errors.New("argv must contain an executable")
+	}
+	if len(req.Argv) > 128 {
+		return errors.New("argv contains too many arguments")
+	}
+	for i, arg := range req.Argv {
+		if strings.ContainsRune(arg, '\x00') {
+			return fmt.Errorf("argv[%d] contains NUL", i)
+		}
+		if len([]byte(arg)) > 16<<10 {
+			return fmt.Errorf("argv[%d] is too large", i)
+		}
+	}
+	if req.SourceRevision == 0 {
+		return errors.New("source revision is required")
+	}
+	digest := normalizeSourceDigest(req.SourceDigest)
+	if len(digest) != sha256.Size*2 {
+		return errors.New("source digest is required")
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return errors.New("source digest must be a SHA-256 hex digest")
+	}
+	if req.TimeoutMS < 0 || (req.TimeoutMS > 0 && time.Duration(req.TimeoutMS)*time.Millisecond > execMaxTimeout) {
+		return fmt.Errorf("timeout must be between 1ms and %s", execMaxTimeout)
+	}
+	if req.MaxOutputBytes < 0 || req.MaxOutputBytes > execMaxOutputBytes {
+		return fmt.Errorf("maxOutputBytes must be between 1 and %d", execMaxOutputBytes)
+	}
+	return nil
 }
 
 // authorizeExec never honors AllowInsecureControl. The executor is a
@@ -361,6 +553,9 @@ func cleanExecPath(raw string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", errExecPathEscape
 	}
+	if clean == workspaceManifestName {
+		return "", fmt.Errorf("workspace path %q is reserved for the platform sync manifest", raw)
+	}
 	return clean, nil
 }
 
@@ -497,6 +692,9 @@ func rejectRootSymlink(rootPath string) error {
 func sanitizedExecEnvironment(workDir string) []string {
 	// Never inherit the agent's environment: it may contain the control token
 	// or provider/runtime credentials. Keep this server-owned and deterministic.
+	// This is not a container boundary: the child shares the component's mounts,
+	// network and PID namespace, so deployment-level secret/credential exposure
+	// must be handled by the dev workload itself.
 	values := map[string]string{
 		"HOME":   "/tmp",
 		"LANG":   "C.UTF-8",
@@ -649,6 +847,9 @@ func snapshotExecWorkspace(root *os.Root) (execWorkspaceSnapshot, error) {
 			return walkErr
 		}
 		if name == "." {
+			return nil
+		}
+		if name == workspaceManifestName {
 			return nil
 		}
 		base := path.Base(name)

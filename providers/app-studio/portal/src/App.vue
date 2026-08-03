@@ -40,8 +40,10 @@ import {
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantActionFeed } from './assistantActionFeed'
+import { parseAssistantExecDisclosure } from './assistantExecDisclosure'
 import { validateLLMBaseURL } from './llmSettingsValidation'
 import AssistantActionLog from './AssistantActionLog.vue'
+import AssistantExecDetails from './AssistantExecDetails.vue'
 import { activeAssistantPlanMessage, assistantPlanProgress, parseAssistantPlan, type AssistantPlan } from './assistantPlan'
 import { formatAssistantWorkedDuration, parseAssistantProgress, type AssistantProgress } from './assistantProgress'
 import { buildAssistantTrace, type AssistantTraceBlock } from './assistantTrace'
@@ -3141,8 +3143,26 @@ function projectMessageInterrupt(message: ProjectMessage): ProjectAssistantUIInt
 
 function isProjectAssistantInterrupt(value: unknown): value is ProjectAssistantUIInterruptRequest {
   if (!value || typeof value !== 'object') return false
-  const item = value as Partial<ProjectAssistantUIInterruptRequest>
-  return typeof item.interruptId === 'string'
+  const item = value as Partial<ProjectAssistantUIInterruptRequest> & Record<string, unknown>
+  const interruptKeys = new Set(['interruptId', 'kind', 'surfaceId', 'description', 'questions', 'status', 'exec', 'action'])
+  if (Object.keys(item).some((key) => !interruptKeys.has(key))
+    || typeof item.interruptId !== 'string'
+    || item.interruptId.trim().length === 0
+    || (item.kind !== undefined && item.kind !== 'permission' && item.kind !== 'follow_up')
+    || (item.status !== undefined && item.status !== 'pending' && item.status !== 'resolved')
+    || (item.surfaceId !== undefined && typeof item.surfaceId !== 'string')
+    || (item.description !== undefined && typeof item.description !== 'string')
+    || (item.questions !== undefined && !Array.isArray(item.questions))) return false
+  if (item.exec !== undefined && !parseAssistantExecDisclosure(item.exec)) return false
+  if (item.action === undefined) return true
+  if (!item.action || typeof item.action !== 'object' || Array.isArray(item.action)) return false
+  const action = item.action as Record<string, unknown>
+  const actionKeys = new Set(['runId', 'requestId', 'assistantMessageId', 'exec'])
+  if (Object.keys(action).some((key) => !actionKeys.has(key))
+    || typeof action.runId !== 'string'
+    || typeof action.requestId !== 'string'
+    || (action.assistantMessageId !== undefined && typeof action.assistantMessageId !== 'string')) return false
+  return action.exec === undefined || Boolean(parseAssistantExecDisclosure(action.exec))
 }
 
 function isAbortError(err: unknown): boolean {
@@ -4241,6 +4261,11 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                     <div class="mt-0.5 text-[12px] leading-5 text-text-secondary">
                       {{ pendingApproval.interrupt.description || 'Review this action before it runs.' }}
                     </div>
+                    <AssistantExecDetails
+                      v-if="pendingApproval.interrupt.action?.exec || pendingApproval.interrupt.exec"
+                      :exec="pendingApproval.interrupt.action?.exec || pendingApproval.interrupt.exec"
+                      variant="approval"
+                    />
                   </div>
                 </div>
                 <div v-if="permissionError(pendingApproval.interrupt)" class="mt-2 text-[11px] leading-4 text-danger">
@@ -4859,6 +4884,11 @@ function repositoryCommitFilesLabel(commit: ProjectRepositoryCommit): string {
                 <div class="mt-1 text-[12px] leading-5 text-text-secondary">
                   {{ pendingApproval.interrupt.description || 'Review this action before it runs.' }}
                 </div>
+                <AssistantExecDetails
+                  v-if="pendingApproval.interrupt.action?.exec || pendingApproval.interrupt.exec"
+                  :exec="pendingApproval.interrupt.action?.exec || pendingApproval.interrupt.exec"
+                  variant="approval"
+                />
               </div>
             </div>
             <div class="flex flex-wrap gap-2">

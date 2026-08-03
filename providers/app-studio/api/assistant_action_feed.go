@@ -74,6 +74,7 @@ type projectAssistantActionFeedItem struct {
 	GroupTitle string                            `json:"groupTitle,omitempty"`
 	Sequence   int                               `json:"sequence,omitempty"`
 	Diagnostic *projectAssistantActionDiagnostic `json:"diagnostic,omitempty"`
+	Exec       *projectAssistantExecMetadata     `json:"exec,omitempty"`
 }
 
 type projectAssistantActionDiagnostic struct {
@@ -91,12 +92,13 @@ func projectAssistantActionFeedItemFromToolCall(toolCall projectToolCallStreamEv
 		toolCall.Summary,
 		toolCall.Error,
 	)
+	item.Exec = cloneProjectAssistantExecMetadata(toolCall.Exec)
 	item.Sequence = toolCall.Sequence
 	return item
 }
 
 func projectAssistantActionFeedItemFromAssistantToolCall(toolCall projectAssistantToolCall) projectAssistantActionFeedItem {
-	return presentProjectAssistantAction(
+	item := presentProjectAssistantAction(
 		toolCall.ID,
 		toolCall.Name,
 		toolCall.Status,
@@ -104,10 +106,12 @@ func projectAssistantActionFeedItemFromAssistantToolCall(toolCall projectAssista
 		toolCall.Summary,
 		toolCall.Error,
 	)
+	item.Exec = cloneProjectAssistantExecMetadata(toolCall.Exec)
+	return item
 }
 
 func projectAssistantActionFeedItemFromPermission(permission projectAssistantPermission) projectAssistantActionFeedItem {
-	return presentProjectAssistantAction(
+	item := presentProjectAssistantAction(
 		permission.ToolCallID,
 		permission.ToolName,
 		"permission_required",
@@ -115,6 +119,8 @@ func projectAssistantActionFeedItemFromPermission(permission projectAssistantPer
 		permission.Reason,
 		"",
 	)
+	item.Exec = cloneProjectAssistantExecMetadata(permission.Exec)
+	return item
 }
 
 func projectAssistantActionFeedItemFromFollowUp(followUp projectAssistantFollowUp) projectAssistantActionFeedItem {

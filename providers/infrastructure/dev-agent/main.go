@@ -55,12 +55,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"net"
@@ -76,6 +79,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -86,6 +90,7 @@ const (
 	previewConsolePluginName = "preview-console-plugin.mjs"
 	previewConsoleJWKSName   = "preview-console-jwks.json"
 	previewConsoleJWKSEnv    = "KEDGE_PREVIEW_CONSOLE_VERIFICATION_JWKS"
+	workspaceManifestName    = ".kedge-workspace-manifest.json"
 )
 
 //go:embed preview-console-plugin.mjs
@@ -413,18 +418,33 @@ type syncFile struct {
 }
 
 type syncRequest struct {
-	Files       []syncFile `json:"files"`
-	DeletePaths []string   `json:"deletePaths"`
-	Restart     string     `json:"restart"`
+	Files          []syncFile `json:"files"`
+	DeletePaths    []string   `json:"deletePaths"`
+	Restart        string     `json:"restart"`
+	SourceRevision uint64     `json:"sourceRevision,omitempty"`
+	SourceDigest   string     `json:"sourceDigest,omitempty"`
 }
 
 type syncResponse struct {
-	Phase       string   `json:"phase"`
-	Changed     []string `json:"changed"`
-	Deleted     []string `json:"deleted,omitempty"`
-	ReloadRuns  []string `json:"reloadRuns,omitempty"`
-	Restarted   bool     `json:"restarted"`
-	ReloadError string   `json:"reloadError,omitempty"`
+	Phase          string   `json:"phase"`
+	Changed        []string `json:"changed"`
+	Deleted        []string `json:"deleted,omitempty"`
+	ReloadRuns     []string `json:"reloadRuns,omitempty"`
+	Restarted      bool     `json:"restarted"`
+	ReloadError    string   `json:"reloadError,omitempty"`
+	SourceRevision uint64   `json:"sourceRevision,omitempty"`
+	SourceDigest   string   `json:"sourceDigest,omitempty"`
+}
+
+// workspaceManifest is synchronization metadata, not a security boundary.
+// The agent rehashes every listed file before execution, so a stale or
+// tampered manifest cannot make an old workspace look current. Runtime-created
+// files (node_modules, build output, logs) are intentionally absent and are
+// never deleted by authoritative sync.
+type workspaceManifest struct {
+	SourceRevision uint64   `json:"sourceRevision"`
+	SourceDigest   string   `json:"sourceDigest"`
+	Files          []string `json:"files"`
 }
 
 type envRequest struct {
@@ -457,6 +477,7 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	mux.HandleFunc("/env", s.handleEnv)
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/exec", s.handlePersistentExec)
 	s.mux = mux
 	return s
 }
@@ -477,6 +498,8 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeControl(w, r) {
 		return
 	}
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
 	var req syncRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
@@ -488,12 +511,88 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = root.Close() }()
+	authoritative := req.SourceRevision != 0 || strings.TrimSpace(req.SourceDigest) != ""
+	if authoritative && (req.SourceRevision == 0 || strings.TrimSpace(req.SourceDigest) == "") {
+		http.Error(w, "sourceRevision and sourceDigest must be supplied together", http.StatusBadRequest)
+		return
+	}
+	previous, found, err := readWorkspaceManifest(root)
+	if err != nil {
+		if req.SourceRevision == 0 && strings.TrimSpace(req.SourceDigest) == "" {
+			http.Error(w, "read workspace manifest: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// A protected manifest is synchronization metadata, not source of truth.
+		// If it is corrupted, an authoritative full-file sync can safely rebuild
+		// it, but must not delete paths that are no longer known to be managed.
+		log.Printf("workspace manifest is invalid; rebuilding from authoritative sync: %v", err)
+		previous, found = workspaceManifest{}, false
+	}
+	var incomingPaths map[string]struct{}
+	cleanDeletePaths := make([]string, 0, len(req.DeletePaths))
+	for _, raw := range req.DeletePaths {
+		clean, err := cleanWorkspacePath(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if authoritative {
+			if err := validateManagedWorkspacePath(clean); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		cleanDeletePaths = append(cleanDeletePaths, clean)
+	}
+	if authoritative {
+		incomingPaths, err = validateSyncFiles(req.Files)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gotDigest, err := digestSyncFiles(req.Files)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if normalizeSourceDigest(req.SourceDigest) != gotDigest {
+			http.Error(w, "sourceDigest does not match the supplied workspace files", http.StatusConflict)
+			return
+		}
+		if found {
+			switch {
+			case req.SourceRevision < previous.SourceRevision:
+				http.Error(w, "workspace sync revision is older than the applied revision", http.StatusConflict)
+				return
+			case req.SourceRevision == previous.SourceRevision && normalizeSourceDigest(previous.SourceDigest) != gotDigest:
+				http.Error(w, "workspace sync revision was already applied with a different digest", http.StatusConflict)
+				return
+			case req.SourceRevision == previous.SourceRevision && verifyWorkspaceManifest(root, previous) == nil:
+				writeJSON(w, http.StatusOK, syncResponse{Phase: "Synced", SourceRevision: previous.SourceRevision, SourceDigest: previous.SourceDigest})
+				return
+			}
+		}
+	}
 
 	changed := make([]string, 0, len(req.Files))
 	for _, f := range req.Files {
 		clean, err := cleanWorkspacePath(f.Path)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if authoritative {
+			if err := validateManagedWorkspacePath(clean); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		if err := ensureExecPathNoSymlink(root, clean, false); err != nil {
+			http.Error(w, fmt.Sprintf("write %q: %v", clean, err), http.StatusConflict)
+			return
+		}
+		if err := ensureExecPathNoSymlink(root, clean, true); err != nil {
+			http.Error(w, fmt.Sprintf("write %q: %v", clean, err), http.StatusConflict)
 			return
 		}
 		content := []byte(f.Content)
@@ -507,20 +606,67 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		changed = append(changed, clean)
 	}
 	deleted := make([]string, 0, len(req.DeletePaths))
-	for _, raw := range req.DeletePaths {
-		clean, err := cleanWorkspacePath(raw)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+	if authoritative {
+		candidates := make(map[string]struct{}, len(previous.Files)+len(cleanDeletePaths))
+		for _, raw := range previous.Files {
+			candidates[raw] = struct{}{}
 		}
-		if err := root.RemoveAll(clean); err != nil {
-			http.Error(w, fmt.Sprintf("delete %q: %v", clean, err), http.StatusInternalServerError)
-			return
+		for _, raw := range cleanDeletePaths {
+			candidates[raw] = struct{}{}
 		}
-		deleted = append(deleted, clean)
+		paths := make([]string, 0, len(candidates))
+		for raw := range candidates {
+			paths = append(paths, raw)
+		}
+		slices.Sort(paths)
+		managed := make(map[string]struct{}, len(previous.Files))
+		for _, raw := range previous.Files {
+			managed[raw] = struct{}{}
+		}
+		for _, raw := range paths {
+			if _, keep := incomingPaths[raw]; keep {
+				continue
+			}
+			// When a valid prior manifest exists, explicit deletion hints are
+			// advisory and may remove only paths that manifest managed. If the
+			// manifest was missing/corrupt, the full sync is still authoritative
+			// for writes, and FileStore's explicit hints allow safe convergence.
+			if found {
+				if _, ok := managed[raw]; !ok {
+					continue
+				}
+			}
+			removed, err := removeManagedWorkspaceFile(root, raw)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("delete %q: %v", raw, err), http.StatusInternalServerError)
+				return
+			}
+			if removed {
+				deleted = append(deleted, raw)
+			}
+		}
+	} else {
+		for _, clean := range cleanDeletePaths {
+			if err := root.RemoveAll(clean); err != nil {
+				http.Error(w, fmt.Sprintf("delete %q: %v", clean, err), http.StatusInternalServerError)
+				return
+			}
+			deleted = append(deleted, clean)
+		}
 	}
 
-	resp := syncResponse{Phase: "Synced", Changed: changed, Deleted: deleted}
+	resp := syncResponse{Phase: "Synced", Changed: changed, Deleted: deleted, SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest}
+	if authoritative {
+		manifest := workspaceManifest{SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest, Files: make([]string, 0, len(incomingPaths))}
+		for clean := range incomingPaths {
+			manifest.Files = append(manifest.Files, clean)
+		}
+		slices.Sort(manifest.Files)
+		if err := writeWorkspaceManifest(root, manifest); err != nil {
+			http.Error(w, "write workspace manifest: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 
 	// The Template-declared reload procedure: run matching rule commands
 	// first (dependency installs), then restart per policy/strategy.
@@ -556,6 +702,185 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 		resp.Restarted = true
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func validateSyncFiles(files []syncFile) (map[string]struct{}, error) {
+	paths := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		clean, err := cleanWorkspacePath(file.Path)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateManagedWorkspacePath(clean); err != nil {
+			return nil, err
+		}
+		if !utf8.ValidString(file.Content) || strings.ContainsRune(file.Content, '\x00') {
+			return nil, fmt.Errorf("source file %q must be UTF-8 text without NUL bytes", clean)
+		}
+		if _, exists := paths[clean]; exists {
+			return nil, fmt.Errorf("duplicate source path %q", clean)
+		}
+		paths[clean] = struct{}{}
+	}
+	return paths, nil
+}
+
+func digestSyncFiles(files []syncFile) (string, error) {
+	type digestEntry struct {
+		path    string
+		content string
+	}
+	entries := make([]digestEntry, 0, len(files))
+	for _, file := range files {
+		clean, err := cleanWorkspacePath(file.Path)
+		if err != nil {
+			return "", err
+		}
+		if err := validateManagedWorkspacePath(clean); err != nil {
+			return "", err
+		}
+		entries = append(entries, digestEntry{path: clean, content: file.Content})
+	}
+	slices.SortFunc(entries, func(a, b digestEntry) int { return strings.Compare(a.path, b.path) })
+	hash := sha256.New()
+	for _, entry := range entries {
+		_, _ = hash.Write([]byte(entry.path))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(entry.content))
+		_, _ = hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func readWorkspaceManifest(root *os.Root) (workspaceManifest, bool, error) {
+	raw, err := root.ReadFile(workspaceManifestName)
+	if errors.Is(err, fs.ErrNotExist) {
+		return workspaceManifest{}, false, nil
+	}
+	if err != nil {
+		return workspaceManifest{}, false, err
+	}
+	var manifest workspaceManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return workspaceManifest{}, false, err
+	}
+	if manifest.SourceRevision == 0 || normalizeSourceDigest(manifest.SourceDigest) == "" {
+		return workspaceManifest{}, false, errors.New("manifest has no source revision or digest")
+	}
+	seen := make(map[string]struct{}, len(manifest.Files))
+	for i, rawPath := range manifest.Files {
+		clean, err := cleanWorkspacePath(rawPath)
+		if err != nil {
+			return workspaceManifest{}, false, fmt.Errorf("manifest files[%d]: %w", i, err)
+		}
+		if err := validateManagedWorkspacePath(clean); err != nil {
+			return workspaceManifest{}, false, fmt.Errorf("manifest files[%d]: %w", i, err)
+		}
+		if _, exists := seen[clean]; exists {
+			return workspaceManifest{}, false, fmt.Errorf("manifest duplicates path %q", clean)
+		}
+		seen[clean] = struct{}{}
+		manifest.Files[i] = clean
+	}
+	slices.Sort(manifest.Files)
+	return manifest, true, nil
+}
+
+func writeWorkspaceManifest(root *os.Root, manifest workspaceManifest) error {
+	slices.Sort(manifest.Files)
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	tmp := workspaceManifestName + ".tmp"
+	if err := root.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := root.Rename(tmp, workspaceManifestName); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func removeManagedWorkspaceFile(root *os.Root, raw string) (bool, error) {
+	clean, err := cleanWorkspacePath(raw)
+	if err != nil {
+		return false, err
+	}
+	if err := ensureExecPathNoSymlink(root, clean, true); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	info, err := root.Lstat(clean)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("managed path is not a regular file")
+	}
+	if err := root.Remove(clean); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func normalizeSourceDigest(raw string) string {
+	return strings.TrimPrefix(strings.TrimSpace(raw), "sha256:")
+}
+
+func validateManagedWorkspacePath(clean string) error {
+	for _, part := range strings.Split(clean, "/") {
+		switch strings.ToLower(part) {
+		case ".git", "node_modules", ".assistant-snapshots":
+			return fmt.Errorf("workspace path contains reserved component %q", part)
+		}
+	}
+	return nil
+}
+
+func verifyWorkspaceManifest(root *os.Root, manifest workspaceManifest) error {
+	if manifest.SourceRevision == 0 || normalizeSourceDigest(manifest.SourceDigest) == "" {
+		return errors.New("workspace manifest has no source revision or digest")
+	}
+	entries := make([]syncFile, 0, len(manifest.Files))
+	for _, raw := range manifest.Files {
+		clean, err := cleanWorkspacePath(raw)
+		if err != nil {
+			return err
+		}
+		if err := validateManagedWorkspacePath(clean); err != nil {
+			return err
+		}
+		if err := ensureExecPathNoSymlink(root, clean, true); err != nil {
+			return err
+		}
+		info, err := root.Lstat(clean)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed path %q is not a regular file", clean)
+		}
+		content, err := root.ReadFile(clean)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, syncFile{Path: clean, Content: string(content)})
+	}
+	got, err := digestSyncFiles(entries)
+	if err != nil {
+		return err
+	}
+	if normalizeSourceDigest(manifest.SourceDigest) != got {
+		return fmt.Errorf("workspace manifest digest does not match managed files")
+	}
+	return nil
 }
 
 // shouldRestartAfterSync decides the post-sync restart. "always" restarts
@@ -728,6 +1053,9 @@ func cleanWorkspacePath(raw string) (string, error) {
 	clean := path.Clean(raw)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("path %q escapes workspace", raw)
+	}
+	if clean == workspaceManifestName {
+		return "", fmt.Errorf("path %q is reserved for the platform sync manifest", raw)
 	}
 	return clean, nil
 }
