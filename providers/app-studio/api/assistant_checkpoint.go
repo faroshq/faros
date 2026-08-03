@@ -428,6 +428,12 @@ func projectAssistantPermissionReasonForArguments(spec projectAssistantToolSpec,
 			return fmt.Sprintf("Set %d non-secret development runtime environment variable(s) and apply the requested restart behavior.", count)
 		}
 		return "Change non-secret development runtime environment variables and apply the requested restart behavior."
+	case projectToolExecCommand:
+		component := projectToolString(args["component"])
+		if component == "" {
+			return "Run one bounded compiler, test, or lint command in an isolated development executor."
+		}
+		return fmt.Sprintf("Run the approved bounded argv in development component %q using an isolated executor with no workspace writeback.", component)
 	case projectToolRebuildProject:
 		if ref := projectToolString(args["ref"]); ref != "" {
 			return fmt.Sprintf("Re-run this project's build workflow for branch or ref %q without changing code.", ref)

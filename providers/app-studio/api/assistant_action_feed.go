@@ -217,6 +217,11 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 			item.Count = count
 			item.Outcome = projectAssistantCountOutcome(count, "environment variable", "environment variables")
 		}
+	case projectToolExecCommand:
+		item.Title = projectAssistantActionLifecycleTitle(status, "Running command", "Ran command", "Command failed")
+		if component := projectToolString(args["component"]); component != "" {
+			item.Target = projectAssistantActionSafeTarget(component)
+		}
 	case projectToolCommitFiles, projectToolCommitProjectFiles:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Committing changes", "Committed changes", "Commit failed")
 		paths := projectToolFilePaths(args["files"])
@@ -267,7 +272,7 @@ func projectAssistantActionFeedItemKind(name string) string {
 	case base == projectToolCheckProjectReadiness || base == projectToolPrepareProjectDeployment ||
 		base == projectToolVerifyDevelopmentRuntime || base == projectToolGetRuntimeStatus ||
 		base == projectToolGetPreviewURL || base == projectToolInspectDevelopmentPreview || base == projectToolGetRuntimeLogs ||
-		base == projectToolRestartRuntime || base == projectToolSetRuntimeEnv:
+		base == projectToolRestartRuntime || base == projectToolSetRuntimeEnv || base == projectToolExecCommand:
 		return projectAssistantActionFeedItemRun
 	case base == projectToolCommitProjectFiles || base == projectToolCommitFiles:
 		return projectAssistantActionFeedItemCommit
@@ -356,7 +361,7 @@ func projectAssistantActionFeedGrouping(item *projectAssistantActionFeedItem, ba
 		item.GroupTitle = "Updated files"
 	case projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment,
 		projectToolVerifyDevelopmentRuntime, projectToolGetRuntimeStatus,
-		projectToolGetPreviewURL, projectToolInspectDevelopmentPreview, projectToolGetRuntimeLogs, projectToolRestartRuntime:
+		projectToolGetPreviewURL, projectToolInspectDevelopmentPreview, projectToolGetRuntimeLogs, projectToolRestartRuntime, projectToolExecCommand:
 		item.GroupKey = "run:checks"
 		item.GroupTitle = "Ran checks"
 	}

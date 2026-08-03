@@ -250,6 +250,8 @@ type projectAssistantWorkflowRunContext struct {
 	Project        *aiv1alpha1.Project
 	Repository     *ProjectRepositoryView
 	WorkspaceScope workspace.Scope
+	Workspace      *workspace.FileStore
+	AssistantRunID string
 	RunState       *projectEinoAssistantRunState
 	ApprovalMode   store.AssistantApprovalMode
 	EventLedger    *projectAssistantRunEventLedger
@@ -271,6 +273,8 @@ func projectAssistantWorkflowRunContextForRequest(server *Server, req projectAss
 		Project:          req.Project,
 		Repository:       req.Repository,
 		WorkspaceScope:   req.WorkspaceScope,
+		Workspace:        req.Workspace,
+		AssistantRunID:   projectAssistantRunID(req),
 		RunState:         runState,
 		ApprovalMode:     req.ApprovalMode,
 		EventLedger:      req.eventLedger,
@@ -291,6 +295,8 @@ func (c projectAssistantWorkflowRunContext) current() projectAssistantWorkflowRu
 	c.Project = req.Project
 	c.Repository = req.Repository
 	c.WorkspaceScope = req.WorkspaceScope
+	c.Workspace = req.Workspace
+	c.AssistantRunID = projectAssistantRunID(req)
 	c.ApprovalMode = req.ApprovalMode
 	c.EventLedger = req.eventLedger
 	c.Identity = req.Identity
@@ -368,6 +374,12 @@ func projectAssistantWorkflowToolSpecs() []projectAssistantToolSpec {
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"},"minProperties":1,"maxProperties":32,"description":"Non-secret environment variables to set, keyed by name."},"restart":{"type":"boolean","description":"Whether to restart the dev process so the new environment takes effect. Defaults to true."}},"required":["env"]}`),
 			Risk:        projectAssistantToolRiskRuntime,
 		},
+		{
+			Name:        projectToolExecCommand,
+			Description: "Run one approved compiler, test, or lint command in an isolated development executor for exactly one application component. Pass argv tokens rather than a shell string; the command receives no inherited environment, network, PTY, image, or workspace writeback capability. Workdir is relative to the selected component workspace and timeout is bounded.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"component":{"type":"string","minLength":1,"maxLength":64,"description":"The single development component to execute in (for example, backend or frontend)."},"argv":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":256},"description":"Executable and argument tokens passed directly without an implicit shell."},"workdir":{"type":"string","maxLength":256,"description":"Optional relative directory under the selected component workspace; defaults to the component root."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":120,"description":"Maximum execution time in seconds (default 30)."}},"required":["component","argv"],"additionalProperties":false}`),
+			Risk:        projectAssistantToolRiskRuntime,
+		},
 	}
 }
 
@@ -431,6 +443,8 @@ func newProjectAssistantGraphWorkflowTool(spec projectAssistantToolSpec, runCtx 
 		return newProjectAssistantRestartRuntimeGraphTool(runCtx)
 	case projectToolSetRuntimeEnv:
 		return newProjectAssistantSetRuntimeEnvGraphTool(runCtx)
+	case projectToolExecCommand:
+		return newProjectAssistantExecCommandGraphTool(runCtx)
 	default:
 		return nil, fmt.Errorf("project assistant tool %q is not an Eino graph workflow", spec.Name)
 	}

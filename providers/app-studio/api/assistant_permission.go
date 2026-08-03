@@ -93,7 +93,7 @@ func projectAssistantPermissionForV2(
 
 func projectAssistantOnRequestRequiresApproval(name string) bool {
 	switch projectToolBaseName(name) {
-	case projectToolInfrastructureProvision, projectToolPrepareProjectDeployment:
+	case projectToolInfrastructureProvision, projectToolPrepareProjectDeployment, projectToolExecCommand:
 		return true
 	default:
 		return false

@@ -12,6 +12,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/faroshq/provider-infrastructure/backend/kro"
 	"github.com/faroshq/provider-infrastructure/dataplane"
 	"github.com/faroshq/provider-infrastructure/tenant"
 )
@@ -60,11 +62,25 @@ func buildDataPlaneHandler(kcpConfig *rest.Config) *dataplane.Handler {
 		return nil
 	}
 
+	factory := tenant.NewClientFactory(kcpConfig)
+	options := []dataplane.HandlerOption{}
+	agentImage := strings.TrimSpace(os.Getenv("KEDGE_DEV_AGENT_IMAGE"))
+	if agentImage == "" {
+		agentImage = kro.DefaultDevAgentImage
+	}
+	executor, execErr := dataplane.NewKubernetesExecutor(runtimeCfg, agentImage)
+	if execErr != nil {
+		log.Printf("data plane exec: disabled: %v", execErr)
+	} else {
+		options = append(options, dataplane.WithExec(executor, dataplane.NewCallerExecAuthorizer(factory)))
+	}
+
 	log.Printf("data plane: enabled (runtime cluster: %s)", src)
 	return dataplane.NewHandler(
-		&tenantInstanceGetter{factory: tenant.NewClientFactory(kcpConfig)},
+		&tenantInstanceGetter{factory: factory},
 		dataplane.NewTemplateContractGetter(providerDyn),
 		runtime,
+		options...,
 	)
 }
 
