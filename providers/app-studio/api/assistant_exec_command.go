@@ -33,6 +33,7 @@ import (
 	"github.com/cloudwego/eino-examples/adk/common/tool/graphtool"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 
 	"github.com/faroshq/provider-app-studio/workspace"
 )
@@ -308,7 +309,90 @@ func newProjectAssistantExecCommandGraphTool(runCtx projectAssistantWorkflowRunC
 	if !ok {
 		return nil, fmt.Errorf("project assistant workflow spec %q is not configured", projectToolExecCommand)
 	}
-	return applyProjectAssistantGraphToolPermission(inner, spec, runCtx)
+	permitted, err := applyProjectAssistantGraphToolPermission(inner, spec, runCtx)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve fail-closed permission semantics: Never rejects the tool without
+	// inspecting or canonicalizing its arguments. Allowed and approval-gated
+	// commands still require the same bounded canonical input before they can
+	// reach either execution or an approval interrupt.
+	if projectAssistantPermissionForV2(spec, runCtx.ApprovalMode, runCtx.RunState, nil, false) == projectAssistantPermissionDeny {
+		return permitted, nil
+	}
+	invokable, ok := permitted.(einotool.InvokableTool)
+	if !ok {
+		return nil, fmt.Errorf("project assistant graph tool %q is not invokable after permission wrapping", projectToolExecCommand)
+	}
+	// Validate and canonicalize the command before the approval wrapper sees
+	// it. Otherwise a model-generated argv that the workflow would reject only
+	// after approval can leave the run waiting on an unrenderable permission
+	// request. The preflight also records failures through the same durable tool
+	// ledger used by the graph tool, so the model receives a replayable result.
+	return projectAssistantExecCommandPreflightTool{
+		InvokableTool: invokable,
+		spec:          spec,
+		ledger:        runCtx.EventLedger,
+	}, nil
+}
+
+// projectAssistantExecCommandPreflightTool is deliberately outside the
+// approval wrapper. An approval interrupt must represent an executable,
+// canonical command; malformed or over-bounded model arguments are ordinary
+// tool failures and must never become pending permission state.
+type projectAssistantExecCommandPreflightTool struct {
+	einotool.InvokableTool
+	spec   projectAssistantToolSpec
+	ledger *projectAssistantRunEventLedger
+}
+
+func (t projectAssistantExecCommandPreflightTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return t.InvokableTool.Info(ctx)
+}
+
+func (t projectAssistantExecCommandPreflightTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...einotool.Option) (string, error) {
+	callID := compose.GetToolCallID(ctx)
+	args, err := projectEinoToolArguments(argumentsInJSON)
+	if err != nil {
+		return t.finishInvalid(ctx, callID, nil, argumentsInJSON, fmt.Errorf("invalid arguments: %w", err))
+	}
+	normalized, err := normalizeProjectAssistantExecCommandArguments(args)
+	if err != nil {
+		return t.finishInvalid(ctx, callID, args, argumentsInJSON, fmt.Errorf("invalid arguments: %w", err))
+	}
+	normalizedJSON := projectEinoToolArgumentsString(normalized)
+	return t.InvokableTool.InvokableRun(ctx, normalizedJSON, opts...)
+}
+
+func (t projectAssistantExecCommandPreflightTool) finishInvalid(
+	ctx context.Context,
+	callID string,
+	args map[string]any,
+	argumentsInJSON string,
+	reason error,
+) (string, error) {
+	if reason == nil {
+		reason = errors.New("invalid arguments")
+	}
+	if args == nil {
+		args = map[string]any{"invalidArguments": argumentsInJSON}
+	}
+	result := projectEinoAssistantSafeToolFailureResult(projectToolBaseName(t.spec.Name), reason)
+	if t.ledger == nil {
+		return result, nil
+	}
+	decision, err := t.ledger.RecordToolRequest(ctx, callID, t.spec, args)
+	if err != nil {
+		return "", err
+	}
+	if decision.Replay != nil {
+		return decision.Replay.InvokeResult()
+	}
+	outcome, err := t.ledger.FinishToolCall(ctx, decision.Token, result, reason)
+	if err != nil {
+		return "", err
+	}
+	return outcome.Result, nil
 }
 
 func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantExecCommandInput) (*projectAssistantExecCommandResult, error) {
@@ -517,6 +601,35 @@ func normalizeProjectAssistantExecCommandInput(input *projectAssistantExecComman
 		blockers = append(blockers, fmt.Sprintf("timeoutSeconds must be between 1 and %d", projectAssistantExecMaxTimeout))
 	}
 	return out, blockers
+}
+
+// normalizeProjectAssistantExecCommandArguments decodes the model-facing map
+// through the same typed input path used by the workflow, then re-encodes the
+// bounded/defaulted values as the canonical tool arguments. Keeping this
+// conversion beside the workflow normalizer prevents approval metadata and
+// execution from accepting different command shapes.
+func normalizeProjectAssistantExecCommandArguments(args map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("exec_command arguments could not be encoded: %w", err)
+	}
+	var input projectAssistantExecCommandInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil, fmt.Errorf("exec_command arguments could not be decoded: %w", err)
+	}
+	normalized, blockers := normalizeProjectAssistantExecCommandInput(&input)
+	if len(blockers) > 0 {
+		return nil, errors.New(strings.Join(blockers, "; "))
+	}
+	canonical, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("exec_command arguments could not be canonicalized: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(canonical, &out); err != nil {
+		return nil, fmt.Errorf("exec_command canonical arguments could not be decoded: %w", err)
+	}
+	return out, nil
 }
 
 func projectAssistantExecSyncEvidence(ctx context.Context, runCtx projectAssistantWorkflowRunContext) (uint64, string, string) {
