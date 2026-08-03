@@ -45,6 +45,7 @@ type fakeProvisioner struct {
 	adminCalls     []workspaceAdminCall
 	mcpCalls       []childWorkspaceCall
 	clusterCalls   []childWorkspaceCall
+	censusCalls    []string
 	wsErr          error
 	memErr         error
 	childErr       error
@@ -52,9 +53,13 @@ type fakeProvisioner struct {
 	adminErr       error
 	mcpErr         error
 	clusterErr     error
+	censusErr      error
 	// clusterHash is the value returned by GetChildWorkspaceClusterName.
 	// Defaults to a fixed test hash; tests can override.
 	clusterHash string
+	// meteringEnabled toggles the Step G2 census binding. Defaults false so
+	// existing tests exercise the non-metering path.
+	meteringEnabled bool
 }
 
 type membershipCall struct {
@@ -127,6 +132,21 @@ func (f *fakeProvisioner) GetChildWorkspaceClusterName(_ context.Context, orgUUI
 		return "test-cluster-hash", nil
 	}
 	return f.clusterHash, nil
+}
+
+func (f *fakeProvisioner) EnsureOrgCensusBinding(_ context.Context, orgUUID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.censusCalls = append(f.censusCalls, orgUUID)
+	return f.censusErr
+}
+
+func (f *fakeProvisioner) MeteringEnabled() bool { return f.meteringEnabled }
+
+func (f *fakeProvisioner) CensusCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.censusCalls...)
 }
 
 func (f *fakeProvisioner) WorkspaceCalls() []string {

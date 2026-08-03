@@ -1,0 +1,12 @@
+# APIExportEndpointSlice for census.kedge.faros.sh. Its status.endpoints carry the
+# per-shard virtual-workspace URLs the census controller lists workspaces against
+# (clusters/*). spec.export.path must name where the export lives (immutable);
+# __METERING_PATH__ is substituted with root:kedge:system:metering at apply time.
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIExportEndpointSlice
+metadata:
+  name: census.kedge.faros.sh
+spec:
+  export:
+    name: census.kedge.faros.sh
+    path: __METERING_PATH__
