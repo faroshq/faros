@@ -83,9 +83,15 @@ func (p restExecPodProxy) Execute(ctx context.Context, namespace, pod, token str
 		SetHeader("Content-Type", "application/json").
 		SetHeader(execAgentTokenHeader, token).
 		Body(payload).
-		Do(ctx).
-		Raw()
+		DoRaw(ctx)
 	if err != nil {
+		message := strings.TrimSpace(string(raw))
+		if len(message) > 2048 {
+			message = message[:2048] + "..."
+		}
+		if message != "" {
+			return execAgentResponse{}, fmt.Errorf("executor pod proxy: %w: %s", err, message)
+		}
 		return execAgentResponse{}, fmt.Errorf("executor pod proxy: %w", err)
 	}
 	var response execAgentResponse

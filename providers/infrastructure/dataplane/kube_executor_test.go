@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -233,6 +234,7 @@ func TestExecPodProxyNameSelectsControlPort(t *testing.T) {
 
 func TestRestExecPodProxyUsesProxySubresourceRoute(t *testing.T) {
 	token := "one-time-token"
+	reject := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -242,6 +244,10 @@ func TestRestExecPodProxyUsesProxySubresourceRoute(t *testing.T) {
 		}
 		if got := r.Header.Get(execAgentTokenHeader); got != token {
 			t.Errorf("control token = %q, want %q", got, token)
+		}
+		if reject {
+			http.Error(w, "request rejected by executor", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(execAgentResponse{Phase: "completed"})
@@ -261,6 +267,10 @@ func TestRestExecPodProxyUsesProxySubresourceRoute(t *testing.T) {
 	}
 	if _, err := (restExecPodProxy{client: client}).Execute(context.Background(), "runtime", "sandbox", token, execAgentRequest{}); err != nil {
 		t.Fatal(err)
+	}
+	reject = true
+	if _, err := (restExecPodProxy{client: client}).Execute(context.Background(), "runtime", "sandbox", token, execAgentRequest{}); err == nil || !strings.Contains(err.Error(), "request rejected by executor") {
+		t.Fatalf("proxy error = %v, want bounded executor response body", err)
 	}
 }
 
