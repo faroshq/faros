@@ -1449,10 +1449,19 @@ func mergeProjectToolCallStreamEvent(existing, next projectToolCallStreamEvent) 
 	if next.Error == "" {
 		next.Error = existing.Error
 	}
-	// Permission/checkpoint callbacks and terminal callbacks carry different
-	// subsets of exec metadata. Preserve the server-authored request/authority
-	// fields while allowing a terminal result to replace its lifecycle fields.
-	next.Exec = mergeProjectAssistantExecMetadata(existing.Exec, next.Exec)
+	// Permission callbacks carry their execution disclosure on Permission.Exec,
+	// while terminal tool callbacks carry it directly on Exec. Normalize both
+	// locations before merging so checkpoint resume cannot drop the approved
+	// argv/authority contract even when the terminal callback has no arguments.
+	existingExec := existing.Exec
+	if existingExec == nil && existing.Permission != nil {
+		existingExec = existing.Permission.Exec
+	}
+	nextExec := next.Exec
+	if nextExec == nil && next.Permission != nil {
+		nextExec = next.Permission.Exec
+	}
+	next.Exec = mergeProjectAssistantExecMetadata(existingExec, nextExec)
 	if next.Permission == nil {
 		next.Permission = existing.Permission
 	}

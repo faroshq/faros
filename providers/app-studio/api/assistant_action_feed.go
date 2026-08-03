@@ -92,7 +92,11 @@ func projectAssistantActionFeedItemFromToolCall(toolCall projectToolCallStreamEv
 		toolCall.Summary,
 		toolCall.Error,
 	)
-	item.Exec = cloneProjectAssistantExecMetadata(toolCall.Exec)
+	var permissionExec *projectAssistantExecMetadata
+	if toolCall.Permission != nil {
+		permissionExec = toolCall.Permission.Exec
+	}
+	item.Exec = mergeProjectAssistantExecMetadata(permissionExec, toolCall.Exec)
 	item.Sequence = toolCall.Sequence
 	return item
 }

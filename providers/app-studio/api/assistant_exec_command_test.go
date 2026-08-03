@@ -342,7 +342,11 @@ func TestProjectAssistantExecActionFeedMergesTerminalResultsAcrossCheckpoints(t 
 			Name:      projectToolExecCommand,
 			Status:    "permission_required",
 			Arguments: projectEinoToolArgumentsString(args),
-			Exec:      projectAssistantExecMetadataForToolArguments(projectToolExecCommand, args, "", "permission_required"),
+			Permission: &projectAssistantPermission{
+				ToolCallID: call.id,
+				ToolName:   projectToolExecCommand,
+				Exec:       projectAssistantExecMetadataForToolArguments(projectToolExecCommand, args, "", "permission_required"),
+			},
 		}
 		events = upsertProjectToolCallStreamEvent(events, permission)
 		// The checkpoint callback intentionally carries only lifecycle data.
