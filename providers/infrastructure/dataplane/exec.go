@@ -147,8 +147,8 @@ type ExecAuthorizer interface {
 
 // Executor starts, polls, and cancels isolated command runs. Each method must
 // honor ctx cancellation. Implementations deduplicate starts by
-// ExecCall.IdempotencyKey. The App Studio run-event ledger is the durable
-// replay boundary; executor sessions are intentionally short-lived.
+// ExecCall.IdempotencyKey and retain bounded runtime records across worker
+// restarts so provider replicas remain interchangeable.
 type Executor interface {
 	Start(context.Context, ExecCall) (ExecResult, error)
 	Poll(context.Context, ExecCall) (ExecResult, error)
@@ -290,6 +290,11 @@ func normalizeExecPath(value string) (string, error) {
 	clean := path.Clean(value)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("escapes the workspace")
+	}
+	for _, component := range strings.Split(clean, "/") {
+		if component == ".kedge-platform" {
+			return "", fmt.Errorf("uses reserved platform metadata directory")
+		}
 	}
 	return clean, nil
 }

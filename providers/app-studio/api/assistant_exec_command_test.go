@@ -84,8 +84,22 @@ func TestProjectAssistantExecCommandContractAndPolicy(t *testing.T) {
 	if !implementation.AllowsTool(spec) {
 		t.Fatal("implementation tool catalog must expose exec_command")
 	}
-	if projectAssistantOnRequestRequiresApproval(projectToolExecCommand) == false {
-		t.Fatal("exec_command must require approval")
+	for _, tt := range []struct {
+		mode store.AssistantApprovalMode
+		want projectAssistantPermissionDecision
+	}{
+		{mode: "", want: projectAssistantPermissionAllow},
+		{mode: store.AssistantApprovalModeOnRequest, want: projectAssistantPermissionAllow},
+		{mode: store.AssistantApprovalModeAlwaysAsk, want: projectAssistantPermissionAsk},
+		{mode: store.AssistantApprovalModeNever, want: projectAssistantPermissionDeny},
+		// Existing runs may still carry this value while the legacy run API is
+		// being retired; it remains equivalent to Allow but is not a new
+		// preference API option.
+		{mode: store.AssistantApprovalModeAutoApprove, want: projectAssistantPermissionAllow},
+	} {
+		if got := projectAssistantPermissionForV2(spec, tt.mode, nil, nil, false); got != tt.want {
+			t.Fatalf("exec_command permission for %q = %q, want %q", tt.mode, got, tt.want)
+		}
 	}
 	if got := projectAssistantToolsForCollaborationMode([]projectAssistantTool{projectAssistantToolFunc{spec: spec}}, projectAssistantCollaborationModePlan); len(got) != 0 {
 		t.Fatal("plan mode must hide exec_command")

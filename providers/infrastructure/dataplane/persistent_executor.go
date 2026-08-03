@@ -21,14 +21,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,83 +34,41 @@ import (
 )
 
 const (
-	persistentExecSessionRetention = 10 * time.Minute
-	persistentExecSessionCapacity  = 256
-	persistentExecStartupGrace     = 15 * time.Second
-	persistentExecAgentBodyLimit   = 2 << 20
+	persistentExecAgentBodyLimit = 2 << 20
+	persistentExecRetryAttempts  = 3
 )
 
 var executionGroupResource = schema.GroupResource{Group: "infrastructure.kedge.faros.sh", Resource: "executions"}
 
-type execAgentRequest struct {
-	Argv           []string `json:"argv"`
-	WorkDir        string   `json:"workDir,omitempty"`
-	TimeoutMS      int      `json:"timeoutMs,omitempty"`
-	MaxOutputBytes int      `json:"maxOutputBytes,omitempty"`
-	SourceRevision uint64   `json:"sourceRevision,omitempty"`
-	SourceDigest   string   `json:"sourceDigest,omitempty"`
+type execWorkerRequest struct {
+	Action         ExecAction `json:"action"`
+	SessionID      string     `json:"sessionID"`
+	RequestID      string     `json:"requestID"`
+	CallerKey      string     `json:"callerKey"`
+	Fingerprint    string     `json:"fingerprint,omitempty"`
+	Argv           []string   `json:"argv,omitempty"`
+	WorkDir        string     `json:"workDir,omitempty"`
+	TimeoutMS      int        `json:"timeoutMs,omitempty"`
+	MaxOutputBytes int        `json:"maxOutputBytes,omitempty"`
+	SourceRevision uint64     `json:"sourceRevision,omitempty"`
+	SourceDigest   string     `json:"sourceDigest,omitempty"`
 }
 
-type execAgentResponse struct {
-	Phase           string `json:"phase"`
-	ExitCode        int32  `json:"exitCode"`
-	TimedOut        bool   `json:"timedOut,omitempty"`
-	Cancelled       bool   `json:"cancelled,omitempty"`
-	Stdout          string `json:"stdout,omitempty"`
-	Stderr          string `json:"stderr,omitempty"`
-	StdoutTruncated bool   `json:"stdoutTruncated,omitempty"`
-	StderrTruncated bool   `json:"stderrTruncated,omitempty"`
-	Error           string `json:"error,omitempty"`
-}
-
-// PersistentExecutor sends direct-argv requests to the live component's
-// kedge-dev-agent. Sync owns the persistent PVC and the agent verifies the
-// synchronized revision/digest before launching a child in that workspace.
+// PersistentExecutor is intentionally stateless. The dedicated component
+// exec-worker owns idempotency, sessions, cancellation, and durable results on
+// the component PVC; any provider replica can forward any lifecycle action.
 type PersistentExecutor struct {
 	runtime Runtime
-	now     func() time.Time
-
-	mu       sync.Mutex
-	sessions map[string]*persistentExecSession
-	requests map[string]string
 }
 
-type persistentExecSession struct {
-	mu sync.RWMutex
-
-	id          string
-	requestID   string
-	fingerprint string
-	workspace   string
-	resource    string
-	name        string
-	component   string
-	callerKey   string
-	result      ExecResult
-	outputLimit int
-	completedAt time.Time
-	cancel      context.CancelFunc
-}
-
-// NewPersistentExecutor constructs an executor using the provider-owned
-// runtime transport. The runtime credential never crosses into App Studio or
-// the dev-agent; only the per-instance control token is sent upstream.
 func NewPersistentExecutor(runtime Runtime) (*PersistentExecutor, error) {
 	if runtime == nil {
 		return nil, fmt.Errorf("runtime is required for persistent exec")
 	}
-	return &PersistentExecutor{
-		runtime:  runtime,
-		now:      time.Now,
-		sessions: map[string]*persistentExecSession{},
-		requests: map[string]string{},
-	}, nil
+	return &PersistentExecutor{runtime: runtime}, nil
 }
 
-func (e *PersistentExecutor) Start(_ context.Context, call ExecCall) (ExecResult, error) {
-	if e == nil || e.runtime == nil {
-		return ExecResult{}, fmt.Errorf("persistent executor is unavailable")
-	}
+func (e *PersistentExecutor) Start(ctx context.Context, call ExecCall) (ExecResult, error) {
 	if err := validatePersistentExecCall(call); err != nil {
 		return ExecResult{}, err
 	}
@@ -120,215 +76,137 @@ func (e *PersistentExecutor) Start(_ context.Context, call ExecCall) (ExecResult
 	if err != nil {
 		return ExecResult{}, err
 	}
-	sessionID := execSessionID(call)
-	requestKey := execRequestKey(call)
-
-	e.mu.Lock()
-	e.pruneSessionsLocked()
-	if existingID := e.requests[requestKey]; existingID != "" {
-		existing := e.sessions[existingID]
-		if existing == nil {
-			delete(e.requests, requestKey)
-		} else if existing.fingerprint != fingerprint {
-			e.mu.Unlock()
-			return ExecResult{}, fmt.Errorf("idempotency key was already used for a different execution request")
-		} else {
-			e.mu.Unlock()
-			return existing.snapshot(), nil
-		}
-	}
-	if len(e.sessions) >= persistentExecSessionCapacity {
-		e.mu.Unlock()
-		return ExecResult{}, fmt.Errorf("persistent executor session capacity is exhausted")
-	}
-	runCtx, cancel := context.WithTimeout(context.Background(), persistentExecRunDeadline(call))
-	session := &persistentExecSession{
-		id: sessionID, requestID: call.Request.RequestID, fingerprint: fingerprint,
-		workspace: call.Workspace, resource: call.Resource, name: call.Name,
-		component: call.Component, callerKey: call.CallerKey,
-		result:      ExecResult{SessionID: sessionID, RequestID: call.Request.RequestID, State: "queued"},
-		outputLimit: execOutputLimit(call), cancel: cancel,
-	}
-	e.sessions[sessionID] = session
-	e.requests[requestKey] = sessionID
-	e.mu.Unlock()
-
-	go e.run(runCtx, session, call)
-	return session.snapshot(), nil
-}
-
-func (e *PersistentExecutor) Poll(_ context.Context, call ExecCall) (ExecResult, error) {
-	session, err := e.sessionFor(call)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	return session.snapshot(), nil
-}
-
-func (e *PersistentExecutor) Cancel(_ context.Context, call ExecCall) (ExecResult, error) {
-	session, err := e.sessionFor(call)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	session.mu.Lock()
-	if !execTerminalState(session.result.State) {
-		session.result.State = "canceled"
-		session.completedAt = e.now()
-	}
-	cancel := session.cancel
-	result := session.result
-	session.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	return result, nil
-}
-
-func (e *PersistentExecutor) sessionFor(call ExecCall) (*persistentExecSession, error) {
-	id := strings.TrimSpace(call.Request.SessionID)
-	e.mu.Lock()
-	e.pruneSessionsLocked()
-	session := e.sessions[id]
-	e.mu.Unlock()
-	if session == nil {
-		return nil, apierrors.NewNotFound(executionGroupResource, id)
-	}
-	if session.workspace != call.Workspace || session.resource != call.Resource || session.name != call.Name || session.component != call.Component ||
-		session.callerKey == "" || session.callerKey != call.CallerKey {
-		return nil, apierrors.NewForbidden(executionGroupResource, id, fmt.Errorf("execution session does not belong to this component"))
-	}
-	return session, nil
-}
-
-func (s *persistentExecSession) snapshot() ExecResult {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.result
-}
-
-func (e *PersistentExecutor) run(ctx context.Context, session *persistentExecSession, call ExecCall) {
-	e.setState(session, "running")
 	limits, _ := limitsForCapability(call.Capability)
-	request := execAgentRequest{
-		Argv: call.Request.Argv, WorkDir: call.Request.Workdir,
-		TimeoutMS: int(execTimeoutSeconds(call)) * 1000, MaxOutputBytes: limits.outputBytes,
-		SourceRevision: call.Request.SourceRevision, SourceDigest: call.Request.SourceDigest,
+	request := execWorkerRequest{
+		Action: ExecActionStart, SessionID: execSessionID(call), RequestID: call.Request.RequestID,
+		CallerKey: call.CallerKey, Fingerprint: fingerprint, Argv: call.Request.Argv,
+		WorkDir: call.Request.Workdir, TimeoutMS: int(execTimeoutSeconds(call)) * 1000,
+		MaxOutputBytes: limits.outputBytes, SourceRevision: call.Request.SourceRevision,
+		SourceDigest: call.Request.SourceDigest,
 	}
-	response, err := e.execute(ctx, call.ControlTarget, request)
-	if err != nil {
-		state := "failed"
-		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			state = "canceled"
-		}
-		e.finish(session, ExecResult{State: state, Stderr: err.Error()})
-		return
-	}
-	e.finish(session, execResultFromAgent(response))
+	return e.execute(ctx, call.ControlTarget, request)
 }
 
-func (e *PersistentExecutor) setState(session *persistentExecSession, state string) {
-	session.mu.Lock()
-	if !execTerminalState(session.result.State) {
-		session.result.State = state
-	}
-	session.mu.Unlock()
+func (e *PersistentExecutor) Poll(ctx context.Context, call ExecCall) (ExecResult, error) {
+	return e.lifecycle(ctx, call, ExecActionPoll)
 }
 
-func (e *PersistentExecutor) finish(session *persistentExecSession, result ExecResult) {
-	session.mu.Lock()
-	if execTerminalState(session.result.State) && session.result.State == "canceled" {
-		session.mu.Unlock()
-		return
-	}
-	result.SessionID = session.id
-	result.RequestID = session.requestID
-	result = boundExecResult(result, session.outputLimit)
-	session.result = result
-	session.completedAt = e.now()
-	session.mu.Unlock()
+func (e *PersistentExecutor) Cancel(ctx context.Context, call ExecCall) (ExecResult, error) {
+	return e.lifecycle(ctx, call, ExecActionCancel)
 }
 
-func (e *PersistentExecutor) pruneSessionsLocked() {
-	cutoff := e.now().Add(-persistentExecSessionRetention)
-	for id, session := range e.sessions {
-		session.mu.RLock()
-		completedAt := session.completedAt
-		requestID := session.requestID
-		session.mu.RUnlock()
-		if !completedAt.IsZero() && completedAt.Before(cutoff) {
-			delete(e.sessions, id)
-			for key, mapped := range e.requests {
-				if mapped == id || strings.HasSuffix(key, "\x00"+requestID) {
-					delete(e.requests, key)
-				}
-			}
-		}
+func (e *PersistentExecutor) lifecycle(ctx context.Context, call ExecCall, action ExecAction) (ExecResult, error) {
+	if err := validatePersistentExecTarget(call); err != nil {
+		return ExecResult{}, err
 	}
+	return e.execute(ctx, call.ControlTarget, execWorkerRequest{
+		Action: action, SessionID: strings.TrimSpace(call.Request.SessionID),
+		RequestID: strings.TrimSpace(call.Request.RequestID), CallerKey: call.CallerKey,
+	})
 }
 
-func (e *PersistentExecutor) execute(ctx context.Context, target ResolvedTarget, input execAgentRequest) (execAgentResponse, error) {
-	if strings.TrimSpace(target.ServiceName) == "" || strings.TrimSpace(target.ServiceNamespace) == "" || strings.TrimSpace(target.ServicePort) == "" {
-		return execAgentResponse{}, fmt.Errorf("persistent exec control Service is unavailable")
-	}
+func (e *PersistentExecutor) execute(ctx context.Context, target ResolvedTarget, input execWorkerRequest) (ExecResult, error) {
 	transport, err := e.runtime.Transport()
 	if err != nil {
-		return execAgentResponse{}, fmt.Errorf("runtime transport unavailable: %w", err)
+		return ExecResult{}, fmt.Errorf("runtime transport unavailable: %w", err)
 	}
 	base, err := url.Parse(e.runtime.Host())
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		return execAgentResponse{}, fmt.Errorf("invalid runtime host: %v", err)
+		return ExecResult{}, fmt.Errorf("invalid runtime host: %v", err)
 	}
-	token := ""
-	if target.TokenSecretName != "" {
-		token, err = e.runtime.ControlToken(ctx, target.TokenSecretNamespace, target.TokenSecretName)
-		if err != nil {
-			return execAgentResponse{}, fmt.Errorf("control token unavailable: %w", err)
-		}
+	token, err := e.runtime.ControlToken(ctx, target.TokenSecretNamespace, target.TokenSecretName)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("control token unavailable: %w", err)
 	}
 	payload, err := json.Marshal(input)
 	if err != nil {
-		return execAgentResponse{}, fmt.Errorf("encode persistent exec request: %w", err)
+		return ExecResult{}, fmt.Errorf("encode exec-worker request: %w", err)
 	}
-	requestURL := *base
-	requestURL.Path = serviceProxyPath(target, "")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(string(payload)))
-	if err != nil {
-		return execAgentResponse{}, fmt.Errorf("build persistent exec request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Del("Authorization")
-	if token != "" {
-		req.Header.Set(controlTokenHeader, token)
-	}
-	resp, err := (&http.Client{Transport: transport}).Do(req)
-	if err != nil {
-		return execAgentResponse{}, fmt.Errorf("persistent dev-agent request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, persistentExecAgentBodyLimit))
-	if err != nil {
-		return execAgentResponse{}, fmt.Errorf("read persistent dev-agent response: %w", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		message := strings.TrimSpace(string(body))
-		if len(message) > 2048 {
-			message = message[:2048] + "..."
+	client := &http.Client{Transport: transport}
+	var lastErr error
+	for attempt := 0; attempt < persistentExecRetryAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ExecResult{}, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 50 * time.Millisecond):
+			}
 		}
-		return execAgentResponse{}, fmt.Errorf("persistent dev-agent returned %s: %s", resp.Status, message)
+		requestURL := *base
+		requestURL.Path = serviceProxyPath(target, "")
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(string(payload)))
+		if err != nil {
+			return ExecResult{}, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(controlTokenHeader, token)
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("exec-worker request: %w", err)
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, persistentExecAgentBodyLimit))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("read exec-worker response: %w", readErr)
+			continue
+		}
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+			lastErr = fmt.Errorf("exec-worker temporarily unavailable: %s", strings.TrimSpace(string(body)))
+			continue
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return ExecResult{}, execWorkerStatusError(resp.StatusCode, input.SessionID, strings.TrimSpace(string(body)))
+		}
+		var result ExecResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			lastErr = fmt.Errorf("decode exec-worker response: %w", err)
+			continue
+		}
+		return result, nil
 	}
-	var response execAgentResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return execAgentResponse{}, fmt.Errorf("decode persistent dev-agent response: %w", err)
+	return ExecResult{}, lastErr
+}
+
+func execWorkerStatusError(status int, sessionID, message string) error {
+	if len(message) > 2048 {
+		message = message[:2048] + "..."
 	}
-	return response, nil
+	cause := fmt.Errorf("exec-worker: %s", message)
+	switch status {
+	case http.StatusForbidden, http.StatusUnauthorized:
+		return apierrors.NewForbidden(executionGroupResource, sessionID, cause)
+	case http.StatusNotFound:
+		return apierrors.NewNotFound(executionGroupResource, sessionID)
+	case http.StatusConflict:
+		return apierrors.NewConflict(executionGroupResource, sessionID, cause)
+	default:
+		return cause
+	}
+}
+
+func validatePersistentExecTarget(call ExecCall) error {
+	if strings.TrimSpace(call.CallerKey) == "" {
+		return fmt.Errorf("persistent executor caller binding is required")
+	}
+	if call.ControlTarget.ServiceName == "" || call.ControlTarget.ServicePort == "" {
+		return fmt.Errorf("persistent executor control Service is unavailable")
+	}
+	if call.ControlTarget.TokenSecretNamespace == "" || call.ControlTarget.TokenSecretName == "" {
+		return fmt.Errorf("persistent executor control token Secret is unavailable")
+	}
+	return nil
 }
 
 func validatePersistentExecCall(call ExecCall) error {
+	if err := validatePersistentExecTarget(call); err != nil {
+		return err
+	}
 	if call.Request.Action != ExecActionStart || strings.TrimSpace(call.IdempotencyKey) == "" {
 		return fmt.Errorf("persistent executor start requires a start request and idempotency key")
 	}
-	if strings.TrimSpace(call.RuntimeNamespace) == "" || strings.TrimSpace(call.CallerKey) == "" {
-		return fmt.Errorf("persistent executor runtime namespace and caller binding are required")
+	if strings.TrimSpace(call.RuntimeNamespace) == "" {
+		return fmt.Errorf("persistent executor runtime namespace is required")
 	}
 	if !path.IsAbs(call.WorkingDir) || path.Clean(call.WorkingDir) == "/" {
 		return fmt.Errorf("persistent executor working directory must be an absolute non-root path")
@@ -336,21 +214,12 @@ func validatePersistentExecCall(call ExecCall) error {
 	if call.Request.SourceRevision == 0 {
 		return fmt.Errorf("sourceRevision is required for persistent execution")
 	}
-	if strings.TrimSpace(call.Request.SourceDigest) == "" {
-		return fmt.Errorf("sourceDigest is required for persistent execution")
-	}
 	digest := strings.TrimPrefix(strings.TrimSpace(call.Request.SourceDigest), "sha256:")
 	if len(digest) != sha256.Size*2 {
 		return fmt.Errorf("sourceDigest must be a SHA-256 hex digest")
 	}
 	if _, err := hex.DecodeString(digest); err != nil {
 		return fmt.Errorf("sourceDigest must be a SHA-256 hex digest")
-	}
-	if call.ControlTarget.ServiceName == "" || call.ControlTarget.ServicePort == "" {
-		return fmt.Errorf("persistent executor control Service is unavailable")
-	}
-	if call.ControlTarget.TokenSecretNamespace == "" || call.ControlTarget.TokenSecretName == "" {
-		return fmt.Errorf("persistent executor control token Secret is unavailable")
 	}
 	return nil
 }
@@ -362,8 +231,7 @@ func persistentExecCallFingerprint(call ExecCall) (string, error) {
 		Argv                                                                    []string
 		Workdir                                                                 string
 		Timeout                                                                 int32
-		Target                                                                  ResolvedTarget
-	}{call.RuntimeNamespace, call.Resource, call.Name, call.Component, call.WorkingDir, call.WorkspacePath, call.Request.SourceDigest, call.Request.SourceRevision, call.Request.Argv, call.Request.Workdir, call.Request.TimeoutSeconds, call.ControlTarget})
+	}{call.RuntimeNamespace, call.Resource, call.Name, call.Component, call.WorkingDir, call.WorkspacePath, call.Request.SourceDigest, call.Request.SourceRevision, call.Request.Argv, call.Request.Workdir, call.Request.TimeoutSeconds})
 	if err != nil {
 		return "", err
 	}
@@ -372,12 +240,10 @@ func persistentExecCallFingerprint(call ExecCall) (string, error) {
 }
 
 func execSessionID(call ExecCall) string {
-	sum := sha256.Sum256([]byte(execRequestKey(call)))
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		call.CallerKey, call.Workspace, call.Resource, call.Name, call.Component, call.IdempotencyKey,
+	}, "\x00")))
 	return hex.EncodeToString(sum[:16])
-}
-
-func execRequestKey(call ExecCall) string {
-	return strings.Join([]string{call.CallerKey, call.Workspace, call.Resource, call.Name, call.Component, call.IdempotencyKey}, "\x00")
 }
 
 func execTimeoutSeconds(call ExecCall) int32 {
@@ -388,11 +254,6 @@ func execTimeoutSeconds(call ExecCall) int32 {
 	return limits.timeoutSeconds
 }
 
-func execOutputLimit(call ExecCall) int {
-	limits, _ := limitsForCapability(call.Capability)
-	return limits.outputBytes
-}
-
 func execTerminalState(state string) bool {
 	switch state {
 	case "succeeded", "failed", "canceled", "timed_out":
@@ -400,38 +261,4 @@ func execTerminalState(state string) bool {
 	default:
 		return false
 	}
-}
-
-func execResultFromAgent(response execAgentResponse) ExecResult {
-	state := "failed"
-	switch {
-	case response.Cancelled:
-		state = "canceled"
-	case response.TimedOut:
-		state = "timed_out"
-	case response.Phase == "completed" && response.ExitCode == 0:
-		state = "succeeded"
-	case response.Phase == "completed":
-		state = "failed"
-	case response.Phase == "cancelled" || response.Phase == "canceled":
-		state = "canceled"
-	case response.Phase == "timed_out":
-		state = "timed_out"
-	}
-	stderr := response.Stderr
-	if response.Error != "" {
-		if stderr != "" {
-			stderr += "\n"
-		}
-		stderr += response.Error
-	}
-	exitCode := response.ExitCode
-	return ExecResult{
-		State: state, ExitCode: &exitCode, Stdout: response.Stdout, Stderr: stderr,
-		Truncated: response.StdoutTruncated || response.StderrTruncated,
-	}
-}
-
-func persistentExecRunDeadline(call ExecCall) time.Duration {
-	return time.Duration(execTimeoutSeconds(call))*time.Second + persistentExecStartupGrace
 }

@@ -62,9 +62,8 @@ func buildDataPlaneHandler(kcpConfig *rest.Config) *dataplane.Handler {
 
 	factory := tenant.NewClientFactory(kcpConfig)
 	options := []dataplane.HandlerOption{}
-	// Persistent component execution is the only executor: the live dev-agent
-	// owns the component PVC/toolchain, so no disposable source-only pod is
-	// created.
+	// Persistent component execution is the only executor: a dedicated worker
+	// container owns lifecycle state while sharing the component PVC/toolchain.
 	executor, execErr := dataplane.NewPersistentExecutor(runtime)
 	if execErr != nil {
 		log.Printf("data plane exec: disabled: %v", execErr)

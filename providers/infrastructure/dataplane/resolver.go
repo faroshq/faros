@@ -63,6 +63,7 @@ func ResolveComponentExecTarget(contract *infrav1alpha1.TemplateDataPlane, insta
 		return ResolvedTarget{}, err
 	}
 	target.UpstreamPath = "/exec"
+	target.ServicePort = "exec"
 	target.Stream = false
 	target.Upgrade = false
 	return target, nil

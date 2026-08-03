@@ -72,12 +72,13 @@ type execResponse struct {
 // deliberately absent: /sync owns the persistent workspace and this endpoint
 // verifies the platform-applied revision/digest before launching argv.
 type persistentExecRequest struct {
-	Argv           []string `json:"argv"`
-	WorkDir        string   `json:"workDir,omitempty"`
-	TimeoutMS      int      `json:"timeoutMs,omitempty"`
-	MaxOutputBytes int      `json:"maxOutputBytes,omitempty"`
-	SourceRevision uint64   `json:"sourceRevision"`
-	SourceDigest   string   `json:"sourceDigest"`
+	Argv            []string `json:"argv"`
+	WorkDir         string   `json:"workDir,omitempty"`
+	TimeoutMS       int      `json:"timeoutMs,omitempty"`
+	MaxOutputBytes  int      `json:"maxOutputBytes,omitempty"`
+	SourceRevision  uint64   `json:"sourceRevision"`
+	SourceDigest    string   `json:"sourceDigest"`
+	DropCredentials bool     `json:"-"`
 }
 
 func (s *agentServer) handlePersistentExec(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +178,18 @@ func runPersistentExec(parent context.Context, workspace string, req persistentE
 	cmd := exec.Command(executable, req.Argv[1:]...)
 	cmd.Dir = workPath
 	cmd.Env = env
+	execMarker := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	cmd.Env = append(cmd.Env, "KEDGE_EXEC_SESSION="+execMarker)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if req.DropCredentials {
+		cmd.SysProcAttr = platformChildProcAttr(true)
+	}
 	cmd.WaitDelay = 2 * time.Second
+	if err := enableChildSubreaper(); err != nil {
+		return execResponse{}, fmt.Errorf("enable child subreaper: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		return execResponse{}, fmt.Errorf("start %q: %w", req.Argv[0], err)
 	}
@@ -198,14 +207,24 @@ func runPersistentExec(parent context.Context, workspace string, req persistentE
 	case <-timer.C:
 		response.Phase = "timed_out"
 		response.TimedOut = true
-		killExecProcessGroup(cmd.Process.Pid)
+		_ = cmd.Process.Kill()
+		if err := cleanupExecProcesses(execMarker, 2*time.Second); err != nil {
+			return execResponse{}, err
+		}
 		waitErr = <-waitCh
 	case <-parent.Done():
 		response.Phase = "cancelled"
 		response.Cancelled = true
-		killExecProcessGroup(cmd.Process.Pid)
+		_ = cmd.Process.Kill()
+		if err := cleanupExecProcesses(execMarker, 2*time.Second); err != nil {
+			return execResponse{}, err
+		}
 		waitErr = <-waitCh
 	}
+	if err := cleanupExecProcesses(execMarker, 2*time.Second); err != nil {
+		return execResponse{}, err
+	}
+	reapExitedChildren()
 	response.DurationMS = time.Since(started).Milliseconds()
 	response.Stdout = stdout.String()
 	response.Stderr = stderr.String()
@@ -286,7 +305,7 @@ func cleanExecPath(raw string) (string, error) {
 			return "", errExecPathEscape
 		}
 		switch strings.ToLower(part) {
-		case ".git", "node_modules", ".assistant-snapshots":
+		case ".git", "node_modules", ".assistant-snapshots", platformMetadataDir:
 			return "", fmt.Errorf("workspace path contains reserved component %q", part)
 		}
 	}
@@ -507,14 +526,6 @@ func (b *execOutputBuffer) ReadFrom(reader io.Reader) (int64, error) {
 }
 
 func (b *execOutputBuffer) Truncated() bool { return b.truncated }
-
-func killExecProcessGroup(pid int) {
-	if pid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-}
 
 func execExitCode(err error) (int, bool) {
 	if err == nil {

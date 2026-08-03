@@ -24,11 +24,76 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestPersistentExecReapsSetsidDescendantOnEveryCompletionPath(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is unavailable")
+	}
+	for _, tc := range []struct {
+		name      string
+		command   string
+		timeoutMS int
+		cancel    bool
+	}{
+		{name: "normal", command: "setsid /bin/sh -c 'sleep 30' </dev/null >/dev/null 2>&1 & echo $! > daemon.pid"},
+		{name: "timeout", command: "setsid /bin/sh -c 'sleep 30' </dev/null >/dev/null 2>&1 & echo $! > daemon.pid; sleep 30", timeoutMS: 40},
+		{name: "cancel", command: "setsid /bin/sh -c 'sleep 30' </dev/null >/dev/null 2>&1 & echo $! > daemon.pid; sleep 30", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			digest, _ := digestSyncFiles(nil)
+			root, err := openWorkspaceRoot(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeWorkspaceManifest(root, workspaceManifest{SourceRevision: 1, SourceDigest: digest}); err != nil {
+				t.Fatal(err)
+			}
+			_ = root.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancel {
+				go func() {
+					time.Sleep(40 * time.Millisecond)
+					cancel()
+				}()
+			} else {
+				defer cancel()
+			}
+			result, err := runPersistentExec(ctx, workspace, persistentExecRequest{
+				Argv: []string{"/bin/sh", "-c", tc.command}, WorkDir: ".", TimeoutMS: tc.timeoutMS,
+				SourceRevision: 1, SourceDigest: digest,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.timeoutMS > 0 && !result.TimedOut {
+				t.Fatalf("result = %+v, want timeout", result)
+			}
+			if tc.cancel && !result.Cancelled {
+				t.Fatalf("result = %+v, want cancel", result)
+			}
+			rawPID, err := os.ReadFile(filepath.Join(workspace, "daemon.pid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("setsid descendant pid %d remains after %s completion: %v", pid, tc.name, err)
+			}
+		})
+	}
+}
 
 func TestPersistentExecRequiresAuthenticationAndRejectsUnknownFields(t *testing.T) {
 	srv := newTestAgent(t, &agentConfig{WorkDir: t.TempDir(), ControlToken: "test-token", AllowInsecureControl: true})

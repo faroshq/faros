@@ -30,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino-examples/adk/common/tool"
 	"github.com/cloudwego/eino-examples/adk/common/tool/graphtool"
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -305,22 +304,11 @@ func newProjectAssistantExecCommandGraphTool(runCtx projectAssistantWorkflowRunC
 	if err != nil {
 		return nil, err
 	}
-	var approved einotool.InvokableTool = inner
-	if runCtx.EventLedger != nil {
-		spec, ok := projectAssistantWorkflowToolSpec(projectToolExecCommand)
-		if !ok {
-			return nil, fmt.Errorf("project assistant workflow spec %q is not configured", projectToolExecCommand)
-		}
-		durable, err := newProjectAssistantDurableGraphTool(inner, spec, runCtx.EventLedger, runCtx.AdmitMutation)
-		if err != nil {
-			return nil, err
-		}
-		approved = durable.(einotool.InvokableTool)
+	spec, ok := projectAssistantWorkflowToolSpec(projectToolExecCommand)
+	if !ok {
+		return nil, fmt.Errorf("project assistant workflow spec %q is not configured", projectToolExecCommand)
 	}
-	if !projectAssistantRuntimeGraphToolRequiresApproval(projectToolExecCommand, runCtx.ApprovalMode) {
-		return approved, nil
-	}
-	return tool.InvokableApprovableTool{InvokableTool: approved}, nil
+	return applyProjectAssistantGraphToolPermission(inner, spec, runCtx)
 }
 
 func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantExecCommandInput) (*projectAssistantExecCommandResult, error) {

@@ -322,7 +322,7 @@ func writeExecAuthorizationError(w http.ResponseWriter, err error) {
 }
 
 func writeExecError(w http.ResponseWriter, err error) {
-	if apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) || apierrors.IsConflict(err) {
 		writeKubeError(w, err)
 		return
 	}

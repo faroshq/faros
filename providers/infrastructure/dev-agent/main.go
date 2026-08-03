@@ -80,6 +80,7 @@ import (
 
 const (
 	defaultControlAddr = ":7070"
+	defaultExecAddr    = ":7071"
 	controlTokenHeader = "X-Sandbox-Control-Token"
 	agentBinaryName    = "kedge-dev-agent"
 
@@ -107,12 +108,24 @@ type agentConfig struct {
 	ReloadStrategy       string // "process" (default) | "container"
 	ReloadRules          []reloadRule
 	AllowInsecureControl bool
+	DropChildGroups      bool
 }
 
 func main() {
 	if len(os.Args) >= 3 && os.Args[1] == "--install" {
 		if err := installSelf(os.Args[2]); err != nil {
 			log.Fatalf("install: %v", err)
+		}
+		if len(os.Args) >= 5 && os.Args[3] == "--prepare-workspace" {
+			if err := preparePlatformState(os.Args[4]); err != nil {
+				log.Fatalf("prepare workspace: %v", err)
+			}
+		}
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "--exec-worker" {
+		if err := runExecWorker(); err != nil {
+			log.Fatalf("exec worker: %v", err)
 		}
 		return
 	}
@@ -343,6 +356,7 @@ func configFromEnv() (*agentConfig, error) {
 		ReloadStrategy:       strategy,
 		ReloadRules:          rules,
 		AllowInsecureControl: strings.EqualFold(insecure, "true"),
+		DropChildGroups:      strings.EqualFold(os.Getenv("KEDGE_DEV_DROP_CHILD_GROUPS"), "true"),
 	}, nil
 }
 
@@ -464,7 +478,6 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	mux.HandleFunc("/env", s.handleEnv)
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/exec", s.handlePersistentExec)
 	s.mux = mux
 	return s
 }
@@ -487,6 +500,12 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.execMu.Lock()
 	defer s.execMu.Unlock()
+	workspaceLock, err := acquireWorkspaceMutationLock(r.Context(), s.config.WorkDir, s.config.DropChildGroups)
+	if err != nil {
+		http.Error(w, "lock workspace: "+err.Error(), http.StatusRequestTimeout)
+		return
+	}
+	defer func() { _ = workspaceLock.Close() }()
 	var req syncRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
@@ -1044,6 +1063,9 @@ func cleanWorkspacePath(raw string) (string, error) {
 	if clean == workspaceManifestName {
 		return "", fmt.Errorf("path %q is reserved for the platform sync manifest", raw)
 	}
+	if clean == platformMetadataDir || strings.HasPrefix(clean, platformMetadataDir+"/") {
+		return "", fmt.Errorf("path %q is reserved for platform metadata", raw)
+	}
 	return clean, nil
 }
 
@@ -1176,6 +1198,9 @@ func (s *supervisor) runReloadCommands(ctx context.Context, commands []string) e
 		cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 		cmd.Dir = s.config.WorkDir
 		cmd.Env = mergeChildEnv(os.Environ(), childEnv, s.config.Port)
+		if s.config.DropChildGroups {
+			cmd.SysProcAttr = platformChildProcAttr(false)
+		}
 		out, err := cmd.CombinedOutput()
 		for line := range strings.SplitSeq(strings.TrimRight(string(out), "\n"), "\n") {
 			if line != "" {
@@ -1248,6 +1273,9 @@ func (s *supervisor) startLocked(ctx context.Context) error {
 	cmd.Dir = s.config.WorkDir
 	cmd.Env = mergeChildEnv(os.Environ(), s.customEnv, s.config.Port)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if s.config.DropChildGroups {
+		cmd.SysProcAttr = platformChildProcAttr(true)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
