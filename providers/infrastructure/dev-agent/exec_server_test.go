@@ -25,152 +25,32 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestExecServerRequiresAuthenticationEvenWhenLegacyControlIsInsecure(t *testing.T) {
-	srv := newExecAgentServer(context.Background(), &agentConfig{WorkDir: t.TempDir(), AllowInsecureControl: true})
-	req := httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(`{"argv":["/bin/echo","ok"]}`))
-	res := httptest.NewRecorder()
-	srv.ServeHTTP(res, req)
-	if res.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", res.Code, http.StatusUnauthorized)
-	}
-}
-
-func TestExecServerRejectsUnknownShellCommandField(t *testing.T) {
-	srv := newExecAgentServer(context.Background(), &agentConfig{WorkDir: t.TempDir(), ControlToken: "secret"})
-	req := httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(`{"command":"echo unsafe","argv":["/bin/true"]}`))
-	req.Header.Set(controlTokenHeader, "secret")
-	res := httptest.NewRecorder()
-	srv.ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
-	}
-}
-
-func TestExecServerRunsDirectArgvWithSanitizedEnvironmentAndChangedPaths(t *testing.T) {
-	workdir := t.TempDir()
-	t.Setenv("ONLY_EXPLICIT", "must-not-inherit")
-	if err := os.WriteFile(filepath.Join(workdir, "before.txt"), []byte("before\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	srv := newExecAgentServer(context.Background(), &agentConfig{WorkDir: workdir, ControlToken: "secret"})
-	reqBody := execRequest{
-		Files:   []execSourceFile{{Path: "staged.txt", Content: "staged\n"}},
-		Argv:    []string{"/bin/sh", "-c", "test -z \"$ONLY_EXPLICIT\"; touch added.txt; rm before.txt"},
-		WorkDir: ".",
-	}
-	raw, err := json.Marshal(reqBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader(raw))
-	req.Header.Set(controlTokenHeader, "secret")
-	res := httptest.NewRecorder()
-	srv.ServeHTTP(res, req)
-	if res.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
-	}
-	var got execResponse
-	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.ExitCode != 0 || got.Stdout != "" || got.Stderr != "" {
-		t.Fatalf("result = %+v", got)
-	}
-	if !slices.Equal(got.Changed, []string{"added.txt"}) {
-		t.Fatalf("changed = %v, want [added.txt]", got.Changed)
-	}
-	if !slices.Equal(got.Deleted, []string{"before.txt"}) {
-		t.Fatalf("deleted = %v, want [before.txt]", got.Deleted)
-	}
-	if _, err := os.Stat(filepath.Join(workdir, "staged.txt")); err != nil {
-		t.Fatalf("staged file missing: %v", err)
-	}
-}
-
-func TestExecServerStagesBeforeValidatingSourceCreatedWorkdir(t *testing.T) {
-	result, err := runExecRequest(context.Background(), t.TempDir(), execRequest{
-		Files:   []execSourceFile{{Path: "component/main.txt", Content: "source\n"}},
-		WorkDir: "component",
-		Argv:    []string{"/bin/cat", "main.txt"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ExitCode != 0 || result.Stdout != "source\n" {
-		t.Fatalf("result = %+v", result)
-	}
-}
-
-func TestExecServerPreservesExplicitExecutableMode(t *testing.T) {
-	result, err := runExecRequest(context.Background(), t.TempDir(), execRequest{
-		Files: []execSourceFile{{Path: "script.sh", Content: "#!/bin/sh\nprintf 'executable\\n'\n", Executable: true}},
-		Argv:  []string{"./script.sh"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ExitCode != 0 || result.Stdout != "executable\n" {
-		t.Fatalf("result = %+v", result)
-	}
-}
-
-func TestExecServerRejectsUnsafeSourceAndWorkdirPaths(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
-		t.Fatal(err)
-	}
-	for name, req := range map[string]execRequest{
-		"source escape":   {Files: []execSourceFile{{Path: "../escape.txt", Content: "x"}}, Argv: []string{"/bin/true"}},
-		"workdir escape":  {WorkDir: "../", Argv: []string{"/bin/true"}},
-		"source symlink":  {Files: []execSourceFile{{Path: "link/file.txt", Content: "x"}}, Argv: []string{"/bin/true"}},
-		"invalid utf8":    {Files: []execSourceFile{{Path: "bad.txt", Content: string([]byte{0xff})}}, Argv: []string{"/bin/true"}},
-		"duplicate paths": {Files: []execSourceFile{{Path: "same.txt", Content: "one"}, {Path: "same.txt", Content: "two"}}, Argv: []string{"/bin/true"}},
+func TestPersistentExecRequiresAuthenticationAndRejectsUnknownFields(t *testing.T) {
+	srv := newTestAgent(t, &agentConfig{WorkDir: t.TempDir(), ControlToken: "test-token", AllowInsecureControl: true})
+	for name, body := range map[string]string{
+		"missing authentication": `{"argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
+		"shell command field":    `{"command":"echo unsafe","argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := runExecRequest(context.Background(), root, req); err == nil {
-				t.Fatal("runExecRequest succeeded, want validation error")
+			req := httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body))
+			if name != "missing authentication" {
+				req.Header.Set(controlTokenHeader, "test-token")
+			}
+			res := httptest.NewRecorder()
+			srv.handlePersistentExec(res, req)
+			want := http.StatusUnauthorized
+			if name != "missing authentication" {
+				want = http.StatusBadRequest
+			}
+			if res.Code != want {
+				t.Fatalf("status = %d, want %d; body=%s", res.Code, want, res.Body.String())
 			}
 		})
-	}
-	if _, err := runExecRequest(context.Background(), root, execRequest{Argv: []string{"/bin/true"}, Env: map[string]string{"LD_PRELOAD": "evil.so"}}); err == nil {
-		t.Fatal("caller environment override succeeded")
-	}
-	if _, err := runExecRequest(context.Background(), root, execRequest{Argv: []string{"/bin/true"}}); err == nil {
-		t.Fatal("workspace symlink was accepted")
-	}
-}
-
-func TestExecServerBoundsOutputAndKillsTimedOutProcess(t *testing.T) {
-	result, err := runExecRequest(context.Background(), t.TempDir(), execRequest{
-		Argv:      []string{"/bin/sh", "-c", "yes output & yes error >&2"},
-		TimeoutMS: 30,
-		MaxOutput: 128,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.TimedOut || result.ExitCode == 0 {
-		t.Fatalf("result = %+v, want timeout and nonzero exit", result)
-	}
-	if !result.StdoutTruncated || len(result.Stdout) != 128 {
-		t.Fatalf("stdout length/truncation = %d/%t, want 128/true", len(result.Stdout), result.StdoutTruncated)
-	}
-	if !result.StderrTruncated || len(result.Stderr) != 128 {
-		t.Fatalf("stderr length/truncation = %d/%t, want 128/true", len(result.Stderr), result.StderrTruncated)
-	}
-}
-
-func TestExecServerRejectsProcessTimeoutAboveMaximum(t *testing.T) {
-	_, err := runExecRequest(context.Background(), t.TempDir(), execRequest{Argv: []string{"/bin/true"}, TimeoutMS: int((execMaxTimeout + time.Second) / time.Millisecond)})
-	if err == nil {
-		t.Fatal("timeout above maximum was accepted")
 	}
 }
 
@@ -214,28 +94,88 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 	if res.Code != http.StatusConflict {
 		t.Fatalf("digest mismatch status = %d body=%s, want 409", res.Code, res.Body.String())
 	}
+
+	req = httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":8,"sourceDigest":"`+digest+`"}`)))
+	req.Header.Set(controlTokenHeader, "test-token")
+	res = httptest.NewRecorder()
+	srv.handlePersistentExec(res, req)
+	if res.Code != http.StatusConflict {
+		t.Fatalf("revision mismatch status = %d body=%s, want 409", res.Code, res.Body.String())
+	}
 }
 
-func TestExecServerCancellationKillsProcessGroup(t *testing.T) {
+func TestPersistentExecBoundsOutputAndKillsTimedOutProcess(t *testing.T) {
+	workdir := t.TempDir()
+	digest, err := digestSyncFiles(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestAgent(t, &agentConfig{WorkDir: workdir, ControlToken: "test-token"})
+	if rec, _ := doSync(t, srv, syncRequest{Files: []syncFile{}, SourceRevision: 1, SourceDigest: digest}); rec.Code != http.StatusOK {
+		t.Fatalf("sync status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	result, err := runPersistentExec(context.Background(), workdir, persistentExecRequest{
+		Argv: []string{"/bin/sh", "-c", "yes output & yes error >&2"}, WorkDir: ".",
+		TimeoutMS: 30, MaxOutputBytes: 128, SourceRevision: 1, SourceDigest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TimedOut || result.ExitCode == 0 {
+		t.Fatalf("result = %+v, want timeout and nonzero exit", result)
+	}
+	if !result.StdoutTruncated || len(result.Stdout) != 128 || !result.StderrTruncated || len(result.Stderr) != 128 {
+		t.Fatalf("bounded output = stdout %d/%t stderr %d/%t", len(result.Stdout), result.StdoutTruncated, len(result.Stderr), result.StderrTruncated)
+	}
+}
+
+func TestPersistentExecCancellationAndWorkspaceConfinement(t *testing.T) {
+	workdir := t.TempDir()
+	digest, err := digestSyncFiles(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestAgent(t, &agentConfig{WorkDir: workdir, ControlToken: "test-token"})
+	if rec, _ := doSync(t, srv, syncRequest{Files: []syncFile{}, SourceRevision: 1, SourceDigest: digest}); rec.Code != http.StatusOK {
+		t.Fatalf("sync status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := runPersistentExec(context.Background(), workdir, persistentExecRequest{
+		Argv: []string{"/bin/true"}, WorkDir: "../escape", SourceRevision: 1, SourceDigest: digest,
+	}); err == nil {
+		t.Fatal("escaping workdir was accepted")
+	}
+	outside := t.TempDir()
+	rootLink := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(outside, rootLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPersistentExec(context.Background(), rootLink, persistentExecRequest{
+		Argv: []string{"/bin/true"}, WorkDir: ".", SourceRevision: 1, SourceDigest: digest,
+	}); err == nil {
+		t.Fatal("symbolic-link workspace root was accepted")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan execResponse, 1)
 	errs := make(chan error, 1)
 	go func() {
-		result, err := runExecRequest(ctx, t.TempDir(), execRequest{Argv: []string{"/bin/sleep", "30"}})
+		result, runErr := runPersistentExec(ctx, workdir, persistentExecRequest{
+			Argv: []string{"/bin/sleep", "30"}, WorkDir: ".", SourceRevision: 1, SourceDigest: digest,
+		})
 		done <- result
-		errs <- err
+		errs <- runErr
 	}()
 	time.Sleep(30 * time.Millisecond)
 	cancel()
 	select {
 	case result := <-done:
 		if !result.Cancelled {
-			t.Fatalf("result = %+v, want cancelled", result)
+			t.Fatalf("result = %+v, want canceled", result)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("cancelled process did not exit")
+		t.Fatal("canceled process did not exit")
 	}
-	if err := <-errs; err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("run error = %v", err)
+	if runErr := <-errs; runErr != nil && !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("run error = %v", runErr)
 	}
 }

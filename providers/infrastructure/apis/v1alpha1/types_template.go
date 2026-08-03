@@ -504,20 +504,6 @@ type TemplateDataPlaneExec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=262144
 	MaxOutputBytes int32 `json:"maxOutputBytes,omitempty"`
-
-	// MaxFiles is the maximum number of source snapshot files accepted on a
-	// start request. Zero uses the provider default.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=512
-	MaxFiles int32 `json:"maxFiles,omitempty"`
-
-	// MaxFileBytes is the maximum UTF-8 content size of one source snapshot
-	// file. Zero uses the provider default.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1048576
-	MaxFileBytes int32 `json:"maxFileBytes,omitempty"`
 }
 
 // TemplateDataPlaneEndpoint describes one data-plane verb: either a value served

@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"path"
 	"strings"
-	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -33,8 +32,8 @@ import (
 )
 
 // ExecAction is the lifecycle operation requested by an exec call. Commands
-// are intentionally asynchronous: a provider can run them in a short-lived,
-// isolated pod without holding an HTTP request open for the whole workload.
+// are intentionally asynchronous: the provider dispatches them to the live
+// component agent without holding an HTTP request open for the whole workload.
 type ExecAction string
 
 const (
@@ -50,12 +49,8 @@ const (
 	ExecMaxTimeoutSeconds     = 120
 	ExecDefaultOutputBytes    = 256 << 10
 	ExecMaxOutputBytes        = 256 << 10
-	ExecDefaultFiles          = 256
-	ExecMaxFiles              = 512
-	ExecDefaultFileBytes      = 512 << 10
-	ExecMaxFileBytes          = 1 << 20
 
-	execMaxBodyBytes       = 16 << 20
+	execMaxBodyBytes       = 512 << 10
 	execMaxArgv            = 64
 	execMaxArgBytes        = 4096
 	execMaxWorkdirBytes    = 256
@@ -64,10 +59,9 @@ const (
 )
 
 // ExecRequest is the JSON body accepted by the component /exec route. Start
-// carries the durable source revision/digest applied by /sync; the default
-// persistent executor runs against that live component workspace. Files are
-// retained only for the explicit KubernetesExecutor fallback. Poll and cancel
-// carry only a session ID.
+// carries the durable source revision/digest applied by /sync; the persistent
+// executor runs against that live component workspace. Poll and cancel carry
+// only a session ID.
 type ExecRequest struct {
 	Action         ExecAction `json:"action"`
 	SessionID      string     `json:"sessionID,omitempty"`
@@ -77,16 +71,6 @@ type ExecRequest struct {
 	Workdir        string     `json:"workdir,omitempty"`
 	TimeoutSeconds int32      `json:"timeoutSeconds,omitempty"`
 	SourceDigest   string     `json:"sourceDigest,omitempty"`
-	Files          []ExecFile `json:"files,omitempty"`
-}
-
-// ExecFile is one file in the optional source snapshot accepted by the
-// KubernetesExecutor fallback. Persistent execution rejects Files and relies
-// on the manifest written by /sync.
-type ExecFile struct {
-	Path       string `json:"path"`
-	Content    string `json:"content"`
-	Executable bool   `json:"executable,omitempty"`
 }
 
 // ExecResult is the bounded response returned by an Executor. Output is
@@ -111,9 +95,6 @@ type ExecCall struct {
 	Component  string
 	Instance   *unstructured.Unstructured
 	Capability *infrav1alpha1.TemplateDataPlaneExec
-	// DevImage is the resolved platform-owned image from the matching
-	// spec.development component. The caller cannot supply or override it.
-	DevImage string
 	// WorkingDir is the absolute working directory from the matching
 	// development component (defaulting to /workspace).
 	WorkingDir string
@@ -122,7 +103,7 @@ type ExecCall struct {
 	WorkspacePath string
 	// CallerKey is a one-way digest of the forwarded caller token. It binds
 	// poll/cancel to the principal that started the session without exposing a
-	// runtime credential to the executor pod.
+	// runtime credential to the live component agent.
 	CallerKey string
 	// RuntimeNamespace is read from the instance status at the contract's
 	// RuntimeNamespacePath. It is provider-resolved and never request supplied.
@@ -177,16 +158,12 @@ type Executor interface {
 type execLimits struct {
 	timeoutSeconds int32
 	outputBytes    int
-	files          int
-	fileBytes      int
 }
 
 func limitsForCapability(capability *infrav1alpha1.TemplateDataPlaneExec) (execLimits, error) {
 	limits := execLimits{
 		timeoutSeconds: ExecDefaultTimeoutSeconds,
 		outputBytes:    ExecDefaultOutputBytes,
-		files:          ExecDefaultFiles,
-		fileBytes:      ExecDefaultFileBytes,
 	}
 	if capability == nil {
 		return limits, fmt.Errorf("component does not declare an exec capability")
@@ -197,23 +174,11 @@ func limitsForCapability(capability *infrav1alpha1.TemplateDataPlaneExec) (execL
 	if capability.MaxOutputBytes > ExecMaxOutputBytes || capability.MaxOutputBytes < 0 {
 		return limits, fmt.Errorf("exec maxOutputBytes must be between 0 and %d", ExecMaxOutputBytes)
 	}
-	if capability.MaxFiles > ExecMaxFiles || capability.MaxFiles < 0 {
-		return limits, fmt.Errorf("exec maxFiles must be between 0 and %d", ExecMaxFiles)
-	}
-	if capability.MaxFileBytes > ExecMaxFileBytes || capability.MaxFileBytes < 0 {
-		return limits, fmt.Errorf("exec maxFileBytes must be between 0 and %d", ExecMaxFileBytes)
-	}
 	if capability.MaxTimeoutSeconds != 0 {
 		limits.timeoutSeconds = capability.MaxTimeoutSeconds
 	}
 	if capability.MaxOutputBytes != 0 {
 		limits.outputBytes = int(capability.MaxOutputBytes)
-	}
-	if capability.MaxFiles != 0 {
-		limits.files = int(capability.MaxFiles)
-	}
-	if capability.MaxFileBytes != 0 {
-		limits.fileBytes = int(capability.MaxFileBytes)
 	}
 	return limits, nil
 }
@@ -292,34 +257,11 @@ func decodeExecRequest(w http.ResponseWriter, r *http.Request, capability *infra
 		if req.TimeoutSeconds < 0 || req.TimeoutSeconds > limits.timeoutSeconds {
 			return ExecRequest{}, "", fmt.Errorf("timeoutSeconds must be between 0 and %d", limits.timeoutSeconds)
 		}
-		if len(req.Files) > limits.files {
-			return ExecRequest{}, "", fmt.Errorf("start files exceed the %d-file capability limit", limits.files)
-		}
-		for i, file := range req.Files {
-			if len(file.Content) > limits.fileBytes {
-				return ExecRequest{}, "", fmt.Errorf("files[%d] exceeds the %d-byte capability limit", i, limits.fileBytes)
-			}
-			if !utf8.ValidString(file.Content) {
-				return ExecRequest{}, "", fmt.Errorf("files[%d].content must be valid UTF-8", i)
-			}
-			if _, err := normalizeExecPath(file.Path); err != nil {
-				return ExecRequest{}, "", fmt.Errorf("files[%d].path: %w", i, err)
-			}
-		}
-		for i := range req.Files {
-			left, _ := normalizeExecPath(req.Files[i].Path)
-			for j := 0; j < i; j++ {
-				right, _ := normalizeExecPath(req.Files[j].Path)
-				if left == right {
-					return ExecRequest{}, "", fmt.Errorf("files[%d].path duplicates files[%d]", i, j)
-				}
-			}
-		}
 	} else {
 		if req.SessionID == "" {
 			return ExecRequest{}, "", fmt.Errorf("sessionID is required for %s", action)
 		}
-		if len(req.Argv) != 0 || req.Workdir != "" || req.TimeoutSeconds != 0 || req.SourceRevision != 0 || req.SourceDigest != "" || len(req.Files) != 0 {
+		if len(req.Argv) != 0 || req.Workdir != "" || req.TimeoutSeconds != 0 || req.SourceRevision != 0 || req.SourceDigest != "" {
 			return ExecRequest{}, "", fmt.Errorf("%s accepts only sessionID and optional requestID", action)
 		}
 		if key == "" {
@@ -327,6 +269,14 @@ func decodeExecRequest(w http.ResponseWriter, r *http.Request, capability *infra
 		}
 	}
 	return req, key, nil
+}
+
+func normalizeExecWorkdir(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "." {
+		return value, nil
+	}
+	return normalizeExecPath(value)
 }
 
 func normalizeExecPath(value string) (string, error) {
@@ -342,14 +292,6 @@ func normalizeExecPath(value string) (string, error) {
 		return "", fmt.Errorf("escapes the workspace")
 	}
 	return clean, nil
-}
-
-func normalizeExecWorkdir(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "." {
-		return value, nil
-	}
-	return normalizeExecPath(value)
 }
 
 func boundExecResult(result ExecResult, outputBytes int) ExecResult {

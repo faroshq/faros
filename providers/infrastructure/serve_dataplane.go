@@ -12,7 +12,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,7 +20,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/faroshq/provider-infrastructure/backend/kro"
 	"github.com/faroshq/provider-infrastructure/dataplane"
 	"github.com/faroshq/provider-infrastructure/tenant"
 )
@@ -64,21 +62,10 @@ func buildDataPlaneHandler(kcpConfig *rest.Config) *dataplane.Handler {
 
 	factory := tenant.NewClientFactory(kcpConfig)
 	options := []dataplane.HandlerOption{}
-	var executor dataplane.Executor
-	var execErr error
-	// Persistent component execution is the default: the live dev-agent owns
-	// the component PVC/toolchain, so no disposable source-only pod is created.
-	// KubernetesExecutor remains an explicit emergency fallback for operators
-	// that have not rolled out the normal agent yet.
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("KEDGE_INFRA_EXECUTOR")), "kubernetes") {
-		agentImage := strings.TrimSpace(os.Getenv("KEDGE_DEV_AGENT_IMAGE"))
-		if agentImage == "" {
-			agentImage = kro.DefaultDevAgentImage
-		}
-		executor, execErr = dataplane.NewKubernetesExecutor(runtimeCfg, agentImage)
-	} else {
-		executor, execErr = dataplane.NewPersistentExecutor(runtime)
-	}
+	// Persistent component execution is the only executor: the live dev-agent
+	// owns the component PVC/toolchain, so no disposable source-only pod is
+	// created.
+	executor, execErr := dataplane.NewPersistentExecutor(runtime)
 	if execErr != nil {
 		log.Printf("data plane exec: disabled: %v", execErr)
 	} else {

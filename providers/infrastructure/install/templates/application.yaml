@@ -379,8 +379,6 @@ spec:
         exec:
           maxTimeoutSeconds: 120
           maxOutputBytes: 262144
-          maxFiles: 512
-          maxFileBytes: 1048576
         endpoints:
           sync:
             servicePath: status.components.frontend.controlServiceRef
@@ -412,8 +410,6 @@ spec:
         exec:
           maxTimeoutSeconds: 120
           maxOutputBytes: 262144
-          maxFiles: 512
-          maxFileBytes: 1048576
         endpoints:
           sync:
             servicePath: status.components.backend.controlServiceRef

@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
-	"github.com/faroshq/provider-infrastructure/backend/kro"
 )
 
 // PathPrefix is where the handler is mounted on the provider's serve mux. It is
@@ -69,7 +68,7 @@ type Handler struct {
 // the original three-argument NewHandler call sites.
 type HandlerOption func(*Handler)
 
-// WithExec wires the isolated command executor and its explicit policy hook.
+// WithExec wires the bounded persistent command executor and its explicit policy hook.
 // Both must be supplied for the /exec route to become available.
 func WithExec(executor Executor, authorizer ExecAuthorizer) HandlerOption {
 	return func(h *Handler) {
@@ -79,7 +78,7 @@ func WithExec(executor Executor, authorizer ExecAuthorizer) HandlerOption {
 }
 
 // WithDevelopmentGetter supplies the platform-owned development metadata used
-// to derive the executor image and absolute working directory.
+// to derive the component workspace path and absolute working directory.
 func WithDevelopmentGetter(getter DevelopmentGetter) HandlerOption {
 	return func(h *Handler) { h.development = getter }
 }
@@ -243,11 +242,6 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		// caller-controlled.
 		reqBody.Workdir = resolved
 	}
-	devImage, err := kro.ResolveDevelopmentImageToken(dev.DevImage)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
 	runtimeNamespace, err := nestedString(instance, contract.RuntimeNamespacePath)
 	if err != nil || runtimeNamespace == "" {
 		if err == nil {
@@ -259,16 +253,10 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 	// Exec is routed to the live dev-agent control Service. The endpoint is
 	// deliberately not caller-selectable: resolve the platform-required sync
 	// endpoint and replace only its upstream path with the fixed /exec operation.
-	controlTarget := ResolvedTarget{}
-	if target, targetErr := ResolveComponentExecTarget(contract, instance, req.component); targetErr != nil {
-		// Legacy/fallback executors may not need a live control Service, but the
-		// default persistent executor must fail closed before it starts a session.
-		if _, persistent := h.executor.(*PersistentExecutor); persistent {
-			http.Error(w, targetErr.Error(), http.StatusConflict)
-			return
-		}
-	} else {
-		controlTarget = target
+	controlTarget, err := ResolveComponentExecTarget(contract, instance, req.component)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 	authorization := ExecAuthorization{
 		Workspace:   req.workspace,
@@ -292,7 +280,6 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		Component:        req.component,
 		Instance:         instance,
 		Capability:       component.Exec,
-		DevImage:         devImage,
 		WorkingDir:       workingDir,
 		WorkspacePath:    strings.TrimSpace(dev.WorkspacePath),
 		CallerKey:        execCallerKey(id.token),

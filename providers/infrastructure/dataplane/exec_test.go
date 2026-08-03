@@ -73,16 +73,18 @@ func (f *fakeExecutor) Cancel(_ context.Context, call ExecCall) (ExecResult, err
 func execContract() *infrav1alpha1.TemplateDataPlane {
 	return &infrav1alpha1.TemplateDataPlane{
 		RuntimeNamespacePath: "status.runtimeNamespace",
+		TokenSecretPath:      "status.controlSecretRef",
 		Components: map[string]infrav1alpha1.TemplateDataPlaneComponent{
 			"backend": {
 				Endpoints: map[string]infrav1alpha1.TemplateDataPlaneEndpoint{
-					"status": {FromStatus: true},
+					"sync": {
+						ServicePath: "status.components.backend.controlServiceRef",
+						Port:        "control", UpstreamPath: "/sync", Methods: []string{http.MethodPost},
+					},
 				},
 				Exec: &infrav1alpha1.TemplateDataPlaneExec{
 					MaxTimeoutSeconds: 30,
 					MaxOutputBytes:    8,
-					MaxFiles:          2,
-					MaxFileBytes:      32,
 				},
 			},
 		},
@@ -97,7 +99,6 @@ func execRequest(t *testing.T, action ExecAction) *http.Request {
 		SourceRevision: 1,
 		SourceDigest:   "sha256:source",
 		Argv:           []string{"go", "test", "./..."},
-		Files:          []ExecFile{{Path: "main.go", Content: "package main\n"}},
 	}
 	if action == ExecActionStart {
 		body.SessionID = ""
@@ -106,7 +107,6 @@ func execRequest(t *testing.T, action ExecAction) *http.Request {
 		body.SourceRevision = 0
 		body.SourceDigest = ""
 		body.Argv = nil
-		body.Files = nil
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -122,7 +122,13 @@ func newExecHandler(t *testing.T, executor *fakeExecutor, authorizer *fakeExecAu
 	t.Helper()
 	instance := &fakeInstanceGetter{instance: &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "app"},
-		"status":   map[string]any{"runtimeNamespace": "tenant-app"},
+		"status": map[string]any{
+			"runtimeNamespace": "tenant-app",
+			"controlSecretRef": map[string]any{"name": "app-control", "namespace": "tenant-app"},
+			"components": map[string]any{"backend": map[string]any{
+				"controlServiceRef": map[string]any{"name": "app-backend-control", "namespace": "tenant-app"},
+			}},
+		},
 	}}}
 	return NewHandler(instance, &fakeContractGetter{contract: execContract()}, &fakeRuntime{}, WithExec(executor, authorizer), WithDevelopmentGetter(development))
 }
@@ -130,15 +136,15 @@ func newExecHandler(t *testing.T, executor *fakeExecutor, authorizer *fakeExecAu
 func TestHandlerExecStartAuthorizesAndPassesPlatformDevelopment(t *testing.T) {
 	executor := &fakeExecutor{result: ExecResult{SessionID: "session-1", State: "running", Stdout: "123456789"}}
 	authorizer := &fakeExecAuthorizer{}
-	development := &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{DevImage: "${kedge.devImage.node}", WorkingDir: "/workspace/backend"}}
+	development := &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{WorkingDir: "/workspace/backend"}}
 	h := newExecHandler(t, executor, authorizer, development)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, execRequest(t, ExecActionStart))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
 	}
-	if executor.startCall.DevImage != "docker.io/library/node:22-bookworm" || executor.startCall.WorkingDir != "/workspace/backend" {
-		t.Fatalf("executor platform fields = %q / %q", executor.startCall.DevImage, executor.startCall.WorkingDir)
+	if executor.startCall.WorkingDir != "/workspace/backend" {
+		t.Fatalf("executor working dir = %q", executor.startCall.WorkingDir)
 	}
 	if executor.startCall.IdempotencyKey != "run-1" || executor.startCall.Request.RequestID != "run-1" {
 		t.Fatalf("idempotency = %q / %q", executor.startCall.IdempotencyKey, executor.startCall.Request.RequestID)
@@ -154,7 +160,7 @@ func TestHandlerExecStartAuthorizesAndPassesPlatformDevelopment(t *testing.T) {
 func TestHandlerExecPollAndCancelDispatch(t *testing.T) {
 	executor := &fakeExecutor{result: ExecResult{SessionID: "session-1", State: "canceled"}}
 	authorizer := &fakeExecAuthorizer{}
-	h := newExecHandler(t, executor, authorizer, &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{DevImage: "${kedge.devImage.node}"}})
+	h := newExecHandler(t, executor, authorizer, &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{}})
 	for _, action := range []ExecAction{ExecActionPoll, ExecActionCancel} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, execRequest(t, action))
@@ -168,7 +174,7 @@ func TestHandlerExecPollAndCancelDispatch(t *testing.T) {
 }
 
 func TestHandlerExecRejectsMissingIdempotencyAndTail(t *testing.T) {
-	h := newExecHandler(t, &fakeExecutor{}, &fakeExecAuthorizer{}, &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{DevImage: "${kedge.devImage.node}"}})
+	h := newExecHandler(t, &fakeExecutor{}, &fakeExecAuthorizer{}, &fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{}})
 	r := execRequest(t, ExecActionStart)
 	r.Header.Del("Idempotency-Key")
 	rec := httptest.NewRecorder()
@@ -186,30 +192,11 @@ func TestHandlerExecRejectsMissingIdempotencyAndTail(t *testing.T) {
 }
 
 func TestHandlerExecRequiresAuthorizer(t *testing.T) {
-	h := NewHandler(&fakeInstanceGetter{instance: &unstructured.Unstructured{}}, &fakeContractGetter{contract: execContract()}, &fakeRuntime{}, WithExec(&fakeExecutor{}, nil), WithDevelopmentGetter(&fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{DevImage: "${kedge.devImage.node}"}}))
+	h := NewHandler(&fakeInstanceGetter{instance: &unstructured.Unstructured{}}, &fakeContractGetter{contract: execContract()}, &fakeRuntime{}, WithExec(&fakeExecutor{}, nil), WithDevelopmentGetter(&fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{}}))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, execRequest(t, ExecActionStart))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
-	}
-}
-
-func TestDecodeExecRequestRejectsDuplicateAndEscapingFiles(t *testing.T) {
-	capability := &infrav1alpha1.TemplateDataPlaneExec{MaxFiles: 3, MaxFileBytes: 32}
-	for _, files := range [][]ExecFile{
-		{{Path: "a/../main.go", Content: "x"}, {Path: "main.go", Content: "y"}},
-		{{Path: "../secret", Content: "x"}},
-	} {
-		body, err := json.Marshal(ExecRequest{Action: ExecActionStart, RequestID: "key", Argv: []string{"true"}, SourceRevision: 1, SourceDigest: "sha", Files: files})
-		if err != nil {
-			t.Fatal(err)
-		}
-		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
-		r.Header.Set("Idempotency-Key", "key")
-		w := httptest.NewRecorder()
-		if _, _, err := decodeExecRequest(w, r, capability); err == nil {
-			t.Fatal("expected invalid file path error")
-		}
 	}
 }
 
@@ -223,6 +210,16 @@ func TestDecodeExecRequestRequiresSourceRevision(t *testing.T) {
 	w := httptest.NewRecorder()
 	if _, _, err := decodeExecRequest(w, r, &infrav1alpha1.TemplateDataPlaneExec{}); err == nil || !strings.Contains(err.Error(), "sourceRevision is required") {
 		t.Fatalf("decodeExecRequest error = %v, want missing sourceRevision", err)
+	}
+}
+
+func TestDecodeExecRequestRejectsRetiredSourceSnapshot(t *testing.T) {
+	body := `{"action":"start","requestID":"key","sourceRevision":1,"sourceDigest":"sha","argv":["true"],"files":[]}`
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Idempotency-Key", "key")
+	w := httptest.NewRecorder()
+	if _, _, err := decodeExecRequest(w, r, &infrav1alpha1.TemplateDataPlaneExec{}); err == nil || !strings.Contains(err.Error(), `unknown field "files"`) {
+		t.Fatalf("decodeExecRequest error = %v, want retired files field rejection", err)
 	}
 }
 

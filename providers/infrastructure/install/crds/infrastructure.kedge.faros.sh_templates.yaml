@@ -225,22 +225,6 @@ spec:
                             Upgrade is an HTTP proxy feature and must never implicitly grant command
                             execution or Kubernetes SPDY exec access.
                           properties:
-                            maxFileBytes:
-                              description: |-
-                                MaxFileBytes is the maximum UTF-8 content size of one source snapshot
-                                file. Zero uses the provider default.
-                              format: int32
-                              maximum: 1048576
-                              minimum: 0
-                              type: integer
-                            maxFiles:
-                              description: |-
-                                MaxFiles is the maximum number of source snapshot files accepted on a
-                                start request. Zero uses the provider default.
-                              format: int32
-                              maximum: 512
-                              minimum: 0
-                              type: integer
                             maxOutputBytes:
                               description: |-
                                 MaxOutputBytes is the combined stdout/stderr response ceiling. Zero uses

@@ -106,14 +106,3 @@ func TestPersistentExecutorRoutesLiveAgentAndDeduplicatesStart(t *testing.T) {
 		t.Fatalf("agent control token = %q", got)
 	}
 }
-
-func TestPersistentExecutorRejectsSourceFiles(t *testing.T) {
-	call := ExecCall{
-		Request:        ExecRequest{Action: ExecActionStart, RequestID: "request-1", SourceRevision: 1, SourceDigest: strings.Repeat("a", 64), Files: []ExecFile{{Path: "main.go", Content: "package main"}}},
-		IdempotencyKey: "request-1", RuntimeNamespace: "runtime", CallerKey: "caller", WorkingDir: "/workspace",
-		ControlTarget: ResolvedTarget{ServiceNamespace: "runtime", ServiceName: "control", ServicePort: "control"},
-	}
-	if err := validatePersistentExecCall(call); err == nil || !strings.Contains(err.Error(), "does not accept source files") {
-		t.Fatalf("validatePersistentExecCall = %v", err)
-	}
-}

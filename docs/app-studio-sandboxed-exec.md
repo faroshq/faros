@@ -132,16 +132,19 @@ Templates that mount high-value production credentials are not appropriate for
 assistant-driven development execution. Runtime namespaces should use
 development-scoped identities and least-privilege network and secret access.
 
-## Disposable compatibility executor
+## Single execution path
 
-Infrastructure retains `KubernetesExecutor` as an explicit operator fallback
-(`KEDGE_INFRA_EXECUTOR=kubernetes`) during rollout. That mode creates an
-ephemeral source-staging pod with no application mounts and default-deny egress,
-but it does not reuse the live dependency tree or cache and therefore does not
-provide the normal App Studio developer experience. Production deployments
-using the fallback must retain its pod, NetworkPolicy, and pod-proxy RBAC and a
-NetworkPolicy-enforcing CNI. The persistent default needs the already-existing
-Service proxy and control-secret access used by development sync/log/restart.
+Infrastructure supports only persistent execution through the selected live
+development component. There is no executor mode selector, disposable
+source-staging pod, or compatibility path that can silently switch a project
+back to a second workspace. The data-plane handler fails closed when the live
+component control target or normal development agent is unavailable.
+
+This also keeps command execution on the already-existing development Service
+proxy and control-secret path used by sync, logs, and restart. It does not need
+separate executor-pod lifecycle, NetworkPolicy, pod-proxy, source-upload, or
+separate executor-image configuration. The normal development-agent image
+remains part of every live development component.
 
 Stateful PTY sessions, package-registry policy controls, and approved
 runtime-to-FileStore change sets remain separate future capabilities.

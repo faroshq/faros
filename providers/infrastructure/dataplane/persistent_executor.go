@@ -32,6 +32,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const (
@@ -41,9 +42,31 @@ const (
 	persistentExecAgentBodyLimit   = 2 << 20
 )
 
+var executionGroupResource = schema.GroupResource{Group: "infrastructure.kedge.faros.sh", Resource: "executions"}
+
+type execAgentRequest struct {
+	Argv           []string `json:"argv"`
+	WorkDir        string   `json:"workDir,omitempty"`
+	TimeoutMS      int      `json:"timeoutMs,omitempty"`
+	MaxOutputBytes int      `json:"maxOutputBytes,omitempty"`
+	SourceRevision uint64   `json:"sourceRevision,omitempty"`
+	SourceDigest   string   `json:"sourceDigest,omitempty"`
+}
+
+type execAgentResponse struct {
+	Phase           string `json:"phase"`
+	ExitCode        int32  `json:"exitCode"`
+	TimedOut        bool   `json:"timedOut,omitempty"`
+	Cancelled       bool   `json:"cancelled,omitempty"`
+	Stdout          string `json:"stdout,omitempty"`
+	Stderr          string `json:"stderr,omitempty"`
+	StdoutTruncated bool   `json:"stdoutTruncated,omitempty"`
+	StderrTruncated bool   `json:"stderrTruncated,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
 // PersistentExecutor sends direct-argv requests to the live component's
-// kedge-dev-agent. Unlike KubernetesExecutor it never creates a pod or stages
-// a source snapshot: sync owns the persistent PVC and the agent verifies the
+// kedge-dev-agent. Sync owns the persistent PVC and the agent verifies the
 // synchronized revision/digest before launching a child in that workspace.
 type PersistentExecutor struct {
 	runtime Runtime
@@ -310,9 +333,6 @@ func validatePersistentExecCall(call ExecCall) error {
 	if !path.IsAbs(call.WorkingDir) || path.Clean(call.WorkingDir) == "/" {
 		return fmt.Errorf("persistent executor working directory must be an absolute non-root path")
 	}
-	if len(call.Request.Files) != 0 {
-		return fmt.Errorf("persistent executor does not accept source files; synchronize the component first")
-	}
 	if call.Request.SourceRevision == 0 {
 		return fmt.Errorf("sourceRevision is required for persistent execution")
 	}
@@ -349,6 +369,67 @@ func persistentExecCallFingerprint(call ExecCall) (string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func execSessionID(call ExecCall) string {
+	sum := sha256.Sum256([]byte(execRequestKey(call)))
+	return hex.EncodeToString(sum[:16])
+}
+
+func execRequestKey(call ExecCall) string {
+	return strings.Join([]string{call.CallerKey, call.Workspace, call.Resource, call.Name, call.Component, call.IdempotencyKey}, "\x00")
+}
+
+func execTimeoutSeconds(call ExecCall) int32 {
+	if call.Request.TimeoutSeconds > 0 {
+		return call.Request.TimeoutSeconds
+	}
+	limits, _ := limitsForCapability(call.Capability)
+	return limits.timeoutSeconds
+}
+
+func execOutputLimit(call ExecCall) int {
+	limits, _ := limitsForCapability(call.Capability)
+	return limits.outputBytes
+}
+
+func execTerminalState(state string) bool {
+	switch state {
+	case "succeeded", "failed", "canceled", "timed_out":
+		return true
+	default:
+		return false
+	}
+}
+
+func execResultFromAgent(response execAgentResponse) ExecResult {
+	state := "failed"
+	switch {
+	case response.Cancelled:
+		state = "canceled"
+	case response.TimedOut:
+		state = "timed_out"
+	case response.Phase == "completed" && response.ExitCode == 0:
+		state = "succeeded"
+	case response.Phase == "completed":
+		state = "failed"
+	case response.Phase == "cancelled" || response.Phase == "canceled":
+		state = "canceled"
+	case response.Phase == "timed_out":
+		state = "timed_out"
+	}
+	stderr := response.Stderr
+	if response.Error != "" {
+		if stderr != "" {
+			stderr += "\n"
+		}
+		stderr += response.Error
+	}
+	exitCode := response.ExitCode
+	return ExecResult{
+		State: state, ExitCode: &exitCode, Stdout: response.Stdout, Stderr: stderr,
+		Truncated: response.StdoutTruncated || response.StderrTruncated,
+	}
 }
 
 func persistentExecRunDeadline(call ExecCall) time.Duration {

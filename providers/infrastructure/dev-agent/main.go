@@ -35,10 +35,6 @@ You may obtain a copy of the License at
 //     GET  /logs     current dev-process attempt output (text/plain).
 //     GET  /status   current child-process and declared-port readiness (JSON).
 //
-// With --exec-server, the same injected binary runs without an app-process
-// supervisor and exposes only authenticated POST /exec for one direct-argv
-// command against a staged source workspace.
-//
 // Every endpoint except /healthz requires X-Sandbox-Control-Token (constant-
 // time compared against KEDGE_DEV_CONTROL_TOKEN, read once then cleared).
 // File writes are confined to the workdir via os.Root. SANDBOX_* names are
@@ -120,21 +116,14 @@ func main() {
 		}
 		return
 	}
-	execServer := len(os.Args) >= 2 && os.Args[1] == "--exec-server"
-
 	cfg, err := configFromEnv()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	var srv *agentServer
-	if execServer {
-		srv = newExecAgentServer(ctx, cfg)
-	} else {
-		srv = newAgentServer(ctx, cfg)
-	}
-	if !execServer && cfg.StartCommand != "" {
+	srv := newAgentServer(ctx, cfg)
+	if cfg.StartCommand != "" {
 		if err := srv.supervisor.start(ctx); err != nil {
 			log.Printf("initial process start failed: %v", err)
 		}
@@ -153,9 +142,7 @@ func main() {
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if !execServer {
-		_ = srv.supervisor.stop()
-	}
+	_ = srv.supervisor.stop()
 	_ = httpSrv.Shutdown(shutdown)
 }
 
