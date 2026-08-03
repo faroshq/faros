@@ -18,6 +18,9 @@ package dataplane
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +28,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
@@ -39,6 +45,9 @@ func TestExecPodForCallHasIsolatedSecurityProfile(t *testing.T) {
 	}
 	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 1 {
 		t.Fatalf("containers = %d init = %d", len(pod.Spec.Containers), len(pod.Spec.InitContainers))
+	}
+	if got := pod.Spec.InitContainers[0].ImagePullPolicy; got != corev1.PullIfNotPresent {
+		t.Fatalf("injector image pull policy = %q, want %q for side-loaded local images and digest-pinned production images", got, corev1.PullIfNotPresent)
 	}
 	container := pod.Spec.Containers[0]
 	if container.Image != call.DevImage || len(container.Command) != 1 || container.Command[0] != "/kedge/bin/kedge-dev-agent" {
@@ -219,6 +228,39 @@ func TestExecCallFingerprintIncludesRequestWorkdir(t *testing.T) {
 func TestExecPodProxyNameSelectsControlPort(t *testing.T) {
 	if got := execPodProxyName("sandbox"); got != "sandbox:7070" {
 		t.Fatalf("proxy name = %q, want sandbox:7070", got)
+	}
+}
+
+func TestRestExecPodProxyUsesProxySubresourceRoute(t *testing.T) {
+	token := "one-time-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got, want := r.URL.Path, "/api/v1/namespaces/runtime/pods/sandbox:7070/proxy/exec"; got != want {
+			t.Errorf("path = %q, want %q", got, want)
+		}
+		if got := r.Header.Get(execAgentTokenHeader); got != token {
+			t.Errorf("control token = %q, want %q", got, token)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(execAgentResponse{Phase: "completed"})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := rest.RESTClientFor(&rest.Config{
+		Host:    server.URL,
+		APIPath: "/api",
+		ContentConfig: rest.ContentConfig{
+			GroupVersion:         &schema.GroupVersion{Version: "v1"},
+			NegotiatedSerializer: clientgoscheme.Codecs.WithoutConversion(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (restExecPodProxy{client: client}).Execute(context.Background(), "runtime", "sandbox", token, execAgentRequest{}); err != nil {
+		t.Fatal(err)
 	}
 }
 

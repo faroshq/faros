@@ -670,7 +670,7 @@ func execPodForCall(call ExecCall, name, agentImage, token string) *corev1.Pod {
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			InitContainers: []corev1.Container{{
-				Name: execInjectorContainerName, Image: agentImage, Args: []string{"--install", "/kedge/bin"},
+				Name: execInjectorContainerName, Image: agentImage, ImagePullPolicy: corev1.PullIfNotPresent, Args: []string{"--install", "/kedge/bin"},
 				SecurityContext: security,
 				VolumeMounts:    []corev1.VolumeMount{{Name: "agent-bin", MountPath: "/kedge/bin", MountPropagation: &mode}},
 				Resources: corev1.ResourceRequirements{
