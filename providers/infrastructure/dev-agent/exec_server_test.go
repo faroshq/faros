@@ -95,22 +95,24 @@ func TestPersistentExecReapsSetsidDescendantOnEveryCompletionPath(t *testing.T) 
 	}
 }
 
-func TestPersistentExecRequiresAuthenticationAndRejectsUnknownFields(t *testing.T) {
-	srv := newTestAgent(t, &agentConfig{WorkDir: t.TempDir(), ControlToken: "test-token", AllowInsecureControl: true})
+func TestStatelessExecutorIsNarrowAndRejectsUnknownFields(t *testing.T) {
+	workspace := t.TempDir()
+	srv := &statelessExecutor{workspace: workspace}
 	for name, body := range map[string]string{
-		"missing authentication": `{"argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
-		"shell command field":    `{"command":"echo unsafe","argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
+		"wrong path":          `{"argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
+		"shell command field": `{"command":"echo unsafe","argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/exec", strings.NewReader(body))
-			if name != "missing authentication" {
-				req.Header.Set(controlTokenHeader, "test-token")
+			requestPath := "/internal/exec"
+			if name == "wrong path" {
+				requestPath = "/exec"
 			}
+			req := httptest.NewRequest(http.MethodPost, requestPath, strings.NewReader(body))
 			res := httptest.NewRecorder()
-			srv.handlePersistentExec(res, req)
-			want := http.StatusUnauthorized
-			if name != "missing authentication" {
-				want = http.StatusBadRequest
+			srv.ServeHTTP(res, req)
+			want := http.StatusBadRequest
+			if name == "wrong path" {
+				want = http.StatusNotFound
 			}
 			if res.Code != want {
 				t.Fatalf("status = %d, want %d; body=%s", res.Code, want, res.Body.String())
@@ -122,6 +124,7 @@ func TestPersistentExecRequiresAuthenticationAndRejectsUnknownFields(t *testing.
 func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *testing.T) {
 	workdir := t.TempDir()
 	srv := newTestAgent(t, &agentConfig{WorkDir: workdir, ControlToken: "test-token"})
+	executor := &statelessExecutor{workspace: workdir}
 	files := []syncFile{{Path: "main.sh", Content: "#!/bin/sh\nprintf '%s\\n' \"$ONLY_EXPLICIT\"\n"}}
 	digest, err := digestSyncFiles(files)
 	if err != nil {
@@ -137,10 +140,9 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader(raw))
-	req.Header.Set(controlTokenHeader, "test-token")
+	req := httptest.NewRequest(http.MethodPost, "/internal/exec", bytes.NewReader(raw))
 	res := httptest.NewRecorder()
-	srv.handlePersistentExec(res, req)
+	executor.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("persistent exec status = %d body=%s", res.Code, res.Body.String())
 	}
@@ -152,18 +154,16 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 		t.Fatalf("persistent exec response = %+v", got)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":7,"sourceDigest":"sha256:bad"}`)))
-	req.Header.Set(controlTokenHeader, "test-token")
+	req = httptest.NewRequest(http.MethodPost, "/internal/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":7,"sourceDigest":"sha256:bad"}`)))
 	res = httptest.NewRecorder()
-	srv.handlePersistentExec(res, req)
+	executor.ServeHTTP(res, req)
 	if res.Code != http.StatusConflict {
 		t.Fatalf("digest mismatch status = %d body=%s, want 409", res.Code, res.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":8,"sourceDigest":"`+digest+`"}`)))
-	req.Header.Set(controlTokenHeader, "test-token")
+	req = httptest.NewRequest(http.MethodPost, "/internal/exec", bytes.NewReader([]byte(`{"argv":["/bin/true"],"sourceRevision":8,"sourceDigest":"`+digest+`"}`)))
 	res = httptest.NewRecorder()
-	srv.handlePersistentExec(res, req)
+	executor.ServeHTTP(res, req)
 	if res.Code != http.StatusConflict {
 		t.Fatalf("revision mismatch status = %d body=%s, want 409", res.Code, res.Body.String())
 	}

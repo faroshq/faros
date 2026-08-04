@@ -67,6 +67,11 @@ os.putenv('KCP_IMAGE_TAG', kcp_image_tag)
 # owns the wiring and reconciles drift on its own.
 os.putenv('KCP_TOKEN_AUTH_SECRET', 'kcp-static-tokens')
 
+# This stack does not run the optional KCP contrib dashboard. The upstream
+# Tiltfile enables it by default and otherwise expects a separate
+# contrib-dashboard checkout.
+os.putenv('KCP_PORTAL_ENABLED', 'false')
+
 kcp_tilt = os.path.join(kcp_dir, 'contrib', 'tilt', 'Tiltfile.static')
 if not os.path.exists(kcp_tilt):
     fail('expected upstream kcp Tiltfile at %s — is --kcp-dir pointing at a kcp checkout?' % kcp_tilt)
@@ -82,6 +87,18 @@ existing = str(local('kind get clusters', quiet=True, echo_off=True)).split('\n'
 if cluster_name not in existing:
     print('creating kind cluster %s' % cluster_name)
     local('kind create cluster --name %s' % cluster_name, quiet=False)
+
+# Provider binaries run on the host while the hub runs in kind. Docker Desktop
+# supplies host.docker.internal automatically, but Linux Docker does not, so
+# derive the kind node's host-side bridge gateway and inject it into the hub
+# pod below. Keep this dynamic because Docker network subnets can vary.
+kind_host_gateway_ip = str(local(
+    "docker inspect %s-control-plane --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'" % cluster_name,
+    quiet=True,
+    echo_off=True,
+)).strip()
+if not kind_host_gateway_ip:
+    fail('could not determine the Docker bridge gateway for kind cluster %s' % cluster_name)
 
 # Host-accessible kubeconfig for the kind cluster (uses 127.0.0.1:<random>).
 # Used by `make dev-kro-up-into` so it knows which cluster to helm-install
@@ -428,6 +445,10 @@ k8s_yaml(helm(
         'hostAliases[0].hostnames[0]=kcp.localhost',
         'hostAliases[0].hostnames[1]=root.kcp.localhost',
         'hostAliases[0].hostnames[2]=theseus.kcp.localhost',
+        # Provider processes listen on the host. Linux kind pods do not resolve
+        # host.docker.internal unless we provide the Docker bridge gateway.
+        'hostAliases[1].ip=%s' % kind_host_gateway_ip,
+        'hostAliases[1].hostnames[0]=host.docker.internal',
     ],
 ))
 
