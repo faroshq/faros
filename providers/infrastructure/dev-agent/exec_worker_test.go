@@ -189,3 +189,55 @@ func TestCoordinatorTerminalPersistenceFailureLogsAndExits(t *testing.T) {
 		t.Fatal("terminal persistence failure was not logged")
 	}
 }
+
+func TestCoordinatorRunningPersistenceFailureLogsExitsAndDoesNotDispatch(t *testing.T) {
+	workspace, stateDir := t.TempDir(), t.TempDir()
+	dispatch := &blockingDispatcher{started: make(chan struct{}), release: make(chan struct{})}
+	coordinator, err := newExecCoordinator(workspace, stateDir, "token", dispatch, &sync.Mutex{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalWrite := coordinator.writeSession
+	coordinator.writeSession = func(record execSessionRecord) error {
+		if record.Result.State == "running" {
+			return errors.New("injected running write failure")
+		}
+		return originalWrite(record)
+	}
+	exited := make(chan int, 1)
+	logged := make(chan string, 1)
+	coordinator.exit = func(code int) { exited <- code }
+	coordinator.logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
+
+	req := testWorkerRequest()
+	if _, err := coordinator.start(req); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-exited:
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("running persistence failure did not exit")
+	}
+	select {
+	case message := <-logged:
+		if !strings.Contains(message, "FATAL") || !strings.Contains(message, "injected running write failure") {
+			t.Fatalf("fatal log = %q", message)
+		}
+	default:
+		t.Fatal("running persistence failure was not logged")
+	}
+	dispatch.mu.Lock()
+	defer dispatch.mu.Unlock()
+	if dispatch.calls != 0 {
+		t.Fatalf("dispatch calls = %d, want 0", dispatch.calls)
+	}
+	coordinator.mu.Lock()
+	_, active := coordinator.active[req.SessionID]
+	coordinator.mu.Unlock()
+	if active {
+		t.Fatal("failed queued session remains active")
+	}
+}

@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -82,6 +83,9 @@ type persistentExecRequest struct {
 
 type statelessExecutor struct {
 	workspace string
+	execute   func(context.Context, string, persistentExecRequest) (execResponse, error)
+	exit      func(int)
+	failed    atomic.Bool
 }
 
 func (s *statelessExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +96,10 @@ func (s *statelessExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.failed.Load() {
+		http.Error(w, "executor is unavailable after an unproven process cleanup", http.StatusServiceUnavailable)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, execRequestMaxBytes)
@@ -107,18 +115,46 @@ func (s *statelessExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body must contain one JSON object", http.StatusBadRequest)
 		return
 	}
-	result, err := runPersistentExec(r.Context(), s.workspace, req)
+	execute := s.execute
+	if execute == nil {
+		execute = runPersistentExec
+	}
+	result, err := execute(r.Context(), s.workspace, req)
 	if err != nil {
 		// Revision/digest mismatch is a conflict: the caller must wait for the
 		// authoritative sync evidence rather than retrying the same command.
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "source revision") || strings.Contains(err.Error(), "source digest") || strings.Contains(err.Error(), "workspace manifest") {
+		if errors.Is(err, errExecCleanupUnproven) {
+			status = http.StatusInternalServerError
+		} else if strings.Contains(err.Error(), "source revision") || strings.Contains(err.Error(), "source digest") || strings.Contains(err.Error(), "workspace manifest") {
 			status = http.StatusConflict
 		}
 		http.Error(w, err.Error(), status)
+		if errors.Is(err, errExecCleanupUnproven) {
+			s.failStop()
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// failStop makes cleanup uncertainty terminal for this executor. Continuing to
+// accept commands after an execution may have escaped would violate the one-at-
+// a-time process boundary; the pod restart restores a clean PID namespace.
+func (s *statelessExecutor) failStop() {
+	if !s.failed.CompareAndSwap(false, true) {
+		return
+	}
+	exit := s.exit
+	if exit == nil {
+		exit = os.Exit
+	}
+	go func() {
+		// Give the HTTP server a brief opportunity to flush the cleanup failure
+		// to the coordinator before terminating the executor process.
+		time.Sleep(10 * time.Millisecond)
+		exit(1)
+	}()
 }
 
 func runPersistentExec(parent context.Context, workspace string, req persistentExecRequest) (execResponse, error) {

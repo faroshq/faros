@@ -153,7 +153,7 @@ func runRuntimeSupervisor(ctx context.Context, cfg *agentConfig) error {
 }
 
 func runStatelessExecutor(ctx context.Context, cfg *agentConfig) error {
-	srv := &http.Server{Addr: defaultExecutorAddr, Handler: &statelessExecutor{workspace: cfg.WorkDir}, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: defaultExecutorAddr, Handler: &statelessExecutor{workspace: cfg.WorkDir, exit: os.Exit}, ReadHeaderTimeout: 10 * time.Second}
 	return serveUntilDone(ctx, srv, nil)
 }
 

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,6 +119,40 @@ func TestStatelessExecutorIsNarrowAndRejectsUnknownFields(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body=%s", res.Code, want, res.Body.String())
 			}
 		})
+	}
+}
+
+func TestStatelessExecutorFailStopsWhenCleanupCannotBeProven(t *testing.T) {
+	exited := make(chan int, 1)
+	executions := 0
+	srv := &statelessExecutor{
+		workspace: t.TempDir(),
+		execute: func(context.Context, string, persistentExecRequest) (execResponse, error) {
+			executions++
+			return execResponse{}, fmt.Errorf("cleanup escaped process: %w", errExecCleanupUnproven)
+		},
+		exit: func(code int) { exited <- code },
+	}
+	req := httptest.NewRequest(http.MethodPost, "/internal/exec", strings.NewReader(
+		`{"argv":["/bin/true"],"sourceRevision":1,"sourceDigest":"sha256:test"}`,
+	))
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, req)
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", res.Code, http.StatusInternalServerError, res.Body.String())
+	}
+	res = httptest.NewRecorder()
+	srv.ServeHTTP(res, req.Clone(context.Background()))
+	if res.Code != http.StatusServiceUnavailable || executions != 1 {
+		t.Fatalf("poisoned executor status = %d, executions = %d; want %d, 1", res.Code, executions, http.StatusServiceUnavailable)
+	}
+	select {
+	case code := <-exited:
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unproven cleanup did not fail-stop the executor")
 	}
 }
 

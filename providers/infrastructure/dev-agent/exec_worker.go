@@ -338,23 +338,45 @@ func (w *execCoordinator) run(ctx context.Context, req workerExecRequest) {
 		w.finish(req.SessionID, workerExecResult{State: "canceled"}, ctx.Err())
 		return
 	}
-	if !w.setRunning(req.SessionID) {
+	running, err := w.setRunning(req.SessionID)
+	if err != nil {
+		w.clearActive(req.SessionID)
+		w.fatalPersistence(req.SessionID, err)
+		return
+	}
+	if !running {
+		w.clearActive(req.SessionID)
 		return
 	}
 	response, runErr := w.dispatcher.Execute(ctx, req.persistentExecRequest)
 	w.finish(req.SessionID, workerResultFromExec(response, runErr), runErr)
 }
 
-func (w *execCoordinator) setRunning(sessionID string) bool {
+func (w *execCoordinator) setRunning(sessionID string) (bool, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	record, found, err := w.readRecord(sessionID)
-	if err != nil || !found || workerTerminal(record.Result.State) {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("read queued execution session: %w", err)
+	}
+	if !found {
+		return false, errors.New("durable queued execution record disappeared")
+	}
+	if workerTerminal(record.Result.State) {
+		return false, nil
 	}
 	record.Result.State = "running"
 	record.UpdatedAt = time.Now().UTC()
-	return w.persistRecord(record) == nil
+	if err := w.persistRecord(record); err != nil {
+		return false, fmt.Errorf("persist running execution session: %w", err)
+	}
+	return true, nil
+}
+
+func (w *execCoordinator) clearActive(sessionID string) {
+	w.mu.Lock()
+	delete(w.active, sessionID)
+	w.mu.Unlock()
 }
 
 func (w *execCoordinator) finish(sessionID string, result workerExecResult, runErr error) {
@@ -393,7 +415,7 @@ func (w *execCoordinator) persistRecord(record execSessionRecord) error {
 }
 
 func (w *execCoordinator) fatalPersistence(sessionID string, err error) {
-	w.logf("FATAL: persist terminal execution session %s: %v", sessionID, err)
+	w.logf("FATAL: persist execution session %s: %v", sessionID, err)
 	w.exit(1)
 }
 
