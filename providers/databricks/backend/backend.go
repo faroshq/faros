@@ -38,9 +38,9 @@ type StatementClient struct {
 	AllowInsecureWorkspaceHost bool
 }
 
-// QueryExecutionTarget is assembled by the TableQuery controller after it
-// resolves the tenant-owned Table -> Warehouse -> Connection -> Secret chain.
-// Callers never supply the credential or backend endpoint through MCP.
+// QueryExecutionTarget is assembled by a tenant-scoped direct action executor
+// after it resolves the tenant-owned Table -> Warehouse -> Connection -> Secret
+// chain. Callers never supply the credential or backend endpoint through MCP.
 type QueryExecutionTarget struct {
 	Table          queryapi.TableRef
 	Connection     queryapi.ConnectionRef

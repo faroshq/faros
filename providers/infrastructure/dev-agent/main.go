@@ -20,13 +20,14 @@ You may obtain a copy of the License at
 // The public control contract remains:
 //
 //	GET  /healthz  liveness; no auth.
+//	GET  /readyz   coordinator readiness; no auth.
 //	POST /sync     write/delete workspace files; restart: ""|"auto"|"always".
 //	POST /restart  stop + start the dev process.
 //	POST /env      set non-secret env for the dev process; optional restart.
 //	GET  /logs     current dev-process attempt output (text/plain).
 //	GET  /status   current child-process and declared-port readiness (JSON).
 //
-// Every endpoint except /healthz requires X-Sandbox-Control-Token (constant-
+// Every endpoint except /healthz and /readyz requires X-Sandbox-Control-Token (constant-
 // time compared against KEDGE_DEV_CONTROL_TOKEN, read once then cleared).
 // File writes are confined to the workdir via os.Root.
 //
@@ -82,6 +83,9 @@ const (
 	previewConsolePluginName = "preview-console-plugin.mjs"
 	previewConsoleJWKSName   = "preview-console-jwks.json"
 	previewConsoleJWKSEnv    = "KEDGE_PREVIEW_CONSOLE_VERIFICATION_JWKS"
+	actionsNodeAssetDir      = "/kedge-actions-node"
+	actionsNodeAssetDirEnv   = "KEDGE_ACTIONS_NODE_ASSET_DIR"
+	actionsNodePackageName   = "@kedge/actions-node"
 	workspaceManifestName    = ".kedge-workspace-manifest.json"
 )
 
@@ -106,6 +110,23 @@ type agentConfig struct {
 	StateDir             string
 	RuntimeURL           string
 	ExecutorURL          string
+	// Provider Actions identity exchange. The bootstrap token is read from a
+	// projected file only in coordinator mode; the app receives only the
+	// refreshed token file and non-secret context.
+	ActionsBootstrapTokenFile string
+	ActionsTokenFile          string
+	ActionsExchangeURL        string
+	ActionsBaseURL            string
+	ActionsProject            string
+	ActionsProjectUID         string
+	ActionsEnvironment        string
+	ActionsInstance           string
+	ActionsTenantPath         string
+	ActionsOrg                string
+	ActionsWorkspace          string
+	ActionsCAFile             string
+	actionsTokenState         *actionsTokenState
+	actionsHTTPClient         *http.Client
 }
 
 func main() {
@@ -194,6 +215,9 @@ func runCoordinator(ctx context.Context, cfg *agentConfig) error {
 	if strings.TrimSpace(cfg.StateDir) == "" {
 		return errors.New("KEDGE_DEV_STATE_DIR is required in coordinator mode")
 	}
+	if cfg.actionsTokenState == nil {
+		cfg.actionsTokenState = newActionsTokenState(strings.TrimSpace(cfg.ActionsExchangeURL) != "")
+	}
 	mutationMu := &sync.Mutex{}
 	runtime := &httpRuntimeClient{baseURL: cfg.RuntimeURL, client: &http.Client{Timeout: 3 * time.Minute}}
 	control := newCoordinatorServer(cfg, runtime, mutationMu)
@@ -201,6 +225,9 @@ func runCoordinator(ctx context.Context, cfg *agentConfig) error {
 		&httpExecDispatcher{url: strings.TrimRight(cfg.ExecutorURL, "/") + "/internal/exec", client: &http.Client{}}, mutationMu)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(cfg.ActionsExchangeURL) != "" {
+		go runActionsTokenRefreshLoop(ctx, cfg)
 	}
 	controlSrv := &http.Server{Addr: defaultControlAddr, Handler: control, ReadHeaderTimeout: 10 * time.Second}
 	execSrv := &http.Server{Addr: defaultExecAddr, Handler: execCoordinator, ReadHeaderTimeout: 10 * time.Second}
@@ -252,14 +279,24 @@ func serveUntilDone(ctx context.Context, srv *http.Server, cleanup func()) error
 }
 
 // installSelf atomically installs the agent executable, the platform-owned
-// preview-console Vite plugin, and (when configured) its trusted public JWKS
-// into dir, the shared emptyDir the dev container mounts at /kedge/bin. Plain
-// copies are used because the injector image may be scratch.
+// preview-console Vite plugin, its optional trusted public JWKS, and the
+// server-only Actions SDK into dir, the shared emptyDir the dev container
+// mounts at /kedge/bin. The same volume is mounted read-only at /node_modules
+// in the application and executor containers, so a bare
+// `@kedge/actions-node` import resolves without writing to the project PVC.
+// Plain copies are used because the injector image may be scratch.
 //
 // Missing or invalid verification configuration disables the optional browser
 // bridge without blocking the application. Any stale JWKS is removed so an old
 // platform key set cannot be trusted accidentally after a bad rollout.
 func installSelf(dir string) error {
+	actionsNodeFiles, err := loadActionsNodeAssets()
+	if err != nil {
+		// Validate every SDK asset before touching the destination. This keeps an
+		// incomplete image fail-closed instead of leaving a partially installed
+		// package visible to the application.
+		return fmt.Errorf("load %s SDK: %w", actionsNodePackageName, err)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate own executable: %w", err)
@@ -295,12 +332,69 @@ func installSelf(dir string) error {
 		return fmt.Errorf("install preview console JWKS: %w", err)
 	}
 
+	actionsNodeDir := filepath.Join(dir, "@kedge", "actions-node")
+	if err := os.MkdirAll(actionsNodeDir, 0o755); err != nil {
+		return fmt.Errorf("create %s SDK directory: %w", actionsNodePackageName, err)
+	}
+	for _, file := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "package.json", mode: 0o644},
+		{name: "index.mjs", mode: 0o644},
+		{name: "index.d.ts", mode: 0o644},
+	} {
+		if err := atomicInstall(actionsNodeDir, file.name, file.mode, bytes.NewReader(actionsNodeFiles[file.name])); err != nil {
+			return fmt.Errorf("install %s/%s: %w", actionsNodePackageName, file.name, err)
+		}
+	}
+
 	if dirHandle, err := os.Open(dir); err == nil {
 		_ = dirHandle.Sync()
 		_ = dirHandle.Close()
 	}
-	log.Printf("installed %s and %s", filepath.Join(dir, agentBinaryName), filepath.Join(dir, previewConsolePluginName))
+	log.Printf("installed %s, %s, and %s", filepath.Join(dir, agentBinaryName), filepath.Join(dir, previewConsolePluginName), actionsNodePackageName)
 	return nil
+}
+
+// loadActionsNodeAssets reads the package that the image build copied from
+// provider-sdk/actions-node. The directory may be overridden in tests (or by
+// a development image) but is otherwise fixed in the scratch runtime image.
+// The package metadata is checked before any destination is touched so an
+// accidentally incomplete or unrelated asset directory fails closed.
+func loadActionsNodeAssets() (map[string][]byte, error) {
+	dir := strings.TrimSpace(os.Getenv(actionsNodeAssetDirEnv))
+	if dir == "" {
+		dir = actionsNodeAssetDir
+	}
+	files := make(map[string][]byte, 3)
+	for _, name := range []string{"package.json", "index.mjs", "index.d.ts"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read %s/%s: %w", dir, name, err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil, fmt.Errorf("%s/%s is empty", dir, name)
+		}
+		files[name] = data
+	}
+	var metadata struct {
+		Name    string `json:"name"`
+		Type    string `json:"type"`
+		Exports map[string]struct {
+			Types   string `json:"types"`
+			Import  string `json:"import"`
+			Default string `json:"default"`
+		} `json:"exports"`
+	}
+	if err := json.Unmarshal(files["package.json"], &metadata); err != nil {
+		return nil, fmt.Errorf("decode package metadata: %w", err)
+	}
+	root, ok := metadata.Exports["."]
+	if metadata.Name != actionsNodePackageName || metadata.Type != "module" || !ok || root.Import != "./index.mjs" || root.Default != "./index.mjs" || root.Types != "./index.d.ts" {
+		return nil, fmt.Errorf("package metadata does not describe %s", actionsNodePackageName)
+	}
+	return files, nil
 }
 
 func atomicInstall(dir, name string, mode os.FileMode, src io.Reader) (retErr error) {
@@ -431,16 +525,28 @@ func configFromEnv() (*agentConfig, error) {
 
 	insecure := strings.TrimSpace(os.Getenv("KEDGE_DEV_ALLOW_INSECURE_CONTROL"))
 	cfg := &agentConfig{
-		WorkDir:              workdir,
-		StartCommand:         strings.TrimSpace(os.Getenv("KEDGE_DEV_START_COMMAND")),
-		Port:                 strings.TrimSpace(os.Getenv("KEDGE_DEV_PORT")),
-		ControlToken:         token,
-		ReloadStrategy:       strategy,
-		ReloadRules:          rules,
-		AllowInsecureControl: strings.EqualFold(insecure, "true"),
-		StateDir:             strings.TrimSpace(os.Getenv("KEDGE_DEV_STATE_DIR")),
-		RuntimeURL:           strings.TrimSpace(os.Getenv("KEDGE_DEV_RUNTIME_URL")),
-		ExecutorURL:          strings.TrimSpace(os.Getenv("KEDGE_DEV_EXECUTOR_URL")),
+		WorkDir:                   workdir,
+		StartCommand:              strings.TrimSpace(os.Getenv("KEDGE_DEV_START_COMMAND")),
+		Port:                      strings.TrimSpace(os.Getenv("KEDGE_DEV_PORT")),
+		ControlToken:              token,
+		ReloadStrategy:            strategy,
+		ReloadRules:               rules,
+		AllowInsecureControl:      strings.EqualFold(insecure, "true"),
+		StateDir:                  strings.TrimSpace(os.Getenv("KEDGE_DEV_STATE_DIR")),
+		RuntimeURL:                strings.TrimSpace(os.Getenv("KEDGE_DEV_RUNTIME_URL")),
+		ExecutorURL:               strings.TrimSpace(os.Getenv("KEDGE_DEV_EXECUTOR_URL")),
+		ActionsBootstrapTokenFile: envOrDefault("KEDGE_ACTIONS_BOOTSTRAP_TOKEN_FILE", "/var/run/secrets/kedge/actions-bootstrap/token"),
+		ActionsTokenFile:          envOrDefault("KEDGE_ACTIONS_TOKEN_FILE", "/var/run/secrets/kedge/actions/token"),
+		ActionsExchangeURL:        strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_EXCHANGE_URL")),
+		ActionsBaseURL:            strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_BASE_URL")),
+		ActionsProject:            strings.TrimSpace(os.Getenv("KEDGE_PROJECT")),
+		ActionsProjectUID:         strings.TrimSpace(os.Getenv("KEDGE_PROJECT_UID")),
+		ActionsEnvironment:        strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_ENVIRONMENT")),
+		ActionsInstance:           strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_INSTANCE")),
+		ActionsTenantPath:         strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_TENANT_PATH")),
+		ActionsOrg:                strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_ORG")),
+		ActionsWorkspace:          strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_WORKSPACE")),
+		ActionsCAFile:             strings.TrimSpace(os.Getenv("KEDGE_ACTIONS_CA_FILE")),
 	}
 	if cfg.RuntimeURL == "" {
 		cfg.RuntimeURL = "http://" + defaultRuntimeAddr
@@ -449,6 +555,13 @@ func configFromEnv() (*agentConfig, error) {
 		cfg.ExecutorURL = "http://" + defaultExecutorAddr
 	}
 	return cfg, nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func reloadRulesFromEnv(raw string) ([]reloadRule, error) {
@@ -551,17 +664,18 @@ type envResponse struct {
 }
 
 type agentServer struct {
-	mux        *http.ServeMux
-	config     *agentConfig
-	supervisor *supervisor
-	logs       *ringLog
-	runtime    runtimeOperations
-	mutationMu *sync.Mutex
+	mux          *http.ServeMux
+	config       *agentConfig
+	actionsState *actionsTokenState
+	supervisor   *supervisor
+	logs         *ringLog
+	runtime      runtimeOperations
+	mutationMu   *sync.Mutex
 }
 
 func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	logs := newRingLog(500)
-	s := &agentServer{config: cfg, logs: logs, mutationMu: &sync.Mutex{}}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}}
 	s.supervisor = newSupervisor(ctx, cfg, logs)
 	s.runtime = &localRuntime{supervisor: s.supervisor, logs: logs}
 	s.initMux()
@@ -569,7 +683,7 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 }
 
 func newCoordinatorServer(cfg *agentConfig, runtime runtimeOperations, mutationMu *sync.Mutex) *agentServer {
-	s := &agentServer{config: cfg, runtime: runtime, mutationMu: mutationMu}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), runtime: runtime, mutationMu: mutationMu}
 	s.initMux()
 	return s
 }
@@ -577,6 +691,7 @@ func newCoordinatorServer(cfg *agentConfig, runtime runtimeOperations, mutationM
 func (s *agentServer) initMux() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/readyz", s.handleReadyz)
 	mux.HandleFunc("/sync", s.handleSync)
 	mux.HandleFunc("/restart", s.handleRestart)
 	mux.HandleFunc("/env", s.handleEnv)
@@ -591,6 +706,26 @@ func (s *agentServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *agentServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *agentServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	status := s.actionsState.snapshot(time.Now())
+	response := map[string]any{
+		"status":         "ok",
+		"actionsEnabled": status.Enabled,
+		"actionsReady":   status.Ready,
+	}
+	if !status.Ready {
+		response["status"] = "not_ready"
+	}
+	if !status.ExpiresAt.IsZero() {
+		response["actionsTokenExpiresAt"] = status.ExpiresAt.UTC()
+	}
+	if !status.Ready {
+		writeJSON(w, http.StatusServiceUnavailable, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -1118,6 +1253,9 @@ type processStatusResponse struct {
 	Running                 bool   `json:"running"`
 	Port                    string `json:"port,omitempty"`
 	PortReachable           bool   `json:"portReachable,omitempty"`
+	ActionsEnabled          bool   `json:"actionsEnabled"`
+	ActionsReady            bool   `json:"actionsReady"`
+	ActionsTokenExpiresAt   int64  `json:"actionsTokenExpiresAtUnixMilli,omitempty"`
 }
 
 type runtimeOperations interface {
@@ -1360,6 +1498,12 @@ func (s *agentServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	actions := s.actionsState.snapshot(time.Now())
+	status.ActionsEnabled = actions.Enabled
+	status.ActionsReady = actions.Ready
+	if !actions.ExpiresAt.IsZero() {
+		status.ActionsTokenExpiresAt = actions.ExpiresAt.UnixMilli()
 	}
 	writeJSON(w, http.StatusOK, status)
 }

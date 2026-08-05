@@ -63,12 +63,68 @@ func (s *Server) reconcileProjectLiveBindings(ctx context.Context, c *asclient.C
 			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil {
 				continue
 			}
-			if _, err := ensureProjectProviderResource(ctx, c, p, binding, id); err != nil {
+			effectiveBinding := binding
+			if strings.TrimSpace(env.Name) == projectDevelopmentEnvironmentName &&
+				strings.TrimSpace(binding.Name) == projectDevelopmentBindingName &&
+				binding.Provider == projectDevelopmentProviderAppStudio {
+				var err error
+				effectiveBinding, err = s.projectDevelopmentRuntimeBinding(binding, p, id)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if _, err := ensureProjectProviderResource(ctx, c, p, effectiveBinding, id); err != nil {
 				return nil, err
 			}
 		}
 	}
 	return syncProjectLiveBindingStatus(ctx, c, p, id)
+}
+
+// projectDevelopmentRuntimeBinding refreshes reserved platform-owned action
+// values immediately before instance reconciliation. The Project UID is not
+// available on the pre-create binding, and the hub URL/tenant context can
+// change independently of a persisted Project, so the provider must not trust
+// stale or user-edited copies in spec.environments.
+func (s *Server) projectDevelopmentRuntimeBinding(binding aiv1alpha1.ProjectProviderBindingSpec, p *aiv1alpha1.Project, id identity) (aiv1alpha1.ProjectProviderBindingSpec, error) {
+	values, err := projectProviderBindingValues(binding)
+	if err != nil {
+		return binding, err
+	}
+	context, err := s.projectTemplateBindingContext(p, id)
+	if err != nil {
+		return binding, err
+	}
+	actionValues := map[string]string{
+		"kedgeActionsExchangeURL": context.ActionsExchangeURL,
+		"kedgeActionsBaseURL":     context.ActionsBaseURL,
+		"kedgeActionsCABundle":    context.ActionsCABundle,
+		"kedgeActionsTenantPath":  context.TenantPath,
+		"kedgeActionsOrg":         context.Org,
+		"kedgeActionsWorkspace":   context.Workspace,
+		"kedgeActionsProject":     context.Project,
+		"kedgeActionsProjectUID":  context.ProjectUID,
+		"kedgeActionsEnvironment": context.Environment,
+		"kedgeActionsInstance":    context.Instance,
+	}
+	// These fields are platform-owned. Remove any stale or user-edited copy
+	// before applying the current trusted context; otherwise a grant revocation
+	// or missing external URL could leave an old action endpoint on the runtime
+	// binding even though the current context has no action transport.
+	for key := range actionValues {
+		delete(values, key)
+	}
+	for key, value := range actionValues {
+		if strings.TrimSpace(value) != "" {
+			values[key] = value
+		}
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return binding, err
+	}
+	binding.Values.Raw = raw
+	return binding, nil
 }
 
 func ensureProjectProviderResource(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec, id identity) (*unstructured.Unstructured, error) {

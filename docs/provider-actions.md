@@ -1,201 +1,267 @@
-# Provider Actions (prototype)
+# Provider Actions
 
-Provider Actions is the small, bounded contract that lets a generated App
-Studio application invoke a provider-owned capability through the hub. It is
-an integration prototype, not a general RPC layer or a production-readiness
-claim. The current implementation has one executable action:
-Databricks `query_table/v1`.
+Provider Actions is the catalog-backed, synchronous action contract for
+server-side generated applications. Providers publish versioned action
+metadata in their `CatalogEntry`; App Studio grants an exact action and
+resource to a Project; the hub authorizes and forwards the invocation to the
+provider's declared VirtualWorkspace action endpoint. The public contract is
+generic, but the only shipped action is Databricks `query_table/v1`.
 
-## Contract
+## Catalog contract
 
-An App Studio environment stores an integration as a
-`ProjectProviderBindingSpec` with `kind: providerReference`. The reference is
-non-owning: App Studio may observe the provider object with a GET, but never
-creates, updates, or deletes that object and never adds an owner reference.
-The reference identifies the provider, API version, kind, resource, and name
-(`resourceRef`). The binding also carries an explicit versioned action
-allow-list:
+`CatalogEntry.spec.actions` is the provider's public action catalog. Each
+entry is keyed by an ID such as `query_table/v1` and declares all policy and
+validation data needed by callers without exposing a provider URL or
+credential model:
+
+| Field | Meaning |
+|---|---|
+| `id`, `displayName`, `description` | Stable name/version plus human-facing metadata. IDs are `name/vN`. |
+| `boundResource` | Exact API version, kind, and resource whose identity is supplied by the Project binding. |
+| `inputSchema`, `outputSchema` | JSON Schemas for caller input and provider result. Schemas are local, bounded, and compiled by the hub. |
+| `schemaDigest` | `sha256:` digest over the canonical input/output schema envelope. The hub and App Studio require an exact match. |
+| `executionMode` | `sync` or `async`; the current hub transport accepts `sync` only. |
+| `readOnly` | Provider declaration that the action does not mutate the bound resource. |
+| `risk` | `low`, `medium`, or `high`, used by consent and UI policy. |
+| `idempotency` | `inherent`, `keyed`, or `none`; keyed idempotency returns `501` until durable deduplication exists. |
+| `limits` | Timeout, input bytes, output bytes, and result-item bounds. |
+| `consent` | Whether explicit approval is required, including its prompt and scope. |
+| `deprecation` | Optional deprecation message, replacement action ID, and sunset timestamp. Deprecated actions cannot receive new grants. |
+
+The hub validates the complete declaration, canonicalizes and compiles both
+schemas, and stores the normalized metadata in its provider registry. Malformed
+catalog state fails closed before it can enter the action router. The
+portal-facing `/api/providers` projection exposes discovery and consent
+metadata, but not transport URLs.
+
+Databricks publishes `query_table/v1` bound to
+`databricks.kedge.faros.sh/v1alpha1 / Table / tables`. Its catalog declaration
+is `sync`, `readOnly: true`, `risk: low`, `idempotency: inherent`, with a
+45-second timeout, 8 KiB input cap, 64 KiB output cap, and 100 result-item
+cap. Consent is not required. Its input schema permits only optional exact
+`columns` (at most 64) and `limit` (1–100); its output schema contains
+`actionVersion`, `tableRef`, column metadata, rows (at most 100), and an
+optional `truncated` flag. The declaration's schema digest is
+`sha256:9d466354d5434778c39c74123156aba76510128b0d48c5f521836770561ab853`.
+
+## Project grants and audit
+
+An App Studio Project environment stores a provider reference as
+`kind: providerReference`. It is non-owning: App Studio may GET the referenced
+provider object for status, but never creates, updates, deletes, or owns it.
+The binding carries the exact `resourceRef` and a list of action grants:
 
 ```yaml
-name: taxi
+name: sales
 provider: databricks
 kind: providerReference
 resourceRef:
   apiVersion: databricks.kedge.faros.sh/v1alpha1
   kind: Table
   resource: tables
-  name: taxi-trips
+  name: order-history
 allowedActions:
   - name: query_table
     version: v1
+    schemaDigest: sha256:<catalog-digest>
 ```
 
-`revoked: true` disables a declared action while preserving the binding and
-its history. An omitted action, unsupported version, or revoked declaration
-is rejected before a provider tool is called. The integration CRUD and
-invoke surface is served by App Studio under
+On integration create or reactivation, App Studio fetches the caller-scoped
+hub catalog and requires an exact provider, action/version, bound resource,
+schema digest, and non-deprecated action. If catalog consent is required,
+`consentAccepted: true` is also required. The server writes
+`grantedBy` and `grantedAt`; client-supplied audit values are ignored. A
+revoke preserves the grant and its original digest/audit, then records
+server-owned `revokedBy` and `revokedAt`. Repeated revocation is idempotent;
+reactivation requires a fresh catalog verification and consent.
+
+This is generic catalog-backed authorization, not a provider-specific App
+Studio adapter. Integration CRUD is exposed under
 `/services/providers/app-studio/api/projects/{project}/integrations`; invoke
-accepts an action such as `query_table/v1` and an object-shaped `input`.
+uses the same alias and accepts a provider-neutral action name/version.
 
-The contract is intentionally generic at the binding boundary. The gateway
-currently adapts only `databricks/query_table/v1`; another provider or action
-is reported as not implemented until an adapter is added.
-
-Implementation anchors are [the App Studio integration gateway](../providers/app-studio/api/integrations.go),
-[the non-owning reference reconciler](../providers/app-studio/api/provider_resources.go),
-[the Databricks TableQuery controller](../providers/databricks/controller/tablequery/controller.go),
-and [the server-only Node SDK](../provider-sdk/actions-node/index.mjs).
-
-## Request sequence
+## Invocation and security boundary
 
 ```text
-generated app (server)
+generated server application
   -> @kedge/actions-node
-  -> App Studio integration gateway
-       authenticate caller; find project + alias + environment
-       enforce providerReference and allowedActions/revoked
-       GET the bound Table; inject its tableRef
-       reject caller-supplied tableRef, SQL, credentials, host, or warehouse
-  -> hub MCP aggregate: databricks__query_table
-  -> Databricks provider MCP server
-       create transient TableQuery in the caller's tenant
-       controller resolves Table -> Warehouse -> Connection -> Secret
-       provider builds an exact SELECT and executes it
-       return bounded structured rows; delete the transient query
-  -> generated app
+  -> App Studio integration invoke
+       verify persisted grant, digest, and exact bound resource
+       POST /api/provider-actions/invoke to the hub
+  -> hub provider-action router
+       resolve Ready CatalogEntry action and tenant cluster
+       verify workload identity + exact Project grant when caller is a workload
+       validate input schema and byte/result/time limits
+       POST provider VirtualWorkspace /actions/{name}/{version}
+  -> provider action handler
+       authorize the bound resource and return a bounded JSON result
 ```
 
-The gateway forwards the caller's bearer credential and tenant context to the
-hub aggregate. It does not choose a Databricks URL or hold a Databricks
-credential. The provider resolves its own connection, warehouse, and Secret
-from tenant-scoped resources. This preserves the provider-isolation boundary:
-cross-provider access uses the owning provider's published API/MCP surface,
-as the tenant caller, rather than an internal service or backend credential.
-See [Provider isolation in the provider architecture](./providers.md#provider-isolation-the-cross-provider-boundary).
+The hub request body contains `provider`, `action`, `actionVersion`,
+`schemaDigest`, `resourceRef`, and `input`. The hub compares every identity
+field with the catalog, validates the input schema, limits the request, rejects
+redirects, and validates the provider's JSON result against the output schema.
+It forwards only the authenticated bearer, resolved tenant/user/cluster
+headers, request ID, trace context, idempotency key, and bounded deadline.
+Caller cancellation and the declared action timeout bound the synchronous
+request. The stable response envelope carries `requestID`, provider,
+action/version, the bound resource reference, and either `result` or a typed
+error (`code`, `message`, `retryable`).
 
-## `query_table/v1`
+The direct hub route is `POST /api/provider-actions/invoke`. The provider
+VirtualWorkspace route is `/actions/{name}/{version}`. The public provider
+backend proxy reserves `/actions` and `/actions/*` and returns `404`, so a
+caller cannot bypass the hub's live grant, digest, schema, and revocation
+checks through `/services/providers/{name}`.
 
-The action requires `actionVersion: v1`, a bound `tableRef` (injected by the
-gateway), optional exact column names, and an optional `limit`. The caller
-cannot submit SQL, a different table, a warehouse ID, a connection host, or
-any provider credential. A missing limit defaults to 100; the maximum is 100.
-Identifiers are validated and quoted individually, and requested columns must
-be present in the imported Table schema.
+Production workload callers use the workload exchange and a short-lived
+workload capability:
 
-The result contains `actionVersion`, `tableRef`, column metadata, rows, and an
-optional `truncated` flag. Results are bounded to at most 100 rows, 64
-columns, and 64 KiB of serialized row data. The provider's TableQuery
-controller gives backend execution a 30-second deadline; the tenant adapter
-polls for at most 45 seconds and cleans up the transient object with a
-bounded three-second context.
+1. The development runtime reads a projected bootstrap token, posts the exact
+   tenant/project/project UID/environment/instance tuple to
+   `/api/provider-actions/workload/exchange`, and never exposes that bootstrap
+   token to the generated application.
+2. The hub asks the Infrastructure provider to perform online attestation at
+   `/workload-identities/review`. Infrastructure performs an audience-bound
+   TokenReview and verifies the pod identity and exact runtime tuple.
+3. The hub verifies the live Project environment, instance, provider resource
+   references, and action grant, then issues a short-lived Kedge
+   ServiceAccount token with GET-only resource scope. The current token TTL is
+   ten minutes and the token is not persisted in a Secret or annotation.
+4. The runtime atomically refreshes a mode-`0600` token file. The generated
+   server reads that file on each request, or uses a refreshable credential
+   provider; a single `401` triggers one forced refresh.
 
-The controller only executes when the current dependency conditions are
-satisfied: the Table and Warehouse are `Ready`, the Connection is both
-`Validated` and `Ready`, the Table/Warehouse connection references agree, and
-the Connection uses the supported PAT auth type. Failures are recorded as a
-sanitized, truncated status message; credential, token, Secret, and similar
-backend details are not returned to the caller.
+The SDK is server-only. Its base URL must be absolute HTTPS; HTTP is allowed
+only for an explicit loopback test override. Do not pass provider URLs,
+provider credentials, resource coordinates, or raw SQL in action input. The
+runtime's `KEDGE_ACTIONS_CA_FILE` can add an explicitly configured CA for the
+workload exchange, but the source does not provide automatic custom-CA
+distribution. Production external URLs therefore require HTTPS with a
+system- or publicly-trusted certificate unless deployment configuration
+explicitly supplies the CA.
 
-The hub MCP federation bounds provider discovery at 15 seconds and a provider
-call at 90 seconds. The caller's cancellation context wins over those bounds.
-An unavailable or unbound integration fails closed, and a revoked or
-non-allow-listed action does not reach the upstream provider.
+## Server-side SDK
 
-## Server-only SDK
-
-`@kedge/actions-node` is a server-only convenience client. It sends the
-caller credential to App Studio and exposes either the generic
-`integration(alias).invoke(...)` form or the `queryTable(alias, ...)` helper:
+Use the generic `integration(alias).invoke` API. The SDK never exposes a
+provider-specific convenience method:
 
 ```js
 import { createActionsClient } from '@kedge/actions-node';
 
 const kedge = createActionsClient({
-  baseURL: process.env.KEDGE_HUB_URL + '/services/providers/app-studio',
+  baseURL: process.env.KEDGE_ACTIONS_BASE_URL,
   project: process.env.KEDGE_PROJECT,
-  token: process.env.KEDGE_CALLER_TOKEN, // server-side caller capability
+  tokenFile: process.env.KEDGE_ACTIONS_TOKEN_FILE,
 });
 
-const rows = await kedge.queryTable('taxi', {
-  columns: ['trip_id', 'fare_amount'],
-  limit: 25,
-});
+const result = await kedge.integration('sales').invoke(
+  'query_table/v1',
+  { columns: ['order_id', 'total'], limit: 25 },
+  { requestID: 'request-42', timeoutMs: 10_000 },
+);
+console.log(result);
 ```
 
-The SDK rejects browser-like globals and requires an explicit credential. A
-`devToken` or `allowDevelopmentToken` is available only for local prototypes;
-the synthetic token is not workload identity. Production generated apps still
-need a short-lived workload capability issued for the caller and passed to
-the server process. Never put this SDK or its token in browser code, and never
-pass provider URLs, Databricks credentials, or raw SQL.
+`tokenFile` defaults to `KEDGE_ACTIONS_TOKEN_FILE`; it is read for every
+request. A `getToken`/credential provider receives `{ forceRefresh, signal }`
+and is retried once after an HTTP `401`. The SDK propagates caller aborts and
+local timeouts, rejects browser globals, and returns typed transport or
+provider-action errors. There is no development-token fallback.
 
-## Extending the prototype
+### Development sandbox delivery
 
-To add a provider action:
+In an App Studio development sandbox, the Infrastructure `kedge-dev-agent`
+image carries the canonical `@kedge/actions-node` package. Its installer
+validates the package metadata (`package.json`) and runtime/type files
+(`index.mjs` and `index.d.ts`) before atomically copying them into a
+platform-owned shared `emptyDir`. The app and executor containers mount that
+same volume read-only at `/node_modules`, so generated code uses the standard
+bare import `import { createActionsClient } from '@kedge/actions-node';`
+without `npm install` and without mutating the project PVC or its
+`node_modules`.
 
-1. Define a versioned, provider-neutral action contract and its bounded input
-   and output. Keep provider credentials, backend URLs, and arbitrary query
-   languages out of the caller input.
-2. Publish the action through the provider's API/MCP surface and enforce
-   tenant-scoped authorization there. The provider remains the sole owner of
-   its backend and secrets.
-3. Add an App Studio adapter that validates the provider reference and
-   versioned allow-list, injects only server-resolved resource identity, and
-   maps provider errors to a sanitized caller contract.
-4. Add deterministic contract tests for allow/revoke/version failures,
-   non-owning references, cancellation, bounds, and credential non-disclosure;
-   then add a live smoke only when a real provider and tenant are available.
+This delivery path is limited to development sandboxes. Production workloads
+still need a normal pinned package install/publication; these checks do not
+claim production publication or installation is complete. The image-build and
+Docker shared-volume Node import checks pass. In the local POC, Ready pod
+`data-dashboard` passed the executor bare-import check (function), the app
+SDK/environment/token preflight, and a `taxi-trips` `query_table/v1` call that
+returned `rowCount=1`, `columnCount=6`, and `truncated=false` without printing
+row data. This is local POC evidence only, not a production claim.
 
-Adding an action does not make all providers executable automatically. The
-gateway's current implementation is deliberately limited to Databricks
-`query_table/v1`.
+## Databricks implementation
 
-## Verification
+`POST /actions/query_table/v1` is the primary app path. The request-scoped
+Databricks executor performs delegated authorization for the exact imported
+Table, resolves `Table → Warehouse → Connection → Secret` with provider
+authority, requires current Table/Warehouse `Ready` and Connection
+`Validated`/`Ready` conditions, checks the connection references and PAT auth
+type, then builds a quoted projection and bounded `SELECT`. It never creates a
+query resource and never persists result rows in control-plane status. Provider
+and credential details are sanitized from errors.
 
-The deterministic local suite builds an embedded hub, host-process App Studio
-and Databricks providers, a local TLS fake Databricks endpoint, and a generated
-Node app. It verifies the full generated-app → SDK → App Studio → hub MCP →
-provider path, including exact SQL/projection, bounded output, no direct
-provider URL or PAT in app output, and fail-closed unbound/version/revoked
-cases:
+The optional `/mcp` and `/mcp/sse` surfaces are controlled by
+`DATABRICKS_MCP_ENABLED` (enabled by default for compatibility). When enabled,
+the MCP `query_table` tool reuses the same request-scoped executor; it is an
+optional presentation adapter and is not required by the primary generated-app
+action path. Setting `DATABRICKS_MCP_ENABLED=false` leaves direct actions
+available.
+
+The provider accepts only the imported Table resource reference, exact column
+identifiers, and a limit from 1 through 100. SQL text, hosts, warehouse IDs,
+connection handles, and credentials are not caller inputs. The backend uses
+the Databricks SQL Statements API and the provider's configured host allowlist.
+
+## Observability and residual limits
+
+The hub emits low-cardinality metrics for provider, action, version, outcome,
+HTTP status, and error class, plus duration and request/response byte
+histograms. Logs and forwarded W3C trace context carry request IDs and
+resource/action identity without prompt text, raw input, credentials, or
+sensitive backend values. Avoid adding tenant IDs, project names, resource
+names, digests, or arbitrary error text as metric labels.
+
+The transport is synchronous and bounded. Keyed idempotency currently returns
+`501`; there are no durable jobs, progress streams, or resume handles. The
+portal and grant contract require an exact resource reference; resource-name
+discovery is not a picker supplied by the action transport. Only
+`query_table/v1` is shipped today.
+
+## Verification commands
+
+The deterministic suite runs the embedded hub, Infrastructure attestation
+fixture, App Studio, Databricks, a local TLS fake, and a generated Node app.
+It exchanges a workload token, writes it to a token file, disables Databricks
+MCP, and verifies direct `/actions` routing, exact Project grants, digest drift,
+tenant isolation, bounded results, and credential non-disclosure:
 
 ```bash
 make e2e-provider-actions
 ```
 
-The SDK unit tests can be run independently:
+SDK unit tests:
 
 ```bash
 cd provider-sdk/actions-node && npm test
 ```
 
-An opt-in smoke exercises an existing local setup without creating resources.
-Set `KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true`, `KEDGE_LIVE_HUB_URL`,
-`KEDGE_LIVE_PROJECT`, and `KEDGE_LIVE_CALLER_TOKEN` (optionally
-`KEDGE_LIVE_ACTION_ALIAS`, `KEDGE_LIVE_ORG`, and `KEDGE_LIVE_WORKSPACE`), then
-run:
+The opt-in live command reads an already-refreshed workload token file. Set
+`KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true`, `KEDGE_LIVE_HUB_URL`,
+`KEDGE_LIVE_PROJECT`, and `KEDGE_LIVE_ACTIONS_TOKEN_FILE` (optionally
+`KEDGE_LIVE_ACTION_ALIAS`, `KEDGE_LIVE_ORG`, and `KEDGE_LIVE_WORKSPACE`):
 
 ```bash
 make e2e-provider-actions-live
 ```
 
-The local deterministic run and the real local `taxi-trips` SDK query have
-passed. These checks verify the prototype path; they do not establish general
-provider coverage, durable action scheduling, or production workload
-identity.
+These are verification commands; this document does not claim that a current
+deterministic or live run has passed.
 
-## Prototype limitations and boundary
-
-- Only Databricks `query_table/v1` is implemented. The binding shape is
-  generic, but generic dispatch and provider discovery are not.
-- The local E2E uses a synthetic caller token. It proves routing and
-  authorization behavior, not issuance, rotation, or attestation of a
-  workload identity.
-- `TableQuery` is transient, but its bounded rows live in control-plane status
-  until cleanup. Cleanup is attempted and bounded; retention and crash
-  recovery policy are not a production data-retention design.
-- The action is synchronous and bounded. There is no durable queue, retry
-  policy, progress stream, or resumable execution contract.
-- Provider isolation remains mandatory. A future adapter must call the owning
-  provider's published API/MCP surface as the tenant caller and must not add a
-  second credential or direct URL into another provider's backend.
+Implementation anchors: [CatalogEntry action types](../apis/providers/v1alpha1/types_catalogentry.go),
+[hub action router](../pkg/hub/provideractions/handler.go),
+[hub workload exchange](../pkg/hub/workloadidentity/workloadidentity.go),
+[App Studio grant verification](../providers/app-studio/api/provider_action_catalog.go),
+[App Studio forwarding](../providers/app-studio/api/integrations.go),
+[server-only SDK](../provider-sdk/actions-node/index.mjs), and
+[Databricks direct action executor](../providers/databricks/tenant/action.go).

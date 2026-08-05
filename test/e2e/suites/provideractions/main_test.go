@@ -42,14 +42,16 @@ import (
 )
 
 var (
-	repoRoot    string
-	hubURL      string
-	kcpServer   string
-	adminToken  string
-	staticToken = "test:user-default"
-	dataDir     string
-	fakeDB      *fixture.FakeDatabricks
-	liveOnly    bool
+	repoRoot       string
+	hubURL         string
+	kcpServer      string
+	adminToken     string
+	staticToken    = "test:user-default"
+	bootstrapToken = "provider-actions-e2e-bootstrap"
+	dataDir        string
+	fakeDB         *fixture.FakeDatabricks
+	fakeAttestor   *fixture.FakeInfrastructureAttestor
+	liveOnly       bool
 
 	appStudioPort   = "18085"
 	databricksPort  = "18086"
@@ -110,13 +112,18 @@ func TestMain(m *testing.M) {
 	}
 	keepData := strings.EqualFold(strings.TrimSpace(os.Getenv("KEDGE_E2E_KEEP_DATA")), "true")
 	fakeDB = fixture.NewFakeDatabricks()
+	fakeAttestor = fixture.NewFakeInfrastructureAttestor(bootstrapToken)
 
 	hubLog, err := os.Create(filepath.Join(dataDir, "hub.log"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub log:", err)
 		os.Exit(1)
 	}
-	hubCmd := exec.Command(filepath.Join(repoRoot, "bin", "kedge-hub"),
+	hubBinary := strings.TrimSpace(os.Getenv("KEDGE_E2E_HUB_BINARY"))
+	if hubBinary == "" {
+		hubBinary = filepath.Join(repoRoot, "bin", "kedge-hub")
+	}
+	hubCmd := exec.Command(hubBinary,
 		"--embedded-kcp",
 		"--kcp-bind-address", "127.0.0.1",
 		"--kcp-secure-port", kcpPort,
@@ -134,6 +141,7 @@ func TestMain(m *testing.M) {
 	if err := hubCmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "start hub:", err)
 		fakeDB.Close()
+		fakeAttestor.Close()
 		os.Exit(1)
 	}
 
@@ -144,6 +152,7 @@ func TestMain(m *testing.M) {
 		}
 		killGroup(hubCmd)
 		fakeDB.Close()
+		fakeAttestor.Close()
 		if keepData {
 			fmt.Fprintf(os.Stderr, "provider-actions evidence/logs preserved under %s\n", dataDir)
 		} else {
@@ -164,10 +173,11 @@ func TestMain(m *testing.M) {
 	}
 
 	writeEvidence("source-config.json", map[string]any{
-		"providers":        []string{"app-studio", "databricks"},
+		"providers":        []string{"app-studio", "databricks", "infrastructure"},
 		"storage":          map[string]any{"appStudioMessageStore": "in-memory"},
 		"fakeUpstream":     map[string]any{"scheme": "https", "url": fakeDB.URL(), "certificate": "self-signed"},
-		"appInputContract": map[string]any{"base": "hub/services/providers/app-studio", "credentials": "server-side caller token only", "providerURL": false, "pat": false},
+		"workloadAttestor": map[string]any{"provider": "infrastructure", "url": fakeAttestor.URL(), "bootstrapToken": "deterministic-fixture-only"},
+		"appInputContract": map[string]any{"base": "hub/services/providers/app-studio", "credentials": "short-lived workload token from exchange file", "tokenFile": "KEDGE_ACTIONS_TOKEN_FILE", "providerURL": false, "pat": false, "mcp": false},
 	})
 
 	if err := applyProviderManifests(); err != nil {
@@ -208,9 +218,12 @@ func TestMain(m *testing.M) {
 
 	appCmd, err := startProvider("app-studio", appStudioPort, appKubeconfig, map[string]string{
 		"APP_STUDIO_IN_MEMORY_MESSAGE_STORE":          "true",
-		"APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY":     "true",
 		"APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY": "true",
 		"APP_STUDIO_PREVIEW_CONSOLE_ENABLED":          "false",
+		// The production action-enabled runtime contract requires an HTTPS
+		// external origin. This fixture is only persisted in Project values;
+		// the generated app still enters through the local hub URL below.
+		"KEDGE_ACTIONS_EXTERNAL_URL": "https://actions.invalid",
 	})
 	if err != nil {
 		cleanup()
@@ -219,8 +232,8 @@ func TestMain(m *testing.M) {
 	}
 	providerCmds = append(providerCmds, appCmd)
 	dbCmd, err := startProvider("databricks", databricksPort, dbKubeconfig, map[string]string{
-		"DATABRICKS_E2E_LOOPBACK":                     "true",
-		"DATABRICKS_MCP_DISABLE_LOCALHOST_PROTECTION": "true",
+		"DATABRICKS_E2E_LOOPBACK": "true",
+		"DATABRICKS_MCP_ENABLED":  "false",
 	})
 	if err != nil {
 		cleanup()
@@ -239,14 +252,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "databricks never ready:", err)
 		os.Exit(1)
 	}
-	if err := waitCatalogReady([]string{"app-studio", "databricks"}, 2*time.Minute); err != nil {
+	if err := waitCatalogReady([]string{"app-studio", "databricks", "infrastructure"}, 2*time.Minute); err != nil {
 		cleanup()
 		fmt.Fprintln(os.Stderr, "catalog entries never ready:", err)
 		os.Exit(1)
 	}
 	writeEvidence("runtime-readiness.json", map[string]any{
 		"hubReady":            true,
-		"providers":           map[string]any{"app-studio": map[string]any{"healthz": true, "catalogReady": true}, "databricks": map[string]any{"healthz": true, "catalogReady": true}},
+		"providers":           map[string]any{"app-studio": map[string]any{"healthz": true, "catalogReady": true}, "databricks": map[string]any{"healthz": true, "catalogReady": true, "mcpEnabled": false}, "infrastructure": map[string]any{"catalogReady": true, "fakeAttestor": true}},
 		"interactionVerified": false,
 	})
 
@@ -273,6 +286,7 @@ func applyProviderManifests() error {
 	}{
 		{name: "app-studio", port: appStudioPort},
 		{name: "databricks", port: databricksPort},
+		{name: "infrastructure"},
 	} {
 		for _, filename := range []string{"provider.yaml", "manifest.yaml"} {
 			raw, err := os.ReadFile(filepath.Join(repoRoot, "providers", provider.name, filename))
@@ -299,8 +313,21 @@ func applyProviderManifests() error {
 				}
 				if obj.GetKind() == "CatalogEntry" {
 					endpoint := "http://127.0.0.1:" + provider.port
-					_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "ui", "url")
-					_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "backend", "url")
+					if provider.name == "infrastructure" {
+						// The E2E only needs Infrastructure's virtual-workspace
+						// attestor. Keep its catalog record deterministic without
+						// starting the full provider process.
+						endpoint = fakeAttestor.URL()
+						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "virtualWorkspace", "url")
+					} else {
+						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "ui", "url")
+						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "backend", "url")
+						// Provider Actions route only through the catalog's published
+						// virtual-workspace URL. Point that contract at the same
+						// task-owned host process; the public backend proxy remains
+						// separately blocked from serving /actions.
+						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "virtualWorkspace", "url")
+					}
 					// The local action lane does not need the optional Code or
 					// Infrastructure providers; removing this catalog-only gate
 					// keeps the suite bounded to the two processes under test.

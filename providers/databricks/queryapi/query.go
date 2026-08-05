@@ -10,7 +10,6 @@
 package queryapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -82,13 +81,6 @@ type QueryTableResult struct {
 	Columns       []QueryColumn    `json:"columns"`
 	Rows          []map[string]any `json:"rows"`
 	Truncated     bool             `json:"truncated,omitempty"`
-}
-
-// QueryRunner is implemented by the tenant adapter. The MCP layer depends on
-// this narrow interface rather than reading Secrets or constructing backend
-// requests itself.
-type QueryRunner interface {
-	QueryTable(context.Context, QueryTableRequest) (QueryTableResult, error)
 }
 
 // BoundQueryResult enforces the provider's row, column, and serialized-byte

@@ -17,6 +17,7 @@ import {
   GitBranch,
   Globe,
   GripVertical,
+  Link2,
   Loader2,
   MessageSquare,
   PanelRight,
@@ -88,6 +89,7 @@ import ApprovalModePicker from './ApprovalModePicker.vue'
 import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
 import PreviewActionsMenu from './PreviewActionsMenu.vue'
 import NewProjectWizard from './NewProjectWizard.vue'
+import ProjectIntegrations from './ProjectIntegrations.vue'
 import {
   ConversationRunController,
   abortedConversationSnapshot,
@@ -948,6 +950,13 @@ const launcherBuiltInItems = computed<WorkbenchLauncherItem[]>(() => [
     subtitle: 'Browse provider views and project tools',
     icon: PanelRight,
     builtInTab: 'providers',
+  },
+  {
+    id: 'builtin:integrations',
+    title: 'Integrations',
+    subtitle: 'Grant and revoke provider actions for this project',
+    icon: Link2,
+    builtInTab: 'integrations',
   },
   {
     id: 'builtin:publishing',
@@ -2897,6 +2906,7 @@ function workbenchTabIcon(tab: WorkbenchTabDescriptor): Component {
   if (tab.kind === 'code') return FileCode
   if (tab.kind === 'review') return ClipboardList
   if (tab.kind === 'providers') return PanelRight
+  if (tab.kind === 'integrations') return Link2
   if (tab.kind === 'publishing') return Globe
   if (tab.kind === 'settings') return Settings2
   if (tab.kind === 'skills') return Plug
@@ -5412,6 +5422,21 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             No provider views found.
           </div>
         </div>
+      </div>
+
+      <div
+        v-else-if="activeWorkbenchTab?.kind === 'integrations'"
+        class="min-h-0 flex-1 overflow-auto bg-surface"
+        role="tabpanel"
+        :id="workbenchTabPanelID(activeWorkbenchTab)"
+        :aria-labelledby="workbenchTabControlID(activeWorkbenchTab)"
+      >
+        <ProjectIntegrations
+          :ctx="props.ctx"
+          :project-name="selected?.name || ''"
+          :providers="providers"
+          :providers-loading="providersLoading"
+        />
       </div>
 
       <div

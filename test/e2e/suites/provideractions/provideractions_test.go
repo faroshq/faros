@@ -32,16 +32,18 @@ import (
 )
 
 const (
-	testProject = "provider-actions-e2e"
-	testAlias   = "taxi"
-	tableRef    = "taxi-trips"
-	pat         = "e2e-pat-not-an-app-input"
+	testProject     = "provider-actions-e2e"
+	testAlias       = "taxi"
+	tableRef        = "taxi-trips"
+	pat             = "e2e-pat-not-an-app-input"
+	runtimeInstance = "provider-actions-e2e-runtime"
 )
 
 func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	requireLocalSuite(t)
 	orgUUID, workspaceUUID, tenantCluster := setupTenantWorkspace(t)
 	tenant := kcpDynamic(t, tenantCluster, staticToken)
+	wrongOrgUUID, wrongWorkspaceUUID, _ := setupTenantWorkspace(t)
 
 	bindProvider(t, tenant, "databricks", databricksWorkspace, databricksExport, []string{"get"})
 	bindProvider(t, tenant, "app-studio", appStudioWorkspace, appStudioExport, []string{"get", "list", "watch", "create", "update", "delete"})
@@ -114,6 +116,7 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 		_ = tenant.Resource(projectGVR).Delete(context.Background(), project.GetName(), metav1.DeleteOptions{})
 	})
 
+	digest := catalogActionSchemaDigest(t, "databricks", "query_table/v1")
 	addBody := map[string]any{
 		"environment": "development",
 		"alias":       testAlias,
@@ -121,16 +124,46 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 		"resourceRef": map[string]any{
 			"name": tableRef, "apiVersion": "databricks.kedge.faros.sh/v1alpha1", "kind": "Table", "resource": "tables",
 		},
-		"allowedActions": []any{map[string]any{"name": "query_table", "version": "v1"}},
+		"allowedActions": []any{map[string]any{"name": "query_table", "version": "v1", "schemaDigest": digest}},
 	}
 	status, body := postJSON(t, hubURL+"/services/providers/app-studio/api/projects/"+testProject+"/integrations", staticToken, addBody, tenantHeaders)
 	if status != http.StatusCreated {
 		t.Fatalf("add project integration: status=%d body=%s", status, body)
 	}
-	assertProjectReferenceBinding(t, tenant, table)
+	ensureInfrastructureBinding(t, tenant, runtimeInstance)
+	assertProjectReferenceBinding(t, tenant, table, digest, runtimeInstance)
+	projectObject := getProject(t, tenant)
+	projectUID := string(projectObject.GetUID())
+	if projectUID == "" {
+		t.Fatal("project has no UID for workload exchange")
+	}
+	tenantPath := "root:kedge:tenants:" + orgUUID + ":" + workspaceUUID
+	runtimeToken := exchangeWorkloadToken(t, tenantPath, projectUID, runtimeInstance, bootstrapToken)
+	tokenFile := filepath.Join(dataDir, "provider-actions-runtime.token")
+	if err := os.WriteFile(tokenFile, []byte(runtimeToken+"\n"), 0o600); err != nil {
+		t.Fatalf("write workload token file: %v", err)
+	}
+	info, err := os.Stat(tokenFile)
+	if err != nil {
+		t.Fatalf("stat workload token file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("workload token file mode=%#o, want 0600", got)
+	}
+	if requests := fakeAttestor.Requests(); len(requests) != 1 || requests[0].TenantPath != tenantPath || requests[0].Project != testProject || requests[0].ProjectUID != projectUID || requests[0].Environment != "development" || requests[0].Instance != runtimeInstance {
+		t.Fatalf("unexpected Infrastructure attestation requests: %#v", requests)
+	}
+	if status, body := postJSON(t, hubURL+"/api/provider-actions/workload/exchange", staticToken, map[string]any{
+		"tenantPath": tenantPath, "project": testProject, "projectUID": projectUID, "environment": "development", "instance": runtimeInstance,
+	}); status != http.StatusForbidden {
+		t.Fatalf("non-bootstrap exchange status=%d body=%s, want 403", status, body)
+	}
+
+	assertDatabricksMCPUnavailable(t)
+	assertDirectDatabricksActionBlocked(t, tenantHeaders)
 
 	input := map[string]any{"columns": []any{"trip_id", "fare_amount"}, "limit": 2}
-	stdout, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, staticToken, "query_table/v1", input, tenantHeaders)
+	stdout, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v1", input, tokenFile, tenantHeaders)
 	if err != nil {
 		t.Fatalf("generated app query failed: %v (stderr=%s)", err, stderr)
 	}
@@ -179,15 +212,15 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	if !sawDescribe {
 		t.Fatal("fake upstream did not receive the Table schema DESCRIBE target")
 	}
-	for _, unsafe := range []string{fakeDB.URL(), pat} {
+	for _, unsafe := range []string{fakeDB.URL(), pat, runtimeToken} {
 		if strings.Contains(stdout, unsafe) || strings.Contains(stderr, unsafe) {
 			t.Fatalf("generated app output leaked provider URL or PAT: %q", unsafe)
 		}
 	}
 	writeEvidence("invocation.json", map[string]any{
-		"surface": "generated-app -> @kedge/actions-node -> App Studio integration gateway -> hub MCP",
+		"surface": "generated-app -> generic @kedge/actions-node -> App Studio integration gateway -> hub provider-action router -> Databricks /actions/query_table/v1",
 		"project": testProject, "integration": testAlias, "action": "query_table/v1",
-		"input": input, "directProviderURL": false, "patInInput": false,
+		"input": input, "directProviderURL": false, "patInInput": false, "mcp": false, "workloadTokenFile": true,
 	})
 	writeEvidence("result.json", map[string]any{
 		"actionVersion": result["actionVersion"], "tableRef": result["tableRef"], "rows": rows,
@@ -196,22 +229,58 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	})
 
 	beforeFailures := len(fakeDB.Requests())
-	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, "unbound", staticToken, "query_table/v1", input, tenantHeaders); err == nil {
+	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, "unbound", "query_table/v1", input, tokenFile, tenantHeaders); err == nil {
 		t.Fatalf("unbound integration unexpectedly succeeded (stderr=%s)", stderr)
 	} else if !strings.Contains(stderr, "404") {
 		t.Fatalf("unbound integration did not fail closed with 404: %s", stderr)
 	}
-	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, staticToken, "query_table/v2", input, tenantHeaders); err == nil {
+	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v2", input, tokenFile, tenantHeaders); err == nil {
 		t.Fatalf("unsupported action version unexpectedly succeeded (stderr=%s)", stderr)
 	} else if !strings.Contains(stderr, "403") {
 		t.Fatalf("unsupported action version did not fail closed with 403: %s", stderr)
 	}
-	patchBody := map[string]any{"allowedActions": []any{map[string]any{"name": "query_table", "version": "v1", "revoked": true}}}
+	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v1", input, tokenFile, map[string]string{"X-Kedge-Org": wrongOrgUUID, "X-Kedge-Workspace": wrongWorkspaceUUID}); err == nil {
+		t.Fatalf("wrong-tenant action unexpectedly succeeded (stderr=%s)", stderr)
+	} else if !strings.Contains(stderr, "401") && !strings.Contains(stderr, "403") && !strings.Contains(stderr, "404") {
+		t.Fatalf("wrong-tenant action did not fail closed: %s", stderr)
+	}
+	if got := len(fakeDB.Requests()); got != beforeFailures {
+		t.Fatalf("wrong-tenant action reached fake upstream: request count %d before %d", got, beforeFailures)
+	}
+	// A validly-shaped but stale digest is rejected by the hub action router
+	// before the provider endpoint is contacted. Mutate the live Project through
+	// the tenant API to model catalog drift without bypassing the production
+	// App Studio gateway.
+	projectObject = getProject(t, tenant)
+	if err := setProjectActionDigest(projectObject, "sha256:"+strings.Repeat("0", 64)); err != nil {
+		t.Fatalf("set drifted action digest: %v", err)
+	}
+	updatedProject, err := tenant.Resource(projectGVR).Update(context.Background(), projectObject, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("persist drifted action digest: %v", err)
+	}
+	projectObject = updatedProject
+	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v1", input, tokenFile, tenantHeaders); err == nil {
+		t.Fatalf("catalog-drifted action unexpectedly succeeded (stderr=%s)", stderr)
+	} else if !strings.Contains(stderr, "409") {
+		t.Fatalf("catalog-drifted action did not fail closed with 409: %s", stderr)
+	}
+	if got := len(fakeDB.Requests()); got != beforeFailures {
+		t.Fatalf("catalog-drifted action reached fake upstream: request count %d before %d", got, beforeFailures)
+	}
+	if err := setProjectActionDigest(projectObject, digest); err != nil {
+		t.Fatalf("restore action digest: %v", err)
+	}
+	projectObject, err = tenant.Resource(projectGVR).Update(context.Background(), projectObject, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("restore action digest: %v", err)
+	}
+	patchBody := map[string]any{"allowedActions": []any{map[string]any{"name": "query_table", "version": "v1", "schemaDigest": digest, "revoked": true}}}
 	status, body = patchJSON(t, hubURL+"/services/providers/app-studio/api/projects/"+testProject+"/integrations/"+testAlias, staticToken, patchBody, tenantHeaders)
 	if status != http.StatusOK {
 		t.Fatalf("revoke integration: status=%d body=%s", status, body)
 	}
-	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, staticToken, "query_table/v1", input, tenantHeaders); err == nil {
+	if _, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v1", input, tokenFile, tenantHeaders); err == nil {
 		t.Fatalf("revoked action unexpectedly succeeded (stderr=%s)", stderr)
 	} else if !strings.Contains(stderr, "403") {
 		t.Fatalf("revoked action did not fail closed with 403: %s", stderr)
@@ -230,9 +299,9 @@ func TestOptionalLiveProviderActionSDK(t *testing.T) {
 	}
 	hub := strings.TrimRight(strings.TrimSpace(os.Getenv("KEDGE_LIVE_HUB_URL")), "/")
 	project := strings.TrimSpace(os.Getenv("KEDGE_LIVE_PROJECT"))
-	token := os.Getenv("KEDGE_LIVE_CALLER_TOKEN")
-	if hub == "" || project == "" || token == "" {
-		t.Skip("KEDGE_LIVE_HUB_URL, KEDGE_LIVE_PROJECT, and KEDGE_LIVE_CALLER_TOKEN are required")
+	tokenFile := strings.TrimSpace(os.Getenv("KEDGE_LIVE_ACTIONS_TOKEN_FILE"))
+	if hub == "" || project == "" || tokenFile == "" {
+		t.Skip("KEDGE_LIVE_HUB_URL, KEDGE_LIVE_PROJECT, and KEDGE_LIVE_ACTIONS_TOKEN_FILE are required")
 	}
 	alias := strings.TrimSpace(os.Getenv("KEDGE_LIVE_ACTION_ALIAS"))
 	if alias == "" {
@@ -242,7 +311,7 @@ func TestOptionalLiveProviderActionSDK(t *testing.T) {
 	if org, workspace := strings.TrimSpace(os.Getenv("KEDGE_LIVE_ORG")), strings.TrimSpace(os.Getenv("KEDGE_LIVE_WORKSPACE")); org != "" && workspace != "" {
 		tenantHeaders = map[string]string{"X-Kedge-Org": org, "X-Kedge-Workspace": workspace}
 	}
-	stdout, stderr, err := runGeneratedApp(t, hub, project, alias, token, "query_table/v1", map[string]any{"limit": 2}, tenantHeaders)
+	stdout, stderr, err := runGeneratedApp(t, hub, project, alias, "query_table/v1", map[string]any{"limit": 2}, tokenFile, tenantHeaders)
 	if err != nil {
 		t.Fatalf("live generated app query failed: %v (stderr=%s)", err, stderr)
 	}
@@ -254,9 +323,6 @@ func TestOptionalLiveProviderActionSDK(t *testing.T) {
 	}
 	if len(result.Rows) > 2 {
 		t.Fatalf("live result returned %d rows, want bounded <=2", len(result.Rows))
-	}
-	if strings.Contains(stdout, token) || strings.Contains(stderr, token) {
-		t.Fatal("live generated app output leaked caller token")
 	}
 	t.Logf("live interaction verified through App Studio SDK: rows=%d; provider URL/PAT were not supplied to the app", len(result.Rows))
 }
@@ -302,28 +368,109 @@ func bindProvider(t *testing.T, tenant dynamic.Interface, name, workspace, expor
 	}, "APIBinding "+name+" Bound")
 }
 
-func assertProjectReferenceBinding(t *testing.T, tenant dynamic.Interface, table *unstructured.Unstructured) {
+func getProject(t *testing.T, tenant dynamic.Interface) *unstructured.Unstructured {
 	t.Helper()
 	project, err := tenant.Resource(projectGVR).Get(context.Background(), testProject, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get project: %v", err)
 	}
+	return project
+}
+
+func ensureInfrastructureBinding(t *testing.T, tenant dynamic.Interface, instance string) {
+	t.Helper()
+	project := getProject(t, tenant)
+	envs, ok, err := unstructured.NestedSlice(project.Object, "spec", "environments")
+	if err != nil || !ok || len(envs) == 0 {
+		t.Fatalf("project environments=%#v (err=%v), want development environment", envs, err)
+	}
+	found := false
+	for _, raw := range envs {
+		env, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(env, "name")
+		if name != "development" {
+			continue
+		}
+		bindings, _, _ := unstructured.NestedSlice(env, "bindings")
+		for _, bindingRaw := range bindings {
+			binding, _ := bindingRaw.(map[string]any)
+			if binding == nil {
+				continue
+			}
+			kind, _, _ := unstructured.NestedString(binding, "kind")
+			provider, _, _ := unstructured.NestedString(binding, "provider")
+			ref, _, _ := unstructured.NestedMap(binding, "resourceRef")
+			name, _, _ := unstructured.NestedString(ref, "name")
+			if kind == "providerResource" && provider == "infrastructure" && name == instance {
+				found = true
+			}
+		}
+		if !found {
+			bindings = append(bindings, map[string]any{
+				"name": "runtime", "provider": "infrastructure", "kind": "providerResource",
+				"resourceRef": map[string]any{
+					"name": instance, "apiVersion": "infrastructure.kedge.faros.sh/v1alpha1",
+					"kind": "Application", "resource": "applications",
+				},
+			})
+			if err := unstructured.SetNestedField(env, bindings, "bindings"); err != nil {
+				t.Fatalf("set infrastructure binding: %v", err)
+			}
+		}
+	}
+	if !found {
+		if err := unstructured.SetNestedField(project.Object, envs, "spec", "environments"); err != nil {
+			t.Fatalf("set project environments: %v", err)
+		}
+		if _, err := tenant.Resource(projectGVR).Update(context.Background(), project, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("persist infrastructure project binding: %v", err)
+		}
+	}
+}
+
+func assertProjectReferenceBinding(t *testing.T, tenant dynamic.Interface, table *unstructured.Unstructured, digest, instance string) {
+	t.Helper()
+	project := getProject(t, tenant)
 	envs, ok, err := unstructured.NestedSlice(project.Object, "spec", "environments")
 	if err != nil || !ok || len(envs) != 1 {
-		t.Fatalf("project environments=%#v (err=%v), want one live environment", envs, err)
+		t.Fatalf("project environments=%#v (err=%v), want one development environment", envs, err)
 	}
 	env, _ := envs[0].(map[string]any)
 	bindings, _, _ := unstructured.NestedSlice(env, "bindings")
-	if len(bindings) != 1 {
-		t.Fatalf("project bindings=%#v, want one providerReference", bindings)
+	var reference, infrastructure map[string]any
+	for _, raw := range bindings {
+		binding, _ := raw.(map[string]any)
+		if binding == nil {
+			continue
+		}
+		kind, _, _ := unstructured.NestedString(binding, "kind")
+		provider, _, _ := unstructured.NestedString(binding, "provider")
+		ref, _, _ := unstructured.NestedMap(binding, "resourceRef")
+		refName, _, _ := unstructured.NestedString(ref, "name")
+		if kind == "providerReference" && provider == "databricks" {
+			reference = binding
+		}
+		if kind == "providerResource" && provider == "infrastructure" && refName == instance {
+			infrastructure = binding
+		}
 	}
-	binding, _ := bindings[0].(map[string]any)
-	if binding["kind"] != "providerReference" {
-		t.Fatalf("binding kind=%v, want providerReference", binding["kind"])
+	if reference == nil || infrastructure == nil {
+		t.Fatalf("project bindings=%#v, want Databricks providerReference and Infrastructure instance %s", bindings, instance)
 	}
-	ref, _, _ := unstructured.NestedMap(binding, "resourceRef")
+	ref, _, _ := unstructured.NestedMap(reference, "resourceRef")
 	if ref["name"] != tableRef || ref["kind"] != "Table" {
 		t.Fatalf("binding resourceRef=%#v, want existing Table %s", ref, tableRef)
+	}
+	actions, _, _ := unstructured.NestedSlice(reference, "allowedActions")
+	if len(actions) != 1 {
+		t.Fatalf("allowedActions=%#v, want one catalog grant", actions)
+	}
+	action, _ := actions[0].(map[string]any)
+	if action["name"] != "query_table" || action["version"] != "v1" || action["schemaDigest"] != digest || strings.TrimSpace(fmt.Sprint(action["grantedBy"])) == "" || strings.TrimSpace(fmt.Sprint(action["grantedAt"])) == "" {
+		t.Fatalf("action grant=%#v, want exact catalog digest and audit fields", action)
 	}
 	latestTable, err := tenant.Resource(tableGVR).Get(context.Background(), table.GetName(), metav1.GetOptions{})
 	if err != nil {
@@ -331,6 +478,123 @@ func assertProjectReferenceBinding(t *testing.T, tenant dynamic.Interface, table
 	}
 	if owners := latestTable.GetOwnerReferences(); len(owners) != 0 {
 		t.Fatalf("provider-owned Table unexpectedly gained App Studio owner references: %#v", owners)
+	}
+}
+
+func catalogActionSchemaDigest(t *testing.T, providerName, actionID string) string {
+	t.Helper()
+	client := kcpDynamic(t, "root:kedge:system:providers", adminToken)
+	entry, err := client.Resource(catalogEntryGVR).Get(context.Background(), providerName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get %s catalog entry: %v", providerName, err)
+	}
+	actions, found, err := unstructured.NestedSlice(entry.Object, "spec", "actions")
+	if err != nil || !found {
+		t.Fatalf("%s catalog actions=%#v (err=%v)", providerName, actions, err)
+	}
+	for _, raw := range actions {
+		action, _ := raw.(map[string]any)
+		id, _, _ := unstructured.NestedString(action, "id")
+		if id != actionID {
+			continue
+		}
+		digest, _, _ := unstructured.NestedString(action, "schemaDigest")
+		if digest == "" {
+			t.Fatalf("%s catalog action %s has no schemaDigest", providerName, actionID)
+		}
+		return digest
+	}
+	t.Fatalf("%s catalog action %s not found", providerName, actionID)
+	return ""
+}
+
+func setProjectActionDigest(project *unstructured.Unstructured, digest string) error {
+	envs, found, err := unstructured.NestedSlice(project.Object, "spec", "environments")
+	if err != nil || !found {
+		return fmt.Errorf("project environments are missing")
+	}
+	for _, raw := range envs {
+		env, _ := raw.(map[string]any)
+		bindings, _, _ := unstructured.NestedSlice(env, "bindings")
+		for _, bindingRaw := range bindings {
+			binding, _ := bindingRaw.(map[string]any)
+			if binding == nil {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(binding, "name")
+			kind, _, _ := unstructured.NestedString(binding, "kind")
+			if name != testAlias || kind != "providerReference" {
+				continue
+			}
+			actions, found, err := unstructured.NestedSlice(binding, "allowedActions")
+			if err != nil || !found || len(actions) != 1 {
+				return fmt.Errorf("integration allowedActions are missing")
+			}
+			action, ok := actions[0].(map[string]any)
+			if !ok {
+				return fmt.Errorf("integration action is malformed")
+			}
+			action["schemaDigest"] = digest
+			if err := unstructured.SetNestedField(binding, actions, "allowedActions"); err != nil {
+				return err
+			}
+			// NestedSlice returns a deep copy. Reattach each changed level so
+			// the subsequent Project update actually persists the drift.
+			if err := unstructured.SetNestedField(env, bindings, "bindings"); err != nil {
+				return err
+			}
+			return unstructured.SetNestedField(project.Object, envs, "spec", "environments")
+		}
+	}
+	return fmt.Errorf("integration %q not found", testAlias)
+}
+
+func exchangeWorkloadToken(t *testing.T, tenantPath, projectUID, instance, bootstrap string) string {
+	t.Helper()
+	status, body := postJSON(t, hubURL+"/api/provider-actions/workload/exchange", bootstrap, map[string]any{
+		"tenantPath": tenantPath, "project": testProject, "projectUID": projectUID,
+		"environment": "development", "instance": instance,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("workload exchange: status=%d body=%s", status, body)
+	}
+	var response struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil || strings.TrimSpace(response.Token) == "" {
+		t.Fatalf("decode workload exchange: err=%v body=%s", err, body)
+	}
+	return strings.TrimSpace(response.Token)
+}
+
+func assertDatabricksMCPUnavailable(t *testing.T) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+databricksPort+"/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0"}`))
+	if err != nil {
+		t.Fatalf("build MCP probe: %v", err)
+	}
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatalf("MCP probe: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		t.Fatalf("Databricks /mcp unexpectedly available: status=%d", response.StatusCode)
+	}
+}
+
+func assertDirectDatabricksActionBlocked(t *testing.T, tenantHeaders map[string]string) {
+	t.Helper()
+	before := len(fakeDB.Requests())
+	status, body := postJSON(t, hubURL+"/services/providers/databricks/actions/query_table/v1", staticToken, map[string]any{
+		"resourceRef": map[string]any{"name": tableRef, "apiVersion": "databricks.kedge.faros.sh/v1alpha1", "kind": "Table", "resource": "tables"},
+		"input":       map[string]any{"limit": 1},
+	}, tenantHeaders)
+	if status != http.StatusNotFound {
+		t.Fatalf("direct provider action URL status=%d body=%s, want 404", status, body)
+	}
+	if got := len(fakeDB.Requests()); got != before {
+		t.Fatalf("direct provider action URL reached upstream: request count %d before %d", got, before)
 	}
 }
 
@@ -386,20 +650,29 @@ func waitCondition(t *testing.T, timeout time.Duration, check func() (bool, stri
 	t.Fatalf("%s never became ready: %s", label, last)
 }
 
-func runGeneratedApp(t *testing.T, hub, project, alias, token, action string, input map[string]any, tenantHeaders ...map[string]string) (string, string, error) {
+func runGeneratedApp(t *testing.T, hub, project, alias, action string, input map[string]any, tokenFile string, tenantHeaders ...map[string]string) (string, string, error) {
 	t.Helper()
 	b, err := json.Marshal(input)
 	if err != nil {
 		t.Fatalf("encode generated app input: %v", err)
 	}
-	script := filepath.Join(repoRoot, "test", "e2e", "provideractions", "generated-app", "run.mjs")
+	script := stageGeneratedApp(t)
 	cmd := exec.CommandContext(ctxWithTimeout(t, 2*time.Minute), "node", script)
-	cmd.Env = append(os.Environ(),
-		"KEDGE_HUB_URL="+hub,
+	cmd.Dir = filepath.Dir(script)
+	env := make([]string, 0, len(os.Environ())+6)
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		if strings.Contains(strings.ToUpper(key), "CALLER_TOKEN") {
+			continue
+		}
+		env = append(env, value)
+	}
+	cmd.Env = append(env,
+		"KEDGE_ACTIONS_BASE_URL="+strings.TrimRight(hub, "/")+"/services/providers/app-studio",
 		"KEDGE_PROJECT="+project,
 		"KEDGE_ACTION_ALIAS="+alias,
 		"KEDGE_ACTION="+action,
-		"KEDGE_CALLER_TOKEN="+token,
+		"KEDGE_ACTIONS_TOKEN_FILE="+tokenFile,
 		"KEDGE_ACTION_INPUT_JSON="+string(b),
 	)
 	if len(tenantHeaders) > 0 && len(tenantHeaders[0]) > 0 {
@@ -415,11 +688,61 @@ func runGeneratedApp(t *testing.T, hub, project, alias, token, action string, in
 	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
 }
 
-// setupTenantWorkspace creates a real child workspace for the static-token
-// caller and waits for its kcp logical-cluster ID. App Studio deliberately
+// stageGeneratedApp mirrors the production generated-app layout: the app
+// imports @kedge/actions-node by package name from a normal node_modules tree.
+// The E2E copies the package into a temporary directory so it never relies on
+// a monorepo-relative runtime import or mutates the checkout under test.
+func stageGeneratedApp(t *testing.T) string {
+	t.Helper()
+	appDir := t.TempDir()
+	sourceDir := filepath.Join(repoRoot, "test", "e2e", "provideractions", "generated-app")
+	script := filepath.Join(appDir, "run.mjs")
+	sourceScript := filepath.Join(sourceDir, "run.mjs")
+	scriptContents, err := os.ReadFile(sourceScript)
+	if err != nil {
+		t.Fatalf("read generated app entrypoint: %v", err)
+	}
+	for _, want := range []string{
+		"import { createActionsClient } from '@kedge/actions-node';",
+		"tokenFile: actionsTokenFile",
+	} {
+		if !strings.Contains(string(scriptContents), want) {
+			t.Fatalf("generated app entrypoint missing production SDK contract %q", want)
+		}
+	}
+	copyGeneratedAppFile(t, sourceScript, script)
+
+	packageDir := filepath.Join(appDir, "node_modules", "@kedge", "actions-node")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatalf("create generated app package fixture: %v", err)
+	}
+	sdkDir := filepath.Join(repoRoot, "provider-sdk", "actions-node")
+	for _, name := range []string{"package.json", "index.mjs", "index.d.ts", "README.md"} {
+		copyGeneratedAppFile(t, filepath.Join(sdkDir, name), filepath.Join(packageDir, name))
+	}
+	return script
+}
+
+func copyGeneratedAppFile(t *testing.T, source, destination string) {
+	t.Helper()
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read generated app fixture %s: %v", source, err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatalf("stat generated app fixture %s: %v", source, err)
+	}
+	if err := os.WriteFile(destination, contents, info.Mode().Perm()); err != nil {
+		t.Fatalf("write generated app fixture %s: %v", destination, err)
+	}
+}
+
+// setupTenantWorkspace creates a real child workspace for the harness control
+// token and waits for its kcp logical-cluster ID. App Studio deliberately
 // rejects org-only context for project routes; the generated app therefore
-// receives only the ordinary tenant-selection headers alongside its caller
-// token, never a provider URL or PAT.
+// receives only ordinary tenant-selection headers and a workload token-file
+// path, never a static caller token, provider URL, or PAT.
 func setupTenantWorkspace(t *testing.T) (string, string, string) {
 	t.Helper()
 	var orgUUID string

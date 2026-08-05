@@ -94,6 +94,8 @@ data:
       backend:
         url: "http://{{ include "infrastructure.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         healthPath: "/healthz"
+      virtualWorkspace:
+        url: "http://{{ include "infrastructure.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
       # Reference-only. The APIExport + its dynamically-generated schemas + the bind
       # grant are created by this chart's init container (provider `init`); the hub
       # no longer provisions.

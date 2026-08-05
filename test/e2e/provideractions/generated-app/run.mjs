@@ -1,12 +1,12 @@
 // This is the generated application's server-side entrypoint used by the E2E.
-// It imports the real @kedge/actions-node implementation from the workspace;
-// it never receives a Databricks URL, PAT, SQL text, or provider credential.
-import { createActionsClient } from '../../../../provider-sdk/actions-node/index.mjs';
+// The production runtime preinstalls @kedge/actions-node in node_modules; the
+// app never receives a Databricks URL, PAT, SQL text, or provider credential.
+import { createActionsClient } from '@kedge/actions-node';
 
-const hubURL = String(process.env.KEDGE_HUB_URL ?? '').trim();
+const actionsBaseURL = String(process.env.KEDGE_ACTIONS_BASE_URL ?? '').trim();
+const actionsTokenFile = String(process.env.KEDGE_ACTIONS_TOKEN_FILE ?? '').trim();
 const project = String(process.env.KEDGE_PROJECT ?? '').trim();
 const alias = String(process.env.KEDGE_ACTION_ALIAS ?? '').trim();
-const token = process.env.KEDGE_CALLER_TOKEN ?? '';
 const input = JSON.parse(process.env.KEDGE_ACTION_INPUT_JSON ?? '{"limit":2}');
 const action = String(process.env.KEDGE_ACTION ?? 'query_table/v1').trim();
 const headers = process.env.KEDGE_ACTION_HEADERS_JSON
@@ -14,15 +14,16 @@ const headers = process.env.KEDGE_ACTION_HEADERS_JSON
   : undefined;
 
 const client = createActionsClient({
-  baseURL: `${hubURL}/services/providers/app-studio`,
+  baseURL: actionsBaseURL,
   project,
-  token,
+  // Pass the injected workload credential path explicitly. The generated
+  // application never receives a caller token or provider credential.
+  tokenFile: actionsTokenFile,
+  allowInsecureLoopback: true,
   headers,
 });
 try {
-  const result = action === 'query_table/v1'
-    ? await client.queryTable(alias, input)
-    : await client.integration(alias).invoke(action, input);
+  const result = await client.integration(alias).invoke(action, input);
   // stdout is the generated app's bounded result contract. Keep it free of
   // configuration and credentials so the suite can assert safe app output.
   process.stdout.write(JSON.stringify(result));

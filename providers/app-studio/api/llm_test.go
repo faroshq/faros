@@ -25,6 +25,7 @@ import (
 	"time"
 
 	einoschema "github.com/cloudwego/eino/schema"
+	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 )
 
 func TestProjectLLMSettingsUseCodexStreamRecoveryDefaults(t *testing.T) {
@@ -385,6 +386,89 @@ func TestDefaultPromptRequiresEvidenceGroundedChecklistUpdates(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("default prompt missing checklist instruction %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestProjectPromptDocumentsPreinstalledActionsSDKForActiveGrant(t *testing.T) {
+	project := &aiv1alpha1.Project{
+		Spec: aiv1alpha1.ProjectSpec{
+			DisplayName: "Actions app",
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: "development",
+				Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+					Name:     "sales",
+					Provider: "databricks",
+					Kind:     aiv1alpha1.ProjectBindingKindProviderReference,
+					AllowedActions: []aiv1alpha1.ProjectProviderActionSpec{{
+						Name: "query_table", Version: "v1", SchemaDigest: "sha256:" + strings.Repeat("a", 64),
+					}},
+				}},
+			}},
+		},
+	}
+	prompt := projectSystemPromptForMode(project, nil, projectAssistantCollaborationModeDefault, false)
+	for _, want := range []string{
+		"@kedge/actions-node is preinstalled in the server runtime/executor",
+		"import { createActionsClient } from '@kedge/actions-node';",
+		"KEDGE_ACTIONS_BASE_URL",
+		"KEDGE_PROJECT",
+		"KEDGE_PROJECT_UID",
+		"KEDGE_ACTIONS_TOKEN_FILE",
+		"KEDGE_ACTIONS_ENVIRONMENT",
+		"KEDGE_ACTIONS_INSTANCE",
+		"KEDGE_ACTIONS_TENANT_PATH",
+		"KEDGE_ACTIONS_ORG",
+		"KEDGE_ACTIONS_WORKSPACE",
+		"Do not run npm install",
+		"do not discover the gateway",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("active-grant prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestProjectPromptDoesNotClaimActionsSDKWithoutActiveGrant(t *testing.T) {
+	tests := []struct {
+		name    string
+		project *aiv1alpha1.Project
+	}{
+		{
+			name:    "no integration",
+			project: &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{DisplayName: "No actions"}},
+		},
+		{
+			name: "empty grant",
+			project: &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+				DisplayName: "No actions",
+				Environments: []aiv1alpha1.ProjectEnvironmentSpec{{Name: "development", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+					Name: "sales", Provider: "databricks", Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+				}}}},
+			}},
+		},
+		{
+			name: "revoked grant",
+			project: &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+				DisplayName: "No actions",
+				Environments: []aiv1alpha1.ProjectEnvironmentSpec{{Name: "development", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+					Name: "sales", Provider: "databricks", Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+					AllowedActions: []aiv1alpha1.ProjectProviderActionSpec{{
+						Name: "query_table", Version: "v1", SchemaDigest: "sha256:" + strings.Repeat("b", 64), Revoked: true,
+					}},
+				}}}},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt := projectSystemPromptForMode(tt.project, nil, projectAssistantCollaborationModeDefault, false)
+			if strings.Contains(prompt, "@kedge/actions-node is preinstalled") || strings.Contains(prompt, "import { createActionsClient } from '@kedge/actions-node';") {
+				t.Fatalf("prompt made an SDK availability claim without an active grant:\n%s", prompt)
+			}
+			if !strings.Contains(prompt, "No active integration action grant is present") {
+				t.Fatalf("prompt missing no-grant guidance:\n%s", prompt)
+			}
+		})
 	}
 }
 

@@ -37,8 +37,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&WarehouseList{},
 		&Table{},
 		&TableList{},
-		&TableQuery{},
-		&TableQueryList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

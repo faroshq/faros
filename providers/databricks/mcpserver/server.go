@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"k8s.io/klog/v2"
 
+	"github.com/faroshq/provider-databricks/actions"
 	"github.com/faroshq/provider-databricks/queryapi"
 )
 
@@ -23,8 +24,8 @@ type Deps struct {
 	Tables                        map[string]queryapi.TableRef
 	TableResolver                 queryapi.TableResolver
 	ResolverFromRequest           func(*http.Request) queryapi.TableResolver
-	QueryRunner                   queryapi.QueryRunner
-	QueryRunnerFromRequest        func(*http.Request) queryapi.QueryRunner
+	ActionExecutor                actions.QueryExecutor
+	ActionExecutorFromRequest     func(*http.Request) actions.QueryExecutor
 	DisableLocalhostMCPProtection bool
 }
 
@@ -53,17 +54,17 @@ func newPerRequestServer(deps Deps, r *http.Request) *mcp.Server {
 			"Do not generate application code that calls provider-databricks, " +
 			"and do not embed Databricks credentials or direct warehouse auth config.",
 	})
-	registerTools(srv, resolverForRequest(deps, r), queryRunnerForRequest(deps, r))
+	registerTools(srv, resolverForRequest(deps, r), actionExecutorForRequest(deps, r))
 	return srv
 }
 
-func queryRunnerForRequest(deps Deps, r *http.Request) queryapi.QueryRunner {
-	if deps.QueryRunnerFromRequest != nil {
-		if runner := deps.QueryRunnerFromRequest(r); runner != nil {
-			return runner
+func actionExecutorForRequest(deps Deps, r *http.Request) actions.QueryExecutor {
+	if deps.ActionExecutorFromRequest != nil {
+		if executor := deps.ActionExecutorFromRequest(r); executor != nil {
+			return executor
 		}
 	}
-	return deps.QueryRunner
+	return deps.ActionExecutor
 }
 
 func resolverForRequest(deps Deps, r *http.Request) queryapi.TableResolver {

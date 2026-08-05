@@ -53,10 +53,12 @@ import (
 	"github.com/faroshq/faros-kedge/pkg/hub/controllers/softdelete"
 	"github.com/faroshq/faros-kedge/pkg/hub/kcp"
 	"github.com/faroshq/faros-kedge/pkg/hub/mcpaggregate"
+	"github.com/faroshq/faros-kedge/pkg/hub/provideractions"
 	"github.com/faroshq/faros-kedge/pkg/hub/providers"
 	"github.com/faroshq/faros-kedge/pkg/hub/restapi"
 	"github.com/faroshq/faros-kedge/pkg/hub/serviceaccounts"
 	"github.com/faroshq/faros-kedge/pkg/hub/tenant"
+	"github.com/faroshq/faros-kedge/pkg/hub/workloadidentity"
 	"github.com/faroshq/faros-kedge/pkg/kcppaths"
 	"github.com/faroshq/faros-kedge/pkg/server/auth"
 	"github.com/faroshq/faros-kedge/pkg/server/proxy"
@@ -201,6 +203,7 @@ func (s *Server) Run(ctx context.Context) error {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = fmt.Fprint(w, "bootstrapping")
 	})
+	earlyMux.Handle("/metrics", provideractions.MetricsHandler())
 	delegate.set(earlyMux)
 
 	earlyHTTPServer := &http.Server{
@@ -331,6 +334,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// (wired below alongside other multicluster controllers) keeps in sync
 	// with ProviderCatalogEntry resources.
 	providerRegistry := providers.NewRegistry()
+	providerActionHandler := provideractions.New(provideractions.Options{
+		Registry: providerRegistry,
+		Logger:   logger,
+	})
+	router.Handle(provideractions.PathInvoke, providerActionHandler).Methods(http.MethodPost)
 	// Keep the UI proxy reference around so we can install the portal SPA as
 	// its fallback once the portal handler is built later in this function.
 	// Without that fallback, a hard refresh of /ui/providers/{name} would
@@ -431,6 +439,7 @@ func (s *Server) Run(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "ok")
 	})
+	router.Handle("/metrics", provideractions.MetricsHandler()).Methods(http.MethodGet)
 
 	// Version endpoint — used by the portal to detect when an edge agent is
 	// running an older build than the hub and to render upgrade instructions.
@@ -493,11 +502,14 @@ func (s *Server) Run(ctx context.Context) error {
 			// See pkg/hub/provider_tenant_resolver.go for the concrete
 			// resolver (lives here to avoid a providers→proxy→kcp→providers
 			// import cycle).
-			backendProxy.SetTenantResolver(newKCPTenantResolver(kcpProxy, userClient))
+			backendProxy.SetTenantResolver(newKCPTenantResolver(kcpProxy, userClient, bootstrapper))
 			// Inject X-Kedge-Cluster (the resolved tenant's logical-cluster
 			// ID) so providers can address per-workspace surfaces that key on
 			// the ID — notably the GraphQL gateway at /graphql/clusters/{id}.
 			backendProxy.SetClusterResolver(newClusterIDResolver(kcpConfig))
+			providerActionHandler.SetTenantResolver(newKCPTenantResolver(kcpProxy, userClient, bootstrapper))
+			providerActionHandler.SetClusterResolver(newClusterIDResolver(kcpConfig))
+			providerActionHandler.SetInvocationAuthorizer(provideractions.NewKCPInvocationAuthorizer(bootstrapper))
 
 			// Step 10: Org / Workspace / Membership / User REST
 			apiMgr := restapi.NewManager(userClient, bootstrapper)
@@ -534,6 +546,22 @@ func (s *Server) Run(ctx context.Context) error {
 			saMgr := serviceaccounts.NewManager(bootstrapper)
 			saHandler := serviceaccounts.NewHandler(saMgr)
 			saHandler.Register(tenantSub)
+
+			// Production provider-action runtimes exchange an Infrastructure-owned
+			// bootstrap attestation for a short-lived, audience-bound Kedge token.
+			// The attestor resolves the provider's declared virtual workspace from
+			// the catalog; the service-account manager owns deterministic identity
+			// and scoped RBAC in the tenant workspace.
+			workloadAttestor := workloadidentity.NewHTTPAttestor(workloadidentity.HTTPAttestorOptions{
+				Registry: providerRegistry,
+			})
+			workloadHandler := workloadidentity.New(workloadidentity.Options{
+				Attestor:      workloadAttestor,
+				Issuer:        saMgr,
+				ScopeResolver: workloadidentity.NewKCPProjectScopeResolver(bootstrapper),
+				Logger:        logger,
+			})
+			router.Handle(workloadidentity.PathExchange, workloadHandler).Methods(http.MethodPost)
 
 			logger.Info("REST routes registered (Org/Workspace/Membership/User + ServiceAccount)")
 

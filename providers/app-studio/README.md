@@ -96,10 +96,13 @@ Environment variables consumed by the binary:
 | Var | Purpose |
 |---|---|
 | `PORT` | Listen port (default `8081`) |
-| `KEDGE_HUB_URL` | Hub base URL (heartbeat + MCP endpoint resolution) |
+| `KEDGE_HUB_URL` | Hub base URL for tenant GraphQL, caller-scoped catalog lookup, and Provider Actions forwarding |
 | `KEDGE_HUB_TOKEN` | Bearer token for the heartbeat |
 | `KEDGE_PROVIDER_NAME` | CatalogEntry name (default `app-studio`) |
 | `KEDGE_PROVIDER_KUBECONFIG` | Provider kubeconfig (kcp front-proxy host + TLS only) |
+| `KEDGE_ACTIONS_EXTERNAL_URL` | Optional absolute HTTPS hub origin, reachable and certificate-valid from sandbox pods, injected into action-enabled development runtimes for workload-token exchange and the server-side Actions SDK; no local default |
+| `KEDGE_ACTIONS_CA_BUNDLE_FILE` | Optional PEM file containing the public CA for that origin; passed only to action-enabled development runtimes, never used to disable TLS verification |
+| `KEDGE_ACTIONS_CA_BUNDLE` | Optional direct PEM equivalent for local launches; when both CA settings are present they must match |
 | `APP_STUDIO_DATABASE_URL` | Postgres DSN for the message store |
 | `APP_STUDIO_IN_MEMORY_MESSAGE_STORE` | `true` → non-durable in-memory store (dev) |
 | `APP_STUDIO_MESSAGE_ENCRYPTION_KEYS` | Comma-separated `key-id:base64-aes-key` entries for message content and metadata encryption at rest |
@@ -151,6 +154,19 @@ when testing a custom key pair.
 To use your own database, set `APP_STUDIO_DATABASE_URL` in the environment or in
 `providers/app-studio/.env` (copy from `.env.example`). To intentionally use the
 old throwaway behavior, set `APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true`.
+
+Action-enabled development sandboxes also require `KEDGE_ACTIONS_EXTERNAL_URL` in
+that environment file (or the launcher environment). `make run-provider-app-studio`
+forwards the explicitly configured value; it does not substitute the provider's
+internal `KEDGE_HUB_URL`, `localhost`, or an insecure HTTP URL. The origin must be
+reachable from the sandbox pod and trusted by its system CA; configure deployment
+CA material separately when a private certificate authority is used. Set
+`KEDGE_ACTIONS_CA_BUNDLE_FILE` (or the direct `KEDGE_ACTIONS_CA_BUNDLE` value) for
+that case. The bundle is copied into a public ConfigMap-backed development
+mount and added to Go/Node trust roots; an unset bundle leaves the image's
+system trust unchanged. Helm deployments can use
+`hub.actionsCABundleConfigMap` to mount the same public PEM file into App
+Studio.
 
 ## Resilient assistant conversations
 
@@ -372,19 +388,30 @@ resourceRef:
 allowedActions:
 - name: query_table
   version: v1
+  schemaDigest: sha256:<catalog-digest>
 ```
 
 App Studio only GETs the referenced object while reconciling and never creates,
 updates, owns, or deletes it. Integrations are managed through
 `/api/projects/{project}/integrations` (GET/POST), removed with DELETE on the
-alias, and invoked with POST on `{alias}/invoke`. The sole adapter currently
-implemented is `query_table/v1`, forwarded to the hub aggregate MCP tool
-`databricks__query_table` with `actionVersion`, the server-injected `tableRef`,
-and optional exact `columns`/bounded `limit`. Caller credentials, provider
-backend URLs, and raw SQL are rejected.
+alias, and invoked with POST on `{alias}/invoke`. On create or reactivation,
+App Studio resolves the caller-scoped `/api/providers` catalog and records a
+server-owned `schemaDigest`, `grantedBy`, and `grantedAt` for every exact
+action/resource grant. Revocation preserves that grant audit and records
+`revokedBy`/`revokedAt`; reactivation requires fresh catalog verification and
+consent when declared.
+
+Invocation forwards the provider-neutral envelope to the hub's direct
+`POST /api/provider-actions/invoke` route. App Studio does not select a
+provider URL or embed provider transport logic. Caller credentials,
+provider backend URLs, resource overrides, and raw SQL are rejected.
 
 Generated server applications can use the provider-neutral
-`provider-sdk/actions-node` package (`client.integration(alias).invoke(...)` or
-`client.queryTable(...)`). It is server-only: a Kedge caller credential must
-never reach browser code. `allowDevelopmentToken` is available only for a
-local synthetic-token prototype and is not production workload identity.
+`provider-sdk/actions-node` package with
+`client.integration(alias).invoke(...)` or `invokeEnvelope(...)`. The SDK is
+server-only, requires an absolute HTTPS base URL (except an explicit loopback
+test override), reads the short-lived workload token from
+`KEDGE_ACTIONS_TOKEN_FILE` on every request or from a refreshable credential
+provider, and retries once with `forceRefresh` after a `401`. The bootstrap
+token used by the workload exchange is never the app token; no development
+token fallback exists.

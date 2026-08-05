@@ -15,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/faroshq/provider-databricks/actions"
 	"github.com/faroshq/provider-databricks/queryapi"
 )
 
@@ -48,11 +49,7 @@ type queryTableOutput struct {
 	Truncated     bool                   `json:"truncated,omitempty"`
 }
 
-func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, runners ...queryapi.QueryRunner) {
-	var runner queryapi.QueryRunner
-	if len(runners) > 0 {
-		runner = runners[0]
-	}
+func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, executor actions.QueryExecutor) {
 	safeRegister("list_tables", func() {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "list_tables",
@@ -95,7 +92,7 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, runners ...
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "query_table",
 			Title:       "Query an imported Databricks table",
-			Description: "Run the versioned v1 bounded table query action. Supply only an imported tableRef, optional exact column names, and a limit; the provider resolves the warehouse, connection, and credentials.",
+			Description: "Run the versioned v1 bounded table query action. Supply only an imported tableRef, optional exact column names, and a limit; the provider resolves the warehouse, connection, and credentials without creating a query resource.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryTableInput) (*mcp.CallToolResult, queryTableOutput, error) {
 			request, err := queryapi.NormalizeQueryRequest(queryapi.QueryTableRequest{
@@ -107,10 +104,15 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, runners ...
 			if err != nil {
 				return nil, queryTableOutput{}, err
 			}
-			if runner == nil {
+			if executor == nil {
 				return nil, queryTableOutput{}, fmt.Errorf("databricks table query is unavailable")
 			}
-			result, err := runner.QueryTable(ctx, request)
+			result, err := executor.QueryTable(ctx, actions.ResourceRef{
+				APIVersion: "databricks.kedge.faros.sh/v1alpha1",
+				Kind:       "Table",
+				Resource:   "tables",
+				Name:       request.TableRef,
+			}, actions.QueryInput{Columns: request.Columns, Limit: request.Limit})
 			if err != nil {
 				return nil, queryTableOutput{}, err
 			}

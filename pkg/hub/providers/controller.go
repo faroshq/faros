@@ -120,6 +120,32 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		return ctrl.Result{}, err
 	}
 
+	// Validate the action map before any endpoint is admitted into the
+	// registry. A malformed declaration must fail closed: keeping a previous
+	// registry record would allow an action whose contract no longer matches
+	// the CatalogEntry observed by the controller.
+	if err := providersv1alpha1.ValidateProviderActions(entry.Spec.Actions); err != nil {
+		r.reg.Delete(entry.Name)
+		now := metav1.NewTime(time.Now())
+		entry.Status.Endpoints = &providersv1alpha1.ProviderEndpoints{}
+		setCondition(&entry.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidActions",
+			Message:            err.Error(),
+			LastTransitionTime: now,
+			ObservedGeneration: entry.Generation,
+		})
+		if statusErr := c.Status().Update(ctx, &entry); statusErr != nil {
+			if apierrors.IsConflict(statusErr) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("updating invalid-action status: %w", statusErr)
+		}
+		logger.Info("Rejected invalid provider action declarations", "error", err.Error())
+		return ctrl.Result{}, nil
+	}
+
 	dependencies := make([]Dependency, 0, len(entry.Spec.Dependencies))
 	for _, dep := range entry.Spec.Dependencies {
 		dependencies = append(dependencies, Dependency{Name: dep.Name})
@@ -159,6 +185,29 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 			})
 		}
 	}
+	parsedActions, actionSchemaErr := ParseProviderActions(entry.Spec.Actions)
+	if actionSchemaErr != nil {
+		r.reg.Delete(entry.Name)
+		now := metav1.NewTime(time.Now())
+		entry.Status.Endpoints = &providersv1alpha1.ProviderEndpoints{}
+		setCondition(&entry.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "InvalidActionSchemas",
+			Message:            actionSchemaErr.Error(),
+			LastTransitionTime: now,
+			ObservedGeneration: entry.Generation,
+		})
+		if statusErr := c.Status().Update(ctx, &entry); statusErr != nil {
+			if apierrors.IsConflict(statusErr) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("updating invalid-action-schema status: %w", statusErr)
+		}
+		logger.Info("Rejected provider action schemas", "error", actionSchemaErr.Error())
+		return ctrl.Result{}, nil
+	}
+	prov.Actions = parsedActions
 
 	var parseErrs []string
 	if entry.Spec.UI != nil && entry.Spec.UI.URL != "" {
@@ -177,6 +226,14 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 			prov.BackendURL = u
 		}
 	}
+	if entry.Spec.VirtualWorkspace != nil {
+		u, err := ParseURL(entry.Spec.VirtualWorkspace.URL)
+		if err != nil {
+			parseErrs = append(parseErrs, "virtualWorkspace.url: "+err.Error())
+		} else {
+			prov.VirtualWorkspaceURL = u
+		}
+	}
 
 	// If this CatalogEntry name matches a first-party provider that
 	// registered LocalUIAssets via BuiltinSpec, plumb the embedded FS into
@@ -191,7 +248,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	// backend proxy target OR embedded UI assets. Heartbeat-driven
 	// readiness is layered on by the sweeper (see Provider.Ready()).
 	prov.EndpointsValid = len(parseErrs) == 0 &&
-		(prov.UIURL != nil || prov.BackendURL != nil || prov.BuiltinRoute != "" || prov.LocalUIAssets != nil)
+		(prov.UIURL != nil || prov.BackendURL != nil || prov.VirtualWorkspaceURL != nil || prov.BuiltinRoute != "" || prov.LocalUIAssets != nil)
 
 	r.reg.Upsert(prov)
 	// Render URLs as strings: a nil *url.URL panics klog's stringer (shows as

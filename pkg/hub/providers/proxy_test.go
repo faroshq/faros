@@ -112,6 +112,47 @@ func TestBackendProxyNoSPAFallback(t *testing.T) {
 	}
 }
 
+func TestBackendProxyReservesProviderActionEndpoints(t *testing.T) {
+	reg := NewRegistry()
+	upstreamCalled := false
+	target, err := url.Parse("http://provider.invalid")
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	reg.Upsert(Provider{Name: "databricks", BackendURL: target, EndpointsValid: true})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.pick = func(Provider) *url.URL {
+		upstreamCalled = true
+		return nil
+	}
+
+	for _, requestPath := range []string{
+		"/services/providers/databricks/actions",
+		"/services/providers/databricks/actions/query_table/v1",
+		"/services/providers/databricks/other/../actions/query_table/v1",
+	} {
+		t.Run(requestPath, func(t *testing.T) {
+			upstreamCalled = false
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, requestPath, nil)
+			proxy.ServeHTTP(response, request)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", response.Code)
+			}
+			if upstreamCalled {
+				t.Fatal("reserved provider action path reached backend upstream")
+			}
+		})
+	}
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/services/providers/databricks/healthz", nil)
+	proxy.ServeHTTP(response, request)
+	if !upstreamCalled {
+		t.Fatalf("ordinary backend route status=%d upstreamCalled=false, want upstream selected", response.Code)
+	}
+}
+
 // TestUIProxyLocalAssets exercises the first-party-provider path:
 // when Provider.LocalUIAssets is set, asset requests serve from the
 // embedded FS without ever touching an upstream URL. The catalog SPA

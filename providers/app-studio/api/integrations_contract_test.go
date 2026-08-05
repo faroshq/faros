@@ -14,11 +14,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -38,6 +41,16 @@ import (
 var testDatabricksTableGVR = schema.GroupVersionResource{
 	Group: "databricks.kedge.faros.sh", Version: "v1alpha1", Resource: "tables",
 }
+
+const (
+	projectIntegrationProviderDatabricks = "databricks"
+	projectIntegrationActionQueryTable   = "query_table"
+	projectIntegrationActionVersionV1    = "v1"
+	testProjectActionSchemaDigest        = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	databricksTableAPIVersion            = "databricks.kedge.faros.sh/v1alpha1"
+	databricksTableKind                  = "Table"
+	databricksTableResource              = "tables"
+)
 
 func TestProviderReferenceReconcileOnlyGetsAndNeverOwnsTarget(t *testing.T) {
 	project := &aiv1alpha1.Project{
@@ -131,25 +144,139 @@ func TestProviderReferenceProjectCleanupDoesNotDeleteTarget(t *testing.T) {
 	}
 }
 
-func TestIntegrationQueryArgumentsRejectProviderControlledFields(t *testing.T) {
-	table := &unstructured.Unstructured{Object: map[string]any{
-		"status": map[string]any{"columns": []any{map[string]any{"name": "id"}}},
-	}}
-	if _, err := projectIntegrationQueryArguments(json.RawMessage(`{"tableRef":"other"}`), table); err == nil {
-		t.Fatal("query input accepted caller-controlled tableRef")
+func TestProviderActionInputRejectsBoundContextOverrides(t *testing.T) {
+	for _, field := range []string{
+		`{"resourceRef":{"name":"other"}}`,
+		`{"provider":"other"}`,
+		`{"providerURL":"https://attacker.invalid"}`,
+		`{"credentials":"secret"}`,
+		`{"nested":{"clusterID":"other"}}`,
+	} {
+		if _, err := normalizeProjectProviderActionInput(json.RawMessage(field)); err == nil {
+			t.Fatalf("provider action input accepted bound-context override: %s", field)
+		}
 	}
-	if _, err := projectIntegrationQueryArguments(json.RawMessage(`{"sql":"select 1"}`), table); err == nil {
-		t.Fatal("query input accepted raw SQL")
-	}
-	if _, err := projectIntegrationQueryArguments(json.RawMessage(`{"columns":["secret"]}`), table); err == nil {
-		t.Fatal("query input accepted a column absent from bound Table metadata")
-	}
-	args, err := projectIntegrationQueryArguments(json.RawMessage(`{"columns":["id"],"limit":25}`), table)
+	input, err := normalizeProjectProviderActionInput(json.RawMessage(`{"columns":["id"],"limit":25,"sql":"select 1"}`))
 	if err != nil {
-		t.Fatalf("valid query input rejected: %v", err)
+		t.Fatalf("generic action input rejected: %v", err)
 	}
-	if args["limit"] != 25 {
-		t.Fatalf("limit argument = %#v, want 25", args["limit"])
+	if string(input) == "" {
+		t.Fatal("normalized generic action input was empty")
+	}
+}
+
+func TestProviderActionForwardingNeverRetriesWithInsecureTLS(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"requestID":"unexpected","provider":"other","action":"lookup","actionVersion":"v1","resourceRef":{"name":"item","apiVersion":"example/v1","kind":"Item","resource":"items"},"result":{}}`))
+	}))
+	defer upstream.Close()
+
+	s := &Server{hubBase: upstream.URL, actionsExternalURL: "https://hub.example", mcpInsecureSkipTLSVerify: true}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	ref := &aiv1alpha1.ProjectProviderResourceReference{
+		Name: "item", APIVersion: "example/v1", Kind: "Item", Resource: "items",
+	}
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected verified TLS failure against self-signed upstream")
+	}
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "provider_action_unavailable" {
+		t.Fatalf("error envelope = %#v, want provider_action_unavailable", envelope.Error)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream received %d calls; action forwarding retried with insecure TLS", got)
+	}
+}
+
+func TestProviderActionForwardingAppendsConfiguredCAToSystemTrust(t *testing.T) {
+	var calls atomic.Int32
+	ref := &aiv1alpha1.ProjectProviderResourceReference{
+		Name: "item", APIVersion: "example/v1", Kind: "Item", Resource: "items",
+	}
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(projectProviderActionEnvelope{
+			RequestID: "request-ca", Provider: "other", Action: "lookup", ActionVersion: "v1", ResourceRef: ref, Result: json.RawMessage(`{"ok":true}`),
+		})
+	}))
+	defer upstream.Close()
+
+	caBundle := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw})
+	s := &Server{hubBase: upstream.URL, actionsExternalURL: "https://hub.example", actionsCABundle: string(caBundle), mcpInsecureSkipTLSVerify: true}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	if err != nil || status != http.StatusOK || envelope.Error != nil {
+		t.Fatalf("forward with configured CA = status %d envelope %#v err %v", status, envelope, err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want one verified request", got)
+	}
+}
+
+func TestProviderActionForwardingUsesVerifiedOrgWorkspaceHeaders(t *testing.T) {
+	ref := &aiv1alpha1.ProjectProviderResourceReference{Name: "item", APIVersion: "example/v1", Kind: "Item", Resource: "items"}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Kedge-Org"); got != "org-verified" {
+			t.Errorf("X-Kedge-Org = %q, want org-verified", got)
+		}
+		if got := r.Header.Get("X-Kedge-Workspace"); got != "workspace-verified" {
+			t.Errorf("X-Kedge-Workspace = %q, want workspace-verified", got)
+		}
+		if got := r.Header.Get("X-Kedge-Tenant"); got != "root:kedge:tenants:org-verified:workspace-verified" {
+			t.Errorf("X-Kedge-Tenant = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer caller-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(projectProviderActionEnvelope{
+			RequestID: "request-1", Provider: "other", Action: "lookup", ActionVersion: "v1", ResourceRef: ref, Result: json.RawMessage(`{"ok":true}`),
+		})
+	}))
+	defer upstream.Close()
+	s := &Server{hubBase: upstream.URL, actionsExternalURL: "https://hub.example"}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.Header.Set("Authorization", "Bearer caller-token")
+	request.Header.Set("X-Kedge-Org", "spoofed")
+	request.Header.Set("X-Kedge-Workspace", "spoofed")
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{
+		tenantPath: "root:kedge:tenants:org-verified:workspace-verified", orgUUID: "org-verified", workspaceUUID: "workspace-verified", token: "caller-token",
+	}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	if err != nil || status != http.StatusOK || envelope.Error != nil {
+		t.Fatalf("forward = status %d envelope %#v err %v", status, envelope, err)
+	}
+}
+
+func TestProviderActionForwardingRejectsRedirectWithoutLeakingBearer(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("redirect target received Authorization %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/sink", http.StatusFound)
+	}))
+	defer redirect.Close()
+	ref := &aiv1alpha1.ProjectProviderResourceReference{Name: "item", APIVersion: "example/v1", Kind: "Item", Resource: "items"}
+	s := &Server{hubBase: redirect.URL, actionsExternalURL: "https://hub.example"}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.Header.Set("Authorization", "Bearer caller-token")
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	if err == nil || status != http.StatusBadGateway || envelope.Error == nil {
+		t.Fatalf("redirect forward = status %d envelope %#v err %v", status, envelope, err)
+	}
+	if got := targetCalls.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
 	}
 }
 
@@ -161,28 +288,29 @@ func TestIntegrationActionNormalizationAndRevocation(t *testing.T) {
 	if _, _, err := normalizeIntegrationAction("query_table/v1", "v2"); err == nil {
 		t.Fatal("mismatched explicit action version was accepted")
 	}
-	actions, err := normalizeProjectIntegrationActions([]aiv1alpha1.ProjectProviderActionSpec{{Name: "query_table", Version: "v1", Revoked: true}})
+	actions, err := normalizeProjectIntegrationActions([]aiv1alpha1.ProjectProviderActionSpec{{Name: "query_table", Version: "v1", SchemaDigest: testProjectActionSchemaDigest, Revoked: true}})
 	if err != nil || len(actions) != 1 || !actions[0].Revoked {
 		t.Fatalf("normalized revoked action = %#v, err %v", actions, err)
 	}
 }
 
-// integrationHTTPFixture backs the provider's GraphQL client and MCP
-// federation endpoint without involving a real hub. It intentionally keeps
+// integrationHTTPFixture backs the provider's GraphQL client and generic hub
+// action endpoint without involving a real hub. It intentionally keeps
 // the project and Table as serialized tenant resources: this exercises the
 // same GraphQL-backed client path used by the HTTP handlers.
 type integrationHTTPFixture struct {
 	mu sync.Mutex
 
-	projectYAML string
-	tableYAML   string
+	projectYAML     string
+	tableYAML       string
+	applicationYAML string
 
-	graphql *httptest.Server
-	mcp     *httptest.Server
-	mcpReqs []integrationMCPRequest
+	graphql    *httptest.Server
+	hub        *httptest.Server
+	actionReqs []integrationActionRequest
 }
 
-type integrationMCPRequest struct {
+type integrationActionRequest struct {
 	URL     string
 	Headers http.Header
 	Body    map[string]any
@@ -219,10 +347,10 @@ func newIntegrationHTTPFixture(t *testing.T, project *aiv1alpha1.Project) *integ
 	}
 	f := &integrationHTTPFixture{projectYAML: string(projectYAML), tableYAML: string(tableYAML)}
 	f.graphql = httptest.NewServer(http.HandlerFunc(f.serveGraphQL))
-	f.mcp = httptest.NewServer(http.HandlerFunc(f.serveMCP))
+	f.hub = httptest.NewServer(http.HandlerFunc(f.serveProviderAction))
 	t.Cleanup(func() {
 		f.graphql.Close()
-		f.mcp.Close()
+		f.hub.Close()
 	})
 	return f
 }
@@ -252,6 +380,12 @@ func (f *integrationHTTPFixture) serveGraphQL(w http.ResponseWriter, r *http.Req
 				"v1alpha1": map[string]any{"TableYaml": f.tableYAML},
 			},
 		})
+	case strings.Contains(request.Query, "ApplicationYaml"):
+		writeIntegrationGraphQLData(w, map[string]any{
+			"infrastructure_kedge_faros_sh": map[string]any{
+				"v1alpha1": map[string]any{"ApplicationYaml": f.applicationYAML},
+			},
+		})
 	case strings.Contains(request.Query, "applyStatusYaml"):
 		writeIntegrationGraphQLData(w, map[string]any{"applyStatusYaml": f.projectYAML})
 	case strings.Contains(request.Query, "applyYaml"):
@@ -270,8 +404,11 @@ func (f *integrationHTTPFixture) serveGraphQL(w http.ResponseWriter, r *http.Req
 			http.Error(w, "applyYaml payload is not YAML", http.StatusBadRequest)
 			return
 		}
-		if object["kind"] == "Project" {
+		switch object["kind"] {
+		case "Project":
 			f.projectYAML = applied
+		case "Application":
+			f.applicationYAML = applied
 		}
 		writeIntegrationGraphQLData(w, map[string]any{"applyYaml": applied})
 	default:
@@ -283,19 +420,29 @@ func writeIntegrationGraphQLData(w http.ResponseWriter, data map[string]any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
-func (f *integrationHTTPFixture) serveMCP(w http.ResponseWriter, r *http.Request) {
+func (f *integrationHTTPFixture) serveProviderAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid MCP request", http.StatusBadRequest)
+		http.Error(w, "invalid provider action request", http.StatusBadRequest)
 		return
 	}
 	f.mu.Lock()
-	f.mcpReqs = append(f.mcpReqs, integrationMCPRequest{
+	f.actionReqs = append(f.actionReqs, integrationActionRequest{
 		URL: r.URL.String(), Headers: r.Header.Clone(), Body: body,
 	})
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"actionVersion\":\"v1\",\"tableRef\":\"orders\",\"rows\":[{\"id\":1}]}"}]}}`))
+	provider, _ := body["provider"].(string)
+	action, _ := body["action"].(string)
+	actionVersion, _ := body["actionVersion"].(string)
+	result := map[string]any{"echo": body["input"]}
+	if provider == "databricks" && action == "query_table" && actionVersion == "v1" {
+		result = map[string]any{"actionVersion": "v1", "tableRef": "orders", "rows": []any{map[string]any{"id": 1}}}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"requestID": "hub-request-1", "provider": provider, "action": action, "actionVersion": actionVersion,
+		"resourceRef": body["resourceRef"], "result": result,
+	})
 }
 
 func (f *integrationHTTPFixture) setProject(t *testing.T, project *aiv1alpha1.Project) {
@@ -310,7 +457,7 @@ func (f *integrationHTTPFixture) setProject(t *testing.T, project *aiv1alpha1.Pr
 	}
 	f.mu.Lock()
 	f.projectYAML = string(raw)
-	f.mcpReqs = nil
+	f.actionReqs = nil
 	f.mu.Unlock()
 }
 
@@ -330,6 +477,29 @@ func (f *integrationHTTPFixture) project(t *testing.T) *aiv1alpha1.Project {
 	return project
 }
 
+func (f *integrationHTTPFixture) setApplication(t *testing.T, application *unstructured.Unstructured) {
+	t.Helper()
+	raw, err := yaml.Marshal(application.Object)
+	if err != nil {
+		t.Fatalf("marshal Application: %v", err)
+	}
+	f.mu.Lock()
+	f.applicationYAML = string(raw)
+	f.mu.Unlock()
+}
+
+func (f *integrationHTTPFixture) application(t *testing.T) *unstructured.Unstructured {
+	t.Helper()
+	f.mu.Lock()
+	raw := []byte(f.applicationYAML)
+	f.mu.Unlock()
+	var object map[string]any
+	if err := yaml.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("decode Application YAML: %v", err)
+	}
+	return &unstructured.Unstructured{Object: object}
+}
+
 func (f *integrationHTTPFixture) table(t *testing.T) *unstructured.Unstructured {
 	t.Helper()
 	f.mu.Lock()
@@ -342,15 +512,16 @@ func (f *integrationHTTPFixture) table(t *testing.T) *unstructured.Unstructured 
 	return &unstructured.Unstructured{Object: object}
 }
 
-func (f *integrationHTTPFixture) mcpRequests() []integrationMCPRequest {
+func (f *integrationHTTPFixture) actionRequests() []integrationActionRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	requests := make([]integrationMCPRequest, len(f.mcpReqs))
-	copy(requests, f.mcpReqs)
+	requests := make([]integrationActionRequest, len(f.actionReqs))
+	copy(requests, f.actionReqs)
 	return requests
 }
 
 func projectWithTableIntegration(revoked bool) *aiv1alpha1.Project {
+	grantedAt := metav1.Now()
 	return &aiv1alpha1.Project{
 		TypeMeta:   metav1.TypeMeta{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project"},
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
@@ -365,11 +536,79 @@ func projectWithTableIntegration(revoked bool) *aiv1alpha1.Project {
 						Name: "orders", APIVersion: databricksTableAPIVersion,
 						Kind: databricksTableKind, Resource: databricksTableResource,
 					},
-					AllowedActions: []aiv1alpha1.ProjectProviderActionSpec{{Name: projectIntegrationActionQueryTable, Version: projectIntegrationActionVersionV1, Revoked: revoked}},
+					AllowedActions: []aiv1alpha1.ProjectProviderActionSpec{{Name: projectIntegrationActionQueryTable, Version: projectIntegrationActionVersionV1, SchemaDigest: testProjectActionSchemaDigest, GrantedBy: "alice@example.com", GrantedAt: &grantedAt, Revoked: revoked}},
 				}},
 			}},
 		},
 	}
+}
+
+func projectWithDevelopmentRuntimeBinding() *aiv1alpha1.Project {
+	project := &aiv1alpha1.Project{
+		TypeMeta:   metav1.TypeMeta{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
+		Spec: aiv1alpha1.ProjectSpec{
+			DisplayName: "Demo",
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: "development", Mode: aiv1alpha1.ProjectEnvironmentModeLive,
+				Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+					Name: projectDevelopmentBindingName, Provider: projectDevelopmentProviderAppStudio,
+					Kind: aiv1alpha1.ProjectBindingKindProviderResource,
+					ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+						Name: "demo-dev", APIVersion: "infrastructure.kedge.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+					},
+					Values: runtime.RawExtension{Raw: []byte(`{
+						"name":"demo-dev",
+						"kedgeMode":"development",
+						"kedgeActionsExchangeURL":"https://stale.example/api/provider-actions/workload/exchange",
+						"kedgeActionsBaseURL":"https://stale.example/services/providers/app-studio",
+						"kedgeActionsTenantPath":"stale-tenant"
+					}`)},
+				}},
+			}},
+		},
+	}
+	return project
+}
+
+func developmentApplicationObject() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.kedge.faros.sh/v1alpha1",
+		"kind":       "Application",
+		"metadata":   map[string]any{"name": "demo-dev"},
+		"spec": map[string]any{
+			"name":                    "demo-dev",
+			"kedgeMode":               "development",
+			"kedgeActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
+			"kedgeActionsBaseURL":     "https://stale.example/services/providers/app-studio",
+			"kedgeActionsTenantPath":  "stale-tenant",
+			"kedgeActionsProject":     "stale-project",
+			"kedgeActionsProjectUID":  "stale-project-uid",
+			"kedgeActionsEnvironment": "stale-environment",
+			"kedgeActionsInstance":    "stale-instance",
+			"kedgeActionsOrg":         "stale-org",
+			"kedgeActionsWorkspace":   "stale-workspace",
+		},
+	}}
+}
+
+func integrationTestCatalogResolver(context.Context, identity) ([]providerCatalogEntry, error) {
+	return []providerCatalogEntry{
+		{
+			Name: "databricks", Ready: true,
+			Actions: []providerCatalogAction{{
+				ID: "query_table/v1", SchemaDigest: testProjectActionSchemaDigest,
+				BoundResource: providerCatalogBoundResource{APIVersion: databricksTableAPIVersion, Kind: databricksTableKind, Resource: databricksTableResource},
+			}},
+		},
+		{
+			Name: "other", Ready: true,
+			Actions: []providerCatalogAction{{
+				ID: "query_table/v1", SchemaDigest: testProjectActionSchemaDigest,
+				BoundResource: providerCatalogBoundResource{APIVersion: databricksTableAPIVersion, Kind: databricksTableKind, Resource: databricksTableResource},
+			}},
+		},
+	}, nil
 }
 
 func integrationHTTPTestRequest(method, path, body string) *http.Request {
@@ -390,11 +629,13 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
 		Spec:       aiv1alpha1.ProjectSpec{DisplayName: "Demo"},
 	})
-	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.mcp.URL, false)
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.actionsExternalURL = "https://actions.example"
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
 	router := mux.NewRouter()
 	server.Register(router)
 
-	add := integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations", `{"alias":"sales","provider":"databricks","resourceRef":{"name":"orders","apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables"},"allowedActions":[{"name":"query_table","version":"v1"}]}`)
+	add := integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations", `{"alias":"sales","provider":"databricks","resourceRef":{"name":"orders","apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables"},"allowedActions":[{"name":"query_table","version":"v1","schemaDigest":"`+testProjectActionSchemaDigest+`"}]}`)
 	addResponse := httptest.NewRecorder()
 	router.ServeHTTP(addResponse, add)
 	if addResponse.Code != http.StatusCreated {
@@ -413,46 +654,59 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 	}
 
 	patchResponse := httptest.NewRecorder()
-	router.ServeHTTP(patchResponse, integrationHTTPTestRequest(http.MethodPatch, "/api/projects/demo/integrations/sales", `{"allowedActions":[{"name":"query_table","version":"v1"}]}`))
+	router.ServeHTTP(patchResponse, integrationHTTPTestRequest(http.MethodPatch, "/api/projects/demo/integrations/sales", `{"allowedActions":[{"name":"query_table","version":"v1","schemaDigest":"`+testProjectActionSchemaDigest+`"}]}`))
 	if patchResponse.Code != http.StatusOK {
 		t.Fatalf("patch integration status = %d: %s", patchResponse.Code, patchResponse.Body.String())
 	}
 
 	invokeResponse := httptest.NewRecorder()
-	router.ServeHTTP(invokeResponse, integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations/sales/invoke", `{"action":"query_table/v1","input":{"columns":["id"],"limit":2}}`))
+	invokeRequest := integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations/sales/invoke", `{"action":"query_table/v1","input":{"columns":["id"],"limit":2}}`)
+	invokeRequest.Header.Set("Idempotency-Key", "idem-1")
+	invokeRequest.Header.Set("X-Request-ID", "request-1")
+	invokeRequest.Header.Set("X-Kedge-Action-Deadline-Ms", "45000")
+	router.ServeHTTP(invokeResponse, invokeRequest)
 	if invokeResponse.Code != http.StatusOK {
 		t.Fatalf("invoke status = %d: %s", invokeResponse.Code, invokeResponse.Body.String())
 	}
-	var invokeBody projectIntegrationInvokeResult
+	var invokeBody projectProviderActionEnvelope
 	if err := json.Unmarshal(invokeResponse.Body.Bytes(), &invokeBody); err != nil {
 		t.Fatalf("decode invoke response: %v", err)
 	}
-	if invokeBody.Action != "query_table" || invokeBody.ActionVersion != "v1" || invokeBody.Environment != "development" {
-		t.Fatalf("invoke response = %#v, want query_table/v1 development", invokeBody)
+	if invokeBody.RequestID != "hub-request-1" || invokeBody.Provider != "databricks" || invokeBody.Action != "query_table" || invokeBody.ActionVersion != "v1" {
+		t.Fatalf("invoke response = %#v, want stable query_table/v1 envelope", invokeBody)
 	}
-	requests := fixture.mcpRequests()
+	requests := fixture.actionRequests()
 	if len(requests) != 1 {
-		t.Fatalf("MCP calls = %d, want exactly one aggregate call", len(requests))
+		t.Fatalf("provider action calls = %d, want exactly one hub call", len(requests))
 	}
-	mcpRequest := requests[0]
-	if !strings.HasPrefix(mcpRequest.URL, "/services/mcpserver/cluster-a/apis/kedge.faros.sh/v1alpha1/mcpservers/default/mcp") {
-		t.Fatalf("MCP URL = %q, want hub aggregate endpoint", mcpRequest.URL)
+	actionRequest := requests[0]
+	if actionRequest.URL != "/api/provider-actions/invoke" {
+		t.Fatalf("provider action URL = %q, want generic hub endpoint", actionRequest.URL)
 	}
-	if mcpRequest.Headers.Get("Authorization") != "Bearer caller-token" ||
-		mcpRequest.Headers.Get("X-Kedge-Tenant") != "root:kedge:tenants:org-a:workspace-a" ||
-		mcpRequest.Headers.Get("X-Kedge-User") != "alice@example.com" {
-		t.Fatalf("MCP caller headers = %#v, want original authorization and tenant identity", mcpRequest.Headers)
+	if actionRequest.Headers.Get("Authorization") != "Bearer caller-token" ||
+		actionRequest.Headers.Get("X-Kedge-Tenant") != "root:kedge:tenants:org-a:workspace-a" ||
+		actionRequest.Headers.Get("X-Kedge-Cluster") != "cluster-a" ||
+		actionRequest.Headers.Get("Idempotency-Key") != "idem-1" ||
+		actionRequest.Headers.Get("X-Request-ID") != "request-1" ||
+		actionRequest.Headers.Get("X-Kedge-Action-Deadline-Ms") != "45000" {
+		t.Fatalf("provider action caller headers = %#v, want propagated auth/tenant/correlation/deadline", actionRequest.Headers)
 	}
-	params, ok := mcpRequest.Body["params"].(map[string]any)
-	if !ok || params["name"] != "databricks__query_table" {
-		t.Fatalf("MCP params = %#v, want aggregate databricks__query_table", mcpRequest.Body["params"])
+	if actionRequest.Body["provider"] != "databricks" || actionRequest.Body["action"] != "query_table" || actionRequest.Body["actionVersion"] != "v1" {
+		t.Fatalf("provider action body = %#v, want bound provider/action/version", actionRequest.Body)
 	}
-	arguments, ok := params["arguments"].(map[string]any)
-	if !ok || arguments["tableRef"] != "orders" || arguments["actionVersion"] != "v1" || arguments["limit"] != float64(2) {
-		t.Fatalf("MCP arguments = %#v, want server-injected orders/v1 and bounded input", params["arguments"])
+	if actionRequest.Body["schemaDigest"] != testProjectActionSchemaDigest {
+		t.Fatalf("provider action schemaDigest = %#v, want %q", actionRequest.Body["schemaDigest"], testProjectActionSchemaDigest)
 	}
-	if _, exposed := arguments["sql"]; exposed {
-		t.Fatal("MCP arguments exposed raw SQL")
+	resourceRef, ok := actionRequest.Body["resourceRef"].(map[string]any)
+	if !ok || resourceRef["name"] != "orders" || resourceRef["apiVersion"] != databricksTableAPIVersion {
+		t.Fatalf("provider action resourceRef = %#v, want server-injected orders ref", actionRequest.Body["resourceRef"])
+	}
+	input, ok := actionRequest.Body["input"].(map[string]any)
+	if !ok || input["limit"] != float64(2) {
+		t.Fatalf("provider action input = %#v, want bounded caller input", actionRequest.Body["input"])
+	}
+	if _, exposed := input["resourceRef"]; exposed {
+		t.Fatal("provider action input exposed an overrideable resourceRef")
 	}
 
 	deleteResponse := httptest.NewRecorder()
@@ -461,40 +715,201 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 		t.Fatalf("delete integration status = %d: %s", deleteResponse.Code, deleteResponse.Body.String())
 	}
 	removed := fixture.project(t)
-	if len(removed.Spec.Environments) != 1 || len(removed.Spec.Environments[0].Bindings) != 0 || len(fixture.mcpRequests()) != 1 {
-		t.Fatalf("after deletion project/invocation state = %#v/%d, want empty development bindings and no extra MCP call", removed.Spec.Environments, len(fixture.mcpRequests()))
+	if len(removed.Spec.Environments) != 1 || len(removed.Spec.Environments[0].Bindings) != 0 || len(fixture.actionRequests()) != 1 {
+		t.Fatalf("after deletion project/invocation state = %#v/%d, want empty development bindings and no extra provider action call", removed.Spec.Environments, len(fixture.actionRequests()))
 	}
 	if got := fixture.table(t).GetName(); got != "orders" {
 		t.Fatalf("referenced Table after binding removal = %q, want orders", got)
 	}
 }
 
-func TestProjectIntegrationInvokeRejectsBeforeMCP(t *testing.T) {
+func TestProjectIntegrationMutationsReconcileDevelopmentActionContext(t *testing.T) {
+	fixture := newIntegrationHTTPFixture(t, projectWithDevelopmentRuntimeBinding())
+	fixture.setApplication(t, developmentApplicationObject())
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.actionsExternalURL = "https://actions.example"
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
+	router := mux.NewRouter()
+	server.Register(router)
+
+	add := integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations", `{"alias":"sales","provider":"databricks","resourceRef":{"name":"orders","apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables"},"allowedActions":[{"name":"query_table","version":"v1","schemaDigest":"`+testProjectActionSchemaDigest+`"}]}`)
+	addResponse := httptest.NewRecorder()
+	router.ServeHTTP(addResponse, add)
+	if addResponse.Code != http.StatusCreated {
+		t.Fatalf("add integration status = %d: %s", addResponse.Code, addResponse.Body.String())
+	}
+	addedApplication := fixture.application(t)
+	addedSpec, ok := addedApplication.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled Application spec = %#v, want object", addedApplication.Object["spec"])
+	}
+	if got := addedSpec["kedgeActionsExchangeURL"]; got != "https://actions.example/api/provider-actions/workload/exchange" {
+		t.Fatalf("after grant kedgeActionsExchangeURL = %v, want trusted exchange URL", got)
+	}
+	if got := addedSpec["kedgeActionsBaseURL"]; got != "https://actions.example/services/providers/app-studio" {
+		t.Fatalf("after grant kedgeActionsBaseURL = %v, want trusted service URL", got)
+	}
+
+	// Revocation must continue to work when the external origin is absent: it
+	// removes the active grant and therefore must clear the runtime transport,
+	// rather than being blocked by the action-enabled URL preflight.
+	server.actionsExternalURL = ""
+	revoke := integrationHTTPTestRequest(http.MethodPatch, "/api/projects/demo/integrations/sales", `{"allowedActions":[{"name":"query_table","version":"v1","revoked":true}]}`)
+	revokeResponse := httptest.NewRecorder()
+	router.ServeHTTP(revokeResponse, revoke)
+	if revokeResponse.Code != http.StatusOK {
+		t.Fatalf("revoke integration status = %d: %s", revokeResponse.Code, revokeResponse.Body.String())
+	}
+	revokedApplication := fixture.application(t)
+	revokedSpec, ok := revokedApplication.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled Application spec after revoke = %#v, want object", revokedApplication.Object["spec"])
+	}
+	for _, field := range []string{"kedgeActionsExchangeURL", "kedgeActionsBaseURL"} {
+		if got, found := revokedSpec[field]; found && strings.TrimSpace(fmt.Sprint(got)) != "" {
+			t.Fatalf("after grant revocation %s = %v, want cleared", field, got)
+		}
+	}
+
+	remove := integrationHTTPTestRequest(http.MethodDelete, "/api/projects/demo/integrations/sales", "")
+	removeResponse := httptest.NewRecorder()
+	router.ServeHTTP(removeResponse, remove)
+	if removeResponse.Code != http.StatusNoContent {
+		t.Fatalf("remove integration status = %d: %s", removeResponse.Code, removeResponse.Body.String())
+	}
+	removedApplication := fixture.application(t)
+	removedSpec, ok := removedApplication.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled Application spec after removal = %#v, want object", removedApplication.Object["spec"])
+	}
+	for _, field := range []string{"kedgeActionsExchangeURL", "kedgeActionsBaseURL"} {
+		if got, found := removedSpec[field]; found && strings.TrimSpace(fmt.Sprint(got)) != "" {
+			t.Fatalf("after grant removal %s = %v, want cleared", field, got)
+		}
+	}
+}
+
+func TestProjectIntegrationAddRejectsMissingActionsURLWithoutMutation(t *testing.T) {
+	initial := projectWithDevelopmentRuntimeBinding()
+	fixture := newIntegrationHTTPFixture(t, initial)
+	fixture.setApplication(t, developmentApplicationObject())
+	before := fixture.project(t)
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
+	router := mux.NewRouter()
+	server.Register(router)
+
+	add := integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations", `{"alias":"sales","provider":"databricks","resourceRef":{"name":"orders","apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables"},"allowedActions":[{"name":"query_table","version":"v1","schemaDigest":"`+testProjectActionSchemaDigest+`"}]}`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, add)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("add without actions URL status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "KEDGE_ACTIONS_EXTERNAL_URL") {
+		t.Fatalf("add without actions URL error = %s, want configuration guidance", response.Body.String())
+	}
+	if got := fixture.project(t); !reflect.DeepEqual(got.Spec, before.Spec) {
+		t.Fatalf("Project changed after rejected grant: got %#v, want %#v", got.Spec, before.Spec)
+	}
+	application := fixture.application(t)
+	spec, ok := application.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime Application spec = %#v, want object", application.Object["spec"])
+	}
+	if got := spec["kedgeActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+		t.Fatalf("runtime changed after rejected grant: kedgeActionsExchangeURL = %v", got)
+	}
+}
+
+func TestProjectIntegrationPatchRejectsReactivationWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "missing"},
+		{name: "http", url: "http://hub.example"},
+		{name: "path", url: "https://hub.example/actions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testProjectIntegrationPatchPreflight(t, tc.url)
+		})
+	}
+}
+
+func testProjectIntegrationPatchPreflight(t *testing.T, actionsURL string) {
+	t.Helper()
+	initial := projectWithDevelopmentRuntimeBinding()
+	initial.Spec.Environments[0].Bindings = append(initial.Spec.Environments[0].Bindings,
+		aiv1alpha1.ProjectProviderBindingSpec{
+			Name: "sales", Provider: projectIntegrationProviderDatabricks,
+			Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+				Name: "orders", APIVersion: databricksTableAPIVersion, Kind: databricksTableKind, Resource: databricksTableResource,
+			},
+			AllowedActions: []aiv1alpha1.ProjectProviderActionSpec{{
+				Name: projectIntegrationActionQueryTable, Version: projectIntegrationActionVersionV1,
+				SchemaDigest: testProjectActionSchemaDigest, Revoked: true,
+			}},
+		})
+	fixture := newIntegrationHTTPFixture(t, initial)
+	fixture.setApplication(t, developmentApplicationObject())
+	before := fixture.project(t)
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.actionsExternalURL = actionsURL
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
+	router := mux.NewRouter()
+	server.Register(router)
+
+	patch := integrationHTTPTestRequest(http.MethodPatch, "/api/projects/demo/integrations/sales", `{"allowedActions":[{"name":"query_table","version":"v1","schemaDigest":"`+testProjectActionSchemaDigest+`"}]}`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, patch)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("reactivation with actions URL %q status = %d, want %d: %s", actionsURL, response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "KEDGE_ACTIONS_EXTERNAL_URL") {
+		t.Fatalf("reactivation with actions URL %q error = %s, want configuration guidance", actionsURL, response.Body.String())
+	}
+	if got := fixture.project(t); !reflect.DeepEqual(got.Spec, before.Spec) {
+		t.Fatalf("Project changed after rejected reactivation: got %#v, want %#v", got.Spec, before.Spec)
+	}
+	application := fixture.application(t)
+	spec, ok := application.Object["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime Application spec = %#v, want object", application.Object["spec"])
+	}
+	if got := spec["kedgeActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+		t.Fatalf("runtime changed after rejected reactivation: kedgeActionsExchangeURL = %v", got)
+	}
+}
+
+func TestProjectIntegrationInvokeRejectsBeforeHubForward(t *testing.T) {
 	fixture := newIntegrationHTTPFixture(t, projectWithTableIntegration(false))
-	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.mcp.URL, false)
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.actionsExternalURL = "https://actions.example"
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
 	router := mux.NewRouter()
 	server.Register(router)
 
 	tests := []struct {
-		name       string
-		alias      string
-		project    *aiv1alpha1.Project
-		body       string
-		wantStatus int
+		name        string
+		alias       string
+		project     *aiv1alpha1.Project
+		body        string
+		wantStatus  int
+		wantForward bool
 	}{
 		{name: "unbound", alias: "missing", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{}}`, wantStatus: http.StatusNotFound},
 		{name: "ambiguous", alias: "sales", project: integrationAmbiguousProject(), body: `{"action":"query_table/v1","input":{}}`, wantStatus: http.StatusBadRequest},
-		{name: "provider", alias: "sales", project: integrationProjectWithProvider("other"), body: `{"action":"query_table/v1","input":{}}`, wantStatus: http.StatusBadRequest},
 		{name: "unknown-action", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"drop_table/v1","input":{}}`, wantStatus: http.StatusForbidden},
 		{name: "mismatched-version", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","actionVersion":"v2","input":{}}`, wantStatus: http.StatusBadRequest},
 		{name: "revoked", alias: "sales", project: projectWithTableIntegration(true), body: `{"action":"query_table/v1","input":{}}`, wantStatus: http.StatusForbidden},
-		{name: "unknown-field", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"unknown":true}}`, wantStatus: http.StatusBadRequest},
-		{name: "raw-sql", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"sql":"select 1"}}`, wantStatus: http.StatusBadRequest},
 		{name: "credentials", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"credentials":"secret"}}`, wantStatus: http.StatusBadRequest},
 		{name: "table-ref", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"tableRef":"other"}}`, wantStatus: http.StatusBadRequest},
-		{name: "invalid-column", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"columns":["bad-name"]}}`, wantStatus: http.StatusBadRequest},
-		{name: "unknown-column", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"columns":["secret"]}}`, wantStatus: http.StatusBadRequest},
-		{name: "limit-too-large", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"limit":101}}`, wantStatus: http.StatusBadRequest},
+		{name: "provider-override", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"provider":"other"}}`, wantStatus: http.StatusBadRequest},
+		// endpoint is provider-domain action input, not a platform-owned
+		// routing field. The generic gateway forwards it to the selected
+		// provider; provider schemas own whether it is meaningful or allowed.
+		{name: "endpoint-provider-input", alias: "sales", project: projectWithTableIntegration(false), body: `{"action":"query_table/v1","input":{"endpoint":"https://attacker.invalid"}}`, wantStatus: http.StatusOK, wantForward: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -504,10 +919,36 @@ func TestProjectIntegrationInvokeRejectsBeforeMCP(t *testing.T) {
 			if response.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", response.Code, tt.wantStatus, response.Body.String())
 			}
-			if got := len(fixture.mcpRequests()); got != 0 {
-				t.Fatalf("rejected invocation reached aggregate MCP %d time(s)", got)
+			if got := len(fixture.actionRequests()); tt.wantForward {
+				if got != 1 {
+					t.Fatalf("forwarded invocation reached hub provider-action endpoint %d time(s), want one", got)
+				}
+			} else if got != 0 {
+				t.Fatalf("rejected invocation reached hub provider-action endpoint %d time(s)", got)
 			}
 		})
+	}
+}
+
+func TestProjectIntegrationInvokeForwardsGenericProviderAndInput(t *testing.T) {
+	fixture := newIntegrationHTTPFixture(t, integrationProjectWithProvider("other"))
+	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
+	server.actionsExternalURL = "https://actions.example"
+	server.providerActionCatalogResolver = integrationTestCatalogResolver
+	router := mux.NewRouter()
+	server.Register(router)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, integrationHTTPTestRequest(http.MethodPost, "/api/projects/demo/integrations/sales/invoke", `{"action":"query_table/v1","input":{"sql":"provider-defined","options":{"limit":2}}}`))
+	if response.Code != http.StatusOK {
+		t.Fatalf("generic provider action status = %d: %s", response.Code, response.Body.String())
+	}
+	requests := fixture.actionRequests()
+	if len(requests) != 1 || requests[0].Body["provider"] != "other" {
+		t.Fatalf("generic provider action calls = %#v, want one forward with provider other", requests)
+	}
+	input, ok := requests[0].Body["input"].(map[string]any)
+	if !ok || input["sql"] != "provider-defined" {
+		t.Fatalf("generic action input = %#v, want provider-defined payload unchanged", requests[0].Body["input"])
 	}
 }
 
@@ -569,7 +1010,10 @@ func TestProviderReferenceSurvivesTemplateSwitchPromotionAndProjectCleanup(t *te
 	if err != nil {
 		t.Fatalf("template info: %v", err)
 	}
-	if err := applyProjectDevelopmentTemplate(project, info); err != nil {
+	if err := applyProjectDevelopmentTemplateWithContext(project, info, projectTemplateBindingContext{
+		ActionsExchangeURL: "https://hub.example/api/provider-actions/workload/exchange",
+		ActionsBaseURL:     "https://hub.example/services/providers/app-studio",
+	}); err != nil {
 		t.Fatalf("switch template: %v", err)
 	}
 	upsertProjectProductionBinding(project, aiv1alpha1.ProjectProviderBindingSpec{
@@ -579,7 +1023,7 @@ func TestProviderReferenceSurvivesTemplateSwitchPromotionAndProjectCleanup(t *te
 			Name: "demo-prod", APIVersion: "infrastructure.kedge.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
 		},
 	})
-	if _, err := (&Server{}).reconcileProjectLiveBindings(context.Background(), c, project, id); err != nil {
+	if _, err := (&Server{actionsExternalURL: "https://hub.example"}).reconcileProjectLiveBindings(context.Background(), c, project, id); err != nil {
 		t.Fatalf("reconcile after template switch/promotion: %v", err)
 	}
 	if err := (&Server{}).deleteProjectProviderResources(context.Background(), c, project, id); err != nil {

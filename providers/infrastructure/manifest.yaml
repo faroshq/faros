@@ -82,6 +82,8 @@ spec:
   backend:
     url: "http://localhost:8082"
     healthPath: "/healthz"
+  virtualWorkspace:
+    url: "http://localhost:8082"
   apiExport:
     name: "infrastructure.providers.kedge.faros.sh"
     # secrets get/list/watch with tenantScoped: true is what lets the

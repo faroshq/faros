@@ -1,0 +1,208 @@
+// Copyright 2026 The Faros Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+package tenant
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+
+	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/faroshq/provider-databricks/actions"
+	databricksv1alpha1 "github.com/faroshq/provider-databricks/apis/databricks/v1alpha1"
+	"github.com/faroshq/provider-databricks/backend"
+	"github.com/faroshq/provider-databricks/controller/shared"
+	"github.com/faroshq/provider-databricks/queryapi"
+)
+
+// ActionExecutor resolves a bound Table and executes query_table/v1 directly.
+// Provider-owned resources and credential Secrets are read with the provider
+// authority client; the forwarded caller token is used only for delegated
+// authorization. It intentionally does not create a query object or persist
+// result rows in control-plane status.
+type ActionExecutor struct {
+	factory    *ClientFactory
+	identity   identity
+	executor   backend.QueryExecutor
+	authorizer TableAuthorizer
+	// authorityClient is test-only dependency injection; production requests
+	// obtain it from ClientFactory.AuthorityClient (the mcmanager manager).
+	authorityClient client.Client
+}
+
+// TableAuthorizer performs caller-scoped authorization for the imported Table
+// before the provider reads its dependency chain.
+type TableAuthorizer interface {
+	AuthorizeTable(context.Context, string, string, string) error
+}
+
+// ActionExecutorForRequest returns a direct action executor for the request's
+// bearer, tenant path, and logical-cluster ID. A nil factory still returns an
+// executor so the endpoint can fail with a useful unavailable error.
+func (f *ClientFactory) ActionExecutorForRequest(r *http.Request, executor backend.QueryExecutor) *ActionExecutor {
+	return &ActionExecutor{factory: f, identity: identityFromRequest(r), executor: executor, authorizer: f}
+}
+
+// QueryTable resolves the provider-owned Table -> Warehouse -> Connection ->
+// Secret chain through the provider authority manager and invokes the shared
+// SQL executor. No resource writes occur on this path.
+func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef, input actions.QueryInput) (queryapi.QueryTableResult, error) {
+	if e == nil || e.factory == nil {
+		return queryapi.QueryTableResult{}, fmt.Errorf("tenant client unavailable")
+	}
+	if !validTenantPath(e.identity.tenantPath) || strings.TrimSpace(e.identity.clusterID) == "" {
+		return queryapi.QueryTableResult{}, fmt.Errorf("tenant identity is missing")
+	}
+	if strings.TrimSpace(e.identity.token) == "" {
+		return queryapi.QueryTableResult{}, fmt.Errorf("caller credential is missing")
+	}
+	if strings.TrimSpace(ref.Name) == "" {
+		return queryapi.QueryTableResult{}, fmt.Errorf("resourceRef.name is required")
+	}
+	request, err := queryapi.NormalizeQueryRequest(queryapi.QueryTableRequest{
+		ActionVersion: queryapi.ActionVersionV1,
+		TableRef:      ref.Name,
+		Columns:       append([]string(nil), input.Columns...),
+		Limit:         input.Limit,
+	})
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	if e.authorizer != nil {
+		if err := e.authorizer.AuthorizeTable(ctx, e.identity.clusterID, e.identity.token, request.TableRef); err != nil {
+			return queryapi.QueryTableResult{}, err
+		}
+	}
+	providerClient := e.authorityClient
+	if providerClient == nil {
+		providerClient, err = e.factory.AuthorityClient(ctx, e.identity.clusterID)
+		if err != nil {
+			return queryapi.QueryTableResult{}, err
+		}
+	}
+	tbl, err := shared.ResolveTable(ctx, providerClient, request.TableRef)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	wh, err := shared.ResolveWarehouse(ctx, providerClient, tbl.Spec.WarehouseRef)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	if strings.TrimSpace(tbl.Spec.ConnectionRef) == "" || tbl.Spec.ConnectionRef != wh.Spec.ConnectionRef {
+		return queryapi.QueryTableResult{}, fmt.Errorf("table and warehouse connection references do not match")
+	}
+	if !shared.CurrentConditionTrue(tbl.Status.Conditions, tbl.Status.ObservedGeneration, tbl.Generation, databricksv1alpha1.ConditionReady) {
+		return queryapi.QueryTableResult{}, fmt.Errorf("table is not ready")
+	}
+	if !shared.CurrentConditionTrue(wh.Status.Conditions, wh.Status.ObservedGeneration, wh.Generation, databricksv1alpha1.ConditionReady) {
+		return queryapi.QueryTableResult{}, fmt.Errorf("warehouse is not ready")
+	}
+	conn, err := shared.ResolveConnection(ctx, providerClient, tbl.Spec.ConnectionRef)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	if !shared.CurrentConditionTrue(conn.Status.Conditions, conn.Status.ObservedGeneration, conn.Generation, databricksv1alpha1.ConditionValidated) ||
+		!shared.CurrentConditionTrue(conn.Status.Conditions, conn.Status.ObservedGeneration, conn.Generation, databricksv1alpha1.ConditionReady) {
+		return queryapi.QueryTableResult{}, fmt.Errorf("connection is not ready")
+	}
+	if conn.Spec.AuthType != databricksv1alpha1.ConnectionAuthPAT {
+		return queryapi.QueryTableResult{}, fmt.Errorf("connection authType is unsupported")
+	}
+	token, err := shared.ResolveBearerToken(ctx, providerClient, conn)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	if e.executor == nil {
+		return queryapi.QueryTableResult{}, fmt.Errorf("databricks query executor is unavailable")
+	}
+	allowed := make([]string, 0, len(tbl.Status.Columns))
+	for _, column := range tbl.Status.Columns {
+		allowed = append(allowed, column.Name)
+	}
+	if len(request.Columns) > 0 && len(allowed) == 0 {
+		return queryapi.QueryTableResult{}, fmt.Errorf("table schema is not available for projection")
+	}
+	result, err := e.executor.ExecuteTableQuery(ctx, backend.QueryExecutionTarget{
+		Table:       queryapi.TableRef{Catalog: tbl.Spec.Catalog, Schema: tbl.Spec.Schema, Table: tbl.Spec.Table},
+		Connection:  queryapi.ConnectionRef{Name: conn.Name, Host: conn.Spec.Host, AuthType: string(conn.Spec.AuthType)},
+		Warehouse:   queryapi.WarehouseRef{Name: wh.Name, WarehouseID: wh.Spec.WarehouseID},
+		BearerToken: token, Projection: request.Columns, Limit: request.Limit, AllowedColumns: allowed,
+	})
+	if err != nil {
+		return queryapi.QueryTableResult{}, sanitizeActionError(err)
+	}
+	// The backend executor only receives resolved SQL target details. Bind the
+	// public result identity to the hub-injected Table resource, never to a
+	// caller-controlled or backend-generated placeholder.
+	result.ActionVersion = request.ActionVersion
+	result.TableRef = request.TableRef
+	return queryapi.BoundQueryResult(result), nil
+}
+
+func validTenantPath(path string) bool {
+	parts := strings.Split(strings.TrimSpace(path), ":")
+	return len(parts) == 5 && parts[0] == "root" && parts[1] == "kedge" && parts[2] == "tenants" && parts[3] != "" && parts[4] != ""
+}
+
+// AuthorizeTable delegates the authorization check to the tenant caller's
+// SelfSubjectAccessReview. The provider's own kubeconfig is never used for
+// the review; it is scoped to the forwarded token and cluster. A successful
+// SSAR both authenticates the caller and proves the exact table/get grant, so
+// no caller-token TokenReview client is needed.
+func (f *ClientFactory) AuthorizeTable(ctx context.Context, clusterID, token, name string) error {
+	if f == nil {
+		return fmt.Errorf("tenant authorization unavailable")
+	}
+	client, err := f.AuthorizationFor(clusterID, token)
+	if err != nil {
+		return err
+	}
+	accessReview, err := client.SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{
+			Group: databricksv1alpha1.GroupName, Version: databricksv1alpha1.Version,
+			Resource: "tables", Name: name, Verb: "get",
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("authorize table action: %w", err)
+	}
+	if !accessReview.Status.Allowed {
+		reason := strings.TrimSpace(accessReview.Status.Reason)
+		if reason == "" {
+			reason = "caller is not allowed to read the imported table"
+		}
+		return apierrors.NewForbidden(databricksv1alpha1.SchemeGroupVersion.WithResource("tables").GroupResource(), name, fmt.Errorf("%s", reason))
+	}
+	return nil
+}
+
+var _ TableAuthorizer = (*ClientFactory)(nil)
+var _ actions.QueryExecutor = (*ActionExecutor)(nil)
+
+func sanitizeActionError(err error) error {
+	message := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(message)
+	for _, marker := range []string{"bearer", "token", "secret", "password", "authorization", "credential"} {
+		if strings.Contains(lower, marker) {
+			return fmt.Errorf("databricks action failed")
+		}
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	if message == "" {
+		message = "databricks action failed"
+	}
+	return fmt.Errorf("%s", message)
+}

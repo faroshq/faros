@@ -2202,7 +2202,13 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	if integrationCount == 0 {
 		b.WriteString("- NONE. Do not invent an integration alias or claim that a provider action is available.\n")
 	}
-	b.WriteString("Generated application code may use the server-side provider-neutral Kedge Actions SDK only for an integration alias and non-revoked action version explicitly listed above; actions marked revoked are unavailable. The SDK runs in the server-side process and routes through the App Studio integration gateway; never expose its caller credential in browser code. Never request, store, or emit Databricks/API credentials, provider backend URLs, or raw SQL. If no declared integration/action exists, explain that it must be configured by the user instead of bypassing the gateway.\n")
+	if projectHasProviderActionGrant(p) {
+		b.WriteString("When an active integration action grant is listed above, @kedge/actions-node is preinstalled in the server runtime/executor. Import it exactly as `import { createActionsClient } from '@kedge/actions-node';` — never use a monorepo-relative path, a provider-specific SDK, or a browser import.\n")
+		b.WriteString("The server runtime injects these application-facing environment variables: KEDGE_ACTIONS_BASE_URL, KEDGE_PROJECT, KEDGE_PROJECT_UID, KEDGE_ACTIONS_TOKEN_FILE, KEDGE_ACTIONS_ENVIRONMENT, KEDGE_ACTIONS_INSTANCE, KEDGE_ACTIONS_TENANT_PATH, KEDGE_ACTIONS_ORG, and KEDGE_ACTIONS_WORKSPACE. Pass the injected KEDGE_ACTIONS_BASE_URL, KEDGE_PROJECT, and KEDGE_ACTIONS_TOKEN_FILE to createActionsClient (the SDK reads the remaining context defaults), then invoke only an alias and non-revoked action version explicitly listed above. Do not run npm install, npm exec, npm search, or package discovery for this dependency, and do not discover the gateway or call provider URLs directly.\n")
+		b.WriteString("The SDK is server-only and routes through the App Studio integration gateway; never expose its caller credential in browser code. Actions marked revoked are unavailable. Never request, store, or emit Databricks/API credentials, provider backend URLs, or raw SQL.\n")
+	} else {
+		b.WriteString("No active integration action grant is present. Do not claim that provider actions, an Actions SDK, or an App Studio gateway are available; do not discover or call provider URLs. Explain that the user must configure an explicit integration action grant before generated application code can use provider actions.\n")
+	}
 	repositoryRef := ""
 	repositoryCommitReady := false
 	if repo := p.Spec.Repository; repo != nil && strings.TrimSpace(repo.RepositoryRef) != "" {

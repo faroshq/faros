@@ -2,9 +2,9 @@
 
 A kedge provider that exposes imported Databricks SQL Warehouse tables to kedge
 workspaces. The provider owns Databricks `Connection`, `Warehouse`, and `Table`
-resources in the tenant workspace. App Studio can inspect existing `Table`
-resources by `tableRef` for design-time guidance; generated apps do not yet have
-a sanctioned runtime data-access bridge to Databricks.
+resources in the tenant workspace. App Studio consumes existing `Table`
+resources by exact `tableRef` through the catalog-backed Provider Actions
+contract; import and pinning remain provider-owned.
 
 ## What works today
 
@@ -12,7 +12,10 @@ a sanctioned runtime data-access bridge to Databricks.
   - `Connection`: Databricks workspace host plus a tenant Secret reference.
   - `Warehouse`: SQL warehouse handle.
   - `Table`: stable imported table handle with cached schema metadata.
-- MCP tools at `/mcp` and `/mcp/sse`, federated through the hub as:
+- Direct Provider Actions at `/actions/query_table/v1`:
+  - `query_table/v1` (catalog-declared, read-only, bounded)
+- Optional MCP tools at `/mcp` and `/mcp/sse`, controlled by
+  `DATABRICKS_MCP_ENABLED` and reusing the same executor:
   - `databricks__list_tables`
   - `databricks__describe_table`
   - `databricks__query_table` (versioned `actionVersion: v1`, bounded rows)
@@ -25,10 +28,12 @@ a sanctioned runtime data-access bridge to Databricks.
   to resolve referenced credential `Secret` resources for validation only.
   Databricks credentials are never returned to App Studio, generated apps, or
   browser clients.
-- `query_table` creates a transient tenant `TableQuery` resource. The
-  controller resolves the imported `Table`'s Warehouse, Connection, and Secret,
-  runs a provider-constructed `SELECT`, writes only bounded structured rows to
-  status, and the tenant MCP adapter deletes the resource after polling.
+- `query_table/v1` is a request-scoped direct action. The provider authorizes
+  the exact imported `Table`, resolves its Warehouse, Connection, and Secret,
+  runs a provider-constructed `SELECT`, and returns only bounded structured
+  rows. It does not create query resources or persist result rows in
+  control-plane status. The optional MCP tool is only a presentation adapter
+  over that same executor.
 
 ## Current import path
 
@@ -83,14 +88,20 @@ metadata, schema inspection, and user-facing planning.
 
 ## Runtime data access
 
-The `query_table` action accepts only an imported `tableRef`, exact optional
-column names, a fixed bounded limit, and the pinned `actionVersion: v1`. Raw SQL,
+The `query_table/v1` action accepts only an imported Table resource reference,
+exact optional column names, and a limit from 1 through 100. Raw SQL,
 warehouse/connection handles, hosts, and credentials are rejected. The
-provider posts a constructed `SELECT` (and `DESCRIBE TABLE` for metadata) to
-`/api/2.0/sql/statements` from its controllers to validate imported tables and
-cache schema metadata on `Table.status`. Query results are capped at 100 rows
-and 64 KiB and report `truncated: true` when the upstream result exceeds those
-bounds.
+request-scoped executor authorizes the caller's `get` on the exact Table,
+resolves `Table → Warehouse → Connection → Secret`, checks current `Ready` /
+`Validated` conditions and matching connection references, then posts a
+provider-constructed `SELECT` to `/api/2.0/sql/statements`. Results are capped
+at 100 rows, 64 columns, and 64 KiB; `truncated: true` reports bounded
+upstream results. Provider errors are sanitized.
+
+The action endpoint requires the hub-resolved tenant and cluster headers and
+the hub-injected `resourceRef`; it does not accept an arbitrary table name or
+backend target. The hub's public backend proxy reserves `/actions` and returns
+`404`, so callers must use the hub Provider Actions route.
 
 Connection hosts must be Databricks workspace root URLs over HTTPS. The backend
 allows the standard Databricks workspace domains by default; set
@@ -119,8 +130,9 @@ allowlisting by default.
 
 - Catalog/schema discovery is not implemented yet; the first UX imports a known
   table by reference.
-- Generated apps must call the provider action through the hub MCP federation;
-  do not hardcode provider backend URLs or Databricks credentials into App
-  Studio-generated source.
+- Generated apps must call `query_table/v1` through the hub Provider Actions
+  route and the server-only SDK; do not hardcode provider backend URLs or
+  Databricks credentials into App Studio-generated source. MCP is optional and
+  is not required by this app path.
 - OAuth federation and service-principal token exchange should be reconciled
   into token-bearing Secrets before validation or future provider actions.

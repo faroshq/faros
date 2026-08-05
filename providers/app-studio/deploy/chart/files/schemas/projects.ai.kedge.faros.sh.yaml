@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260808-1d96203b.projects.ai.kedge.faros.sh
+  name: v260808-50d90fba.projects.ai.kedge.faros.sh
 spec:
   group: ai.kedge.faros.sh
   names:
@@ -88,6 +88,18 @@ spec:
                               action, an unknown version, or a revoked declaration is rejected before any
                               provider tool is called.
                             properties:
+                              grantedAt:
+                                description: |-
+                                  GrantedAt is the server time at which the catalog-backed grant was
+                                  verified. Clients cannot set or replace this audit value.
+                                format: date-time
+                                type: string
+                              grantedBy:
+                                description: |-
+                                  GrantedBy is the authenticated caller recorded by the server when the
+                                  action grant is verified against the provider catalog. Clients cannot
+                                  set or replace this audit value.
+                                type: string
                               name:
                                 description: Name is the provider-neutral action name
                                   (for example query_table).
@@ -99,6 +111,27 @@ spec:
                                   Revoked disables this action without removing the integration binding,
                                   allowing an operator to retain the audit history while closing access.
                                 type: boolean
+                              revokedAt:
+                                description: |-
+                                  RevokedAt is the server time at which the active action grant was
+                                  revoked. Clients cannot set or replace this audit value.
+                                format: date-time
+                                type: string
+                              revokedBy:
+                                description: |-
+                                  RevokedBy is the authenticated caller recorded by the server when an
+                                  active action grant is revoked. Clients cannot set or replace this audit
+                                  value.
+                                type: string
+                              schemaDigest:
+                                description: |-
+                                  SchemaDigest identifies the exact provider action schema that the caller
+                                  reviewed and consented to. Digests are immutable action-catalog content
+                                  addresses; digest-less grants are never accepted.
+                                maxLength: 71
+                                minLength: 71
+                                pattern: ^sha256:[a-f0-9]{64}$
+                                type: string
                               version:
                                 description: Version identifies the versioned action
                                   contract (for example v1).
@@ -107,6 +140,7 @@ spec:
                                 type: string
                             required:
                             - name
+                            - schemaDigest
                             - version
                             type: object
                           type: array

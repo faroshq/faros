@@ -12,49 +12,52 @@ package api
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 )
 
 const (
-	projectIntegrationDefaultEnvironment = "development"
-	projectIntegrationProviderDatabricks = "databricks"
-	projectIntegrationActionQueryTable   = "query_table"
-	projectIntegrationActionVersionV1    = "v1"
-
-	databricksTableAPIVersion = "databricks.kedge.faros.sh/v1alpha1"
-	databricksTableKind       = "Table"
-	databricksTableResource   = "tables"
-
-	projectIntegrationMaxLimit = 100
+	projectIntegrationDefaultEnvironment  = "development"
+	projectProviderActionsInvokePath      = "/api/provider-actions/invoke"
+	projectProviderActionMaxResponseBytes = 4 << 20
 )
+
+// projectProviderActionCallTimeout is separate from the assistant/MCP
+// timeout. Keeping the action gateway budget independent makes it possible to
+// tune or test this synchronous forwarding path without changing assistant
+// execution semantics.
+var projectProviderActionCallTimeout = 2 * time.Minute
 
 var projectIntegrationIdentifierRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,62}$`)
 
-var databricksColumnIdentifierRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-
 // projectIntegrationAddRequest is intentionally generic: the binding
-// contract can point at resources owned by any provider. Only the Databricks
-// query_table/v1 adapter is currently executable by the invocation gateway.
+// contract can point at resources owned by any provider. Invocation is
+// forwarded to the hub's provider-actions gateway; App Studio does not carry
+// provider-specific adapters or credentials.
 type projectIntegrationAddRequest struct {
-	Environment    string                                       `json:"environment,omitempty"`
-	Alias          string                                       `json:"alias"`
-	Provider       string                                       `json:"provider"`
-	Kind           aiv1alpha1.ProjectBindingKind                `json:"kind,omitempty"`
-	ResourceRef    *aiv1alpha1.ProjectProviderResourceReference `json:"resourceRef"`
-	AllowedActions []aiv1alpha1.ProjectProviderActionSpec       `json:"allowedActions,omitempty"`
+	Environment     string                                       `json:"environment,omitempty"`
+	Alias           string                                       `json:"alias"`
+	Provider        string                                       `json:"provider"`
+	Kind            aiv1alpha1.ProjectBindingKind                `json:"kind,omitempty"`
+	ResourceRef     *aiv1alpha1.ProjectProviderResourceReference `json:"resourceRef"`
+	ConsentAccepted bool                                         `json:"consentAccepted,omitempty"`
+	AllowedActions  []aiv1alpha1.ProjectProviderActionSpec       `json:"allowedActions,omitempty"`
 	// Actions is accepted as a concise alias for clients that use the action
 	// terminology directly. It is normalized into AllowedActions before the
 	// Project is persisted.
@@ -62,8 +65,9 @@ type projectIntegrationAddRequest struct {
 }
 
 type projectIntegrationPatchRequest struct {
-	AllowedActions []aiv1alpha1.ProjectProviderActionSpec `json:"allowedActions,omitempty"`
-	Actions        []aiv1alpha1.ProjectProviderActionSpec `json:"actions,omitempty"`
+	ConsentAccepted bool                                   `json:"consentAccepted,omitempty"`
+	AllowedActions  []aiv1alpha1.ProjectProviderActionSpec `json:"allowedActions,omitempty"`
+	Actions         []aiv1alpha1.ProjectProviderActionSpec `json:"actions,omitempty"`
 }
 
 type projectIntegrationView struct {
@@ -83,17 +87,23 @@ type projectIntegrationInvokeRequest struct {
 	Input         json.RawMessage `json:"input,omitempty"`
 }
 
-type projectIntegrationInvokeResult struct {
-	Integration   string `json:"integration"`
-	Environment   string `json:"environment"`
-	Action        string `json:"action"`
-	ActionVersion string `json:"actionVersion"`
-	Result        any    `json:"result"`
+type projectProviderActionError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
 }
 
-type projectIntegrationQueryInput struct {
-	Columns []string `json:"columns,omitempty"`
-	Limit   *int     `json:"limit,omitempty"`
+// projectProviderActionEnvelope is the stable contract shared by the hub and
+// App Studio. The result is kept raw so provider actions can choose their own
+// bounded JSON result without App Studio reinterpreting it.
+type projectProviderActionEnvelope struct {
+	RequestID     string                                       `json:"requestID"`
+	Provider      string                                       `json:"provider"`
+	Action        string                                       `json:"action"`
+	ActionVersion string                                       `json:"actionVersion"`
+	ResourceRef   *aiv1alpha1.ProjectProviderResourceReference `json:"resourceRef"`
+	Result        json.RawMessage                              `json:"result,omitempty"`
+	Error         *projectProviderActionError                  `json:"error,omitempty"`
 }
 
 func (s *Server) addProjectIntegration(w http.ResponseWriter, r *http.Request) {
@@ -124,12 +134,8 @@ func (s *Server) addProjectIntegration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, newValidationError("resourceRef is required"))
 		return
 	}
-	ref := normalizeIntegrationResourceRef(req.Provider, req.ResourceRef)
+	ref := normalizeIntegrationResourceRef(req.ResourceRef)
 	if err := validateProviderReferenceRef(ref); err != nil {
-		writeError(w, err)
-		return
-	}
-	if err := validateIntegrationProviderReference(req.Provider, ref); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -140,6 +146,11 @@ func (s *Server) addProjectIntegration(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(actions) == 0 {
 		writeError(w, newValidationError("at least one allowed action is required"))
+		return
+	}
+	actions, err = s.verifyProjectActionGrants(r.Context(), id, req.Provider, ref, actions, req.ConsentAccepted)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	if err := observeProjectProviderReference(r.Context(), c, aiv1alpha1.ProjectProviderBindingSpec{
@@ -164,11 +175,29 @@ func (s *Server) addProjectIntegration(w http.ResponseWriter, r *http.Request) {
 		ResourceRef: ref, AllowedActions: actions,
 	})
 	newBinding := env.Bindings[len(env.Bindings)-1]
-	if _, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{}); err != nil {
+	if _, err := s.projectTemplateBindingContext(next, id); err != nil {
+		// Validate the trusted runtime context before persisting the grant. A
+		// missing/invalid external origin must not leave an action grant in the
+		// Project after this request reports failure.
+		writeError(w, newValidationError(err.Error()))
+		return
+	}
+	updated, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
+	if err != nil {
 		writeProjectError(w, err)
 		return
 	}
-	phase := projectProviderBindingStatus(r.Context(), c, next, newBinding, id).Phase
+	// Persisting an integration grant is only half of the mutation: a live
+	// development runtime carries the grant-derived Provider Actions context
+	// in its provider-resource spec. Reconcile before acknowledging the write so
+	// callers never receive a successful grant that has not reached the runtime.
+	if reconciled, reconcileErr := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); reconcileErr != nil {
+		writeProjectError(w, reconcileErr)
+		return
+	} else if reconciled != nil {
+		updated = reconciled
+	}
+	phase := projectProviderBindingStatus(r.Context(), c, updated, newBinding, id).Phase
 	if phase == "" {
 		phase = "Pending"
 	}
@@ -206,7 +235,7 @@ func (s *Server) listProjectIntegrations(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) removeProjectIntegration(w http.ResponseWriter, r *http.Request) {
-	c, _, project, ok := s.requireProjectWithClient(w, r)
+	c, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
 		return
 	}
@@ -233,7 +262,15 @@ func (s *Server) removeProjectIntegration(w http.ResponseWriter, r *http.Request
 		writeStatus(w, http.StatusNotFound, "NotFound", fmt.Sprintf("project integration %q was not found", alias))
 		return
 	}
-	if _, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{}); err != nil {
+	updated, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
+	if err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	// Removing a grant must clear its action context from the live development
+	// instance before the API reports success. The reconciler also preserves
+	// context when another active grant remains on the project.
+	if _, err := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); err != nil {
 		writeProjectError(w, err)
 		return
 	}
@@ -241,7 +278,7 @@ func (s *Server) removeProjectIntegration(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) patchProjectIntegration(w http.ResponseWriter, r *http.Request) {
-	c, _, project, ok := s.requireProjectWithClient(w, r)
+	c, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
 		return
 	}
@@ -264,11 +301,38 @@ func (s *Server) patchProjectIntegration(w http.ResponseWriter, r *http.Request)
 		for j := range next.Spec.Environments[i].Bindings {
 			binding := &next.Spec.Environments[i].Bindings[j]
 			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderReference && strings.EqualFold(strings.TrimSpace(binding.Name), alias) {
-				binding.AllowedActions = actions
+				ref := normalizeIntegrationResourceRef(binding.ResourceRef)
+				if err := validateProviderReferenceRef(ref); err != nil {
+					writeError(w, err)
+					return
+				}
+				merged, mergeErr := s.mergeProjectIntegrationActions(r.Context(), id, binding.Provider, ref, binding.AllowedActions, actions, req.ConsentAccepted)
+				if mergeErr != nil {
+					writeError(w, mergeErr)
+					return
+				}
+				binding.AllowedActions = merged
+				if _, contextErr := s.projectTemplateBindingContext(next, id); contextErr != nil {
+					// The reactivation path is another grant mutation. Keep it
+					// transactional with respect to the Project when the runtime
+					// exchange origin is unavailable; revocations have no active grant
+					// and therefore pass this check and still clear the runtime below.
+					writeError(w, newValidationError(contextErr.Error()))
+					return
+				}
 				updated, updateErr := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
 				if updateErr != nil {
 					writeProjectError(w, updateErr)
 					return
+				}
+				// Action changes are runtime state changes as well. Reconcile the
+				// updated project before returning the integration view so revoke/
+				//grant transitions cannot leave a stale sandbox context.
+				if reconciled, reconcileErr := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); reconcileErr != nil {
+					writeProjectError(w, reconcileErr)
+					return
+				} else if reconciled != nil {
+					updated = reconciled
 				}
 				writeJSON(w, http.StatusOK, projectIntegrationViewForBinding(next.Spec.Environments[i].Name, updated.Spec.Environments[i].Bindings[j], ""))
 				return
@@ -279,7 +343,7 @@ func (s *Server) patchProjectIntegration(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) invokeProjectIntegration(w http.ResponseWriter, r *http.Request) {
-	c, id, project, ok := s.requireProjectWithClient(w, r)
+	_, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
 		return
 	}
@@ -311,20 +375,22 @@ func (s *Server) invokeProjectIntegration(w http.ResponseWriter, r *http.Request
 		writeError(w, err)
 		return
 	}
-	if strings.TrimSpace(binding.Provider) != projectIntegrationProviderDatabricks {
-		writeError(w, newValidationError(fmt.Sprintf("integration %q provider %q has no action adapter", alias, binding.Provider)))
-		return
-	}
 	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || binding.ResourceRef == nil {
 		writeError(w, newValidationError(fmt.Sprintf("integration %q is not a provider reference", alias)))
 		return
 	}
 	allowed := false
 	revoked := false
+	var schemaDigest string
+	var grantedBy string
+	var grantedAt *metav1.Time
 	for _, declared := range binding.AllowedActions {
 		if strings.EqualFold(strings.TrimSpace(declared.Name), name) && strings.EqualFold(strings.TrimSpace(declared.Version), version) {
 			allowed = true
 			revoked = declared.Revoked
+			schemaDigest = strings.TrimSpace(declared.SchemaDigest)
+			grantedBy = strings.TrimSpace(declared.GrantedBy)
+			grantedAt = declared.GrantedAt
 			break
 		}
 	}
@@ -336,53 +402,30 @@ func (s *Server) invokeProjectIntegration(w http.ResponseWriter, r *http.Request
 		writeStatus(w, http.StatusForbidden, "Forbidden", fmt.Sprintf("integration %q action %s/%s has been revoked", alias, name, version))
 		return
 	}
-	if name != projectIntegrationActionQueryTable || version != projectIntegrationActionVersionV1 {
-		writeError(w, newValidationError(fmt.Sprintf("action %s/%s is not implemented", name, version)))
+	if !projectActionSchemaDigestRE.MatchString(schemaDigest) || grantedBy == "" || grantedAt == nil || grantedAt.IsZero() {
+		writeStatus(w, http.StatusForbidden, "Forbidden", fmt.Sprintf("integration %q action %s/%s has an incomplete catalog grant", alias, name, version))
 		return
 	}
-	ref := normalizeIntegrationResourceRef(binding.Provider, binding.ResourceRef)
+	ref := normalizeIntegrationResourceRef(binding.ResourceRef)
 	if err := validateProviderReferenceRef(ref); err != nil {
 		writeError(w, err)
 		return
 	}
-	if err := validateIntegrationProviderReference(binding.Provider, ref); err != nil {
-		writeError(w, err)
-		return
-	}
-	gvr, gvrErr := projectProviderResourceGVR(ref)
-	if gvrErr != nil {
-		writeError(w, gvrErr)
-		return
-	}
-	table, err := c.Resource(providerBindingResource(gvr, ref.Kind), "").Get(r.Context(), strings.TrimSpace(ref.Name), metav1.GetOptions{})
+	input, err := normalizeProjectProviderActionInput(req.Input)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	args, err := projectIntegrationQueryArguments(req.Input, table)
+
+	statusCode, envelope, err := s.forwardProjectProviderAction(r, id, binding.Provider, name, version, schemaDigest, ref, input)
 	if err != nil {
-		writeError(w, err)
+		writeProviderActionForwardError(w, statusCode, envelope, err)
 		return
 	}
-	args["actionVersion"] = version
-	// tableRef is injected exclusively from the server-side binding. The
-	// caller cannot select a different Table, even when it knows another
-	// resource name in the tenant.
-	args["tableRef"] = strings.TrimSpace(ref.Name)
-	result, err := callProjectMCPTool(r.Context(), s.mcpEndpoint(id.clusterID), r, id.tenantPath, s.mcpInsecureSkipTLSVerify, "databricks__"+name, args)
-	if err != nil {
-		writeError(w, err)
-		return
+	if envelope.RequestID != "" {
+		w.Header().Set("X-Request-ID", envelope.RequestID)
 	}
-	var structured any
-	if json.Valid([]byte(result)) {
-		_ = json.Unmarshal([]byte(result), &structured)
-	} else {
-		structured = result
-	}
-	writeJSON(w, http.StatusOK, projectIntegrationInvokeResult{
-		Integration: alias, Environment: envName, Action: name, ActionVersion: version, Result: structured,
-	})
+	writeJSON(w, statusCode, envelope)
 	_ = envName // environment is included in binding lookup for ambiguity checks
 }
 
@@ -393,22 +436,11 @@ func validateProjectIntegrationAlias(alias string) error {
 	return nil
 }
 
-func normalizeIntegrationResourceRef(provider string, ref *aiv1alpha1.ProjectProviderResourceReference) *aiv1alpha1.ProjectProviderResourceReference {
+func normalizeIntegrationResourceRef(ref *aiv1alpha1.ProjectProviderResourceReference) *aiv1alpha1.ProjectProviderResourceReference {
 	if ref == nil {
 		return nil
 	}
 	out := *ref
-	if strings.EqualFold(strings.TrimSpace(provider), projectIntegrationProviderDatabricks) {
-		if strings.TrimSpace(out.APIVersion) == "" {
-			out.APIVersion = databricksTableAPIVersion
-		}
-		if strings.TrimSpace(out.Kind) == "" {
-			out.Kind = databricksTableKind
-		}
-		if strings.TrimSpace(out.Resource) == "" {
-			out.Resource = databricksTableResource
-		}
-	}
 	return &out
 }
 
@@ -428,18 +460,6 @@ func validateProviderReferenceRef(ref *aiv1alpha1.ProjectProviderResourceReferen
 	return nil
 }
 
-func validateIntegrationProviderReference(provider string, ref *aiv1alpha1.ProjectProviderResourceReference) error {
-	if !strings.EqualFold(strings.TrimSpace(provider), projectIntegrationProviderDatabricks) {
-		return nil
-	}
-	if !strings.EqualFold(strings.TrimSpace(ref.APIVersion), databricksTableAPIVersion) ||
-		!strings.EqualFold(strings.TrimSpace(ref.Kind), databricksTableKind) ||
-		!strings.EqualFold(strings.TrimSpace(ref.Resource), databricksTableResource) {
-		return newValidationError("databricks integrations must reference a databricks.kedge.faros.sh/v1alpha1 Table resource")
-	}
-	return nil
-}
-
 func normalizeProjectIntegrationActions(actions []aiv1alpha1.ProjectProviderActionSpec) ([]aiv1alpha1.ProjectProviderActionSpec, error) {
 	if len(actions) == 0 {
 		return nil, nil
@@ -455,8 +475,17 @@ func normalizeProjectIntegrationActions(actions []aiv1alpha1.ProjectProviderActi
 		if _, exists := seen[key]; exists {
 			return nil, newValidationError(fmt.Sprintf("duplicate allowed action %s/%s", name, version))
 		}
+		digest := strings.TrimSpace(action.SchemaDigest)
+		// A revoke is keyed by the stored name/version and can proceed with a
+		// stale or omitted client digest. Active grants still require the
+		// catalog-shaped digest before they can be created or reactivated.
+		if !action.Revoked && !projectActionSchemaDigestRE.MatchString(digest) {
+			return nil, newValidationError(fmt.Sprintf("allowed action %s/%s must include schemaDigest sha256:<64 lowercase hex digits>", name, version))
+		}
 		seen[key] = struct{}{}
-		out = append(out, aiv1alpha1.ProjectProviderActionSpec{Name: name, Version: version, Revoked: action.Revoked})
+		// Grant and revoke audit fields are deliberately not copied: those
+		// server-owned values are written only by the transition merge.
+		out = append(out, aiv1alpha1.ProjectProviderActionSpec{Name: name, Version: version, SchemaDigest: digest, Revoked: action.Revoked})
 	}
 	return out, nil
 }
@@ -532,67 +561,253 @@ func projectIntegrationViewForBinding(environment string, binding aiv1alpha1.Pro
 	}
 }
 
-func projectIntegrationQueryArguments(raw json.RawMessage, table *unstructured.Unstructured) (map[string]any, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		raw = []byte(`{}`)
+// providerActionForbiddenInputKeys is deliberately provider-neutral. The
+// binding owns the provider and resource coordinates; callers may only supply
+// action-specific data. Reject these keys recursively so a nested options map
+// cannot smuggle a second target, credential, or backend topology through an
+// otherwise generic action.
+var providerActionForbiddenInputKeys = map[string]struct{}{
+	"action": {}, "actionversion": {}, "version": {},
+	"provider": {}, "providername": {}, "providerref": {}, "providerreference": {},
+	"providerurl": {}, "providerbaseurl": {}, "huburl": {},
+	"resourceref": {}, "resource": {}, "resourceid": {}, "resourcename": {},
+	"tableref": {}, "apiversion": {}, "kind": {}, "namespace": {},
+	"tenant": {}, "tenantpath": {}, "cluster": {}, "clusterid": {},
+	"credential": {}, "credentials": {}, "token": {}, "accesstoken": {},
+	"bearertoken": {}, "authorization": {},
+}
+
+func normalizeProjectProviderActionInput(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage(`{}`), nil
 	}
-	var in projectIntegrationQueryInput
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&in); err != nil {
-		return nil, newValidationError("invalid query_table/v1 input: " + err.Error())
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, newValidationError("invalid provider action input: " + err.Error())
 	}
-	if in.Limit != nil && (*in.Limit < 1 || *in.Limit > projectIntegrationMaxLimit) {
-		return nil, newValidationError(fmt.Sprintf("limit must be between 1 and %d", projectIntegrationMaxLimit))
-	}
-	seenColumns := map[string]struct{}{}
-	for i, column := range in.Columns {
-		column = strings.TrimSpace(column)
-		if !databricksColumnIdentifierRE.MatchString(column) {
-			return nil, newValidationError(fmt.Sprintf("column %q is not a valid column identifier", column))
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, newValidationError("invalid provider action input: multiple JSON values")
 		}
-		if _, exists := seenColumns[column]; exists {
-			return nil, newValidationError(fmt.Sprintf("column %q is duplicated", column))
-		}
-		seenColumns[column] = struct{}{}
-		in.Columns[i] = column
+		return nil, newValidationError("invalid provider action input: " + err.Error())
 	}
-	if table != nil {
-		if allowed, ok := tableColumnNames(table); ok && len(in.Columns) > 0 {
-			for _, column := range in.Columns {
-				if _, exists := allowed[strings.TrimSpace(column)]; !exists {
-					return nil, newValidationError(fmt.Sprintf("column %q is not declared by the bound Table", column))
-				}
+	if err := validateProjectProviderActionInputValue(value, "input"); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(trimmed), nil
+}
+
+func validateProjectProviderActionInputValue(value any, path string) error {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			canonical := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(strings.TrimSpace(key)))
+			if _, forbidden := providerActionForbiddenInputKeys[canonical]; forbidden {
+				return newValidationError(fmt.Sprintf("provider action input field %q cannot override bound provider or resource context", path+"."+key))
+			}
+			if err := validateProjectProviderActionInputValue(child, path+"."+key); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, child := range value {
+			if err := validateProjectProviderActionInputValue(child, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
 			}
 		}
 	}
-	args := map[string]any{}
-	if len(in.Columns) > 0 {
-		args["columns"] = in.Columns
-	}
-	if in.Limit != nil {
-		args["limit"] = *in.Limit
-	}
-	return args, nil
+	return nil
 }
 
-func tableColumnNames(table *unstructured.Unstructured) (map[string]struct{}, bool) {
-	columns, ok, _ := unstructured.NestedSlice(table.Object, "status", "columns")
-	if !ok || len(columns) == 0 {
-		return nil, false
+type projectProviderActionInvokeRequest struct {
+	Provider      string                                       `json:"provider"`
+	Action        string                                       `json:"action"`
+	ActionVersion string                                       `json:"actionVersion"`
+	SchemaDigest  string                                       `json:"schemaDigest"`
+	ResourceRef   *aiv1alpha1.ProjectProviderResourceReference `json:"resourceRef"`
+	Input         json.RawMessage                              `json:"input"`
+}
+
+func (s *Server) forwardProjectProviderAction(r *http.Request, id identity, provider, action, version, schemaDigest string, ref *aiv1alpha1.ProjectProviderResourceReference, input json.RawMessage) (int, projectProviderActionEnvelope, error) {
+	if _, err := validateActionsExternalURL(s.actionsExternalURL); err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), err
 	}
-	out := map[string]struct{}{}
-	for _, raw := range columns {
-		obj, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := obj["name"].(string)
-		if name = strings.TrimSpace(name); name != "" {
-			out[name] = struct{}{}
+	payload, err := json.Marshal(projectProviderActionInvokeRequest{
+		Provider: provider, Action: action, ActionVersion: version, SchemaDigest: schemaDigest, ResourceRef: ref, Input: input,
+	})
+	if err != nil {
+		return http.StatusBadGateway, projectProviderActionEnvelope{}, fmt.Errorf("encode provider action request: %w", err)
+	}
+	endpoint := strings.TrimRight(s.hubBase, "/") + projectProviderActionsInvokePath
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return http.StatusBadGateway, projectProviderActionEnvelope{}, fmt.Errorf("new provider action request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	if id.tenantPath != "" {
+		req.Header.Set("X-Kedge-Tenant", id.tenantPath)
+	}
+	if id.clusterID != "" {
+		req.Header.Set("X-Kedge-Cluster", id.clusterID)
+	}
+	if id.orgUUID != "" {
+		req.Header.Set("X-Kedge-Org", id.orgUUID)
+	}
+	if id.workspaceUUID != "" {
+		req.Header.Set("X-Kedge-Workspace", id.workspaceUUID)
+	}
+	for _, header := range []string{"Idempotency-Key", "X-Request-ID", "X-Kedge-Action-Deadline-Ms"} {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			req.Header.Set(header, value)
 		}
 	}
-	return out, len(out) > 0
+
+	transport, err := projectProviderActionTransport(s.actionsCABundle)
+	if err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), fmt.Errorf("configure provider action transport: %w", err)
+	}
+	client := &http.Client{
+		Timeout:   projectProviderActionCallTimeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("provider action redirect rejected")
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), fmt.Errorf("POST %s: %w", endpoint, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, projectProviderActionMaxResponseBytes))
+	if err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), fmt.Errorf("read provider action response: %w", err)
+	}
+	var envelope projectProviderActionEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), fmt.Errorf("decode provider action response: %w", err)
+	}
+	if err := normalizeAndValidateProviderActionEnvelope(&envelope, provider, action, version, ref, r.Header.Get("X-Request-ID")); err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, envelope, nil
+	}
+	if envelope.Error != nil {
+		return http.StatusBadGateway, envelope, nil
+	}
+	return resp.StatusCode, envelope, nil
+}
+
+// projectProviderActionTransport is intentionally independent of the MCP
+// transport. Provider Actions carry caller credentials and may reach a
+// production hub, so this path always uses certificate verification and never
+// retries with InsecureSkipVerify, even when the development MCP option is
+// enabled for unrelated assistant calls. An explicitly configured CA bundle
+// is appended to the system pool; it never replaces the host's normal trust.
+func projectProviderActionTransport(caBundle string) (http.RoundTripper, error) {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		if strings.TrimSpace(caBundle) != "" {
+			return nil, errors.New("custom Provider Actions CA requires an HTTP transport with TLS configuration")
+		}
+		return http.DefaultTransport, nil
+	}
+	transport := base.Clone()
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if transport.TLSClientConfig != nil {
+		tlsConfig = transport.TLSClientConfig.Clone()
+		if tlsConfig.MinVersion < tls.VersionTLS12 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	tlsConfig.InsecureSkipVerify = false
+	if bundle := strings.TrimSpace(caBundle); bundle != "" {
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM([]byte(bundle)) {
+			return nil, errors.New("configured Provider Actions CA bundle contains no PEM certificates")
+		}
+		tlsConfig.RootCAs = roots
+	}
+	transport.TLSClientConfig = tlsConfig
+	return transport, nil
+}
+
+func normalizeAndValidateProviderActionEnvelope(envelope *projectProviderActionEnvelope, provider, action, version string, ref *aiv1alpha1.ProjectProviderResourceReference, requestID string) error {
+	if envelope == nil {
+		return errors.New("provider action response was empty")
+	}
+	if envelope.RequestID == "" {
+		envelope.RequestID = strings.TrimSpace(requestID)
+	}
+	if envelope.Provider == "" {
+		envelope.Provider = provider
+	}
+	if envelope.Action == "" {
+		envelope.Action = action
+	}
+	if envelope.ActionVersion == "" {
+		envelope.ActionVersion = version
+	}
+	if envelope.ResourceRef == nil {
+		envelope.ResourceRef = normalizeIntegrationResourceRef(ref)
+	}
+	if !strings.EqualFold(strings.TrimSpace(envelope.Provider), strings.TrimSpace(provider)) ||
+		!strings.EqualFold(strings.TrimSpace(envelope.Action), strings.TrimSpace(action)) ||
+		!strings.EqualFold(strings.TrimSpace(envelope.ActionVersion), strings.TrimSpace(version)) {
+		return errors.New("provider action response identity did not match the bound action")
+	}
+	if !sameProjectProviderResourceReference(envelope.ResourceRef, ref) {
+		return errors.New("provider action response resourceRef did not match the bound resource")
+	}
+	if envelope.Error == nil && len(envelope.Result) == 0 {
+		return errors.New("provider action response contained neither result nor error")
+	}
+	if envelope.Error != nil && len(envelope.Result) != 0 {
+		return errors.New("provider action response contained both result and error")
+	}
+	return nil
+}
+
+func sameProjectProviderResourceReference(left, right *aiv1alpha1.ProjectProviderResourceReference) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return strings.TrimSpace(left.Name) == strings.TrimSpace(right.Name) &&
+		strings.TrimSpace(left.APIVersion) == strings.TrimSpace(right.APIVersion) &&
+		strings.TrimSpace(left.Kind) == strings.TrimSpace(right.Kind) &&
+		strings.TrimSpace(left.Resource) == strings.TrimSpace(right.Resource)
+}
+
+func providerActionUnavailableEnvelope(provider, action, version string, ref *aiv1alpha1.ProjectProviderResourceReference) projectProviderActionEnvelope {
+	return projectProviderActionEnvelope{
+		Provider: provider, Action: action, ActionVersion: version, ResourceRef: normalizeIntegrationResourceRef(ref),
+		Error: &projectProviderActionError{Code: "provider_action_unavailable", Message: "provider action gateway is unavailable", Retryable: true},
+	}
+}
+
+func writeProviderActionForwardError(w http.ResponseWriter, statusCode int, envelope projectProviderActionEnvelope, err error) {
+	if envelope.Error != nil {
+		if statusCode < 400 {
+			statusCode = http.StatusBadGateway
+		}
+		writeJSON(w, statusCode, envelope)
+		return
+	}
+	if statusCode < 400 {
+		statusCode = http.StatusBadGateway
+	}
+	writeJSON(w, statusCode, providerActionUnavailableEnvelope(envelope.Provider, envelope.Action, envelope.ActionVersion, envelope.ResourceRef))
 }
 
 // muxVars is kept in one helper so handlers remain straightforward and tests

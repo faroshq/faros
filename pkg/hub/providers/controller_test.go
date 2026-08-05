@@ -108,3 +108,45 @@ func TestCatalogReconciler_PreservesChartOwnedUIRoutingForBuiltinName(t *testing
 		t.Fatalf("status endpoints = %#v, want UI=http://app-studio.invalid", updated.Status.Endpoints)
 	}
 }
+
+func TestCatalogReconcilerRejectsInvalidActionDeclarations(t *testing.T) {
+	reg := NewRegistry()
+	scheme := newProviderTestScheme(t)
+	entry := &providersv1alpha1.CatalogEntry{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-actions"},
+		Spec: providersv1alpha1.CatalogEntrySpec{
+			DisplayName: "Invalid actions",
+			UI:          &providersv1alpha1.ProviderUI{URL: "http://provider.invalid"},
+			Actions: []providersv1alpha1.ProviderActionSpec{{
+				ID:          "query_table/latest",
+				DisplayName: "Invalid action",
+			}},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&providersv1alpha1.CatalogEntry{}).
+		WithObjects(entry).
+		Build()
+
+	r := &CatalogReconciler{mgr: testfakes.NewManager(c), reg: reg, noKCP: true}
+	if _, err := r.Reconcile(context.Background(), testfakes.NewRequest("cluster", "", "invalid-actions")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, ok := reg.Get("invalid-actions"); ok {
+		t.Fatal("invalid action declaration must not enter the provider registry")
+	}
+
+	var updated providersv1alpha1.CatalogEntry
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "invalid-actions"}, &updated); err != nil {
+		t.Fatalf("get updated entry: %v", err)
+	}
+	if len(updated.Status.Conditions) != 1 {
+		t.Fatalf("conditions = %#v, want one Ready condition", updated.Status.Conditions)
+	}
+	condition := updated.Status.Conditions[0]
+	if condition.Type != "Ready" || condition.Status != metav1.ConditionFalse || condition.Reason != "InvalidActions" {
+		t.Fatalf("condition = %#v, want Ready=False/InvalidActions", condition)
+	}
+}

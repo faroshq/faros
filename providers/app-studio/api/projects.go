@@ -427,7 +427,7 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 		},
 	}
 	if selectedTemplate != nil {
-		if err := applyProjectDevelopmentTemplate(p, *selectedTemplate); err != nil {
+		if err := s.applyProjectDevelopmentTemplateWithIdentity(p, *selectedTemplate, id); err != nil {
 			return nil, err
 		}
 	}

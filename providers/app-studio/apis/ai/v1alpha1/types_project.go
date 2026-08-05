@@ -216,10 +216,41 @@ type ProjectProviderActionSpec struct {
 	// +kubebuilder:validation:MaxLength=32
 	Version string `json:"version"`
 
+	// SchemaDigest identifies the exact provider action schema that the caller
+	// reviewed and consented to. Digests are immutable action-catalog content
+	// addresses; digest-less grants are never accepted.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=71
+	// +kubebuilder:validation:MaxLength=71
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	SchemaDigest string `json:"schemaDigest"`
+
+	// GrantedBy is the authenticated caller recorded by the server when the
+	// action grant is verified against the provider catalog. Clients cannot
+	// set or replace this audit value.
+	// +optional
+	GrantedBy string `json:"grantedBy,omitempty"`
+
+	// GrantedAt is the server time at which the catalog-backed grant was
+	// verified. Clients cannot set or replace this audit value.
+	// +optional
+	GrantedAt *metav1.Time `json:"grantedAt,omitempty"`
+
 	// Revoked disables this action without removing the integration binding,
 	// allowing an operator to retain the audit history while closing access.
 	// +optional
 	Revoked bool `json:"revoked,omitempty"`
+
+	// RevokedBy is the authenticated caller recorded by the server when an
+	// active action grant is revoked. Clients cannot set or replace this audit
+	// value.
+	// +optional
+	RevokedBy string `json:"revokedBy,omitempty"`
+
+	// RevokedAt is the server time at which the active action grant was
+	// revoked. Clients cannot set or replace this audit value.
+	// +optional
+	RevokedAt *metav1.Time `json:"revokedAt,omitempty"`
 }
 
 type ProjectEnvironmentSpec struct {

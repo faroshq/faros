@@ -99,10 +99,11 @@ func (f TenantResolverFunc) Resolve(r *http.Request) (string, string, error) {
 // setting those headers directly.
 func NewBackendProxy(reg *Registry, log logr.Logger) *ProviderProxy {
 	p := &ProviderProxy{
-		reg:        reg,
-		log:        log.WithName("backend-proxy"),
-		pathPrefix: apiurl.PathPrefixProvidersProxy,
-		pick:       func(p Provider) *url.URL { return p.BackendURL },
+		reg:                 reg,
+		log:                 log.WithName("backend-proxy"),
+		pathPrefix:          apiurl.PathPrefixProvidersProxy,
+		pick:                func(p Provider) *url.URL { return p.BackendURL },
+		denyActionEndpoints: true,
 	}
 	// setHeaders runs after the Director's URL rewrite. Always strip
 	// inbound X-Kedge-* identity headers (defense in depth — a client
@@ -217,6 +218,13 @@ type ProviderProxy struct {
 	// per-cluster schema lookup only matches a cluster ID. See
 	// SetClusterResolver.
 	clusterResolver func(ctx context.Context, tenantPath string) (string, error)
+
+	// denyActionEndpoints reserves /actions and /actions/* for the hub's
+	// Provider Actions router. A provider may serve its backend and virtual
+	// workspace from the same process, but callers must not be able to reach
+	// the internal action endpoint through /services/providers/{name}: that
+	// would bypass live Project grant and revocation enforcement in the hub.
+	denyActionEndpoints bool
 }
 
 // SetFallback installs the portal SPA handler invoked for non-asset paths
@@ -237,6 +245,11 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.fallback.ServeHTTP(w, r)
 			return
 		}
+		http.NotFound(w, r)
+		return
+	}
+
+	if p.denyActionEndpoints && isProviderActionPath(rest) {
 		http.NotFound(w, r)
 		return
 	}
@@ -308,6 +321,11 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	rp.ServeHTTP(w, r)
+}
+
+func isProviderActionPath(rest string) bool {
+	clean := path.Clean("/" + strings.TrimPrefix(rest, "/"))
+	return clean == "/actions" || strings.HasPrefix(clean, "/actions/")
 }
 
 // localAssetCacheControl is what we serve on embedded provider assets.
