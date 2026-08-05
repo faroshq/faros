@@ -289,3 +289,27 @@ func TestWebFetchAdvertisesMaxChars(t *testing.T) {
 	}
 	t.Fatal("web family has no web_fetch tool")
 }
+
+// web_search and spawn compete for the same job on a multi-part request, and a
+// model picks the cheaper-looking one. The search tool therefore points at spawn
+// — but only when the caller actually has it.
+func TestSearchFanOutHint(t *testing.T) {
+	withSpawn := Deps{Spawn: func(context.Context, SpawnRequest) (string, error) { return "", nil }}
+	if got := searchFanOutHint(withSpawn); !strings.Contains(got, "spawn a worker per part") {
+		t.Fatalf("expected a fan-out hint, got %q", got)
+	}
+	if got := searchFanOutHint(Deps{}); got != "" {
+		t.Fatalf("no spawn tool means no hint to give, got %q", got)
+	}
+
+	// And the hint has to reach the tool description the model reads.
+	for _, tool := range Web(withSpawn) {
+		if tool.Name == "web_search" {
+			if !strings.Contains(tool.Desc, "spawn a worker per part") {
+				t.Fatalf("web_search description is missing the hint: %s", tool.Desc)
+			}
+			return
+		}
+	}
+	t.Fatal("web family has no web_search tool")
+}

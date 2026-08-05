@@ -549,6 +549,34 @@ func durationLabel(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
+// fanOutGuidance is injected into any run whose toolset actually contains spawn.
+//
+// It lives here rather than in the user's system prompt because a capability that
+// only works when the operator separately pastes instructions is not a
+// capability. Granting fan-out has to be enough to get fan-out. Measured
+// behaviour without this: an agent holding spawn, web_search and a vague request
+// ran sixteen sequential searches and never called spawn once — the tool
+// description alone does not change what a model reaches for.
+//
+// The split is deliberate: this supplies the MECHANICS (when to fan out, the
+// spawn-all-then-join-once ordering, self-contained tasks), while the agent's own
+// system prompt stays about WHO it is and what standards it holds. Users should
+// never have to write the mechanics; they cannot be expected to know that joining
+// after each spawn silently serializes the whole thing.
+const fanOutGuidance = `You can work several things at once, and you should when the request allows it.
+
+When a request has independent parts — different topics, competitors, regions, time periods, options to compare — do NOT investigate them one after another yourself. Instead:
+
+1. Split it into 3-6 parts that do not depend on each other's answers. If one genuinely depends on another, do that one yourself first.
+2. Call spawn once per part, all of them, before collecting anything. Each task must stand alone: the worker cannot see this conversation, so restate every name, date, version and constraint it needs.
+3. Then call join ONCE. Calling join after each spawn makes the work sequential and defeats the point.
+4. Read what comes back critically. Where two workers disagree, or a load-bearing claim is thinly sourced, spawn a short second wave to check just that.
+5. Answer in your own voice using their findings and sources, and say plainly what the evidence does not cover.
+
+For a single narrow question, just answer it — a fan-out you do not need is slower than doing the work.
+
+The judgement is yours: a worker reports findings, it does not decide.`
+
 // workerPreamble is the fixed system guidance every worker gets, above the
 // parent's persona. It sets the contract the join formatting depends on: the
 // final message IS the return value, and sources are listed at the end.

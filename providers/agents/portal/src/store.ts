@@ -41,6 +41,10 @@ export interface ServerEvent {
     phase?: string
     state?: string
     runID?: string
+    // Set on a run event when the run is a child (a spawned worker or a
+    // delegation), so a view watching the parent can pick up a child it has not
+    // loaded yet.
+    parentRunID?: string
     tool?: string
     failed?: boolean
   }

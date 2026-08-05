@@ -143,7 +143,8 @@ func Web(d Deps) []engine.Tool {
 		},
 		{
 			Name: "web_search",
-			Desc: "Search the web and return the top results (title, URL, snippet). Follow up with web_fetch to read a result in full. Requires a websearch connection in this workspace.",
+			Desc: "Search the web and return the top results (title, URL, snippet). Follow up with web_fetch to read a result in full. Requires a websearch connection in this workspace." +
+				searchFanOutHint(d),
 			Params: map[string]engine.Param{
 				"query": {Type: "string", Desc: "search query", Required: true},
 			},
@@ -165,6 +166,18 @@ func fetchReturnBudget(maxChars int) int {
 		return webFetchMaxReturn
 	}
 	return min(maxChars, webFetchHardMaxReturn)
+}
+
+// searchFanOutHint steers a multi-part request toward the spawn tool when the
+// caller has it. Without this the two tools compete for the same job and the
+// model reliably picks the cheaper-looking one — a sequence of searches in a
+// single turn, which is both slower and shallower than a fan-out.
+func searchFanOutHint(d Deps) string {
+	if d.Spawn == nil {
+		return ""
+	}
+	return " If the request has several independent parts, do NOT search them one after another here: " +
+		"spawn a worker per part and join the results instead."
 }
 
 func webFetch(ctx context.Context, raw string, maxChars int) (string, error) {

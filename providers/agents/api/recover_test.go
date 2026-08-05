@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestSweepFailsRunsWithNoCheckpoint(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 		t.Fatal("a run with no checkpoint must not be resumed")
 		return nil
-	})
+	}, nil)
 
 	got := f.phaseOf(t, "r1")
 	if got.Phase != store.RunPhaseFailed {
@@ -112,7 +113,7 @@ func TestSweepResumesCheckpointedRuns(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(_ context.Context, sr store.ScopedRun, clusterID string) error {
 		gotCluster, gotRun = clusterID, sr.Run.ID
 		return nil
-	})
+	}, nil)
 
 	if gotRun != "r1" {
 		t.Fatalf("resumed %q, want r1", gotRun)
@@ -143,7 +144,7 @@ func TestSweepLeavesFreshAndLiveRunsAlone(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(_ context.Context, sr store.ScopedRun, _ string) error {
 		resumed[sr.Run.ID] = true
 		return nil
-	})
+	}, nil)
 
 	if resumed["fresh"] {
 		t.Fatal("a run inside the grace period is not stale")
@@ -167,7 +168,7 @@ func TestSweepIgnoresPendingApproval(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 		t.Fatal("an approval-gated run must never be auto-resumed — it is waiting for a person")
 		return nil
-	})
+	}, nil)
 
 	if got := f.phaseOf(t, "gate"); got.Phase != store.RunPhasePendingApproval {
 		t.Fatalf("phase = %s, want PendingApproval untouched", got.Phase)
@@ -182,7 +183,7 @@ func TestSweepGivesUpAfterRepeatedAttempts(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 		t.Fatal("a run that has exhausted its attempts must not be resumed again")
 		return nil
-	})
+	}, nil)
 
 	got := f.phaseOf(t, "loop")
 	if got.Phase != store.RunPhaseFailed {
@@ -201,7 +202,7 @@ func TestSweepFailsWhenResumeIsUnavailableOrFails(t *testing.T) {
 	t.Run("no background execution configured", func(t *testing.T) {
 		f := newRecoverFixture(t)
 		f.seedRun(t, "r1", store.RunPhaseRunning, time.Hour, true, 0)
-		f.s.sweepStaleRuns(ctx, nil)
+		f.s.sweepStaleRuns(ctx, nil, nil)
 		got := f.phaseOf(t, "r1")
 		if got.Phase != store.RunPhaseFailed {
 			t.Fatalf("phase = %s, want Failed", got.Phase)
@@ -216,7 +217,7 @@ func TestSweepFailsWhenResumeIsUnavailableOrFails(t *testing.T) {
 		f.seedRun(t, "r1", store.RunPhaseRunning, time.Hour, true, 0)
 		f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 			return errors.New("virtual workspace unreachable")
-		})
+		}, nil)
 		got := f.phaseOf(t, "r1")
 		if got.Phase != store.RunPhaseFailed {
 			t.Fatalf("phase = %s, want Failed", got.Phase)
@@ -242,7 +243,7 @@ func TestSweepFailsWhenResumeIsUnavailableOrFails(t *testing.T) {
 		f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 			t.Fatal("must not attempt a resume without a cluster")
 			return nil
-		})
+		}, nil)
 		run, err := f.s.store.GetRun(ctx, other, "r2")
 		if err != nil {
 			t.Fatal(err)
@@ -263,7 +264,7 @@ func TestSweepFailsPendingRunsThatNeverStarted(t *testing.T) {
 	f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
 		t.Fatal("a Pending run has no checkpoint to resume from")
 		return nil
-	})
+	}, nil)
 
 	if got := f.phaseOf(t, "never"); got.Phase != store.RunPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", got.Phase)
@@ -351,4 +352,125 @@ func TestListUnfinishedRunsOrdersAndFilters(t *testing.T) {
 	if strings.Join(ids, ",") != "old,newer" {
 		t.Fatalf("ids = %v, want [old newer]", ids)
 	}
+}
+
+// The failure mode that prompted this: a user asks a question in a chat, the
+// provider restarts mid-run, and the sweep closes the run — silently. From the
+// chat it is indistinguishable from the agent still thinking, forever.
+func TestSweepTellsTheWaiterTheRunDied(t *testing.T) {
+	ctx := context.Background()
+
+	seedWithDelivery := func(t *testing.T, f *recoverFixture, id string, d *store.RunDelivery) {
+		t.Helper()
+		at := time.Now().UTC().Add(-time.Hour)
+		if err := f.s.store.SaveRun(ctx, f.scope, store.Run{
+			ID: id, AgentName: "scout", SessionID: "discord:discord-dev:123",
+			Trigger: agentsv1alpha1.RunTriggerChannel, Phase: store.RunPhaseRunning,
+			Input: "research vertical gardens in lithuania", Delivery: d,
+			CreatedAt: at, UpdatedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("a channel run is reported back to its chat", func(t *testing.T) {
+		f := newRecoverFixture(t)
+		seedWithDelivery(t, f, "r1", &store.RunDelivery{
+			SourceName: "discord-dev", ReplyTarget: "1474867054824919153", Kind: "channel",
+		})
+
+		var gotCluster, gotText string
+		var gotRun string
+		f.s.sweepStaleRuns(ctx, nil, func(_ context.Context, sr store.ScopedRun, clusterID, text string) error {
+			gotCluster, gotText, gotRun = clusterID, text, sr.Run.ID
+			return nil
+		})
+
+		if gotRun != "r1" {
+			t.Fatalf("notified about %q, want r1", gotRun)
+		}
+		if gotCluster != "cluster-1" {
+			t.Fatalf("clusterID = %q, want the mapped cluster", gotCluster)
+		}
+		// It has to say what happened AND whether re-asking is safe — "failed"
+		// alone leaves the reader guessing.
+		if !strings.Contains(gotText, "restarted") {
+			t.Fatalf("message should say why: %q", gotText)
+		}
+		if !strings.Contains(gotText, "safe to ask again") {
+			t.Fatalf("message should say what to do next: %q", gotText)
+		}
+		// Echo the question so a busy chat has context for the apology.
+		if !strings.Contains(gotText, "vertical gardens") {
+			t.Fatalf("message should quote the request: %q", gotText)
+		}
+		if f.phaseOf(t, "r1").Phase != store.RunPhaseFailed {
+			t.Fatal("the run should still be closed out")
+		}
+	})
+
+	t.Run("a run with nowhere to report is not reported", func(t *testing.T) {
+		f := newRecoverFixture(t)
+		// A spawned worker answers its parent in memory and has no channel; the
+		// parent's own failure is what the user hears about.
+		seedWithDelivery(t, f, "r1", nil)
+		f.s.sweepStaleRuns(ctx, nil, func(context.Context, store.ScopedRun, string, string) error {
+			t.Fatal("nothing was waiting on this run in a channel")
+			return nil
+		})
+	})
+
+	t.Run("a delivery failure does not stop the sweep", func(t *testing.T) {
+		f := newRecoverFixture(t)
+		seedWithDelivery(t, f, "r1", &store.RunDelivery{SourceName: "discord-dev", Kind: "channel"})
+		seedWithDelivery(t, f, "r2", &store.RunDelivery{SourceName: "discord-dev", Kind: "channel"})
+		f.s.sweepStaleRuns(ctx, nil, func(context.Context, store.ScopedRun, string, string) error {
+			return errors.New("discord unreachable")
+		})
+		// Both runs are still closed: the run record is the source of truth, and a
+		// chat that cannot be reached must not leave rows stuck Running forever.
+		for _, id := range []string{"r1", "r2"} {
+			if f.phaseOf(t, id).Phase != store.RunPhaseFailed {
+				t.Fatalf("run %s should be Failed despite the delivery error", id)
+			}
+		}
+	})
+}
+
+// Cancelling a run from the UI used to surface whatever HTTP call happened to be
+// in flight — "Post https://api.openai.com/v1/chat/completions: context
+// canceled" — into the user's chat, which reads like the agent crashed rather
+// than like the stop they just asked for.
+func TestChannelErrorText(t *testing.T) {
+	t.Run("a cancel reads as a stop", func(t *testing.T) {
+		// Wrapped the way it actually arrives: engine wraps the SDK, which wraps
+		// the HTTP error, which wraps context.Canceled.
+		err := fmt.Errorf("engine: start stream: %w",
+			fmt.Errorf(`Post "https://api.openai.com/v1/chat/completions": %w`, context.Canceled))
+		got := channelErrorText(err)
+		if !strings.Contains(got, "Stopped") {
+			t.Fatalf("got %q, want a plain stop message", got)
+		}
+		// None of the internals leak.
+		for _, leak := range []string{"context canceled", "openai.com", "engine:"} {
+			if strings.Contains(got, leak) {
+				t.Fatalf("message leaks %q: %s", leak, got)
+			}
+		}
+	})
+
+	t.Run("a timeout says what to do about it", func(t *testing.T) {
+		got := channelErrorText(fmt.Errorf("engine: %w", context.DeadlineExceeded))
+		if !strings.Contains(got, "time limit") {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("a real error is passed through", func(t *testing.T) {
+		// Hiding genuine failures would be worse than an ugly message.
+		got := channelErrorText(errors.New("model credential is invalid"))
+		if !strings.Contains(got, "model credential is invalid") {
+			t.Fatalf("got %q, want the real reason", got)
+		}
+	})
 }

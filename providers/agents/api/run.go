@@ -133,6 +133,12 @@ type taskRun struct {
 	// NotifyChannel is the agent-channel role a paused/resumed background run
 	// delivers to (recorded in the checkpoint for resume delivery).
 	NotifyChannel string
+	// ReplyTarget pins the exact chat a channel conversation came from, so the
+	// answer goes back where the question was asked.
+	ReplyTarget string
+	// DeliveryKind marks a channel conversation ("channel") so a run that dies
+	// can be reported in the chat rather than to the agent's notify channel.
+	DeliveryKind string
 
 	// Callback, when set, is POSTed the run's outcome once it finishes. Delivery,
 	// not execution — consumed by the detached-start helpers. See api/callback.go.
@@ -165,6 +171,22 @@ type taskRun struct {
 	OnDelta     func(string)
 	OnToolStart func(id, name, args string)
 	OnTool      func(engine.ToolEvent)
+}
+
+// delivery describes where this run's answer should go, for the run record. A
+// worker or a delegated child reports to its parent in memory and has no channel
+// of its own, so it records none.
+func (r taskRun) delivery() *store.RunDelivery {
+	if r.Worker != nil || r.Trigger == agentsv1alpha1.RunTriggerDelegation {
+		return nil
+	}
+	if r.SourceName == "" && r.ReplyTarget == "" && r.NotifyChannel == "" {
+		return nil
+	}
+	return &store.RunDelivery{
+		SourceName: r.SourceName, ReplyTarget: r.ReplyTarget,
+		NotifyChannel: r.NotifyChannel, Kind: r.DeliveryKind,
+	}
 }
 
 // executeTask runs one agent turn against a task prompt, persisting the
@@ -241,7 +263,9 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 	// Assemble the turn before persisting the task message — LoadRecentMessages
 	// has no notion of "current run", so appending first would replay the task
 	// into history and the model would see it twice.
-	msgs := s.assembleTurnCtx(ctx, run, sessionID, mcpInstructions)
+	// Derived from the toolset that was actually built, not from the grant: a
+	// depth-limited worker has no spawn tool and must not be told to fan out.
+	msgs := s.assembleTurnCtx(ctx, run, sessionID, mcpInstructions, hasToolNamed(toolset, "spawn"))
 
 	_ = s.store.AppendMessage(ctx, scope, store.Message{
 		ID: uuid.NewString(), AgentName: agent.Name, SessionID: sessionID, RunID: runID,
@@ -250,9 +274,10 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 	_ = s.store.SaveRun(ctx, scope, store.Run{
 		ID: runID, AgentName: agent.Name, SessionID: sessionID, Trigger: run.Trigger,
 		ParentRunID: run.ParentRunID, IdempotencyKey: run.IdempotencyKey,
-		Phase: store.RunPhaseRunning, Input: run.Task, CreatedAt: now, UpdatedAt: now, StartedAt: &now,
+		Delivery: run.delivery(),
+		Phase:    store.RunPhaseRunning, Input: run.Task, CreatedAt: now, UpdatedAt: now, StartedAt: &now,
 	})
-	s.publishRunEvent(scope, runID, agent.Name, run.Trigger, store.RunPhaseRunning)
+	s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseRunning})
 
 	cb := s.runCallbacks(ctx, run, sessionID)
 	// Periodic checkpoints make a long run recoverable: if this replica dies, the
@@ -272,7 +297,7 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 			phase = store.RunPhaseAborted
 		}
 		s.finishRun(ctx, scope, runID, runOutcome{Phase: phase, Message: err.Error()}, end)
-		s.publishRunEvent(scope, runID, agent.Name, run.Trigger, phase)
+		s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: phase})
 		return runResult{RunID: runID}, err
 	}
 
@@ -301,7 +326,7 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 			stored.UpdatedAt = end
 			_ = s.store.SaveRun(ctx, scope, stored)
 		}
-		s.publishRunEvent(scope, runID, agent.Name, run.Trigger, store.RunPhasePendingApproval)
+		s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhasePendingApproval})
 		out := runResult{RunID: runID, Content: res.Content,
 			Pending: &pendingInfo{InboxID: res.Interrupt.RequestID, Tool: res.Interrupt.Tool, Args: res.Interrupt.Args}}
 		out.Usage.InputTokens = res.Usage.InputTokens
@@ -323,7 +348,7 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		Output: body, Sources: sources,
 	}
 	s.finishRun(ctx, scope, runID, fin, end)
-	s.publishRunEvent(scope, runID, agent.Name, run.Trigger, store.RunPhaseSucceeded)
+	s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseSucceeded})
 
 	out := runResult{RunID: runID, Content: res.Content}
 	out.Usage.InputTokens = res.Usage.InputTokens
@@ -457,11 +482,31 @@ func (s *Server) finishRun(ctx context.Context, scope store.Scope, runID string,
 	_ = s.store.SaveRun(ctx, scope, stored)
 }
 
+// runEvent is one run lifecycle change pushed to /api/events subscribers. A
+// struct rather than positional arguments: id, agent, trigger and parentRunID
+// are all strings, and transposing two of them would be invisible at the call
+// site and wrong on the wire.
+type runEvent struct {
+	ID      string
+	Agent   string
+	Trigger string
+	// ParentRunID lets a client watching a run recognize a child it has not seen
+	// before. Without it the run-detail view could only refresh for children it
+	// already knew about, so a worker spawned after the page opened stayed
+	// invisible until a manual reload.
+	ParentRunID string
+	Phase       store.RunPhase
+}
+
 // publishRunEvent pushes a run lifecycle change to /api/events subscribers.
-func (s *Server) publishRunEvent(scope store.Scope, runID, agent, trigger string, phase store.RunPhase) {
-	s.events.publish(store.Scope{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID}, "run", map[string]any{
-		"id": runID, "agent": agent, "trigger": trigger, "phase": string(phase),
-	})
+func (s *Server) publishRunEvent(scope store.Scope, ev runEvent) {
+	payload := map[string]any{
+		"id": ev.ID, "agent": ev.Agent, "trigger": ev.Trigger, "phase": string(ev.Phase),
+	}
+	if ev.ParentRunID != "" {
+		payload["parentRunID"] = ev.ParentRunID
+	}
+	s.events.publish(store.Scope{OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID}, "run", payload)
 }
 
 // memoryNoteClip bounds one injected note's body, and memoryNoteLimit how many
@@ -479,7 +524,17 @@ func memoryNoteLimit(agent *agentsv1alpha1.Agent) int {
 // assembleTurnCtx builds the message list (system prompt + recent history +
 // task) using a context rather than an *http.Request, so background callers
 // (scheduler) can reuse it.
-func (s *Server) assembleTurnCtx(ctx context.Context, run taskRun, sessionID, mcpInstructions string) []engine.Message {
+// hasToolNamed reports whether the assembled toolset contains a tool.
+func hasToolNamed(ts []engine.Tool, name string) bool {
+	for _, t := range ts {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) assembleTurnCtx(ctx context.Context, run taskRun, sessionID, mcpInstructions string, fanOut bool) []engine.Message {
 	scope, agent, task, trigger := run.Scope, run.Agent, run.Task, run.Trigger
 	var msgs []engine.Message
 	// A worker gets a fixed sub-agent preamble above the agent's persona: it is
@@ -491,6 +546,9 @@ func (s *Server) assembleTurnCtx(ctx context.Context, run taskRun, sessionID, mc
 	}
 	if sp := agent.Spec.SystemPrompt; sp != "" {
 		msgs = append(msgs, engine.Message{Role: engine.RoleSystem, Content: sp})
+	}
+	if fanOut && run.Worker == nil {
+		msgs = append(msgs, engine.Message{Role: engine.RoleSystem, Content: fanOutGuidance})
 	}
 	if run.Worker != nil {
 		if instr := strings.TrimSpace(run.Worker.Instructions); instr != "" {

@@ -8,7 +8,6 @@ import { html, nothing, type TemplateResult } from 'lit'
 import { state } from 'lit/decorators.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
-import { AGENT_PRESETS, presetByID } from '../presets'
 import type { AgentCreate } from '../types'
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
@@ -18,7 +17,12 @@ export class AgentCreateWizard extends StoreElement {
   @state() private modelCredential = ''
   @state() private systemPrompt = ''
   @state() private channel = ''
-  @state() private preset = 'blank'
+  // Capabilities, not a preset: the same two toggles the Config pane shows, so
+  // there is one vocabulary for "what can this agent do" whether you are creating
+  // it or editing it. Each carries its own behaviour (the provider injects the
+  // fan-out mechanics with the grant), so ticking one is all that is needed.
+  @state() private web = false
+  @state() private fanOut = false
   @state() private errors: Record<string, string> = {}
 
   firstUpdated(): void {
@@ -40,7 +44,10 @@ export class AgentCreateWizard extends StoreElement {
     const prompt = this.systemPrompt.trim()
     if (prompt) body.systemPrompt = prompt
     if (this.channel) body.channels = [{ name: 'primary', connectionRef: this.channel, primary: true }]
-    body = presetByID(this.preset).apply(body)
+    const fams = ['core']
+    if (this.web) fams.push('web')
+    if (this.fanOut) fams.push('spawn')
+    if (fams.length > 1) body.interactiveFamilies = fams
     this.dispatchEvent(new CustomEvent<AgentCreate>('agents-create', { detail: body }))
   }
 
@@ -61,38 +68,6 @@ export class AgentCreateWizard extends StoreElement {
           <span class="agents-dialog-ic">${icon('bot')}</span>
           <h3>New agent</h3>
         </header>
-
-        <fieldset class="agents-preset-fs">
-          <legend>Start from</legend>
-          <div class="agents-presets">
-            ${AGENT_PRESETS.map(
-              (p) => html`<label class="agents-preset ${this.preset === p.id ? 'is-on' : ''}">
-                <input
-                  type="radio"
-                  name="preset"
-                  value=${p.id}
-                  .checked=${this.preset === p.id}
-                  @change=${() => (this.preset = p.id)}
-                />
-                <span class="agents-preset-body">
-                  <strong>${p.label}</strong>
-                  <span class="muted">${p.blurb}</span>
-                  ${p.grants.length
-                    ? html`<span class="agents-preset-grants">
-                        ${p.grants.map((g) => html`<span class="agents-chip">${g}</span>`)}
-                      </span>`
-                    : nothing}
-                </span>
-              </label>`,
-            )}
-          </div>
-          ${this.preset === 'research'
-            ? html`<p class="agents-hint">
-                Comes with a research persona and the tools to run it — you can edit both in Config afterwards. Parallel research needs
-                a web-search connection; without one its workers can still fetch pages they are given, but cannot search.
-              </p>`
-            : nothing}
-        </fieldset>
 
         <label>
           Name *
@@ -133,14 +108,10 @@ export class AgentCreateWizard extends StoreElement {
 
         <label>
           System prompt
-          <span class="agents-hint">
-            ${this.preset === 'research'
-              ? 'optional — leave empty to use the research persona'
-              : 'optional — persona and standing instructions'}
-          </span>
+          <span class="agents-hint">optional — persona and standing instructions, not mechanics</span>
           <textarea
             rows="3"
-            placeholder=${this.preset === 'research' ? 'Leave empty for the research persona, or write your own…' : 'You are a concise assistant that…'}
+            placeholder="You are a concise assistant that…"
             .value=${this.systemPrompt}
             @input=${(e: Event) => (this.systemPrompt = (e.target as HTMLTextAreaElement).value)}
           ></textarea>
@@ -153,6 +124,22 @@ export class AgentCreateWizard extends StoreElement {
             ${channels.map((c) => html`<option value=${c.metadata.name} ?selected=${c.metadata.name === this.channel}>${c.spec.displayName || c.metadata.name} (${c.spec.type})</option>`)}
           </select>
         </label>
+
+        <fieldset class="agents-cap-fs">
+          <legend>Can do <span class="agents-hint">— changeable later</span></legend>
+          <label class="agents-cap">
+            <input type="checkbox" .checked=${this.web} @change=${(e: Event) => (this.web = (e.target as HTMLInputElement).checked)} />
+            <span><strong>Read the web</strong> <span class="muted">— fetch pages; search needs a websearch tool</span></span>
+          </label>
+          <label class="agents-cap">
+            <input
+              type="checkbox"
+              .checked=${this.fanOut}
+              @change=${(e: Event) => (this.fanOut = (e.target as HTMLInputElement).checked)}
+            />
+            <span><strong>Research fan-out</strong> <span class="muted">— work independent parts in parallel</span></span>
+          </label>
+        </fieldset>
 
         <div class="agents-form-actions">
           <button type="submit">${icon('check')} Create agent</button>

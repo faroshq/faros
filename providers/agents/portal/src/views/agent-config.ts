@@ -329,6 +329,11 @@ export class AgentConfig extends StoreElement {
     const toolConns = this.store.toolConnections()
     const spawnInteractive = (interactive?.families || []).includes('spawn')
     const spawnBackground = (background?.families || []).includes('spawn')
+    const webInteractive = (interactive?.families || []).includes('web')
+    const webBackground = (background?.families || []).includes('web')
+    // A websearch Connection wired to this agent is what makes web_search work;
+    // web_fetch alone does not need one.
+    const hasSearchTool = (interactive?.connections || []).some((n) => this.store.connectionType(n) === 'websearch')
 
     return html`<section class="agents-panel agents-config-sec">
       <h3>${icon('wrench')} Tools &amp; toolsets</h3>
@@ -359,20 +364,34 @@ export class AgentConfig extends StoreElement {
             </p>`}
       </fieldset>
       <fieldset class="agents-wire-fs">
-        <legend>${icon('workflow')} Research fan-out</legend>
+        <legend>${icon('globe')} Built-in capabilities</legend>
         <p class="muted">
-          Lets a run split a big question into sub-tasks, work them in parallel as scoped workers, and synthesize the findings. Each
-          worker is this agent with a fresh context and a subset of the tools above — never more — and its cost counts against this
-          agent's budget.
+          Tools the agent has on its own, with nothing to wire up. Reading the web needs no connection; <strong>searching</strong> it
+          needs a websearch tool granted below, and without one the agent can only read pages it is given a link to. Turning on fan-out
+          also teaches the agent how to use it — you do not need to write that into the prompt.
         </p>
         ${this.grantRow(
-          'Spawn workers',
-          html`<span class="muted">core capability</span>`,
+          'Read the web',
+          html`<span class="muted">web_fetch${webInteractive && !hasSearchTool ? ' — no search tool wired' : ''}</span>`,
+          webInteractive,
+          webBackground,
+          (on) => void this.setFamily(a, 'web', 'Web access', on, false),
+          (on) => void this.setFamily(a, 'web', 'Web access', on, true),
+        )}
+        ${this.grantRow(
+          'Research fan-out',
+          html`<span class="muted">spawn + join${spawnInteractive && !webInteractive ? ' — workers will have no web access' : ''}</span>`,
           spawnInteractive,
           spawnBackground,
-          (on) => void this.setSpawn(a, on, false),
-          (on) => void this.setSpawn(a, on, true),
+          (on) => void this.setFamily(a, 'spawn', 'Research fan-out', on, false),
+          (on) => void this.setFamily(a, 'spawn', 'Research fan-out', on, true),
         )}
+        ${spawnInteractive && !webInteractive
+          ? html`<p class="agents-hint agents-warn-inline">
+              ${icon('circle')} This agent can spawn workers but has no web access, so a worker inherits none either — a fan-out would
+              answer from the model alone. Turn on <strong>Read the web</strong>, and wire a websearch tool for real searching.
+            </p>`
+          : nothing}
       </fieldset>
       <fieldset class="agents-wire-fs">
         <legend>${icon('wrench')} Direct tools</legend>
@@ -480,32 +499,34 @@ export class AgentConfig extends StoreElement {
     )
   }
 
-  // Research fan-out: spawn is a capability of the agent, not a wired tool, so
-  // it is toggled directly rather than derived from a connection.
-  private setSpawn(a: Agent, on: boolean, background: boolean): Promise<boolean> {
-    const withSpawn = (fams: string[] | undefined, enabled: boolean): string[] => {
+  // Standalone families (web, spawn) are capabilities of the agent rather than
+  // wired connections, so they are toggled directly. web_fetch in particular
+  // needs no connection at all, which is why "web" cannot only come from a
+  // websearch Connection.
+  private setFamily(a: Agent, family: string, label: string, on: boolean, background: boolean): Promise<boolean> {
+    const withFamily = (fams: string[] | undefined, enabled: boolean): string[] => {
       const set = new Set(fams && fams.length ? fams : ['core'])
-      if (enabled) set.add('spawn')
-      else set.delete('spawn')
+      if (enabled) set.add(family)
+      else set.delete(family)
       return [...set]
     }
     const inter = a.spec?.tools?.interactive?.families
     const bg = a.spec?.tools?.background?.families
     const patch: AgentPatch = background
-      ? { backgroundFamilies: withSpawn(bg, on) }
+      ? { backgroundFamilies: withFamily(bg, on) }
       : {
-          interactiveFamilies: withSpawn(inter, on),
+          interactiveFamilies: withFamily(inter, on),
           // Turning it off entirely also clears the background grant, so a
           // background-only grant can't linger invisibly.
-          ...(on ? {} : { backgroundFamilies: withSpawn(bg, false) }),
+          ...(on ? {} : { backgroundFamilies: withFamily(bg, false) }),
         }
     const msg = background
       ? on
-        ? 'Fan-out enabled for background runs.'
-        : 'Fan-out is now interactive-only.'
+        ? `${label} enabled for background runs.`
+        : `${label} is now interactive-only.`
       : on
-        ? 'Research fan-out enabled.'
-        : 'Research fan-out disabled.'
+        ? `${label} enabled.`
+        : `${label} disabled.`
     return this.save(patch, (spec) => setGrants(spec, patch), msg)
   }
 

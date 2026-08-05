@@ -37,16 +37,40 @@ func openTestPostgres(t *testing.T) *PostgresStore {
 	return ps
 }
 
-// pgScope returns a unique scope per test run so tests don't collide on a
-// shared database.
-func pgScope() Scope {
-	return Scope{OrgUUID: "org-" + uuid.NewString()[:8], WorkspaceUUID: "ws-" + uuid.NewString()[:8], AgentName: "helper"}
+// pgScope returns a unique scope per test and deletes everything it wrote when
+// the test ends.
+//
+// The cleanup is not hygiene, it is correctness of the environment: the DSN
+// commonly points at the developer's live dev database (that is the whole point
+// of AGENTS_TEST_POSTGRES_DSN), so rows left behind show up as phantom agents and
+// stranded runs in the portal — and the recovery sweep then dutifully marks them
+// Failed, which looks exactly like a real outage.
+func pgScope(t *testing.T, ps *PostgresStore) Scope {
+	t.Helper()
+	sc := Scope{OrgUUID: "org-" + uuid.NewString()[:8], WorkspaceUUID: "ws-" + uuid.NewString()[:8], AgentName: "helper"}
+	t.Cleanup(func() { purgeTestScope(t, ps, sc.OrgUUID) })
+	return sc
+}
+
+// purgeTestScope removes every row an org wrote. Keyed on org_uuid alone so it
+// also catches the extra agents and workspaces a test invents under its own org.
+func purgeTestScope(t *testing.T, ps *PostgresStore, orgUUID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, table := range []string{
+		"agents_messages", "agents_runs", "agents_memories", "agents_inbox",
+		"agents_tool_calls", "agents_usage", "agents_session_summaries", "agents_tenants",
+	} {
+		if _, err := ps.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE org_uuid=$1", orgUUID); err != nil {
+			t.Logf("cleanup: %s for %s: %v", table, orgUUID, err)
+		}
+	}
 }
 
 func TestPostgres_MessagesRoundTripAndPagination(t *testing.T) {
 	ps := openTestPostgres(t)
 	ctx := context.Background()
-	sc := pgScope()
+	sc := pgScope(t, ps)
 	base := time.Now().UTC().Truncate(time.Millisecond)
 
 	for i := range 5 {
@@ -84,7 +108,7 @@ func TestPostgres_MessagesRoundTripAndPagination(t *testing.T) {
 func TestPostgres_RunSaveClaimAndUsage(t *testing.T) {
 	ps := openTestPostgres(t)
 	ctx := context.Background()
-	sc := pgScope()
+	sc := pgScope(t, ps)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	runID := uuid.NewString()
@@ -148,7 +172,7 @@ func TestPostgres_RunSaveClaimAndUsage(t *testing.T) {
 func TestPostgres_InboxMemoryTenantRefTeardown(t *testing.T) {
 	ps := openTestPostgres(t)
 	ctx := context.Background()
-	sc := pgScope()
+	sc := pgScope(t, ps)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	// Inbox add + resolve with payload round-trip.
@@ -205,7 +229,7 @@ func TestPostgres_InboxMemoryTenantRefTeardown(t *testing.T) {
 func TestPostgres_CompactionAndRecovery(t *testing.T) {
 	ps := openTestPostgres(t)
 	ctx := context.Background()
-	sc := pgScope()
+	sc := pgScope(t, ps)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	t.Run("session summary upserts and clears with the session", func(t *testing.T) {

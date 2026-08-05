@@ -615,7 +615,7 @@ func TestWorkerTurnContextIsFresh(t *testing.T) {
 	t.Run("an ordinary run gets memory and history", func(t *testing.T) {
 		out := joined(s.assembleTurnCtx(ctx, taskRun{
 			Scope: scope, Agent: agent, Task: "do the thing", Trigger: agentsv1alpha1.RunTriggerChat,
-		}, "shared", ""))
+		}, "shared", "", false))
 		if !strings.Contains(out, "secret-note") || !strings.Contains(out, "earlier conversation turn") {
 			t.Fatalf("baseline run should carry memory + history:\n%s", out)
 		}
@@ -625,7 +625,7 @@ func TestWorkerTurnContextIsFresh(t *testing.T) {
 		out := joined(s.assembleTurnCtx(ctx, taskRun{
 			Scope: scope, Agent: agent, Task: "check one fact", Trigger: agentsv1alpha1.RunTriggerSpawn,
 			Worker: &workerRun{Depth: 1, Instructions: "be brief", ParentTask: "the big question", MaxToolTurns: 4},
-		}, "shared", ""))
+		}, "shared", "", false))
 		if strings.Contains(out, "secret-note") {
 			t.Fatalf("a worker must not get memory injection:\n%s", out)
 		}
@@ -698,6 +698,69 @@ func TestFinishRunPersistsOutputAndSources(t *testing.T) {
 		}
 		if got.Message != "model unavailable" {
 			t.Fatalf("message = %q", got.Message)
+		}
+	})
+}
+
+// The capability has to carry its own instructions. Measured behaviour without
+// this: an agent holding spawn + web_search with an empty system prompt ran
+// sixteen sequential searches and never called spawn — so a grant that depends on
+// the operator also pasting a recipe is not a working feature.
+func TestFanOutGuidanceComesWithTheGrant(t *testing.T) {
+	ctx := context.Background()
+	s := &Server{store: store.NewMemoryStore()}
+	scope := store.Scope{OrgUUID: "o", WorkspaceUUID: "w", AgentName: "researcher"}
+	agent := &agentsv1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "researcher"}}
+	// Deliberately EMPTY system prompt: the whole point is that none is needed.
+	run := taskRun{Scope: scope, Agent: agent, Task: "do the research", Trigger: agentsv1alpha1.RunTriggerChannel}
+
+	joined := func(msgs []engine.Message) string {
+		var b strings.Builder
+		for _, m := range msgs {
+			b.WriteString(m.Role + ": " + m.Content + "\n")
+		}
+		return b.String()
+	}
+
+	t.Run("granted: the mechanics are injected", func(t *testing.T) {
+		out := joined(s.assembleTurnCtx(ctx, run, "chat", "", true))
+		for _, want := range []string{"join ONCE", "do NOT investigate them one after another", "stand alone"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("guidance missing %q:\n%s", want, out)
+			}
+		}
+		// It must also say when NOT to, or every trivial question becomes a fan-out.
+		if !strings.Contains(out, "single narrow question") {
+			t.Fatalf("guidance should bound itself:\n%s", out)
+		}
+	})
+
+	t.Run("not granted: nothing is injected", func(t *testing.T) {
+		out := joined(s.assembleTurnCtx(ctx, run, "chat", "", false))
+		if strings.Contains(out, "join ONCE") {
+			t.Fatal("an agent without the grant must not be told to fan out")
+		}
+	})
+
+	t.Run("a worker is never told to fan out", func(t *testing.T) {
+		// A depth-limited worker has no spawn tool; telling it to spawn would have
+		// it call a tool it does not have.
+		w := run
+		w.Worker = &workerRun{Depth: 2, MaxToolTurns: 4}
+		out := joined(s.assembleTurnCtx(ctx, w, "chat", "", false))
+		if strings.Contains(out, "join ONCE") {
+			t.Fatal("worker context must not carry fan-out mechanics")
+		}
+	})
+
+	t.Run("the agent's own persona still leads", func(t *testing.T) {
+		withPersona := run
+		a := *agent
+		a.Spec.SystemPrompt = "You are Bob, terse and sceptical."
+		withPersona.Agent = &a
+		out := joined(s.assembleTurnCtx(ctx, withPersona, "chat", "", true))
+		if strings.Index(out, "You are Bob") > strings.Index(out, "join ONCE") {
+			t.Fatal("the agent's persona should come before provider mechanics")
 		}
 	})
 }

@@ -119,7 +119,12 @@ const TOOL_FAMILY: Record<string, string> = { mcp: 'mcp', github: 'github', webs
 // agent itself, toggled directly. Because familiesForConns rebuilds the list
 // from scratch on every tool grant, these have to be carried over explicitly or
 // wiring a tool would silently switch them off.
-export const STANDALONE_FAMILIES = ['spawn'] as const
+//
+// "web" belongs here even though a websearch Connection also implies it:
+// web_fetch needs no connection whatsoever (it reads public URLs), so an agent
+// can usefully have web without one — and a preset that grants web would
+// otherwise lose it the moment the user wired any tool.
+export const STANDALONE_FAMILIES = ['spawn', 'web'] as const
 
 export function familiesForConns(
   names: string[],

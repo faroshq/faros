@@ -93,6 +93,7 @@ var agentsSchema = []string{
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS output TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS sources JSONB`,
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS delivery JSONB`,
 	// Partial unique index: at most one run per (tenant, agent, key), while the
 	// overwhelming majority of runs carry no key at all and are unconstrained.
 	`CREATE UNIQUE INDEX IF NOT EXISTS agents_runs_idempotency_idx
@@ -424,19 +425,25 @@ func (p *PostgresStore) SaveRun(ctx context.Context, scope Scope, run Run) error
 	if err != nil {
 		return err
 	}
+	var delivery any
+	if run.Delivery != nil {
+		if delivery, err = marshalJSONB(run.Delivery); err != nil {
+			return err
+		}
+	}
 	_, err = p.db.ExecContext(ctx, `
 		INSERT INTO agents_runs
 			(id, org_uuid, workspace_uuid, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt,
-			 input, output, sources, idempotency_key, message, checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+			 input, output, sources, idempotency_key, delivery, message, checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		ON CONFLICT (id) DO UPDATE SET
 			phase=EXCLUDED.phase, attempt=EXCLUDED.attempt, message=EXCLUDED.message,
-			output=EXCLUDED.output, sources=EXCLUDED.sources,
+			output=EXCLUDED.output, sources=EXCLUDED.sources, delivery=EXCLUDED.delivery,
 			checkpoint=EXCLUDED.checkpoint, input_tokens=EXCLUDED.input_tokens,
 			output_tokens=EXCLUDED.output_tokens, usd_micros=EXCLUDED.usd_micros,
 			updated_at=EXCLUDED.updated_at, started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at`,
 		run.ID, scope.OrgUUID, scope.WorkspaceUUID, run.AgentName, run.SessionID, run.Trigger, run.ParentRunID,
-		string(run.Phase), run.Attempt, run.Input, run.Output, sources, run.IdempotencyKey, run.Message, nullBytes(run.Checkpoint),
+		string(run.Phase), run.Attempt, run.Input, run.Output, sources, run.IdempotencyKey, delivery, run.Message, nullBytes(run.Checkpoint),
 		run.InputTokens, run.OutputTokens, run.USDMicros,
 		run.CreatedAt.UTC(), run.UpdatedAt.UTC(), nullTime(run.StartedAt), nullTime(run.FinishedAt))
 	return err
@@ -444,7 +451,7 @@ func (p *PostgresStore) SaveRun(ctx context.Context, scope Scope, run Run) error
 
 // runColumns is the run SELECT list, shared by every read path so a schema
 // change cannot drift one query out of step with scanRun.
-const runColumns = `id, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt, input, output, sources, idempotency_key, message,
+const runColumns = `id, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt, input, output, sources, idempotency_key, delivery, message,
 		       checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at`
 
 func (p *PostgresStore) GetRun(ctx context.Context, scope Scope, id string) (Run, error) {
@@ -584,14 +591,14 @@ func scanRun(r rowScanner) (Run, error) { return scanScopedRun(r, nil) }
 func scanScopedRun(r rowScanner, sc *Scope) (Run, error) {
 	var run Run
 	var phase string
-	var checkpoint, sources []byte
+	var checkpoint, sources, delivery []byte
 	var started, finished sql.NullTime
 	dest := []any{}
 	if sc != nil {
 		dest = append(dest, &sc.OrgUUID, &sc.WorkspaceUUID)
 	}
 	dest = append(dest, &run.ID, &run.AgentName, &run.SessionID, &run.Trigger, &run.ParentRunID, &phase, &run.Attempt,
-		&run.Input, &run.Output, &sources, &run.IdempotencyKey, &run.Message, &checkpoint, &run.InputTokens, &run.OutputTokens, &run.USDMicros,
+		&run.Input, &run.Output, &sources, &run.IdempotencyKey, &delivery, &run.Message, &checkpoint, &run.InputTokens, &run.OutputTokens, &run.USDMicros,
 		&run.CreatedAt, &run.UpdatedAt, &started, &finished)
 	if err := r.Scan(dest...); err != nil {
 		return Run{}, err
@@ -601,6 +608,11 @@ func scanScopedRun(r rowScanner, sc *Scope) (Run, error) {
 	if len(sources) > 0 {
 		if err := json.Unmarshal(sources, &run.Sources); err != nil {
 			return Run{}, fmt.Errorf("decode run sources: %w", err)
+		}
+	}
+	if len(delivery) > 0 {
+		if err := json.Unmarshal(delivery, &run.Delivery); err != nil {
+			return Run{}, fmt.Errorf("decode run delivery: %w", err)
 		}
 	}
 	if started.Valid {

@@ -214,3 +214,48 @@ func TestAPIRunSourceLabel(t *testing.T) {
 		t.Fatalf("source = %q, want api", got)
 	}
 }
+
+// A client watching a run has to be able to recognize a child it has never
+// loaded — otherwise a worker spawned after the page opened stays invisible
+// until a manual refresh, which is exactly how a fan-out looked like nothing
+// was happening.
+func TestPublishRunEventCarriesTheParent(t *testing.T) {
+	s := &Server{events: newEventBus()}
+	scope := store.Scope{OrgUUID: "o", WorkspaceUUID: "w", AgentName: "scout"}
+	ch, unsubscribe := s.events.subscribe(store.Scope{OrgUUID: "o", WorkspaceUUID: "w"})
+	defer unsubscribe()
+
+	s.publishRunEvent(scope, runEvent{
+		ID: "child-1", Agent: "scout", Trigger: agentsv1alpha1.RunTriggerSpawn,
+		ParentRunID: "parent-1", Phase: store.RunPhaseRunning,
+	})
+
+	select {
+	case ev := <-ch:
+		data, ok := ev.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("payload = %T", ev.Data)
+		}
+		if data["parentRunID"] != "parent-1" {
+			t.Fatalf("parentRunID = %v, want parent-1", data["parentRunID"])
+		}
+		if data["id"] != "child-1" || data["phase"] != "Running" {
+			t.Fatalf("payload = %+v", data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event published")
+	}
+
+	t.Run("a top-level run omits the field rather than sending an empty one", func(t *testing.T) {
+		s.publishRunEvent(scope, runEvent{ID: "top", Agent: "scout", Trigger: agentsv1alpha1.RunTriggerChat, Phase: store.RunPhaseSucceeded})
+		select {
+		case ev := <-ch:
+			data := ev.Data.(map[string]any)
+			if _, present := data["parentRunID"]; present {
+				t.Fatalf("parentRunID should be absent for a top-level run; got %+v", data)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("no event published")
+		}
+	})
+}

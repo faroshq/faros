@@ -38,12 +38,17 @@ func Spawn(d Deps) []engine.Tool {
 		{
 			Name: "spawn",
 			Desc: fmt.Sprintf(
-				"Start a worker on one self-contained sub-task and return immediately with its task id. "+
-					"Use this to work several independent sub-questions at once: spawn one worker per sub-topic, then call join to collect them. "+
-					"A worker is you, with a fresh context (it cannot see this conversation — put everything it needs in the task) and only the tools you grant it. "+
-					"It returns a written answer with its sources. Up to %d workers per run, %d running at a time. "+
+				"Start a worker on one self-contained sub-task and return immediately with its task id; call join to collect the answers. "+
+					"PREFER THIS over investigating several things yourself one at a time. If a request has independent parts — "+
+					"different topics, competitors, regions, time periods, options to compare — spawn one worker per part instead of "+
+					"running a sequence of searches in this turn. Two reasons it is better: the workers run at the same time (%d at once), "+
+					"and each gets its own context and tool budget, so each part is investigated properly instead of sharing this one turn "+
+					"between all of them. "+
+					"A worker is you, with a fresh context (it cannot see this conversation — put everything it needs in the task) and only "+
+					"the tools you grant it. It returns a written answer with its sources. Up to %d workers per run. "+
+					"Do NOT use it for a single narrow lookup — answer that yourself. "+
 					"Do the synthesis yourself: a worker reports findings, it does not decide.",
-				p.MaxPerRun, p.MaxConcurrent),
+				p.MaxConcurrent, p.MaxPerRun),
 			// A raw schema rather than Params: the tools array needs an item type.
 			JSONSchema: map[string]any{
 				"type": "object",

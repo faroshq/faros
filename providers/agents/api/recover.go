@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/faroshq/provider-agents/engine"
@@ -113,11 +114,19 @@ func (s *Server) checkpointRecorder(ctx context.Context, run taskRun, sessionID 
 // resume is unavailable and stale runs are only failed, never resumed.
 type recoveryRunner func(ctx context.Context, scoped store.ScopedRun, clusterID string) error
 
+// recoveryNotifier tells whoever was waiting that a run is not coming back.
+//
+// Closing a stranded run silently is the worst outcome available: someone asked a
+// question in a chat, the process died before it could answer, and without this
+// they wait forever with no way to tell "still thinking" from "dead". Injected
+// alongside recoveryRunner because delivery needs the same tenant access.
+type recoveryNotifier func(ctx context.Context, scoped store.ScopedRun, clusterID, text string) error
+
 // sweepStaleRuns handles runs left non-terminal by a crashed or restarted
 // replica. Safe to call repeatedly; safe to call while other replicas are
 // working, because a run executing here is skipped and ClaimRun settles races
 // between replicas.
-func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner) {
+func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner, notify recoveryNotifier) {
 	cutoff := time.Now().UTC().Add(-staleRunGrace)
 	stale, err := s.store.ListUnfinishedRuns(ctx,
 		[]store.RunPhase{store.RunPhaseRunning, store.RunPhasePending}, cutoff, sweepBatch)
@@ -132,7 +141,7 @@ func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner) {
 		if s.liveRuns.has(sr.Run.ID) {
 			continue
 		}
-		if s.recoverRun(ctx, sr, resume) {
+		if s.recoverRun(ctx, sr, resume, notify) {
 			resumed++
 		} else {
 			failed++
@@ -145,11 +154,12 @@ func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner) {
 
 // recoverRun resumes one stranded run, or fails it when it cannot be resumed.
 // Reports whether it was resumed.
-func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume recoveryRunner) bool {
+func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume recoveryRunner, notify recoveryNotifier) bool {
 	run, scope := sr.Run, sr.Scope
 	fail := func(reason string) bool {
 		s.finishRun(ctx, scope, run.ID, runOutcome{Phase: store.RunPhaseFailed, Message: reason}, time.Now().UTC())
-		s.publishRunEvent(scope, run.ID, run.AgentName, run.Trigger, store.RunPhaseFailed)
+		s.publishRunEvent(scope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseFailed})
+		s.reportStrandedRun(ctx, sr, notify, reason)
 		return false
 	}
 
@@ -175,4 +185,37 @@ func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume reco
 		return fail("the provider restarted while this run was in progress, and resuming it failed: " + err.Error())
 	}
 	return true
+}
+
+// reportStrandedRun tells the chat or channel a dead run was answering that it is
+// not coming. Best-effort and deliberately quiet on failure: the run is already
+// closed, and a delivery problem must not stop the sweep working through the rest
+// of the batch.
+//
+// Only runs that recorded a delivery target are reported. A spawned worker or a
+// delegated child has none — it answers its parent in memory, and the parent's own
+// failure is what the user hears about.
+func (s *Server) reportStrandedRun(ctx context.Context, sr store.ScopedRun, notify recoveryNotifier, reason string) {
+	if notify == nil || sr.Run.Delivery == nil {
+		return
+	}
+	d := sr.Run.Delivery
+	if d.SourceName == "" && d.NotifyChannel == "" {
+		return
+	}
+	clusterID, ok, err := s.store.FindClusterForScope(ctx, sr.Scope.OrgUUID, sr.Scope.WorkspaceUUID)
+	if err != nil || !ok {
+		return
+	}
+	// Say what happened and what to do about it. "Failed" alone would leave the
+	// reader guessing whether re-asking is safe.
+	text := "⚠️ I lost that request when this service restarted, and it did not finish. " +
+		"Nothing was completed, so it is safe to ask again."
+	if ask := strings.TrimSpace(sr.Run.Input); ask != "" {
+		text += "\n\nYou asked: " + safeTruncate(strings.Join(strings.Fields(ask), " "), 300)
+	}
+	if err := notify(ctx, sr, clusterID, text); err != nil {
+		log.Printf("recovery: telling %s about stranded run %s: %v", d.SourceName, sr.Run.ID, err)
+	}
+	_ = reason
 }

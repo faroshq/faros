@@ -200,7 +200,7 @@ func TestAssembleTurnCtxReplaysSummaryInsteadOfFoldedMessages(t *testing.T) {
 	}
 
 	var b strings.Builder
-	for _, m := range f.s.assembleTurnCtx(ctx, f.run(), "chat", "") {
+	for _, m := range f.s.assembleTurnCtx(ctx, f.run(), "chat", "", false) {
 		b.WriteString(m.Role + ": " + m.Content + "\n")
 	}
 	out := b.String()

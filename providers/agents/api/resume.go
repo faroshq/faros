@@ -95,7 +95,7 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 		log.Printf("resume: run %s: %v", run.ID, err)
 		return
 	}
-	s.publishRunEvent(agentScope, run.ID, run.AgentName, run.Trigger, store.RunPhaseRunning)
+	s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseRunning})
 
 	agent, err := rd.CR.GetAgent(ctx, run.AgentName)
 	if err != nil {
@@ -173,7 +173,7 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 			stored.UpdatedAt = end
 			_ = s.store.SaveRun(ctx, agentScope, stored)
 		}
-		s.publishRunEvent(agentScope, run.ID, agent.Name, run.Trigger, store.RunPhasePendingApproval)
+		s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhasePendingApproval})
 		return
 	}
 
@@ -186,7 +186,7 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 		Phase: store.RunPhaseSucceeded, Usage: res.Usage, CostMicros: costMicros,
 		Output: body, Sources: sources,
 	}, end)
-	s.publishRunEvent(agentScope, run.ID, agent.Name, run.Trigger, store.RunPhaseSucceeded)
+	s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseSucceeded})
 
 	// Deliver the continuation where the run's output was headed: channel runs
 	// reply on their source connection, background runs notify their channel
@@ -208,7 +208,7 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 func (s *Server) failResume(ctx context.Context, scope store.Scope, run store.Run, err error) {
 	log.Printf("resume: run %s failed: %v", run.ID, err)
 	s.finishRun(ctx, scope, run.ID, runOutcome{Phase: store.RunPhaseFailed, Message: err.Error()}, time.Now().UTC())
-	s.publishRunEvent(scope, run.ID, run.AgentName, run.Trigger, store.RunPhaseFailed)
+	s.publishRunEvent(scope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseFailed})
 }
 
 // sendToConnection delivers text through a named messaging connection using

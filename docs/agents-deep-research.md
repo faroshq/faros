@@ -483,6 +483,26 @@ Do the judgement yourself. A worker reports; you decide.
 The run tree in the portal (`GET /api/runs/{id}` → children) is the trace:
 each worker is a child run with its own steps, output, sources, and cost.
 
+### Watching a fan-out
+
+The run-detail page is the live view. Above the child table it tallies what the
+workers are doing — "2 running · 1 queued · 3 done" with a spinner while any are
+outstanding — and the table updates as each finishes; click a worker to see its
+own steps.
+
+Two details make that work, and both were missing at first:
+
+- Run events carry `parentRunID`. Without it a client could only refresh for
+  children it had *already loaded*, so a worker spawned after the page opened
+  stayed invisible until a manual reload — which is what made a fan-out look like
+  nothing was happening.
+- **Running and queued are counted separately.** With concurrency 4 and ten
+  workers spawned, six sit on the semaphore; collapsing them into one "in
+  progress" number makes a queued worker indistinguishable from a stuck one.
+
+Chat shows the same run as `spawn` and `join` tool rows, so you can see how many
+workers started, but per-worker progress lives in the run tree.
+
 ## Implementation notes — where the code differs from this design
 
 Recorded because each one was a deliberate correction found while building, not

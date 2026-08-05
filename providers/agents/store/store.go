@@ -98,16 +98,37 @@ type Run struct {
 	// IdempotencyKey is a caller-supplied de-duplication token, unique per
 	// (org, workspace, agent). An at-least-once caller retrying a delivery gets
 	// the original run back instead of a second one doing the same work twice.
-	IdempotencyKey string          `json:"idempotencyKey,omitempty"`
-	Message        string          `json:"message,omitempty"`
-	Checkpoint     json.RawMessage `json:"checkpoint,omitempty"`
-	InputTokens    int64           `json:"inputTokens,omitempty"`
-	OutputTokens   int64           `json:"outputTokens,omitempty"`
-	USDMicros      int64           `json:"usdMicros,omitempty"` // cost in millionths of a USD
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
-	StartedAt      *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt     *time.Time      `json:"finishedAt,omitempty"`
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+	// Delivery records where this run's answer was headed. Persisted because the
+	// goroutine that knew is exactly what a crash destroys: without it, a run that
+	// dies mid-flight can never tell the person waiting in a channel that it is
+	// not coming, and they wait forever.
+	Delivery     *RunDelivery    `json:"delivery,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	Checkpoint   json.RawMessage `json:"checkpoint,omitempty"`
+	InputTokens  int64           `json:"inputTokens,omitempty"`
+	OutputTokens int64           `json:"outputTokens,omitempty"`
+	USDMicros    int64           `json:"usdMicros,omitempty"` // cost in millionths of a USD
+	CreatedAt    time.Time       `json:"createdAt"`
+	UpdatedAt    time.Time       `json:"updatedAt"`
+	StartedAt    *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt   *time.Time      `json:"finishedAt,omitempty"`
+}
+
+// RunDelivery is where a run's output goes: the connection to answer on, the
+// exact chat within it, and the agent-channel role for unattended runs.
+type RunDelivery struct {
+	// SourceName is the schedule, trigger, or channel connection that started it.
+	SourceName string `json:"sourceName,omitempty"`
+	// ReplyTarget pins the exact chat inside the source connection (the Discord
+	// channel or Telegram chat the message came from), so the answer lands where
+	// the question was asked rather than on the connection's default target.
+	ReplyTarget string `json:"replyTarget,omitempty"`
+	// NotifyChannel is the agent-channel role an unattended run reports to.
+	NotifyChannel string `json:"notifyChannel,omitempty"`
+	// Kind distinguishes a channel conversation (answer in the chat) from a
+	// schedule/trigger (notify the configured channel).
+	Kind string `json:"kind,omitempty"`
 }
 
 // SessionSummary is a compacted stand-in for the older part of one session's

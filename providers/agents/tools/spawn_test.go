@@ -178,7 +178,16 @@ func TestSpawnToolDescriptionStatesLimits(t *testing.T) {
 	if !strings.Contains(desc, "3 workers per run") {
 		t.Fatalf("description should state the per-run limit, got: %s", desc)
 	}
-	if !strings.Contains(desc, "2 running at a time") {
+	if !strings.Contains(desc, "2 at once") {
 		t.Fatalf("description should state the concurrency limit, got: %s", desc)
+	}
+	// It also has to argue for itself. A model holding both spawn and web_search
+	// will otherwise take the cheaper-looking path — a sequence of searches in one
+	// turn — which is what happened in practice.
+	if !strings.Contains(desc, "PREFER THIS") {
+		t.Fatalf("description should say when to prefer a fan-out, got: %s", desc)
+	}
+	if !strings.Contains(desc, "single narrow lookup") {
+		t.Fatalf("description should also say when NOT to fan out, got: %s", desc)
 	}
 }
