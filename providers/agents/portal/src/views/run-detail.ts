@@ -168,11 +168,30 @@ export class RunDetailView extends StoreElement {
   }
 
   private output(r: Run): TemplateResult | typeof nothing {
-    if (!r.message) return nothing
     const failed = r.phase === 'Failed' || r.phase === 'Aborted'
+    // The answer lives on the run record; message carries the failure reason. A
+    // failed run can have both (it produced text, then broke).
+    if (failed && r.message) {
+      return html`<section class="agents-panel">
+        <h3>${icon('x')} Error</h3>
+        <div class="agents-err" role="alert">${r.message}</div>
+        ${r.output ? html`<h3>${icon('message')} Partial output</h3>
+            <div class="agents-body">${renderMarkdown(r.output)}</div>` : nothing}
+      </section>`
+    }
+    const body = r.output || r.message
+    if (!body) return nothing
     return html`<section class="agents-panel">
-      <h3>${failed ? html`${icon('x')} Error` : html`${icon('message')} Output`}</h3>
-      ${failed ? html`<div class="agents-err" role="alert">${r.message}</div>` : html`<div class="agents-body">${renderMarkdown(r.message)}</div>`}
+      <h3>${icon('message')} Output</h3>
+      <div class="agents-body">${renderMarkdown(body)}</div>
+      ${r.sources?.length
+        ? html`<div class="agents-runsources">
+            <span class="agents-runmeta-k">sources</span>
+            <ul>
+              ${r.sources.map((s) => html`<li><a href=${s} target="_blank" rel="noopener noreferrer">${s}</a></li>`)}
+            </ul>
+          </div>`
+        : nothing}
     </section>`
   }
 
@@ -213,12 +232,18 @@ export class RunDetailView extends StoreElement {
 
   private childRuns(r: Run): TemplateResult | typeof nothing {
     if (!r.children?.length) return nothing
+    // Children are spawned workers and delegations alike, so the heading names
+    // the relationship rather than one of the two mechanisms.
+    const workers = r.children.filter((c) => c.trigger === 'spawn').length
     return html`<section class="agents-panel">
-      <h3>${icon('corner-down-right')} Delegated runs</h3>
+      <h3>
+        ${icon('corner-down-right')} Child runs <span class="muted">(${r.children.length})</span>
+        ${workers ? html`<span class="muted">· ${workers} spawned worker${workers === 1 ? '' : 's'}</span>` : nothing}
+      </h3>
       <div class="agents-tablewrap">
         <table class="agents-table">
           <thead>
-            <tr><th>Agent</th><th>Input</th><th>Phase</th><th>Duration</th><th>Usage</th></tr>
+            <tr><th>Agent</th><th>Kind</th><th>Input</th><th>Phase</th><th>Duration</th><th>Usage</th></tr>
           </thead>
           <tbody>
             ${r.children.map((c: RunSummary) => html`<tr class="agents-run-row" tabindex="0" role="link" aria-label="Open run ${c.id}"
@@ -231,6 +256,7 @@ export class RunDetailView extends StoreElement {
               }}
             >
               <td><strong>${c.agent}</strong></td>
+              <td class="muted mono">${c.trigger === 'spawn' ? 'worker' : 'delegated'}</td>
               <td class="agents-cell-task muted">${c.inputPreview || '—'}</td>
               <td>${phaseChip(c.phase)}</td>
               <td class="muted">${c.durationMS ? fmtDuration(c.durationMS) : '—'}</td>

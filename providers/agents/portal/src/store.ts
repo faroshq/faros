@@ -87,8 +87,10 @@ export class AppStore extends EventTarget {
     return this.connections.data.find((c) => c.metadata.name === name)?.spec.type
   }
   // families derived from a list of tool-connection names (never hand-picked).
-  familiesFor(names: string[]): string[] {
-    return familiesForConns(names, (n) => this.connectionType(n))
+  // `current` carries over the families that aren't connection-derived (spawn),
+  // which this list would otherwise drop.
+  familiesFor(names: string[], current: string[] = []): string[] {
+    return familiesForConns(names, (n) => this.connectionType(n), current)
   }
   toolConnections(): Connection[] {
     return this.connections.data.filter((c) => CONN_CATEGORY[c.spec.type] === 'tool')

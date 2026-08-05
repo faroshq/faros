@@ -327,6 +327,8 @@ export class AgentConfig extends StoreElement {
     const bgToolsets = new Set(background?.toolsets || [])
     const bgTools = new Set(background?.connections || [])
     const toolConns = this.store.toolConnections()
+    const spawnInteractive = (interactive?.families || []).includes('spawn')
+    const spawnBackground = (background?.families || []).includes('spawn')
 
     return html`<section class="agents-panel agents-config-sec">
       <h3>${icon('wrench')} Tools &amp; toolsets</h3>
@@ -355,6 +357,22 @@ export class AgentConfig extends StoreElement {
               </button>
               tab.
             </p>`}
+      </fieldset>
+      <fieldset class="agents-wire-fs">
+        <legend>${icon('workflow')} Research fan-out</legend>
+        <p class="muted">
+          Lets a run split a big question into sub-tasks, work them in parallel as scoped workers, and synthesize the findings. Each
+          worker is this agent with a fresh context and a subset of the tools above — never more — and its cost counts against this
+          agent's budget.
+        </p>
+        ${this.grantRow(
+          'Spawn workers',
+          html`<span class="muted">core capability</span>`,
+          spawnInteractive,
+          spawnBackground,
+          (on) => void this.setSpawn(a, on, false),
+          (on) => void this.setSpawn(a, on, true),
+        )}
       </fieldset>
       <fieldset class="agents-wire-fs">
         <legend>${icon('wrench')} Direct tools</legend>
@@ -442,8 +460,8 @@ export class AgentConfig extends StoreElement {
     const patch: AgentPatch = {
       interactiveConnections: nextInter,
       backgroundConnections: nextBg,
-      interactiveFamilies: this.store.familiesFor(nextInter),
-      backgroundFamilies: this.store.familiesFor(nextBg),
+      interactiveFamilies: this.store.familiesFor(nextInter, a.spec?.tools?.interactive?.families),
+      backgroundFamilies: this.store.familiesFor(nextBg, a.spec?.tools?.background?.families),
     }
     return this.save(patch, (spec) => setGrants(spec, patch), on ? 'Tool granted.' : 'Tool removed.')
   }
@@ -451,12 +469,44 @@ export class AgentConfig extends StoreElement {
   private setToolBackground(a: Agent, cn: string, on: boolean): Promise<boolean> {
     const bg = a.spec?.tools?.background?.connections || []
     const next = on ? [...new Set([...bg, cn])] : bg.filter((x) => x !== cn)
-    const patch: AgentPatch = { backgroundConnections: next, backgroundFamilies: this.store.familiesFor(next) }
+    const patch: AgentPatch = {
+      backgroundConnections: next,
+      backgroundFamilies: this.store.familiesFor(next, a.spec?.tools?.background?.families),
+    }
     return this.save(
       patch,
       (spec) => setGrants(spec, patch),
       on ? 'Tool enabled for background runs.' : 'Tool is now interactive-only.',
     )
+  }
+
+  // Research fan-out: spawn is a capability of the agent, not a wired tool, so
+  // it is toggled directly rather than derived from a connection.
+  private setSpawn(a: Agent, on: boolean, background: boolean): Promise<boolean> {
+    const withSpawn = (fams: string[] | undefined, enabled: boolean): string[] => {
+      const set = new Set(fams && fams.length ? fams : ['core'])
+      if (enabled) set.add('spawn')
+      else set.delete('spawn')
+      return [...set]
+    }
+    const inter = a.spec?.tools?.interactive?.families
+    const bg = a.spec?.tools?.background?.families
+    const patch: AgentPatch = background
+      ? { backgroundFamilies: withSpawn(bg, on) }
+      : {
+          interactiveFamilies: withSpawn(inter, on),
+          // Turning it off entirely also clears the background grant, so a
+          // background-only grant can't linger invisibly.
+          ...(on ? {} : { backgroundFamilies: withSpawn(bg, false) }),
+        }
+    const msg = background
+      ? on
+        ? 'Fan-out enabled for background runs.'
+        : 'Fan-out is now interactive-only.'
+      : on
+        ? 'Research fan-out enabled.'
+        : 'Research fan-out disabled.'
+    return this.save(patch, (spec) => setGrants(spec, patch), msg)
   }
 
   // ---- channels ------------------------------------------------------------

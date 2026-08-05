@@ -405,6 +405,12 @@ func (b *background) loop(ctx context.Context) {
 	if b.ready() && b.discord != nil {
 		b.discord.reconcile(ctx)
 	}
+	// Recover runs a previous process left in flight before doing anything else:
+	// a restarted deploy should pick its work back up, not sit on rows stuck in
+	// Running until someone notices.
+	if b.ready() {
+		b.server.sweepStaleRuns(ctx, b.resumeRecoveredRun)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -419,11 +425,44 @@ func (b *background) loop(ctx context.Context) {
 			}
 			b.tick(ctx)
 			b.refreshOAuthTokens(ctx)
+			// Catches runs stranded by a crash of ANOTHER replica, and any this
+			// process could not recover at startup.
+			b.server.sweepStaleRuns(ctx, b.resumeRecoveredRun)
 			if b.discord != nil {
 				b.discord.reconcile(ctx)
 			}
 		}
 	}
+}
+
+// resumeRecoveredRun continues a run the sweep found stranded. It is the
+// background executor's half of recovery: the sweep owns the policy (what counts
+// as stale, when to give up), this owns the tenant access — the agent's own
+// ServiceAccount through the APIExport virtual workspace, exactly as a scheduled
+// run executes. No user token, so no edges family, same as any background run.
+func (b *background) resumeRecoveredRun(ctx context.Context, sr store.ScopedRun, clusterID string) error {
+	dyn, err := b.scoped(ctx, clusterID)
+	if err != nil {
+		return fmt.Errorf("workspace %s: %w", clusterID, err)
+	}
+	// Count the attempt before resuming, so a run that kills the provider on every
+	// resume still walks toward maxRecoveryAttempts instead of looping forever.
+	if stored, gerr := b.server.store.GetRun(ctx, sr.Scope, sr.Run.ID); gerr == nil {
+		stored.Attempt++
+		stored.UpdatedAt = time.Now().UTC()
+		if serr := b.server.store.SaveRun(ctx, sr.Scope, stored); serr != nil {
+			return fmt.Errorf("recording the resume attempt: %w", serr)
+		}
+	}
+	rd := resumeDeps{
+		Creds: vwSecrets{dyn}, CR: vwCR{dyn}, ClusterID: clusterID,
+		HubToken: b.agentToken(ctx, dyn, clusterID, sr.Run.AgentName),
+	}
+	// Detached: the resume outlives this tick, and its own timeout bounds it.
+	go b.server.resumeRun(context.WithoutCancel(ctx), sr.Scope, sr.Run.ID, rd, resumeIntent{
+		FromPhase: store.RunPhaseRunning,
+	})
+	return nil
 }
 
 func (b *background) tick(ctx context.Context) {

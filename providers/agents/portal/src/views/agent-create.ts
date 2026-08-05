@@ -8,6 +8,7 @@ import { html, nothing, type TemplateResult } from 'lit'
 import { state } from 'lit/decorators.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
+import { AGENT_PRESETS, presetByID } from '../presets'
 import type { AgentCreate } from '../types'
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/
@@ -17,6 +18,7 @@ export class AgentCreateWizard extends StoreElement {
   @state() private modelCredential = ''
   @state() private systemPrompt = ''
   @state() private channel = ''
+  @state() private preset = 'blank'
   @state() private errors: Record<string, string> = {}
 
   firstUpdated(): void {
@@ -34,10 +36,11 @@ export class AgentCreateWizard extends StoreElement {
     this.errors = errors
     if (Object.keys(errors).length) return
 
-    const body: AgentCreate = { name, displayName: name, modelCredential: this.modelCredential }
+    let body: AgentCreate = { name, displayName: name, modelCredential: this.modelCredential }
     const prompt = this.systemPrompt.trim()
     if (prompt) body.systemPrompt = prompt
     if (this.channel) body.channels = [{ name: 'primary', connectionRef: this.channel, primary: true }]
+    body = presetByID(this.preset).apply(body)
     this.dispatchEvent(new CustomEvent<AgentCreate>('agents-create', { detail: body }))
   }
 
@@ -58,6 +61,38 @@ export class AgentCreateWizard extends StoreElement {
           <span class="agents-dialog-ic">${icon('bot')}</span>
           <h3>New agent</h3>
         </header>
+
+        <fieldset class="agents-preset-fs">
+          <legend>Start from</legend>
+          <div class="agents-presets">
+            ${AGENT_PRESETS.map(
+              (p) => html`<label class="agents-preset ${this.preset === p.id ? 'is-on' : ''}">
+                <input
+                  type="radio"
+                  name="preset"
+                  value=${p.id}
+                  .checked=${this.preset === p.id}
+                  @change=${() => (this.preset = p.id)}
+                />
+                <span class="agents-preset-body">
+                  <strong>${p.label}</strong>
+                  <span class="muted">${p.blurb}</span>
+                  ${p.grants.length
+                    ? html`<span class="agents-preset-grants">
+                        ${p.grants.map((g) => html`<span class="agents-chip">${g}</span>`)}
+                      </span>`
+                    : nothing}
+                </span>
+              </label>`,
+            )}
+          </div>
+          ${this.preset === 'research'
+            ? html`<p class="agents-hint">
+                Comes with a research persona and the tools to run it — you can edit both in Config afterwards. Parallel research needs
+                a web-search connection; without one its workers can still fetch pages they are given, but cannot search.
+              </p>`
+            : nothing}
+        </fieldset>
 
         <label>
           Name *
@@ -97,10 +132,15 @@ export class AgentCreateWizard extends StoreElement {
         </label>
 
         <label>
-          System prompt <span class="agents-hint">optional — persona and standing instructions</span>
+          System prompt
+          <span class="agents-hint">
+            ${this.preset === 'research'
+              ? 'optional — leave empty to use the research persona'
+              : 'optional — persona and standing instructions'}
+          </span>
           <textarea
             rows="3"
-            placeholder="You are a concise assistant that…"
+            placeholder=${this.preset === 'research' ? 'Leave empty for the research persona, or write your own…' : 'You are a concise assistant that…'}
             .value=${this.systemPrompt}
             @input=${(e: Event) => (this.systemPrompt = (e.target as HTMLTextAreaElement).value)}
           ></textarea>

@@ -161,10 +161,47 @@ describe('run detail', () => {
     expect(resolveInbox).toHaveBeenCalledWith('i7', 'approve')
   })
 
-  it('links delegated child runs', async () => {
-    const api = stubApi({ getRun: () => Promise.resolve(detail({ children: [run({ id: 'c1', agent: 'researcher' })] })) })
+  it('links child runs, distinguishing spawned workers from delegations', async () => {
+    const api = stubApi({
+      getRun: () =>
+        Promise.resolve(
+          detail({
+            children: [
+              run({ id: 'c1', agent: 'researcher' }),
+              run({ id: 'c2', agent: 'scout', trigger: 'spawn' }),
+            ],
+          }),
+        ),
+    })
     const el = await mount<RunDetailView>('agents-run-detail', { store: makeStore(api), api, runID: 'r5' })
-    expect(text(el)).toContain('Delegated runs')
+    expect(text(el)).toContain('Child runs')
     expect(text(el)).toContain('researcher')
+    // A fan-out's workers are labelled as such — one spawned worker here.
+    expect(text(el)).toContain('1 spawned worker')
+    expect(text(el)).toContain('delegated')
+    expect(text(el)).toContain('worker')
+  })
+
+  it('shows the run answer and its sources', async () => {
+    const api = stubApi({
+      getRun: () =>
+        Promise.resolve(
+          detail({ output: 'The answer is 42.', sources: ['https://a.example/x', 'https://b.example/y'] }),
+        ),
+    })
+    const el = await mount<RunDetailView>('agents-run-detail', { store: makeStore(api), api, runID: 'r5' })
+    expect(text(el)).toContain('The answer is 42.')
+    const links = [...el.querySelectorAll('.agents-runsources a')] as HTMLAnchorElement[]
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://a.example/x', 'https://b.example/y'])
+  })
+
+  it('shows the error and any partial output for a failed run', async () => {
+    const api = stubApi({
+      getRun: () => Promise.resolve(detail({ phase: 'Failed', message: 'model unavailable', output: 'got this far' })),
+    })
+    const el = await mount<RunDetailView>('agents-run-detail', { store: makeStore(api), api, runID: 'r5' })
+    expect(text(el)).toContain('model unavailable')
+    expect(text(el)).toContain('Partial output')
+    expect(text(el)).toContain('got this far')
   })
 })

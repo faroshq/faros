@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentConfig } from '../views/agent-config'
 import type { AgentPatch } from '../types'
 import '../views/agent-config'
+import { familiesForConns } from '../conn-defs'
+import { presetByID } from '../presets'
 import { clearToasts, subscribeToasts } from '../ui/toast'
 import { agentFixture, makeStore, mount, settle, stubApi } from './helpers'
 
@@ -114,5 +116,84 @@ describe('connection test feedback', () => {
     const failure = raised.find((m) => m.startsWith('error:'))
     expect(failure).toContain('Test of “tg” failed')
     expect(failure).toContain('blocked by the user')
+  })
+})
+
+// Research fan-out is a capability of the agent, not a wired connection. That
+// makes it the one family a user picks directly — and the one that the
+// derive-families-from-connections rule would silently drop.
+describe('research fan-out grant', () => {
+  const spawnRow = (el: AgentConfig): HTMLInputElement[] => {
+    const fs = [...el.querySelectorAll('fieldset')].find((f) => f.textContent?.includes('Research fan-out'))!
+    return [...fs.querySelectorAll<HTMLInputElement>('input[type=checkbox]')]
+  }
+
+  it('grants and revokes spawn for interactive runs', async () => {
+    const { el, patchAgent } = await mountConfig({ tools: { interactive: { families: ['core', 'web'] } } })
+    const [linked] = spawnRow(el)
+    expect(linked.checked).toBe(false)
+
+    linked.checked = true
+    linked.dispatchEvent(new Event('change'))
+    await settle(el, 4)
+    expect(patchAgent.mock.calls[0][1].interactiveFamilies).toEqual(expect.arrayContaining(['core', 'web', 'spawn']))
+  })
+
+  it('turning it off also clears the background grant', async () => {
+    const { el, patchAgent } = await mountConfig({
+      tools: { interactive: { families: ['core', 'spawn'] }, background: { families: ['core', 'spawn'] } },
+    })
+    const [linked] = spawnRow(el)
+    expect(linked.checked).toBe(true)
+
+    linked.checked = false
+    linked.dispatchEvent(new Event('change'))
+    await settle(el, 4)
+    const patch = patchAgent.mock.calls[0][1]
+    expect(patch.interactiveFamilies).not.toContain('spawn')
+    expect(patch.backgroundFamilies).not.toContain('spawn')
+  })
+
+  // The trap: familiesForConns rebuilds the list from scratch on every tool
+  // grant, so without carrying spawn over, wiring a tool would switch fan-out
+  // off behind the user's back.
+  it('survives a rebuild of families from connections', () => {
+    const connType = (n: string) => (n === 'gh' ? 'github' : undefined)
+    const rebuilt = familiesForConns(['gh'], connType, ['core', 'spawn'])
+    expect(rebuilt).toContain('spawn')
+    expect(rebuilt).toContain('github')
+    expect(rebuilt).toContain('core')
+  })
+
+  it('does not invent spawn when it was never granted', () => {
+    expect(familiesForConns(['gh'], () => 'github', ['core'])).not.toContain('spawn')
+    expect(familiesForConns([], () => undefined)).toEqual(['core'])
+  })
+})
+
+// The preset is the front door to research fan-out: if it grants the wrong
+// families or discards a prompt the user typed, it is worse than no preset.
+describe('agent presets', () => {
+  it('research grants web + spawn and supplies the persona', () => {
+    const body = presetByID('research').apply({ name: 'r', modelCredential: 'main' })
+    expect(body.interactiveFamilies).toEqual(['core', 'web', 'spawn'])
+    expect(body.systemPrompt).toContain('spawn one worker per sub-question')
+    expect(body.systemPrompt).toContain('join ONCE')
+  })
+
+  it('never discards a prompt the user typed', () => {
+    const body = presetByID('research').apply({ name: 'r', systemPrompt: 'You are mine.' })
+    expect(body.systemPrompt).toBe('You are mine.')
+    // The grant still applies — the tools are the part the user cannot guess.
+    expect(body.interactiveFamilies).toContain('spawn')
+  })
+
+  it('blank changes nothing', () => {
+    const input = { name: 'r', modelCredential: 'main' }
+    expect(presetByID('blank').apply({ ...input })).toEqual(input)
+  })
+
+  it('an unknown id falls back to blank rather than throwing', () => {
+    expect(presetByID('nope').id).toBe('blank')
   })
 })
