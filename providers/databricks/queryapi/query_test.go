@@ -33,3 +33,37 @@ func TestDescribeTableSQLRejectsUnsafeIdentifier(t *testing.T) {
 		t.Fatalf("error = %q, want table context", err.Error())
 	}
 }
+
+func TestSelectTableSQLBuildsBoundedProjection(t *testing.T) {
+	sql, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, []string{"order_id", "total"}, 25, []string{"order_id", "total"})
+	if err != nil {
+		t.Fatalf("SelectTableSQL returned error: %v", err)
+	}
+	if sql != "SELECT `order_id`, `total` FROM `sales`.`gold`.`orders` LIMIT 25" {
+		t.Fatalf("sql = %q", sql)
+	}
+}
+
+func TestSelectTableSQLRejectsRawSQLAndUnknownColumns(t *testing.T) {
+	for _, projection := range [][]string{{"order_id); DROP TABLE users; --"}, {"missing"}} {
+		if _, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, projection, 10, []string{"order_id"}); err == nil {
+			t.Fatalf("SelectTableSQL accepted unsafe projection %#v", projection)
+		}
+	}
+	if _, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, nil, MaxQueryLimit+1, nil); err == nil {
+		t.Fatal("SelectTableSQL accepted limit above fixed maximum")
+	}
+}
+
+func TestNormalizeQueryRequestRequiresPinnedVersionAndBounds(t *testing.T) {
+	if _, err := NormalizeQueryRequest(QueryTableRequest{TableRef: "orders"}); err == nil {
+		t.Fatal("NormalizeQueryRequest accepted missing actionVersion")
+	}
+	request, err := NormalizeQueryRequest(QueryTableRequest{ActionVersion: ActionVersionV1, TableRef: "orders"})
+	if err != nil {
+		t.Fatalf("NormalizeQueryRequest returned error: %v", err)
+	}
+	if request.Limit != DefaultQueryLimit {
+		t.Fatalf("default limit = %d, want %d", request.Limit, DefaultQueryLimit)
+	}
+}

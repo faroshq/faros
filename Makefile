@@ -295,7 +295,7 @@ codegen-databricks-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for 
 		$(CURDIR)/$(CONTROLLER_GEN) crd paths="./apis/..." \
 			output:crd:artifacts:config=$(CURDIR)/providers/databricks/config/crds
 	./$(KCP_APIGEN_GEN) --input-dir providers/databricks/config/crds --output-dir providers/databricks/config/kcp
-	@for r in connections warehouses tables; do \
+	@for r in connections warehouses tables tablequeries; do \
 		cp providers/databricks/config/kcp/apiresourceschema-$$r.databricks.kedge.faros.sh.yaml \
 		   providers/databricks/deploy/chart/files/schemas/$$r.databricks.kedge.faros.sh.yaml; \
 	done
@@ -838,6 +838,26 @@ e2e-infra-provider: build-hub build-infrastructure-provider ## Run infrastructur
 		exit 1; \
 	}
 	go test ./test/e2e/suites/infraprovider/... -v -timeout $(E2E_INFRA_PROVIDER_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
+
+## Provider-actions E2E: embedded hub plus host-process App Studio and
+## Databricks providers, a local TLS fake upstream, and a generated Node app
+## invoking the action through the hub. KEDGE_E2E_KEEP_DATA=true preserves
+## logs and source/readiness/interaction evidence under the suite temp dir.
+E2E_PROVIDER_ACTIONS_TIMEOUT ?= 20m
+.PHONY: e2e-provider-actions e2e-provider-actions-live
+e2e-provider-actions: build-hub build-app-studio-provider build-databricks-provider ## Run local generated-app provider-actions E2E
+	@test -z "$$(lsof -ti :19463 :16463 :18085 :18086 :25063 :2380 2>/dev/null)" || { \
+		echo "ports 19463/16463/18085/18086/25063/2380 are in use; stop the provider-actions E2E processes first"; \
+		exit 1; \
+	}
+	go test ./test/e2e/suites/provideractions/... -v -timeout $(E2E_PROVIDER_ACTIONS_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
+
+## Optional bounded smoke against an already-running local hub/provider setup.
+## Set KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true plus KEDGE_LIVE_HUB_URL,
+## KEDGE_LIVE_PROJECT, and KEDGE_LIVE_CALLER_TOKEN.
+e2e-provider-actions-live: ## Run the opt-in live generated-app provider-actions smoke
+	KEDGE_E2E_PROVIDER_ACTIONS_LIVE_ONLY=true KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true \
+		go test ./test/e2e/suites/provideractions/... -run '^TestOptionalLiveProviderActionSDK$$' -v -timeout $(E2E_PROVIDER_ACTIONS_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
 ## Edges provider e2e (embedded kcp + edges-provider init/serve subprocesses).
 ## Covers the control-plane + auth surface of the decoupled edges provider:

@@ -33,7 +33,26 @@ type describeTableInput struct {
 	TableRef string `json:"tableRef" jsonschema:"Imported kedge Table resource name, e.g. order-history"`
 }
 
-func registerTools(srv *mcp.Server, resolver queryapi.TableResolver) {
+type queryTableInput struct {
+	ActionVersion string   `json:"actionVersion" jsonschema:"Pinned provider action contract version; currently v1"`
+	TableRef      string   `json:"tableRef" jsonschema:"Imported kedge Table resource name, e.g. order-history"`
+	Columns       []string `json:"columns,omitempty" jsonschema:"Optional exact column-name projection; SQL expressions are not accepted"`
+	Limit         int      `json:"limit,omitempty" jsonschema:"Maximum 100 rows; defaults to 100"`
+}
+
+type queryTableOutput struct {
+	ActionVersion string                 `json:"actionVersion"`
+	TableRef      string                 `json:"tableRef"`
+	Columns       []queryapi.QueryColumn `json:"columns"`
+	Rows          []map[string]any       `json:"rows"`
+	Truncated     bool                   `json:"truncated,omitempty"`
+}
+
+func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, runners ...queryapi.QueryRunner) {
+	var runner queryapi.QueryRunner
+	if len(runners) > 0 {
+		runner = runners[0]
+	}
 	safeRegister("list_tables", func() {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "list_tables",
@@ -69,6 +88,40 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver) {
 				return nil, tableSummary{}, fmt.Errorf("tableRef %q not found", in.TableRef)
 			}
 			return nil, tableSummary{Name: in.TableRef, Catalog: ref.Catalog, Schema: ref.Schema, Table: ref.Table}, nil
+		})
+	})
+
+	safeRegister("query_table", func() {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "query_table",
+			Title:       "Query an imported Databricks table",
+			Description: "Run the versioned v1 bounded table query action. Supply only an imported tableRef, optional exact column names, and a limit; the provider resolves the warehouse, connection, and credentials.",
+			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryTableInput) (*mcp.CallToolResult, queryTableOutput, error) {
+			request, err := queryapi.NormalizeQueryRequest(queryapi.QueryTableRequest{
+				ActionVersion: in.ActionVersion,
+				TableRef:      in.TableRef,
+				Columns:       in.Columns,
+				Limit:         in.Limit,
+			})
+			if err != nil {
+				return nil, queryTableOutput{}, err
+			}
+			if runner == nil {
+				return nil, queryTableOutput{}, fmt.Errorf("databricks table query is unavailable")
+			}
+			result, err := runner.QueryTable(ctx, request)
+			if err != nil {
+				return nil, queryTableOutput{}, err
+			}
+			result = queryapi.BoundQueryResult(result)
+			return nil, queryTableOutput{
+				ActionVersion: queryapi.ActionVersionV1,
+				TableRef:      request.TableRef,
+				Columns:       result.Columns,
+				Rows:          result.Rows,
+				Truncated:     result.Truncated,
+			}, nil
 		})
 	})
 }

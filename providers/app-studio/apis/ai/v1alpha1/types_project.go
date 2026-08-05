@@ -191,7 +191,36 @@ type ProjectBindingKind string
 
 const (
 	ProjectBindingKindProviderResource ProjectBindingKind = "providerResource"
+	// ProjectBindingKindProviderReference is a non-owning reference to a
+	// provider resource that already exists in the tenant workspace. App
+	// Studio may observe the resource and use explicitly declared actions, but
+	// must never create, update, or delete it.
+	ProjectBindingKindProviderReference ProjectBindingKind = "providerReference"
 )
+
+// ProjectProviderActionSpec declares one versioned provider action that a
+// generated application may invoke through the App Studio integration
+// gateway. The gateway treats the declaration as an allow-list: an omitted
+// action, an unknown version, or a revoked declaration is rejected before any
+// provider tool is called.
+type ProjectProviderActionSpec struct {
+	// Name is the provider-neutral action name (for example query_table).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Version identifies the versioned action contract (for example v1).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	Version string `json:"version"`
+
+	// Revoked disables this action without removing the integration binding,
+	// allowing an operator to retain the audit history while closing access.
+	// +optional
+	Revoked bool `json:"revoked,omitempty"`
+}
 
 type ProjectEnvironmentSpec struct {
 	// Name is a stable environment identifier such as development or test.
@@ -230,6 +259,7 @@ type ProjectProviderBindingSpec struct {
 	Provider string `json:"provider"`
 
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=providerResource;providerReference
 	Kind ProjectBindingKind `json:"kind"`
 
 	// +optional
@@ -239,6 +269,13 @@ type ProjectProviderBindingSpec struct {
 	// opaque contract payload.
 	// +optional
 	Values runtime.RawExtension `json:"values,omitempty"`
+
+	// AllowedActions is the versioned allow-list for non-owning provider
+	// references. Owning providerResource bindings may leave this empty; the
+	// integration gateway requires an explicitly declared action before it
+	// forwards a call.
+	// +optional
+	AllowedActions []ProjectProviderActionSpec `json:"allowedActions,omitempty"`
 }
 
 type ProjectProviderResourceReference struct {

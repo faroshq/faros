@@ -8,7 +8,10 @@
 
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
 
 type LocalSecretReference struct {
 	// Name is the Secret name in the tenant workspace.
@@ -200,6 +203,109 @@ type TableStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// TableQueryPhase is the lifecycle state of a transient provider-owned query.
+// TableQuery resources are created by the provider MCP adapter and should be
+// deleted after their result has been read.
+// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+type TableQueryPhase string
+
+const (
+	TableQueryPhasePending   TableQueryPhase = "Pending"
+	TableQueryPhaseRunning   TableQueryPhase = "Running"
+	TableQueryPhaseSucceeded TableQueryPhase = "Succeeded"
+	TableQueryPhaseFailed    TableQueryPhase = "Failed"
+)
+
+// TableQuery executes one bounded, provider-constructed SELECT against an
+// imported Table. The caller supplies only the Table resource name and an
+// optional projection; the controller resolves the Warehouse, Connection,
+// and credential Secret from that Table.
+//
+// +crd
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:storageversion
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster,categories=kedge,shortName=dbxq
+// +kubebuilder:printcolumn:name="Table",type=string,JSONPath=`.spec.tableRef`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Truncated",type=boolean,JSONPath=`.status.truncated`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+type TableQuery struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   TableQuerySpec   `json:"spec"`
+	Status TableQueryStatus `json:"status,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type TableQueryList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []TableQuery `json:"items"`
+}
+
+type TableQuerySpec struct {
+	// ActionVersion is the versioned query_table contract. The provider
+	// currently accepts only v1.
+	// +required
+	// +kubebuilder:validation:Enum=v1
+	ActionVersion string `json:"actionVersion"`
+
+	// TableRef is the name of an imported Table resource in this tenant.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	TableRef string `json:"tableRef"`
+
+	// Columns is an optional projection. Every item must match a cached Table
+	// status column exactly; arbitrary SQL expressions are not accepted.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	Columns []string `json:"columns,omitempty"`
+
+	// Limit is bounded by the provider and defaults to its fixed maximum when
+	// omitted. It is retained on the transient resource for auditability.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	Limit int32 `json:"limit,omitempty"`
+}
+
+type TableQueryStatus struct {
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +optional
+	Phase TableQueryPhase `json:"phase,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	Columns []QueryColumn `json:"columns,omitempty"`
+	// Rows contain only bounded query data. Credentials and connection details
+	// are never copied into status.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	Rows []runtime.RawExtension `json:"rows,omitempty"`
+	// +optional
+	Truncated bool `json:"truncated,omitempty"`
+	// Error is a sanitized, user-safe failure message.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	Error string `json:"error,omitempty"`
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+type QueryColumn struct {
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +optional
+	Type string `json:"type,omitempty"`
 }
 
 type Column struct {

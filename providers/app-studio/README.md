@@ -355,3 +355,36 @@ edge is provisioning. The preview URL is the Template's normal public route,
 not an App Studio-signed preview token, and browser traffic goes directly to
 that route. `APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY` is only a local-dev
 override for the readiness probe.
+
+## Generated-app integrations
+
+Project environments may contain a non-owning `providerReference` binding:
+
+```yaml
+name: sales
+provider: databricks
+kind: providerReference
+resourceRef:
+  apiVersion: databricks.kedge.faros.sh/v1alpha1
+  kind: Table
+  resource: tables
+  name: order-history
+allowedActions:
+- name: query_table
+  version: v1
+```
+
+App Studio only GETs the referenced object while reconciling and never creates,
+updates, owns, or deletes it. Integrations are managed through
+`/api/projects/{project}/integrations` (GET/POST), removed with DELETE on the
+alias, and invoked with POST on `{alias}/invoke`. The sole adapter currently
+implemented is `query_table/v1`, forwarded to the hub aggregate MCP tool
+`databricks__query_table` with `actionVersion`, the server-injected `tableRef`,
+and optional exact `columns`/bounded `limit`. Caller credentials, provider
+backend URLs, and raw SQL are rejected.
+
+Generated server applications can use the provider-neutral
+`provider-sdk/actions-node` package (`client.integration(alias).invoke(...)` or
+`client.queryTable(...)`). It is server-only: a Kedge caller credential must
+never reach browser code. `allowDevelopmentToken` is available only for a
+local synthetic-token prototype and is not production workload identity.

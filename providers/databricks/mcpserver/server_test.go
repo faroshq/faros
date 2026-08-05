@@ -50,7 +50,7 @@ func TestHandlerAllowsHubFederationHostHeaderWhenConfigured(t *testing.T) {
 	if strings.Contains(string(body), "databricks__list_tables") {
 		t.Fatalf("provider-local tools should not be provider-prefixed: %s", string(body))
 	}
-	if strings.Contains(string(body), `"query_table"`) {
-		t.Fatalf("tools/list exposed runtime data query tool: %s", string(body))
+	if !strings.Contains(string(body), `"query_table"`) {
+		t.Fatalf("tools/list missing versioned runtime data query tool: %s", string(body))
 	}
 }

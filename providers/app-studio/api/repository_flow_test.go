@@ -451,7 +451,7 @@ func TestGenerateProjectAssistantStreamDiscoversDatabricksToolsForDataTableQuest
 		"tableRef",
 		"provider-databricks",
 		"Do not call provider backend URLs",
-		"Do not generate application code that queries Databricks tableRefs",
+		"server-side provider-neutral Kedge Actions SDK",
 		"do not embed Databricks credentials",
 	} {
 		if !strings.Contains(joined, want) {

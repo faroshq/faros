@@ -1,0 +1,16 @@
+{
+  "name": "@kedge/actions-node",
+  "version": "0.0.1",
+  "description": "Server-side App Studio integration gateway client for generated apps",
+  "type": "module",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "main": "./index.mjs",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

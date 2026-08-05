@@ -1,0 +1,6 @@
+{
+  "name": "kedge-provider-actions-generated-app",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" }
+}

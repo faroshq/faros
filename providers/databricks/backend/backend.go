@@ -12,6 +12,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,23 @@ type StatementClient struct {
 	AllowInsecureWorkspaceHost bool
 }
 
+// QueryExecutionTarget is assembled by the TableQuery controller after it
+// resolves the tenant-owned Table -> Warehouse -> Connection -> Secret chain.
+// Callers never supply the credential or backend endpoint through MCP.
+type QueryExecutionTarget struct {
+	Table          queryapi.TableRef
+	Connection     queryapi.ConnectionRef
+	Warehouse      queryapi.WarehouseRef
+	BearerToken    string
+	Projection     []string
+	Limit          int
+	AllowedColumns []string
+}
+
+type QueryExecutor interface {
+	ExecuteTableQuery(context.Context, QueryExecutionTarget) (queryapi.QueryTableResult, error)
+}
+
 func NewStatementClient(httpClient *http.Client) StatementClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -45,6 +63,80 @@ func NewStatementClient(httpClient *http.Client) StatementClient {
 		HTTPClient:  httpClient,
 		WaitTimeout: defaultStatementWaitTimeout,
 	}
+}
+
+// NewDevelopmentLoopbackStatementClient is an explicit local-E2E escape hatch
+// for an HTTPS fake Databricks endpoint using a self-signed certificate. TLS
+// verification is relaxed only for loopback destinations; remote Databricks
+// hosts continue to use the normal verified transport. Production wiring never
+// calls this constructor by default.
+func NewDevelopmentLoopbackStatementClient() StatementClient {
+	secure := transportClone(http.DefaultTransport)
+	insecure := secure.Clone()
+	if insecure.TLSClientConfig == nil {
+		insecure.TLSClientConfig = &tls.Config{}
+	} else {
+		insecure.TLSClientConfig = insecure.TLSClientConfig.Clone()
+	}
+	insecure.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // explicit loopback-only development opt-in
+	return StatementClient{
+		HTTPClient: &http.Client{
+			Transport: loopbackTransport{secure: secure, insecure: insecure},
+			Timeout:   30 * time.Second,
+		},
+		AllowInsecureWorkspaceHost: true,
+	}
+}
+
+func transportClone(rt http.RoundTripper) *http.Transport {
+	if tr, ok := rt.(*http.Transport); ok {
+		return tr.Clone()
+	}
+	return (&http.Transport{}).Clone()
+}
+
+type loopbackTransport struct {
+	secure   *http.Transport
+	insecure *http.Transport
+}
+
+func (t loopbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL != nil && isLoopbackHost(strings.ToLower(req.URL.Hostname())) {
+		return t.insecure.RoundTrip(req)
+	}
+	return t.secure.RoundTrip(req)
+}
+
+var _ QueryExecutor = StatementClient{}
+
+// ExecuteTableQuery executes a provider-constructed SELECT and returns only a
+// bounded structured result. The SQL builder rejects arbitrary expressions and
+// raw SQL before the request can reach Databricks.
+func (c StatementClient) ExecuteTableQuery(ctx context.Context, target QueryExecutionTarget) (queryapi.QueryTableResult, error) {
+	request, err := queryapi.NormalizeQueryRequest(queryapi.QueryTableRequest{
+		ActionVersion: queryapi.ActionVersionV1,
+		TableRef:      "table",
+		Columns:       target.Projection,
+		Limit:         target.Limit,
+	})
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	sql, err := queryapi.SelectTableSQL(target.Table, request.Columns, request.Limit, target.AllowedColumns)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	response, err := c.executeStatement(ctx, queryapi.TableTarget{
+		Table:      target.Table,
+		Connection: target.Connection,
+		Warehouse:  target.Warehouse,
+		Credential: queryapi.Credential{BearerToken: target.BearerToken},
+	}, sql)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	result := queryResultFromStatement(response, request.TableRef)
+	return boundQueryResult(result), nil
 }
 
 func (c StatementClient) executeStatement(ctx context.Context, target queryapi.TableTarget, sql string) (statementResponse, error) {
@@ -132,7 +224,9 @@ type statementResponse struct {
 	Manifest struct {
 		Schema struct {
 			Columns []struct {
-				Name string `json:"name"`
+				Name     string `json:"name"`
+				TypeName string `json:"type_name,omitempty"`
+				TypeText string `json:"type_text,omitempty"`
 			} `json:"columns"`
 		} `json:"schema"`
 		Truncated bool `json:"truncated,omitempty"`
@@ -174,16 +268,45 @@ func rowsFromStatement(resp statementResponse) []map[string]any {
 	return rows
 }
 
+func queryResultFromStatement(resp statementResponse, tableRef string) queryapi.QueryTableResult {
+	columns := make([]queryapi.QueryColumn, 0, len(resp.Manifest.Schema.Columns))
+	for _, column := range resp.Manifest.Schema.Columns {
+		typ := strings.TrimSpace(column.TypeText)
+		if typ == "" {
+			typ = strings.TrimSpace(column.TypeName)
+		}
+		columns = append(columns, queryapi.QueryColumn{Name: column.Name, Type: typ})
+	}
+	rows := make([]map[string]any, 0, len(resp.Result.DataArray))
+	for _, values := range resp.Result.DataArray {
+		row := make(map[string]any, len(columns))
+		for i, column := range columns {
+			if i < len(values) {
+				row[column.Name] = values[i]
+			}
+		}
+		rows = append(rows, row)
+	}
+	return queryapi.QueryTableResult{
+		ActionVersion: queryapi.ActionVersionV1,
+		TableRef:      tableRef,
+		Columns:       columns,
+		Rows:          rows,
+		Truncated:     resp.Manifest.Truncated || resp.Result.Truncated,
+	}
+}
+
+func boundQueryResult(result queryapi.QueryTableResult) queryapi.QueryTableResult {
+	return queryapi.BoundQueryResult(result)
+}
+
 type statementHTTPError struct {
 	status string
 	body   string
 }
 
 func (e statementHTTPError) Error() string {
-	if e.body == "" {
-		return statementHTTPFailureSafeMessage + ": " + e.status
-	}
-	return fmt.Sprintf("%s: %s: %s", statementHTTPFailureSafeMessage, e.status, e.body)
+	return statementHTTPFailureSafeMessage + ": " + e.status
 }
 
 func (e statementHTTPError) SafeStatusMessage() string {
@@ -196,10 +319,10 @@ type statementStateError struct {
 }
 
 func (e statementStateError) Error() string {
-	if e.message == "" {
-		return "databricks statement did not complete: " + e.state
+	if e.state == "" {
+		return "databricks statement did not complete"
 	}
-	return fmt.Sprintf("databricks statement %s: %s", e.state, e.message)
+	return "databricks statement did not complete: " + e.state
 }
 
 func (e statementStateError) SafeStatusMessage() string {

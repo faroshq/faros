@@ -69,6 +69,9 @@ func runServe() {
 	tables := seedTablesFromEnv()
 	devStaticTables := os.Getenv("DATABRICKS_DEV_STATIC_TABLES") == "true"
 	statementClient := backend.NewStatementClient(nil)
+	if loopbackE2EEnabled() {
+		statementClient = backend.NewDevelopmentLoopbackStatementClient()
+	}
 	var validator backend.Validator = statementClient
 	if devStaticTables {
 		validator = backend.Stub{}
@@ -97,7 +100,7 @@ func runServe() {
 			log.Fatalf("server: %v", err)
 		}
 	}()
-	if err := startControllerManager(ctx, kcpConfig, validator); err != nil {
+	if err := startControllerManager(ctx, kcpConfig, validator, statementClient); err != nil {
 		if errors.Is(err, errControllerDisabled) {
 			log.Printf("controller manager: disabled (no kubeconfig); set KEDGE_PROVIDER_KUBECONFIG to enable")
 		} else {
@@ -114,12 +117,25 @@ func runServe() {
 	}
 }
 
+func loopbackE2EEnabled() bool {
+	return os.Getenv("DATABRICKS_E2E_LOOPBACK") == "true"
+}
+
 func newServeMux(tables map[string]queryapi.TableRef, devStaticTables bool, tenantFactory *tenant.ClientFactory) (*http.ServeMux, error) {
 	resolverFromRequest := func(r *http.Request) queryapi.TableResolver {
 		if devStaticTables {
 			return queryapi.StaticTableResolver(tables)
 		}
 		return tenantFactory.TableResolverForRequest(r)
+	}
+	queryRunnerFromRequest := func(r *http.Request) queryapi.QueryRunner {
+		if devStaticTables {
+			return nil
+		}
+		if tenantFactory == nil {
+			return nil
+		}
+		return tenantFactory.QueryRunnerForRequest(r)
 	}
 
 	mux := http.NewServeMux()
@@ -146,6 +162,7 @@ func newServeMux(tables map[string]queryapi.TableRef, devStaticTables bool, tena
 	mcpHandler := mcpserver.NewHandler(mcpserver.Deps{
 		Tables:                        tables,
 		ResolverFromRequest:           resolverFromRequest,
+		QueryRunnerFromRequest:        queryRunnerFromRequest,
 		DisableLocalhostMCPProtection: os.Getenv("DATABRICKS_MCP_DISABLE_LOCALHOST_PROTECTION") == "true",
 	})
 	mux.Handle("/mcp", mcpHandler)

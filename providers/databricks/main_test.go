@@ -29,3 +29,15 @@ func TestProviderDoesNotExposeRuntimeTableQueryEndpoint(t *testing.T) {
 		t.Fatalf("POST /api/tables/{tableRef}/query status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
+
+func TestLoopbackE2ERequiresExactOptIn(t *testing.T) {
+	t.Setenv("DATABRICKS_E2E_LOOPBACK", "")
+	t.Setenv("DATABRICKS_DEV_ALLOW_LOOPBACK_TLS", "true")
+	if loopbackE2EEnabled() {
+		t.Fatal("legacy loopback env must not enable the TLS bypass")
+	}
+	t.Setenv("DATABRICKS_E2E_LOOPBACK", "true")
+	if !loopbackE2EEnabled() {
+		t.Fatal("DATABRICKS_E2E_LOOPBACK=true must enable the explicit E2E transport")
+	}
+}

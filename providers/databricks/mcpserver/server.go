@@ -23,6 +23,8 @@ type Deps struct {
 	Tables                        map[string]queryapi.TableRef
 	TableResolver                 queryapi.TableResolver
 	ResolverFromRequest           func(*http.Request) queryapi.TableResolver
+	QueryRunner                   queryapi.QueryRunner
+	QueryRunnerFromRequest        func(*http.Request) queryapi.QueryRunner
 	DisableLocalhostMCPProtection bool
 }
 
@@ -46,12 +48,22 @@ func newPerRequestServer(deps Deps, r *http.Request) *mcp.Server {
 	}, &mcp.ServerOptions{
 		Instructions: "Use these tools only with Databricks tables already imported " +
 			"as kedge Table resources. Do not import tables from App Studio. " +
-			"Use tableRef only for design-time metadata and schema inspection. " +
+			"Use tableRef for metadata and the versioned query_table action (actionVersion v1). " +
+			"query_table accepts only exact column names and a bounded limit; never send raw SQL. " +
 			"Do not generate application code that calls provider-databricks, " +
 			"and do not embed Databricks credentials or direct warehouse auth config.",
 	})
-	registerTools(srv, resolverForRequest(deps, r))
+	registerTools(srv, resolverForRequest(deps, r), queryRunnerForRequest(deps, r))
 	return srv
+}
+
+func queryRunnerForRequest(deps Deps, r *http.Request) queryapi.QueryRunner {
+	if deps.QueryRunnerFromRequest != nil {
+		if runner := deps.QueryRunnerFromRequest(r); runner != nil {
+			return runner
+		}
+	}
+	return deps.QueryRunner
 }
 
 func resolverForRequest(deps Deps, r *http.Request) queryapi.TableResolver {

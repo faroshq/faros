@@ -26,11 +26,12 @@ import (
 	"github.com/faroshq/provider-databricks/backend"
 	"github.com/faroshq/provider-databricks/controller/connection"
 	"github.com/faroshq/provider-databricks/controller/table"
+	"github.com/faroshq/provider-databricks/controller/tablequery"
 	"github.com/faroshq/provider-databricks/controller/warehouse"
 	databricksscheme "github.com/faroshq/provider-databricks/scheme"
 )
 
-func startControllerManager(ctx context.Context, config *rest.Config, validator backend.Validator) error {
+func startControllerManager(ctx context.Context, config *rest.Config, validator backend.Validator, executors ...backend.QueryExecutor) error {
 	if config == nil {
 		return errControllerDisabled
 	}
@@ -65,6 +66,15 @@ func startControllerManager(ctx context.Context, config *rest.Config, validator 
 	}
 	if err := (&table.Reconciler{Validator: validator}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("table controller: %w", err)
+	}
+	var executor backend.QueryExecutor
+	if len(executors) > 0 {
+		executor = executors[0]
+	} else if candidate, ok := validator.(backend.QueryExecutor); ok {
+		executor = candidate
+	}
+	if err := (&tablequery.Reconciler{Executor: executor}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("table query controller: %w", err)
 	}
 	go func() {
 		log.Printf("databricks controller manager starting (endpointSlice=%s)", apiExportName)

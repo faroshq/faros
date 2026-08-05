@@ -10,6 +10,8 @@ package tenant
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -17,6 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
+
+	"github.com/faroshq/provider-databricks/queryapi"
 )
 
 func TestTableResolverListsImportedTablesAsCaller(t *testing.T) {
@@ -81,6 +86,48 @@ func TestTableResolverReturnsNotFoundForMissingTable(t *testing.T) {
 	}
 }
 
+func TestQueryRunnerCreatesPollsAndDeletesTransientQueryAsCaller(t *testing.T) {
+	dyn := fakeTenantClient()
+	fakeDyn := dyn.(*dynamicfake.FakeDynamicClient)
+	var created map[string]any
+	deleted := false
+	fakeDyn.PrependReactor("create", "tablequeries", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		created = action.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured).Object
+		return false, nil, nil
+	})
+	fakeDyn.PrependReactor("get", "tablequeries", func(clienttesting.Action) (bool, runtime.Object, error) {
+		result := obj(tableQueriesGVR.Group, tableQueriesGVR.Version, "TableQuery", "", "query-1", nil)
+		result.Object["status"] = map[string]any{
+			"phase":   "Succeeded",
+			"columns": []any{map[string]any{"name": "trip_id", "type": "STRING"}},
+			"rows":    []any{map[string]any{"trip_id": "t-1"}},
+		}
+		return true, result, nil
+	})
+	fakeDyn.PrependReactor("delete", "tablequeries", func(clienttesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return true, nil, nil
+	})
+	runner := queryRunner{
+		factory:  &ClientFactory{hot: map[string]dynamic.Interface{"cluster-a:" + hashToken("caller-token"): dyn}},
+		identity: identity{tenantPath: "root:org:workspace", clusterID: "cluster-a", token: "caller-token"},
+	}
+	result, err := runner.QueryTable(context.Background(), queryapi.QueryTableRequest{ActionVersion: queryapi.ActionVersionV1, TableRef: "taxi-trips", Columns: []string{"trip_id"}, Limit: 1})
+	if err != nil {
+		t.Fatalf("QueryTable returned error: %v", err)
+	}
+	if !deleted {
+		t.Fatal("transient TableQuery was not deleted")
+	}
+	if result.TableRef != "taxi-trips" || len(result.Rows) != 1 || result.Rows[0]["trip_id"] != "t-1" {
+		t.Fatalf("result = %#v", result)
+	}
+	encoded, _ := json.Marshal(created)
+	if strings.Contains(string(encoded), "caller-token") || strings.Contains(string(encoded), "Bearer") {
+		t.Fatalf("created transient resource leaked caller credential: %s", encoded)
+	}
+}
+
 func testResolver(dyn dynamic.Interface) tableResolver {
 	return tableResolver{
 		factory: &ClientFactory{
@@ -98,7 +145,8 @@ func testResolver(dyn dynamic.Interface) tableResolver {
 
 func fakeTenantClient(objects ...runtime.Object) dynamic.Interface {
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		tablesGVR: "TableList",
+		tablesGVR:       "TableList",
+		tableQueriesGVR: "TableQueryList",
 	}, objects...)
 }
 

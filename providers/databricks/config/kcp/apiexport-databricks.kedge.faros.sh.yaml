@@ -10,6 +10,11 @@ spec:
     storage:
       crd: {}
   - group: databricks.kedge.faros.sh
+    name: tablequeries
+    schema: v260805-a0b09d83.tablequeries.databricks.kedge.faros.sh
+    storage:
+      crd: {}
+  - group: databricks.kedge.faros.sh
     name: tables
     schema: v260630-0d050b9c.tables.databricks.kedge.faros.sh
     storage:

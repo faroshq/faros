@@ -245,6 +245,17 @@ retained historical proposal in
 > provider's published API, but it owns the failure handling when a
 > prerequisite binding isn't present.
 
+### Provider Actions prototype
+
+App Studio's Provider Actions prototype applies this same boundary to a
+bounded, server-side action: a non-owning `providerReference` plus an explicit
+versioned allow-list, followed by a call through the hub's aggregate MCP
+surface. The current adapter only implements Databricks `query_table/v1` and
+is not a general provider-RPC or production-workload-identity solution. See
+the [Provider Actions contract and verification guide](./provider-actions.md)
+for the request sequence, security limits, extension path, and deterministic
+and live test commands.
+
 ---
 
 ## CRDs

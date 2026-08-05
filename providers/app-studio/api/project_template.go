@@ -347,7 +347,7 @@ func applyProjectDevelopmentTemplate(p *aiv1alpha1.Project, info projectTemplate
 		}
 		kept := env.Bindings[:0]
 		for _, existing := range env.Bindings {
-			if strings.TrimSpace(existing.Name) == projectDevelopmentBindingName {
+			if strings.TrimSpace(existing.Name) == projectDevelopmentBindingName && existing.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
 				continue
 			}
 			kept = append(kept, existing)

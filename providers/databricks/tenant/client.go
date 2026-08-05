@@ -18,10 +18,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	krand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
@@ -29,7 +31,15 @@ import (
 	"github.com/faroshq/provider-databricks/queryapi"
 )
 
-var tablesGVR = databricksv1alpha1.SchemeGroupVersion.WithResource("tables")
+var (
+	tablesGVR       = databricksv1alpha1.SchemeGroupVersion.WithResource("tables")
+	tableQueriesGVR = databricksv1alpha1.SchemeGroupVersion.WithResource("tablequeries")
+)
+
+const (
+	queryPollInterval = 100 * time.Millisecond
+	queryPollTimeout  = 45 * time.Second
+)
 
 type ClientFactory struct {
 	baseHost string
@@ -102,6 +112,13 @@ func (f *ClientFactory) TableResolverForRequest(r *http.Request) queryapi.TableR
 	return tableResolver{factory: f, identity: ident}
 }
 
+func (f *ClientFactory) QueryRunnerForRequest(r *http.Request) queryapi.QueryRunner {
+	if f == nil {
+		return unavailableQueryRunner{message: "tenant client unavailable (provider kubeconfig not set)"}
+	}
+	return queryRunner{factory: f, identity: identityFromRequest(r)}
+}
+
 type identity struct {
 	tenantPath string
 	clusterID  string
@@ -126,6 +143,170 @@ func bearerToken(r *http.Request) string {
 type tableResolver struct {
 	factory  *ClientFactory
 	identity identity
+}
+
+type queryRunner struct {
+	factory  *ClientFactory
+	identity identity
+}
+
+func (r queryRunner) QueryTable(ctx context.Context, request queryapi.QueryTableRequest) (result queryapi.QueryTableResult, err error) {
+	request, err = queryapi.NormalizeQueryRequest(request)
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	dyn, err := r.dynamicClient()
+	if err != nil {
+		return queryapi.QueryTableResult{}, err
+	}
+	name := "table-query-" + randomNameSuffix()
+	spec := map[string]any{
+		"actionVersion": request.ActionVersion,
+		"tableRef":      request.TableRef,
+		"limit":         int64(request.Limit),
+	}
+	if len(request.Columns) > 0 {
+		columns := make([]any, 0, len(request.Columns))
+		for _, column := range request.Columns {
+			columns = append(columns, column)
+		}
+		spec["columns"] = columns
+	}
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": groupVersionString(databricksv1alpha1.GroupName, databricksv1alpha1.Version),
+		"kind":       "TableQuery",
+		"metadata": map[string]any{
+			"name": name,
+		},
+		"spec": spec,
+	}}
+	resource := dyn.Resource(tableQueriesGVR)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cleanupErr := resource.Delete(cleanupCtx, name, metav1.DeleteOptions{})
+		if apierrors.IsNotFound(cleanupErr) {
+			cleanupErr = nil
+		}
+		if cleanupErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%w; query cleanup failed", err)
+			} else {
+				result = queryapi.QueryTableResult{}
+				err = errors.New("table query cleanup failed")
+			}
+		}
+	}()
+	if _, err = resource.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		return queryapi.QueryTableResult{}, sanitizeQueryError(err)
+	}
+
+	deadline := time.NewTimer(queryPollTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(queryPollInterval)
+	defer ticker.Stop()
+	for {
+		current, getErr := resource.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return queryapi.QueryTableResult{}, sanitizeQueryError(getErr)
+		}
+		phase, _, _ := unstructured.NestedString(current.Object, "status", "phase")
+		switch databricksv1alpha1.TableQueryPhase(phase) {
+		case databricksv1alpha1.TableQueryPhaseSucceeded:
+			return resultFromStatus(current, request.TableRef), nil
+		case databricksv1alpha1.TableQueryPhaseFailed:
+			message, _, _ := unstructured.NestedString(current.Object, "status", "error")
+			return queryapi.QueryTableResult{}, sanitizeQueryError(errors.New(message))
+		}
+		select {
+		case <-ctx.Done():
+			return queryapi.QueryTableResult{}, ctx.Err()
+		case <-deadline.C:
+			return queryapi.QueryTableResult{}, errors.New("table query timed out")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r queryRunner) dynamicClient() (dynamic.Interface, error) {
+	if r.identity.tenantPath == "" {
+		return nil, errors.New("no tenant identity on this request; bearer token did not resolve to a workspace")
+	}
+	if r.identity.clusterID == "" {
+		return nil, errors.New("no workspace cluster on this request (X-Kedge-Cluster missing)")
+	}
+	if r.factory == nil {
+		return nil, errors.New("tenant client unavailable (provider kubeconfig not set)")
+	}
+	return r.factory.For(r.identity.clusterID, r.identity.token)
+}
+
+type unavailableQueryRunner struct{ message string }
+
+func (r unavailableQueryRunner) QueryTable(context.Context, queryapi.QueryTableRequest) (queryapi.QueryTableResult, error) {
+	return queryapi.QueryTableResult{}, errors.New(r.message)
+}
+
+func resultFromStatus(obj *unstructured.Unstructured, tableRef string) queryapi.QueryTableResult {
+	result := queryapi.QueryTableResult{ActionVersion: queryapi.ActionVersionV1, TableRef: tableRef}
+	if columns, ok, _ := unstructured.NestedSlice(obj.Object, "status", "columns"); ok {
+		for _, raw := range columns {
+			column, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(column, "name")
+			typ, _, _ := unstructured.NestedString(column, "type")
+			if name != "" {
+				result.Columns = append(result.Columns, queryapi.QueryColumn{Name: name, Type: typ})
+			}
+		}
+	}
+	if rows, ok, _ := unstructured.NestedSlice(obj.Object, "status", "rows"); ok {
+		for _, raw := range rows {
+			row, ok := raw.(map[string]any)
+			if ok {
+				result.Rows = append(result.Rows, row)
+			}
+		}
+	}
+	result.Truncated, _, _ = unstructured.NestedBool(obj.Object, "status", "truncated")
+	return boundResult(result)
+}
+
+func boundResult(result queryapi.QueryTableResult) queryapi.QueryTableResult {
+	return queryapi.BoundQueryResult(result)
+}
+
+func sanitizeQueryError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(message)
+	for _, marker := range []string{"bearer", "token", "secret", "password", "authorization"} {
+		if strings.Contains(lower, marker) {
+			return errors.New("table query failed")
+		}
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	if message == "" {
+		return errors.New("table query failed")
+	}
+	return errors.New(message)
+}
+
+func randomNameSuffix() string {
+	return krand.String(10)
+}
+
+func groupVersionString(group, version string) string {
+	if group == "" {
+		return version
+	}
+	return group + "/" + version
 }
 
 func (r tableResolver) ListTables(ctx context.Context) (map[string]queryapi.TableRef, error) {

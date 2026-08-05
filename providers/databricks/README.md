@@ -15,6 +15,7 @@ a sanctioned runtime data-access bridge to Databricks.
 - MCP tools at `/mcp` and `/mcp/sse`, federated through the hub as:
   - `databricks__list_tables`
   - `databricks__describe_table`
+  - `databricks__query_table` (versioned `actionVersion: v1`, bounded rows)
 - Portal UX for creating and updating `Connection`, `Warehouse`, and `Table`
   handles, plus cached schema inspection.
 - Multicluster controllers validate PAT credentials against the Databricks
@@ -24,6 +25,10 @@ a sanctioned runtime data-access bridge to Databricks.
   to resolve referenced credential `Secret` resources for validation only.
   Databricks credentials are never returned to App Studio, generated apps, or
   browser clients.
+- `query_table` creates a transient tenant `TableQuery` resource. The
+  controller resolves the imported `Table`'s Warehouse, Connection, and Secret,
+  runs a provider-constructed `SELECT`, writes only bounded structured rows to
+  status, and the tenant MCP adapter deletes the resource after polling.
 
 ## Current import path
 
@@ -78,13 +83,14 @@ metadata, schema inspection, and user-facing planning.
 
 ## Runtime data access
 
-Runtime row access is intentionally not exposed by this provider yet. App Studio
-and generated apps should treat Databricks `Table` resources as metadata until a
-provider action contract and App Studio runtime data-access bridge exist.
-
-The provider still posts `DESCRIBE TABLE` statements to
+The `query_table` action accepts only an imported `tableRef`, exact optional
+column names, a fixed bounded limit, and the pinned `actionVersion: v1`. Raw SQL,
+warehouse/connection handles, hosts, and credentials are rejected. The
+provider posts a constructed `SELECT` (and `DESCRIBE TABLE` for metadata) to
 `/api/2.0/sql/statements` from its controllers to validate imported tables and
-cache schema metadata on `Table.status`.
+cache schema metadata on `Table.status`. Query results are capped at 100 rows
+and 64 KiB and report `truncated: true` when the upstream result exceeds those
+bounds.
 
 Connection hosts must be Databricks workspace root URLs over HTTPS. The backend
 allows the standard Databricks workspace domains by default; set
@@ -104,11 +110,17 @@ For a no-kcp smoke test only, set `DATABRICKS_DEV_STATIC_TABLES=true`. That mode
 uses a seeded `order-history` table and a stub validator; normal serve mode fails
 closed if tenant table lookup or Databricks credentials are unavailable.
 
+For local E2E against an explicitly configured self-signed HTTPS fake on
+`127.0.0.1`, set `DATABRICKS_E2E_LOOPBACK=true`. The provider then uses a
+loopback-only development transport; production remains strict TLS and host
+allowlisting by default.
+
 ## Gaps
 
 - Catalog/schema discovery is not implemented yet; the first UX imports a known
   table by reference.
-- Generated-app runtime access is not implemented yet. Do not hardcode provider
-  backend URLs or Databricks credentials into App Studio-generated source.
+- Generated apps must call the provider action through the hub MCP federation;
+  do not hardcode provider backend URLs or Databricks credentials into App
+  Studio-generated source.
 - OAuth federation and service-principal token exchange should be reconciled
   into token-bearing Secrets before validation or future provider actions.

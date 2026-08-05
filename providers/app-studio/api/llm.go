@@ -1671,8 +1671,16 @@ func projectMCPRequest(ctx context.Context, endpoint, method string, paramsJSON 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if auth := r.Header.Get("Authorization"); strings.TrimSpace(auth) != "" {
-		req.Header.Set("Authorization", auth)
+	// Preserve the hub-verified caller context when App Studio forwards an
+	// integration action to the aggregate MCP virtual workspace. In
+	// particular, a provider must see the original bearer and tenant identity;
+	// App Studio never substitutes a service credential or provider URL.
+	for _, header := range []string{
+		"Authorization", "X-Kedge-User", "X-Kedge-Org", "X-Kedge-Workspace", "X-Kedge-Cluster",
+	} {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			req.Header.Set(header, value)
+		}
 	}
 	if tenantPath != "" {
 		req.Header.Set("X-Kedge-Tenant", tenantPath)
@@ -2170,6 +2178,31 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	if strings.TrimSpace(p.Spec.Description) != "" {
 		b.WriteString("- Description: " + p.Spec.Description + "\n")
 	}
+	b.WriteString("\nGenerated-app integrations:\n")
+	integrationCount := 0
+	for _, environment := range p.Spec.Environments {
+		for _, binding := range environment.Bindings {
+			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+				continue
+			}
+			integrationCount++
+			actions := make([]string, 0, len(binding.AllowedActions))
+			for _, action := range binding.AllowedActions {
+				version := strings.TrimSpace(action.Version)
+				name := strings.TrimSpace(action.Name)
+				if action.Revoked {
+					actions = append(actions, name+"/"+version+" (revoked)")
+					continue
+				}
+				actions = append(actions, name+"/"+version)
+			}
+			b.WriteString("- " + strings.TrimSpace(binding.Name) + " (environment " + strings.TrimSpace(environment.Name) + ", provider " + strings.TrimSpace(binding.Provider) + "): allowed actions " + strings.Join(actions, ", ") + "\n")
+		}
+	}
+	if integrationCount == 0 {
+		b.WriteString("- NONE. Do not invent an integration alias or claim that a provider action is available.\n")
+	}
+	b.WriteString("Generated application code may use the server-side provider-neutral Kedge Actions SDK only for an integration alias and non-revoked action version explicitly listed above; actions marked revoked are unavailable. The SDK runs in the server-side process and routes through the App Studio integration gateway; never expose its caller credential in browser code. Never request, store, or emit Databricks/API credentials, provider backend URLs, or raw SQL. If no declared integration/action exists, explain that it must be configured by the user instead of bypassing the gateway.\n")
 	repositoryRef := ""
 	repositoryCommitReady := false
 	if repo := p.Spec.Repository; repo != nil && strings.TrimSpace(repo.RepositoryRef) != "" {
@@ -2223,7 +2256,7 @@ func projectMCPToolsPrompt(tools []chatTool) string {
 		prompt.WriteString("Databricks guidance: use existing imported kedge Table resources only. " +
 			"Refer to them by tableRef when designing app data models, inspecting cached table metadata, or asking the user which imported table to use through provider-databricks. " +
 			"Do not call provider backend URLs from generated code. " +
-			"Do not generate application code that queries Databricks tableRefs yet; no App Studio runtime data-access bridge is available in this workspace. " +
+			"Generated application code may query a Table only through the server-side provider-neutral Kedge Actions SDK and only when the Project has a non-revoked integration action declaration for that alias; do not bypass the App Studio integration gateway. " +
 			"Do not create or import Databricks tables from App Studio, and do not embed Databricks credentials or raw warehouse auth config in generated code.\n")
 	}
 	return prompt.String()
