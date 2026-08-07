@@ -118,6 +118,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 
 	// Converge each bound instance, folding observed state per environment.
 	allReady := true
+	instancesNeedRetry := false
 	liveStatuses := make([]aiv1alpha1.ProjectEnvironmentStatus, 0, len(bound))
 	for _, env := range bound {
 		bindingStatuses := make([]aiv1alpha1.ProjectProviderBindingStatus, 0, len(env.bindings))
@@ -134,7 +135,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 				bindingStatuses = append(bindingStatuses, st)
 				continue
 			case err != nil:
-				return ctrl.Result{}, fmt.Errorf("instance for binding %q: %w", binding.Name, err)
+				// Transient — most often "the object has been modified"
+				// (an optimistic-concurrency conflict when the infra provider
+				// updates the instance while we converge it). Do NOT abort the
+				// whole reconcile here: returning early also skips repository
+				// and commit convergence below, which is exactly why workspace
+				// changes stopped reaching git. Mark the binding pending,
+				// remember to retry soon, and keep going.
+				log.Printf("app-studio project %s: instance for binding %q not converged (will retry): %v", p.Name, binding.Name, err)
+				instancesNeedRetry = true
+				allReady = false
+				bindingStatuses = append(bindingStatuses, bindings.StatusFromObject(binding, nil))
+				continue
 			}
 			st := bindings.StatusFromObject(binding, obj)
 			if st.Phase != "Ready" {
@@ -171,7 +183,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	}
 	repositoryPending := p.Spec.Repository != nil && p.Spec.Repository.RepositoryRef != "" && !repositoryReady(repo)
 
-	if !allReady || dirty || repositoryPending {
+	if !allReady || dirty || repositoryPending || instancesNeedRetry {
 		return ctrl.Result{RequeueAfter: requeueInterval}, nil
 	}
 	// Ready: keep a slow poll so drift (instance deleted out-of-band, status

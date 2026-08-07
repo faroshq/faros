@@ -378,6 +378,26 @@ export interface DevelopmentTemplate {
   hasScaffold?: boolean
 }
 
+export interface ProjectFileInfo {
+  path: string
+  size?: number
+}
+
+export interface ProjectFileList {
+  files: ProjectFileInfo[]
+  truncated?: boolean
+  limit?: number
+}
+
+export interface ProjectFileContent {
+  path: string
+  content?: string
+  size: number
+  version?: string
+  binary?: boolean
+  truncated?: boolean
+}
+
 export interface ProjectPlanScaffold {
   repository: string
   ref?: string

@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/klog/v2"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -385,7 +386,13 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 	}
 	if p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) == info.Name {
 		// Already selected — the reconciler owns convergence; return fresh
-		// observed state (idempotent re-select).
+		// observed state (idempotent re-select). Still attempt the scaffold
+		// seed: it is a no-op once the workspace has content, but recovers a
+		// project whose template was bound before the seed step existed (or
+		// whose earlier seed failed).
+		if _, err := s.seedProjectScaffold(ctx, id, p, info); err != nil {
+			klog.V(1).Infof("scaffold seed on re-select for %s: %v", p.Name, err)
+		}
 		return projectWithLiveBindingStatus(ctx, c, p, id), info, nil
 	}
 
@@ -404,6 +411,16 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 	updated, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, projectTemplateInfo{}, err
+	}
+	// Attach the template's starter code the moment the template is bound —
+	// this is the "scaffolding attached to template" step. It is the primary
+	// seed point in practice: the assistant usually picks the template mid-
+	// turn (select_project_template) rather than at create, so create-time
+	// seeding alone would leave most projects empty. Best-effort and a no-op
+	// on an already-populated workspace, so switching templates never
+	// clobbers existing code.
+	if _, err := s.seedProjectScaffold(ctx, id, updated, info); err != nil {
+		klog.V(1).Infof("scaffold seed on template select for %s: %v", updated.Name, err)
 	}
 	// The Project reconciler converges the new binding into an instance; the
 	// response reports it Pending until the mirror catches up.

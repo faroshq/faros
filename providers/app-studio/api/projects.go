@@ -342,7 +342,13 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 	if preflight != nil {
 		req.DisplayName = preflight.Naming.DisplayName
 		repoBase = preflight.Naming.RepositoryName
-	} else if req.Prompt != "" {
+	} else if req.Prompt != "" && !(req.DisplayName != "" && selectedTemplate != nil) {
+		// Skip inference when the caller already committed both a name and a
+		// template — the wizard's blueprint step (POST /api/projects/plan)
+		// already ran the preflight, so re-running it here would double the
+		// LLM round-trip (a visible stall on "Planning project") and clobber
+		// the name the user just confirmed. Only infer when something is
+		// genuinely missing.
 		if err := emitProjectCreationStatus(onStatus, "Planning project"); err != nil {
 			return nil, err
 		}

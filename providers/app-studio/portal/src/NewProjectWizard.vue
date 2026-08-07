@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Sparkles, Package, Layers, Loader2, ArrowRight } from 'lucide-vue-next'
 import type { KedgeContext } from './types'
 import type { ProjectPlan } from './types'
@@ -10,12 +10,20 @@ import { api } from './api'
 // wizard-first flow so an app-studio project opens on a runnable placeholder
 // rather than an empty directory. The parent owns the actual createProject +
 // first-turn kickoff; this component only proposes and confirms.
+//
+// Styling uses the portal's Tailwind design tokens directly (border-border-
+// subtle, bg-surface, text-text-*, accent) so it renders consistently with
+// the rest of the app — no scoped <style>, which was not being applied.
 
 const props = defineProps<{
   ctx: KedgeContext | null
   // disabled blocks Create while the parent isn't ready (setup incomplete).
   disabled?: boolean
   disabledReason?: string
+  // initialPrompt, when set, is the intake the user already typed on the
+  // landing composer — the wizard skips its own intake and jumps straight to
+  // the blueprint (auto-planning it).
+  initialPrompt?: string
 }>()
 
 const emit = defineEmits<{
@@ -88,44 +96,75 @@ watch(
     error.value = null
   },
 )
+
+onMounted(() => {
+  const seed = props.initialPrompt?.trim()
+  if (seed) {
+    prompt.value = seed
+    void runPlan()
+  }
+})
 </script>
 
 <template>
-  <div class="wizard">
-    <div v-if="step === 'intake'" class="intake">
-      <label class="lead">
+  <div class="flex flex-col gap-3">
+    <!-- Intake (skipped when initialPrompt auto-plans) -->
+    <div v-if="step === 'intake'" class="flex flex-col gap-3">
+      <label class="flex items-center gap-2 text-[13px] font-semibold text-text-primary">
         <Sparkles :size="16" />
         <span>What do you want to build?</span>
       </label>
       <textarea
         v-model="prompt"
-        class="prompt"
         rows="3"
+        class="min-h-[72px] w-full resize-y rounded-md border border-border-subtle bg-surface px-3 py-2.5 text-[13px] leading-5 text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
         placeholder="e.g. A storefront for a produce co-op with a product catalog and checkout"
         @keydown.meta.enter.prevent="runPlan"
         @keydown.ctrl.enter.prevent="runPlan"
       />
-      <div class="actions">
-        <button class="ghost" type="button" @click="emit('cancel')">Cancel</button>
-        <button class="primary" type="button" :disabled="!canPlan" @click="runPlan">
-          <Loader2 v-if="planning" :size="15" class="spin" />
+      <div class="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          class="inline-flex h-9 items-center gap-1.5 rounded-md border border-border-subtle px-3 text-[13px] font-medium text-text-secondary transition hover:bg-surface-hover"
+          @click="emit('cancel')"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 text-[13px] font-medium text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="!canPlan"
+          @click="runPlan"
+        >
+          <Loader2 v-if="planning" :size="15" class="animate-spin" />
           <template v-else>Plan project <ArrowRight :size="15" /></template>
         </button>
       </div>
-      <p v-if="error" class="err">{{ error }}</p>
+      <p v-if="error" class="text-[12px] text-danger">{{ error }}</p>
     </div>
 
-    <div v-else class="blueprint">
-      <p class="blueprint-lead">Here's the plan — review and create.</p>
+    <!-- Blueprint -->
+    <div v-else class="flex flex-col gap-3">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-text-primary">
+        <Loader2 v-if="planning" :size="15" class="animate-spin" />
+        <span>Here's the plan — review and create.</span>
+      </div>
 
-      <label class="field">
-        <span>Project name</span>
-        <input v-model="displayName" type="text" class="text" />
+      <label class="grid gap-1.5">
+        <span class="text-[12px] font-medium text-text-secondary">Project name</span>
+        <input
+          v-model="displayName"
+          type="text"
+          class="h-10 min-w-0 rounded-md border border-border-subtle bg-surface px-3 text-[13px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
+        />
       </label>
 
-      <label class="field">
-        <span>Template</span>
-        <select v-model="chosenTemplate" class="text">
+      <label class="grid gap-1.5">
+        <span class="text-[12px] font-medium text-text-secondary">Template</span>
+        <select
+          v-model="chosenTemplate"
+          class="h-10 min-w-0 rounded-md border border-border-subtle bg-surface px-3 text-[13px] text-text-primary outline-none transition focus:border-accent/50"
+        >
           <option value="">No template (start empty)</option>
           <option v-for="t in plan?.availableTemplates ?? []" :key="t.name" :value="t.name">
             {{ t.displayName || t.name }}{{ t.hasScaffold ? ' — includes starter code' : '' }}
@@ -133,129 +172,37 @@ watch(
         </select>
       </label>
 
-      <div v-if="activeTemplate" class="shape">
-        <div class="shape-row">
+      <div v-if="activeTemplate" class="flex flex-col gap-1.5 rounded-md border border-border-subtle bg-surface p-3">
+        <div class="flex items-center gap-2 text-[12px] text-text-secondary">
           <Layers :size="15" />
-          <span>{{ Object.keys(activeTemplate.components || {}).length }} component(s):
-            {{ Object.keys(activeTemplate.components || {}).join(', ') }}</span>
+          <span>{{ Object.keys(activeTemplate.components || {}).length }} component(s): {{ Object.keys(activeTemplate.components || {}).join(', ') }}</span>
         </div>
-        <div class="shape-row" :class="{ good: willAttachScaffold }">
+        <div class="flex items-center gap-2 text-[12px]" :class="willAttachScaffold ? 'font-medium text-accent' : 'text-text-secondary'">
           <Package :size="15" />
           <span v-if="willAttachScaffold">Starter code will be attached — the project opens on a working placeholder.</span>
           <span v-else>No starter code — the assistant builds from scratch.</span>
         </div>
       </div>
 
-      <p v-if="disabled && disabledReason" class="err">{{ disabledReason }}</p>
+      <p v-if="disabled && disabledReason" class="text-[12px] text-danger">{{ disabledReason }}</p>
 
-      <div class="actions">
-        <button class="ghost" type="button" @click="back">Back</button>
-        <button class="primary" type="button" :disabled="disabled" @click="confirmCreate">
+      <div class="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          class="inline-flex h-9 items-center gap-1.5 rounded-md border border-border-subtle px-3 text-[13px] font-medium text-text-secondary transition hover:bg-surface-hover"
+          @click="back"
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          class="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-3 text-[13px] font-medium text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="disabled"
+          @click="confirmCreate"
+        >
           Create project
         </button>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.wizard {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  width: 100%;
-}
-.lead,
-.blueprint-lead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: 14px;
-}
-.prompt,
-.text {
-  width: 100%;
-  border: 1px solid var(--border, #d9dfd7);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font: inherit;
-  background: var(--card, #fff);
-  color: inherit;
-  box-sizing: border-box;
-}
-.prompt {
-  resize: vertical;
-  min-height: 72px;
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-}
-.field > span {
-  color: var(--muted, #5d6b61);
-}
-.shape {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--border, #d9dfd7);
-  border-radius: 10px;
-  background: var(--bg, #f7f5ef);
-}
-.shape-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--muted, #5d6b61);
-}
-.shape-row.good {
-  color: var(--accent, #3f7d4a);
-  font-weight: 600;
-}
-.actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border-radius: 999px;
-  padding: 9px 16px;
-  font-weight: 600;
-  cursor: pointer;
-  border: 1px solid transparent;
-}
-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.primary {
-  background: var(--accent, #3f7d4a);
-  color: #fff;
-}
-.ghost {
-  background: transparent;
-  border-color: var(--border, #d9dfd7);
-  color: inherit;
-}
-.err {
-  color: #b3261e;
-  font-size: 13px;
-  margin: 0;
-}
-.spin {
-  animation: wizard-spin 0.8s linear infinite;
-}
-@keyframes wizard-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-</style>

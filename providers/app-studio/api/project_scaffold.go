@@ -58,6 +58,20 @@ func (s *Server) seedProjectScaffold(ctx context.Context, id identity, p *aiv1al
 	if err := s.workspaces.ApplyFiles(ctx, scope, files); err != nil {
 		return 0, fmt.Errorf("seeding workspace: %w", err)
 	}
+	// Register the seeded files as uncommitted so the rest of the workspace
+	// machinery sees them: the Project reconciler's commit convergence lands
+	// them as the FIRST commit (git repo = scaffold), and development sync
+	// pushes them into the sandbox. ApplyFiles writes bytes + bumps the
+	// source revision but does NOT touch the uncommitted-paths ledger, so
+	// without this the scaffold is invisible to both — the symptom being a
+	// project that "just started working" with an empty repo and no dev sync.
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	if _, err := s.workspaces.AddUncommittedPaths(ctx, scope, paths); err != nil {
+		return 0, fmt.Errorf("tracking seeded files: %w", err)
+	}
 	return len(files), nil
 }
 
