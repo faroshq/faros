@@ -375,6 +375,21 @@ export interface DevelopmentTemplate {
   description?: string
   category?: string
   components: Record<string, string>
+  hasScaffold?: boolean
+}
+
+export interface ProjectPlanScaffold {
+  repository: string
+  ref?: string
+}
+
+export interface ProjectPlan {
+  displayName: string
+  repositoryName: string
+  template?: string
+  components?: Record<string, string>
+  scaffold?: ProjectPlanScaffold
+  availableTemplates: DevelopmentTemplate[]
 }
 
 // One Code repository a new project can be imported from (unclaimed).

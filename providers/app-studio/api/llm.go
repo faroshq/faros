@@ -134,6 +134,8 @@ const (
 	projectActionRestoreWorkspace             = "restore_workspace"
 	projectToolCommitProjectFiles             = "commit_project_files"
 	projectToolCommitFiles                    = "commit_files"
+	projectToolWebSearch                      = "web_search"
+	projectToolWebFetch                       = "web_fetch"
 	projectToolCodeCommitFiles                = "code__commit_files"
 	projectToolInfrastructureListTemplates    = "infrastructure__list_templates"
 	projectToolInfrastructureDescribeTemplate = "infrastructure__describe_template"

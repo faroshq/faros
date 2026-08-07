@@ -63,6 +63,13 @@ type projectTemplateInfo struct {
 	// Components maps a development component name to its contract. Non-empty
 	// iff the template declares spec.development.
 	Components map[string]projectTemplateComponent
+
+	// ScaffoldRepo / ScaffoldRef pin the starter-code repository whose tree
+	// seeds a fresh project's workspace (spec.development.scaffold). Empty
+	// when the template ships no scaffold — the project then starts empty and
+	// the assistant generates from scratch.
+	ScaffoldRepo string
+	ScaffoldRef  string
 }
 
 // projectTemplateComponent is one development component's contract: where its
@@ -159,6 +166,14 @@ func projectTemplateInfoFromUnstructured(obj *unstructured.Unstructured) (projec
 			}
 		}
 	}
+
+	// Scaffold: the starter-code repo whose tree seeds the workspace at
+	// creation. Optional — a template without one starts projects empty.
+	repo, _, _ := unstructured.NestedString(obj.Object, "spec", "development", "scaffold", "repository")
+	ref, _, _ := unstructured.NestedString(obj.Object, "spec", "development", "scaffold", "ref")
+	info.ScaffoldRepo = strings.TrimSpace(repo)
+	info.ScaffoldRef = strings.TrimSpace(ref)
+
 	return info, nil
 }
 
@@ -369,12 +384,9 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 		return nil, projectTemplateInfo{}, err
 	}
 	if p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) == info.Name {
-		// Already selected — reconcile and return (idempotent re-select).
-		next, err := s.reconcileProjectLiveBindings(ctx, c, p, id)
-		if err != nil {
-			return nil, projectTemplateInfo{}, err
-		}
-		return next, info, nil
+		// Already selected — the reconciler owns convergence; return fresh
+		// observed state (idempotent re-select).
+		return projectWithLiveBindingStatus(ctx, c, p, id), info, nil
 	}
 
 	// Tear down the previous development instance before rewriting the spec:
@@ -393,11 +405,9 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 	if err != nil {
 		return nil, projectTemplateInfo{}, err
 	}
-	reconciled, err := s.reconcileProjectLiveBindings(ctx, c, updated, id)
-	if err != nil {
-		return nil, projectTemplateInfo{}, err
-	}
-	return reconciled, info, nil
+	// The Project reconciler converges the new binding into an instance; the
+	// response reports it Pending until the mirror catches up.
+	return updated, info, nil
 }
 
 // deleteProjectDevelopmentBindingResources deletes the instances behind the
@@ -487,6 +497,10 @@ type projectDevelopmentTemplateView struct {
 	Description string            `json:"description,omitempty"`
 	Category    string            `json:"category,omitempty"`
 	Components  map[string]string `json:"components"`
+	// HasScaffold reports whether picking this template seeds the workspace
+	// with starter code (spec.development.scaffold) — the wizard shows it so
+	// the user knows the project opens on a runnable placeholder.
+	HasScaffold bool `json:"hasScaffold,omitempty"`
 }
 
 // listDevelopmentTemplates is GET /api/projects/development-templates: the
@@ -537,8 +551,9 @@ func developmentTemplateViews(items []unstructured.Unstructured) []projectDevelo
 			continue
 		}
 		view := projectDevelopmentTemplateView{
-			Name:       info.Name,
-			Components: info.WorkspacePaths(),
+			Name:        info.Name,
+			Components:  info.WorkspacePaths(),
+			HasScaffold: info.ScaffoldRepo != "",
 		}
 		view.DisplayName, _, _ = unstructured.NestedString(obj.Object, "spec", "displayName")
 		view.Description, _, _ = unstructured.NestedString(obj.Object, "spec", "description")

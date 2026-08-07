@@ -171,6 +171,36 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		},
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
+				Name:         projectToolWebSearch,
+				Description:  "Search the web and return the top results (title, URL, snippet). Follow up with web_fetch to read one in full. Backed by the workspace's shared private search instance.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","minLength":1,"description":"Search query."}},"required":["query"],"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				s, err := projectAssistantToolServer(server)
+				if err != nil {
+					return "", err
+				}
+				query, _ := req.Arguments["query"].(string)
+				return s.projectAssistantWebSearch(ctx, req, query)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolWebFetch,
+				Description:  "Fetch a public web page over HTTP(S) and return its readable text (truncated). Use it to read documentation, a README, or a page found with web_search. Internal addresses are blocked.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","minLength":1,"description":"Absolute http(s) URL."}},"required":["url"],"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				rawURL, _ := req.Arguments["url"].(string)
+				return projectAssistantWebFetch(ctx, rawURL)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
 				Name:        projectToolCreateFile,
 				Description: "Create one new bounded UTF-8 project-relative file. Creation is always create-only; if the target exists, use replace_file with the complete read version or edit_file with an exact oldString and expectedVersion.",
 				Parameters:  json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":%d},"content":{"type":"string","maxLength":%d},"recoveryOf":{"type":"string","minLength":1,"maxLength":120,"description":"Optional server-issued action reference used only to correlate a retry in the activity feed."}},"required":["path","content"],"additionalProperties":false}`, workspace.MaxProjectPathBytes, workspace.MaxWriteBytes)),

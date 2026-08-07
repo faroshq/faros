@@ -25,6 +25,7 @@ import type {
   ProjectPromotionReadiness,
   ProjectPromoteResult,
   ProviderItem,
+  ProjectPlan,
 } from './types'
 import type { ProjectCreateReadiness } from './createReadiness'
 import type { PreviewConsoleEvent, PreviewConsoleSession } from './previewConsole'
@@ -329,6 +330,25 @@ export const api = {
     },
   ): Promise<Project> {
     return request<Project>(ctx, 'POST', baseURL(ctx), body)
+  },
+
+  // planProject returns a creation blueprint (proposed name, recommended
+  // template, whether starter code will be attached) WITHOUT creating —
+  // the wizard's confirm step. See ProjectPlan in the backend.
+  async planProject(
+    ctx: KedgeContext | null,
+    body: { prompt?: string; templateName?: string },
+  ): Promise<ProjectPlan> {
+    return request<ProjectPlan>(ctx, 'POST', `${baseURL(ctx)}/plan`, body)
+  },
+
+  // reseedScaffold re-attaches the template's starter code to an empty
+  // workspace (retry after a failed seed, or seed a legacy project).
+  async reseedScaffold(
+    ctx: KedgeContext | null,
+    name: string,
+  ): Promise<{ template: string; scaffold: { repository: string; ref?: string }; seeded: number }> {
+    return request(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/scaffold`, {})
   },
 
   async listDevelopmentTemplates(ctx: KedgeContext | null): Promise<DevelopmentTemplate[]> {

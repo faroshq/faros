@@ -85,6 +85,7 @@ import ThreadsWorkbench from './ThreadsWorkbench.vue'
 import ApprovalModePicker from './ApprovalModePicker.vue'
 import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
 import PreviewActionsMenu from './PreviewActionsMenu.vue'
+import NewProjectWizard from './NewProjectWizard.vue'
 import {
   ConversationRunController,
   abortedConversationSnapshot,
@@ -1932,6 +1933,26 @@ async function createProjectFromPrompt() {
   await createProjectAndStartConversation(content)
 }
 
+// The mini creation wizard: an opt-in confirm step (blueprint → template +
+// scaffold preview → create) over the same create path. The one-shot prompt
+// entry above still works unchanged; the wizard just supplies a confirmed
+// template/name before kicking off.
+const wizardOpen = ref(false)
+
+function openCreateWizard() {
+  wizardOpen.value = true
+}
+
+async function onWizardCreate(payload: { prompt: string; templateName?: string; displayName?: string }) {
+  wizardOpen.value = false
+  prompt.value = payload.prompt
+  if (!await ensureCreateSetupReady()) return
+  await createProjectAndStartConversation(payload.prompt, {
+    templateName: payload.templateName,
+    displayName: payload.displayName,
+  })
+}
+
 async function ensureCreateSetupReady(): Promise<boolean> {
   if (!gitConnectionCreateReady.value && !createReadinessLoading.value) {
     await loadCreateReadiness()
@@ -1941,7 +1962,10 @@ async function ensureCreateSetupReady(): Promise<boolean> {
   return false
 }
 
-async function createProjectAndStartConversation(content: string) {
+async function createProjectAndStartConversation(
+  content: string,
+  createOverrides?: { templateName?: string; displayName?: string },
+) {
   const retry = pendingFirstProjectSubmission?.projectName && pendingFirstProjectSubmission.content === content
   let submission = retry
     ? pendingFirstProjectSubmission!
@@ -1983,7 +2007,10 @@ async function createProjectAndStartConversation(content: string) {
       const created = await api.createProject(props.ctx, {
         description: description || undefined,
         prompt: content,
-        inferDevelopmentTemplate: true,
+        // A wizard-confirmed template pins the choice; otherwise infer.
+        templateName: createOverrides?.templateName,
+        displayName: createOverrides?.displayName,
+        inferDevelopmentTemplate: !createOverrides?.templateName,
       })
       if (!current()) return
       projectName = created.name
@@ -4060,6 +4087,29 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     Create and send
                   </button>
                 </div>
+              </div>
+              <div class="mx-auto mt-3 flex max-w-[860px] justify-end">
+                <button
+                  type="button"
+                  class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border-subtle px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-60"
+                  :disabled="busy"
+                  title="Preview the template and starter code before creating"
+                  @click="openCreateWizard"
+                >
+                  Plan first
+                </button>
+              </div>
+              <div
+                v-if="wizardOpen"
+                class="mx-auto mt-4 max-w-[860px] rounded-lg border border-border-subtle bg-surface-raised p-4 text-left shadow-sm"
+              >
+                <NewProjectWizard
+                  :ctx="props.ctx"
+                  :disabled="busy || !canStartProjectFromPrompt"
+                  :disabled-reason="createPromptSubmitTitle"
+                  @create="onWizardCreate"
+                  @cancel="wizardOpen = false"
+                />
               </div>
               <div
                 v-if="createSetupVisible"
