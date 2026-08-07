@@ -144,9 +144,13 @@ func (r *Reconciler) commitWorkspace(ctx context.Context, c client.Client, p *ai
 		return skipped > 0, nil
 	}
 
+	writtenPaths := make([]string, 0, len(files))
+	for _, f := range files {
+		writtenPaths = append(writtenPaths, f["path"])
+	}
 	commitArgs := map[string]any{
 		"repositoryRef": b.RepositoryRef,
-		"message":       commitMessage(len(files), len(deletePaths)),
+		"message":       commitMessage(writtenPaths, deletePaths),
 		"files":         files,
 	}
 	if len(deletePaths) > 0 {
@@ -179,13 +183,88 @@ func (r *Reconciler) commitWorkspace(ctx context.Context, c client.Client, p *ai
 	return skipped > 0, nil
 }
 
-// commitMessage summarizes a background convergence commit.
-func commitMessage(files, deletions int) string {
-	msg := fmt.Sprintf("chore: sync workspace (%d files", files)
-	if deletions > 0 {
-		msg += fmt.Sprintf(", %d deletions", deletions)
+// commitMessage builds a human-readable message describing what actually
+// changed, so the git history reads like real work instead of an opaque
+// "sync workspace (N files)". Subject names the file for a single change or
+// summarizes the count + top-level areas for many; the body lists the paths.
+func commitMessage(writePaths, deletePaths []string) string {
+	total := len(writePaths) + len(deletePaths)
+	var subject string
+	switch {
+	case total == 1 && len(writePaths) == 1:
+		subject = "Update " + writePaths[0]
+	case total == 1 && len(deletePaths) == 1:
+		subject = "Delete " + deletePaths[0]
+	default:
+		var parts []string
+		if len(writePaths) > 0 {
+			parts = append(parts, fmt.Sprintf("update %d %s", len(writePaths), pluralFiles(len(writePaths))))
+		}
+		if len(deletePaths) > 0 {
+			parts = append(parts, fmt.Sprintf("delete %d %s", len(deletePaths), pluralFiles(len(deletePaths))))
+		}
+		subject = capitalizeFirst(strings.Join(parts, ", "))
+		if areas := topLevelAreas(writePaths, deletePaths); areas != "" {
+			subject += " in " + areas
+		}
 	}
-	return msg + ")"
+
+	var body strings.Builder
+	listed := 0
+	const maxListed = 20
+	for _, p := range writePaths {
+		if listed >= maxListed {
+			break
+		}
+		fmt.Fprintf(&body, "\n- %s", p)
+		listed++
+	}
+	for _, p := range deletePaths {
+		if listed >= maxListed {
+			break
+		}
+		fmt.Fprintf(&body, "\n- delete %s", p)
+		listed++
+	}
+	if total > listed {
+		fmt.Fprintf(&body, "\n- … and %d more", total-listed)
+	}
+	return subject + "\n" + body.String()
+}
+
+func pluralFiles(n int) string {
+	if n == 1 {
+		return "file"
+	}
+	return "files"
+}
+
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// topLevelAreas lists the distinct top-level directories touched (e.g.
+// "web, api"), so a multi-file commit says where the work happened. Returns
+// "" when there are none, too many to be useful, or only root-level files.
+func topLevelAreas(writePaths, deletePaths []string) string {
+	seen := map[string]bool{}
+	var areas []string
+	for _, p := range append(append([]string{}, writePaths...), deletePaths...) {
+		if i := strings.Index(p, "/"); i > 0 {
+			dir := p[:i]
+			if !seen[dir] {
+				seen[dir] = true
+				areas = append(areas, dir)
+			}
+		}
+	}
+	if len(areas) == 0 || len(areas) > 3 {
+		return ""
+	}
+	return strings.Join(areas, ", ")
 }
 
 // clusterOf returns the workspace's logical-cluster id, which kcp stamps as
