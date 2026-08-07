@@ -31,12 +31,12 @@ type listTablesOutput struct {
 }
 
 type describeTableInput struct {
-	TableRef string `json:"tableRef" jsonschema:"Imported kedge Table resource name, e.g. order-history"`
+	TableRef string `json:"tableRef" jsonschema:"Exact imported kedge Table resource name (the name returned by list_tables or the grant), e.g. order-history; never an App Studio integration alias"`
 }
 
 type queryTableInput struct {
 	ActionVersion string   `json:"actionVersion" jsonschema:"Pinned provider action contract version; currently v1"`
-	TableRef      string   `json:"tableRef" jsonschema:"Imported kedge Table resource name, e.g. order-history"`
+	TableRef      string   `json:"tableRef" jsonschema:"Exact imported kedge Table resource name (the name returned by list_tables or the grant), e.g. order-history; never an App Studio integration alias"`
 	Columns       []string `json:"columns,omitempty" jsonschema:"Optional exact column-name projection; SQL expressions are not accepted"`
 	Limit         int      `json:"limit,omitempty" jsonschema:"Maximum 100 rows; defaults to 100"`
 }
@@ -54,7 +54,7 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, executor ac
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "list_tables",
 			Title:       "List imported Databricks tables",
-			Description: "List Databricks tables already imported into this kedge workspace. Use this before asking the user to pick a tableRef.",
+			Description: "List Databricks tables already imported into this kedge workspace. The returned tables[].name is the exact kedge Table resource name to copy as tableRef; never substitute an App Studio integration alias or another binding identifier.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listTablesOutput, error) {
 			tables, err := resolver.ListTables(ctx)
@@ -74,7 +74,7 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, executor ac
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "describe_table",
 			Title:       "Describe an imported Databricks table",
-			Description: "Describe one imported kedge Databricks Table resource by tableRef. The resource is a pointer plus cached schema, not table data.",
+			Description: "Describe one imported kedge Databricks Table resource by its exact tableRef (the name returned by list_tables or the project grant). The resource is a pointer plus cached schema, not table data; an App Studio integration alias is never a tableRef.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in describeTableInput) (*mcp.CallToolResult, tableSummary, error) {
 			ref, ok, err := resolver.GetTable(ctx, in.TableRef)
@@ -92,7 +92,7 @@ func registerTools(srv *mcp.Server, resolver queryapi.TableResolver, executor ac
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "query_table",
 			Title:       "Query an imported Databricks table",
-			Description: "Run the versioned v1 bounded table query action. Supply only an imported tableRef, optional exact column names, and a limit; the provider resolves the warehouse, connection, and credentials without creating a query resource.",
+			Description: "Run the versioned v1 bounded table query action. Supply only the exact imported Table resource name as tableRef (copied from list_tables or the project grant), optional exact column names, and a limit; never send an App Studio integration alias or binding alias. The provider resolves the warehouse, connection, and credentials without creating a query resource.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryTableInput) (*mcp.CallToolResult, queryTableOutput, error) {
 			request, err := queryapi.NormalizeQueryRequest(queryapi.QueryTableRequest{

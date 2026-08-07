@@ -1,6 +1,6 @@
 ---
 name: databricks-app-integration
-description: Use when building or reviewing an App Studio application that reads an existing Databricks table through the versioned Provider Action query_table/v1; discover the existing project grant, require exact bound-Table schema discovery before query or UI code, honor the published schema and limits, use the server-only @kedge/actions-node SDK, and verify endpoint responses before relying on a live preview.
+description: Use when building or reviewing an App Studio application that reads an existing Databricks table through the versioned Provider Action query_table/v1; distinguish the SDK integration alias from the exact grant-bound Table resource name/tableRef, require one authoritative schema probe at most before query or UI code, honor the published schema and limits, use the server-only @kedge/actions-node SDK, and verify endpoint responses before relying on a live preview.
 ---
 
 # Databricks App Integration
@@ -15,11 +15,16 @@ discover provider infrastructure, or put Databricks credentials in the app.
 1. **Discover the project grant.** Read the project's existing integration and
    grant through the App Studio project/API surface. Find the exact integration
    alias (for example, `<BOUND_INTEGRATION_ALIAS>`) and confirm that
-   `query_table/v1` is allowed. Treat the hub catalog, grant, action schema,
-   and binding status as authoritative. If the grant is absent, revoked, stale,
-   or does not allow this action, stop and report that state; do not invent a
-   provider URL or a new permission. Angle-bracket values in this document are
-   placeholders, not literal aliases, resources, or columns.
+   `query_table/v1` is allowed. The integration alias is an SDK selector only;
+   it is not a `Table` resource name, `tableRef`, or binding identity. Keep it
+   separate from the exact Table name supplied by the grant (and, when doing
+   assistant-side discovery before a grant is available, the exact `name`
+   returned by `list_tables`). Never pass the alias as a Table name or tableRef,
+   and never derive one value from the other. Treat the hub catalog, grant,
+   action schema, and binding status as authoritative. If the grant is absent,
+   revoked, stale, or does not allow this action, stop and report that state; do
+   not invent a provider URL or a new permission. Angle-bracket values in this
+   document are placeholders, not literal aliases, resources, or columns.
 
 2. **Pass the schema gate before writing query or UI code.** Resolve the exact
    `Table` named by the grant and read that bound resource's current status as
@@ -31,8 +36,16 @@ discover provider infrastructure, or put Databricks credentials in the app.
    and `limit: 1`. Verify the discovery response's action version, bound
    `tableRef` matching the grant-bound Table, and bounded `columns` before
    treating those column names as evidence. This discovery request is the only
-   query code permitted before
-   the schema gate; do not write application query or UI code until it succeeds.
+   query code permitted before the schema gate; do not write application query
+   or UI code until it succeeds. After the grant is known, MCP
+   `describe_table` and MCP `query_table` are not an application schema-
+   discovery path and must not be used as a substitute for the bound resource
+   status or this granted action probe.
+   Make at most one schema probe in this assistant turn. If it fails, times out,
+   or returns a mismatched/empty schema, stop this turn and report the
+   structured failure; do not retry or switch to MCP/direct provider access
+   without new authoritative grant, binding-status, or schema evidence in a
+   later turn.
    The fallback request is shape-only and must omit `columns` (an empty
    `columns: []` is not schema discovery):
 
@@ -62,6 +75,12 @@ discover provider infrastructure, or put Databricks credentials in the app.
    name: <GRANT_BOUND_TABLE_NAME>
    ```
 
+   `<GRANT_BOUND_TABLE_NAME>` must be the exact resource `name` in the project
+   grant. If a pre-grant assistant workflow used `list_tables`, its exact
+   `name` is the only acceptable `tableRef`; do not normalize, abbreviate, or
+   replace it. This Table name/tableRef is distinct from the SDK integration
+   alias above and is never used as that alias.
+
    The application may choose bounded query inputs such as selected `columns`
    and `limit`, but must not accept `tableRef`, provider URLs, catalog/schema
    names, workspace IDs, credentials, or an arbitrary `resourceRef` from a
@@ -89,6 +108,11 @@ discover provider infrastructure, or put Databricks credentials in the app.
    });
    ```
 
+   `integration('<BOUND_INTEGRATION_ALIAS>')` takes the project integration
+   alias only. The bound Table's resource `name`/`tableRef` is server-owned and
+   must not be substituted into this SDK selector (or accepted from the
+   browser).
+
    `@kedge/actions-node` is the only supported integration client. It reads an
    atomically refreshed `KEDGE_ACTIONS_TOKEN_FILE` on every request, or it may
    use a refreshable `getToken({ forceRefresh, signal })` callback. Never ship
@@ -102,9 +126,10 @@ discover provider infrastructure, or put Databricks credentials in the app.
    `columns` has at most 64 entries and `limit` is an integer from 1 through
    100 (the omitted limit defaults to the bounded action default). Reject or
    truncate user input before invocation; never bypass validation with raw SQL,
-   a second endpoint, MCP, or a direct Databricks client. Preserve the stable
-   envelope when useful by calling `invokeEnvelope` and do not expose raw table
-   data in logs.
+   a second endpoint, MCP, or a direct Databricks client. MCP remains an
+   assistant-facing aid, not the application's post-grant schema or data path.
+   Preserve the stable envelope when useful by calling `invokeEnvelope` and do
+   not expose raw table data in logs.
 
 6. **Handle structured failures.** A provider action failure includes a stable
    `code`, safe `message`, `retryable` flag, request metadata, and binding

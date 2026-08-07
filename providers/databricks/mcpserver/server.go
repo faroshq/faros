@@ -49,7 +49,9 @@ func newPerRequestServer(deps Deps, r *http.Request) *mcp.Server {
 	}, &mcp.ServerOptions{
 		Instructions: "Use these tools only with Databricks tables already imported " +
 			"as kedge Table resources. Do not import tables from App Studio. " +
-			"Use tableRef for metadata and the versioned query_table action (actionVersion v1). " +
+			"Use list_tables first when you need a table name, and copy its exact tables[].name " +
+			"into tableRef for metadata and the versioned query_table action (actionVersion v1). " +
+			"An App Studio integration alias or other binding alias is never a tableRef. " +
 			"query_table accepts only exact column names and a bounded limit; never send raw SQL. " +
 			"Do not generate application code that calls provider-databricks, " +
 			"and do not embed Databricks credentials or direct warehouse auth config.",

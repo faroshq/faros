@@ -1,7 +1,11 @@
 # `query_table/v1` contract and troubleshooting
 
 This reference is for implementation and diagnosis after the project grant has
-been discovered. It does not replace the authenticated catalog or grant.
+been discovered. It does not replace the authenticated catalog or grant. Keep
+the project integration alias (used only by the SDK) separate from the exact
+grant-bound Table resource `name`/`tableRef` (the exact `name` from the grant,
+or from `list_tables` in a pre-grant assistant workflow). Never pass one in
+place of the other.
 
 Schema discovery is a hard prerequisite for application query and UI code:
 prefer current `status.columns` from the exact grant-bound `Table`; otherwise
@@ -9,8 +13,13 @@ make one server-side `query_table/v1` discovery call with `columns` omitted and
 `limit: 1`. The discovery request is `{ "limit": 1 }`; do not send
 `"columns": []` and do not send any guessed column. Never invent or guess
 columns, and never treat examples below as real names. Every angle-bracket value
-is an explicit placeholder. Do not log row values during discovery or normal
-querying.
+is an explicit placeholder. After the grant is known, MCP `describe_table` and
+MCP `query_table` are not an application schema-discovery path and cannot
+replace the bound status or granted action probe. Allow at most one schema probe
+per assistant turn; if it fails, times out, or returns a mismatch, stop and
+report its structured failure. Continue only when a later turn has new
+authoritative grant, binding-status, or schema evidence. Do not log row values
+during discovery or normal querying.
 
 Use `invokeEnvelope` for this probe so the server can verify the complete
 envelope before reading `schemaProbe.result.columns`:
@@ -27,10 +36,11 @@ const discoveredColumns = schemaProbe.result.columns;
 ## Request shape
 
 The server SDK sends the integration alias and action ID through the App Studio
-gateway. The gateway resolves the project's grant and injects the bound
-resource reference. The only caller-controlled action input has this shape. The
-following is illustrative only; `<COLUMN_NAME_FROM_SCHEMA>` is a placeholder that
-must be replaced only after schema evidence:
+gateway. The alias is only the SDK selector; the gateway resolves the project's
+grant and injects the exact bound resource reference. The only caller-controlled
+action input has this shape. The following is illustrative only;
+`<COLUMN_NAME_FROM_SCHEMA>` is a placeholder that must be replaced only after
+schema evidence:
 
 ```json
 {
@@ -39,7 +49,9 @@ must be replaced only after schema evidence:
 }
 ```
 
-The provider-side resource identity is fixed to:
+The provider-side resource identity is fixed to the exact grant-bound Table
+`name` (the `tableRef` returned by `list_tables` in a pre-grant assistant
+workflow):
 
 ```json
 {

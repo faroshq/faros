@@ -94,12 +94,12 @@ spec:
         required: false
   assistantSkills:
     - packageName: "databricks-app-integration"
-      version: "1.0.0"
-      digest: "sha256:d62112048cd4e6f4551f4e3d83c8f51a6bd91be2b55dc3de3e764b4a7a2d0a6b"
+      version: "1.0.1"
+      digest: "sha256:55d939df1b7f6fa686276a1cbeec4521b18936424db20fe87386c35b8cf1d833"
       skill: |
         ---
         name: databricks-app-integration
-        description: Use when building or reviewing an App Studio application that reads an existing Databricks table through the versioned Provider Action query_table/v1; discover the existing project grant, require exact bound-Table schema discovery before query or UI code, honor the published schema and limits, use the server-only @kedge/actions-node SDK, and verify endpoint responses before relying on a live preview.
+        description: Use when building or reviewing an App Studio application that reads an existing Databricks table through the versioned Provider Action query_table/v1; distinguish the SDK integration alias from the exact grant-bound Table resource name/tableRef, require one authoritative schema probe at most before query or UI code, honor the published schema and limits, use the server-only @kedge/actions-node SDK, and verify endpoint responses before relying on a live preview.
         ---
 
         # Databricks App Integration
@@ -114,11 +114,16 @@ spec:
         1. **Discover the project grant.** Read the project's existing integration and
            grant through the App Studio project/API surface. Find the exact integration
            alias (for example, `<BOUND_INTEGRATION_ALIAS>`) and confirm that
-           `query_table/v1` is allowed. Treat the hub catalog, grant, action schema,
-           and binding status as authoritative. If the grant is absent, revoked, stale,
-           or does not allow this action, stop and report that state; do not invent a
-           provider URL or a new permission. Angle-bracket values in this document are
-           placeholders, not literal aliases, resources, or columns.
+           `query_table/v1` is allowed. The integration alias is an SDK selector only;
+           it is not a `Table` resource name, `tableRef`, or binding identity. Keep it
+           separate from the exact Table name supplied by the grant (and, when doing
+           assistant-side discovery before a grant is available, the exact `name`
+           returned by `list_tables`). Never pass the alias as a Table name or tableRef,
+           and never derive one value from the other. Treat the hub catalog, grant,
+           action schema, and binding status as authoritative. If the grant is absent,
+           revoked, stale, or does not allow this action, stop and report that state; do
+           not invent a provider URL or a new permission. Angle-bracket values in this
+           document are placeholders, not literal aliases, resources, or columns.
 
         2. **Pass the schema gate before writing query or UI code.** Resolve the exact
            `Table` named by the grant and read that bound resource's current status as
@@ -130,8 +135,16 @@ spec:
            and `limit: 1`. Verify the discovery response's action version, bound
            `tableRef` matching the grant-bound Table, and bounded `columns` before
            treating those column names as evidence. This discovery request is the only
-           query code permitted before
-           the schema gate; do not write application query or UI code until it succeeds.
+           query code permitted before the schema gate; do not write application query
+           or UI code until it succeeds. After the grant is known, MCP
+           `describe_table` and MCP `query_table` are not an application schema-
+           discovery path and must not be used as a substitute for the bound resource
+           status or this granted action probe.
+           Make at most one schema probe in this assistant turn. If it fails, times out,
+           or returns a mismatched/empty schema, stop this turn and report the
+           structured failure; do not retry or switch to MCP/direct provider access
+           without new authoritative grant, binding-status, or schema evidence in a
+           later turn.
            The fallback request is shape-only and must omit `columns` (an empty
            `columns: []` is not schema discovery):
 
@@ -161,6 +174,12 @@ spec:
            name: <GRANT_BOUND_TABLE_NAME>
            ```
 
+           `<GRANT_BOUND_TABLE_NAME>` must be the exact resource `name` in the project
+           grant. If a pre-grant assistant workflow used `list_tables`, its exact
+           `name` is the only acceptable `tableRef`; do not normalize, abbreviate, or
+           replace it. This Table name/tableRef is distinct from the SDK integration
+           alias above and is never used as that alias.
+
            The application may choose bounded query inputs such as selected `columns`
            and `limit`, but must not accept `tableRef`, provider URLs, catalog/schema
            names, workspace IDs, credentials, or an arbitrary `resourceRef` from a
@@ -188,6 +207,11 @@ spec:
            });
            ```
 
+           `integration('<BOUND_INTEGRATION_ALIAS>')` takes the project integration
+           alias only. The bound Table's resource `name`/`tableRef` is server-owned and
+           must not be substituted into this SDK selector (or accepted from the
+           browser).
+
            `@kedge/actions-node` is the only supported integration client. It reads an
            atomically refreshed `KEDGE_ACTIONS_TOKEN_FILE` on every request, or it may
            use a refreshable `getToken({ forceRefresh, signal })` callback. Never ship
@@ -201,9 +225,10 @@ spec:
            `columns` has at most 64 entries and `limit` is an integer from 1 through
            100 (the omitted limit defaults to the bounded action default). Reject or
            truncate user input before invocation; never bypass validation with raw SQL,
-           a second endpoint, MCP, or a direct Databricks client. Preserve the stable
-           envelope when useful by calling `invokeEnvelope` and do not expose raw table
-           data in logs.
+           a second endpoint, MCP, or a direct Databricks client. MCP remains an
+           assistant-facing aid, not the application's post-grant schema or data path.
+           Preserve the stable envelope when useful by calling `invokeEnvelope` and do
+           not expose raw table data in logs.
 
         6. **Handle structured failures.** A provider action failure includes a stable
            `code`, safe `message`, `retryable` flag, request metadata, and binding
@@ -252,7 +277,11 @@ spec:
             # `query_table/v1` contract and troubleshooting
 
             This reference is for implementation and diagnosis after the project grant has
-            been discovered. It does not replace the authenticated catalog or grant.
+            been discovered. It does not replace the authenticated catalog or grant. Keep
+            the project integration alias (used only by the SDK) separate from the exact
+            grant-bound Table resource `name`/`tableRef` (the exact `name` from the grant,
+            or from `list_tables` in a pre-grant assistant workflow). Never pass one in
+            place of the other.
 
             Schema discovery is a hard prerequisite for application query and UI code:
             prefer current `status.columns` from the exact grant-bound `Table`; otherwise
@@ -260,8 +289,13 @@ spec:
             `limit: 1`. The discovery request is `{ "limit": 1 }`; do not send
             `"columns": []` and do not send any guessed column. Never invent or guess
             columns, and never treat examples below as real names. Every angle-bracket value
-            is an explicit placeholder. Do not log row values during discovery or normal
-            querying.
+            is an explicit placeholder. After the grant is known, MCP `describe_table` and
+            MCP `query_table` are not an application schema-discovery path and cannot
+            replace the bound status or granted action probe. Allow at most one schema probe
+            per assistant turn; if it fails, times out, or returns a mismatch, stop and
+            report its structured failure. Continue only when a later turn has new
+            authoritative grant, binding-status, or schema evidence. Do not log row values
+            during discovery or normal querying.
 
             Use `invokeEnvelope` for this probe so the server can verify the complete
             envelope before reading `schemaProbe.result.columns`:
@@ -278,10 +312,11 @@ spec:
             ## Request shape
 
             The server SDK sends the integration alias and action ID through the App Studio
-            gateway. The gateway resolves the project's grant and injects the bound
-            resource reference. The only caller-controlled action input has this shape. The
-            following is illustrative only; `<COLUMN_NAME_FROM_SCHEMA>` is a placeholder that
-            must be replaced only after schema evidence:
+            gateway. The alias is only the SDK selector; the gateway resolves the project's
+            grant and injects the exact bound resource reference. The only caller-controlled
+            action input has this shape. The following is illustrative only;
+            `<COLUMN_NAME_FROM_SCHEMA>` is a placeholder that must be replaced only after
+            schema evidence:
 
             ```json
             {
@@ -290,7 +325,9 @@ spec:
             }
             ```
 
-            The provider-side resource identity is fixed to:
+            The provider-side resource identity is fixed to the exact grant-bound Table
+            `name` (the `tableRef` returned by `list_tables` in a pre-grant assistant
+            workflow):
 
             ```json
             {
