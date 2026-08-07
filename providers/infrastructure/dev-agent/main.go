@@ -83,9 +83,6 @@ const (
 	previewConsolePluginName = "preview-console-plugin.mjs"
 	previewConsoleJWKSName   = "preview-console-jwks.json"
 	previewConsoleJWKSEnv    = "KEDGE_PREVIEW_CONSOLE_VERIFICATION_JWKS"
-	actionsNodeAssetDir      = "/kedge-actions-node"
-	actionsNodeAssetDirEnv   = "KEDGE_ACTIONS_NODE_ASSET_DIR"
-	actionsNodePackageName   = "@kedge/actions-node"
 	workspaceManifestName    = ".kedge-workspace-manifest.json"
 )
 
@@ -279,24 +276,16 @@ func serveUntilDone(ctx context.Context, srv *http.Server, cleanup func()) error
 }
 
 // installSelf atomically installs the agent executable, the platform-owned
-// preview-console Vite plugin, its optional trusted public JWKS, and the
-// server-only Actions SDK into dir, the shared emptyDir the dev container
-// mounts at /kedge/bin. The same volume is mounted read-only at /node_modules
-// in the application and executor containers, so a bare
-// `@kedge/actions-node` import resolves without writing to the project PVC.
-// Plain copies are used because the injector image may be scratch.
+// preview-console Vite plugin, and its optional trusted public JWKS into dir,
+// the shared emptyDir the dev container mounts at /kedge/bin. Plain copies are
+// used because the injector image may be scratch. Application dependencies are
+// deliberately not projected here: generated applications install their
+// declared package aliases through the component toolchain.
 //
 // Missing or invalid verification configuration disables the optional browser
 // bridge without blocking the application. Any stale JWKS is removed so an old
 // platform key set cannot be trusted accidentally after a bad rollout.
 func installSelf(dir string) error {
-	actionsNodeFiles, err := loadActionsNodeAssets()
-	if err != nil {
-		// Validate every SDK asset before touching the destination. This keeps an
-		// incomplete image fail-closed instead of leaving a partially installed
-		// package visible to the application.
-		return fmt.Errorf("load %s SDK: %w", actionsNodePackageName, err)
-	}
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate own executable: %w", err)
@@ -332,69 +321,12 @@ func installSelf(dir string) error {
 		return fmt.Errorf("install preview console JWKS: %w", err)
 	}
 
-	actionsNodeDir := filepath.Join(dir, "@kedge", "actions-node")
-	if err := os.MkdirAll(actionsNodeDir, 0o755); err != nil {
-		return fmt.Errorf("create %s SDK directory: %w", actionsNodePackageName, err)
-	}
-	for _, file := range []struct {
-		name string
-		mode os.FileMode
-	}{
-		{name: "package.json", mode: 0o644},
-		{name: "index.mjs", mode: 0o644},
-		{name: "index.d.ts", mode: 0o644},
-	} {
-		if err := atomicInstall(actionsNodeDir, file.name, file.mode, bytes.NewReader(actionsNodeFiles[file.name])); err != nil {
-			return fmt.Errorf("install %s/%s: %w", actionsNodePackageName, file.name, err)
-		}
-	}
-
 	if dirHandle, err := os.Open(dir); err == nil {
 		_ = dirHandle.Sync()
 		_ = dirHandle.Close()
 	}
-	log.Printf("installed %s, %s, and %s", filepath.Join(dir, agentBinaryName), filepath.Join(dir, previewConsolePluginName), actionsNodePackageName)
+	log.Printf("installed %s and %s", filepath.Join(dir, agentBinaryName), filepath.Join(dir, previewConsolePluginName))
 	return nil
-}
-
-// loadActionsNodeAssets reads the package that the image build copied from
-// provider-sdk/actions-node. The directory may be overridden in tests (or by
-// a development image) but is otherwise fixed in the scratch runtime image.
-// The package metadata is checked before any destination is touched so an
-// accidentally incomplete or unrelated asset directory fails closed.
-func loadActionsNodeAssets() (map[string][]byte, error) {
-	dir := strings.TrimSpace(os.Getenv(actionsNodeAssetDirEnv))
-	if dir == "" {
-		dir = actionsNodeAssetDir
-	}
-	files := make(map[string][]byte, 3)
-	for _, name := range []string{"package.json", "index.mjs", "index.d.ts"} {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read %s/%s: %w", dir, name, err)
-		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			return nil, fmt.Errorf("%s/%s is empty", dir, name)
-		}
-		files[name] = data
-	}
-	var metadata struct {
-		Name    string `json:"name"`
-		Type    string `json:"type"`
-		Exports map[string]struct {
-			Types   string `json:"types"`
-			Import  string `json:"import"`
-			Default string `json:"default"`
-		} `json:"exports"`
-	}
-	if err := json.Unmarshal(files["package.json"], &metadata); err != nil {
-		return nil, fmt.Errorf("decode package metadata: %w", err)
-	}
-	root, ok := metadata.Exports["."]
-	if metadata.Name != actionsNodePackageName || metadata.Type != "module" || !ok || root.Import != "./index.mjs" || root.Default != "./index.mjs" || root.Types != "./index.d.ts" {
-		return nil, fmt.Errorf("package metadata does not describe %s", actionsNodePackageName)
-	}
-	return files, nil
 }
 
 func atomicInstall(dir, name string, mode os.FileMode, src io.Reader) (retErr error) {

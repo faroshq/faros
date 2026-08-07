@@ -81,6 +81,10 @@ type providerDTO struct {
 	// only discovery and consent policy metadata; provider transport URLs and
 	// credentials are intentionally not exposed here.
 	Actions []providerActionDTO `json:"actions,omitempty"`
+	// AssistantSkills contains validated inline App Studio packages. The
+	// authenticated /api/providers response is the only distribution surface;
+	// no provider runtime URL or credential is projected into this shape.
+	AssistantSkills []providerAssistantSkillDTO `json:"assistantSkills,omitempty"`
 }
 
 // providerActionDTO is the stable portal-facing projection of a provider
@@ -102,6 +106,19 @@ type providerActionDTO struct {
 	Limits        providersv1alpha1.ProviderActionLimits        `json:"limits"`
 	Consent       providersv1alpha1.ProviderActionConsent       `json:"consent"`
 	Deprecation   *providersv1alpha1.ProviderActionDeprecation  `json:"deprecation,omitempty"`
+}
+
+type providerAssistantSkillDTO struct {
+	PackageName string                           `json:"packageName"`
+	Version     string                           `json:"version"`
+	Digest      string                           `json:"digest"`
+	Skill       string                           `json:"skill"`
+	Resources   []providerAssistantSkillResource `json:"resources,omitempty"`
+}
+
+type providerAssistantSkillResource struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 type permissionClaimDTO struct {
@@ -209,6 +226,20 @@ func NewListHandler(reg *Registry) http.Handler {
 					Deprecation: action.Deprecation.DeepCopy(),
 				})
 			}
+			assistantSkills := make([]providerAssistantSkillDTO, 0, len(p.AssistantSkills))
+			for _, skill := range p.AssistantSkills {
+				resources := make([]providerAssistantSkillResource, 0, len(skill.Resources))
+				for _, resource := range skill.Resources {
+					resources = append(resources, providerAssistantSkillResource{Path: resource.Path, Content: resource.Content})
+				}
+				assistantSkills = append(assistantSkills, providerAssistantSkillDTO{
+					PackageName: skill.PackageName,
+					Version:     skill.Version,
+					Digest:      skill.Digest,
+					Skill:       skill.Skill,
+					Resources:   resources,
+				})
+			}
 			_, isBuiltin := BuiltinByName(p.Name)
 			items = append(items, providerDTO{
 				Name:             p.Name,
@@ -228,6 +259,7 @@ func NewListHandler(reg *Registry) http.Handler {
 				EdgeProxyAccess:  p.EdgeProxyAccess,
 				Builtin:          isBuiltin,
 				Actions:          actions,
+				AssistantSkills:  assistantSkills,
 			})
 		}
 

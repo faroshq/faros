@@ -1,8 +1,11 @@
 {
-  "name": "@kedge/actions-node",
+  "name": "@crwilhit/kedge-actions-node",
   "version": "0.1.0",
   "description": "Server-side App Studio integration gateway client for generated apps",
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "exports": {
     ".": {

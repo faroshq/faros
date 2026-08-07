@@ -36,6 +36,16 @@ const props = withDefaults(defineProps<{
   providersLoading: false,
 })
 
+/**
+ * Temporary compatibility mode: assistant turns materialize provider actions
+ * automatically, so this portal keeps the legacy grant controls available in
+ * source but does not expose them to users.
+ *
+ * TODO: remove this guard when explicit consent and least-privilege grants are
+ * restored.
+ */
+const automaticProviderAccessOnly = true
+
 const integrations = ref<ProjectIntegration[]>([])
 const loading = ref(false)
 const busy = ref(false)
@@ -248,7 +258,7 @@ function formatTimestamp(value?: string): string {
         <div class="min-w-0">
           <h2 class="text-[16px] font-semibold text-text-primary">Integrations</h2>
           <p class="mt-1 max-w-2xl text-[12px] leading-5 text-text-muted">
-            Grant a generated app access to one exact provider resource and versioned action. Provider credentials and URLs stay server-side.
+            Ready providers are connected automatically to every accessible matching resource. Provider credentials and URLs stay server-side.
           </p>
         </div>
       </div>
@@ -278,7 +288,22 @@ function formatTimestamp(value?: string): string {
       <span>{{ notice }}</span>
     </div>
 
-    <section class="grid gap-3 rounded-2xl border border-border-subtle bg-surface-raised p-4">
+    <section class="grid gap-3 rounded-2xl border border-accent/20 bg-accent-subtle/40 p-4" aria-labelledby="automatic-integrations-title">
+      <div class="flex items-start gap-2">
+        <ShieldCheck class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" aria-hidden="true" />
+        <div class="min-w-0">
+          <h3 id="automatic-integrations-title" class="text-[13px] font-semibold text-text-primary">Automatic provider access</h3>
+          <p class="mt-0.5 text-[11px] leading-4 text-text-secondary">
+            Before each assistant turn, current non-deprecated actions from Ready provider catalogs are materialized for resources you can access. These bindings are read-only here and never mutate the provider resource.
+          </p>
+          <p class="mt-1 text-[11px] leading-4 text-text-muted">
+            Temporary compatibility mode accepts consent-required actions automatically; audit and revocation state remain visible below.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="!automaticProviderAccessOnly" class="grid gap-3 rounded-2xl border border-border-subtle bg-surface-raised p-4">
       <div class="flex items-start gap-2">
         <Plus class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" aria-hidden="true" />
         <div>
@@ -409,8 +434,8 @@ function formatTimestamp(value?: string): string {
     <section class="grid gap-3 rounded-2xl border border-border-subtle bg-surface-raised p-4">
       <div class="flex items-center justify-between gap-3">
         <div>
-          <h3 class="text-[13px] font-semibold text-text-primary">Current grants</h3>
-          <p class="mt-0.5 text-[11px] text-text-muted">Revoking blocks future action calls; removing deletes the integration binding.</p>
+          <h3 class="text-[13px] font-semibold text-text-primary">Current provider access</h3>
+          <p class="mt-0.5 text-[11px] text-text-muted">Automatic bindings are read-only here. Audit and revocation state remain visible.</p>
         </div>
         <span class="rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-[11px] font-medium text-text-muted">{{ integrations.length }}</span>
       </div>
@@ -428,6 +453,7 @@ function formatTimestamp(value?: string): string {
               <div class="flex flex-wrap items-center gap-2">
                 <h4 class="font-mono text-[13px] font-semibold text-text-primary">{{ integration.alias }}</h4>
                 <span class="rounded-full border border-accent/25 bg-accent-subtle px-2 py-0.5 text-[11px] font-medium text-accent">{{ providerDisplayName(integration.provider) }}</span>
+                <span class="rounded-full border border-border-subtle bg-surface-raised px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Automatic</span>
                 <span v-if="integration.phase" class="rounded-full border border-border-subtle bg-surface-raised px-2 py-0.5 text-[11px] text-text-muted">{{ integration.phase }}</span>
               </div>
               <p class="mt-1 font-mono text-[11px] text-text-secondary">
@@ -435,6 +461,7 @@ function formatTimestamp(value?: string): string {
               </p>
             </div>
             <button
+              v-if="!automaticProviderAccessOnly"
               type="button"
               class="inline-flex h-8 items-center gap-1.5 rounded-lg border border-danger/30 bg-danger-subtle px-2.5 text-[11px] font-medium text-danger transition hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-60"
               :disabled="busy"
@@ -465,7 +492,7 @@ function formatTimestamp(value?: string): string {
                 </div>
               </div>
               <button
-                v-if="!grant.revoked"
+                v-if="!automaticProviderAccessOnly && !grant.revoked"
                 type="button"
                 class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-warning/30 bg-warning-subtle px-2.5 text-[11px] font-medium text-warning transition hover:bg-warning/10 disabled:cursor-not-allowed disabled:opacity-60"
                 :disabled="busy"
@@ -474,7 +501,7 @@ function formatTimestamp(value?: string): string {
                 <Undo2 class="h-3.5 w-3.5" :stroke-width="1.75" />
                 Revoke
               </button>
-              <span v-else class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-2.5 text-[11px] text-text-muted">
+              <span v-else-if="grant.revoked" class="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-2.5 text-[11px] text-text-muted">
                 <ShieldCheck class="h-3.5 w-3.5" :stroke-width="1.75" />
                 Access blocked
               </span>

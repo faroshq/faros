@@ -389,7 +389,58 @@ func TestDefaultPromptRequiresEvidenceGroundedChecklistUpdates(t *testing.T) {
 	}
 }
 
-func TestProjectPromptDocumentsPreinstalledActionsSDKForActiveGrant(t *testing.T) {
+func TestProjectAssistantPromptsRequireBoundedRepairOrStopCadence(t *testing.T) {
+	project := projectWithRepository("demo-repo", "demo", "github")
+	repository := &ProjectRepositoryView{Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true}
+	required := []string{
+		"Repair-or-stop cadence after a failed preview/API/network/console/provider observation",
+		"at most one targeted fresh read/search answering a new question",
+		"Never repeat an unchanged read/action/hypothesis loop",
+		"one bounded repair attempt using authorized version-checked mutations",
+		"rerun the original failed observation once",
+		"or stop/report the blocker and remaining evidence gap",
+		"Do not start a second diagnosis/read loop without new evidence that changes the question",
+		"Never claim recovery without later success evidence from rerunning that same observation",
+		"Plan and Review remain read-only",
+	}
+	for _, mode := range []projectAssistantCollaborationMode{
+		projectAssistantCollaborationModeDefault,
+		projectAssistantCollaborationModePlan,
+		projectAssistantCollaborationModeReview,
+	} {
+		prompt := projectSystemPromptForMode(project, repository, mode, false)
+		for _, want := range required {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s prompt missing repair-or-stop instruction %q:\n%s", mode, want, prompt)
+			}
+		}
+	}
+	for _, want := range required {
+		if !strings.Contains(projectEinoAssistantV2DeepInstruction, want) {
+			t.Fatalf("deep instruction missing repair-or-stop instruction %q", want)
+		}
+	}
+}
+
+func TestProjectAssistantReadOnlyRecoveryStopsWithoutMutation(t *testing.T) {
+	project := projectWithRepository("demo-repo", "demo", "github")
+	for _, mode := range []projectAssistantCollaborationMode{
+		projectAssistantCollaborationModePlan,
+		projectAssistantCollaborationModeReview,
+	} {
+		prompt := projectSystemPromptForMode(project, nil, mode, false)
+		for _, want := range []string{
+			"they cannot take the mutation branch",
+			"stop/report the blocker after the allowed fresh read or search",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s prompt missing read-only recovery instruction %q:\n%s", mode, want, prompt)
+			}
+		}
+	}
+}
+
+func TestProjectPromptDocumentsPublishedActionsSDKAliasForActiveGrant(t *testing.T) {
 	project := &aiv1alpha1.Project{
 		Spec: aiv1alpha1.ProjectSpec{
 			DisplayName: "Actions app",
@@ -408,7 +459,8 @@ func TestProjectPromptDocumentsPreinstalledActionsSDKForActiveGrant(t *testing.T
 	}
 	prompt := projectSystemPromptForMode(project, nil, projectAssistantCollaborationModeDefault, false)
 	for _, want := range []string{
-		"@kedge/actions-node is preinstalled in the server runtime/executor",
+		`"@kedge/actions-node": "npm:@crwilhit/kedge-actions-node@0.1.0"`,
+		"server component's package.json MUST declare this exact dependency alias",
 		"import { createActionsClient } from '@kedge/actions-node';",
 		"KEDGE_ACTIONS_BASE_URL",
 		"KEDGE_PROJECT",
@@ -419,7 +471,8 @@ func TestProjectPromptDocumentsPreinstalledActionsSDKForActiveGrant(t *testing.T
 		"KEDGE_ACTIONS_TENANT_PATH",
 		"KEDGE_ACTIONS_ORG",
 		"KEDGE_ACTIONS_WORKSPACE",
-		"Do not run npm install",
+		"component automatically installs and reloads dependencies after the manifest synchronizes",
+		"do not manually run npm install, npm exec, npm search, or package discovery",
 		"do not discover the gateway",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -462,7 +515,7 @@ func TestProjectPromptDoesNotClaimActionsSDKWithoutActiveGrant(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := projectSystemPromptForMode(tt.project, nil, projectAssistantCollaborationModeDefault, false)
-			if strings.Contains(prompt, "@kedge/actions-node is preinstalled") || strings.Contains(prompt, "import { createActionsClient } from '@kedge/actions-node';") {
+			if strings.Contains(prompt, "MUST declare this exact dependency alias") || strings.Contains(prompt, "import { createActionsClient } from '@kedge/actions-node';") {
 				t.Fatalf("prompt made an SDK availability claim without an active grant:\n%s", prompt)
 			}
 			if !strings.Contains(prompt, "No active integration action grant is present") {

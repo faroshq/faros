@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	appskills "github.com/faroshq/provider-app-studio/skills"
 )
 
 const (
@@ -47,18 +48,28 @@ var projectActionSchemaDigestRE = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 // a second HTTP server, while production always uses fetchProviderActionCatalog.
 type providerActionCatalogResolver func(context.Context, identity) ([]providerCatalogEntry, error)
 
-type providerCatalogResponse struct {
-	Items []providerCatalogEntry `json:"items"`
-}
-
 // These structs mirror the hub's /api/providers action metadata contract. The
 // App Studio gateway only needs a subset for grant verification, but retaining
 // the published fields makes decoding forward-compatible and keeps fixtures
 // representative of the catalog wire shape.
 type providerCatalogEntry struct {
-	Name    string                  `json:"name"`
-	Ready   bool                    `json:"ready"`
-	Actions []providerCatalogAction `json:"actions"`
+	Name            string                          `json:"name"`
+	Ready           bool                            `json:"ready"`
+	Actions         []providerCatalogAction         `json:"actions"`
+	AssistantSkills []providerCatalogAssistantSkill `json:"assistantSkills"`
+}
+
+type providerCatalogAssistantSkill struct {
+	PackageName string                             `json:"packageName"`
+	Version     string                             `json:"version"`
+	Digest      string                             `json:"digest"`
+	Skill       string                             `json:"skill"`
+	Resources   []providerCatalogAssistantResource `json:"resources"`
+}
+
+type providerCatalogAssistantResource struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 type providerCatalogAction struct {
@@ -197,15 +208,70 @@ func (s *Server) providerActionCatalog(ctx context.Context, id identity) ([]prov
 	return s.fetchProviderActionCatalog(ctx, id)
 }
 
+// providerAssistantSkillSource loads provider-declared packages through the
+// same authenticated /api/providers catalog as Provider Actions. It never
+// contacts provider backends. Skill presence follows the registered
+// CatalogEntry; transient heartbeat/readiness state does not revoke an
+// already-published package.
+func (s *Server) providerAssistantSkillSource(ctx context.Context, id identity) (appskills.Source, error) {
+	if s == nil {
+		return nil, errors.New("provider assistant skill catalog is not configured")
+	}
+	if s.providerActionCatalogResolver == nil && strings.TrimSpace(id.token) == "" {
+		// Provider skills are optional guidance. A request without a caller
+		// bearer cannot fetch the hub catalog, but that must not block bundled
+		// or project skills (or an otherwise actionless assistant turn).
+		return appskills.NewProviderSkillSource(nil)
+	}
+	catalog, err := s.providerActionCatalog(ctx, id)
+	if err != nil {
+		// Provider skills are optional guidance. Return a source whose List
+		// failure is isolated by appskills.Catalog.Load, preserving bundled and
+		// project entries while exposing only its sanitized bounded warning. The
+		// same catalog failure remains an error for Provider Action/grant paths.
+		return appskills.NewProviderSkillUnavailableSource(), nil
+	}
+	packages := make([]appskills.ProviderSkillPackage, 0)
+	for _, provider := range catalog {
+		for _, skill := range provider.AssistantSkills {
+			resources := make([]appskills.ProviderSkillResource, 0, len(skill.Resources))
+			for _, resource := range skill.Resources {
+				resources = append(resources, appskills.ProviderSkillResource{Path: resource.Path, Content: resource.Content})
+			}
+			packages = append(packages, appskills.ProviderSkillPackage{
+				ProviderName: provider.Name,
+				PackageName:  skill.PackageName,
+				Version:      skill.Version,
+				Digest:       skill.Digest,
+				Skill:        skill.Skill,
+				Resources:    resources,
+			})
+		}
+	}
+	return appskills.NewProviderSkillSource(packages)
+}
+
 func (s *Server) fetchProviderActionCatalog(ctx context.Context, id identity) ([]providerCatalogEntry, error) {
+	catalog, err := s.fetchProviderCatalog(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.Items, nil
+}
+
+type providerCatalogFetchResponse struct {
+	Items []providerCatalogEntry `json:"items"`
+}
+
+func (s *Server) fetchProviderCatalog(ctx context.Context, id identity) (providerCatalogFetchResponse, error) {
 	base := strings.TrimRight(strings.TrimSpace(s.hubBase), "/")
 	if base == "" {
-		return nil, errors.New("provider action catalog hub endpoint is not configured")
+		return providerCatalogFetchResponse{}, errors.New("provider catalog hub endpoint is not configured")
 	}
 	endpoint := base + providerCatalogPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("new provider action catalog request: %w", err)
+		return providerCatalogFetchResponse{}, fmt.Errorf("new provider catalog request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	if id.token != "" {
@@ -239,20 +305,20 @@ func (s *Server) fetchProviderActionCatalog(ctx context.Context, id identity) ([
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", endpoint, err)
+		return providerCatalogFetchResponse{}, fmt.Errorf("GET %s: %w", endpoint, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, providerCatalogMaxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read provider action catalog response: %w", err)
+		return providerCatalogFetchResponse{}, fmt.Errorf("read provider catalog response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GET %s returned status %d", endpoint, resp.StatusCode)
+		return providerCatalogFetchResponse{}, fmt.Errorf("GET %s returned status %d", endpoint, resp.StatusCode)
 	}
-	var catalog providerCatalogResponse
+	var catalog providerCatalogFetchResponse
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&catalog); err != nil {
-		return nil, fmt.Errorf("decode provider action catalog response: %w", err)
+		return providerCatalogFetchResponse{}, fmt.Errorf("decode provider catalog response: %w", err)
 	}
-	return catalog.Items, nil
+	return catalog, nil
 }

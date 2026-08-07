@@ -10,7 +10,10 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,12 +52,75 @@ type actionTestExecutor struct {
 func (e *actionTestExecutor) ExecuteTableQuery(_ context.Context, target backend.QueryExecutionTarget) (queryapi.QueryTableResult, error) {
 	e.calls++
 	e.target = target
+	if len(target.Projection) > 0 {
+		if _, err := queryapi.SelectTableSQL(target.Table, target.Projection, target.Limit, target.AllowedColumns); err != nil {
+			return queryapi.QueryTableResult{}, err
+		}
+	}
 	return queryapi.QueryTableResult{
 		ActionVersion: queryapi.ActionVersionV1,
 		TableRef:      "taxi-trips",
 		Columns:       []queryapi.QueryColumn{{Name: "trip_id", Type: "BIGINT"}},
 		Rows:          []map[string]any{{"trip_id": int64(1)}},
 	}, nil
+}
+
+func TestActionExecutorUnknownProjectionReturnsTypedFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := databricksv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Databricks scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	authority := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		actionTableObject(), actionWarehouseObject(), actionConnectionObject(), actionSecretObject(),
+	).Build()
+	actionExecutor := &ActionExecutor{
+		factory: &ClientFactory{}, authorityClient: authority,
+		identity: identity{tenantPath: "root:kedge:tenants:org:workspace", clusterID: "cluster-a", token: "caller-token"},
+		executor: &actionTestExecutor{}, authorizer: &actionTestAuthorizer{},
+	}
+	_, err := actionExecutor.QueryTable(context.Background(), actions.ResourceRef{
+		APIVersion: "databricks.kedge.faros.sh/v1alpha1", Kind: "Table", Resource: "tables", Name: "taxi-trips",
+	}, actions.QueryInput{Columns: []string{"missing"}, Limit: 1})
+	var typed *actions.ActionError
+	if !errors.As(err, &typed) || typed.Code != actions.ActionErrorCodeSchemaProjectionInvalid {
+		t.Fatalf("unknown projection error = %T %v, want typed schema projection failure", err, err)
+	}
+	if typed.Status != 400 || typed.Retryable || !strings.Contains(typed.Message, "missing") {
+		t.Fatalf("typed projection failure = %#v", typed)
+	}
+}
+
+func TestActionExecutorNotReadyResourceReturnsTypedFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := databricksv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Databricks scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	table := actionTableObject()
+	table.Status.Conditions = nil
+	authority := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		table, actionWarehouseObject(), actionConnectionObject(), actionSecretObject(),
+	).Build()
+	actionExecutor := &ActionExecutor{
+		factory: &ClientFactory{}, authorityClient: authority,
+		identity: identity{tenantPath: "root:kedge:tenants:org:workspace", clusterID: "cluster-a", token: "caller-token"},
+		executor: &actionTestExecutor{}, authorizer: &actionTestAuthorizer{},
+	}
+	_, err := actionExecutor.QueryTable(context.Background(), actions.ResourceRef{
+		APIVersion: "databricks.kedge.faros.sh/v1alpha1", Kind: "Table", Resource: "tables", Name: "taxi-trips",
+	}, actions.QueryInput{Limit: 1})
+	var typed *actions.ActionError
+	if !errors.As(err, &typed) || typed.Code != actions.ActionErrorCodeResourceNotReady {
+		t.Fatalf("not-ready error = %T %v, want typed resource-not-ready failure", err, err)
+	}
+	if typed.Status != http.StatusConflict || typed.Retryable {
+		t.Fatalf("typed not-ready failure = %#v", typed)
+	}
 }
 
 func TestActionExecutorResolvesTenantResourcesWithoutControlPlaneWrites(t *testing.T) {

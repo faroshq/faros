@@ -124,6 +124,197 @@ func TestForwardOnlyProviderAction(t *testing.T) {
 	}
 }
 
+func TestProviderTypedFailurePreservesHubIdentityStatusAndRetryability(t *testing.T) {
+	base, _ := url.Parse("https://provider.invalid/vw")
+	reg := providers.NewRegistry()
+	action := mustAction(t, "query_table/v1", "databricks.kedge.faros.sh/v1alpha1", "Table", "tables", `{}`, `{"type":"object"}`, providersv1alpha1.ProviderActionIdempotencyInherent, providers.ProviderActionLimits{})
+	reg.Upsert(providers.Provider{Name: "databricks", EndpointsValid: true, VirtualWorkspaceURL: base, Actions: []providers.ProviderAction{action}})
+	h := New(Options{
+		Registry: reg, Logger: logr.Discard(),
+		TenantResolver:  fakeTenantResolver(func(*http.Request) (string, string, error) { return "caller", "root:kedge:tenants:org:ws", nil }),
+		ClusterResolver: func(context.Context, string) (string, error) { return "cluster-a", nil },
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusConflict,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"resource_not_ready","message":"bound Databricks resource is not ready","retryable":false}}`)),
+			}, nil
+		})},
+	})
+	r := httptest.NewRequest(http.MethodPost, PathInvoke, strings.NewReader(fmt.Sprintf(`{"provider":"databricks","action":"query_table","actionVersion":"v1","schemaDigest":%q,"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`, action.SchemaDigest)))
+	r.Header.Set("Authorization", "Bearer caller-token")
+	r.Header.Set("X-Request-ID", "request-typed")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, r)
+	if rw.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rw.Code, rw.Body.String())
+	}
+	var envelope actionEnvelope
+	if err := json.Unmarshal(rw.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envelope.RequestID != "request-typed" || envelope.Provider != "databricks" || envelope.Action != "query_table" || envelope.ActionVersion != "v1" {
+		t.Fatalf("identity envelope = %#v", envelope)
+	}
+	if envelope.ResourceRef == nil || envelope.ResourceRef.Name != "taxi-trips" {
+		t.Fatalf("resource identity = %#v", envelope.ResourceRef)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "resource_not_ready" || envelope.Error.Message != "bound Databricks resource is not ready" || envelope.Error.Retryable {
+		t.Fatalf("typed error = %#v", envelope.Error)
+	}
+}
+
+func TestSchemaProjectionFailurePreservesHubIdentityStatusAndRetryability(t *testing.T) {
+	base, _ := url.Parse("https://provider.invalid/vw")
+	reg := providers.NewRegistry()
+	action := mustAction(t, "query_table/v1", "databricks.kedge.faros.sh/v1alpha1", "Table", "tables", `{}`, `{"type":"object"}`, providersv1alpha1.ProviderActionIdempotencyInherent, providers.ProviderActionLimits{})
+	reg.Upsert(providers.Provider{Name: "databricks", EndpointsValid: true, VirtualWorkspaceURL: base, Actions: []providers.ProviderAction{action}})
+	h := New(Options{
+		Registry: reg, Logger: logr.Discard(),
+		TenantResolver:  fakeTenantResolver(func(*http.Request) (string, string, error) { return "caller", "root:kedge:tenants:org:ws", nil }),
+		ClusterResolver: func(context.Context, string) (string, error) { return "cluster-a", nil },
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				// This is the exact typed body emitted by the Databricks action
+				// handler for an unknown requested projection.
+				Body: io.NopCloser(strings.NewReader(`{"error":{"code":"schema_projection_invalid","message":"requested column \"missing\" is not present in the imported table schema","retryable":false}}`)),
+			}, nil
+		})},
+	})
+	r := httptest.NewRequest(http.MethodPost, PathInvoke, strings.NewReader(fmt.Sprintf(`{"provider":"databricks","action":"query_table","actionVersion":"v1","schemaDigest":%q,"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{"columns":["missing"],"limit":1}}`, action.SchemaDigest)))
+	r.Header.Set("Authorization", "Bearer caller-token")
+	r.Header.Set("X-Request-ID", "request-projection")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, r)
+	if rw.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rw.Code, rw.Body.String())
+	}
+	var envelope actionEnvelope
+	if err := json.Unmarshal(rw.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envelope.RequestID != "request-projection" || envelope.Provider != "databricks" || envelope.Action != "query_table" || envelope.ActionVersion != "v1" {
+		t.Fatalf("identity envelope = %#v", envelope)
+	}
+	if envelope.ResourceRef == nil || envelope.ResourceRef.APIVersion != "databricks.kedge.faros.sh/v1alpha1" || envelope.ResourceRef.Kind != "Table" || envelope.ResourceRef.Resource != "tables" || envelope.ResourceRef.Name != "taxi-trips" {
+		t.Fatalf("resource identity = %#v", envelope.ResourceRef)
+	}
+	if envelope.Error == nil || envelope.Error.Code != "schema_projection_invalid" || envelope.Error.Message != `requested column "missing" is not present in the imported table schema` || envelope.Error.Retryable {
+		t.Fatalf("typed projection error = %#v", envelope.Error)
+	}
+}
+
+func TestProviderFailureParsingFallsBackForUnsafeOrMalformedBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed", body: `{"error":{"code":"backend_failure"}`},
+		{name: "missing retryability", body: `{"error":{"code":"backend_failure","message":"backend failed"}}`},
+		{name: "unknown code", body: `{"error":{"code":"internal_sql","message":"backend failed","retryable":true}}`},
+		{name: "unknown field", body: `{"error":{"code":"backend_failure","message":"backend failed","retryable":true,"details":"x"}}`},
+		{name: "unsafe message", body: `{"error":{"code":"backend_failure","message":"request https://dbc.example.com/token root:kedge:tenants:org:ws SELECT * FROM x","retryable":true}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseProviderActionFailure([]byte(tc.body), http.StatusBadGateway); ok {
+				t.Fatalf("unsafe provider body parsed successfully: %s", tc.body)
+			}
+		})
+	}
+	oversized := strings.Repeat("x", maxProviderErrorBytes+1)
+	if _, ok := parseProviderActionFailure([]byte(oversized), http.StatusBadGateway); ok {
+		t.Fatal("oversized provider body parsed successfully")
+	}
+	projectionBody := `{"error":{"code":"schema_projection_invalid","message":"requested column \"missing\" is not present in the imported table schema","retryable":false}}`
+	projection, ok := parseProviderActionFailure([]byte(projectionBody), http.StatusBadRequest)
+	if !ok || projection.code != "schema_projection_invalid" || projection.retryable || !strings.Contains(projection.message, "missing") {
+		t.Fatalf("projection failure = %#v, ok=%t", projection, ok)
+	}
+}
+
+func TestProviderFailureRetryabilityIsNotDerivedFromStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status    int
+		retryable bool
+	}{
+		{status: http.StatusConflict, retryable: false},
+		{status: http.StatusServiceUnavailable, retryable: true},
+	} {
+		body := fmt.Sprintf(`{"error":{"code":"resource_not_ready","message":"dependency is not ready","retryable":%t}}`, tc.retryable)
+		failure, ok := parseProviderActionFailure([]byte(body), tc.status)
+		if !ok || failure.status != tc.status || failure.retryable != tc.retryable {
+			t.Fatalf("parsed failure = %#v, ok=%t; want status=%d retryable=%t", failure, ok, tc.status, tc.retryable)
+		}
+	}
+	backendAuth := `{"error":{"code":"backend_failure","message":"databricks statement failed","retryable":false}}`
+	if _, ok := parseProviderActionFailure([]byte(backendAuth), http.StatusUnauthorized); ok {
+		t.Fatal("backend dependency 401 was exposed as a caller-auth failure")
+	}
+}
+
+func TestProviderFailureStatusMismatchFallsBackToGenericHubError(t *testing.T) {
+	base, _ := url.Parse("https://provider.invalid/vw")
+	actionBody := func(code, message string, retryable bool) string {
+		return fmt.Sprintf(`{"error":{"code":%q,"message":%q,"retryable":%t}}`, code, message, retryable)
+	}
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "projection on service unavailable",
+			status: http.StatusServiceUnavailable,
+			body:   actionBody("schema_projection_invalid", `requested column "missing" is not present in the imported table schema`, false),
+		},
+		{
+			name:   "backend dependency unauthorized",
+			status: http.StatusUnauthorized,
+			body:   actionBody("backend_failure", "databricks statement failed", false),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := providers.NewRegistry()
+			action := mustAction(t, "query_table/v1", "databricks.kedge.faros.sh/v1alpha1", "Table", "tables", `{}`, `{"type":"object"}`, providersv1alpha1.ProviderActionIdempotencyInherent, providers.ProviderActionLimits{})
+			reg.Upsert(providers.Provider{Name: "databricks", EndpointsValid: true, VirtualWorkspaceURL: base, Actions: []providers.ProviderAction{action}})
+			h := New(Options{
+				Registry: reg, Logger: logr.Discard(),
+				TenantResolver:  fakeTenantResolver(func(*http.Request) (string, string, error) { return "caller", "root:kedge:tenants:org:ws", nil }),
+				ClusterResolver: func(context.Context, string) (string, error) { return "cluster-a", nil },
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: tc.status,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(tc.body)),
+					}, nil
+				})},
+			})
+			r := httptest.NewRequest(http.MethodPost, PathInvoke, strings.NewReader(fmt.Sprintf(`{"provider":"databricks","action":"query_table","actionVersion":"v1","schemaDigest":%q,"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`, action.SchemaDigest)))
+			r.Header.Set("Authorization", "Bearer caller-token")
+			r.Header.Set("X-Request-ID", "request-fallback")
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, r)
+			if rw.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want generic 502; body=%s", rw.Code, rw.Body.String())
+			}
+			var envelope actionEnvelope
+			if err := json.Unmarshal(rw.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode generic envelope: %v", err)
+			}
+			if envelope.Error == nil || envelope.Error.Code != "provider_action_failed" || envelope.Error.Message != "provider action failed" || envelope.Error.Retryable {
+				t.Fatalf("generic provider failure = %#v", envelope.Error)
+			}
+			if envelope.Error.Code == "unauthenticated" || strings.Contains(envelope.Error.Message, "missing") || strings.Contains(envelope.Error.Message, "statement") {
+				t.Fatalf("incompatible provider detail leaked into generic error = %#v", envelope.Error)
+			}
+		})
+	}
+}
+
 func TestProviderActionRejectsSpoofedOrMissingIdentity(t *testing.T) {
 	base, _ := url.Parse("https://provider.invalid/vw")
 	reg := providers.NewRegistry()

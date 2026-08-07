@@ -184,8 +184,9 @@ func (c StatementClient) executeStatement(ctx context.Context, target queryapi.T
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return statementResponse{}, statementHTTPError{
-			status: resp.Status,
-			body:   strings.TrimSpace(string(body)),
+			statusCode: resp.StatusCode,
+			status:     resp.Status,
+			body:       strings.TrimSpace(string(body)),
 		}
 	}
 	var out statementResponse
@@ -301,8 +302,9 @@ func boundQueryResult(result queryapi.QueryTableResult) queryapi.QueryTableResul
 }
 
 type statementHTTPError struct {
-	status string
-	body   string
+	statusCode int
+	status     string
+	body       string
 }
 
 func (e statementHTTPError) Error() string {
@@ -311,6 +313,26 @@ func (e statementHTTPError) Error() string {
 
 func (e statementHTTPError) SafeStatusMessage() string {
 	return statementHTTPFailureSafeMessage + ": " + e.status
+}
+
+func (e statementHTTPError) ActionFailureCode() string { return "backend_failure" }
+
+func (e statementHTTPError) ActionFailureMessage() string { return e.SafeStatusMessage() }
+
+func (e statementHTTPError) ActionFailureStatus() int {
+	if e.statusCode == http.StatusTooManyRequests || e.statusCode >= http.StatusInternalServerError {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
+}
+
+func (e statementHTTPError) ActionFailureRetryable() bool {
+	switch e.statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	default:
+		return e.statusCode >= http.StatusInternalServerError && e.statusCode <= 599
+	}
 }
 
 type statementStateError struct {
@@ -331,6 +353,11 @@ func (e statementStateError) SafeStatusMessage() string {
 	}
 	return "databricks statement did not complete: " + e.state
 }
+
+func (e statementStateError) ActionFailureCode() string    { return "backend_failure" }
+func (e statementStateError) ActionFailureStatus() int     { return http.StatusBadGateway }
+func (e statementStateError) ActionFailureRetryable() bool { return false }
+func (e statementStateError) ActionFailureMessage() string { return e.SafeStatusMessage() }
 
 // Stub is a local-development validator used only when DATABRICKS_DEV_STATIC_TABLES
 // is explicitly enabled.

@@ -848,7 +848,7 @@ e2e-infra-provider: build-hub build-infrastructure-provider ## Run infrastructur
 ## invoking the action through the hub. KEDGE_E2E_KEEP_DATA=true preserves
 ## logs and source/readiness/interaction evidence under the suite temp dir.
 E2E_PROVIDER_ACTIONS_TIMEOUT ?= 20m
-.PHONY: e2e-provider-actions e2e-provider-actions-live
+.PHONY: e2e-provider-actions e2e-provider-actions-live e2e-provider-actions-npm
 e2e-provider-actions: build-hub build-app-studio-provider build-databricks-provider ## Run local generated-app provider-actions E2E
 	@test -z "$$(lsof -ti :19463 :16463 :18085 :18086 :25063 :2380 2>/dev/null)" || { \
 		echo "ports 19463/16463/18085/18086/25063/2380 are in use; stop the provider-actions E2E processes first"; \
@@ -862,6 +862,13 @@ e2e-provider-actions: build-hub build-app-studio-provider build-databricks-provi
 e2e-provider-actions-live: ## Run the opt-in live generated-app provider-actions smoke
 	KEDGE_E2E_PROVIDER_ACTIONS_LIVE_ONLY=true KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true \
 		go test ./test/e2e/suites/provideractions/... -run '^TestOptionalLiveProviderActionSDK$$' -v -timeout $(E2E_PROVIDER_ACTIONS_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
+
+## Optional registry-backed package smoke. The live-only flag keeps TestMain
+## from starting the full hub/provider stack; set KEDGE_E2E_PROVIDER_ACTIONS_NPM_REGISTRY
+## to use a non-default registry mirror.
+e2e-provider-actions-npm: ## Verify the published Actions SDK alias with a clean npm install
+	KEDGE_E2E_PROVIDER_ACTIONS_LIVE_ONLY=true KEDGE_E2E_PROVIDER_ACTIONS_NPM_SMOKE=true \
+		go test ./test/e2e/suites/provideractions/... -run '^TestOptionalPublishedActionsSDKCleanInstall$$' -v -timeout $(E2E_PROVIDER_ACTIONS_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
 ## Edges provider e2e (embedded kcp + edges-provider init/serve subprocesses).
 ## Covers the control-plane + auth surface of the decoupled edges provider:
@@ -1689,9 +1696,9 @@ uninstall-provider-vibe-studio: ## Delete the vibe-studio CatalogEntry + Provide
 
 # --- Dev agent image (template-native development mode) ---
 # The static control binary an init container injects into any dev-mode
-# component (docs/app-studio-template-sandboxes.md §2). Scratch image,
-# stdlib-only module plus the canonical provider-sdk/actions-node package copied
-# from the repository root into the scratch image.
+# component (docs/app-studio-template-sandboxes.md §2). Scratch image with a
+# stdlib-only module; application dependencies are installed by each component
+# from its declared package manifest, not projected by this image.
 DEV_AGENT_DIR ?= providers/infrastructure/dev-agent
 DEV_AGENT_IMAGE ?= ghcr.io/faroshq/kedge-dev-agent:latest
 DEV_AGENT_PLATFORM ?= linux/$(ARCH)

@@ -26,11 +26,13 @@ import (
 	"sync/atomic"
 	"testing"
 
+	appskills "github.com/faroshq/provider-app-studio/skills"
 	"github.com/gorilla/mux"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/tenant"
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 func TestFetchProviderActionCatalogRejectsSelfSignedByDefault(t *testing.T) {
@@ -42,6 +44,125 @@ func TestFetchProviderActionCatalogRejectsSelfSignedByDefault(t *testing.T) {
 	_, err := (&Server{hubBase: upstream.URL}).fetchProviderActionCatalog(context.Background(), identity{token: "caller-token"})
 	if err == nil {
 		t.Fatal("catalog lookup accepted a self-signed hub without an explicit insecure opt-in")
+	}
+}
+
+func TestProviderAssistantSkillSourceKeepsCatalogPackagesAcrossReadinessChanges(t *testing.T) {
+	valid := appskills.ProviderSkillPackage{
+		ProviderName: "databricks",
+		PackageName:  "databricks-app-integration",
+		Version:      "1.0.0",
+		Skill:        "---\nname: databricks-app-integration\ndescription: integration guidance\n---\nbody\n",
+	}
+	digest, err := appskills.ProviderSkillPackageDigest(valid)
+	if err != nil {
+		t.Fatalf("provider skill digest: %v", err)
+	}
+	valid.Digest = digest
+	ready := true
+	server := &Server{}
+	server.providerActionCatalogResolver = func(context.Context, identity) ([]providerCatalogEntry, error) {
+		return []providerCatalogEntry{
+			{Name: "databricks", Ready: ready, AssistantSkills: []providerCatalogAssistantSkill{{
+				PackageName: valid.PackageName,
+				Version:     valid.Version,
+				Digest:      valid.Digest,
+				Skill:       valid.Skill,
+			}}},
+		}, nil
+	}
+	source, err := server.providerAssistantSkillSource(context.Background(), identity{})
+	if err != nil {
+		t.Fatalf("providerAssistantSkillSource: %v", err)
+	}
+	list, err := source.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("provider skill source list: %v", err)
+	}
+	if len(list.Packages) != 1 || list.Packages[0].Path != "providers/databricks/databricks-app-integration" {
+		t.Fatalf("provider packages = %#v, want registered catalog package", list.Packages)
+	}
+	if list.Packages[0].Digest != digest {
+		t.Fatalf("provider package digest = %q, want %q", list.Packages[0].Digest, digest)
+	}
+	firstSnapshot, err := appskills.Build(context.Background(), appskills.CatalogOptions{Sources: []appskills.Source{source}})
+	if err != nil {
+		t.Fatalf("ready catalog build: %v", err)
+	}
+	ready = false
+	offlineSource, err := server.providerAssistantSkillSource(context.Background(), identity{})
+	if err != nil {
+		t.Fatalf("offline providerAssistantSkillSource: %v", err)
+	}
+	offlineSnapshot, err := appskills.Build(context.Background(), appskills.CatalogOptions{Sources: []appskills.Source{offlineSource}})
+	if err != nil {
+		t.Fatalf("offline catalog build: %v", err)
+	}
+	if firstSnapshot.CatalogDigest != offlineSnapshot.CatalogDigest || len(offlineSnapshot.Entries) != 1 || offlineSnapshot.Entries[0].Digest != digest {
+		t.Fatalf("readiness changed provider skill catalog: ready=%#v offline=%#v", firstSnapshot, offlineSnapshot)
+	}
+}
+
+func TestProviderAssistantSkillSourceWithoutBearerOmitsOptionalPackages(t *testing.T) {
+	source, err := (&Server{hubBase: "https://hub.invalid"}).providerAssistantSkillSource(context.Background(), identity{})
+	if err != nil {
+		t.Fatalf("missing-bearer provider source: %v", err)
+	}
+	list, err := source.List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("missing-bearer source list: %v", err)
+	}
+	if len(list.Packages) != 0 || len(list.Warnings) != 0 {
+		t.Fatalf("missing-bearer provider source = %#v, want empty optional source", list)
+	}
+}
+
+func TestProjectAssistantSkillCatalogResolverFailureIsolated(t *testing.T) {
+	server := &Server{}
+	server.providerActionCatalogResolver = func(context.Context, identity) ([]providerCatalogEntry, error) {
+		return nil, errors.New("provider catalog backend secret should not escape")
+	}
+	snapshot, err := server.projectAssistantSkillCatalogSnapshot(context.Background(), workspace.Scope{}, identity{token: "caller-token"})
+	if err != nil {
+		t.Fatalf("catalog snapshot = %v, want source failure isolation", err)
+	}
+	if len(snapshot.Entries) == 0 {
+		t.Fatal("bundled skills disappeared after optional provider catalog failure")
+	}
+	foundWarning := false
+	for _, warning := range snapshot.Warnings {
+		if warning.Code == "source_list_failed" && warning.Scope == appskills.ScopeSystem {
+			foundWarning = true
+		}
+		if strings.Contains(warning.Message, "secret") || strings.Contains(warning.Message, "provider catalog") {
+			t.Fatalf("provider fetch error escaped warning sanitization: %#v", warning)
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("snapshot warnings = %#v, want sanitized provider source_list_failed", snapshot.Warnings)
+	}
+}
+
+func TestVerifyProjectActionGrantsPropagatesCatalogFailure(t *testing.T) {
+	expected := errors.New("provider catalog backend unavailable")
+	server := &Server{}
+	server.providerActionCatalogResolver = func(context.Context, identity) ([]providerCatalogEntry, error) {
+		return nil, expected
+	}
+	ref := &aiv1alpha1.ProjectProviderResourceReference{
+		Name:       "orders",
+		APIVersion: databricksTableAPIVersion,
+		Kind:       databricksTableKind,
+		Resource:   databricksTableResource,
+	}
+	actions := []aiv1alpha1.ProjectProviderActionSpec{{
+		Name:         projectIntegrationActionQueryTable,
+		Version:      projectIntegrationActionVersionV1,
+		SchemaDigest: testProjectActionSchemaDigest,
+	}}
+	_, err := server.verifyProjectActionGrants(context.Background(), identity{user: "alice@example.com"}, "databricks", ref, actions, false)
+	if !errors.Is(err, expected) {
+		t.Fatalf("verifyProjectActionGrants() error = %v, want provider catalog failure %v", err, expected)
 	}
 }
 

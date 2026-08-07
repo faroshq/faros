@@ -954,7 +954,7 @@ const launcherBuiltInItems = computed<WorkbenchLauncherItem[]>(() => [
   {
     id: 'builtin:integrations',
     title: 'Integrations',
-    subtitle: 'Grant and revoke provider actions for this project',
+    subtitle: 'Review automatic provider actions for this project',
     icon: Link2,
     builtInTab: 'integrations',
   },

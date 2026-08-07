@@ -453,15 +453,6 @@ func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopment
 		mounts = append(mounts, map[string]any{"name": "kedge-dev-agent-bin", "mountPath": devAgentBinDir, "readOnly": true})
 		extraVolumes = append(extraVolumes, map[string]any{"name": "kedge-dev-agent-bin", "emptyDir": map[string]any{}})
 	}
-	// The injected Actions SDK is resolved by Node's normal bare-specifier
-	// lookup from /node_modules. Reusing the agent-bin emptyDir keeps the SDK
-	// out of the project workspace and gives the init container the only
-	// writable view. A template-owned /node_modules mount would mask the
-	// injected package (or create ambiguous duplicate mounts), so reject it
-	// before synthesizing the dev pod.
-	if hasMountPath(mounts, "/node_modules", false) {
-		return nil, nil, false, fmt.Errorf("production workload already mounts reserved Actions SDK path %q", "/node_modules")
-	}
 	if !hasMountPath(mounts, "/tmp", true) {
 		mounts = append(mounts, map[string]any{"name": "kedge-dev-runtime-tmp", "mountPath": "/tmp"})
 		extraVolumes = append(extraVolumes, map[string]any{"name": "kedge-dev-runtime-tmp", "emptyDir": map[string]any{}})
@@ -546,7 +537,6 @@ func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopment
 		"volumeMounts": []any{
 			copyVolumeMount(workspaceMount, workingDir),
 			map[string]any{"name": agentBinMount["name"], "mountPath": devAgentBinDir, "readOnly": true},
-			map[string]any{"name": agentBinMount["name"], "mountPath": "/node_modules", "readOnly": true},
 			map[string]any{"name": "kedge-dev-exec-tmp", "mountPath": "/tmp"},
 			map[string]any{"name": "kedge-dev-no-serviceaccount", "mountPath": devServiceAccountDir, "readOnly": true},
 		},
@@ -567,9 +557,6 @@ func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopment
 	})
 	app["volumeMounts"] = append(app["volumeMounts"].([]any), map[string]any{
 		"name": devActionsCABundleVolumeName, "mountPath": "/etc/kedge/actions-ca", "readOnly": true,
-	})
-	app["volumeMounts"] = append(app["volumeMounts"].([]any), map[string]any{
-		"name": agentBinMount["name"], "mountPath": "/node_modules", "readOnly": true,
 	})
 	// These annotations let the attestor bind the reviewed projected token to
 	// the exact tenant/project instance that requested the exchange. They are

@@ -1,8 +1,19 @@
-# `@kedge/actions-node`
+# `@crwilhit/kedge-actions-node`
 
-`@kedge/actions-node` is a server-only SDK for generated App Studio
-applications. It invokes a project integration through App Studio's
-authenticated gateway; the gateway selects the provider and bound resource:
+`@crwilhit/kedge-actions-node` is the published server-only SDK artifact for
+generated App Studio applications. Consumers intentionally install it under
+the stable `@kedge/actions-node` import name with this exact npm alias:
+
+```json
+{
+  "dependencies": {
+    "@kedge/actions-node": "npm:@crwilhit/kedge-actions-node@0.1.0"
+  }
+}
+```
+
+The package invokes a project integration through App Studio's authenticated
+gateway; the gateway selects the provider and bound resource:
 
 ```js
 import { createActionsClient } from '@kedge/actions-node';
@@ -27,25 +38,23 @@ or pass provider URLs, credentials, resource references, or other topology in
 action input. The SDK throws when `window` or `document` is present as a
 defense against accidental browser bundling.
 
-## Development sandbox delivery
+## Installation and development sandboxes
 
-App Studio development sandboxes receive the canonical package through the
-platform-owned `kedge-dev-agent` image. At startup, its installer validates the
-package metadata (`package.json`) and required `index.mjs`/`index.d.ts` files,
-then atomically installs them into a shared `emptyDir`. The app and executor
-containers mount that same volume read-only at `/node_modules`, so generated
-code uses the standard bare import
-`import { createActionsClient } from '@kedge/actions-node';` without `npm install`
-and without mutating the project PVC or its `node_modules`.
+The published artifact is installed through the exact alias shown above. Keep
+the alias in the server component's `package.json` and keep application code on
+the stable consumer import:
 
-This is development-sandbox injection only. Production workloads still require
-the normal pinned package install/publication path; this mechanism does not
-claim that production publication or installation is complete. The image-build
-and Docker shared-volume Node import checks pass. In the local POC, Ready pod
-`data-dashboard` passed the executor bare-import check (function), the app
-SDK/environment/token preflight, and a `taxi-trips` `query_table/v1` call that
-returned `rowCount=1`, `columnCount=6`, and `truncated=false` without printing
-row data. This is local POC evidence only, not a production claim.
+```js
+import { createActionsClient } from '@kedge/actions-node';
+```
+
+App Studio development sandboxes use the component toolchain's normal package
+installation and reload flow. The platform-owned `kedge-dev-agent` supplies
+the coordinator, runtime supervisor, and executor only; it does not copy,
+validate, or mount this SDK. This keeps dependency resolution explicit in the
+application's manifest and makes development and production use the same
+published artifact. The SDK remains server-only and the app still receives
+only the short-lived workload credential and non-secret action context.
 
 Use an atomically refreshed token file (the default when
 `KEDGE_ACTIONS_TOKEN_FILE` is set), a static workload token, or a refreshable credential provider. A provider is

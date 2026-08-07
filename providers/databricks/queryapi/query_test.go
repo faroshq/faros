@@ -9,6 +9,7 @@
 package queryapi
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -46,8 +47,18 @@ func TestSelectTableSQLBuildsBoundedProjection(t *testing.T) {
 
 func TestSelectTableSQLRejectsRawSQLAndUnknownColumns(t *testing.T) {
 	for _, projection := range [][]string{{"order_id); DROP TABLE users; --"}, {"missing"}} {
-		if _, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, projection, 10, []string{"order_id"}); err == nil {
+		_, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, projection, 10, []string{"order_id"})
+		if err == nil {
 			t.Fatalf("SelectTableSQL accepted unsafe projection %#v", projection)
+		}
+		if projection[0] == "missing" {
+			var validation *ValidationError
+			if !errors.As(err, &validation) || validation.Code != ErrorCodeSchemaProjectionInvalid {
+				t.Fatalf("unknown projection error = %T %v, want %q", err, err, ErrorCodeSchemaProjectionInvalid)
+			}
+			if validation.Message != `requested column "missing" is not present in the imported table schema` {
+				t.Fatalf("unknown projection message = %q", validation.Message)
+			}
 		}
 	}
 	if _, err := SelectTableSQL(TableRef{Catalog: "sales", Schema: "gold", Table: "orders"}, nil, MaxQueryLimit+1, nil); err == nil {

@@ -138,6 +138,67 @@ type CatalogEntrySpec struct {
 	// +listType=map
 	// +listMapKey=id
 	Actions []ProviderActionSpec `json:"actions,omitempty"`
+
+	// AssistantSkills declares read-only App Studio skill packages supplied by
+	// this provider. Packages are embedded in the CatalogEntry so the hub can
+	// authenticate and validate the artifact without contacting a provider
+	// runtime or learning any provider credentials. The App Studio projection
+	// publishes these packages as provider-qualified system skills.
+	// +optional
+	// +listType=map
+	// +listMapKey=packageName
+	// +kubebuilder:validation:MaxItems=64
+	AssistantSkills []ProviderAssistantSkillSpec `json:"assistantSkills,omitempty"`
+}
+
+// ProviderAssistantSkillSpec declares one immutable, provider-supplied App
+// Studio skill package. Skill is the complete raw SKILL.md document, including
+// its YAML frontmatter and markdown body. The digest is the sha256 digest of
+// the canonical package payload produced by ProviderAssistantSkillDigest.
+type ProviderAssistantSkillSpec struct {
+	// PackageName is the provider-local package identity. The hub qualifies it
+	// as providers/<provider>/<packageName> before exposing it to App Studio.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	PackageName string `json:"packageName"`
+
+	// Version is the provider-owned immutable package version.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Version string `json:"version"`
+
+	// Digest is the deterministic package integrity digest.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	Digest string `json:"digest"`
+
+	// Skill is the complete raw SKILL.md document. App Studio parses the
+	// document using its strict, authority-free frontmatter contract.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32768
+	Skill string `json:"skill"`
+
+	// Resources are optional package-relative supporting files. They are
+	// included inline so no arbitrary provider URL or fetch capability is
+	// admitted into the skill source.
+	// +optional
+	// +listType=map
+	// +listMapKey=path
+	// +kubebuilder:validation:MaxItems=64
+	Resources []ProviderAssistantSkillResource `json:"resources,omitempty"`
+}
+
+// ProviderAssistantSkillResource is one bounded, package-relative supporting
+// file for a ProviderAssistantSkillSpec.
+type ProviderAssistantSkillResource struct {
+	// Path is relative to the provider skill package and must not contain
+	// traversal, absolute, or SKILL.md paths.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Path string `json:"path"`
+
+	// Content is UTF-8 resource content.
+	// +kubebuilder:validation:MaxLength=65536
+	Content string `json:"content"`
 }
 
 // ProviderActionSpec declares one provider-owned, versioned action. The

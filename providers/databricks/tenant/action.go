@@ -10,6 +10,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -57,7 +58,12 @@ func (f *ClientFactory) ActionExecutorForRequest(r *http.Request, executor backe
 // QueryTable resolves the provider-owned Table -> Warehouse -> Connection ->
 // Secret chain through the provider authority manager and invokes the shared
 // SQL executor. No resource writes occur on this path.
-func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef, input actions.QueryInput) (queryapi.QueryTableResult, error) {
+func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef, input actions.QueryInput) (result queryapi.QueryTableResult, retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = sanitizeActionError(retErr)
+		}
+	}()
 	if e == nil || e.factory == nil {
 		return queryapi.QueryTableResult{}, fmt.Errorf("tenant client unavailable")
 	}
@@ -133,14 +139,14 @@ func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef
 	if len(request.Columns) > 0 && len(allowed) == 0 {
 		return queryapi.QueryTableResult{}, fmt.Errorf("table schema is not available for projection")
 	}
-	result, err := e.executor.ExecuteTableQuery(ctx, backend.QueryExecutionTarget{
+	result, err = e.executor.ExecuteTableQuery(ctx, backend.QueryExecutionTarget{
 		Table:       queryapi.TableRef{Catalog: tbl.Spec.Catalog, Schema: tbl.Spec.Schema, Table: tbl.Spec.Table},
 		Connection:  queryapi.ConnectionRef{Name: conn.Name, Host: conn.Spec.Host, AuthType: string(conn.Spec.AuthType)},
 		Warehouse:   queryapi.WarehouseRef{Name: wh.Name, WarehouseID: wh.Spec.WarehouseID},
 		BearerToken: token, Projection: request.Columns, Limit: request.Limit, AllowedColumns: allowed,
 	})
 	if err != nil {
-		return queryapi.QueryTableResult{}, sanitizeActionError(err)
+		return queryapi.QueryTableResult{}, err
 	}
 	// The backend executor only receives resolved SQL target details. Bind the
 	// public result identity to the hub-injected Table resource, never to a
@@ -190,19 +196,100 @@ func (f *ClientFactory) AuthorizeTable(ctx context.Context, clusterID, token, na
 var _ TableAuthorizer = (*ClientFactory)(nil)
 var _ actions.QueryExecutor = (*ActionExecutor)(nil)
 
+type actionFailureMetadata interface {
+	ActionFailureCode() string
+	ActionFailureMessage() string
+	ActionFailureStatus() int
+	ActionFailureRetryable() bool
+}
+
+func gatewayFailureStatus(retryable bool) int {
+	if retryable {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
+}
+
 func sanitizeActionError(err error) error {
-	message := strings.TrimSpace(err.Error())
-	lower := strings.ToLower(message)
-	for _, marker := range []string{"bearer", "token", "secret", "password", "authorization", "credential"} {
-		if strings.Contains(lower, marker) {
-			return fmt.Errorf("databricks action failed")
+	if err == nil {
+		return nil
+	}
+	var typed *actions.ActionError
+	if errors.As(err, &typed) && typed != nil {
+		copy := *typed
+		if copy.Code == actions.ActionErrorCodeBackendFailure || copy.Code == actions.ActionErrorCodeActionFailed {
+			copy.Status = gatewayFailureStatus(copy.Retryable)
+		} else if copy.Status < http.StatusBadRequest || copy.Status > 599 {
+			copy.Status = http.StatusBadGateway
+		}
+		return &copy
+	}
+	var metadata actionFailureMetadata
+	if errors.As(err, &metadata) && metadata != nil {
+		code := strings.TrimSpace(metadata.ActionFailureCode())
+		message := strings.TrimSpace(metadata.ActionFailureMessage())
+		status := metadata.ActionFailureStatus()
+		if code == "" {
+			code = actions.ActionErrorCodeBackendFailure
+		}
+		if message == "" || len(message) > 512 {
+			message = "databricks action failed"
+		}
+		if code == actions.ActionErrorCodeBackendFailure || code == actions.ActionErrorCodeActionFailed {
+			status = gatewayFailureStatus(metadata.ActionFailureRetryable())
+		} else if status < http.StatusBadRequest || status > 599 {
+			status = http.StatusBadGateway
+		}
+		return &actions.ActionError{Code: code, Message: message, Status: status, Retryable: metadata.ActionFailureRetryable(), Cause: err}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeActionTimeout, Message: "databricks action timed out",
+			Retryable: true, Status: http.StatusGatewayTimeout, Cause: err,
 		}
 	}
-	if len(message) > 512 {
-		message = message[:512]
+	if errors.Is(err, context.Canceled) {
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeActionTimeout, Message: "databricks action was canceled",
+			Retryable: true, Status: http.StatusGatewayTimeout, Cause: err,
+		}
 	}
-	if message == "" {
-		message = "databricks action failed"
+	var validation *queryapi.ValidationError
+	if errors.As(err, &validation) && validation != nil && validation.Code == queryapi.ErrorCodeSchemaProjectionInvalid {
+		message := strings.TrimSpace(validation.Message)
+		if message == "" || len(message) > 512 {
+			message = "requested projection is not present in the imported table schema"
+		}
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeSchemaProjectionInvalid, Message: message,
+			Status: http.StatusBadRequest, Cause: err,
+		}
 	}
-	return fmt.Errorf("%s", message)
+	if apierrors.IsNotFound(err) {
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeResourceNotFound, Message: "bound Databricks resource was not found",
+			Status: http.StatusNotFound, Cause: err,
+		}
+	}
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeResourceForbidden, Message: "caller is not allowed to read the bound Databricks resource",
+			Status: http.StatusForbidden, Cause: err,
+		}
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, "not ready") || strings.Contains(message, "not validated") ||
+		strings.Contains(message, "schema is not available") || strings.Contains(message, "unsupported") {
+		return &actions.ActionError{
+			Code: actions.ActionErrorCodeResourceNotReady, Message: "bound Databricks resource is not ready",
+			Status: http.StatusConflict, Cause: err,
+		}
+	}
+	// Do not carry arbitrary backend text across the provider boundary. The
+	// action handler will retain this typed code/message while the hub performs
+	// its own allowlist and envelope identity checks.
+	return &actions.ActionError{
+		Code: actions.ActionErrorCodeBackendFailure, Message: "databricks action failed",
+		Status: http.StatusBadGateway, Cause: err,
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -208,6 +209,49 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		return ctrl.Result{}, nil
 	}
 	prov.Actions = parsedActions
+	seenSkillPackages := make(map[string]struct{}, len(entry.Spec.AssistantSkills))
+	var assistantSkillBytes int64
+	for _, skill := range entry.Spec.AssistantSkills {
+		if skillErr := providersv1alpha1.ValidateProviderAssistantSkill(skill); skillErr != nil {
+			// Skill packages are independent of provider routing and action
+			// declarations. Omit only the malformed package so valid sibling
+			// skills and actions remain available; App Studio receives no
+			// partially validated artifact.
+			logger.Info("Omitting invalid provider assistant skill", "packageName", skill.PackageName, "error", skillErr.Error())
+			continue
+		}
+		if _, duplicate := seenSkillPackages[skill.PackageName]; duplicate {
+			logger.Info("Omitting duplicate provider assistant skill", "packageName", skill.PackageName)
+			continue
+		}
+		packageBytes := int64(len([]byte(skill.Skill)))
+		for _, resource := range skill.Resources {
+			packageBytes += int64(len([]byte(resource.Content)))
+		}
+		if assistantSkillBytes+packageBytes > providersv1alpha1.ProviderAssistantSkillsMaxAggregateBytes {
+			logger.Info("Omitting provider assistant skill after aggregate bound", "packageName", skill.PackageName, "maxBytes", providersv1alpha1.ProviderAssistantSkillsMaxAggregateBytes)
+			continue
+		}
+		seenSkillPackages[skill.PackageName] = struct{}{}
+		assistantSkillBytes += packageBytes
+		resources := make([]ProviderAssistantSkillResource, 0, len(skill.Resources))
+		for _, resource := range skill.Resources {
+			resources = append(resources, ProviderAssistantSkillResource{Path: resource.Path, Content: resource.Content})
+		}
+		prov.AssistantSkills = append(prov.AssistantSkills, ProviderAssistantSkill{
+			PackageName: skill.PackageName,
+			Version:     skill.Version,
+			Digest:      skill.Digest,
+			Skill:       skill.Skill,
+			Resources:   resources,
+		})
+	}
+	sort.Slice(prov.AssistantSkills, func(i, j int) bool {
+		if prov.AssistantSkills[i].PackageName != prov.AssistantSkills[j].PackageName {
+			return prov.AssistantSkills[i].PackageName < prov.AssistantSkills[j].PackageName
+		}
+		return prov.AssistantSkills[i].Version < prov.AssistantSkills[j].Version
+	})
 
 	var parseErrs []string
 	if entry.Spec.UI != nil && entry.Spec.UI.URL != "" {

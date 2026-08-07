@@ -108,6 +108,38 @@ request. The stable response envelope carries `requestID`, provider,
 action/version, the bound resource reference, and either `result` or a typed
 error (`code`, `message`, `retryable`).
 
+### Typed provider failures
+
+Provider action failures are a deliberately small, typed boundary. Databricks
+must return an allowlisted `code`, a safe bounded `message`, and an explicit
+`retryable` boolean; callers must not infer retryability from the HTTP status.
+The hub accepts the typed body only when its shape, code, message, and
+code/status combination are valid and bounded. It then rebuilds the response
+identity (`requestID`, provider, action/version, and bound `resourceRef`) from
+the authenticated invocation and catalog-selected request; provider-supplied
+identity is not trusted.
+
+For `query_table/v1`, an unknown column in the exact bound Table is
+`schema_projection_invalid`, HTTP 400, and non-retryable. A Databricks
+dependency authentication failure is normalized to `backend_failure` at the
+gateway (HTTP 502, non-retryable), rather than being exposed as the caller's
+HTTP 401. Transient backend/dependency failures may use HTTP 503 with
+`retryable: true`; this remains an explicit provider decision.
+
+Malformed, unsafe, unknown-code, status-incompatible, or over-bound typed error
+bodies do not pass through. The hub returns the generic
+`provider_action_failed` failure instead, without raw provider details. The
+server SDK surfaces accepted provider failures as a stable
+`ProviderActionError` (`code`, safe `message`, `retryable`, request metadata,
+and binding metadata).
+
+Provider authors should keep this boundary provider-neutral: choose only the
+published codes, sanitize messages before writing them, set retryability from
+the actual failure policy, and never include credentials, URLs, SQL, tenant
+paths, or backend resource details. Application authors should branch on the
+typed `code` and `retryable` fields, repair permanent input/schema failures,
+and retry only bounded, idempotent transient failures.
+
 The direct hub route is `POST /api/provider-actions/invoke`. The provider
 VirtualWorkspace route is `/actions/{name}/{version}`. The public provider
 backend proxy reserves `/actions` and `/actions/*` and returns `404`, so a
@@ -143,8 +175,21 @@ explicitly supplies the CA.
 
 ## Server-side SDK
 
-Use the generic `integration(alias).invoke` API. The SDK never exposes a
-provider-specific convenience method:
+The published artifact is `@crwilhit/kedge-actions-node@0.1.0`. Generated
+server components must install it under the stable consumer name with this
+exact npm alias in their `package.json`; the artifact name and import name are
+intentionally different:
+
+```json
+{
+  "dependencies": {
+    "@kedge/actions-node": "npm:@crwilhit/kedge-actions-node@0.1.0"
+  }
+}
+```
+
+Use the generic `integration(alias).invoke` API with the stable consumer import.
+The SDK never exposes a provider-specific convenience method:
 
 ```js
 import { createActionsClient } from '@kedge/actions-node';
@@ -171,24 +216,14 @@ provider-action errors. There is no development-token fallback.
 
 ### Development sandbox delivery
 
-In an App Studio development sandbox, the Infrastructure `kedge-dev-agent`
-image carries the canonical `@kedge/actions-node` package. Its installer
-validates the package metadata (`package.json`) and runtime/type files
-(`index.mjs` and `index.d.ts`) before atomically copying them into a
-platform-owned shared `emptyDir`. The app and executor containers mount that
-same volume read-only at `/node_modules`, so generated code uses the standard
-bare import `import { createActionsClient } from '@kedge/actions-node';`
-without `npm install` and without mutating the project PVC or its
-`node_modules`.
-
-This delivery path is limited to development sandboxes. Production workloads
-still need a normal pinned package install/publication; these checks do not
-claim production publication or installation is complete. The image-build and
-Docker shared-volume Node import checks pass. In the local POC, Ready pod
-`data-dashboard` passed the executor bare-import check (function), the app
-SDK/environment/token preflight, and a `taxi-trips` `query_table/v1` call that
-returned `rowCount=1`, `columnCount=6`, and `truncated=false` without printing
-row data. This is local POC evidence only, not a production claim.
+The Infrastructure `kedge-dev-agent` supplies only the coordinator, runtime
+supervisor, executor, and preview-console assets. It does not copy, validate,
+or mount the Actions SDK. Development components run their normal package
+manager against the exact alias in the server `package.json`, writing
+dependencies into the shared workspace used by the app and executor. This
+keeps the development path aligned with production publication and preserves
+the server-only credential boundary; browser components must not import the
+SDK or receive its token.
 
 ## Databricks implementation
 
@@ -246,6 +281,19 @@ SDK unit tests:
 cd provider-sdk/actions-node && npm test
 ```
 
+The registry-backed clean-install smoke is opt-in because it needs network
+access and the published artifact to exist. It stages the generated server
+manifest in a fresh directory, installs the exact alias from npm, and imports
+`@kedge/actions-node`:
+
+```bash
+make e2e-provider-actions-npm
+```
+
+The target sets `KEDGE_E2E_PROVIDER_ACTIONS_LIVE_ONLY=true` so the smoke does
+not start the full hub/provider stack. Set
+`KEDGE_E2E_PROVIDER_ACTIONS_NPM_REGISTRY` first when using a registry mirror.
+
 The opt-in live command reads an already-refreshed workload token file. Set
 `KEDGE_E2E_PROVIDER_ACTIONS_LIVE=true`, `KEDGE_LIVE_HUB_URL`,
 `KEDGE_LIVE_PROJECT`, and `KEDGE_LIVE_ACTIONS_TOKEN_FILE` (optionally
@@ -259,9 +307,11 @@ These are verification commands; this document does not claim that a current
 deterministic or live run has passed.
 
 Implementation anchors: [CatalogEntry action types](../apis/providers/v1alpha1/types_catalogentry.go),
-[hub action router](../pkg/hub/provideractions/handler.go),
+[hub action router and typed-failure validation](../pkg/hub/provideractions/handler.go),
 [hub workload exchange](../pkg/hub/workloadidentity/workloadidentity.go),
 [App Studio grant verification](../providers/app-studio/api/provider_action_catalog.go),
 [App Studio forwarding](../providers/app-studio/api/integrations.go),
+[Databricks typed action errors](../providers/databricks/actions/actions.go),
+[Databricks backend error normalization](../providers/databricks/backend/backend.go),
 [server-only SDK](../provider-sdk/actions-node/index.mjs), and
 [Databricks direct action executor](../providers/databricks/tenant/action.go).

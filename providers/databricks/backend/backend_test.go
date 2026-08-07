@@ -22,6 +22,16 @@ import (
 	"github.com/faroshq/provider-databricks/queryapi"
 )
 
+func TestStatementHTTPErrorNormalizesBackendAuthStatus(t *testing.T) {
+	err := statementHTTPError{statusCode: http.StatusUnauthorized, status: "401 Unauthorized"}
+	if got := err.ActionFailureStatus(); got != http.StatusBadGateway {
+		t.Fatalf("backend auth status = %d, want gateway 502", got)
+	}
+	if err.ActionFailureRetryable() {
+		t.Fatal("backend auth failure unexpectedly marked retryable")
+	}
+}
+
 func TestStatementClientValidateTablePostsStatementExecutionRequest(t *testing.T) {
 	var gotPath string
 	var gotAuth string

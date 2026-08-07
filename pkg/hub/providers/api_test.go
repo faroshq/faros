@@ -69,6 +69,13 @@ func TestListHandlerIncludesActionDiscoveryMetadataWithoutTransportURLs(t *testi
 				ReplacementID: "mutate/v2",
 			},
 		}},
+		AssistantSkills: []ProviderAssistantSkill{{
+			PackageName: "databricks-app-integration",
+			Version:     "1.0.0",
+			Digest:      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Skill:       "---\nname: databricks-app-integration\ndescription: guidance\n---\nbody",
+			Resources:   []ProviderAssistantSkillResource{{Path: "references/action-contract.md", Content: "contract"}},
+		}},
 	})
 
 	r := httptest.NewRequest(http.MethodGet, PathListProviders, nil)
@@ -111,6 +118,19 @@ func TestListHandlerIncludesActionDiscoveryMetadataWithoutTransportURLs(t *testi
 	}
 	if _, ok := item["virtualWorkspaceURL"]; ok {
 		t.Error("provider discovery response exposed virtualWorkspaceURL")
+	}
+	skills, ok := item["assistantSkills"].([]any)
+	if !ok || len(skills) != 1 {
+		t.Fatalf("assistantSkills = %#v, want one inline package", item["assistantSkills"])
+	}
+	skill, ok := skills[0].(map[string]any)
+	if !ok || skill["packageName"] != "databricks-app-integration" || skill["version"] != "1.0.0" {
+		t.Fatalf("assistant skill = %#v", skills[0])
+	}
+	for _, field := range []string{"url", "backendURL", "token", "credential"} {
+		if _, ok := skill[field]; ok {
+			t.Errorf("assistant skill exposed forbidden field %q: %#v", field, skill)
+		}
 	}
 	if got := action["id"]; got != "mutate/v1" {
 		t.Errorf("action id = %#v, want mutate/v1", got)

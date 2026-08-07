@@ -327,6 +327,36 @@ func TestOptionalLiveProviderActionSDK(t *testing.T) {
 	t.Logf("live interaction verified through App Studio SDK: rows=%d; provider URL/PAT were not supplied to the app", len(result.Rows))
 }
 
+// TestOptionalPublishedActionsSDKCleanInstall is intentionally opt-in. It is
+// the only provider-actions test that talks to an npm registry: deterministic
+// unit/E2E lanes stage the SDK fixture locally and never require network
+// access. The fresh temp directory verifies the published artifact and exact
+// consumer alias resolve together before importing the stable package name.
+func TestOptionalPublishedActionsSDKCleanInstall(t *testing.T) {
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("KEDGE_E2E_PROVIDER_ACTIONS_NPM_SMOKE")), "true") {
+		t.Skip("set KEDGE_E2E_PROVIDER_ACTIONS_NPM_SMOKE=true for the registry-backed SDK smoke")
+	}
+	registry := strings.TrimSpace(os.Getenv("KEDGE_E2E_PROVIDER_ACTIONS_NPM_REGISTRY"))
+	if registry == "" {
+		registry = "https://registry.npmjs.org"
+	}
+	appDir := t.TempDir()
+	manifest := filepath.Join(repoRoot, "test", "e2e", "provideractions", "generated-app", "package.json")
+	copyGeneratedAppFile(t, manifest, filepath.Join(appDir, "package.json"))
+	install := exec.CommandContext(ctxWithTimeout(t, 5*time.Minute), "npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--registry", registry)
+	install.Dir = appDir
+	output, err := install.CombinedOutput()
+	if err != nil {
+		t.Fatalf("npm clean install from %s failed: %v\n%s", registry, err, output)
+	}
+	verify := exec.CommandContext(ctxWithTimeout(t, time.Minute), "node", "--input-type=module", "-e", "import { createActionsClient } from '@kedge/actions-node'; if (typeof createActionsClient !== 'function') process.exit(1)")
+	verify.Dir = appDir
+	if output, err := verify.CombinedOutput(); err != nil {
+		t.Fatalf("published Actions SDK import failed after npm install: %v\n%s", err, output)
+	}
+	t.Logf("registry-backed clean install verified for @crwilhit/kedge-actions-node@0.1.0 via %s", registry)
+}
+
 func bindProvider(t *testing.T, tenant dynamic.Interface, name, workspace, export string, secretVerbs []string) {
 	t.Helper()
 	claims := make([]any, 0, 1)
@@ -698,6 +728,22 @@ func stageGeneratedApp(t *testing.T) string {
 	sourceDir := filepath.Join(repoRoot, "test", "e2e", "provideractions", "generated-app")
 	script := filepath.Join(appDir, "run.mjs")
 	sourceScript := filepath.Join(sourceDir, "run.mjs")
+	sourceManifest := filepath.Join(sourceDir, "package.json")
+	manifestContents, err := os.ReadFile(sourceManifest)
+	if err != nil {
+		t.Fatalf("read generated app package manifest: %v", err)
+	}
+	var manifest struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(manifestContents, &manifest); err != nil {
+		t.Fatalf("decode generated app package manifest: %v", err)
+	}
+	const exactAlias = "npm:@crwilhit/kedge-actions-node@0.1.0"
+	if got := manifest.Dependencies["@kedge/actions-node"]; got != exactAlias {
+		t.Fatalf("generated app Actions SDK dependency = %q, want exact alias %q", got, exactAlias)
+	}
+	copyGeneratedAppFile(t, sourceManifest, filepath.Join(appDir, "package.json"))
 	scriptContents, err := os.ReadFile(sourceScript)
 	if err != nil {
 		t.Fatalf("read generated app entrypoint: %v", err)

@@ -1,6 +1,7 @@
 // This is the generated application's server-side entrypoint used by the E2E.
-// The production runtime preinstalls @kedge/actions-node in node_modules; the
-// app never receives a Databricks URL, PAT, SQL text, or provider credential.
+// The server package manifest installs @kedge/actions-node through the exact
+// public-artifact npm alias; the app never receives a Databricks URL, PAT, SQL
+// text, or provider credential.
 import { createActionsClient } from '@kedge/actions-node';
 
 const actionsBaseURL = String(process.env.KEDGE_ACTIONS_BASE_URL ?? '').trim();

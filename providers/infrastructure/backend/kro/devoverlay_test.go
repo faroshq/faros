@@ -606,16 +606,10 @@ func TestDevOverlayThreeContainerDeploymentShape(t *testing.T) {
 	if appActionsMount["name"] != devActionsTokenVolumeName || appActionsMount["readOnly"] != true {
 		t.Errorf("app actions token mount = %v", appActionsMount)
 	}
-	appNodeModules := testMount(t, app, "/node_modules")
-	executorNodeModules := testMount(t, executor, "/node_modules")
-	if appNodeModules["name"] != testMount(t, app, devAgentBinDir)["name"] || appNodeModules["readOnly"] != true {
-		t.Errorf("app Actions SDK mount = %v, want the read-only agent-bin volume", appNodeModules)
-	}
-	if executorNodeModules["name"] != appNodeModules["name"] || executorNodeModules["readOnly"] != true {
-		t.Errorf("executor Actions SDK mount = %v, want the app's read-only agent-bin volume", executorNodeModules)
-	}
-	if _, ok := findMount(coordinator, "/node_modules"); ok {
-		t.Error("coordinator unexpectedly mounts the application-only /node_modules view")
+	for _, container := range []map[string]any{coordinator, app, executor} {
+		if _, ok := findMount(container, "/node_modules"); ok {
+			t.Errorf("%s unexpectedly mounts a projected /node_modules SDK view", container["name"])
+		}
 	}
 	volumes, _ := podSpec["volumes"].([]any)
 	var projected bool
@@ -716,7 +710,7 @@ func TestDevOverlayThreeContainerDeploymentShape(t *testing.T) {
 	}
 }
 
-func TestDevOverlayRejectsProductionNodeModulesMountCollision(t *testing.T) {
+func TestDevOverlayPreservesProductionNodeModulesMount(t *testing.T) {
 	tmpl := devTestTemplate(t)
 	var backend map[string]any
 	if err := json.Unmarshal(tmpl.Spec.BackendConfig.Raw, &backend); err != nil {
@@ -731,8 +725,8 @@ func TestDevOverlayRejectsProductionNodeModulesMountCollision(t *testing.T) {
 	app["volumeMounts"] = []any{map[string]any{"name": "project-node-modules", "mountPath": "/node_modules"}}
 	raw, _ := json.Marshal(backend)
 	tmpl.Spec.BackendConfig.Raw = raw
-	if _, err := buildRGD(tmpl, devTestTokens()); err == nil || !strings.Contains(err.Error(), "reserved Actions SDK path") {
-		t.Fatalf("buildRGD = %v, want /node_modules collision error", err)
+	if _, err := buildRGD(tmpl, devTestTokens()); err != nil {
+		t.Fatalf("buildRGD rejected a template-owned /node_modules mount: %v", err)
 	}
 }
 

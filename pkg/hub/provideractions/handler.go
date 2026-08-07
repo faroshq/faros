@@ -44,15 +44,16 @@ import (
 const (
 	PathInvoke = "/api/provider-actions/invoke"
 
-	defaultActionTimeout = 90 * time.Second
-	maxRequestBytes      = 1 << 20
-	maxResponseBytes     = 8 << 20
-	maxActionNameLength  = 128
-	maxRequestIDLength   = 256
-	maxHeaderValueLength = 512
-	providerActionSync   = "sync"
-	providerActionKeyed  = "keyed"
-	providerActionNone   = "none"
+	defaultActionTimeout  = 90 * time.Second
+	maxRequestBytes       = 1 << 20
+	maxResponseBytes      = 8 << 20
+	maxActionNameLength   = 128
+	maxRequestIDLength    = 256
+	maxHeaderValueLength  = 512
+	maxProviderErrorBytes = 16 << 10
+	providerActionSync    = "sync"
+	providerActionKeyed   = "keyed"
+	providerActionNone    = "none"
 )
 
 // ProviderLookup is the minimal registry surface needed by the transport.
@@ -387,6 +388,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if failure, ok := parseProviderActionFailure(responseBody, resp.StatusCode); ok {
+			h.writeProviderFailure(w, failure.status, failure.code, failure.message, failure.retryable, requestID, &req)
+			return
+		}
 		h.writeError(w, http.StatusBadGateway, "provider_action_failed", "provider action failed", requestID, &req)
 		return
 	}
@@ -518,6 +523,110 @@ type actionError struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable"`
+}
+
+type providerActionFailure struct {
+	status    int
+	code      string
+	message   string
+	retryable bool
+}
+
+// parseProviderActionFailure accepts only the provider's small, typed error
+// body. Provider identity is deliberately absent: the hub rebuilds it from
+// the authenticated request and the catalog-selected invocation below.
+func parseProviderActionFailure(body []byte, status int) (providerActionFailure, bool) {
+	if len(body) == 0 || len(body) > maxProviderErrorBytes || status < http.StatusBadRequest || status > 599 {
+		return providerActionFailure{}, false
+	}
+	var wire struct {
+		Error *struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable *bool  `json:"retryable"`
+		} `json:"error"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil || wire.Error == nil || wire.Error.Retryable == nil {
+		return providerActionFailure{}, false
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return providerActionFailure{}, false
+	}
+	code := strings.TrimSpace(wire.Error.Code)
+	message := sanitizeProviderActionMessage(wire.Error.Message)
+	if !providerActionErrorCodeAllowed(code) || !providerActionErrorStatusAllowed(code, status) || message == "" {
+		return providerActionFailure{}, false
+	}
+	return providerActionFailure{status: status, code: code, message: message, retryable: *wire.Error.Retryable}, true
+}
+
+func providerActionErrorCodeAllowed(code string) bool {
+	switch code {
+	case "unauthenticated", "tenant_required", "action_not_found", "invalid_request", "invalid_deadline",
+		"action_unavailable", "action_timeout", "action_failed", "resource_not_found", "resource_forbidden",
+		"resource_not_ready", "schema_projection_invalid", "backend_failure", "timeout", "aborted", "network_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func providerActionErrorStatusAllowed(code string, status int) bool {
+	if status < http.StatusBadRequest || status > 599 {
+		return false
+	}
+	switch code {
+	case "unauthenticated":
+		return status == http.StatusUnauthorized
+	case "tenant_required", "resource_forbidden":
+		return status == http.StatusForbidden
+	case "action_not_found", "resource_not_found":
+		return status == http.StatusNotFound
+	case "invalid_request", "invalid_deadline", "schema_projection_invalid":
+		return status == http.StatusBadRequest || status == http.StatusUnprocessableEntity
+	case "action_unavailable":
+		return status == http.StatusServiceUnavailable
+	case "action_timeout", "timeout":
+		return status == http.StatusGatewayTimeout || status == http.StatusServiceUnavailable
+	case "resource_not_ready":
+		return status == http.StatusConflict || status == http.StatusServiceUnavailable
+	case "backend_failure", "action_failed":
+		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
+	case "aborted", "network_error":
+		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+	default:
+		return false
+	}
+}
+
+func sanitizeProviderActionMessage(value string) string {
+	message := strings.TrimSpace(value)
+	if message == "" || len(message) > maxHeaderValueLength {
+		return ""
+	}
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"bearer", "token", "secret", "password", "authorization", "credential",
+		"root:kedge:tenants:", "/clusters/", "http://", "https://", "://",
+	} {
+		if strings.Contains(lower, marker) {
+			return ""
+		}
+	}
+	for _, r := range message {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	for _, marker := range []string{"select ", "insert ", "update ", "delete ", "drop ", "alter ", "create ", "merge "} {
+		if strings.Contains(lower, marker) {
+			return ""
+		}
+	}
+	return message
 }
 
 func decodeInvokeRequest(w http.ResponseWriter, r *http.Request) (invokeRequest, any, error) {
@@ -687,13 +796,21 @@ func (h *Handler) writeSuccess(w http.ResponseWriter, requestID string, req *inv
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, code, message, requestID string, reqs ...*invokeRequest) {
+	h.writeErrorWithRetryable(w, status, code, message, retryableForHubError(code), requestID, reqs...)
+}
+
+func (h *Handler) writeProviderFailure(w http.ResponseWriter, status int, code, message string, retryable bool, requestID string, reqs ...*invokeRequest) {
+	h.writeErrorWithRetryable(w, status, code, message, retryable, requestID, reqs...)
+}
+
+func (h *Handler) writeErrorWithRetryable(w http.ResponseWriter, status int, code, message string, retryable bool, requestID string, reqs ...*invokeRequest) {
 	if recorded, ok := w.(*responseRecorder); ok {
 		recorded.errorCode = code
 	}
 	envelope := actionEnvelope{
 		RequestID: requestID,
 		Error: &actionError{
-			Code: code, Message: message, Retryable: status >= http.StatusInternalServerError,
+			Code: code, Message: message, Retryable: retryable,
 		},
 	}
 	if len(reqs) > 0 && reqs[0] != nil {
@@ -704,6 +821,18 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, code, message, r
 		envelope.ResourceRef = resourceRefPointer(req.ResourceRef)
 	}
 	h.writeJSON(w, status, envelope)
+}
+
+// Retryability is an explicit policy decision, not a consequence of an HTTP
+// status. In particular, a 5xx grant/schema/provider error may be permanent,
+// while a 4xx timeout or transient dependency condition may be retryable.
+func retryableForHubError(code string) bool {
+	switch code {
+	case "action_unavailable", "tenant_unavailable", "provider_unavailable", "action_timeout", "timeout", "aborted", "network_error":
+		return true
+	default:
+		return false
+	}
 }
 
 func resourceRefPointer(ref resourceRef) *resourceRef {

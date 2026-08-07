@@ -38,6 +38,80 @@ const (
 	maxActionDeadline  = 90 * time.Second
 )
 
+const (
+	// Provider action error codes are a deliberately small, provider-neutral
+	// surface. The hub allowlists the same values before it exposes a failure
+	// to callers; provider-specific internals must never become wire codes.
+	ActionErrorCodeUnauthenticated         = "unauthenticated"
+	ActionErrorCodeTenantRequired          = "tenant_required"
+	ActionErrorCodeActionNotFound          = "action_not_found"
+	ActionErrorCodeInvalidRequest          = "invalid_request"
+	ActionErrorCodeInvalidDeadline         = "invalid_deadline"
+	ActionErrorCodeActionUnavailable       = "action_unavailable"
+	ActionErrorCodeActionTimeout           = "action_timeout"
+	ActionErrorCodeActionFailed            = "action_failed"
+	ActionErrorCodeResourceNotFound        = "resource_not_found"
+	ActionErrorCodeResourceForbidden       = "resource_forbidden"
+	ActionErrorCodeResourceNotReady        = "resource_not_ready"
+	ActionErrorCodeSchemaProjectionInvalid = "schema_projection_invalid"
+	ActionErrorCodeBackendFailure          = "backend_failure"
+)
+
+const (
+	defaultActionFailureMessage = "databricks action failed"
+	maxActionErrorMessageBytes  = 512
+)
+
+// ActionError is the typed, provider-to-hub failure contract. Status is an
+// HTTP transport detail and is intentionally not serialized in the body; the
+// hub preserves it only for an allowlisted typed error. Retryable is explicit
+// and must never be inferred from Status by either side of the boundary.
+//
+// Cause is for provider-side unwrapping/logging only. It is never sent to a
+// caller and must not be used as a public message without sanitization.
+type ActionError struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+	Status    int    `json:"-"`
+	Cause     error  `json:"-"`
+}
+
+// ProviderActionError is retained as a descriptive alias for consumers that
+// name the wire contract directly.
+type ProviderActionError = ActionError
+
+func (e *ActionError) Error() string {
+	if e == nil {
+		return defaultActionFailureMessage
+	}
+	if message := strings.TrimSpace(e.Message); message != "" {
+		return message
+	}
+	if code := strings.TrimSpace(e.Code); code != "" {
+		return code
+	}
+	return defaultActionFailureMessage
+}
+
+func (e *ActionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// NewActionError creates an explicit typed failure. Callers should use one of
+// the ActionErrorCode constants and a safe, bounded message.
+func NewActionError(code, message string, status int, retryable bool) *ActionError {
+	return &ActionError{Code: code, Message: message, Status: status, Retryable: retryable}
+}
+
+// NewProviderActionError is an explicit-name alias for NewActionError.
+func NewProviderActionError(code, message string, status int, retryable bool) *ProviderActionError {
+	return NewActionError(code, message, status, retryable)
+}
+
 // ResourceRef is the provider-neutral resource identity selected by the hub
 // catalog and carried to the provider action endpoint.
 type ResourceRef struct {
@@ -114,11 +188,12 @@ func NewHandler(deps Deps) http.Handler {
 		result, err := executor.QueryTable(ctx, ref, input)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				writeError(w, http.StatusGatewayTimeout, "action_timeout", "databricks action timed out")
+				writeError(w, http.StatusGatewayTimeout, ActionErrorCodeActionTimeout, "databricks action timed out")
 				return
 			}
-			logActionFailure(deps.Logger, requestID, started, "action_failed", classifyActionError(err))
-			writeError(w, http.StatusBadGateway, "action_failed", safeActionError(err))
+			failure := normalizeActionError(err)
+			logActionFailure(deps.Logger, requestID, started, failure.Code, classifyActionError(err))
+			writeFailure(w, failure)
 			return
 		}
 		// Keep the result identity server-owned even if an executor returns a
@@ -150,6 +225,118 @@ func classifyActionError(err error) string {
 		return "dependency_not_ready"
 	default:
 		return "backend_failure"
+	}
+}
+
+func normalizeActionError(err error) *ActionError {
+	if err == nil {
+		return &ActionError{Code: ActionErrorCodeActionFailed, Message: defaultActionFailureMessage, Status: http.StatusBadGateway}
+	}
+	var typed *ActionError
+	if errors.As(err, &typed) && typed != nil {
+		code := strings.TrimSpace(typed.Code)
+		rawMessage := strings.TrimSpace(typed.Message)
+		message := safeActionErrorMessage(rawMessage)
+		if !isKnownActionErrorCode(code) || (rawMessage != "" && rawMessage != defaultActionFailureMessage && message == defaultActionFailureMessage) {
+			return &ActionError{Code: ActionErrorCodeActionFailed, Message: defaultActionFailureMessage, Status: http.StatusBadGateway}
+		}
+		status := typed.Status
+		if status == 0 {
+			status = defaultActionErrorStatus(code, typed.Retryable)
+		}
+		if !actionErrorStatusAllowed(code, status) {
+			if code == ActionErrorCodeBackendFailure || code == ActionErrorCodeActionFailed {
+				status = gatewayFailureStatus(typed.Retryable)
+			} else {
+				return &ActionError{Code: ActionErrorCodeActionFailed, Message: defaultActionFailureMessage, Status: http.StatusBadGateway}
+			}
+		}
+		return &ActionError{Code: code, Message: message, Retryable: typed.Retryable, Status: status, Cause: typed.Cause}
+	}
+	return &ActionError{
+		Code:    ActionErrorCodeActionFailed,
+		Message: safeActionError(err),
+		Status:  http.StatusBadGateway,
+	}
+}
+
+func isKnownActionErrorCode(code string) bool {
+	switch code {
+	case ActionErrorCodeUnauthenticated,
+		ActionErrorCodeTenantRequired,
+		ActionErrorCodeActionNotFound,
+		ActionErrorCodeInvalidRequest,
+		ActionErrorCodeInvalidDeadline,
+		ActionErrorCodeActionUnavailable,
+		ActionErrorCodeActionTimeout,
+		ActionErrorCodeActionFailed,
+		ActionErrorCodeResourceNotFound,
+		ActionErrorCodeResourceForbidden,
+		ActionErrorCodeResourceNotReady,
+		ActionErrorCodeSchemaProjectionInvalid,
+		ActionErrorCodeBackendFailure:
+		return true
+	default:
+		return false
+	}
+}
+
+func actionErrorStatusAllowed(code string, status int) bool {
+	if status < http.StatusBadRequest || status > 599 {
+		return false
+	}
+	switch code {
+	case ActionErrorCodeUnauthenticated:
+		return status == http.StatusUnauthorized
+	case ActionErrorCodeTenantRequired, ActionErrorCodeResourceForbidden:
+		return status == http.StatusForbidden
+	case ActionErrorCodeActionNotFound, ActionErrorCodeResourceNotFound:
+		return status == http.StatusNotFound
+	case ActionErrorCodeInvalidRequest, ActionErrorCodeInvalidDeadline, ActionErrorCodeSchemaProjectionInvalid:
+		return status == http.StatusBadRequest || status == http.StatusUnprocessableEntity
+	case ActionErrorCodeActionUnavailable:
+		return status == http.StatusServiceUnavailable
+	case ActionErrorCodeActionTimeout:
+		return status == http.StatusGatewayTimeout || status == http.StatusServiceUnavailable
+	case ActionErrorCodeResourceNotReady:
+		return status == http.StatusConflict || status == http.StatusServiceUnavailable
+	case ActionErrorCodeBackendFailure, ActionErrorCodeActionFailed:
+		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
+	default:
+		return false
+	}
+}
+
+func gatewayFailureStatus(retryable bool) int {
+	if retryable {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadGateway
+}
+
+func defaultActionErrorStatus(code string, retryable bool) int {
+	switch code {
+	case ActionErrorCodeUnauthenticated:
+		return http.StatusUnauthorized
+	case ActionErrorCodeTenantRequired, ActionErrorCodeResourceForbidden:
+		return http.StatusForbidden
+	case ActionErrorCodeActionNotFound, ActionErrorCodeResourceNotFound:
+		return http.StatusNotFound
+	case ActionErrorCodeInvalidRequest, ActionErrorCodeInvalidDeadline, ActionErrorCodeSchemaProjectionInvalid:
+		return http.StatusBadRequest
+	case ActionErrorCodeActionUnavailable:
+		return http.StatusServiceUnavailable
+	case ActionErrorCodeActionTimeout:
+		return http.StatusGatewayTimeout
+	case ActionErrorCodeResourceNotReady:
+		if retryable {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusConflict
+	case ActionErrorCodeBackendFailure, ActionErrorCodeActionFailed:
+		return gatewayFailureStatus(retryable)
+	default:
+		return http.StatusBadGateway
 	}
 }
 
@@ -247,18 +434,42 @@ func hasBearer(value string) bool {
 }
 
 func safeActionError(err error) string {
+	if err == nil {
+		return defaultActionFailureMessage
+	}
 	message := strings.TrimSpace(err.Error())
+	return safeActionErrorMessage(message)
+}
+
+func safeActionErrorMessage(message string) string {
+	message = strings.TrimSpace(message)
 	lower := strings.ToLower(message)
-	for _, marker := range []string{"bearer", "token", "secret", "password", "authorization", "credential"} {
+	for _, marker := range []string{
+		"bearer", "token", "secret", "password", "authorization", "credential",
+		"root:kedge:tenants:", "/clusters/", "http://", "https://", "://",
+	} {
 		if strings.Contains(lower, marker) {
-			return "databricks action failed"
+			return defaultActionFailureMessage
+		}
+	}
+	for _, r := range message {
+		if r < 0x20 || r == 0x7f {
+			return defaultActionFailureMessage
+		}
+	}
+	// SQL text and provider target details are never safe to surface. Keep the
+	// check intentionally conservative: all normal action diagnostics are
+	// short status/readiness messages and do not contain SQL verbs.
+	for _, marker := range []string{"select ", "insert ", "update ", "delete ", "drop ", "alter ", "create ", "merge "} {
+		if strings.Contains(lower, marker) {
+			return defaultActionFailureMessage
 		}
 	}
 	if message == "" {
-		return "databricks action failed"
+		return defaultActionFailureMessage
 	}
-	if len(message) > 512 {
-		message = message[:512]
+	if len(message) > maxActionErrorMessageBytes {
+		return defaultActionFailureMessage
 	}
 	return message
 }
@@ -270,5 +481,48 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+	message = safeActionErrorMessage(message)
+	writeJSON(w, status, map[string]any{"error": map[string]any{
+		"code": code, "message": message, "retryable": defaultRetryable(code),
+	}})
+}
+
+func writeFailure(w http.ResponseWriter, failure *ActionError) {
+	if failure == nil {
+		failure = &ActionError{Code: ActionErrorCodeActionFailed, Message: defaultActionFailureMessage, Status: http.StatusBadGateway}
+	}
+	code := strings.TrimSpace(failure.Code)
+	if !isKnownActionErrorCode(code) {
+		code = ActionErrorCodeActionFailed
+	}
+	message := safeActionErrorMessage(failure.Message)
+	if message == defaultActionFailureMessage && code != ActionErrorCodeActionFailed {
+		code = ActionErrorCodeActionFailed
+	}
+	status := failure.Status
+	if status == 0 {
+		status = defaultActionErrorStatus(code, failure.Retryable)
+	}
+	if !actionErrorStatusAllowed(code, status) {
+		if code == ActionErrorCodeBackendFailure || code == ActionErrorCodeActionFailed {
+			status = gatewayFailureStatus(failure.Retryable)
+		} else {
+			code = ActionErrorCodeActionFailed
+			message = defaultActionFailureMessage
+			status = http.StatusBadGateway
+			failure.Retryable = false
+		}
+	}
+	writeJSON(w, status, map[string]any{"error": map[string]any{
+		"code": code, "message": message, "retryable": failure.Retryable,
+	}})
+}
+
+func defaultRetryable(code string) bool {
+	switch code {
+	case ActionErrorCodeActionUnavailable, ActionErrorCodeActionTimeout:
+		return true
+	default:
+		return false
+	}
 }

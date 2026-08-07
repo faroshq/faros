@@ -301,6 +301,85 @@ spec:
                 required:
                 - name
                 type: object
+              assistantSkills:
+                description: |-
+                  AssistantSkills declares read-only App Studio skill packages supplied by
+                  this provider. Packages are embedded in the CatalogEntry so the hub can
+                  authenticate and validate the artifact without contacting a provider
+                  runtime or learning any provider credentials. The App Studio projection
+                  publishes these packages as provider-qualified system skills.
+                items:
+                  description: |-
+                    ProviderAssistantSkillSpec declares one immutable, provider-supplied App
+                    Studio skill package. Skill is the complete raw SKILL.md document, including
+                    its YAML frontmatter and markdown body. The digest is the sha256 digest of
+                    the canonical package payload produced by ProviderAssistantSkillDigest.
+                  properties:
+                    digest:
+                      description: Digest is the deterministic package integrity digest.
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    packageName:
+                      description: |-
+                        PackageName is the provider-local package identity. The hub qualifies it
+                        as providers/<provider>/<packageName> before exposing it to App Studio.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                    resources:
+                      description: |-
+                        Resources are optional package-relative supporting files. They are
+                        included inline so no arbitrary provider URL or fetch capability is
+                        admitted into the skill source.
+                      items:
+                        description: |-
+                          ProviderAssistantSkillResource is one bounded, package-relative supporting
+                          file for a ProviderAssistantSkillSpec.
+                        properties:
+                          content:
+                            description: Content is UTF-8 resource content.
+                            maxLength: 65536
+                            type: string
+                          path:
+                            description: |-
+                              Path is relative to the provider skill package and must not contain
+                              traversal, absolute, or SKILL.md paths.
+                            maxLength: 256
+                            minLength: 1
+                            type: string
+                        required:
+                        - content
+                        - path
+                        type: object
+                      maxItems: 64
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - path
+                      x-kubernetes-list-type: map
+                    skill:
+                      description: |-
+                        Skill is the complete raw SKILL.md document. App Studio parses the
+                        document using its strict, authority-free frontmatter contract.
+                      maxLength: 32768
+                      minLength: 1
+                      type: string
+                    version:
+                      description: Version is the provider-owned immutable package
+                        version.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                  required:
+                  - digest
+                  - packageName
+                  - skill
+                  - version
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - packageName
+                x-kubernetes-list-type: map
               backend:
                 description: |-
                   Backend declares the provider's custom HTTP backend (REST/GraphQL/WS).

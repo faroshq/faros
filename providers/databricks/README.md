@@ -6,6 +6,12 @@ resources in the tenant workspace. App Studio consumes existing `Table`
 resources by exact `tableRef` through the catalog-backed Provider Actions
 contract; import and pinning remain provider-owned.
 
+For the complete App Studio integration workflow, see the shipped
+[`databricks-app-integration` skill](skills/databricks-app-integration/SKILL.md).
+It is distributed as an inline, digest-pinned provider package; publication
+does not grant action authority. It follows App Studio's system-skill default
+of enabled, and each project may disable or re-enable it.
+
 ## What works today
 
 - Tenant-facing CRDs for:
@@ -101,7 +107,19 @@ upstream results. Provider errors are sanitized.
 The action endpoint requires the hub-resolved tenant and cluster headers and
 the hub-injected `resourceRef`; it does not accept an arbitrary table name or
 backend target. The hub's public backend proxy reserves `/actions` and returns
-`404`, so callers must use the hub Provider Actions route.
+`404`, so callers must use the hub Provider Actions route. Failures retain the
+published structured envelope (`code`, sanitized `message`, `retryable`, and
+request/binding metadata); grant, schema, or bound-resource failures are not
+retry instructions.
+
+The companion skill makes the same boundary explicit for app builders: discover
+the existing project grant, use its bound `Table` (never a caller-selected
+table), invoke only from a server route through `@kedge/actions-node`, honor the
+published schema and limits, and handle the structured error envelope. Verify
+the action response first, then runtime/preview reachability, then rendered
+state and interactions; HTTP 200, `Ready`, or a reachable preview alone is not
+data-path evidence. Grants, binding status, and the live catalog remain
+authoritative and fail closed.
 
 Connection hosts must be Databricks workspace root URLs over HTTPS. The backend
 allows the standard Databricks workspace domains by default; set

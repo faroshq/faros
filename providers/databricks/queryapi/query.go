@@ -27,6 +27,10 @@ const (
 	MaxQueryRows      = 100
 	MaxQueryColumns   = 64
 	MaxQueryBytes     = 64 * 1024
+	// ErrorCodeSchemaProjectionInvalid identifies a bounded projection that
+	// cannot be satisfied by the imported Table schema. It is safe to expose
+	// through the Provider Actions error envelope.
+	ErrorCodeSchemaProjectionInvalid = "schema_projection_invalid"
 )
 
 var identifierRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -68,6 +72,20 @@ type QueryTableRequest struct {
 	TableRef      string
 	Columns       []string
 	Limit         int
+}
+
+// ValidationError is a typed, safe query validation failure. It intentionally
+// contains no SQL, backend target, credential, or tenant information.
+type ValidationError struct {
+	Code    string
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	if e == nil || strings.TrimSpace(e.Message) == "" {
+		return "query validation failed"
+	}
+	return e.Message
 }
 
 type QueryColumn struct {
@@ -195,7 +213,10 @@ func SelectTableSQL(ref TableRef, projection []string, limit int, allowedColumns
 			}
 			if len(allowed) > 0 {
 				if _, ok := allowed[column]; !ok {
-					return "", fmt.Errorf("column %q is not present in the imported table schema", column)
+					return "", &ValidationError{
+						Code:    ErrorCodeSchemaProjectionInvalid,
+						Message: fmt.Sprintf("requested column %q is not present in the imported table schema", column),
+					}
 				}
 			}
 			if _, ok := seen[column]; ok {

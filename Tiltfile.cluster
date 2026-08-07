@@ -142,6 +142,46 @@ os.putenv('KCP_KUBECONFIG_DIR', os.getcwd())
 # Pull in the entire upstream kcp Tilt setup.
 include(kcp_tilt)
 
+# The upstream KCP Tiltfile defines an `ingress` forward, but this stack imports
+# it from another checkout and the command relies on ambient kubectl context.
+# After a kind repave that can leave host-side provider jobs with a kubeconfig
+# pointing at kcp.localhost:8443 while no host listener exists. Keep a Kedge-
+# owned forward for the endpoint used by provider registration and runtime
+# kubeconfigs. Resolve the Envoy service on every reconnect because both the
+# service name and backing pod can change during a repave.
+local_resource(
+    'kcp-frontproxy-forward',
+    cmd='true',
+    serve_cmd='''
+set -eu
+CTX=%s
+while true; do
+  kubectl --context "$CTX" -n envoy-gateway-system \
+    wait gateway/eg --for=condition=Programmed --timeout=30s >/dev/null 2>&1 || {
+      sleep 2
+      continue
+    }
+  svc="$(kubectl --context "$CTX" -n envoy-gateway-system \
+    get svc -l gateway.envoyproxy.io/owning-gateway-name=eg \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$svc" ]; then
+    sleep 2
+    continue
+  fi
+  kubectl --context "$CTX" -n envoy-gateway-system \
+    port-forward "svc/$svc" 8443:8443 &
+  pf=$!
+  while kill -0 "$pf" 2>/dev/null; do
+    sleep 1
+  done
+  wait "$pf" 2>/dev/null || true
+  sleep 2
+done
+'''.strip() % k8s_context(),
+    resource_deps=['kcp-admin extract'],
+    labels=['kcp'],
+)
+
 # ---------------------------------------------------------------------------
 # hub — kedge-hub running IN-CLUSTER as a container, against the external kcp.
 #

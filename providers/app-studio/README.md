@@ -54,8 +54,23 @@ activation metadata in `.agents/skills/.kedge-catalog.json`.
 Every package must contain a `SKILL.md` whose YAML frontmatter includes the
 required `name` and `description` fields. Skill bodies and supporting resources
 are untrusted guidance: they cannot grant tools, permissions, models, approval
-bypasses, or override system/tool policy. App Studio reads only bundled and
-project sources; there is no remote skill registry.
+bypasses, or override system/tool policy. App Studio reads bundled skills,
+authenticated provider-inline packages, and project packages; there is no
+remote skill registry. Provider packages are read-only system skills qualified
+as `providers/<provider>/<packageName>`.
+
+Provider package distribution and provider/action enablement are separate. A
+validated `CatalogEntry.spec.assistantSkills` entry is distributed through the
+authenticated hub `/api/providers` catalog. It follows the system-skill default
+of enabled, and each project may disable or re-enable it. The package's version
+and canonical `sha256:` digest are retained in the same catalog snapshot used
+for metadata discovery, progressive `load_skill`/`read_skill_resource`,
+activation, and turn receipts. Provider readiness is not skill authority: a transient
+heartbeat/readiness change does not revoke declared guidance. A missing bearer
+or transient provider-catalog failure leaves bundled and project skills
+available and emits only a bounded sanitized warning where applicable.
+Provider Actions and grants remain authoritative and fail closed; skill text
+cannot widen them.
 
 For each `Default`, `Plan`, or `Review` turn, catalog discovery exposes metadata
 for enabled skills and the model selectively invokes the assistant's native
@@ -100,7 +115,7 @@ Environment variables consumed by the binary:
 | `KEDGE_HUB_TOKEN` | Bearer token for the heartbeat |
 | `KEDGE_PROVIDER_NAME` | CatalogEntry name (default `app-studio`) |
 | `KEDGE_PROVIDER_KUBECONFIG` | Provider kubeconfig (kcp front-proxy host + TLS only) |
-| `KEDGE_ACTIONS_EXTERNAL_URL` | Optional absolute HTTPS hub origin, reachable and certificate-valid from sandbox pods, injected into action-enabled development runtimes for workload-token exchange and the server-side Actions SDK; no local default |
+| `KEDGE_ACTIONS_EXTERNAL_URL` | Optional absolute HTTPS hub origin, reachable and certificate-valid from sandbox pods, injected into action-enabled development runtimes for workload-token exchange and the declared server-side Actions SDK gateway calls; no local default |
 | `KEDGE_ACTIONS_CA_BUNDLE_FILE` | Optional PEM file containing the public CA for that origin; passed only to action-enabled development runtimes, never used to disable TLS verification |
 | `KEDGE_ACTIONS_CA_BUNDLE` | Optional direct PEM equivalent for local launches; when both CA settings are present they must match |
 | `APP_STUDIO_DATABASE_URL` | Postgres DSN for the message store |
@@ -406,12 +421,26 @@ Invocation forwards the provider-neutral envelope to the hub's direct
 provider URL or embed provider transport logic. Caller credentials,
 provider backend URLs, resource overrides, and raw SQL are rejected.
 
-Generated server applications can use the provider-neutral
-`provider-sdk/actions-node` package with
+Generated server applications install the public
+`@crwilhit/kedge-actions-node@0.1.0` artifact under the stable consumer name
+with this exact dependency alias in the server component's `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@kedge/actions-node": "npm:@crwilhit/kedge-actions-node@0.1.0"
+  }
+}
+```
+
+Application code keeps the canonical import
+`import { createActionsClient } from '@kedge/actions-node';` and can call
 `client.integration(alias).invoke(...)` or `invokeEnvelope(...)`. The SDK is
 server-only, requires an absolute HTTPS base URL (except an explicit loopback
 test override), reads the short-lived workload token from
 `KEDGE_ACTIONS_TOKEN_FILE` on every request or from a refreshable credential
 provider, and retries once with `forceRefresh` after a `401`. The bootstrap
 token used by the workload exchange is never the app token; no development
-token fallback exists.
+token fallback exists. Development sandboxes install this declared dependency
+through the component toolchain; `kedge-dev-agent` does not project an SDK or
+mount `/node_modules`.

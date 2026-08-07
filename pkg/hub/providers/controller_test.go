@@ -150,3 +150,49 @@ func TestCatalogReconcilerRejectsInvalidActionDeclarations(t *testing.T) {
 		t.Fatalf("condition = %#v, want Ready=False/InvalidActions", condition)
 	}
 }
+
+func TestCatalogReconcilerOmitsInvalidAssistantSkillAndKeepsValidSibling(t *testing.T) {
+	reg := NewRegistry()
+	scheme := newProviderTestScheme(t)
+	valid := providersv1alpha1.ProviderAssistantSkillSpec{
+		PackageName: "valid",
+		Version:     "1.0.0",
+		Skill:       "---\nname: valid\ndescription: valid guidance\n---\nbody\n",
+	}
+	digest, err := providersv1alpha1.ProviderAssistantSkillDigest(valid)
+	if err != nil {
+		t.Fatalf("skill digest: %v", err)
+	}
+	valid.Digest = digest
+	invalid := valid
+	invalid.PackageName = "invalid"
+	invalid.Skill += "tampered"
+	entry := &providersv1alpha1.CatalogEntry{
+		ObjectMeta: metav1.ObjectMeta{Name: "skills"},
+		Spec: providersv1alpha1.CatalogEntrySpec{
+			DisplayName: "Skills",
+			UI:          &providersv1alpha1.ProviderUI{URL: "http://skills.invalid"},
+			AssistantSkills: []providersv1alpha1.ProviderAssistantSkillSpec{
+				invalid,
+				valid,
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&providersv1alpha1.CatalogEntry{}).
+		WithObjects(entry).
+		Build()
+
+	r := &CatalogReconciler{mgr: testfakes.NewManager(c), reg: reg, noKCP: true}
+	if _, err := r.Reconcile(context.Background(), testfakes.NewRequest("cluster", "", "skills")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got, ok := reg.Get("skills")
+	if !ok {
+		t.Fatal("expected provider in registry")
+	}
+	if len(got.AssistantSkills) != 1 || got.AssistantSkills[0].PackageName != "valid" || got.AssistantSkills[0].Digest != digest {
+		t.Fatalf("assistant skills = %#v, want only valid sibling", got.AssistantSkills)
+	}
+}

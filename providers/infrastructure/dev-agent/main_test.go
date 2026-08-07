@@ -98,7 +98,6 @@ func TestMatchReloadRules(t *testing.T) {
 
 func TestInstallSelf(t *testing.T) {
 	dir := t.TempDir()
-	setTestActionsNodeAssets(t)
 	t.Setenv(previewConsoleJWKSEnv, testPreviewConsoleJWKS())
 	if err := installSelf(dir); err != nil {
 		t.Fatalf("installSelf: %v", err)
@@ -116,27 +115,6 @@ func TestInstallSelf(t *testing.T) {
 	if info.Size() != selfInfo.Size() {
 		t.Errorf("installed binary size %d != executable size %d", info.Size(), selfInfo.Size())
 	}
-	for _, name := range []string{"package.json", "index.mjs", "index.d.ts"} {
-		installed, err := os.ReadFile(filepath.Join(dir, "@kedge", "actions-node", name))
-		if err != nil {
-			t.Fatalf("read installed Actions SDK %s: %v", name, err)
-		}
-		canonical, err := os.ReadFile(filepath.Join("..", "..", "..", "provider-sdk", "actions-node", name))
-		if err != nil {
-			t.Fatalf("read canonical Actions SDK %s: %v", name, err)
-		}
-		if !bytes.Equal(installed, canonical) {
-			t.Errorf("installed Actions SDK %s differs from canonical source", name)
-		}
-		info, err := os.Stat(filepath.Join(dir, "@kedge", "actions-node", name))
-		if err != nil {
-			t.Fatalf("stat installed Actions SDK %s: %v", name, err)
-		}
-		if info.Mode().Perm() != 0o644 {
-			t.Errorf("Actions SDK %s mode = %v, want 0644", name, info.Mode())
-		}
-	}
-
 	plugin, err := os.ReadFile(filepath.Join(dir, previewConsolePluginName))
 	if err != nil {
 		t.Fatalf("read installed plugin: %v", err)
@@ -169,40 +147,9 @@ func TestInstallSelf(t *testing.T) {
 			t.Errorf("temporary install file was not cleaned up: %s", entry.Name())
 		}
 	}
-	entries, err = os.ReadDir(filepath.Join(dir, "@kedge", "actions-node"))
-	if err != nil {
-		t.Fatalf("read installed Actions SDK directory: %v", err)
-	}
-	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".tmp-") {
-			t.Errorf("temporary Actions SDK file was not cleaned up: %s", entry.Name())
-		}
-	}
-}
-
-func TestInstallSelfFailsClosedBeforeWritingWhenActionsSDKIsIncomplete(t *testing.T) {
-	dir := t.TempDir()
-	assets := t.TempDir()
-	if err := os.WriteFile(filepath.Join(assets, "package.json"), []byte(`{"name":"@kedge/actions-node","type":"module"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(assets, "index.mjs"), []byte("export {};\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(actionsNodeAssetDirEnv, assets)
-	if err := installSelf(dir); err == nil {
-		t.Fatal("installSelf accepted an incomplete Actions SDK")
-	}
-	if _, err := os.Stat(filepath.Join(dir, agentBinaryName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("agent binary was written after SDK validation failure: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "@kedge", "actions-node")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("partial Actions SDK directory exists after validation failure: %v", err)
-	}
 }
 
 func TestInstallSelfInvalidJWKSFailsOpenAndRemovesStaleConfig(t *testing.T) {
-	setTestActionsNodeAssets(t)
 	for _, raw := range []string{"", `{"keys":[{"kty":"EC","crv":"P-256","kid":"attacker","x":"x","y":"y","d":"private"}]}`} {
 		t.Run(raw, func(t *testing.T) {
 			dir := t.TempDir()
@@ -223,14 +170,6 @@ func TestInstallSelfInvalidJWKSFailsOpenAndRemovesStaleConfig(t *testing.T) {
 		})
 	}
 }
-
-func setTestActionsNodeAssets(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join("..", "..", "..", "provider-sdk", "actions-node")
-	t.Setenv(actionsNodeAssetDirEnv, dir)
-	return dir
-}
-
 func TestNormalizePreviewConsoleJWKSRejectsPrivateOrMalformedKeys(t *testing.T) {
 	for _, raw := range []string{
 		`{"keys":[]}`,

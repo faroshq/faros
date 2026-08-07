@@ -259,6 +259,38 @@ consent, and deprecation metadata. See the [Provider Actions contract and
 verification guide](./provider-actions.md) for the workload exchange, SDK,
 provider boundary, and verification commands.
 
+### Provider assistant skills
+
+`CatalogEntry.spec.assistantSkills` is an inline, versioned package contract
+for read-only App Studio guidance. Each package carries `packageName`,
+`version`, a complete raw `SKILL.md`, optional package-relative resources, and
+a canonical `sha256:` digest. The digest covers the package identity, version,
+document bytes, and resources in deterministic path order; it is provenance
+and integrity, not an authority grant. The authenticated hub
+`/api/providers` catalog distributes validated inline bytes. It never follows
+a provider URL and does not grant credentials, tools, models, permissions, or
+runtime authority.
+
+Publication is bounded: at most 64 packages per `CatalogEntry`, each document
+is at most 32 KiB, each supporting resource at most 64 KiB, and all documents
+and resources for one provider entry are at most 512 KiB. Invalid packages are
+isolated with bounded sanitized warnings where possible. These limits apply to
+the published artifact; they do not make a skill trusted instructions.
+
+App Studio projects expose valid packages as read-only, provider-qualified
+system skills (`providers/<provider>/<packageName>`). They use the existing
+catalog progressive-disclosure flow: metadata discovery, explicit
+`load_skill`, bounded `read_skill_resource`, activation policy, and immutable
+catalog/digest snapshots for a turn. Distribution is not provider or action
+enablement: a published provider package follows the system-skill default of
+enabled, and each project may disable or re-enable the qualified skill. A
+transient provider heartbeat/readiness change does not revoke declared
+guidance. If the request has no bearer or the provider skill catalog is
+temporarily unavailable, App Studio preserves bundled and project skills and
+emits only a bounded sanitized warning where applicable. Provider Actions and
+their grants remain the authoritative, fail-closed path for data access or
+other effects; a skill can never create or widen that authority.
+
 ---
 
 ## CRDs

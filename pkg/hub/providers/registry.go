@@ -60,12 +60,17 @@ type Provider struct {
 	// use BackendURL or a provider MCP endpoint.
 	VirtualWorkspaceURL *url.URL
 	Actions             []ProviderAction
-	BuiltinRoute        string     // when set, portal renders this Vue route instead of loading /main.js
-	Children            []NavChild // sub-nav entries surfaced indented under this provider
-	Version             string     // CatalogEntry.spec.version (chart-declared)
-	APIExportPath       string     // kcp workspace path hosting the APIExport (e.g. root:kedge:providers:cost)
-	APIExportName       string     // APIExport name (e.g. cost.providers.kedge.faros.sh)
-	PermissionClaims    []PermissionClaim
+	// AssistantSkills contains only validated, provider-supplied inline App
+	// Studio packages. It intentionally carries no provider URL, credential, or
+	// runtime handle; the authenticated catalog API is the sole distribution
+	// boundary.
+	AssistantSkills  []ProviderAssistantSkill
+	BuiltinRoute     string     // when set, portal renders this Vue route instead of loading /main.js
+	Children         []NavChild // sub-nav entries surfaced indented under this provider
+	Version          string     // CatalogEntry.spec.version (chart-declared)
+	APIExportPath    string     // kcp workspace path hosting the APIExport (e.g. root:kedge:providers:cost)
+	APIExportName    string     // APIExport name (e.g. cost.providers.kedge.faros.sh)
+	PermissionClaims []PermissionClaim
 
 	// EdgeProxyAccess mirrors CatalogEntry.spec.edgeProxyAccess: on tenant
 	// Enable, the hub grants the provider SA the "proxy" verb on edges in
@@ -186,6 +191,23 @@ type ProviderActionLimits struct {
 	MaxInputBytes  int64
 	MaxOutputBytes int64
 	MaxResultItems int64
+}
+
+// ProviderAssistantSkill is the registry's normalized view of one inline App
+// Studio skill package. Resource paths remain package-relative and content is
+// copied into the catalog response only after CatalogEntry validation.
+type ProviderAssistantSkill struct {
+	PackageName string
+	Version     string
+	Digest      string
+	Skill       string
+	Resources   []ProviderAssistantSkillResource
+}
+
+// ProviderAssistantSkillResource is one package-relative supporting resource.
+type ProviderAssistantSkillResource struct {
+	Path    string
+	Content string
 }
 
 // ParseProviderActions normalizes the typed CatalogEntry action list and
@@ -363,7 +385,7 @@ func (r *Registry) Get(name string) (Provider, bool) {
 	if !ok {
 		return Provider{}, false
 	}
-	return *p, true
+	return cloneProvider(*p), true
 }
 
 // List returns a snapshot of all registered providers.
@@ -372,7 +394,7 @@ func (r *Registry) List() []Provider {
 	defer r.mu.RUnlock()
 	out := make([]Provider, 0, len(r.byName))
 	for _, p := range r.byName {
-		out = append(out, *p)
+		out = append(out, cloneProvider(*p))
 	}
 	return out
 }
@@ -396,7 +418,38 @@ func (r *Registry) Upsert(p Provider) {
 		}
 	}
 	cp := p
+	cp.AssistantSkills = cloneProviderAssistantSkills(p.AssistantSkills)
 	r.byName[p.Name] = &cp
+}
+
+func cloneProviderAssistantSkills(in []ProviderAssistantSkill) []ProviderAssistantSkill {
+	if in == nil {
+		return nil
+	}
+	out := make([]ProviderAssistantSkill, len(in))
+	for i, skill := range in {
+		out[i] = skill
+		if skill.Resources != nil {
+			out[i].Resources = append([]ProviderAssistantSkillResource(nil), skill.Resources...)
+		}
+	}
+	return out
+}
+
+func cloneProvider(p Provider) Provider {
+	p.Dependencies = append([]Dependency(nil), p.Dependencies...)
+	p.PermissionClaims = append([]PermissionClaim(nil), p.PermissionClaims...)
+	for i := range p.PermissionClaims {
+		p.PermissionClaims[i].Verbs = append([]string(nil), p.PermissionClaims[i].Verbs...)
+	}
+	p.Children = append([]NavChild(nil), p.Children...)
+	p.Actions = append([]ProviderAction(nil), p.Actions...)
+	for i := range p.Actions {
+		p.Actions[i].InputSchema = append(json.RawMessage(nil), p.Actions[i].InputSchema...)
+		p.Actions[i].OutputSchema = append(json.RawMessage(nil), p.Actions[i].OutputSchema...)
+	}
+	p.AssistantSkills = cloneProviderAssistantSkills(p.AssistantSkills)
+	return p
 }
 
 // SetWorkspaceCluster records the logical cluster ID of the provider's
