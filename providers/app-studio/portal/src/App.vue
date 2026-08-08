@@ -4106,7 +4106,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     :title="createPromptSubmitTitle"
                   >
                     Continue
-                    <ArrowRight class="h-4 w-4" :stroke-width="2" />
+                    <ArrowRight class="h-4 w-4" :stroke-width="1.75" />
                   </button>
                 </div>
               </div>
@@ -4277,7 +4277,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           </div>
           <div class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-text-muted">
             <template v-if="selected?.repository">
-              <GitBranch class="h-3 w-3 shrink-0" :stroke-width="1.75" />
+              <GitBranch class="h-3 w-3 shrink-0" :stroke-width="2" />
               <span class="truncate">{{ selected.repository.name || selected.repository.ref }}</span>
             </template>
             <template v-else>
@@ -4313,7 +4313,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface text-text-muted"
                   :class="llmSettings?.configured ? 'text-success' : 'text-accent'"
                 >
-                  <Check v-if="llmSettings?.configured" class="h-4 w-4" :stroke-width="2" />
+                  <Check v-if="llmSettings?.configured" class="h-4 w-4" :stroke-width="1.75" />
                   <Settings2 v-else class="h-4 w-4" :stroke-width="1.75" />
                 </div>
                 <div class="min-w-0 flex-1">
@@ -4383,7 +4383,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     class="inline-flex max-w-full items-center gap-1 rounded-sm border border-border-subtle bg-surface-raised px-2 py-1 text-[10px] text-text-secondary"
                     :title="`${skill.name} · ${skill.scope}`"
                   >
-                    <Plug class="h-3 w-3 shrink-0 text-accent" :stroke-width="1.75" aria-hidden="true" />
+                    <Plug class="h-3 w-3 shrink-0 text-accent" :stroke-width="2" aria-hidden="true" />
                     <span class="max-w-40 truncate font-medium text-text-primary">{{ skill.name }}</span>
                     <span class="max-w-24 truncate text-text-muted">{{ skill.scope }}</span>
                   </span>
@@ -4424,7 +4424,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                       <span>Worked for {{ assistantWorkedLabel(message) }}</span>
                       <span v-if="message.viewStatus === 'interrupted'" class="inline-flex items-center gap-1 text-warning/80" title="The assistant stopped before completing this turn">
                         <span class="text-text-muted" aria-hidden="true">·</span>
-                        <TriangleAlert class="h-3 w-3" :stroke-width="1.75" aria-hidden="true" />
+                        <TriangleAlert class="h-3 w-3" :stroke-width="2" aria-hidden="true" />
                         <span>Interrupted</span>
                       </span>
                       <ChevronRight
@@ -4505,7 +4505,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   aria-atomic="true"
                   title="The assistant stopped before completing this turn"
                 >
-                  <TriangleAlert class="h-3 w-3 text-warning/80" :stroke-width="1.75" aria-hidden="true" />
+                  <TriangleAlert class="h-3 w-3 text-warning/80" :stroke-width="2" aria-hidden="true" />
                   Interrupted
                 </div>
               </div>
@@ -4707,7 +4707,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               aria-label="Stop generating"
               @click="cancelMessageStream"
             >
-              <Square class="h-4 w-4 fill-current" :stroke-width="2" />
+              <Square class="h-4 w-4 fill-current" :stroke-width="1.75" />
             </button>
             <button
               v-else-if="activeAssistantRun?.status === 'stopping'"
@@ -4717,7 +4717,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               title="Stopping"
               aria-label="Stopping"
             >
-              <Loader2 class="h-4 w-4 animate-spin" :stroke-width="2" />
+              <Loader2 class="h-4 w-4 animate-spin" :stroke-width="1.75" />
             </button>
             <button
               v-else
@@ -4726,7 +4726,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               :title="llmSettings?.configured ? 'Send' : 'Configure LLM settings before sending'"
               :aria-label="llmSettings?.configured ? 'Send' : 'Configure LLM settings before sending'"
             >
-              <ArrowUp class="h-4 w-4" :stroke-width="2" />
+              <ArrowUp class="h-4 w-4" :stroke-width="1.75" />
             </button>
           </div>
         </form>
@@ -5495,7 +5495,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             title="Close"
             @click="closeSettings"
           >
-            <X class="h-4 w-4" :stroke-width="2" />
+            <X class="h-4 w-4" :stroke-width="1.75" />
           </button>
         </header>
 
@@ -5544,7 +5544,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 title="Save project details"
               >
                 <Loader2 v-if="projectSettingsSaving" class="h-4 w-4 animate-spin" :stroke-width="1.75" />
-                <Check v-else class="h-4 w-4" :stroke-width="2" />
+                <Check v-else class="h-4 w-4" :stroke-width="1.75" />
                 Save project
               </button>
             </div>
@@ -5693,7 +5693,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   :disabled="llmSaving || !llmModel.trim() || Boolean(llmBaseURLError)"
                 >
                   <Loader2 v-if="llmSaving" class="h-4 w-4 animate-spin" :stroke-width="1.75" />
-                  <Check v-else class="h-4 w-4" :stroke-width="2" />
+                  <Check v-else class="h-4 w-4" :stroke-width="1.75" />
                   Save settings
                 </button>
               </div>
