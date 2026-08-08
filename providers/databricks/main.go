@@ -152,11 +152,19 @@ func newServeMux(tables map[string]queryapi.TableRef, devStaticTables bool, tena
 		}
 		return tenantFactory.TableResolverForRequest(r)
 	}
+	actionExecutorForRoute := func(r *http.Request, route actions.Route) actions.QueryExecutor {
+		if devStaticTables || tenantFactory == nil {
+			return nil
+		}
+		return tenantFactory.ActionExecutorForRoute(r, route.ClusterID, actionExecutor)
+	}
+	// The MCP tool still resolves identity from proxy-injected headers; it is
+	// a presentation adapter over the same executor, not an action route.
 	actionExecutorFromRequest := func(r *http.Request) actions.QueryExecutor {
 		if devStaticTables || tenantFactory == nil {
 			return nil
 		}
-		return tenantFactory.ActionExecutorForRequest(r, actionExecutor)
+		return tenantFactory.ActionExecutorForRoute(r, r.Header.Get("X-Kedge-Cluster"), actionExecutor)
 	}
 
 	mux := http.NewServeMux()
@@ -190,9 +198,9 @@ func newServeMux(tables map[string]queryapi.TableRef, devStaticTables bool, tena
 		mux.Handle("/mcp/sse", mcpHandler)
 	}
 	actionHandler := actions.NewHandler(actions.Deps{
-		QueryExecutorFromRequest: actionExecutorFromRequest,
+		QueryExecutorForRoute: actionExecutorForRoute,
 	})
-	mux.Handle(actions.PathQueryTableV1, actionHandler)
+	mux.Handle(actions.PathPrefix, actionHandler)
 
 	fileServer, distFS, err := portalHandler()
 	if err != nil {

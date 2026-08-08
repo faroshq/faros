@@ -42,17 +42,28 @@ type ActionExecutor struct {
 	authorityClient client.Client
 }
 
-// TableAuthorizer performs caller-scoped authorization for the imported Table
-// before the provider reads its dependency chain.
+// TableAuthorizer performs caller-scoped authorization before the provider
+// reads its dependency chain: a visibility gate (get on the Table) and a verb
+// gate (create on the action's virtual subresource). Both reviews run with
+// the forwarded caller token so kcp RBAC — including workload-identity action
+// grants — is the deciding authority.
 type TableAuthorizer interface {
 	AuthorizeTable(context.Context, string, string, string) error
+	AuthorizeTableAction(context.Context, string, string, string, string) error
 }
 
-// ActionExecutorForRequest returns a direct action executor for the request's
-// bearer, tenant path, and logical-cluster ID. A nil factory still returns an
-// executor so the endpoint can fail with a useful unavailable error.
-func (f *ClientFactory) ActionExecutorForRequest(r *http.Request, executor backend.QueryExecutor) *ActionExecutor {
-	return &ActionExecutor{factory: f, identity: identityFromRequest(r), executor: executor, authorizer: f}
+// ActionExecutorForRoute returns a direct action executor for the request's
+// bearer and the route's logical-cluster ID. The cluster comes from the
+// action path — the platform data-plane grammar — never from proxy-injected
+// headers. A nil factory still returns an executor so the endpoint can fail
+// with a useful unavailable error.
+func (f *ClientFactory) ActionExecutorForRoute(r *http.Request, clusterID string, executor backend.QueryExecutor) *ActionExecutor {
+	return &ActionExecutor{
+		factory:  f,
+		identity: identity{clusterID: strings.TrimSpace(clusterID), token: bearerToken(r)},
+		executor: executor,
+		authorizer: f,
+	}
 }
 
 // QueryTable resolves the provider-owned Table -> Warehouse -> Connection ->
@@ -67,7 +78,7 @@ func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef
 	if e == nil || e.factory == nil {
 		return queryapi.QueryTableResult{}, fmt.Errorf("tenant client unavailable")
 	}
-	if !validTenantPath(e.identity.tenantPath) || strings.TrimSpace(e.identity.clusterID) == "" {
+	if strings.TrimSpace(e.identity.clusterID) == "" {
 		return queryapi.QueryTableResult{}, fmt.Errorf("tenant identity is missing")
 	}
 	if strings.TrimSpace(e.identity.token) == "" {
@@ -87,6 +98,9 @@ func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef
 	}
 	if e.authorizer != nil {
 		if err := e.authorizer.AuthorizeTable(ctx, e.identity.clusterID, e.identity.token, request.TableRef); err != nil {
+			return queryapi.QueryTableResult{}, err
+		}
+		if err := e.authorizer.AuthorizeTableAction(ctx, e.identity.clusterID, e.identity.token, request.TableRef, actions.ActionQueryName); err != nil {
 			return queryapi.QueryTableResult{}, err
 		}
 	}
@@ -156,11 +170,6 @@ func (e *ActionExecutor) QueryTable(ctx context.Context, ref actions.ResourceRef
 	return queryapi.BoundQueryResult(result), nil
 }
 
-func validTenantPath(path string) bool {
-	parts := strings.Split(strings.TrimSpace(path), ":")
-	return len(parts) == 5 && parts[0] == "root" && parts[1] == "kedge" && parts[2] == "tenants" && parts[3] != "" && parts[4] != ""
-}
-
 // AuthorizeTable delegates the authorization check to the tenant caller's
 // SelfSubjectAccessReview. The provider's own kubeconfig is never used for
 // the review; it is scoped to the forwarded token and cluster. A successful
@@ -187,6 +196,44 @@ func (f *ClientFactory) AuthorizeTable(ctx context.Context, clusterID, token, na
 		reason := strings.TrimSpace(accessReview.Status.Reason)
 		if reason == "" {
 			reason = "caller is not allowed to read the imported table"
+		}
+		return apierrors.NewForbidden(databricksv1alpha1.SchemeGroupVersion.WithResource("tables").GroupResource(), name, fmt.Errorf("%s", reason))
+	}
+	return nil
+}
+
+// AuthorizeTableAction is the verb gate: an explicit create permission on the
+// action's virtual subresource (e.g. tables/query_table), reviewed as the
+// caller. This is where action grants are enforced — App Studio materializes
+// a Project grant as exactly this RBAC rule on the workload identity, and a
+// human needs the equivalent workspace permission. The subresource is not
+// served by any API server; it exists purely as an RBAC coordinate, the same
+// pattern the infrastructure data plane uses for instance exec.
+func (f *ClientFactory) AuthorizeTableAction(ctx context.Context, clusterID, token, name, action string) error {
+	if f == nil {
+		return fmt.Errorf("tenant authorization unavailable")
+	}
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return fmt.Errorf("action name is required for authorization")
+	}
+	client, err := f.AuthorizationFor(clusterID, token)
+	if err != nil {
+		return err
+	}
+	accessReview, err := client.SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{
+			Group: databricksv1alpha1.GroupName, Version: databricksv1alpha1.Version,
+			Resource: "tables", Subresource: action, Name: name, Verb: "create",
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("authorize table action verb: %w", err)
+	}
+	if !accessReview.Status.Allowed {
+		reason := strings.TrimSpace(accessReview.Status.Reason)
+		if reason == "" {
+			reason = "caller is not granted this action on the imported table"
 		}
 		return apierrors.NewForbidden(databricksv1alpha1.SchemeGroupVersion.WithResource("tables").GroupResource(), name, fmt.Errorf("%s", reason))
 	}

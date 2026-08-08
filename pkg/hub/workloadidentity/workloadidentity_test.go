@@ -143,7 +143,7 @@ func TestHTTPAttestorForwardsBearerAndExactBody(t *testing.T) {
 		got = r
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"authenticated":true,"subject":"s","namespace":"n","serviceAccount":"sa"}`)), Header: make(http.Header)}, nil
 	})}
-	a := NewHTTPAttestor(HTTPAttestorOptions{Registry: fakeProviderLookup{provider: providers.Provider{VirtualWorkspaceURL: base, EndpointsValid: true}}, Client: client})
+	a := NewHTTPAttestor(HTTPAttestorOptions{Registry: fakeProviderLookup{provider: providers.Provider{BackendURL: base, EndpointsValid: true}}, Client: client})
 	req := ExchangeRequest{TenantPath: "root:kedge:tenants:o:w", Project: "p", ProjectUID: "u", Environment: "development", Instance: "i"}
 	review, err := a.Verify(context.Background(), "Bearer bootstrap", req)
 	if err != nil {

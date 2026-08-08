@@ -151,6 +151,13 @@ func (r *KCPProjectScopeResolver) Resolve(ctx context.Context, orgUUID, wsUUID s
 		if err != nil {
 			return serviceaccounts.WorkloadIdentityScope{}, err
 		}
+		if kind == "providerReference" {
+			actions, err := providerReferenceActions(binding)
+			if err != nil {
+				return serviceaccounts.WorkloadIdentityScope{}, err
+			}
+			resource.Actions = actions
+		}
 		// The runtime instance must be the infrastructure-owned binding (or
 		// App Studio's exact generated development binding). A providerReference
 		// with a coincidentally identical name cannot satisfy this check.
@@ -187,19 +194,79 @@ func providerResourceScope(ref map[string]any) (serviceaccounts.ProviderResource
 	return serviceaccounts.ProviderResourceScope{APIVersion: apiVersion, Kind: kind, Resource: resource, Name: name}, nil
 }
 
-func dedupeProviderResources(resources []serviceaccounts.ProviderResourceScope) []serviceaccounts.ProviderResourceScope {
-	seen := make(map[string]struct{}, len(resources))
-	out := make([]serviceaccounts.ProviderResourceScope, 0, len(resources))
-	for _, resource := range resources {
-		key := resource.APIVersion + "\x00" + resource.Resource + "\x00" + resource.Name
-		if _, ok := seen[key]; ok {
+// providerReferenceActions extracts the non-revoked action-grant names from a
+// providerReference binding. These become create rules on the action's
+// virtual subresource in the workload ClusterRole — the RBAC materialization
+// of the Project grant. Version and schema digest stay in the grant record;
+// RBAC carries the action family only.
+func providerReferenceActions(binding map[string]any) ([]string, error) {
+	raw, found, err := unstructured.NestedSlice(binding, "allowedActions")
+	if err != nil {
+		return nil, fmt.Errorf("project provider action grants are malformed")
+	}
+	if !found {
+		return nil, nil
+	}
+	actions := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		grant, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("project provider action grant is malformed")
+		}
+		revoked, _, _ := unstructured.NestedBool(grant, "revoked")
+		if revoked {
 			continue
 		}
-		seen[key] = struct{}{}
-		out = append(out, resource)
+		name, _, _ := unstructured.NestedString(grant, "name")
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return nil, fmt.Errorf("project provider action grant has no name")
+		}
+		actions = append(actions, name)
+	}
+	sort.Strings(actions)
+	return dedupeStrings(actions), nil
+}
+
+func dedupeStrings(values []string) []string {
+	out := values[:0]
+	var last string
+	for i, value := range values {
+		if i == 0 || value != last {
+			out = append(out, value)
+		}
+		last = value
+	}
+	return out
+}
+
+func dedupeProviderResources(resources []serviceaccounts.ProviderResourceScope) []serviceaccounts.ProviderResourceScope {
+	merged := make(map[string]*serviceaccounts.ProviderResourceScope, len(resources))
+	order := make([]string, 0, len(resources))
+	for _, resource := range resources {
+		key := resource.APIVersion + "\x00" + resource.Resource + "\x00" + resource.Name
+		if existing, ok := merged[key]; ok {
+			// Same resource granted by more than one binding: union the
+			// action grants so a duplicate reference cannot drop a grant.
+			existing.Actions = dedupeStrings(sortedUnion(existing.Actions, resource.Actions))
+			continue
+		}
+		copied := resource
+		merged[key] = &copied
+		order = append(order, key)
+	}
+	out := make([]serviceaccounts.ProviderResourceScope, 0, len(order))
+	for _, key := range order {
+		out = append(out, *merged[key])
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].APIVersion+"/"+out[i].Resource+"/"+out[i].Name < out[j].APIVersion+"/"+out[j].Resource+"/"+out[j].Name
 	})
 	return out
+}
+
+func sortedUnion(left, right []string) []string {
+	union := append(append([]string(nil), left...), right...)
+	sort.Strings(union)
+	return union
 }

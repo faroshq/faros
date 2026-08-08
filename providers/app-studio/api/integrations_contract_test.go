@@ -179,7 +179,7 @@ func TestProviderActionForwardingNeverRetriesWithInsecureTLS(t *testing.T) {
 	ref := &aiv1alpha1.ProjectProviderResourceReference{
 		Name: "item", APIVersion: "example/v1", Kind: "Item", Resource: "items",
 	}
-	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{clusterID: "cluster-a"}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected verified TLS failure against self-signed upstream")
 	}
@@ -211,7 +211,7 @@ func TestProviderActionForwardingAppendsConfiguredCAToSystemTrust(t *testing.T) 
 	caBundle := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw})
 	s := &Server{hubBase: upstream.URL, actionsExternalURL: "https://hub.example", actionsCABundle: string(caBundle), mcpInsecureSkipTLSVerify: true}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{clusterID: "cluster-a"}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
 	if err != nil || status != http.StatusOK || envelope.Error != nil {
 		t.Fatalf("forward with configured CA = status %d envelope %#v err %v", status, envelope, err)
 	}
@@ -246,7 +246,7 @@ func TestProviderActionForwardingUsesVerifiedOrgWorkspaceHeaders(t *testing.T) {
 	request.Header.Set("X-Kedge-Org", "spoofed")
 	request.Header.Set("X-Kedge-Workspace", "spoofed")
 	status, envelope, err := s.forwardProjectProviderAction(request, identity{
-		tenantPath: "root:kedge:tenants:org-verified:workspace-verified", orgUUID: "org-verified", workspaceUUID: "workspace-verified", token: "caller-token",
+		tenantPath: "root:kedge:tenants:org-verified:workspace-verified", orgUUID: "org-verified", workspaceUUID: "workspace-verified", token: "caller-token", clusterID: "cluster-a",
 	}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
 	if err != nil || status != http.StatusOK || envelope.Error != nil {
 		t.Fatalf("forward = status %d envelope %#v err %v", status, envelope, err)
@@ -271,7 +271,7 @@ func TestProviderActionForwardingRejectsRedirectWithoutLeakingBearer(t *testing.
 	s := &Server{hubBase: redirect.URL, actionsExternalURL: "https://hub.example"}
 	request := httptest.NewRequest(http.MethodPost, "/", nil)
 	request.Header.Set("Authorization", "Bearer caller-token")
-	status, envelope, err := s.forwardProjectProviderAction(request, identity{}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
+	status, envelope, err := s.forwardProjectProviderAction(request, identity{clusterID: "cluster-a"}, "other", "lookup", "v1", testProjectActionSchemaDigest, ref, json.RawMessage(`{}`))
 	if err == nil || status != http.StatusBadGateway || envelope.Error == nil {
 		t.Fatalf("redirect forward = status %d envelope %#v err %v", status, envelope, err)
 	}
@@ -420,6 +420,10 @@ func writeIntegrationGraphQLData(w http.ResponseWriter, data map[string]any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
+// serveProviderAction emulates a provider's action endpoint behind the hub
+// backend proxy: identity is parsed from the data-plane route
+// (/services/providers/{provider}/actions/clusters/{cluster}/{resource}/{name}/{action}/{version})
+// and the body carries only input, mirroring the real wire contract.
 func (f *integrationHTTPFixture) serveProviderAction(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -431,17 +435,21 @@ func (f *integrationHTTPFixture) serveProviderAction(w http.ResponseWriter, r *h
 		URL: r.URL.String(), Headers: r.Header.Clone(), Body: body,
 	})
 	f.mu.Unlock()
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// services providers {provider} actions clusters {cluster} {resource} {name} {action} {version}
+	if len(parts) != 10 || parts[0] != "services" || parts[1] != "providers" || parts[3] != "actions" || parts[4] != "clusters" {
+		http.Error(w, "unexpected provider action route", http.StatusNotFound)
+		return
+	}
+	provider, resourceName, action, actionVersion := parts[2], parts[7], parts[8], parts[9]
 	w.Header().Set("Content-Type", "application/json")
-	provider, _ := body["provider"].(string)
-	action, _ := body["action"].(string)
-	actionVersion, _ := body["actionVersion"].(string)
 	result := map[string]any{"echo": body["input"]}
 	if provider == "databricks" && action == "query_table" && actionVersion == "v1" {
-		result = map[string]any{"actionVersion": "v1", "tableRef": "orders", "rows": []any{map[string]any{"id": 1}}}
+		result = map[string]any{"actionVersion": "v1", "tableRef": resourceName, "rows": []any{map[string]any{"id": 1}}}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"requestID": "hub-request-1", "provider": provider, "action": action, "actionVersion": actionVersion,
-		"resourceRef": body["resourceRef"], "result": result,
+		"result": result,
 	})
 }
 
@@ -680,8 +688,11 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 		t.Fatalf("provider action calls = %d, want exactly one hub call", len(requests))
 	}
 	actionRequest := requests[0]
-	if actionRequest.URL != "/api/provider-actions/invoke" {
-		t.Fatalf("provider action URL = %q, want generic hub endpoint", actionRequest.URL)
+	// The route IS the resource reference: provider, cluster, resource, name,
+	// action, and version are all addressed in the path on the provider's
+	// embedded virtual workspace, reached through the hub backend proxy.
+	if actionRequest.URL != "/services/providers/databricks/actions/clusters/cluster-a/tables/orders/query_table/v1" {
+		t.Fatalf("provider action URL = %q, want data-plane action route", actionRequest.URL)
 	}
 	if actionRequest.Headers.Get("Authorization") != "Bearer caller-token" ||
 		actionRequest.Headers.Get("X-Kedge-Tenant") != "root:kedge:tenants:org-a:workspace-a" ||
@@ -691,15 +702,10 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 		actionRequest.Headers.Get("X-Kedge-Action-Deadline-Ms") != "45000" {
 		t.Fatalf("provider action caller headers = %#v, want propagated auth/tenant/correlation/deadline", actionRequest.Headers)
 	}
-	if actionRequest.Body["provider"] != "databricks" || actionRequest.Body["action"] != "query_table" || actionRequest.Body["actionVersion"] != "v1" {
-		t.Fatalf("provider action body = %#v, want bound provider/action/version", actionRequest.Body)
-	}
-	if actionRequest.Body["schemaDigest"] != testProjectActionSchemaDigest {
-		t.Fatalf("provider action schemaDigest = %#v, want %q", actionRequest.Body["schemaDigest"], testProjectActionSchemaDigest)
-	}
-	resourceRef, ok := actionRequest.Body["resourceRef"].(map[string]any)
-	if !ok || resourceRef["name"] != "orders" || resourceRef["apiVersion"] != databricksTableAPIVersion {
-		t.Fatalf("provider action resourceRef = %#v, want server-injected orders ref", actionRequest.Body["resourceRef"])
+	for _, field := range []string{"provider", "action", "actionVersion", "schemaDigest", "resourceRef"} {
+		if _, present := actionRequest.Body[field]; present {
+			t.Fatalf("provider action body carried identity field %q; identity must live in the route only", field)
+		}
 	}
 	input, ok := actionRequest.Body["input"].(map[string]any)
 	if !ok || input["limit"] != float64(2) {
@@ -943,8 +949,8 @@ func TestProjectIntegrationInvokeForwardsGenericProviderAndInput(t *testing.T) {
 		t.Fatalf("generic provider action status = %d: %s", response.Code, response.Body.String())
 	}
 	requests := fixture.actionRequests()
-	if len(requests) != 1 || requests[0].Body["provider"] != "other" {
-		t.Fatalf("generic provider action calls = %#v, want one forward with provider other", requests)
+	if len(requests) != 1 || !strings.HasPrefix(requests[0].URL, "/services/providers/other/actions/clusters/") {
+		t.Fatalf("generic provider action calls = %#v, want one forward routed to provider other", requests)
 	}
 	input, ok := requests[0].Body["input"].(map[string]any)
 	if !ok || input["sql"] != "provider-defined" {

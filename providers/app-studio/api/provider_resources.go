@@ -74,6 +74,15 @@ func (s *Server) reconcileProjectLiveBindings(ctx context.Context, c *asclient.C
 				}
 			}
 			if _, err := ensureProjectProviderResource(ctx, c, p, effectiveBinding, id); err != nil {
+				// One provider's absence must not block another provider's
+				// grant lifecycle: a revoke or grant change on a databricks
+				// integration has to succeed even when the infrastructure
+				// API backing the runtime binding is not (or no longer)
+				// bound in this workspace. Absent-API failures degrade to
+				// binding status; anything else still fails the request.
+				if isProjectAPIInitializingError(err) {
+					continue
+				}
 				return nil, err
 			}
 		}

@@ -56,10 +56,8 @@ func TestMCPCanBeExplicitlyDisabledWithoutRemovingActions(t *testing.T) {
 		t.Fatal("POST /mcp succeeded while DATABRICKS_MCP_ENABLED=false")
 	}
 
-	actionReq := httptest.NewRequest(http.MethodPost, "/actions/query_table/v1", bytes.NewBufferString(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"order-history"},"input":{"limit":1}}`))
+	actionReq := httptest.NewRequest(http.MethodPost, "/actions/clusters/tenant-cluster/tables/order-history/query_table/v1", bytes.NewBufferString(`{"input":{"limit":1}}`))
 	actionReq.Header.Set("Authorization", "Bearer workload")
-	actionReq.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:workspace")
-	actionReq.Header.Set("X-Kedge-Cluster", "tenant-cluster")
 	actionRec := httptest.NewRecorder()
 	mux.ServeHTTP(actionRec, actionReq)
 	if actionRec.Code == http.StatusNotFound {

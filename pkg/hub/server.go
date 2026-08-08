@@ -53,7 +53,6 @@ import (
 	"github.com/faroshq/faros-kedge/pkg/hub/controllers/softdelete"
 	"github.com/faroshq/faros-kedge/pkg/hub/kcp"
 	"github.com/faroshq/faros-kedge/pkg/hub/mcpaggregate"
-	"github.com/faroshq/faros-kedge/pkg/hub/provideractions"
 	"github.com/faroshq/faros-kedge/pkg/hub/providers"
 	"github.com/faroshq/faros-kedge/pkg/hub/restapi"
 	"github.com/faroshq/faros-kedge/pkg/hub/serviceaccounts"
@@ -203,7 +202,6 @@ func (s *Server) Run(ctx context.Context) error {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = fmt.Fprint(w, "bootstrapping")
 	})
-	earlyMux.Handle("/metrics", provideractions.MetricsHandler())
 	delegate.set(earlyMux)
 
 	earlyHTTPServer := &http.Server{
@@ -334,11 +332,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// (wired below alongside other multicluster controllers) keeps in sync
 	// with ProviderCatalogEntry resources.
 	providerRegistry := providers.NewRegistry()
-	providerActionHandler := provideractions.New(provideractions.Options{
-		Registry: providerRegistry,
-		Logger:   logger,
-	})
-	router.Handle(provideractions.PathInvoke, providerActionHandler).Methods(http.MethodPost)
+	// Provider action invocations ride the backend proxy like every other
+	// data-plane verb (/services/providers/{name}/actions/clusters/...): the
+	// owning provider authorizes them with caller-scoped SSAR gates and kcp
+	// RBAC carries the grants, so no hub-side action router exists.
 	// Keep the UI proxy reference around so we can install the portal SPA as
 	// its fallback once the portal handler is built later in this function.
 	// Without that fallback, a hard refresh of /ui/providers/{name} would
@@ -439,8 +436,6 @@ func (s *Server) Run(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "ok")
 	})
-	router.Handle("/metrics", provideractions.MetricsHandler()).Methods(http.MethodGet)
-
 	// Version endpoint — used by the portal to detect when an edge agent is
 	// running an older build than the hub and to render upgrade instructions.
 	router.HandleFunc(apiurl.PathVersion, func(w http.ResponseWriter, r *http.Request) {
@@ -507,9 +502,6 @@ func (s *Server) Run(ctx context.Context) error {
 			// ID) so providers can address per-workspace surfaces that key on
 			// the ID — notably the GraphQL gateway at /graphql/clusters/{id}.
 			backendProxy.SetClusterResolver(newClusterIDResolver(kcpConfig))
-			providerActionHandler.SetTenantResolver(newKCPTenantResolver(kcpProxy, userClient, bootstrapper))
-			providerActionHandler.SetClusterResolver(newClusterIDResolver(kcpConfig))
-			providerActionHandler.SetInvocationAuthorizer(provideractions.NewKCPInvocationAuthorizer(bootstrapper))
 
 			// Step 10: Org / Workspace / Membership / User REST
 			apiMgr := restapi.NewManager(userClient, bootstrapper)

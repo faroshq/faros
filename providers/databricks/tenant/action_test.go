@@ -29,14 +29,29 @@ import (
 )
 
 type actionTestAuthorizer struct {
-	calls int
-	err   error
+	calls       int
+	actionCalls int
+	lastAction  string
+	err         error
+	actionErr   error
 }
 
 func (a *actionTestAuthorizer) AuthorizeTable(_ context.Context, _, _, name string) error {
 	a.calls++
 	if a.err != nil {
 		return a.err
+	}
+	if name != "taxi-trips" {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (a *actionTestAuthorizer) AuthorizeTableAction(_ context.Context, _, _, name, action string) error {
+	a.actionCalls++
+	a.lastAction = action
+	if a.actionErr != nil {
+		return a.actionErr
 	}
 	if name != "taxi-trips" {
 		return context.Canceled

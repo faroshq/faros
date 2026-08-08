@@ -314,19 +314,20 @@ func applyProviderManifests() error {
 				if obj.GetKind() == "CatalogEntry" {
 					endpoint := "http://127.0.0.1:" + provider.port
 					if provider.name == "infrastructure" {
-						// The E2E only needs Infrastructure's virtual-workspace
-						// attestor. Keep its catalog record deterministic without
-						// starting the full provider process.
+						// The E2E only needs Infrastructure's attestation
+						// endpoint. It lives on the backend origin under the
+						// hub-only /workload-identities prefix; the backend
+						// proxy refuses that prefix so only the hub's attestor
+						// can reach it. Keep the catalog record deterministic
+						// without starting the full provider process.
 						endpoint = fakeAttestor.URL()
-						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "virtualWorkspace", "url")
+						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "backend", "url")
 					} else {
 						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "ui", "url")
+						// Provider actions are data-plane verbs on the backend
+						// origin, reached through the hub backend proxy at
+						// /services/providers/{name}/actions/clusters/....
 						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "backend", "url")
-						// Provider Actions route only through the catalog's published
-						// virtual-workspace URL. Point that contract at the same
-						// task-owned host process; the public backend proxy remains
-						// separately blocked from serving /actions.
-						_ = unstructured.SetNestedField(obj.Object, endpoint, "spec", "virtualWorkspace", "url")
 					}
 					// The local action lane does not need the optional Code or
 					// Infrastructure providers; removing this catalog-only gate

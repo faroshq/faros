@@ -416,10 +416,14 @@ action/resource grant. Revocation preserves that grant audit and records
 `revokedBy`/`revokedAt`; reactivation requires fresh catalog verification and
 consent when declared.
 
-Invocation forwards the provider-neutral envelope to the hub's direct
-`POST /api/provider-actions/invoke` route. App Studio does not select a
-provider URL or embed provider transport logic. Caller credentials,
-provider backend URLs, resource overrides, and raw SQL are rejected.
+Invocation re-verifies the persisted grant digest against the live catalog
+(`409` on drift), then forwards `{"input": ...}` to the provider's
+data-plane action route through the hub backend proxy —
+`/services/providers/{provider}/actions/clusters/{cluster}/{resource}/{name}/{action}/{version}`.
+The route is composed from the hub base plus the grant's bound resource; App
+Studio never learns a provider URL or embeds provider transport logic.
+Caller credentials, provider backend URLs, resource overrides, and raw SQL
+are rejected.
 
 Generated server applications install the public
 `@crwilhit/kedge-actions-node@0.1.0` artifact under the stable consumer name

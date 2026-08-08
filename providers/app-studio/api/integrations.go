@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,7 +35,6 @@ import (
 
 const (
 	projectIntegrationDefaultEnvironment  = "development"
-	projectProviderActionsInvokePath      = "/api/provider-actions/invoke"
 	projectProviderActionMaxResponseBytes = 4 << 20
 )
 
@@ -416,6 +416,15 @@ func (s *Server) invokeProjectIntegration(w http.ResponseWriter, r *http.Request
 		writeError(w, err)
 		return
 	}
+	if err := s.verifyProjectActionDigestForInvoke(r.Context(), id, binding.Provider, ref, name, version, schemaDigest); err != nil {
+		var drift errProjectActionDigestDrift
+		if errors.As(err, &drift) {
+			writeStatus(w, http.StatusConflict, "Conflict", drift.Error())
+			return
+		}
+		writeStatus(w, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		return
+	}
 
 	statusCode, envelope, err := s.forwardProjectProviderAction(r, id, binding.Provider, name, version, schemaDigest, ref, input)
 	if err != nil {
@@ -624,25 +633,40 @@ func validateProjectProviderActionInputValue(value any, path string) error {
 }
 
 type projectProviderActionInvokeRequest struct {
-	Provider      string                                       `json:"provider"`
-	Action        string                                       `json:"action"`
-	ActionVersion string                                       `json:"actionVersion"`
-	SchemaDigest  string                                       `json:"schemaDigest"`
-	ResourceRef   *aiv1alpha1.ProjectProviderResourceReference `json:"resourceRef"`
-	Input         json.RawMessage                              `json:"input"`
+	Input json.RawMessage `json:"input"`
+}
+
+// providerActionInvokeURL composes the data-plane action route on the target
+// provider's embedded virtual workspace, reached through the hub backend
+// proxy. The URL is the resource reference — cluster ID, resource, name, and
+// verb all live in the path, so the provider authorizes exactly what was
+// addressed and no identity travels in the body.
+func providerActionInvokeURL(hubBase, provider, clusterID string, ref *aiv1alpha1.ProjectProviderResourceReference, action, version string) (string, error) {
+	for field, value := range map[string]string{
+		"provider": provider, "cluster": clusterID, "resource": ref.Resource, "resource name": ref.Name,
+		"action": action, "version": version,
+	} {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "." || value == ".." || url.PathEscape(value) != value {
+			return "", fmt.Errorf("provider action %s is not path-safe", field)
+		}
+	}
+	return strings.TrimRight(hubBase, "/") + "/services/providers/" + provider +
+		"/actions/clusters/" + clusterID + "/" + ref.Resource + "/" + ref.Name + "/" + action + "/" + version, nil
 }
 
 func (s *Server) forwardProjectProviderAction(r *http.Request, id identity, provider, action, version, schemaDigest string, ref *aiv1alpha1.ProjectProviderResourceReference, input json.RawMessage) (int, projectProviderActionEnvelope, error) {
 	if _, err := validateActionsExternalURL(s.actionsExternalURL); err != nil {
 		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), err
 	}
-	payload, err := json.Marshal(projectProviderActionInvokeRequest{
-		Provider: provider, Action: action, ActionVersion: version, SchemaDigest: schemaDigest, ResourceRef: ref, Input: input,
-	})
+	payload, err := json.Marshal(projectProviderActionInvokeRequest{Input: input})
 	if err != nil {
 		return http.StatusBadGateway, projectProviderActionEnvelope{}, fmt.Errorf("encode provider action request: %w", err)
 	}
-	endpoint := strings.TrimRight(s.hubBase, "/") + projectProviderActionsInvokePath
+	endpoint, err := providerActionInvokeURL(s.hubBase, provider, id.clusterID, ref, action, version)
+	if err != nil {
+		return http.StatusBadGateway, providerActionUnavailableEnvelope(provider, action, version, ref), err
+	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return http.StatusBadGateway, projectProviderActionEnvelope{}, fmt.Errorf("new provider action request: %w", err)

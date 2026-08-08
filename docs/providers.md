@@ -248,16 +248,27 @@ retained historical proposal in
 ### Provider Actions
 
 Provider Actions extends the isolation boundary with catalog-declared,
-versioned capabilities. App Studio stores a non-owning `providerReference`
-and grants an exact provider action, resource reference, and schema digest;
-the hub verifies the live grant and forwards to the provider's declared
-VirtualWorkspace `/actions/{name}/{version}` route. The public backend proxy
-reserves `/actions` so callers cannot bypass those checks. The current shipped
-action is Databricks `query_table/v1`; the generic catalog and transport also
-carry schemas, execution mode, read-only/risk/idempotency policy, limits,
-consent, and deprecation metadata. See the [Provider Actions contract and
-verification guide](./provider-actions.md) for the workload exchange, SDK,
-provider boundary, and verification commands.
+versioned capabilities served on the provider's **embedded virtual
+workspace** — the same resource-addressed data-plane shape as the
+infrastructure `dataplane/` verbs. App Studio stores a non-owning
+`providerReference`, grants an exact provider action, resource reference, and
+schema digest, and **materializes the grant as kcp RBAC** (`create` on the
+action's virtual subresource, e.g. `tables/query_table`, name-scoped) on the
+workload identity. Invocations ride the ordinary hub backend proxy at
+`/services/providers/{name}/actions/clusters/{clusterID}/{resource}/{rname}/{action}/{version}`;
+the owning provider authorizes them as the caller with two SSAR gates
+(visibility on the resource, verb on the subresource) — uniform for humans
+and workloads, mirroring how data-plane exec is authorized. There is no
+dedicated hub action router; the proxy reserves only the hub-internal
+`/workload-identities/*` prefix. The current shipped action is Databricks
+`query_table/v1`; the generic catalog also carries schemas, execution mode,
+read-only/risk/idempotency policy, limits, consent, and deprecation metadata.
+See the [Provider Actions contract and verification
+guide](./provider-actions.md) for the workload exchange, SDK, provider
+boundary, and verification commands, and
+[cross-provider-simplification.md](./cross-provider-simplification.md) for
+how this pattern generalizes (decision #6's `spec.virtualWorkspace.url` dial
+target is retired in favor of reserved prefixes on `spec.backend.url`).
 
 ### Provider assistant skills
 

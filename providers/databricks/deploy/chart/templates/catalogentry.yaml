@@ -31,8 +31,6 @@ data:
       backend:
         url: "http://{{ include "databricks.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         healthPath: "/healthz"
-      virtualWorkspace:
-        url: "http://{{ include "databricks.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
       actions:
         - id: query_table/v1
           displayName: "Query table"

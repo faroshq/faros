@@ -208,6 +208,34 @@ func (s *Server) providerActionCatalog(ctx context.Context, id identity) ([]prov
 	return s.fetchProviderActionCatalog(ctx, id)
 }
 
+// errProjectActionDigestDrift marks a persisted grant whose schema digest no
+// longer matches the live catalog. Invocation maps it to 409 Conflict: the
+// grant must be re-verified (and re-consented where required) before the
+// action can run again.
+type errProjectActionDigestDrift struct{ message string }
+
+func (e errProjectActionDigestDrift) Error() string { return e.message }
+
+// verifyProjectActionDigestForInvoke re-checks the persisted grant against
+// the caller-scoped live catalog at invocation time. With invocations riding
+// the provider data plane directly, this is where schema drift is caught —
+// the grant-time digest pin alone would let a provider schema bump go
+// unnoticed until the generated app breaks on changed output.
+func (s *Server) verifyProjectActionDigestForInvoke(ctx context.Context, id identity, provider string, ref *aiv1alpha1.ProjectProviderResourceReference, name, version, grantDigest string) error {
+	catalog, err := s.providerActionCatalog(ctx, id)
+	if err != nil {
+		return fmt.Errorf("provider action catalog is unavailable: %w", err)
+	}
+	meta, err := findProviderCatalogAction(catalog, provider, ref, aiv1alpha1.ProjectProviderActionSpec{Name: name, Version: version, SchemaDigest: grantDigest})
+	if err != nil {
+		return errProjectActionDigestDrift{message: err.Error()}
+	}
+	if meta.SchemaDigest != grantDigest {
+		return errProjectActionDigestDrift{message: fmt.Sprintf("provider action %s/%s schema digest has drifted from the catalog", name, version)}
+	}
+	return nil
+}
+
 // providerAssistantSkillSource loads provider-declared packages through the
 // same authenticated /api/providers catalog as Provider Actions. It never
 // contacts provider backends. Skill presence follows the registered

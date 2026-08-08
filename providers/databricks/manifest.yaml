@@ -28,8 +28,6 @@ spec:
   backend:
     url: "http://localhost:8086"
     healthPath: "/healthz"
-  virtualWorkspace:
-    url: "http://localhost:8086"
   actions:
     - id: query_table/v1
       displayName: "Query table"

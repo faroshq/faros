@@ -3,9 +3,26 @@
 Provider Actions is the catalog-backed, synchronous action contract for
 server-side generated applications. Providers publish versioned action
 metadata in their `CatalogEntry`; App Studio grants an exact action and
-resource to a Project; the hub authorizes and forwards the invocation to the
-provider's declared VirtualWorkspace action endpoint. The public contract is
+resource to a Project and materializes the grant as **kcp RBAC** on the
+workload identity; invocations ride the ordinary hub backend proxy to the
+provider's **embedded virtual workspace** — a resource-addressed data-plane
+route the provider itself serves and authorizes with caller-scoped
+SelfSubjectAccessReviews, exactly like the infrastructure data plane's exec
+verb. There is no dedicated hub action router. The public contract is
 generic, but the only shipped action is Databricks `query_table/v1`.
+
+The action route grammar is the platform data-plane grammar:
+
+```text
+POST /services/providers/{provider}/actions/clusters/{clusterID}/{resource}/{name}/{action}/{version}
+```
+
+The URL is the resource reference — cluster ID, resource, name, and verb are
+all addressed in the path; the body carries only `{"input": {...}}`. Because
+authentication is the caller's bearer validated against kcp (never
+proxy-injected headers) and addressing is by cluster ID, the same handler can
+later be split out of the provider binary or promoted to a real kcp virtual
+workspace without any consumer change.
 
 ## Catalog contract
 
@@ -19,7 +36,7 @@ credential model:
 | `id`, `displayName`, `description` | Stable name/version plus human-facing metadata. IDs are `name/vN`. |
 | `boundResource` | Exact API version, kind, and resource whose identity is supplied by the Project binding. |
 | `inputSchema`, `outputSchema` | JSON Schemas for caller input and provider result. Schemas are local, bounded, and compiled by the hub. |
-| `schemaDigest` | `sha256:` digest over the canonical input/output schema envelope. The hub and App Studio require an exact match. |
+| `schemaDigest` | `sha256:` digest over the canonical input/output schema envelope. The hub recomputes it at catalog admission; App Studio pins it at grant time and re-verifies it on every invoke. |
 | `executionMode` | `sync` or `async`; the current hub transport accepts `sync` only. |
 | `readOnly` | Provider declaration that the action does not mutate the bound resource. |
 | `risk` | `low`, `medium`, or `high`, used by consent and UI policy. |
@@ -86,38 +103,46 @@ uses the same alias and accepts a provider-neutral action name/version.
 generated server application
   -> @kedge/actions-node
   -> App Studio integration invoke
-       verify persisted grant, digest, and exact bound resource
-       POST /api/provider-actions/invoke to the hub
-  -> hub provider-action router
-       resolve Ready CatalogEntry action and tenant cluster
-       verify workload identity + exact Project grant when caller is a workload
-       validate input schema and byte/result/time limits
-       POST provider VirtualWorkspace /actions/{name}/{version}
-  -> provider action handler
-       authorize the bound resource and return a bounded JSON result
+       verify persisted grant (non-revoked, complete audit)
+       re-verify the grant digest against the live catalog (409 on drift)
+       POST /services/providers/{provider}/actions/clusters/{cluster}/{resource}/{name}/{action}/{version}
+  -> hub backend proxy
+       strip + re-inject X-Kedge-* identity hints, forward the bearer
+  -> provider action handler (embedded virtual workspace)
+       parse identity from the route; bearer is the only trust root
+       gate 1: SSAR get on the addressed resource, as the caller
+       gate 2: SSAR create on {resource}/{action} — the verb grant — as the caller
+       enforce the declared input schema, byte/result/time limits
+       return the stable envelope with a bounded JSON result
 ```
 
-The hub request body contains `provider`, `action`, `actionVersion`,
-`schemaDigest`, `resourceRef`, and `input`. The hub compares every identity
-field with the catalog, validates the input schema, limits the request, rejects
-redirects, and validates the provider's JSON result against the output schema.
-It forwards only the authenticated bearer, resolved tenant/user/cluster
-headers, request ID, trace context, idempotency key, and bounded deadline.
+Authorization is kcp RBAC, uniform for every caller class. A human invokes an
+action iff their workspace RBAC allows `create` on the action's virtual
+subresource (`tables/query_table`), the same way exec on a sandbox is
+authorized. A workload identity carries exactly the rules App Studio's grants
+materialized — granting an action *is* writing the RBAC rule, revoking it
+removes the rule. The subresource is an RBAC coordinate only; no API server
+serves it.
+
+The provider enforces its own declared limits — it authored them, and the
+catalog's fail-closed validation guarantees the declaration is well-formed.
 Caller cancellation and the declared action timeout bound the synchronous
 request. The stable response envelope carries `requestID`, provider,
 action/version, the bound resource reference, and either `result` or a typed
-error (`code`, `message`, `retryable`).
+error (`code`, `message`, `retryable`); App Studio validates the envelope
+identity against the bound grant before relaying it.
 
 ### Typed provider failures
 
 Provider action failures are a deliberately small, typed boundary. Databricks
 must return an allowlisted `code`, a safe bounded `message`, and an explicit
 `retryable` boolean; callers must not infer retryability from the HTTP status.
-The hub accepts the typed body only when its shape, code, message, and
-code/status combination are valid and bounded. It then rebuilds the response
-identity (`requestID`, provider, action/version, and bound `resourceRef`) from
-the authenticated invocation and catalog-selected request; provider-supplied
-identity is not trusted.
+The provider's handler enforces the code/status compatibility table and
+sanitizes messages before anything reaches the wire, and it stamps the
+envelope identity (`requestID`, provider, action/version, route-derived
+`resourceRef`) itself — the route, not the body, is what was authorized. App
+Studio then validates that envelope identity against the bound grant and
+refuses a response whose identity does not match.
 
 For `query_table/v1`, an unknown column in the exact bound Table is
 `schema_projection_invalid`, HTTP 400, and non-retryable. A Databricks
@@ -126,12 +151,11 @@ gateway (HTTP 502, non-retryable), rather than being exposed as the caller's
 HTTP 401. Transient backend/dependency failures may use HTTP 503 with
 `retryable: true`; this remains an explicit provider decision.
 
-Malformed, unsafe, unknown-code, status-incompatible, or over-bound typed error
-bodies do not pass through. The hub returns the generic
-`provider_action_failed` failure instead, without raw provider details. The
-server SDK surfaces accepted provider failures as a stable
-`ProviderActionError` (`code`, safe `message`, `retryable`, request metadata,
-and binding metadata).
+Malformed, unsafe, unknown-code, status-incompatible, or over-bound typed
+errors collapse to the generic `action_failed` failure at the provider
+boundary, without raw provider details. The server SDK surfaces accepted
+provider failures as a stable `ProviderActionError` (`code`, safe `message`,
+`retryable`, request metadata, and binding metadata).
 
 Provider authors should keep this boundary provider-neutral: choose only the
 published codes, sanitize messages before writing them, set retryability from
@@ -140,26 +164,38 @@ paths, or backend resource details. Application authors should branch on the
 typed `code` and `retryable` fields, repair permanent input/schema failures,
 and retry only bounded, idempotent transient failures.
 
-The direct hub route is `POST /api/provider-actions/invoke`. The provider
-VirtualWorkspace route is `/actions/{name}/{version}`. The public provider
-backend proxy reserves `/actions` and `/actions/*` and returns `404`, so a
-caller cannot bypass the hub's live grant, digest, schema, and revocation
-checks through `/services/providers/{name}`.
+There is deliberately no hub invoke route: the action route through the
+backend proxy is the public data-plane surface, and calling it directly is
+legitimate — the provider's caller-scoped SSAR gates are the enforcement, so
+"bypassing App Studio" gains a caller nothing kcp RBAC does not already
+allow. What the proxy does reserve is the **hub-only** prefix
+`/workload-identities/*` on every provider backend: the attestation endpoint
+must never be reachable with a caller bearer, where it would act as a
+TokenReview oracle. App Studio's invoke gateway adds the consumer-side value
+on top: revocation is refused immediately (before RBAC reconciliation catches
+up on the next exchange), and the persisted grant digest is re-verified
+against the live catalog on every invoke, returning `409` on drift.
 
-Production workload callers use the workload exchange and a short-lived
-workload capability:
+Workload callers — today minted for the development runtime — use the
+workload exchange and a short-lived workload capability:
 
 1. The development runtime reads a projected bootstrap token, posts the exact
    tenant/project/project UID/environment/instance tuple to
    `/api/provider-actions/workload/exchange`, and never exposes that bootstrap
    token to the generated application.
 2. The hub asks the Infrastructure provider to perform online attestation at
-   `/workload-identities/review`. Infrastructure performs an audience-bound
-   TokenReview and verifies the pod identity and exact runtime tuple.
-3. The hub verifies the live Project environment, instance, provider resource
-   references, and action grant, then issues a short-lived Kedge
-   ServiceAccount token with GET-only resource scope. The current token TTL is
-   ten minutes and the token is not persisted in a Secret or annotation.
+   `/workload-identities/review` on its backend origin (a hub-only reserved
+   prefix the backend proxy refuses to serve). Infrastructure performs an
+   audience-bound TokenReview and verifies the pod identity and exact runtime
+   tuple.
+3. The hub verifies the live Project environment, instance, and provider
+   resource references, then issues a short-lived Kedge ServiceAccount token
+   whose ClusterRole carries GET on each granted resource plus `create` on
+   each granted action's virtual subresource — the RBAC materialization of
+   the Project's action grants. The current token TTL is ten minutes and the
+   token is not persisted in a Secret or annotation. Grant changes reconcile
+   on the next exchange; the five-field identity tuple is immutable for the
+   ServiceAccount's lifetime.
 4. The runtime atomically refreshes a mode-`0600` token file. The generated
    server reads that file on each request, or uses a refreshable credential
    provider; a single `401` triggers one forced refresh.
@@ -227,14 +263,18 @@ SDK or receive its token.
 
 ## Databricks implementation
 
-`POST /actions/query_table/v1` is the primary app path. The request-scoped
-Databricks executor performs delegated authorization for the exact imported
-Table, resolves `Table → Warehouse → Connection → Secret` with provider
-authority, requires current Table/Warehouse `Ready` and Connection
-`Validated`/`Ready` conditions, checks the connection references and PAT auth
-type, then builds a quoted projection and bounded `SELECT`. It never creates a
-query resource and never persists result rows in control-plane status. Provider
-and credential details are sanitized from errors.
+`POST /actions/clusters/{clusterID}/tables/{name}/query_table/v1` is the
+primary app path, mounted under the provider's `/actions/` data-plane root.
+The handler derives the resource reference from the route, then the
+request-scoped executor performs delegated authorization as the caller — an
+SSAR `get` on the exact imported Table (visibility) and an SSAR `create` on
+the `tables/query_table` subresource (the verb grant) — before resolving
+`Table → Warehouse → Connection → Secret` with provider authority. It
+requires current Table/Warehouse `Ready` and Connection `Validated`/`Ready`
+conditions, checks the connection references and PAT auth type, then builds a
+quoted projection and bounded `SELECT`. It never creates a query resource and
+never persists result rows in control-plane status. Provider and credential
+details are sanitized from errors.
 
 The optional `/mcp` and `/mcp/sse` surfaces are controlled by
 `DATABRICKS_MCP_ENABLED` (enabled by default for compatibility). When enabled,
@@ -250,17 +290,22 @@ the Databricks SQL Statements API and the provider's configured host allowlist.
 
 ## Observability and residual limits
 
-The hub emits low-cardinality metrics for provider, action, version, outcome,
-HTTP status, and error class, plus duration and request/response byte
-histograms. Logs and forwarded W3C trace context carry request IDs and
-resource/action identity without prompt text, raw input, credentials, or
-sensitive backend values. Avoid adding tenant IDs, project names, resource
-names, digests, or arbitrary error text as metric labels.
+With the hub router removed, observability lives where enforcement lives: the
+provider logs each action failure with request ID, action identity, outcome
+code, error class, and duration — never prompt text, raw input, credentials,
+or sensitive backend values. The backend proxy provides the transport-level
+request log. When provider-side action metrics are added, keep labels
+low-cardinality: provider, action, version, outcome, and error class only —
+never tenant IDs, project names, resource names, digests, or arbitrary error
+text.
 
-The transport is synchronous and bounded. Keyed idempotency currently returns
-`501`; there are no durable jobs, progress streams, or resume handles. The
-portal and grant contract require an exact resource reference; resource-name
-discovery is not a picker supplied by the action transport. Only
+The transport is synchronous and bounded. There are no durable jobs, progress
+streams, or resume handles. The portal and grant contract require an exact
+resource reference; resource-name discovery is not a picker supplied by the
+action transport. Enforcement of declared limits and schemas is per-provider
+(the databricks handler is the reference); extracting that into a shared
+server-kit package is the planned next step in
+[cross-provider-simplification.md](./cross-provider-simplification.md). Only
 `query_table/v1` is shipped today.
 
 ## Verification commands
@@ -307,11 +352,12 @@ These are verification commands; this document does not claim that a current
 deterministic or live run has passed.
 
 Implementation anchors: [CatalogEntry action types](../apis/providers/v1alpha1/types_catalogentry.go),
-[hub action router and typed-failure validation](../pkg/hub/provideractions/handler.go),
+[data-plane action handler and route grammar](../providers/databricks/actions/actions.go),
+[two-gate caller authorization (visibility + verb SSAR)](../providers/databricks/tenant/action.go),
+[hub-only proxy reservations](../pkg/hub/providers/proxy.go),
 [hub workload exchange](../pkg/hub/workloadidentity/workloadidentity.go),
-[App Studio grant verification](../providers/app-studio/api/provider_action_catalog.go),
+[action-grant RBAC materialization](../pkg/hub/serviceaccounts/workload_identity.go),
+[App Studio grant verification and invoke-time digest re-check](../providers/app-studio/api/provider_action_catalog.go),
 [App Studio forwarding](../providers/app-studio/api/integrations.go),
-[Databricks typed action errors](../providers/databricks/actions/actions.go),
-[Databricks backend error normalization](../providers/databricks/backend/backend.go),
-[server-only SDK](../provider-sdk/actions-node/index.mjs), and
-[Databricks direct action executor](../providers/databricks/tenant/action.go).
+[Databricks backend error normalization](../providers/databricks/backend/backend.go), and
+[server-only SDK](../provider-sdk/actions-node/index.mjs).

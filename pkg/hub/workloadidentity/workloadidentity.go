@@ -325,10 +325,13 @@ func (a *HTTPAttestor) Verify(ctx context.Context, bearer string, req ExchangeRe
 		return Review{}, errors.New("infrastructure attestor is unavailable")
 	}
 	provider, ok := a.registry.Get(InfrastructureProviderName)
-	if !ok || !provider.Ready() || provider.VirtualWorkspaceURL == nil {
-		return Review{}, errors.New("infrastructure virtual workspace is unavailable")
+	if !ok || !provider.Ready() || provider.BackendURL == nil {
+		return Review{}, errors.New("infrastructure attestation endpoint is unavailable")
 	}
-	target, err := reviewURL(provider.VirtualWorkspaceURL)
+	// The attestation endpoint lives on the provider's backend origin under a
+	// hub-only reserved prefix: the backend proxy 404s /workload-identities/*
+	// so a caller bearer can never reach it, and only the hub dials it here.
+	target, err := reviewURL(provider.BackendURL)
 	if err != nil {
 		return Review{}, err
 	}

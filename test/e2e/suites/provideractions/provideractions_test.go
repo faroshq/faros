@@ -160,7 +160,8 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	}
 
 	assertDatabricksMCPUnavailable(t)
-	assertDirectDatabricksActionBlocked(t, tenantHeaders)
+	assertWorkloadReviewReserved(t, tenantHeaders)
+	assertDirectActionAuthorization(t, tenantCluster, runtimeToken, tenantHeaders)
 
 	input := map[string]any{"columns": []any{"trip_id", "fare_amount"}, "limit": 2}
 	stdout, stderr, err := runGeneratedApp(t, hubURL, testProject, testAlias, "query_table/v1", input, tokenFile, tenantHeaders)
@@ -218,7 +219,7 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 		}
 	}
 	writeEvidence("invocation.json", map[string]any{
-		"surface": "generated-app -> generic @kedge/actions-node -> App Studio integration gateway -> hub provider-action router -> Databricks /actions/query_table/v1",
+		"surface": "generated-app -> generic @kedge/actions-node -> App Studio integration gateway -> hub backend proxy -> Databricks /actions/clusters/{cluster}/tables/{name}/query_table/v1",
 		"project": testProject, "integration": testAlias, "action": "query_table/v1",
 		"input": input, "directProviderURL": false, "patInInput": false, "mcp": false, "workloadTokenFile": true,
 	})
@@ -247,10 +248,10 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	if got := len(fakeDB.Requests()); got != beforeFailures {
 		t.Fatalf("wrong-tenant action reached fake upstream: request count %d before %d", got, beforeFailures)
 	}
-	// A validly-shaped but stale digest is rejected by the hub action router
-	// before the provider endpoint is contacted. Mutate the live Project through
-	// the tenant API to model catalog drift without bypassing the production
-	// App Studio gateway.
+	// A validly-shaped but stale digest is rejected by App Studio's
+	// invoke-time catalog re-verification before the provider endpoint is
+	// contacted. Mutate the live Project through the tenant API to model
+	// catalog drift without bypassing the production App Studio gateway.
 	projectObject = getProject(t, tenant)
 	if err := setProjectActionDigest(projectObject, "sha256:"+strings.Repeat("0", 64)); err != nil {
 		t.Fatalf("set drifted action digest: %v", err)
@@ -287,6 +288,21 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	}
 	if got := len(fakeDB.Requests()); got != beforeFailures {
 		t.Fatalf("fail-closed calls reached fake upstream: request count %d before %d", got, beforeFailures)
+	}
+
+	// Revocation is enforced in kcp RBAC too, not only at the App Studio
+	// gateway: a fresh workload exchange reconciles the ClusterRole without
+	// the revoked action's subresource rule, so the direct data-plane route
+	// refuses the runtime identity as well.
+	revokedToken := exchangeWorkloadToken(t, tenantPath, projectUID, runtimeInstance, bootstrapToken)
+	status, body = postJSON(t, hubURL+"/services/providers/databricks/actions/clusters/"+tenantCluster+"/tables/"+tableRef+"/query_table/v1", revokedToken, map[string]any{
+		"input": map[string]any{"limit": 1},
+	}, tenantHeaders)
+	if status != http.StatusForbidden {
+		t.Fatalf("revoked workload direct action status=%d body=%s, want 403 from the verb SSAR", status, body)
+	}
+	if got := len(fakeDB.Requests()); got != beforeFailures {
+		t.Fatalf("revoked direct action reached fake upstream: request count %d before %d", got, beforeFailures)
 	}
 }
 
@@ -613,18 +629,46 @@ func assertDatabricksMCPUnavailable(t *testing.T) {
 	}
 }
 
-func assertDirectDatabricksActionBlocked(t *testing.T, tenantHeaders map[string]string) {
+// assertWorkloadReviewReserved proves the attestation endpoint is hub-only:
+// the backend proxy refuses the /workload-identities prefix, so a caller
+// bearer can never turn the provider into a TokenReview oracle.
+func assertWorkloadReviewReserved(t *testing.T, tenantHeaders map[string]string) {
+	t.Helper()
+	before := len(fakeAttestor.Requests())
+	status, body := postJSON(t, hubURL+"/services/providers/infrastructure/workload-identities/review", staticToken, map[string]any{
+		"tenantPath": "root:kedge:tenants:x:y", "project": "p", "projectUID": "u", "environment": "development", "instance": "i",
+	}, tenantHeaders)
+	if status != http.StatusNotFound {
+		t.Fatalf("proxied attestation endpoint status=%d body=%s, want 404", status, body)
+	}
+	if got := len(fakeAttestor.Requests()); got != before {
+		t.Fatalf("proxied attestation request reached the attestor: count %d before %d", got, before)
+	}
+}
+
+// assertDirectActionAuthorization pins the data-plane authorization model:
+// the action route through the backend proxy is legitimate, and it is the
+// provider's caller-scoped SSAR gates — kcp RBAC — that decide. A workload
+// token addressing a table outside its grants is refused before the provider
+// backend is contacted, and the retired body-addressed route no longer
+// exists.
+func assertDirectActionAuthorization(t *testing.T, tenantCluster, workloadToken string, tenantHeaders map[string]string) {
 	t.Helper()
 	before := len(fakeDB.Requests())
 	status, body := postJSON(t, hubURL+"/services/providers/databricks/actions/query_table/v1", staticToken, map[string]any{
-		"resourceRef": map[string]any{"name": tableRef, "apiVersion": "databricks.kedge.faros.sh/v1alpha1", "kind": "Table", "resource": "tables"},
-		"input":       map[string]any{"limit": 1},
+		"input": map[string]any{"limit": 1},
 	}, tenantHeaders)
 	if status != http.StatusNotFound {
-		t.Fatalf("direct provider action URL status=%d body=%s, want 404", status, body)
+		t.Fatalf("legacy body-addressed action URL status=%d body=%s, want 404", status, body)
+	}
+	status, body = postJSON(t, hubURL+"/services/providers/databricks/actions/clusters/"+tenantCluster+"/tables/ungranted-table/query_table/v1", workloadToken, map[string]any{
+		"input": map[string]any{"limit": 1},
+	}, tenantHeaders)
+	if status != http.StatusForbidden && status != http.StatusNotFound {
+		t.Fatalf("ungranted direct action status=%d body=%s, want caller-scoped refusal", status, body)
 	}
 	if got := len(fakeDB.Requests()); got != before {
-		t.Fatalf("direct provider action URL reached upstream: request count %d before %d", got, before)
+		t.Fatalf("refused direct action reached upstream: request count %d before %d", got, before)
 	}
 }
 

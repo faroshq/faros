@@ -18,7 +18,11 @@ of enabled, and each project may disable or re-enable it.
   - `Connection`: Databricks workspace host plus a tenant Secret reference.
   - `Warehouse`: SQL warehouse handle.
   - `Table`: stable imported table handle with cached schema metadata.
-- Direct Provider Actions at `/actions/query_table/v1`:
+- Provider Actions on the embedded virtual workspace, addressed with the
+  platform data-plane grammar
+  `/actions/clusters/{clusterID}/tables/{name}/query_table/v1` and authorized
+  as the caller (SSAR `get` on the Table + SSAR `create` on the
+  `tables/query_table` subresource):
   - `query_table/v1` (catalog-declared, read-only, bounded)
 - Optional MCP tools at `/mcp` and `/mcp/sse`, controlled by
   `DATABRICKS_MCP_ENABLED` and reusing the same executor:

@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -103,13 +104,22 @@ type WorkloadIdentityScope struct {
 }
 
 // ProviderResourceScope is one exact provider reference from the verified
-// Project environment. The resulting ClusterRole contains only GET on this
-// GVR and resource name.
+// Project environment. The resulting ClusterRole contains GET on this GVR and
+// resource name, plus — for each granted action — CREATE on the action's
+// virtual subresource ({resource}/{action}). The subresource is an RBAC
+// coordinate only (nothing serves it); the owning provider enforces it with a
+// caller-scoped SSAR, the same pattern as the infrastructure data-plane exec
+// verb. Materializing a Project action grant IS writing this rule; revoking
+// it removes the rule.
 type ProviderResourceScope struct {
 	APIVersion string
 	Kind       string
 	Resource   string
 	Name       string
+	// Actions are the non-revoked action names (version-less: version pinning
+	// lives in the grant's schema digest, not in RBAC) granted on this exact
+	// resource.
+	Actions []string
 }
 
 // WorkloadIdentityToken is the short-lived capability returned by
@@ -264,9 +274,18 @@ func validateWorkloadScope(scope WorkloadIdentityScope) error {
 		if _, err := schema.ParseGroupVersion(resource.APIVersion); err != nil {
 			return fmt.Errorf("provider resource apiVersion is invalid: %w", err)
 		}
+		for _, action := range resource.Actions {
+			if !workloadActionNameRE.MatchString(action) {
+				return fmt.Errorf("provider action name %q is invalid", action)
+			}
+		}
 	}
 	return nil
 }
+
+// workloadActionNameRE matches the name half of a CatalogEntry action ID
+// (the ID grammar is name/vN; RBAC carries the name only).
+var workloadActionNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
 
 func ensureWorkloadServiceAccount(ctx context.Context, cs kubernetes.Interface, name string, scope WorkloadIdentityScope) (*corev1.ServiceAccount, error) {
 	sas := cs.CoreV1().ServiceAccounts(Namespace)
@@ -290,7 +309,12 @@ func ensureWorkloadServiceAccount(ctx context.Context, cs kubernetes.Interface, 
 	if err != nil {
 		return nil, fmt.Errorf("getting workload ServiceAccount: %w", err)
 	}
-	if sa.Labels[LabelWorkloadIdentity] != "true" || sa.Annotations[AnnotationWorkloadIdentityScope] != wantAnnotations[AnnotationWorkloadIdentityScope] || sa.Annotations[AnnotationWorkloadIdentityTenantPath] != wantAnnotations[AnnotationWorkloadIdentityTenantPath] {
+	// The identity of the ServiceAccount is the five-field tuple (which also
+	// determines its hashed name). The scope marker, by contrast, is a
+	// snapshot of the CURRENT grants — it changes whenever an integration is
+	// added, revoked, or reactivated, and must reconcile on re-exchange so a
+	// grant change never bricks the runtime identity.
+	if sa.Labels[LabelWorkloadIdentity] != "true" || sa.Annotations[AnnotationWorkloadIdentityTenantPath] != wantAnnotations[AnnotationWorkloadIdentityTenantPath] {
 		return nil, fmt.Errorf("ServiceAccount %q is already bound to a different workload identity", name)
 	}
 	if err := reconcileWorkloadIdentityAnnotations(ctx, sas, sa, wantAnnotations); err != nil {
@@ -341,8 +365,12 @@ func reconcileWorkloadIdentityAnnotations(ctx context.Context, sas corev1typed.S
 	}
 	changed := false
 	for key, value := range want {
-		if existing, ok := sa.Annotations[key]; ok && existing != "" && existing != value {
-			return fmt.Errorf("ServiceAccount %q has conflicting workload annotation %q", sa.Name, key)
+		// The five identity annotations are immutable for the SA's lifetime;
+		// the scope marker reconciles because it tracks the current grants.
+		if key != AnnotationWorkloadIdentityScope {
+			if existing, ok := sa.Annotations[key]; ok && existing != "" && existing != value {
+				return fmt.Errorf("ServiceAccount %q has conflicting workload annotation %q", sa.Name, key)
+			}
 		}
 		if sa.Annotations[key] != value {
 			sa.Annotations[key] = value
@@ -375,6 +403,17 @@ func ensureWorkloadRBAC(ctx context.Context, cs kubernetes.Interface, serviceAcc
 			APIGroups: []string{gv.Group}, Resources: []string{resource.Resource},
 			Verbs: []string{"get"}, ResourceNames: []string{resource.Name},
 		})
+		// One create rule per granted action, on the action's virtual
+		// subresource. The owning provider enforces this exact coordinate with
+		// a caller-scoped SSAR before serving the verb.
+		actions := append([]string(nil), resource.Actions...)
+		sort.Strings(actions)
+		for _, action := range actions {
+			providerRules = append(providerRules, rbacv1.PolicyRule{
+				APIGroups: []string{gv.Group}, Resources: []string{resource.Resource + "/" + action},
+				Verbs: []string{"create"}, ResourceNames: []string{resource.Name},
+			})
+		}
 	}
 	sort.Slice(providerRules, func(i, j int) bool {
 		return strings.Join(providerRules[i].APIGroups, "/")+"/"+providerRules[i].Resources[0]+"/"+providerRules[i].ResourceNames[0] < strings.Join(providerRules[j].APIGroups, "/")+"/"+providerRules[j].Resources[0]+"/"+providerRules[j].ResourceNames[0]
@@ -470,6 +509,9 @@ func workloadScopeMarker(scope WorkloadIdentityScope) string {
 	parts := []string{scope.TenantPath, scope.Project, scope.ProjectUID, scope.Environment, scope.Instance}
 	for _, resource := range resources {
 		parts = append(parts, resource.APIVersion, resource.Kind, resource.Resource, resource.Name)
+		actions := append([]string(nil), resource.Actions...)
+		sort.Strings(actions)
+		parts = append(parts, actions...)
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])

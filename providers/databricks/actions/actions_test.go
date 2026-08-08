@@ -22,6 +22,8 @@ import (
 	"github.com/faroshq/provider-databricks/queryapi"
 )
 
+const testActionPath = "/actions/clusters/cluster-a/tables/taxi-trips/query_table/v1"
+
 type fakeExecutor struct {
 	ref   ResourceRef
 	input QueryInput
@@ -42,34 +44,83 @@ func (f *fakeExecutor) QueryTable(ctx context.Context, ref ResourceRef, input Qu
 	}, nil
 }
 
+func routeDeps(t *testing.T, executor QueryExecutor) Deps {
+	t.Helper()
+	return Deps{QueryExecutorForRoute: func(_ *http.Request, route Route) QueryExecutor {
+		if route.ClusterID != "cluster-a" {
+			t.Fatalf("route cluster = %q, want cluster-a", route.ClusterID)
+		}
+		return executor
+	}}
+}
+
+type wireEnvelope struct {
+	RequestID     string          `json:"requestID"`
+	Provider      string          `json:"provider"`
+	Action        string          `json:"action"`
+	ActionVersion string          `json:"actionVersion"`
+	ResourceRef   *ResourceRef    `json:"resourceRef"`
+	Result        json.RawMessage `json:"result"`
+	Error         *struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	} `json:"error"`
+}
+
+func decodeEnvelope(t *testing.T, body []byte) wireEnvelope {
+	t.Helper()
+	var env wireEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode envelope: %v; body=%s", err, string(body))
+	}
+	return env
+}
+
+func TestParseActionPath(t *testing.T) {
+	route, err := ParseActionPath(testActionPath)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if route.ClusterID != "cluster-a" || route.Resource != "tables" || route.Name != "taxi-trips" || route.Action != "query_table" || route.Version != "v1" {
+		t.Fatalf("route = %#v", route)
+	}
+	for _, bad := range []string{
+		"/actions/query_table/v1",
+		"/actions/clusters/../tables/x/query_table/v1",
+		"/actions/clusters//tables/x/query_table/v1",
+		"/actions/clusters/c/tables/x/query_table/v1/extra",
+		"/other/clusters/c/tables/x/query_table/v1",
+	} {
+		if _, err := ParseActionPath(bad); err == nil {
+			t.Fatalf("path %q must be rejected", bad)
+		}
+	}
+	if got := ActionPath("cluster-a", "tables", "taxi-trips", "query_table", "v1"); got != testActionPath {
+		t.Fatalf("ActionPath = %q, want %q", got, testActionPath)
+	}
+}
+
 func TestQueryTableActionPreservesTypedFailure(t *testing.T) {
 	executor := &fakeExecutor{err: &ActionError{
 		Code: ActionErrorCodeResourceNotReady, Message: "bound Databricks resource is not ready",
 		Status: http.StatusConflict, Retryable: false,
 	}}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`))
+	h := NewHandler(routeDeps(t, executor))
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	r.Header.Set("X-Request-ID", "request-typed")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, r)
 	if rw.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rw.Code, rw.Body.String())
 	}
-	var body struct {
-		Error struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
+	env := decodeEnvelope(t, rw.Body.Bytes())
+	if env.Error == nil || env.Error.Code != ActionErrorCodeResourceNotReady || env.Error.Message != "bound Databricks resource is not ready" || env.Error.Retryable {
+		t.Fatalf("typed failure = %#v", env.Error)
 	}
-	if err := json.Unmarshal(rw.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode typed failure: %v", err)
-	}
-	if body.Error.Code != ActionErrorCodeResourceNotReady || body.Error.Message != "bound Databricks resource is not ready" || body.Error.Retryable {
-		t.Fatalf("typed failure = %#v", body.Error)
+	if env.Provider != ProviderName || env.Action != "query_table" || env.ActionVersion != "v1" || env.ResourceRef == nil || env.ResourceRef.Name != "taxi-trips" {
+		t.Fatalf("failure envelope identity = %#v", env)
 	}
 }
 
@@ -79,29 +130,18 @@ func TestQueryTableActionEmitsSchemaProjectionFailure(t *testing.T) {
 		Code: ActionErrorCodeSchemaProjectionInvalid, Message: message,
 		Status: http.StatusBadRequest, Retryable: false,
 	}}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{"columns":["missing"],"limit":1}}`))
+	h := NewHandler(routeDeps(t, executor))
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{"columns":["missing"],"limit":1}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	r.Header.Set("X-Request-ID", "request-projection")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, r)
 	if rw.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rw.Code, rw.Body.String())
 	}
-	var body struct {
-		Error struct {
-			Code      string `json:"code"`
-			Message   string `json:"message"`
-			Retryable bool   `json:"retryable"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rw.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode schema projection failure: %v", err)
-	}
-	if body.Error.Code != ActionErrorCodeSchemaProjectionInvalid || body.Error.Message != message || body.Error.Retryable {
-		t.Fatalf("schema projection failure = %#v; body=%s", body.Error, rw.Body.String())
+	env := decodeEnvelope(t, rw.Body.Bytes())
+	if env.Error == nil || env.Error.Code != ActionErrorCodeSchemaProjectionInvalid || env.Error.Message != message || env.Error.Retryable {
+		t.Fatalf("schema projection failure = %#v; body=%s", env.Error, rw.Body.String())
 	}
 }
 
@@ -109,11 +149,9 @@ func TestQueryTableActionDefaultsTypedFailureStatusFromCode(t *testing.T) {
 	executor := &fakeExecutor{err: &ActionError{
 		Code: ActionErrorCodeResourceNotReady, Message: "bound Databricks resource is not ready",
 	}}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`))
+	h := NewHandler(routeDeps(t, executor))
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, r)
 	if rw.Code != http.StatusConflict {
@@ -127,11 +165,9 @@ func TestQueryTableActionUnsafeTypedFailureFallsBack(t *testing.T) {
 		Code: ActionErrorCodeBackendFailure, Message: unsafe,
 		Status: http.StatusServiceUnavailable, Retryable: true,
 	}}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`))
+	h := NewHandler(routeDeps(t, executor))
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, r)
 	if rw.Code != http.StatusBadGateway {
@@ -150,11 +186,9 @@ func TestQueryTableActionBackendAuthFailureUsesGatewayStatus(t *testing.T) {
 		Code: ActionErrorCodeBackendFailure, Message: "databricks statement failed",
 		Status: http.StatusUnauthorized, Retryable: false,
 	}}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`))
+	h := NewHandler(routeDeps(t, executor))
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, r)
 	if rw.Code != http.StatusBadGateway {
@@ -167,11 +201,11 @@ func TestQueryTableActionBackendAuthFailureUsesGatewayStatus(t *testing.T) {
 
 func TestQueryTableActionForwardsOnlyValidatedInput(t *testing.T) {
 	executor := &fakeExecutor{}
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor { return executor }, Logger: logr.Discard()})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{"columns":["trip_id","fare_amount"],"limit":25}}`))
+	deps := routeDeps(t, executor)
+	deps.Logger = logr.Discard()
+	h := NewHandler(deps)
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{"columns":["trip_id","fare_amount"],"limit":25}}`))
 	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-	r.Header.Set("X-Kedge-Cluster", "cluster-a")
 	r.Header.Set("X-Kedge-Action-Deadline-Ms", "5000")
 	r.Header.Set("X-Request-ID", "req-1")
 	r.Header.Set("Idempotency-Key", "idem-1")
@@ -190,8 +224,15 @@ func TestQueryTableActionForwardsOnlyValidatedInput(t *testing.T) {
 	if _, ok := executor.ctx.Deadline(); !ok {
 		t.Fatal("action deadline was not applied")
 	}
+	env := decodeEnvelope(t, rw.Body.Bytes())
+	if env.RequestID != "req-1" || env.Provider != ProviderName || env.Action != "query_table" || env.ActionVersion != "v1" {
+		t.Fatalf("envelope identity = %#v", env)
+	}
+	if env.ResourceRef == nil || env.ResourceRef.Name != "taxi-trips" || env.ResourceRef.Resource != "tables" {
+		t.Fatalf("envelope resourceRef = %#v", env.ResourceRef)
+	}
 	var result queryapi.QueryTableResult
-	if err := json.Unmarshal(rw.Body.Bytes(), &result); err != nil {
+	if err := json.Unmarshal(env.Result, &result); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
 	if result.TableRef != "taxi-trips" || len(result.Rows) != 1 {
@@ -199,48 +240,87 @@ func TestQueryTableActionForwardsOnlyValidatedInput(t *testing.T) {
 	}
 }
 
-func TestQueryTableActionFailsClosedForMissingTenant(t *testing.T) {
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor {
-		t.Fatal("executor should not run without tenant headers")
+func TestQueryTableActionRejectsUnknownRoutes(t *testing.T) {
+	h := NewHandler(Deps{QueryExecutorForRoute: func(*http.Request, Route) QueryExecutor {
+		t.Fatal("executor should not run for unknown routes")
 		return nil
 	}})
-	r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":{}}`))
-	r.Header.Set("Authorization", "Bearer caller")
-	r.Header.Set("Content-Type", "application/json")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, r)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rw.Code)
-	}
-}
-
-func TestQueryTableActionRejectsCallerResourceOverride(t *testing.T) {
-	h := NewHandler(Deps{QueryExecutorFromRequest: func(*http.Request) QueryExecutor {
-		t.Fatal("executor should not run for invalid input")
-		return nil
-	}})
-	for _, input := range []string{`{"tableRef":"other"}`, `{"sql":"select 1"}`, `{"limit":101}`} {
-		r := httptest.NewRequest(http.MethodPost, PathQueryTableV1, strings.NewReader(`{"resourceRef":{"apiVersion":"databricks.kedge.faros.sh/v1alpha1","kind":"Table","resource":"tables","name":"taxi-trips"},"input":`+input+`}`))
+	for _, path := range []string{
+		"/actions/query_table/v1",
+		"/actions/clusters/cluster-a/tables/taxi-trips/query_table/v2",
+		"/actions/clusters/cluster-a/warehouses/x/query_table/v1",
+		"/actions/clusters/cluster-a/tables/taxi-trips/drop_table/v1",
+	} {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"input":{}}`))
 		r.Header.Set("Authorization", "Bearer caller")
-		r.Header.Set("X-Kedge-Tenant", "root:kedge:tenants:org:ws")
-		r.Header.Set("X-Kedge-Cluster", "cluster-a")
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, r)
-		if rw.Code != http.StatusBadRequest {
-			t.Fatalf("input %s status = %d, want 400", input, rw.Code)
+		if rw.Code != http.StatusNotFound {
+			t.Fatalf("path %s status = %d, want 404", path, rw.Code)
 		}
 	}
 }
 
+func TestQueryTableActionRequiresBearer(t *testing.T) {
+	h := NewHandler(Deps{QueryExecutorForRoute: func(*http.Request, Route) QueryExecutor {
+		t.Fatal("executor should not run without a bearer")
+		return nil
+	}})
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(`{"input":{}}`))
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, r)
+	if rw.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rw.Code)
+	}
+}
+
+func TestQueryTableActionRejectsCallerResourceOverride(t *testing.T) {
+	h := NewHandler(Deps{QueryExecutorForRoute: func(*http.Request, Route) QueryExecutor {
+		t.Fatal("executor should not run for invalid input")
+		return nil
+	}})
+	for _, body := range []string{
+		// resourceRef moved into the URL; a body copy is an unknown field.
+		`{"resourceRef":{"name":"other"},"input":{}}`,
+		`{"input":{"tableRef":"other"}}`,
+		`{"input":{"sql":"select 1"}}`,
+		`{"input":{"limit":101}}`,
+	} {
+		r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer caller")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, r)
+		if rw.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, want 400", body, rw.Code)
+		}
+	}
+}
+
+func TestQueryTableActionEnforcesDeclaredInputLimit(t *testing.T) {
+	h := NewHandler(Deps{QueryExecutorForRoute: func(*http.Request, Route) QueryExecutor {
+		t.Fatal("executor should not run for over-limit input")
+		return nil
+	}})
+	oversized := `{"input":{"columns":["` + strings.Repeat("a", maxInputBytes) + `"]}}`
+	r := httptest.NewRequest(http.MethodPost, testActionPath, strings.NewReader(oversized))
+	r.Header.Set("Authorization", "Bearer caller")
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, r)
+	if rw.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for over-limit input", rw.Code)
+	}
+}
+
 func TestActionDeadlineDefaultIsBounded(t *testing.T) {
-	deadline, err := actionDeadline(httptest.NewRequest(http.MethodPost, PathQueryTableV1, nil))
+	deadline, err := actionDeadline(httptest.NewRequest(http.MethodPost, testActionPath, nil))
 	if err != nil || deadline != maxActionDeadline {
 		t.Fatalf("default deadline = %s, err=%v; want %s", deadline, err, maxActionDeadline)
 	}
-	if deadline <= 0 || maxActionDeadline != 90*time.Second {
-		t.Fatal("action deadline must remain bounded")
+	// The handler ceiling must match the declared limits.timeoutSeconds.
+	if deadline <= 0 || maxActionDeadline != 45*time.Second {
+		t.Fatal("action deadline must remain bounded to the declared timeout")
 	}
-	invalid := httptest.NewRequest(http.MethodPost, PathQueryTableV1, nil)
+	invalid := httptest.NewRequest(http.MethodPost, testActionPath, nil)
 	invalid.Header.Set("X-Kedge-Action-Deadline-Ms", "not-a-number")
 	if _, err := actionDeadline(invalid); err == nil {
 		t.Fatal("invalid action deadline must fail closed")
