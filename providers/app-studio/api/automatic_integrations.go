@@ -127,26 +127,18 @@ func (s *Server) materializeAutomaticProjectIntegrations(ctx context.Context, c 
 	next := project.DeepCopy()
 	changed := materializeAutomaticIntegrationTargets(next, targets)
 	if !changed {
-		reconciled, reconcileErr := s.reconcileProjectLiveBindings(ctx, c, project, id)
-		if reconcileErr != nil {
-			return nil, reconcileErr
-		}
-		if reconciled != nil {
-			return reconciled, nil
-		}
+		// Automatic discovery only writes the Project's providerReference
+		// bindings. Provider-owned resources are converged by the Project
+		// controller; this turn-start path must never create or update them.
 		return project, nil
 	}
 	updated, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("persist automatic provider integrations: %w", err)
 	}
-	reconciled, err := s.reconcileProjectLiveBindings(ctx, c, updated, id)
-	if err != nil {
-		return nil, fmt.Errorf("reconcile automatic provider integrations: %w", err)
-	}
-	if reconciled != nil {
-		return reconciled, nil
-	}
+	// Do not synchronously reconcile provider resources here. The controller is
+	// the sole owner of provider-resource writes, while read-through status
+	// remains available to subsequent project/integration reads.
 	return updated, nil
 }
 

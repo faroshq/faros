@@ -187,16 +187,10 @@ func (s *Server) addProjectIntegration(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
-	// Persisting an integration grant is only half of the mutation: a live
-	// development runtime carries the grant-derived Provider Actions context
-	// in its provider-resource spec. Reconcile before acknowledging the write so
-	// callers never receive a successful grant that has not reached the runtime.
-	if reconciled, reconcileErr := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); reconcileErr != nil {
-		writeProjectError(w, reconcileErr)
-		return
-	} else if reconciled != nil {
-		updated = reconciled
-	}
+	// Provider-resource instances are converged exclusively by the Project
+	// controller. Integration CRUD records the non-owning reference and reads
+	// the target below for truthful status; it must not synchronously create or
+	// update a provider-owned object.
 	phase := projectProviderBindingStatus(r.Context(), c, updated, newBinding, id).Phase
 	if phase == "" {
 		phase = "Pending"
@@ -235,7 +229,7 @@ func (s *Server) listProjectIntegrations(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) removeProjectIntegration(w http.ResponseWriter, r *http.Request) {
-	c, id, project, ok := s.requireProjectWithClient(w, r)
+	c, _, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
 		return
 	}
@@ -262,18 +256,13 @@ func (s *Server) removeProjectIntegration(w http.ResponseWriter, r *http.Request
 		writeStatus(w, http.StatusNotFound, "NotFound", fmt.Sprintf("project integration %q was not found", alias))
 		return
 	}
-	updated, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
+	_, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
 	if err != nil {
 		writeProjectError(w, err)
 		return
 	}
-	// Removing a grant must clear its action context from the live development
-	// instance before the API reports success. The reconciler also preserves
-	// context when another active grant remains on the project.
-	if _, err := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); err != nil {
-		writeProjectError(w, err)
-		return
-	}
+	// Removal is a Project spec mutation only. The Project controller observes
+	// the changed grant set and clears/converges the owning runtime binding.
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -325,16 +314,13 @@ func (s *Server) patchProjectIntegration(w http.ResponseWriter, r *http.Request)
 					writeProjectError(w, updateErr)
 					return
 				}
-				// Action changes are runtime state changes as well. Reconcile the
-				// updated project before returning the integration view so revoke/
-				//grant transitions cannot leave a stale sandbox context.
-				if reconciled, reconcileErr := s.reconcileProjectLiveBindings(r.Context(), c, updated, id); reconcileErr != nil {
-					writeProjectError(w, reconcileErr)
-					return
-				} else if reconciled != nil {
-					updated = reconciled
+				// The target status is read through after the Project write. Runtime
+				// convergence is asynchronous and belongs to the Project controller.
+				phase := projectProviderBindingStatus(r.Context(), c, updated, updated.Spec.Environments[i].Bindings[j], id).Phase
+				if phase == "" {
+					phase = "Pending"
 				}
-				writeJSON(w, http.StatusOK, projectIntegrationViewForBinding(next.Spec.Environments[i].Name, updated.Spec.Environments[i].Bindings[j], ""))
+				writeJSON(w, http.StatusOK, projectIntegrationViewForBinding(next.Spec.Environments[i].Name, updated.Spec.Environments[i].Bindings[j], phase))
 				return
 			}
 		}

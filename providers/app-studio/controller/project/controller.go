@@ -60,6 +60,11 @@ const (
 	// not watched (their kinds are per-template and dynamic); polling keeps
 	// the controller simple and deterministic.
 	requeueInterval = 15 * time.Second
+	// instanceConvergenceMaxAttempts bounds optimistic-concurrency recovery.
+	// A fresh GET/recompute is enough to absorb the provider's usual computed
+	// field update; persistent contention is surfaced to the normal reconcile
+	// poll instead of spinning in one request.
+	instanceConvergenceMaxAttempts = 2
 
 	projectDevelopmentEnvironmentName = "development"
 	projectDevelopmentBindingName     = "dev"
@@ -356,37 +361,51 @@ func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *aiv
 		return nil, err
 	}
 
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(want.GroupVersionKind())
-	err = c.Get(ctx, types.NamespacedName{Name: want.GetName()}, got)
-	if apierrors.IsNotFound(err) {
-		if err := c.Create(ctx, want); err != nil && !apierrors.IsAlreadyExists(err) {
+	for attempt := 0; attempt < instanceConvergenceMaxAttempts; attempt++ {
+		// Every retry starts with a fresh read and recomputes the merge. Provider
+		// controllers commonly stamp spec fields (fqdn, credential references)
+		// between our read and update; reusing the stale object would overwrite
+		// those values on the retry.
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(want.GroupVersionKind())
+		err = c.Get(ctx, types.NamespacedName{Name: want.GetName()}, got)
+		if apierrors.IsNotFound(err) {
+			created := want.DeepCopy()
+			if createErr := c.Create(ctx, created); createErr == nil {
+				return created, nil
+			} else if apierrors.IsAlreadyExists(createErr) && attempt+1 < instanceConvergenceMaxAttempts {
+				continue
+			} else {
+				return nil, createErr
+			}
+		}
+		if err != nil {
 			return nil, err
 		}
-		return want, nil
-	}
-	if err != nil {
-		return nil, err
-	}
 
-	next := got.DeepCopy()
-	next.Object["spec"] = want.Object["spec"]
-	labels := next.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
+		next := got.DeepCopy()
+		observedSpec, _, _ := unstructured.NestedMap(got.Object, "spec")
+		desiredSpec, _, _ := unstructured.NestedMap(want.Object, "spec")
+		next.Object["spec"] = bindings.MergeProviderSpec(observedSpec, desiredSpec)
+		labels := next.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[bindings.ProjectLabel] = p.Name
+		next.SetLabels(labels)
+		if owner := bindings.OwnerRef(p); owner != nil {
+			next.SetOwnerReferences(want.GetOwnerReferences())
+		}
+		if equalSpecAndMeta(got, next) {
+			return got, nil
+		}
+		if updateErr := c.Update(ctx, next); updateErr == nil {
+			return next, nil
+		} else if !apierrors.IsConflict(updateErr) || attempt+1 >= instanceConvergenceMaxAttempts {
+			return nil, updateErr
+		}
 	}
-	labels[bindings.ProjectLabel] = p.Name
-	next.SetLabels(labels)
-	if owner := bindings.OwnerRef(p); owner != nil {
-		next.SetOwnerReferences(want.GetOwnerReferences())
-	}
-	if equalSpecAndMeta(got, next) {
-		return got, nil
-	}
-	if err := c.Update(ctx, next); err != nil {
-		return nil, err
-	}
-	return next, nil
+	return nil, fmt.Errorf("instance convergence retry budget exhausted")
 }
 
 // finalize deletes bound instances, then releases the finalizer. The

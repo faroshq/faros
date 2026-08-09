@@ -32,14 +32,13 @@ import (
 // the reconciler creates/updates/deletes the instances under the provider's
 // claimed identity, mirroring status into Project.status.environments.
 //
-// What remains here is read-through status (so a GET right after a spec write
-// shows fresh instance state without waiting for the mirror), the best-effort
-// teardown used when project CREATION fails halfway (the Project CR may not
-// have gained the reconciler's finalizer yet), and the synchronous reconcile
-// used by the integrations flow so a grant/revoke is applied before the
-// request returns. The desired-state and status-fold logic itself lives in
-// the bindings package, shared with the reconciler so the two can never
-// disagree.
+// What remains here is GET-only read-through status (so a GET right after a
+// spec write shows fresh instance state without waiting for the mirror) and
+// best-effort teardown used when project CREATION fails halfway (the Project
+// CR may not have gained the reconciler's finalizer yet). The desired-state
+// and status-fold logic itself lives in the bindings package, shared with the
+// reconciler so the two can never disagree. No API handler creates or updates
+// provider-owned resources.
 
 func (s *Server) reconcileProjectLiveBindings(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, id identity) (*aiv1alpha1.Project, error) {
 	if c == nil || p == nil {
@@ -47,40 +46,18 @@ func (s *Server) reconcileProjectLiveBindings(ctx context.Context, c *asclient.C
 	}
 	for _, env := range p.Spec.Environments {
 		for _, binding := range env.Bindings {
-			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderReference {
-				// A providerReference is deliberately non-owning. Reconcile may
-				// observe it to publish truthful status, but must never call
-				// ensureProjectProviderResource (which creates/updates and adds an
-				// owner reference).
-				if err := observeProjectProviderReference(ctx, c, binding); err != nil {
-					return nil, err
-				}
+			if binding.ResourceRef == nil {
 				continue
 			}
-			if env.Mode != aiv1alpha1.ProjectEnvironmentModeLive {
+			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference &&
+				(binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || env.Mode != aiv1alpha1.ProjectEnvironmentModeLive) {
 				continue
 			}
-			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil {
-				continue
-			}
-			effectiveBinding := binding
-			if strings.TrimSpace(env.Name) == projectDevelopmentEnvironmentName &&
-				strings.TrimSpace(binding.Name) == projectDevelopmentBindingName &&
-				binding.Provider == projectDevelopmentProviderAppStudio {
-				var err error
-				effectiveBinding, err = s.projectDevelopmentRuntimeBinding(binding, p, id)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if _, err := ensureProjectProviderResource(ctx, c, p, effectiveBinding, id); err != nil {
-				// One provider's absence must not block another provider's
-				// grant lifecycle: a revoke or grant change on a databricks
-				// integration has to succeed even when the infrastructure
-				// API backing the runtime binding is not (or no longer)
-				// bound in this workspace. Absent-API failures degrade to
-				// binding status; anything else still fails the request.
-				if isProjectAPIInitializingError(err) {
+			// This compatibility helper is now read-only. The Project
+			// controller owns all provider-resource writes; API paths may only
+			// observe to keep the status mirror/read-through truthful.
+			if _, err := observeProjectProviderBinding(ctx, c, p, binding, id); err != nil {
+				if isProjectAPIInitializingError(err) || apierrors.IsNotFound(err) {
 					continue
 				}
 				return nil, err
@@ -128,48 +105,32 @@ func (s *Server) projectDevelopmentRuntimeBinding(binding aiv1alpha1.ProjectProv
 }
 
 func ensureProjectProviderResource(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec, id identity) (*unstructured.Unstructured, error) {
-	if binding.Kind == aiv1alpha1.ProjectBindingKindProviderReference {
-		if c == nil || binding.ResourceRef == nil {
-			return nil, fmt.Errorf("provider reference %q requires resourceRef", binding.Name)
-		}
-		gvr, err := projectProviderResourceGVR(binding.ResourceRef)
-		if err != nil {
-			return nil, err
-		}
-		name := strings.TrimSpace(binding.ResourceRef.Name)
-		if name == "" {
-			return nil, fmt.Errorf("provider reference %q requires resourceRef.name", binding.Name)
-		}
-		// This compatibility guard keeps the helper non-owning even if a future
-		// caller accidentally routes a providerReference through the owning
-		// reconcile path.
-		return c.Resource(providerBindingResource(gvr, binding.ResourceRef.Kind), "").Get(ctx, name, metav1.GetOptions{})
+	return observeProjectProviderBinding(ctx, c, p, binding, id)
+}
+
+// observeProjectProviderBinding is intentionally GET-only. Keep the legacy
+// helper signature above for package-local callers while enforcing the
+// controller-only provider-resource write boundary.
+func observeProjectProviderBinding(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec, id identity) (*unstructured.Unstructured, error) {
+	if c == nil || binding.ResourceRef == nil {
+		return nil, fmt.Errorf("provider binding %q requires resourceRef", binding.Name)
 	}
-	want, gvr, err := bindings.Desired(p, binding)
+	gvr, err := projectProviderResourceGVR(binding.ResourceRef)
 	if err != nil {
 		return nil, err
 	}
-	res := c.Resource(providerBindingResource(gvr, binding.ResourceRef.Kind), "")
-	existing, err := res.Get(ctx, want.GetName(), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return res.Create(ctx, want, metav1.CreateOptions{})
+	name := strings.TrimSpace(binding.ResourceRef.Name)
+	if binding.Kind == aiv1alpha1.ProjectBindingKindProviderResource {
+		values, valuesErr := projectProviderBindingValues(binding)
+		if valuesErr != nil {
+			return nil, valuesErr
+		}
+		name = projectProviderBindingResourceName(p, binding, values, id)
 	}
-	if err != nil {
-		return nil, err
+	if name == "" {
+		return nil, fmt.Errorf("provider binding %q has no resource name", binding.Name)
 	}
-	existing.SetAPIVersion(binding.ResourceRef.APIVersion)
-	existing.SetKind(binding.ResourceRef.Kind)
-	existing.Object["spec"] = want.Object["spec"]
-	labels := existing.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[bindings.ProjectLabel] = p.Name
-	existing.SetLabels(labels)
-	if owner := bindings.OwnerRef(p); owner != nil {
-		existing.SetOwnerReferences([]metav1.OwnerReference{*owner})
-	}
-	return res.Update(ctx, existing, metav1.UpdateOptions{})
+	return c.Resource(providerBindingResource(gvr, binding.ResourceRef.Kind), "").Get(ctx, name, metav1.GetOptions{})
 }
 
 // observeProjectProviderReference performs the only reconciliation operation

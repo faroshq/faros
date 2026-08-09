@@ -729,7 +729,7 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 	}
 }
 
-func TestProjectIntegrationMutationsReconcileDevelopmentActionContext(t *testing.T) {
+func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *testing.T) {
 	fixture := newIntegrationHTTPFixture(t, projectWithDevelopmentRuntimeBinding())
 	fixture.setApplication(t, developmentApplicationObject())
 	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
@@ -747,18 +747,18 @@ func TestProjectIntegrationMutationsReconcileDevelopmentActionContext(t *testing
 	addedApplication := fixture.application(t)
 	addedSpec, ok := addedApplication.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("reconciled Application spec = %#v, want object", addedApplication.Object["spec"])
+		t.Fatalf("Application spec = %#v, want object", addedApplication.Object["spec"])
 	}
-	if got := addedSpec["kedgeActionsExchangeURL"]; got != "https://actions.example/api/provider-actions/workload/exchange" {
-		t.Fatalf("after grant kedgeActionsExchangeURL = %v, want trusted exchange URL", got)
+	if got := addedSpec["kedgeActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+		t.Fatalf("after grant kedgeActionsExchangeURL = %v, want unchanged provider resource", got)
 	}
-	if got := addedSpec["kedgeActionsBaseURL"]; got != "https://actions.example/services/providers/app-studio" {
-		t.Fatalf("after grant kedgeActionsBaseURL = %v, want trusted service URL", got)
+	if got := addedSpec["kedgeActionsBaseURL"]; got != "https://stale.example/services/providers/app-studio" {
+		t.Fatalf("after grant kedgeActionsBaseURL = %v, want unchanged provider resource", got)
 	}
 
-	// Revocation must continue to work when the external origin is absent: it
-	// removes the active grant and therefore must clear the runtime transport,
-	// rather than being blocked by the action-enabled URL preflight.
+	// Revocation remains a Project-spec mutation even when the external origin
+	// is absent. The controller will clear the owning runtime transport on its
+	// next reconciliation; this request does not mutate the provider object.
 	server.actionsExternalURL = ""
 	revoke := integrationHTTPTestRequest(http.MethodPatch, "/api/projects/demo/integrations/sales", `{"allowedActions":[{"name":"query_table","version":"v1","revoked":true}]}`)
 	revokeResponse := httptest.NewRecorder()
@@ -771,9 +771,12 @@ func TestProjectIntegrationMutationsReconcileDevelopmentActionContext(t *testing
 	if !ok {
 		t.Fatalf("reconciled Application spec after revoke = %#v, want object", revokedApplication.Object["spec"])
 	}
-	for _, field := range []string{"kedgeActionsExchangeURL", "kedgeActionsBaseURL"} {
-		if got, found := revokedSpec[field]; found && strings.TrimSpace(fmt.Sprint(got)) != "" {
-			t.Fatalf("after grant revocation %s = %v, want cleared", field, got)
+	for field, want := range map[string]string{
+		"kedgeActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
+		"kedgeActionsBaseURL":     "https://stale.example/services/providers/app-studio",
+	} {
+		if got := revokedSpec[field]; got != want {
+			t.Fatalf("after grant revocation %s = %v, want unchanged provider resource", field, got)
 		}
 	}
 
@@ -788,9 +791,12 @@ func TestProjectIntegrationMutationsReconcileDevelopmentActionContext(t *testing
 	if !ok {
 		t.Fatalf("reconciled Application spec after removal = %#v, want object", removedApplication.Object["spec"])
 	}
-	for _, field := range []string{"kedgeActionsExchangeURL", "kedgeActionsBaseURL"} {
-		if got, found := removedSpec[field]; found && strings.TrimSpace(fmt.Sprint(got)) != "" {
-			t.Fatalf("after grant removal %s = %v, want cleared", field, got)
+	for field, want := range map[string]string{
+		"kedgeActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
+		"kedgeActionsBaseURL":     "https://stale.example/services/providers/app-studio",
+	} {
+		if got := removedSpec[field]; got != want {
+			t.Fatalf("after grant removal %s = %v, want unchanged provider resource", field, got)
 		}
 	}
 }

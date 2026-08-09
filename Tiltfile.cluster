@@ -205,6 +205,8 @@ load('ext://restart_process', 'docker_build_with_restart')
 
 hub_namespace = 'kedge-system'
 hub_image = 'ghcr.io/faroshq/kedge-hub'
+hub_tls_secret_name = 'kedge-hub-tls'
+hub_tls_state_dir = '.kcp/tilt-hub-tls'
 app_studio_provider_image = 'ghcr.io/faroshq/kedge/app-studio-provider:dev'
 app_studio_preview_namespace = 'kedge-preview'
 app_studio_preview_gateway_name = 'sandbox-preview-gateway'
@@ -238,6 +240,26 @@ kind: Namespace
 metadata:
   name: %s
 '''.strip() % hub_namespace))
+
+# Helm's genCA/genSignedCert helpers return new material on every template
+# render. Keep Tilt's local hub identity in ignored .kcp state and supply it as
+# an existing Secret so unrelated Tiltfile reloads cannot invalidate the CA
+# already injected into App Studio development runtimes.
+hub_tls_yaml = str(local(
+    'bash hack/scripts/render-tilt-hub-tls.sh %s %s %s' % (
+        hub_namespace,
+        hub_tls_secret_name,
+        hub_tls_state_dir,
+    ),
+    quiet=True,
+    echo_off=True,
+))
+k8s_yaml(blob(hub_tls_yaml))
+k8s_resource(
+    new_name='hub-tls',
+    objects=['%s:secret' % hub_tls_secret_name],
+    labels=['hub'],
+)
 
 # Envoy gateway ClusterIP that *.kcp.localhost resolves to (see kcp's
 # gateway.yaml addresses + the hostAliases in its shard/front-proxy manifests).
@@ -533,6 +555,8 @@ k8s_yaml(helm(
         'kcp.external.enabled=true',
         'kcp.external.existingSecret=kcp-frontproxy-admin',
         'hub.hubExternalURL=https://localhost:9443',
+        'hub.tls.existingSecret=%s' % hub_tls_secret_name,
+        'hub.tls.selfSigned.enabled=false',
         'hub.devMode=true',
         'hub.embeddedGraphQL=true',
         # Match the plain Tiltfile's App Studio in-memory message store wiring.
@@ -553,7 +577,7 @@ k8s_yaml(helm(
 k8s_resource(
     'kedge-hub',
     port_forwards=['9443:9443'],
-    resource_deps=['hub-compile', 'hub-kcp-secrets', 'hub-rbac'],
+    resource_deps=['hub-compile', 'hub-kcp-secrets', 'hub-rbac', 'hub-tls'],
     labels=['hub'],
 )
 
@@ -912,14 +936,60 @@ app_studio_actions_ca_cmd = '''
 set -eu
 mkdir -p .kcp
 tmp_file="$(mktemp .kcp/app-studio-actions-ca.XXXXXX)"
+trap 'rm -f "$tmp_file"' EXIT
 kubectl -n %s get secret kedge-hub-tls -o go-template='{{ index .data "ca.crt" | base64decode }}' > "$tmp_file"
 chmod 0644 "$tmp_file"
-mv "$tmp_file" %s
-''' % (hub_namespace, app_studio_actions_ca_file)
+
+# Updating the mounted Secret does not restart the Go server that already
+# loaded its previous keypair. This covers the one-time migration from the old
+# chart-generated identity and any later intentional rotation: never publish a
+# CA to App Studio until it verifies the live hub certificate.
+verify_live_hub_tls() {
+  openssl s_client \
+    -connect 127.0.0.1:9443 \
+    -servername kedge-hub.%s.svc \
+    -CAfile "$tmp_file" \
+    -verify_return_error </dev/null >/dev/null 2>&1
+}
+
+if ! verify_live_hub_tls; then
+  echo "hub serving certificate does not match kedge-hub-tls; restarting hub"
+  kubectl -n %s rollout restart deployment/kedge-hub
+  kubectl -n %s rollout status deployment/kedge-hub --timeout=120s
+
+  verified=false
+  for _ in $(seq 1 30); do
+    if verify_live_hub_tls; then
+      verified=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$verified" != true ]; then
+    echo "hub serving certificate still does not match kedge-hub-tls after restart" >&2
+    exit 1
+  fi
+fi
+
+if [ -f %s ] && cmp -s "$tmp_file" %s; then
+  rm -f "$tmp_file"
+else
+  mv "$tmp_file" %s
+fi
+trap - EXIT
+''' % (
+    hub_namespace,
+    hub_namespace,
+    hub_namespace,
+    hub_namespace,
+    app_studio_actions_ca_file,
+    app_studio_actions_ca_file,
+    app_studio_actions_ca_file,
+)
 local_resource(
     'app-studio-actions-ca',
     cmd=app_studio_actions_ca_cmd,
-    resource_deps=['kedge-hub'],
+    resource_deps=['hub-tls', 'kedge-hub'],
     labels=['providers-app-studio'],
 )
 
@@ -957,6 +1027,10 @@ local_resource(
         'providers/app-studio/portal/vite.config.ts',
         'providers/app-studio/manifest.yaml',
         'providers/app-studio/.env',
+        # The provider loads this public CA once at process start. Restart it
+        # when the hub identity rotates so existing project bindings reconcile
+        # from the new authoritative bundle instead of retaining stale trust.
+        app_studio_actions_ca_file,
     ],
     resource_deps=[
         'kedge-hub',

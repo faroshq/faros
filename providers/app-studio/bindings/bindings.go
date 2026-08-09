@@ -25,6 +25,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
@@ -277,6 +278,45 @@ func Values(binding aiv1alpha1.ProjectProviderBindingSpec) (map[string]any, erro
 		return nil, fmt.Errorf("decode provider binding %q values: %w", binding.Name, err)
 	}
 	return values, nil
+}
+
+// MergeProviderSpec overlays desired binding values onto an observed provider
+// spec without erasing fields that the provider computes. Maps merge
+// recursively, scalar and list values are replaced by the explicit desired
+// value, and a top-level nil is an explicit desired value. Platform-owned
+// Provider Actions fields are removed from the observed map first so a grant
+// revocation or action removal cannot leave stale transport/identity values on
+// the instance. The inputs and all nested values remain untouched.
+func MergeProviderSpec(observed, desired map[string]any) map[string]any {
+	merged := make(map[string]any, len(observed)+len(desired))
+	for key, value := range observed {
+		if strings.HasPrefix(key, ActionsFieldPrefix) {
+			continue
+		}
+		merged[key] = runtime.DeepCopyJSONValue(value)
+	}
+	mergeProviderSpecMap(merged, desired)
+	return merged
+}
+
+func mergeProviderSpecMap(dst, desired map[string]any) {
+	for key, desiredValue := range desired {
+		desiredMap, desiredIsMap := desiredValue.(map[string]any)
+		if !desiredIsMap {
+			dst[key] = runtime.DeepCopyJSONValue(desiredValue)
+			continue
+		}
+		observedMap, observedIsMap := dst[key].(map[string]any)
+		if !observedIsMap {
+			observedMap = map[string]any{}
+		}
+		mergedMap := make(map[string]any, len(observedMap)+len(desiredMap))
+		for nestedKey, nestedValue := range observedMap {
+			mergedMap[nestedKey] = runtime.DeepCopyJSONValue(nestedValue)
+		}
+		mergeProviderSpecMap(mergedMap, desiredMap)
+		dst[key] = mergedMap
+	}
 }
 
 // ResourceName resolves the instance name: explicit resourceRef.name, then a

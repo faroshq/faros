@@ -13,15 +13,19 @@ package project
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/bindings"
@@ -125,6 +129,119 @@ func TestEqualSpecAndMetaDetectsDrift(t *testing.T) {
 	if !equalSpecAndMeta(base(), statusOnly) {
 		t.Fatal("status-only difference must not count as drift")
 	}
+}
+
+func TestEnsureInstanceDeepMergesComputedFieldsAndRetriesConflict(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"}}
+	b := binding(projectDevelopmentBindingName)
+	b.ResourceRef.Name = "demo-dev"
+	b.Values = runtime.RawExtension{Raw: []byte(`{
+		"name":"demo-dev",
+		"expose":{"hostnamePrefix":"desired"},
+		"nested":{"input":"new"}
+	}`)}
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": b.ResourceRef.APIVersion,
+		"kind":       b.ResourceRef.Kind,
+		"metadata": map[string]any{
+			"name":   "demo-dev",
+			"labels": map[string]any{bindings.ProjectLabel: "demo"},
+		},
+		"spec": map[string]any{
+			"name": "demo-dev",
+			"expose": map[string]any{
+				"hostnamePrefix": "old",
+				"fqdn":           "provider-computed.example",
+				"providerField":  "preserve",
+			},
+			"credentialsSecretName": "demo-dev-credentials",
+			"nested": map[string]any{
+				"input":    "old",
+				"computed": "preserve-nested",
+			},
+			bindings.ActionsExchangeURLField: "https://stale.example/exchange",
+			"kedgeActionsFutureField":        "stale",
+		},
+	}}
+	instance.SetGroupVersionKind(instance.GroupVersionKind())
+	var updates int
+	c := fake.NewClientBuilder().WithObjects(instance).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			if updates == 1 {
+				latest := &unstructured.Unstructured{}
+				latest.SetGroupVersionKind(instance.GroupVersionKind())
+				if err := underlying.Get(ctx, client.ObjectKey{Name: "demo-dev"}, latest); err != nil {
+					return err
+				}
+				spec, _, err := unstructured.NestedMap(latest.Object, "spec")
+				if err != nil {
+					return err
+				}
+				spec["expose"].(map[string]any)["fqdn"] = "fresh-provider-computed.example"
+				latest.Object["spec"] = spec
+				if err := underlying.Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(schemaGroupResourceForTest(), "demo-dev", fmt.Errorf("the object has been modified"))
+			}
+			return underlying.Update(ctx, obj)
+		},
+	}).Build()
+
+	got, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b)
+	if err != nil {
+		t.Fatalf("ensureInstance after conflict: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ensureInstance returned nil object")
+	}
+	if updates != 2 {
+		t.Fatalf("Update calls = %d, want bounded fresh retry (2)", updates)
+	}
+
+	stored := &unstructured.Unstructured{}
+	stored.SetGroupVersionKind(instance.GroupVersionKind())
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "demo-dev"}, stored); err != nil {
+		t.Fatalf("get converged instance: %v", err)
+	}
+	spec, _, err := unstructured.NestedMap(stored.Object, "spec")
+	if err != nil {
+		t.Fatalf("get spec: %v", err)
+	}
+	expose := spec["expose"].(map[string]any)
+	if expose["hostnamePrefix"] != "desired" || expose["fqdn"] != "fresh-provider-computed.example" || expose["providerField"] != "preserve" {
+		t.Fatalf("merged expose = %#v, want desired input + fresh/unknown provider fields", expose)
+	}
+	if spec["credentialsSecretName"] != "demo-dev-credentials" || spec["nested"].(map[string]any)["computed"] != "preserve-nested" {
+		t.Fatalf("computed fields were lost: %#v", spec)
+	}
+	for key := range spec {
+		if strings.HasPrefix(key, bindings.ActionsFieldPrefix) {
+			t.Fatalf("stale Provider Actions field %q survived: %#v", key, spec[key])
+		}
+	}
+
+	// A converged retry is a no-op. An explicit desired update still changes
+	// only its requested field and leaves provider-computed fields intact.
+	if _, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b); err != nil {
+		t.Fatalf("second ensureInstance: %v", err)
+	}
+	if updates != 2 {
+		t.Fatalf("converged ensure made an Update call: %d", updates)
+	}
+	b.Values = runtime.RawExtension{Raw: []byte(`{"name":"demo-dev","expose":{"hostnamePrefix":"final"},"nested":{"input":"explicit"}}`)}
+	if _, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b); err != nil {
+		t.Fatalf("explicit desired update: %v", err)
+	}
+	if updates != 3 {
+		t.Fatalf("explicit desired update calls = %d, want 3", updates)
+	}
+}
+
+// Keep the conflict test independent of provider-specific API discovery.
+func schemaGroupResourceForTest() schema.GroupResource {
+	return schema.GroupResource{Group: "infrastructure.kedge.faros.sh", Resource: "applications"}
 }
 
 func TestResolveLogicalClusterPathFromAppStudioBinding(t *testing.T) {

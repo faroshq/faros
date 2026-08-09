@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package bindings
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -189,6 +190,68 @@ func TestApplyActionsOverlayReplacesReservedValuesAndClearsTransport(t *testing.
 		if _, found := got[key]; found {
 			t.Errorf("actionless transport field %s survived: %v", key, got[key])
 		}
+	}
+}
+
+func TestMergeProviderSpecPreservesComputedFieldsAndClearsStaleActions(t *testing.T) {
+	observed := map[string]any{
+		"name": "demo-dev",
+		"expose": map[string]any{
+			"hostnamePrefix": "demo",
+			"fqdn":           "demo-tenant.apps.example",
+			"providerFlag":   "keep",
+		},
+		"credentialsSecretName": "demo-dev-credentials",
+		"providerComputed":      "keep-top-level",
+		ActionsExchangeURLField: "https://stale.example/exchange",
+		"kedgeActionsFuture":    "stale-future",
+	}
+	desired := map[string]any{
+		"expose": map[string]any{
+			"hostnamePrefix": "new-prefix",
+		},
+		"providerInput": "explicit",
+	}
+	got := MergeProviderSpec(observed, desired)
+
+	expose, ok := got["expose"].(map[string]any)
+	if !ok {
+		t.Fatalf("expose = %#v, want map", got["expose"])
+	}
+	for key, want := range map[string]any{
+		"hostnamePrefix": "new-prefix",
+		"fqdn":           "demo-tenant.apps.example",
+		"providerFlag":   "keep",
+	} {
+		if expose[key] != want {
+			t.Errorf("expose[%q] = %#v, want %#v", key, expose[key], want)
+		}
+	}
+	for key, want := range map[string]any{
+		"credentialsSecretName": "demo-dev-credentials",
+		"providerComputed":      "keep-top-level",
+		"providerInput":         "explicit",
+	} {
+		if got[key] != want {
+			t.Errorf("spec[%q] = %#v, want %#v", key, got[key], want)
+		}
+	}
+	for key := range observed {
+		if strings.HasPrefix(key, ActionsFieldPrefix) {
+			if _, found := got[key]; found {
+				t.Errorf("stale reserved field %q survived merge: %#v", key, got[key])
+			}
+		}
+	}
+	if observed[ActionsExchangeURLField] != "https://stale.example/exchange" {
+		t.Fatal("MergeProviderSpec mutated observed input")
+	}
+
+	// A subsequent explicit update changes only the requested nested input and
+	// remains stable once the provider has accepted it.
+	updated := MergeProviderSpec(got, map[string]any{"expose": map[string]any{"hostnamePrefix": "final"}})
+	if updated["expose"].(map[string]any)["fqdn"] != "demo-tenant.apps.example" {
+		t.Fatalf("explicit update dropped computed fqdn: %#v", updated["expose"])
 	}
 }
 
