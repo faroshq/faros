@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260809-66cfca6f.studios.ai.kedge.faros.sh
+  name: v260809-dbe6b457.studios.ai.kedge.faros.sh
 spec:
   group: ai.kedge.faros.sh
   names:

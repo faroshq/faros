@@ -16,7 +16,7 @@ spec:
       crd: {}
   - group: ai.kedge.faros.sh
     name: studios
-    schema: v260809-66cfca6f.studios.ai.kedge.faros.sh
+    schema: v260809-dbe6b457.studios.ai.kedge.faros.sh
     storage:
       crd: {}
 status: {}

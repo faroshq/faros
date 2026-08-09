@@ -131,7 +131,7 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	}
 	registry := server.projectAssistantToolRegistry()
 	policy := normalizeProjectAssistantTurnPolicy(req.TurnPolicy, req.TurnProfile)
-	includePreviewInspection := server.projectAssistantPreviewInspectionAvailable(ctx)
+	includePreviewInspection := server.projectAssistantPreviewInspectionAvailable(ctx, req.Identity)
 	localTools := projectEinoAssistantFilterPreviewInspection(registry.Tools(false), includePreviewInspection)
 	chatTools := projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(localTools), policy))
 	if len(chatTools) == 0 {
