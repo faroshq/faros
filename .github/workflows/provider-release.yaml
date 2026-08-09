@@ -188,7 +188,7 @@ jobs:
         if: needs.meta.outputs.provider == 'infrastructure'
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./providers/infrastructure/dev-agent
           file: ./providers/infrastructure/dev-agent/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
