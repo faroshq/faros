@@ -87,7 +87,7 @@ func (s *Server) inspectPreviewViaBrowserMCP(ctx context.Context, id identity, r
 		return projectAssistantPreviewInspectionResult{
 			Status:      "failed",
 			FailureKind: "navigation",
-			Summary:     browserMCPFirstLine(nav.text, "the preview did not load"),
+			Summary:     browserMCPNavigationSummary(nav.text, "the preview did not load"),
 			FinalURL:    req.URL,
 		}, nil
 	}
@@ -489,6 +489,53 @@ func browserMCPScreenshot(content browserMCPContent) *projectAssistantPreviewIns
 		shot.Bytes = len(decoded)
 	}
 	return shot
+}
+
+const browserMCPNavigationSummaryMaxChars = 240
+
+// browserMCPNavigationSummary extracts a useful navigation failure from
+// Playwright MCP's Markdown response. The tool commonly starts with headings
+// such as "### Result" or "### Error"; those are presentation scaffolding, not
+// evidence. Prefer a bounded substantive error line and fall back to the first
+// non-heading detail when the server uses a different wording.
+func browserMCPNavigationSummary(text, fallback string) string {
+	var firstDetail, substantive string
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		line = strings.TrimLeft(line, "-* \t")
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "```") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		trimmedLabel := strings.TrimSuffix(strings.TrimSpace(lower), ":")
+		switch trimmedLabel {
+		case "result", "error", "navigation", "navigation failed", "call log", "page url", "page title", "page snapshot":
+			continue
+		}
+		if strings.HasPrefix(lower, "page url:") || strings.HasPrefix(lower, "page title:") || strings.HasPrefix(lower, "page snapshot:") {
+			continue
+		}
+		if firstDetail == "" {
+			firstDetail = line
+		}
+		if strings.HasPrefix(lower, "error:") ||
+			strings.Contains(lower, "net::") ||
+			strings.Contains(lower, "err_") ||
+			strings.Contains(lower, "timed out") ||
+			strings.Contains(lower, "timeout") ||
+			strings.Contains(lower, "failed") ||
+			strings.Contains(lower, "refused") {
+			substantive = line
+			break
+		}
+	}
+	if substantive == "" {
+		substantive = firstDetail
+	}
+	if substantive == "" {
+		return fallback
+	}
+	return trimProjectAssistantWorkflowString(substantive, browserMCPNavigationSummaryMaxChars)
 }
 
 // browserMCPFirstLine returns the first non-empty line of text, or fallback.

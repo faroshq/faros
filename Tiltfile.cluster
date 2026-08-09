@@ -265,6 +265,31 @@ k8s_resource(
 # gateway.yaml addresses + the hostAliases in its shard/front-proxy manifests).
 gateway_ip = '10.96.2.2'
 
+# Keep host-side sslip.io loopback behavior while making the same app hosts
+# reachable from in-cluster development runtimes. This is a cluster-only
+# CoreDNS template; production clusters and per-project pod hostAliases are
+# untouched.
+app_studio_preview_dns_apply = 'hack/scripts/configure-tilt-preview-dns.sh %s %s %s' % (
+    k8s_context(), app_base_domain, gateway_ip)
+app_studio_preview_dns_cleanup = 'hack/scripts/configure-tilt-preview-dns.sh --cleanup %s %s %s' % (
+    k8s_context(), app_base_domain, gateway_ip)
+local_resource(
+    'app-studio-preview-dns',
+    # Keep a tiny serving process so Tilt can run the idempotent cleanup trap
+    # when the resource (or the whole Tilt session) is stopped.
+    cmd='true',
+    serve_cmd='''
+set -eu
+cleanup() { %s || true; }
+trap cleanup 0
+trap 'exit 0' 2 15
+%s
+while :; do sleep 86400; done
+'''.strip() % (app_studio_preview_dns_cleanup, app_studio_preview_dns_apply),
+    deps=['Tiltfile.cluster', 'hack/scripts/configure-tilt-preview-dns.sh'],
+    labels=['providers-app-studio'],
+)
+
 hub_host_aliases = [
     # Make *.kcp.localhost resolve to the Envoy gateway from the hub pod,
     # so the operator-issued kubeconfigs work in-cluster unchanged.

@@ -1777,6 +1777,7 @@ async function openNewProjectComposer() {
   selectedLandingCategory.value = null
   prompt.value = ''
   error.value = null
+  wizardOpen.value = false
   props.navigate(CREATE_PROJECT_ROUTE)
   await nextTick()
   promptRef.value?.focus()
@@ -1786,6 +1787,7 @@ function closeNewProjectComposer() {
   selectedLandingCategory.value = null
   prompt.value = ''
   error.value = null
+  wizardOpen.value = false
   props.navigate('')
 }
 
@@ -1948,17 +1950,25 @@ async function clearLLMKey() {
 async function createProjectFromPrompt() {
   const content = prompt.value.trim()
   if (!content) return
-  // Blueprint-first: submitting the intake opens the confirmation step
-  // (template + starter code) rather than creating one-shot. The actual
-  // create runs from the blueprint via onWizardCreate, which re-checks setup.
+  // Blueprint-first: submitting the landing idea hands off to a full creation
+  // surface. The actual create still runs from onWizardCreate, which re-checks
+  // setup before using the durable project/thread path below.
   wizardOpen.value = true
 }
 
-// The mini creation wizard: an opt-in confirm step (blueprint → template +
-// scaffold preview → create) over the same create path. The one-shot prompt
-// entry above still works unchanged; the wizard just supplies a confirmed
-// template/name before kicking off.
+// The creation surface is continuous from the landing composer: its planning
+// and review states replace the composer without losing the submitted idea.
 const wizardOpen = ref(false)
+
+async function onWizardCancel() {
+  // Keep prompt.value intact so editing/back returns to the landing composer
+  // with the exact idea that was submitted. NewProjectWizard invalidates its
+  // pending plan request before emitting cancel.
+  wizardOpen.value = false
+  await nextTick()
+  promptRef.value?.focus()
+  promptRef.value?.setSelectionRange(prompt.value.length, prompt.value.length)
+}
 
 async function onWizardCreate(payload: { prompt: string; templateName?: string; displayName?: string }) {
   wizardOpen.value = false
@@ -4118,6 +4128,18 @@ function isMissingCodeConnectionError(value: string | null): boolean {
       <div v-else>
         <main class="flex min-h-0 flex-1 items-center justify-center py-4">
           <section class="w-full max-w-[1060px]">
+            <template v-if="wizardOpen">
+              <NewProjectWizard
+                :ctx="props.ctx"
+                :initial-prompt="prompt"
+                :disabled="busy || !canStartProjectFromPrompt"
+                :disabled-reason="createPromptSubmitTitle"
+                @create="onWizardCreate"
+                @cancel="onWizardCancel"
+              />
+            </template>
+
+            <template v-else>
             <div class="mx-auto flex max-w-[760px] flex-col items-center text-center">
               <h2 class="text-[44px] font-semibold leading-[1.05] text-text-primary md:text-[56px]">
                 What do you want to build?
@@ -4168,19 +4190,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     <ArrowRight class="h-4 w-4" :stroke-width="1.75" />
                   </button>
                 </div>
-              </div>
-              <div
-                v-if="wizardOpen"
-                class="mx-auto mt-4 max-w-[860px] rounded-lg border border-border-subtle bg-surface-raised p-4 text-left shadow-sm"
-              >
-                <NewProjectWizard
-                  :ctx="props.ctx"
-                  :initial-prompt="prompt"
-                  :disabled="busy || !canStartProjectFromPrompt"
-                  :disabled-reason="createPromptSubmitTitle"
-                  @create="onWizardCreate"
-                  @cancel="wizardOpen = false"
-                />
               </div>
               <div
                 v-if="createSetupVisible"
@@ -4304,6 +4313,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 </button>
               </div>
             </div>
+            </template>
           </section>
         </main>
       </div>

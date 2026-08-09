@@ -777,43 +777,11 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	deleted := make([]string, 0, len(req.DeletePaths))
 	if authoritative {
-		candidates := make(map[string]struct{}, len(previous.Files)+len(cleanDeletePaths))
-		for _, raw := range previous.Files {
-			candidates[raw] = struct{}{}
-		}
-		for _, raw := range cleanDeletePaths {
-			candidates[raw] = struct{}{}
-		}
-		paths := make([]string, 0, len(candidates))
-		for raw := range candidates {
-			paths = append(paths, raw)
-		}
-		slices.Sort(paths)
-		managed := make(map[string]struct{}, len(previous.Files))
-		for _, raw := range previous.Files {
-			managed[raw] = struct{}{}
-		}
-		for _, raw := range paths {
-			if _, keep := incomingPaths[raw]; keep {
-				continue
-			}
-			// When a valid prior manifest exists, explicit deletion hints are
-			// advisory and may remove only paths that manifest managed. If the
-			// manifest was missing/corrupt, the full sync is still authoritative
-			// for writes, and FileStore's explicit hints allow safe convergence.
-			if found {
-				if _, ok := managed[raw]; !ok {
-					continue
-				}
-			}
-			removed, err := removeManagedWorkspaceFile(root, raw)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("delete %q: %v", raw, err), http.StatusInternalServerError)
-				return
-			}
-			if removed {
-				deleted = append(deleted, raw)
-			}
+		var err error
+		deleted, err = deleteAuthoritativeWorkspaceCandidates(root, previous, found, cleanDeletePaths, incomingPaths)
+		if err != nil {
+			http.Error(w, "delete authoritative workspace files: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 	} else {
 		for _, clean := range cleanDeletePaths {
@@ -826,13 +794,14 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := syncResponse{Phase: "Synced", Changed: changed, Deleted: deleted, SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest}
+	var appliedManifest workspaceManifest
 	if authoritative {
-		manifest := workspaceManifest{SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest, Files: make([]string, 0, len(incomingPaths))}
+		appliedManifest = workspaceManifest{SourceRevision: req.SourceRevision, SourceDigest: req.SourceDigest, Files: make([]string, 0, len(incomingPaths))}
 		for clean := range incomingPaths {
-			manifest.Files = append(manifest.Files, clean)
+			appliedManifest.Files = append(appliedManifest.Files, clean)
 		}
-		slices.Sort(manifest.Files)
-		if err := writeWorkspaceManifest(root, manifest); err != nil {
+		slices.Sort(appliedManifest.Files)
+		if err := writeWorkspaceManifest(root, appliedManifest); err != nil {
 			http.Error(w, "write workspace manifest: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -849,10 +818,35 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if restartNeeded && len(ruleCommands) > 0 {
 		resp.ReloadRuns = ruleCommands
-		if err := s.runtime.Reload(r.Context(), ruleCommands); err != nil {
+		reloadErr := s.runtime.Reload(r.Context(), ruleCommands)
+		if authoritative {
+			// Reload hooks are allowed to install dependencies, but they must not
+			// become a second source of truth for managed files. A hook can mutate
+			// package-lock.json (or fail after doing so), so restore the exact
+			// authoritative bundle and verify the original manifest before any
+			// restart or response is accepted.
+			if err := restoreAuthoritativeWorkspaceFiles(root, req.Files); err != nil {
+				http.Error(w, "restore authoritative workspace after reload: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := writeWorkspaceManifest(root, appliedManifest); err != nil {
+				http.Error(w, "restore workspace manifest after reload: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if _, err := deleteAuthoritativeWorkspaceCandidates(root, previous, found, cleanDeletePaths, incomingPaths); err != nil {
+				http.Error(w, "re-delete authoritative workspace files after reload: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := verifyWorkspaceManifest(root, appliedManifest); err != nil {
+				http.Error(w, "workspace manifest verification after reload: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if reloadErr != nil {
 			// Keep the sync result; surface the reload failure for the caller
-			// (the dev process keeps running against the old dependencies).
-			resp.ReloadError = err.Error()
+			// (the dev process keeps running against the old dependencies). The
+			// authoritative source has already been restored above.
+			resp.ReloadError = reloadErr.Error()
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -1109,6 +1103,84 @@ func writeWorkspaceFile(root *os.Root, clean string, content []byte) error {
 func workspaceFileContentChanged(root *os.Root, clean string, next []byte) bool {
 	current, err := root.ReadFile(clean)
 	return err != nil || !bytes.Equal(current, next)
+}
+
+// restoreAuthoritativeWorkspaceFiles repairs managed source files after a
+// reload hook. Hooks may legitimately create runtime output, but they must not
+// mutate the submitted source bundle or make the manifest claim hook output as
+// the current source digest.
+func restoreAuthoritativeWorkspaceFiles(root *os.Root, files []syncFile) error {
+	if _, err := validateSyncFiles(files); err != nil {
+		return err
+	}
+	for _, file := range files {
+		clean, err := cleanWorkspacePath(file.Path)
+		if err != nil {
+			return err
+		}
+		if err := validateManagedWorkspacePath(clean); err != nil {
+			return err
+		}
+		if err := ensureExecPathNoSymlink(root, clean, false); err != nil {
+			return err
+		}
+		if err := ensureExecPathNoSymlink(root, clean, true); err != nil {
+			return err
+		}
+		content := []byte(file.Content)
+		if workspaceFileContentChanged(root, clean, content) {
+			if err := writeWorkspaceFile(root, clean, content); err != nil {
+				return fmt.Errorf("restore %q: %w", clean, err)
+			}
+		}
+	}
+	return nil
+}
+
+// deleteAuthoritativeWorkspaceCandidates removes only files that the previous
+// manifest managed or that the caller explicitly asked to delete. Runtime-only
+// files are never swept. The same bounded set is replayed after reload hooks so
+// a hook cannot recreate a source file that the authoritative sync removed.
+func deleteAuthoritativeWorkspaceCandidates(root *os.Root, previous workspaceManifest, found bool, deletePaths []string, incoming map[string]struct{}) ([]string, error) {
+	candidates := make(map[string]struct{}, len(previous.Files)+len(deletePaths))
+	for _, raw := range previous.Files {
+		candidates[raw] = struct{}{}
+	}
+	for _, raw := range deletePaths {
+		candidates[raw] = struct{}{}
+	}
+	paths := make([]string, 0, len(candidates))
+	for raw := range candidates {
+		paths = append(paths, raw)
+	}
+	slices.Sort(paths)
+	managed := make(map[string]struct{}, len(previous.Files))
+	for _, raw := range previous.Files {
+		managed[raw] = struct{}{}
+	}
+	deleted := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		if _, keep := incoming[raw]; keep {
+			continue
+		}
+		// When a valid prior manifest exists, explicit deletion hints are
+		// advisory and may remove only paths that manifest managed. If the
+		// manifest was missing/corrupt, explicit hints still allow safe
+		// convergence without broad deletion of unknown runtime files.
+		if found {
+			if _, ok := managed[raw]; !ok {
+				continue
+			}
+		}
+		removed, err := removeManagedWorkspaceFile(root, raw)
+		if err != nil {
+			return nil, fmt.Errorf("delete %q: %w", raw, err)
+		}
+		if removed {
+			deleted = append(deleted, raw)
+		}
+	}
+	return deleted, nil
 }
 
 // isStartupAffectingPath is the legacy node-shaped heuristic, used only when

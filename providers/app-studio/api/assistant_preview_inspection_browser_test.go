@@ -16,7 +16,10 @@ limitations under the License.
 
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A representative Playwright MCP browser_snapshot result: the "Page URL" /
 // "Page Title" preamble plus a fenced YAML accessibility tree.
@@ -112,5 +115,25 @@ func TestBrowserMCPParseConsole(t *testing.T) {
 	}
 	if events[2].Level != "log" || events[2].Message != "plain line" {
 		t.Fatalf("event[2] = %+v", events[2])
+	}
+}
+
+func TestBrowserMCPNavigationSummarySkipsHeadingsAndKeepsError(t *testing.T) {
+	text := "### Result\n### Error\nError: page.goto: net::ERR_CONNECTION_REFUSED at https://preview.example/" + strings.Repeat(" details", 80)
+	got := browserMCPNavigationSummary(text, "fallback")
+	if strings.HasPrefix(got, "#") || strings.HasPrefix(got, "Result") {
+		t.Fatalf("navigation summary retained Markdown scaffolding: %q", got)
+	}
+	if !strings.Contains(got, "ERR_CONNECTION_REFUSED") {
+		t.Fatalf("navigation summary lost substantive error: %q", got)
+	}
+	if len([]rune(got)) > browserMCPNavigationSummaryMaxChars {
+		t.Fatalf("navigation summary length = %d, want <= %d", len([]rune(got)), browserMCPNavigationSummaryMaxChars)
+	}
+}
+
+func TestBrowserMCPNavigationSummaryFallsBackWhenResponseHasNoDetail(t *testing.T) {
+	if got := browserMCPNavigationSummary("### Result\n### Error\n", "the preview did not load"); got != "the preview did not load" {
+		t.Fatalf("heading-only navigation summary = %q", got)
 	}
 }
