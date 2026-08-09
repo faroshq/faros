@@ -128,7 +128,10 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ./providers/${{ matrix.name }}
+          # The dev-agent Dockerfile intentionally uses the repository root so
+          # its COPY path matches the local Makefile build. Other providers
+          # remain self-contained under providers/<name>.
+          context: ${{ matrix.name == 'infrastructure/dev-agent' && '.' || format('./providers/{0}', matrix.name) }}
           file: ./providers/${{ matrix.name }}/Dockerfile
           # Multi-arch on release; single-arch build-only on PRs (no QEMU emulation cost).
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}

@@ -230,7 +230,7 @@ func NewListHandler(reg *Registry) http.Handler {
 			for _, skill := range p.AssistantSkills {
 				resources := make([]providerAssistantSkillResource, 0, len(skill.Resources))
 				for _, resource := range skill.Resources {
-					resources = append(resources, providerAssistantSkillResource{Path: resource.Path, Content: resource.Content})
+					resources = append(resources, providerAssistantSkillResource(resource))
 				}
 				assistantSkills = append(assistantSkills, providerAssistantSkillDTO{
 					PackageName: skill.PackageName,

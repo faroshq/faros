@@ -352,7 +352,7 @@ func (a *HTTPAttestor) Verify(ctx context.Context, bearer string, req ExchangeRe
 	if err != nil {
 		return Review{}, fmt.Errorf("attestation request failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxReviewBody+1))
 	if err != nil || len(responseBody) > maxReviewBody {
 		return Review{}, errors.New("attestation response could not be read")

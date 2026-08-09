@@ -371,7 +371,7 @@ func initProvider(name, kubeconfig, workspace, schemas string) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s init: %w (log %s)", name, err, logFile.Name())

@@ -13,8 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	providersv1alpha1 "github.com/faroshq/faros-kedge/apis/providers/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	providersv1alpha1 "github.com/faroshq/faros-kedge/apis/providers/v1alpha1"
 )
 
 func TestParseProviderActionsCanonicalCatalogShape(t *testing.T) {

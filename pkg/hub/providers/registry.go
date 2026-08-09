@@ -30,9 +30,10 @@ import (
 	"sync"
 	"time"
 
-	providersv1alpha1 "github.com/faroshq/faros-kedge/apis/providers/v1alpha1"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	providersv1alpha1 "github.com/faroshq/faros-kedge/apis/providers/v1alpha1"
 )
 
 // HeartbeatTTL is how long a provider's last heartbeat is considered fresh.

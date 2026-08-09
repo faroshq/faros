@@ -99,10 +99,10 @@ func (f TenantResolverFunc) Resolve(r *http.Request) (string, string, error) {
 // setting those headers directly.
 func NewBackendProxy(reg *Registry, log logr.Logger) *ProviderProxy {
 	p := &ProviderProxy{
-		reg:                 reg,
-		log:                 log.WithName("backend-proxy"),
-		pathPrefix:          apiurl.PathPrefixProvidersProxy,
-		pick:                func(p Provider) *url.URL { return p.BackendURL },
+		reg:                  reg,
+		log:                  log.WithName("backend-proxy"),
+		pathPrefix:           apiurl.PathPrefixProvidersProxy,
+		pick:                 func(p Provider) *url.URL { return p.BackendURL },
 		denyHubOnlyEndpoints: true,
 	}
 	// setHeaders runs after the Director's URL rewrite. Always strip

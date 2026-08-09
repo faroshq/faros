@@ -272,7 +272,7 @@ func TestProviderActionQueryThroughGeneratedNodeSDK(t *testing.T) {
 	if err := setProjectActionDigest(projectObject, digest); err != nil {
 		t.Fatalf("restore action digest: %v", err)
 	}
-	projectObject, err = tenant.Resource(projectGVR).Update(context.Background(), projectObject, metav1.UpdateOptions{})
+	_, err = tenant.Resource(projectGVR).Update(context.Background(), projectObject, metav1.UpdateOptions{})
 	if err != nil {
 		t.Fatalf("restore action digest: %v", err)
 	}
@@ -623,7 +623,7 @@ func assertDatabricksMCPUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MCP probe: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		t.Fatalf("Databricks /mcp unexpectedly available: status=%d", response.StatusCode)
 	}
@@ -846,7 +846,7 @@ func setupTenantWorkspace(t *testing.T) (string, string, string) {
 		if err != nil {
 			return false, err.Error()
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			return false, fmt.Sprintf("status=%d body=%s", resp.StatusCode, body)
@@ -917,44 +917,6 @@ func waitTenantProxyContext(t *testing.T, orgUUID, workspaceUUID string) {
 	}, "provider-actions workspace proxy context")
 }
 
-func loginStaticTokenAndGetCluster(t *testing.T) string {
-	t.Helper()
-	var body []byte
-	waitCondition(t, 90*time.Second, func() (bool, string) {
-		req, err := http.NewRequest(http.MethodPost, hubURL+"/auth/token-login", nil)
-		if err != nil {
-			return false, err.Error()
-		}
-		req.Header.Set("Authorization", "Bearer "+staticToken)
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-		if err != nil {
-			return false, err.Error()
-		}
-		defer resp.Body.Close()
-		body, _ = io.ReadAll(resp.Body)
-		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status=%d body=%s", resp.StatusCode, body)
-	}, "static token login")
-	var out struct {
-		Kubeconfig string `json:"kubeconfig"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("decode token-login: %v", err)
-	}
-	kubeconfig, err := base64.StdEncoding.DecodeString(out.Kubeconfig)
-	if err != nil {
-		t.Fatalf("decode token-login kubeconfig: %v", err)
-	}
-	for _, line := range strings.Split(string(kubeconfig), "\n") {
-		if index := strings.Index(line, "/clusters/"); index >= 0 {
-			cluster := strings.TrimSpace(line[index+len("/clusters/"):])
-			cluster = strings.Trim(cluster, " /")
-			return cluster
-		}
-	}
-	t.Fatalf("token-login kubeconfig has no cluster URL: %s", kubeconfig)
-	return ""
-}
-
 func postJSON(t *testing.T, url, token string, payload any, extraHeaders ...map[string]string) (int, string) {
 	return doJSON(t, http.MethodPost, url, token, payload, extraHeaders...)
 }
@@ -990,7 +952,7 @@ func doJSON(t *testing.T, method, url, token string, payload any, extraHeaders .
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	responseBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(responseBody)
 }

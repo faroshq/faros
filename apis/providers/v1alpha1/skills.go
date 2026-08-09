@@ -163,7 +163,7 @@ func ProviderAssistantSkillDigest(skill ProviderAssistantSkillSpec) (string, err
 	}
 	resources := make([]canonicalResource, 0, len(skill.Resources))
 	for _, resource := range skill.Resources {
-		resources = append(resources, canonicalResource{Path: resource.Path, Content: resource.Content})
+		resources = append(resources, canonicalResource(resource))
 	}
 	sort.SliceStable(resources, func(i, j int) bool {
 		if resources[i].Path != resources[j].Path {

@@ -193,7 +193,7 @@ func (m *Manager) EnsureWorkloadIdentity(ctx context.Context, orgUUID, wsUUID st
 	// A misbehaving API server must not turn this path into a longer-lived
 	// credential than policy allows. A shorter expiration is valid because
 	// cluster admission may cap TokenRequest TTLs.
-	if issued.Status.ExpirationTimestamp.Time.After(time.Now().Add(WorkloadIdentityTokenTTL + time.Second)) {
+	if issued.Status.ExpirationTimestamp.After(time.Now().Add(WorkloadIdentityTokenTTL + time.Second)) {
 		return nil, fmt.Errorf("workload identity token exceeds maximum lifetime")
 	}
 
