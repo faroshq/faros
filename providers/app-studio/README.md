@@ -126,7 +126,6 @@ Environment variables consumed by the binary:
 | `APP_STUDIO_ASSISTANT_MAX_ITERATIONS` | Optional positive emergency model-call ceiling. The default is continuation-driven/unlimited, matching Codex; exhaustion fails with `budget_limited`. |
 | `APP_STUDIO_ASSISTANT_ROLLOUT_BUDGET_TOKENS` | Optional positive weighted-token budget for the Project conversation; disabled by default. Usage and reminders survive compaction and carry across runs. Exhaustion produces `failed` with `budget_limited`. |
 | `APP_STUDIO_ASSISTANT_MODEL_CONTEXT_TOKENS` | Active model context window used for token-pressure compaction (default `128000` when provider model metadata is unavailable). |
-| `APP_STUDIO_BROWSER_WORKER_URL` | Internal URL of the read-only Playwright worker. When unset or unhealthy, `inspect_development_preview` is not exposed to the model. |
 | `APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verify on MCP calls (dev) |
 | `APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verification only for preview readiness probes (local dev with a self-signed Gateway) |
 | `APP_STUDIO_PREVIEW_CONSOLE_ENABLED` | Automatically shares bounded browser-console evidence while the embedded preview is open; set `false` for a deployment-wide kill switch. |
@@ -143,11 +142,14 @@ make app-studio-db-up
 make run-provider-app-studio
 ```
 
-Tilt starts the browser worker as a separate resource. Outside Tilt, run
-`make run-app-studio-browser-worker`; the provider uses
-`http://127.0.0.1:8090` by default. The model can supply only a path within the
-server-resolved current preview plus bounded semantic assertions. It cannot
-select an origin, click, type, or execute arbitrary JavaScript.
+Preview inspection (`inspect_development_preview`) drives the workspace's shared
+headless browser — the infrastructure provider's Playwright MCP `browser`
+template, provisioned once per workspace by the Studio reconciler — over the
+infrastructure data plane. There is no app-studio browser worker to run; the
+tool is exposed to the model only when that shared browser is Ready. The model
+can supply only a path within the server-resolved current preview plus bounded
+semantic assertions. It cannot select an origin, click, type, or execute
+arbitrary JavaScript.
 
 The database container is named `kedge-app-studio-postgres`, listens on
 `127.0.0.1:55432`, and stores data under `.kcp/app-studio-postgres/`. Both

@@ -169,9 +169,9 @@ func runServe() {
 			hubInsecure,
 	)
 	apiServer.SetPreviewInsecureSkipTLSVerify(os.Getenv("APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY") == "true")
-	if err := apiServer.ConfigurePreviewInspection(os.Getenv("APP_STUDIO_BROWSER_WORKER_URL")); err != nil {
-		log.Fatalf("browser worker: %v", err)
-	}
+	// Preview inspection drives the workspace's shared browser (the Studio's
+	// Playwright MCP instance) over the infrastructure data plane — no
+	// app-studio-owned browser worker to configure.
 	previewConsoleEnabled, previewConsoleSigningKey, previewConsoleSigningKeyID := previewConsoleEnvironmentConfig()
 	if err := apiServer.ConfigurePreviewConsole(
 		previewConsoleEnabled,
