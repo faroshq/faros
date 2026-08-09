@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 
@@ -39,6 +38,7 @@ import (
 	"k8s.io/klog/v2"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/bindings"
 	asclient "github.com/faroshq/provider-app-studio/client"
 	"github.com/faroshq/provider-app-studio/tenant"
 )
@@ -318,22 +318,20 @@ func projectTemplateDevBindingWithContext(p *aiv1alpha1.Project, info projectTem
 		"name":      name,
 		"kedgeMode": "development",
 	}
-	for key, value := range map[string]string{
-		"kedgeActionsExchangeURL": context.ActionsExchangeURL,
-		"kedgeActionsBaseURL":     context.ActionsBaseURL,
-		"kedgeActionsCABundle":    context.ActionsCABundle,
-		"kedgeActionsTenantPath":  context.TenantPath,
-		"kedgeActionsOrg":         context.Org,
-		"kedgeActionsWorkspace":   context.Workspace,
-		"kedgeActionsProject":     context.Project,
-		"kedgeActionsProjectUID":  context.ProjectUID,
-		"kedgeActionsEnvironment": context.Environment,
-		"kedgeActionsInstance":    context.Instance,
-	} {
-		if strings.TrimSpace(value) != "" {
-			valuesMap[key] = value
-		}
-	}
+	valuesMap = bindings.ApplyActionsOverlay(valuesMap, bindings.ActionsOverlay{
+		ExchangeURL: context.ActionsExchangeURL,
+		BaseURL:     context.ActionsBaseURL,
+		CABundle:    context.ActionsCABundle,
+		ActionsIdentity: bindings.ActionsIdentity{
+			TenantPath:  context.TenantPath,
+			Org:         context.Org,
+			Workspace:   context.Workspace,
+			Project:     context.Project,
+			ProjectUID:  context.ProjectUID,
+			Environment: context.Environment,
+			Instance:    context.Instance,
+		},
+	})
 	values, err := json.Marshal(valuesMap)
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, err
@@ -403,37 +401,11 @@ func applyProjectDevelopmentTemplateWithContext(p *aiv1alpha1.Project, info proj
 }
 
 func validateActionsExternalURL(raw string) (string, error) {
-	origin := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if origin == "" {
-		return "", fmt.Errorf("KEDGE_ACTIONS_EXTERNAL_URL is required for action-enabled development runtimes")
-	}
-	u, err := url.Parse(origin)
-	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
-		return "", fmt.Errorf("KEDGE_ACTIONS_EXTERNAL_URL must be an absolute HTTPS URL")
-	}
-	if !strings.EqualFold(u.Scheme, "https") {
-		return "", fmt.Errorf("KEDGE_ACTIONS_EXTERNAL_URL must use HTTPS")
-	}
-	return origin, nil
+	return bindings.ValidateActionsExternalURL(raw)
 }
 
 func projectHasProviderActionGrant(p *aiv1alpha1.Project) bool {
-	if p == nil {
-		return false
-	}
-	for _, environment := range p.Spec.Environments {
-		for _, binding := range environment.Bindings {
-			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
-				continue
-			}
-			for _, action := range binding.AllowedActions {
-				if strings.TrimSpace(action.Name) != "" && !action.Revoked {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return bindings.HasActiveProviderActionGrant(p)
 }
 
 func (s *Server) projectTemplateBindingContext(p *aiv1alpha1.Project, id identity) (projectTemplateBindingContext, error) {
@@ -458,12 +430,12 @@ func (s *Server) projectTemplateBindingContext(p *aiv1alpha1.Project, id identit
 	if externalRaw == "" {
 		return projectTemplateBindingContext{}, fmt.Errorf("KEDGE_ACTIONS_EXTERNAL_URL is required for action-enabled development runtimes")
 	}
-	external, err := validateActionsExternalURL(externalRaw)
+	transport, err := bindings.ActionsTransportForOrigin(externalRaw)
 	if err != nil {
 		return projectTemplateBindingContext{}, err
 	}
-	context.ActionsExchangeURL = external + "/api/provider-actions/workload/exchange"
-	context.ActionsBaseURL = external + "/services/providers/app-studio"
+	context.ActionsExchangeURL = transport.ExchangeURL
+	context.ActionsBaseURL = transport.BaseURL
 	if s.actionsCABundleErr != nil {
 		return projectTemplateBindingContext{}, fmt.Errorf("configured action CA bundle: %w", s.actionsCABundleErr)
 	}
@@ -477,6 +449,20 @@ func (s *Server) applyProjectDevelopmentTemplateWithIdentity(p *aiv1alpha1.Proje
 		return err
 	}
 	return applyProjectDevelopmentTemplateWithContext(p, info, context)
+}
+
+// ActionsRuntimeConfig exposes the operator-owned action transport settings to
+// the background Project controller. The controller still derives tenant and
+// project identity from its authoritative multicluster context.
+func (s *Server) ActionsRuntimeConfig() bindings.ActionsRuntimeConfig {
+	if s == nil {
+		return bindings.ActionsRuntimeConfig{}
+	}
+	return bindings.ActionsRuntimeConfig{
+		ExternalURL: s.actionsExternalURL,
+		CABundle:    s.actionsCABundle,
+		CABundleErr: s.actionsCABundleErr,
+	}
 }
 
 // selectProjectTemplate switches the Project's development environment onto

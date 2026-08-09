@@ -908,16 +908,17 @@ local_resource(
 # action-enabled development runtimes and append to its own verified Actions
 # transport. Production deployments continue to use their system trust.
 app_studio_actions_ca_file = '.kcp/app-studio-actions-ca.crt'
-local_resource(
-    'app-studio-actions-ca',
-    cmd='''
+app_studio_actions_ca_cmd = '''
 set -eu
 mkdir -p .kcp
 tmp_file="$(mktemp .kcp/app-studio-actions-ca.XXXXXX)"
 kubectl -n %s get secret kedge-hub-tls -o go-template='{{ index .data "ca.crt" | base64decode }}' > "$tmp_file"
 chmod 0644 "$tmp_file"
 mv "$tmp_file" %s
-''' % (hub_namespace, app_studio_actions_ca_file),
+''' % (hub_namespace, app_studio_actions_ca_file)
+local_resource(
+    'app-studio-actions-ca',
+    cmd=app_studio_actions_ca_cmd,
     resource_deps=['kedge-hub'],
     labels=['providers-app-studio'],
 )
@@ -951,11 +952,12 @@ local_resource(
     # /clusters/root kubeconfig makes the reconcilers watch an empty
     # workspace and silently never engage. Development previews are the
     # template instance's own public URL — no preview-gateway env.
-    serve_cmd=('KEDGE_ACTIONS_EXTERNAL_URL=https://kedge-hub.{hub_namespace}.svc:9443 ' +
-               'KEDGE_ACTIONS_CA_BUNDLE_FILE={actions_ca} ' +
-               'make run-provider-app-studio').format(
-                   hub_namespace=hub_namespace,
-                   actions_ca=app_studio_actions_ca_file),
+    serve_cmd=(app_studio_actions_ca_cmd +
+               'KEDGE_ACTIONS_EXTERNAL_URL=https://kedge-hub.%s.svc:9443 ' +
+               'KEDGE_ACTIONS_CA_BUNDLE_FILE=%s ' +
+               'make run-provider-app-studio') % (
+                   hub_namespace,
+                   app_studio_actions_ca_file),
     deps=[
         'providers/app-studio/main.go',
         'providers/app-studio/heartbeat.go',
@@ -973,7 +975,6 @@ local_resource(
         'providers/app-studio/portal/vite.config.ts',
         'providers/app-studio/manifest.yaml',
         'providers/app-studio/.env',
-        app_studio_actions_ca_file,
     ],
     resource_deps=[
         'kedge-hub',

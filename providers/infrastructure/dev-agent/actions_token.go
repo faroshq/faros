@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,8 @@ const (
 	actionsTokenRetryDelay          = 5 * time.Second
 	actionsExchangeTimeout          = 30 * time.Second
 	actionsResponseLimit            = 1 << 20
+	actionsExchangePath             = "/api/provider-actions/workload/exchange"
+	actionsBasePath                 = "/services/providers/app-studio"
 )
 
 type actionsExchangeRequest struct {
@@ -107,8 +110,9 @@ func exchangeActionsToken(ctx context.Context, cfg *agentConfig) (time.Time, err
 	if cfg == nil {
 		return time.Time{}, errors.New("actions configuration is nil")
 	}
-	if strings.TrimSpace(cfg.ActionsExchangeURL) == "" {
-		return time.Time{}, errors.New("KEDGE_ACTIONS_EXCHANGE_URL is required")
+	exchangeURL, err := validateActionsExchangeEndpoint(cfg.ActionsExchangeURL, cfg.ActionsBaseURL)
+	if err != nil {
+		return time.Time{}, err
 	}
 	reqBody := actionsExchangeRequest{
 		TenantPath:  strings.TrimSpace(cfg.ActionsTenantPath),
@@ -143,11 +147,20 @@ func exchangeActionsToken(ctx context.Context, cfg *agentConfig) (time.Time, err
 			return time.Time{}, err
 		}
 	}
+	// Preserve an injected transport/client for deterministic tests, but never
+	// inherit its redirect policy: a redirect must not receive bootstrap
+	// credentials at a second location. Clone so the caller's test client is not
+	// mutated.
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client = &clientCopy
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("marshal actions exchange request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSpace(cfg.ActionsExchangeURL), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, exchangeURL, bytes.NewReader(body))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("create actions exchange request: %w", err)
 	}
@@ -194,6 +207,45 @@ func exchangeActionsToken(ctx context.Context, cfg *agentConfig) (time.Time, err
 		cfg.actionsTokenState.publish(expiresAt)
 	}
 	return expiresAt, nil
+}
+
+// validateActionsExchangeEndpoint accepts only the fixed HTTPS exchange path
+// on the same host as the fixed SDK base URL. Both values are operator/platform
+// inputs; binding values never participate in this validation.
+func validateActionsExchangeEndpoint(exchangeRaw, baseRaw string) (string, error) {
+	exchangeRaw = strings.TrimSpace(exchangeRaw)
+	if exchangeRaw == "" {
+		return "", errors.New("KEDGE_ACTIONS_EXCHANGE_URL is required")
+	}
+	exchange, err := url.Parse(exchangeRaw)
+	if err != nil || !exchange.IsAbs() || exchange.Host == "" || exchange.User != nil || exchange.RawQuery != "" || exchange.Fragment != "" || exchange.RawPath != "" {
+		return "", errors.New("KEDGE_ACTIONS_EXCHANGE_URL must be an absolute HTTPS exchange endpoint")
+	}
+	if !strings.EqualFold(exchange.Scheme, "https") {
+		return "", errors.New("KEDGE_ACTIONS_EXCHANGE_URL must use HTTPS")
+	}
+	if exchange.Path != actionsExchangePath {
+		return "", fmt.Errorf("KEDGE_ACTIONS_EXCHANGE_URL must use path %q", actionsExchangePath)
+	}
+
+	baseRaw = strings.TrimRight(strings.TrimSpace(baseRaw), "/")
+	if baseRaw == "" {
+		return "", errors.New("KEDGE_ACTIONS_BASE_URL is required when Provider Actions are enabled")
+	}
+	base, err := url.Parse(baseRaw)
+	if err != nil || !base.IsAbs() || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" {
+		return "", errors.New("KEDGE_ACTIONS_BASE_URL must be an absolute HTTPS provider base URL")
+	}
+	if !strings.EqualFold(base.Scheme, "https") {
+		return "", errors.New("KEDGE_ACTIONS_BASE_URL must use HTTPS")
+	}
+	if base.Path != actionsBasePath {
+		return "", fmt.Errorf("KEDGE_ACTIONS_BASE_URL must use path %q", actionsBasePath)
+	}
+	if !strings.EqualFold(exchange.Host, base.Host) {
+		return "", errors.New("KEDGE_ACTIONS_EXCHANGE_URL host must match KEDGE_ACTIONS_BASE_URL")
+	}
+	return exchange.String(), nil
 }
 
 func parseActionsExpiry(raw string) (time.Time, error) {
@@ -251,7 +303,10 @@ func waitActionsTokenRefresh(ctx context.Context, delay time.Duration) bool {
 func actionsExchangeClient(caFile string) (*http.Client, error) {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return &http.Client{Timeout: actionsExchangeTimeout}, nil
+		return &http.Client{
+			Timeout:       actionsExchangeTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}, nil
 	}
 	transport = transport.Clone()
 	caFile = strings.TrimSpace(caFile)
@@ -269,7 +324,11 @@ func actionsExchangeClient(caFile string) (*http.Client, error) {
 			return nil, fmt.Errorf("read actions CA file: %w", err)
 		}
 	}
-	return &http.Client{Timeout: actionsExchangeTimeout, Transport: transport}, nil
+	return &http.Client{
+		Timeout:       actionsExchangeTimeout,
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}, nil
 }
 
 func writeActionsTokenAtomic(path string, data []byte, mode os.FileMode) error {

@@ -113,6 +113,85 @@ func TestDesiredInvalidBinding(t *testing.T) {
 	}
 }
 
+func TestApplyActionsOverlayReplacesReservedValuesAndClearsTransport(t *testing.T) {
+	input := map[string]any{
+		"ordinary":                "preserved",
+		ActionsExchangeURLField:   "stale-exchange",
+		ActionsBaseURLField:       "stale-base",
+		ActionsCABundleField:      "stale-ca",
+		ActionsTenantPathField:    "stale-tenant",
+		"kedgeActionsFutureField": "stale-future",
+		"kedgeActions":            "stale-prefix",
+	}
+	overlay := ActionsOverlay{
+		ActionsIdentity: ActionsIdentity{
+			TenantPath:  "root:kedge:tenants:org:workspace",
+			Org:         "org",
+			Workspace:   "workspace",
+			Project:     "demo",
+			ProjectUID:  "uid-1",
+			Environment: "development",
+			Instance:    "demo-dev",
+		},
+		ExchangeURL: "https://actions.example/api/provider-actions/workload/exchange",
+		BaseURL:     "https://actions.example/services/providers/app-studio",
+		CABundle:    "public-ca",
+	}
+
+	got := ApplyActionsOverlay(input, overlay)
+	if got["ordinary"] != "preserved" {
+		t.Fatalf("ordinary value = %v, want preserved", got["ordinary"])
+	}
+	for key, want := range map[string]string{
+		ActionsExchangeURLField: overlay.ExchangeURL,
+		ActionsBaseURLField:     overlay.BaseURL,
+		ActionsCABundleField:    overlay.CABundle,
+		ActionsTenantPathField:  overlay.TenantPath,
+		ActionsOrgField:         overlay.Org,
+		ActionsWorkspaceField:   overlay.Workspace,
+		ActionsProjectField:     overlay.Project,
+		ActionsProjectUIDField:  overlay.ProjectUID,
+		ActionsEnvironmentField: overlay.Environment,
+		ActionsInstanceField:    overlay.Instance,
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %v, want %q", key, got[key], want)
+		}
+	}
+	for _, key := range []string{"kedgeActionsFutureField", "kedgeActions"} {
+		if _, found := got[key]; found {
+			t.Errorf("reserved unknown field %s survived: %v", key, got[key])
+		}
+	}
+	if input[ActionsExchangeURLField] != "stale-exchange" || input["ordinary"] != "preserved" {
+		t.Fatalf("input was mutated: %v", input)
+	}
+
+	actionless := overlay
+	actionless.ExchangeURL = ""
+	actionless.BaseURL = ""
+	actionless.CABundle = ""
+	got = ApplyActionsOverlay(input, actionless)
+	for key, want := range map[string]string{
+		ActionsTenantPathField:  actionless.TenantPath,
+		ActionsOrgField:         actionless.Org,
+		ActionsWorkspaceField:   actionless.Workspace,
+		ActionsProjectField:     actionless.Project,
+		ActionsProjectUIDField:  actionless.ProjectUID,
+		ActionsEnvironmentField: actionless.Environment,
+		ActionsInstanceField:    actionless.Instance,
+	} {
+		if got[key] != want {
+			t.Errorf("actionless %s = %v, want identity %q", key, got[key], want)
+		}
+	}
+	for _, key := range []string{ActionsExchangeURLField, ActionsBaseURLField, ActionsCABundleField} {
+		if _, found := got[key]; found {
+			t.Errorf("actionless transport field %s survived: %v", key, got[key])
+		}
+	}
+}
+
 func TestPhase(t *testing.T) {
 	cases := []struct {
 		name   string

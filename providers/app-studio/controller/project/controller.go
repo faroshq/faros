@@ -31,8 +31,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	"github.com/kcp-dev/sdk/apis/core"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,12 +60,27 @@ const (
 	// not watched (their kinds are per-template and dynamic); polling keeps
 	// the controller simple and deterministic.
 	requeueInterval = 15 * time.Second
+
+	projectDevelopmentEnvironmentName = "development"
+	projectDevelopmentBindingName     = "dev"
+	projectDevelopmentProvider        = "app-studio"
+	appStudioAPIExportName            = "ai.kedge.faros.sh"
+	appStudioAPIExportPath            = "root:kedge:providers:app-studio"
 )
+
+type tenantPathResolver func(context.Context, client.Client, string) (string, error)
 
 // Reconciler lifecycles infrastructure instances, the git backing
 // repository, and workspace→git commit convergence for Projects.
 type Reconciler struct {
 	Manager mcmanager.Manager
+	// Actions is operator-owned transport configuration. Tenant and project
+	// identity are derived per reconcile from the selected logical cluster and
+	// Project object, never from this configuration or Project annotations.
+	Actions bindings.ActionsRuntimeConfig
+	// ResolveTenantPath is a test seam for the authoritative LogicalCluster
+	// lookup. Production leaves it nil and uses resolveLogicalClusterPath.
+	ResolveTenantPath tenantPathResolver
 	// Workspace is the shared on-disk project file store (nil disables
 	// commit convergence).
 	Workspace *workspace.FileStore
@@ -107,6 +125,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		// Nothing to lifecycle yet.
 		return ctrl.Result{}, nil
 	}
+	clusterName := string(req.ClusterName)
+	actionsTenantPath, err := r.actionsTenantPath(ctx, c, &p, bound, clusterName)
+	if err != nil {
+		// Resolve the authoritative tenant before adding a finalizer or mutating
+		// any instance. A missing or inconsistent LogicalCluster path therefore
+		// fails closed with no partial reconciliation side effects.
+		return ctrl.Result{}, err
+	}
 
 	if !controllerutil.ContainsFinalizer(&p, finalizer) {
 		controllerutil.AddFinalizer(&p, finalizer)
@@ -123,7 +149,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	for _, env := range bound {
 		bindingStatuses := make([]aiv1alpha1.ProjectProviderBindingStatus, 0, len(env.bindings))
 		for _, binding := range env.bindings {
-			obj, err := r.ensureInstance(ctx, c, &p, binding)
+			effectiveBinding := binding
+			if actionsTenantPath != "" && isProjectDevelopmentBinding(env.spec.Name, binding) {
+				effectiveBinding, err = r.overlayDevelopmentBinding(&p, binding, actionsTenantPath)
+				if err != nil {
+					allReady = false
+					st := bindings.InvalidStatus(binding)
+					st.Outputs = map[string]string{"error": err.Error()}
+					bindingStatuses = append(bindingStatuses, st)
+					continue
+				}
+			}
+			obj, err := r.ensureInstance(ctx, c, &p, effectiveBinding)
 			switch {
 			case apierrors.IsInvalid(err) || bindings.IsInvalidBinding(err):
 				// The API server rejects the spec, or the binding cannot even
@@ -189,6 +226,125 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	// Ready: keep a slow poll so drift (instance deleted out-of-band, status
 	// regressions, new dirty files) is noticed without watching dynamic kinds.
 	return ctrl.Result{RequeueAfter: 4 * requeueInterval}, nil
+}
+
+func isProjectDevelopmentBinding(environment string, binding aiv1alpha1.ProjectProviderBindingSpec) bool {
+	return strings.TrimSpace(environment) == projectDevelopmentEnvironmentName &&
+		strings.TrimSpace(binding.Name) == projectDevelopmentBindingName &&
+		strings.TrimSpace(binding.Provider) == projectDevelopmentProvider
+}
+
+func hasProjectDevelopmentBinding(bound []boundEnv) bool {
+	for _, env := range bound {
+		for _, binding := range env.bindings {
+			if isProjectDevelopmentBinding(env.spec.Name, binding) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// actionsTenantPath resolves the tenant path before any Project or instance
+// mutation. Project org/workspace annotations are checked only as a
+// consistency guard; they never supply the controller's authority.
+func (r *Reconciler) actionsTenantPath(ctx context.Context, c client.Client, p *aiv1alpha1.Project, bound []boundEnv, clusterName string) (string, error) {
+	if !hasProjectDevelopmentBinding(bound) {
+		return "", nil
+	}
+	resolver := r.ResolveTenantPath
+	if resolver == nil {
+		resolver = resolveLogicalClusterPath
+	}
+	path, err := resolver(ctx, c, clusterName)
+	if err != nil {
+		return "", fmt.Errorf("resolve Project Actions tenant for cluster %q: %w", clusterName, err)
+	}
+	org, workspace, err := bindings.ParseTenantWorkspacePath(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve Project Actions tenant for cluster %q: %w", clusterName, err)
+	}
+	annotations := p.GetAnnotations()
+	if annotated := strings.TrimSpace(annotations[bindings.OrgUUIDAnnotation]); annotated != "" && annotated != org {
+		return "", fmt.Errorf("Project %q organization annotation does not match authoritative tenant path", p.Name)
+	}
+	if annotated := strings.TrimSpace(annotations[bindings.WorkspaceUUIDAnnotation]); annotated != "" && annotated != workspace {
+		return "", fmt.Errorf("Project %q workspace annotation does not match authoritative tenant path", p.Name)
+	}
+	return strings.TrimSpace(path), nil
+}
+
+func resolveLogicalClusterPath(ctx context.Context, c client.Client, clusterName string) (string, error) {
+	clusterName = strings.TrimSpace(clusterName)
+	if c == nil {
+		return "", fmt.Errorf("logical-cluster client is nil")
+	}
+	if clusterName == "" {
+		return "", fmt.Errorf("multicluster cluster name is required")
+	}
+	bindingsList := &apisv1alpha2.APIBindingList{}
+	if err := c.List(ctx, bindingsList); err != nil {
+		return "", fmt.Errorf("list APIBindings: %w", err)
+	}
+
+	matches := make([]*apisv1alpha2.APIBinding, 0, len(bindingsList.Items))
+	preferred := make([]*apisv1alpha2.APIBinding, 0, len(bindingsList.Items))
+	for i := range bindingsList.Items {
+		binding := &bindingsList.Items[i]
+		export := binding.Spec.Reference.Export
+		if export == nil || strings.TrimSpace(export.Name) != appStudioAPIExportName {
+			continue
+		}
+		matches = append(matches, binding)
+		if strings.TrimSpace(export.Path) == appStudioAPIExportPath {
+			preferred = append(preferred, binding)
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no APIBinding references App Studio APIExport %q", appStudioAPIExportName)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("multiple APIBindings reference App Studio APIExport %q", appStudioAPIExportName)
+	}
+	if len(preferred) == 1 {
+		matches = preferred
+	}
+
+	annotations := matches[0].GetAnnotations()
+	if got := strings.TrimSpace(annotations["kcp.io/cluster"]); got == "" {
+		return "", fmt.Errorf("App Studio APIBinding has no kcp.io/cluster annotation")
+	} else if got != clusterName {
+		return "", fmt.Errorf("App Studio APIBinding cluster %q does not match request cluster %q", got, clusterName)
+	}
+	path := strings.TrimSpace(annotations[core.LogicalClusterPathAnnotationKey])
+	if path == "" {
+		return "", fmt.Errorf("App Studio APIBinding has no %s annotation", core.LogicalClusterPathAnnotationKey)
+	}
+	return path, nil
+}
+
+func (r *Reconciler) overlayDevelopmentBinding(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec, tenantPath string) (aiv1alpha1.ProjectProviderBindingSpec, error) {
+	values, err := bindings.Values(binding)
+	if err != nil {
+		return binding, err
+	}
+	org, workspace, err := bindings.ParseTenantWorkspacePath(tenantPath)
+	if err != nil {
+		return binding, err
+	}
+	overlay, err := bindings.NewActionsOverlay(bindings.ActionsIdentity{
+		TenantPath:  tenantPath,
+		Org:         org,
+		Workspace:   workspace,
+		Project:     strings.TrimSpace(p.Name),
+		ProjectUID:  string(p.UID),
+		Environment: projectDevelopmentEnvironmentName,
+		Instance:    bindings.ResourceName(p, binding, values),
+	}, r.Actions, bindings.HasActiveProviderActionGrant(p))
+	if err != nil {
+		return binding, err
+	}
+	return bindings.ApplyActionsOverlayToBinding(binding, overlay)
 }
 
 // ensureInstance gets or creates the bound instance, converging spec, labels,

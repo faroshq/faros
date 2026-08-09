@@ -104,30 +104,21 @@ func (s *Server) projectDevelopmentRuntimeBinding(binding aiv1alpha1.ProjectProv
 	if err != nil {
 		return binding, err
 	}
-	actionValues := map[string]string{
-		"kedgeActionsExchangeURL": context.ActionsExchangeURL,
-		"kedgeActionsBaseURL":     context.ActionsBaseURL,
-		"kedgeActionsCABundle":    context.ActionsCABundle,
-		"kedgeActionsTenantPath":  context.TenantPath,
-		"kedgeActionsOrg":         context.Org,
-		"kedgeActionsWorkspace":   context.Workspace,
-		"kedgeActionsProject":     context.Project,
-		"kedgeActionsProjectUID":  context.ProjectUID,
-		"kedgeActionsEnvironment": context.Environment,
-		"kedgeActionsInstance":    context.Instance,
-	}
-	// These fields are platform-owned. Remove any stale or user-edited copy
-	// before applying the current trusted context; otherwise a grant revocation
-	// or missing external URL could leave an old action endpoint on the runtime
-	// binding even though the current context has no action transport.
-	for key := range actionValues {
-		delete(values, key)
-	}
-	for key, value := range actionValues {
-		if strings.TrimSpace(value) != "" {
-			values[key] = value
-		}
-	}
+	context.Instance = bindings.ResourceName(p, binding, values)
+	values = bindings.ApplyActionsOverlay(values, bindings.ActionsOverlay{
+		ExchangeURL: context.ActionsExchangeURL,
+		BaseURL:     context.ActionsBaseURL,
+		CABundle:    context.ActionsCABundle,
+		ActionsIdentity: bindings.ActionsIdentity{
+			TenantPath:  context.TenantPath,
+			Org:         context.Org,
+			Workspace:   context.Workspace,
+			Project:     context.Project,
+			ProjectUID:  context.ProjectUID,
+			Environment: context.Environment,
+			Instance:    context.Instance,
+		},
+	})
 	raw, err := json.Marshal(values)
 	if err != nil {
 		return binding, err

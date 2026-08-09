@@ -43,6 +43,11 @@ func (actionsStatusRuntime) Status(context.Context) (processStatusResponse, erro
 	return processStatusResponse{}, nil
 }
 
+func actionsTestURLs(origin string) (exchangeURL, baseURL string) {
+	origin = strings.TrimRight(origin, "/")
+	return origin + actionsExchangePath, origin + actionsBasePath
+}
+
 func actionsExchangeClientForResponse(status int, body string) *http.Client {
 	return &http.Client{Transport: actionsTestRoundTripper(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -65,14 +70,16 @@ func actionsReadinessConfig(t *testing.T, enabled bool, client *http.Client) (*a
 		t.Fatal(err)
 	}
 	exchangeURL := ""
+	baseURL := ""
 	if enabled {
-		exchangeURL = "https://exchange.test/workload/exchange"
+		exchangeURL, baseURL = actionsTestURLs("https://actions.test")
 	}
 	cfg := &agentConfig{
 		ControlToken:              "control-token",
 		ActionsBootstrapTokenFile: bootstrapPath,
 		ActionsTokenFile:          filepath.Join(dir, "actions", "token"),
 		ActionsExchangeURL:        exchangeURL,
+		ActionsBaseURL:            baseURL,
 		ActionsTenantPath:         "root:kedge:tenants:org:workspace",
 		ActionsProject:            "demo",
 		ActionsProjectUID:         "project-uid",
@@ -114,7 +121,7 @@ func TestExchangeActionsTokenPublishesTokenAndExactIdentity(t *testing.T) {
 	}
 	var gotRequest actionsExchangeRequest
 	var gotAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
 			t.Errorf("decode request: %v", err)
@@ -123,16 +130,19 @@ func TestExchangeActionsTokenPublishesTokenAndExactIdentity(t *testing.T) {
 		_, _ = w.Write([]byte(`{"token":"refreshed-token","tokenType":"Bearer","expiresAt":"2099-01-01T00:00:00Z"}`))
 	}))
 	defer server.Close()
+	exchangeURL, baseURL := actionsTestURLs(server.URL)
 
 	cfg := &agentConfig{
 		ActionsBootstrapTokenFile: bootstrapPath,
 		ActionsTokenFile:          filepath.Join(dir, "actions", "token"),
-		ActionsExchangeURL:        server.URL,
+		ActionsExchangeURL:        exchangeURL,
+		ActionsBaseURL:            baseURL,
 		ActionsTenantPath:         "root:kedge:tenants:org:ws",
 		ActionsProject:            "demo",
 		ActionsProjectUID:         "project-uid",
 		ActionsEnvironment:        "development",
 		ActionsInstance:           "demo-dev",
+		actionsHTTPClient:         server.Client(),
 	}
 	expiresAt, err := exchangeActionsToken(t.Context(), cfg)
 	if err != nil {
@@ -175,18 +185,67 @@ func TestExchangeActionsTokenRejectsInvalidResponse(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bootstrap, "token"), []byte("bootstrap"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"token":"token","tokenType":"Basic","expiresAt":"2099-01-01T00:00:00Z"}`))
 	}))
 	defer server.Close()
+	exchangeURL, baseURL := actionsTestURLs(server.URL)
 	cfg := &agentConfig{
 		ActionsBootstrapTokenFile: filepath.Join(bootstrap, "token"),
 		ActionsTokenFile:          filepath.Join(dir, "token"),
-		ActionsExchangeURL:        server.URL,
+		ActionsExchangeURL:        exchangeURL,
+		ActionsBaseURL:            baseURL,
 		ActionsTenantPath:         "tenant", ActionsProject: "project", ActionsProjectUID: "uid", ActionsEnvironment: "development", ActionsInstance: "instance",
+		actionsHTTPClient: server.Client(),
 	}
 	if _, err := exchangeActionsToken(t.Context(), cfg); err == nil {
 		t.Fatal("invalid token type unexpectedly accepted")
+	}
+}
+
+func TestExchangeActionsTokenDoesNotFollowRedirectOrForwardBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	bootstrapPath := filepath.Join(dir, "bootstrap", "token")
+	if err := os.MkdirAll(filepath.Dir(bootstrapPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bootstrapPath, []byte("bootstrap-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exchangeURL, baseURL := actionsTestURLs("https://actions.test")
+	var requests []*http.Request
+	client := &http.Client{Transport: actionsTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.Clone(r.Context()))
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"https://evil.example/capture"}},
+			Body:       io.NopCloser(strings.NewReader("redirect")),
+			Request:    r,
+		}, nil
+	})}
+	cfg := &agentConfig{
+		ActionsBootstrapTokenFile: bootstrapPath,
+		ActionsTokenFile:          filepath.Join(dir, "actions", "token"),
+		ActionsExchangeURL:        exchangeURL,
+		ActionsBaseURL:            baseURL,
+		ActionsTenantPath:         "root:kedge:tenants:org:ws",
+		ActionsProject:            "demo",
+		ActionsProjectUID:         "project-uid",
+		ActionsEnvironment:        "development",
+		ActionsInstance:           "demo-dev",
+		actionsHTTPClient:         client,
+	}
+	if _, err := exchangeActionsToken(t.Context(), cfg); err == nil {
+		t.Fatal("redirect response unexpectedly accepted")
+	}
+	if len(requests) != 1 {
+		t.Fatalf("transport requests = %d, want one request with no redirect follow", len(requests))
+	}
+	if got := requests[0].Header.Get("Authorization"); got != "Bearer bootstrap-token" {
+		t.Fatalf("initial authorization = %q, want bootstrap credential", got)
+	}
+	if _, err := os.Stat(cfg.ActionsTokenFile); !os.IsNotExist(err) {
+		t.Fatalf("token file stat error = %v, want no token published", err)
 	}
 }
 

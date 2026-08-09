@@ -215,6 +215,7 @@ func runServe() {
 	// controller — silently, forever.
 	go func() {
 		deps := controllerDeps{
+			Actions:     apiServer.ActionsRuntimeConfig(),
 			Workspace:   workspaces,
 			Busy:        apiServer.AssistantBusy,
 			Store:       msgStore,
