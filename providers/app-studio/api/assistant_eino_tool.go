@@ -279,7 +279,7 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 		})
 		if t.runState != nil {
 			t.runState.RecordToolMessage(chatMessage{Role: "tool", Name: spec.Name, ToolCallID: callID, Content: result})
-			t.runState.RecordCompletedAction(spec.Name, projectEinoToolArgumentsString(args), false)
+			t.runState.RecordCompletedAction(spec.Name, projectEinoToolArgumentsString(args))
 		}
 		if t.req.eventLedger != nil {
 			decision, err := t.req.eventLedger.RecordToolRequest(ctx, callID, spec, durableArgs)
@@ -684,7 +684,7 @@ func (t projectEinoAssistantTool) recordV2CommitSettlement(
 	if err := t.recoverV2CommitSettlement(ctx, spec, args, succeeded); err != nil {
 		return err
 	}
-	t.runState.RecordCompletedAction(spec.Name, projectEinoAssistantCanonicalActionArguments(projectEinoToolArgumentsString(args)), succeeded)
+	t.runState.RecordCompletedAction(spec.Name, projectEinoAssistantCanonicalActionArguments(projectEinoToolArgumentsString(args)))
 	return nil
 }
 
@@ -1643,7 +1643,7 @@ func projectEinoUnknownToolHandler(server *Server, req projectAssistantRunReques
 			ToolCallID: callID,
 			Content:    result,
 		})
-		runState.RecordCompletedAction(name, projectEinoToolArgumentsString(args), false)
+		runState.RecordCompletedAction(name, projectEinoToolArgumentsString(args))
 		return result, nil
 	}
 }
