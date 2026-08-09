@@ -5,11 +5,12 @@
 # that an init container copies into the component's toolchain image
 # (`kedge-dev-agent --install /kedge/bin`). Application dependencies stay in
 # generated component manifests and are installed by the component toolchain;
-# this image carries no application SDK projection. The build context is the
-# repository root (see Makefile's docker-build-dev-agent target).
+# this image carries no application SDK projection. The build context is this
+# directory (providers/infrastructure/dev-agent), matching the per-provider
+# contexts used by the CI image workflows.
 FROM golang:1.26 AS build
 WORKDIR /src
-COPY providers/infrastructure/dev-agent/ ./
+COPY . ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kedge-dev-agent .
 

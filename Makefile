@@ -1696,7 +1696,7 @@ docker-build-dev-agent: ## Build the kedge-dev-agent injector image used by dev-
 	docker build -f $(DEV_AGENT_DIR)/Dockerfile \
 		--platform $(DEV_AGENT_PLATFORM) \
 		--provenance=false \
-		-t $(DEV_AGENT_IMAGE) $(CURDIR)
+		-t $(DEV_AGENT_IMAGE) $(DEV_AGENT_DIR)
 
 load-dev-agent-image: docker-build-dev-agent ## Load the dev agent image into the local kind runtime cluster
 	@echo ">>> loading $(DEV_AGENT_IMAGE) into kind cluster $(KRO_KIND_NAME)"
