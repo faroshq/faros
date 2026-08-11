@@ -146,6 +146,10 @@ const (
 	projectToolInfrastructureGetInstance      = "infrastructure__get_instance"
 	projectToolDatabricksListTables           = "databricks__list_tables"
 	projectToolDatabricksDescribeTable        = "databricks__describe_table"
+	projectToolAgentsRunAgent                 = "agents__run_agent"
+	projectToolAgentsGetRun                   = "agents__get_run"
+	projectToolAgentsListRuns                 = "agents__list_runs"
+	projectToolAgentsListAgents               = "agents__list_agents"
 )
 
 var (
@@ -2340,6 +2344,14 @@ func projectAssistantMCPToolSpec(tool projectMCPTool) (projectAssistantToolSpec,
 	case projectToolDatabricksListTables,
 		projectToolDatabricksDescribeTable:
 		risk = projectAssistantToolRiskRead
+	case projectToolAgentsListAgents,
+		projectToolAgentsGetRun,
+		projectToolAgentsListRuns:
+		risk = projectAssistantToolRiskRead
+	case projectToolAgentsRunAgent:
+		// Starting an agent run executes work (and spends tokens) in the agents
+		// provider — effectful, so read-only collaboration modes exclude it.
+		risk = projectAssistantToolRiskRuntime
 	default:
 		return projectAssistantToolSpec{}, false
 	}
