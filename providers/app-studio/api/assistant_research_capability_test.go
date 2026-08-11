@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProjectAssistantResearchPhraseRequested(t *testing.T) {
@@ -180,6 +181,28 @@ func TestProjectAssistantResearchCapabilityPrompt(t *testing.T) {
 			t.Fatalf("expected no prompt in plan mode, got %q", prompt)
 		}
 	})
+}
+
+func TestProjectAssistantMCPToolCallTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+		want time.Duration
+	}{
+		{"run_agent max wait gets margin", projectToolAgentsRunAgent, map[string]any{"wait": float64(120)}, 150 * time.Second},
+		{"get_run max wait gets margin", projectToolAgentsGetRun, map[string]any{"wait": float64(300)}, 330 * time.Second},
+		{"short wait keeps the default floor", projectToolAgentsRunAgent, map[string]any{"wait": float64(10)}, projectMCPCallTimeout},
+		{"absent wait keeps the default", projectToolAgentsRunAgent, map[string]any{}, projectMCPCallTimeout},
+		{"absurd wait is capped", projectToolAgentsGetRun, map[string]any{"wait": float64(100000)}, projectAssistantMCPWaitTimeoutCap},
+		{"non-agents tools keep the default", projectToolInfrastructureProvision, map[string]any{"wait": float64(300)}, projectMCPCallTimeout},
+		{"non-numeric wait keeps the default", projectToolAgentsRunAgent, map[string]any{"wait": "300"}, projectMCPCallTimeout},
+	}
+	for _, tc := range cases {
+		if got := projectAssistantMCPToolCallTimeout(tc.tool, tc.args); got != tc.want {
+			t.Errorf("%s: timeout = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
 
 func TestProjectAssistantMCPToolSpecAllowsAgentsRunTools(t *testing.T) {

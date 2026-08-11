@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Research delegation capability. It activates only when all three hold for a
@@ -39,6 +40,54 @@ import (
 var projectAssistantResearchPhrasePattern = regexp.MustCompile(`(?i)\bresearch\b`)
 
 const projectAssistantResearchMaxAgentNames = 8
+
+// Agents run tools hold the MCP connection for their wait argument (run_agent
+// caps it at 120s, get_run at 300s server-side). The transport deadline must
+// exceed the requested wait or the client kills every maximal-wait call at
+// exactly the moment the provider would have answered.
+const (
+	projectAssistantMCPWaitMargin     = 30 * time.Second
+	projectAssistantMCPWaitTimeoutCap = 6 * time.Minute
+)
+
+// projectAssistantMCPToolCallTimeout returns the transport timeout for one
+// aggregate MCP tool call: the default for everything except the agents run
+// tools, whose blocking wait argument extends the deadline (plus margin).
+func projectAssistantMCPToolCallTimeout(name string, args map[string]any) time.Duration {
+	switch projectAssistantToolKey(name) {
+	case projectToolAgentsRunAgent, projectToolAgentsGetRun:
+	default:
+		return projectMCPCallTimeout
+	}
+	wait, ok := projectAssistantMCPWaitSeconds(args)
+	if !ok || wait <= 0 {
+		return projectMCPCallTimeout
+	}
+	timeout := time.Duration(wait)*time.Second + projectAssistantMCPWaitMargin
+	if timeout < projectMCPCallTimeout {
+		return projectMCPCallTimeout
+	}
+	if timeout > projectAssistantMCPWaitTimeoutCap {
+		return projectAssistantMCPWaitTimeoutCap
+	}
+	return timeout
+}
+
+func projectAssistantMCPWaitSeconds(args map[string]any) (int64, bool) {
+	switch wait := args["wait"].(type) {
+	case float64:
+		return int64(wait), true
+	case int:
+		return int64(wait), true
+	case int64:
+		return wait, true
+	case json.Number:
+		v, err := wait.Int64()
+		return v, err == nil
+	default:
+		return 0, false
+	}
+}
 
 func projectAssistantResearchPhraseRequested(text string) bool {
 	return projectAssistantResearchPhrasePattern.MatchString(text)
