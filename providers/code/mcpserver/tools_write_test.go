@@ -124,7 +124,7 @@ func TestRepositoryCommitObjectKeepsAuthoritativeRepositoryLabel(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "demo-app",
 			Labels: map[string]string{
-				codev1alpha1.LabelRepository:           "stale-repo",
+				codev1alpha1.LabelRepository:     "stale-repo",
 				"app-studio.ai.faros.sh/project": "demo-project",
 			},
 		},

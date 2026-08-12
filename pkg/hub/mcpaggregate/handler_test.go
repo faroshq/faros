@@ -35,9 +35,9 @@ func TestParseMCPServerPath(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"/",
-		"/cluster/apis/faros.sh/v1alpha1/mcpservers",           // too short
-		"/cluster/apis/wrong.group/v1alpha1/mcpservers/default/mcp",  // wrong group
-		"/cluster/apis/faros.sh/v1alpha1/mcpservers/default/x", // not /mcp
+		"/cluster/apis/faros.sh/v1alpha1/mcpservers",                // too short
+		"/cluster/apis/wrong.group/v1alpha1/mcpservers/default/mcp", // wrong group
+		"/cluster/apis/faros.sh/v1alpha1/mcpservers/default/x",      // not /mcp
 	} {
 		if _, _, ok := parseMCPServerPath(bad); ok {
 			t.Errorf("parseMCPServerPath(%q) = ok, want !ok", bad)

@@ -551,7 +551,7 @@ spec:
                       Group MUST be infrastructure.faros.sh. Pinned here so
                       every per-template CRD lives under the same namespace and the
                       portal can render them uniformly.
-                    pattern: ^infrastructure\.faros\.faros\.sh$
+                    pattern: ^infrastructure\.faros\.sh$
                     type: string
                   kind:
                     description: Kind is the CamelCase singular tenants use in apiVersion

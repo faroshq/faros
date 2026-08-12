@@ -156,9 +156,9 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 			// faros-authored so a human (or a future GC) can tell these
 			// apart from hand-applied RGDs on the runtime cluster.
 			"labels": map[string]any{
-				"faros.sh/template":         tmpl.Name,
-				"faros.sh/template-version": tmpl.Spec.Version,
-				"app.kubernetes.io/managed-by":    "faros-infrastructure",
+				"faros.sh/template":            tmpl.Name,
+				"faros.sh/template-version":    tmpl.Spec.Version,
+				"app.kubernetes.io/managed-by": "faros-infrastructure",
 			},
 		},
 		"spec": map[string]any{

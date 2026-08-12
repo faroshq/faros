@@ -26,8 +26,8 @@ func TestScopeToTenant_ReplacesLabels(t *testing.T) {
 	spec := &v1alpha1.QuerySpec{
 		Cluster: &v1alpha1.ClusterFilter{
 			Labels: map[string]string{
-				"tenant":                  "someone-else", // spoof attempt
-				"x') OR 1=1 --":           "boom",         // sqlite json_extract injection attempt
+				"tenant":            "someone-else", // spoof attempt
+				"x') OR 1=1 --":     "boom",         // sqlite json_extract injection attempt
 				"faros.sh/whatever": "v",
 			},
 		},

@@ -148,13 +148,13 @@ func publicConfig(target string) Config {
 
 func privateConfig(target string, hub *fakeHub) Config {
 	return Config{
-		Host:      testHost,
-		Mode:      ModePrivate,
-		Instance:  testInstance(),
-		HubURL:    testHubURL,
+		Host:         testHost,
+		Mode:         ModePrivate,
+		Instance:     testInstance(),
+		HubURL:       testHubURL,
 		HubPublicURL: testHubPub,
-		Routes:    []Route{{Prefix: "/", Target: target}},
-		HubClient: &http.Client{Transport: hub},
+		Routes:       []Route{{Prefix: "/", Target: target}},
+		HubClient:    &http.Client{Transport: hub},
 	}
 }
 
