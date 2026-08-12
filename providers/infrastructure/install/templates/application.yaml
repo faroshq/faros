@@ -22,8 +22,8 @@ spec:
   # gate so "Provision → see it working" needs zero external setup (demo/dev).
   sampleValues:
     name: demo
-    webImage: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.2
-    apiImage: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.2
+    webImage: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3
+    apiImage: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3
     database:
       version: "16"
     oidc:
@@ -234,7 +234,7 @@ spec:
       # ── Frontend tier (the only tier exposed, behind oauth2-proxy) ──
       webImage:
         type: string
-        default: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.2
+        default: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3
         description: "Container image for the public-facing frontend. Defaults to the scaffold hello-world (same tag as development.scaffold.ref) so provisioning with no images runs a working app — replace with your own image to ship real code. Ignored when farosMode is development — dev mode runs the platform dev image against the project workspace."
       webPort:
         type: integer
@@ -255,7 +255,7 @@ spec:
       # ── Backend tier (internal; reachable only via cluster DNS) ──
       apiImage:
         type: string
-        default: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.2
+        default: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3
         description: "Container image for the internal backend/API tier. Defaults to the scaffold hello-world (same tag as development.scaffold.ref) so provisioning with no images runs a working app — replace with your own image to ship real code. Ignored when farosMode is development."
       apiPort:
         type: integer
@@ -372,7 +372,7 @@ spec:
     # match. Without this block a new project gets an EMPTY sandbox.
     scaffold:
       repository: https://github.com/faroshq/faros-scaffold-application
-      ref: v0.1.2
+      ref: v0.1.3
     components:
       web:
         workspacePath: web

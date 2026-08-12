@@ -163,7 +163,7 @@ spec:
     # image tag. Without this block a new project gets an EMPTY sandbox.
     scaffold:
       repository: https://github.com/faroshq/faros-scaffold-simple-webapp
-      ref: v0.1.2
+      ref: v0.1.3
     components:
       app:
         workspacePath: .
