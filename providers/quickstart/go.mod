@@ -48,3 +48,8 @@ replace (
 	k8s.io/component-base => github.com/kcp-dev/kubernetes/staging/src/k8s.io/component-base v0.0.0-20260602065202-e006560fc76a
 	k8s.io/kms => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kms v0.0.0-20260602065202-e006560fc76a
 )
+
+// provider-sdk lives in this monorepo; build against the in-tree source so
+// the module stays in lockstep with the rest of the repo. The mirror published
+// by split-provider-sdk.yaml is what external consumers resolve instead.
+replace github.com/faroshq/provider-sdk => ../../provider-sdk
