@@ -112,8 +112,3 @@ replace (
 replace github.com/kcp-dev/apimachinery/v2 => github.com/kcp-dev/apimachinery/v2 v2.32.0
 
 replace github.com/kcp-dev/multicluster-provider/client => github.com/kcp-dev/multicluster-provider/client v0.8.0
-
-// provider-sdk lives in this monorepo; build against the in-tree source so
-// the module stays in lockstep with the rest of the repo. The mirror published
-// by split-provider-sdk.yaml is what external consumers resolve instead.
-replace github.com/faroshq/provider-sdk => ../../provider-sdk

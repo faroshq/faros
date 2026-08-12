@@ -18,7 +18,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	google.golang.org/genai v1.36.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.36.1
+	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.1
 	k8s.io/klog/v2 v2.140.0
@@ -133,8 +133,3 @@ replace (
 )
 
 replace github.com/kcp-dev/apimachinery/v2 => github.com/kcp-dev/apimachinery/v2 v2.32.0
-
-// provider-sdk lives in this monorepo; build against the in-tree source so
-// the module stays in lockstep with the rest of the repo. The mirror published
-// by split-provider-sdk.yaml is what external consumers resolve instead.
-replace github.com/faroshq/provider-sdk => ../../provider-sdk

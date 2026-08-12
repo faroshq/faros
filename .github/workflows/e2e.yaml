@@ -29,6 +29,22 @@ jobs:
         with:
           go-version: v1.26.1
 
+      # These suites build the provider binaries and assert on their behaviour,
+      # so they must exercise THIS commit's provider-sdk, not the last published
+      # release of it. The providers deliberately carry no `replace` (see
+      # go.work.template and hack/provider-sdk-cutover.sh) — workspace mode is
+      # how the monorepo develops the SDK and its consumers together, and go.work
+      # is gitignored, so CI has to create it. Without this the suites silently
+      # link the published SDK and test code that is not in the diff.
+      - name: Set up Go workspace (in-tree provider-sdk)
+        run: |
+          go work init
+          go work use . ./provider-sdk
+          for d in providers/*/; do
+            [ -f "$d/go.mod" ] && go work use "./$d"
+          done
+          go work edit -json | grep -c DiskPath
+
       - name: Run infrastructure provider e2e
         run: make e2e-infra-provider
 
