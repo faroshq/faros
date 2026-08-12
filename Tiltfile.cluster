@@ -577,7 +577,16 @@ spec:
         - name: image-cache
           image: %s
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "sleep infinity"]
+          # The image is distroless (no shell), so idle the pod by running the
+          # proxy itself with a throwaway public config: it listens on :8080,
+          # never receives traffic, and keeps the image pinned on the node.
+          env:
+            - name: KEDGE_ACCESS_PROXY_MODE
+              value: public
+            - name: KEDGE_ACCESS_PROXY_HOST
+              value: image-cache.invalid
+            - name: KEDGE_ACCESS_PROXY_ROUTES
+              value: /=http://image-cache.kedge-system.svc.cluster.local:1
 '''.strip() % (hub_namespace, access_proxy_image)))
 k8s_resource(
     'kedge-access-proxy-image',
