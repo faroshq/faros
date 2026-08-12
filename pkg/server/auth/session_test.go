@@ -26,10 +26,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faroshq/faros-kedge/pkg/browsersession"
 	"github.com/gorilla/mux"
 	"golang.org/x/oauth2"
 	"k8s.io/klog/v2"
+
+	"github.com/faroshq/faros-kedge/pkg/browsersession"
 )
 
 func TestBrowserSessionBootstrapAndLogout(t *testing.T) {

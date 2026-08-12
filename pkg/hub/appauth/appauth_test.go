@@ -264,14 +264,14 @@ func TestAuthorizePolicyOutageFailsClosed(t *testing.T) {
 func TestAuthorizeRejectsBadRedirects(t *testing.T) {
 	f := newFixture(t)
 	for name, redirect := range map[string]string{
-		"outside domain":    "https://evil.example" + CallbackPath,
-		"nested subdomain":  "https://a.b." + testAppsDomain + CallbackPath,
-		"suffix squat":      "https://evil-" + testAppsDomain + CallbackPath,
-		"http scheme":       strings.Replace(validRedirect(), "https://", "http://", 1),
-		"wrong path":        "https://ok." + testAppsDomain + "/anywhere",
-		"userinfo":          "https://u@ok." + testAppsDomain + CallbackPath,
-		"query smuggling":   validRedirect() + "?x=1",
-		"apex apps domain":  "https://" + testAppsDomain + CallbackPath,
+		"outside domain":   "https://evil.example" + CallbackPath,
+		"nested subdomain": "https://a.b." + testAppsDomain + CallbackPath,
+		"suffix squat":     "https://evil-" + testAppsDomain + CallbackPath,
+		"http scheme":      strings.Replace(validRedirect(), "https://", "http://", 1),
+		"wrong path":       "https://ok." + testAppsDomain + "/anywhere",
+		"userinfo":         "https://u@ok." + testAppsDomain + CallbackPath,
+		"query smuggling":  validRedirect() + "?x=1",
+		"apex apps domain": "https://" + testAppsDomain + CallbackPath,
 	} {
 		rec := httptest.NewRecorder()
 		f.handler.HandleAuthorize(rec, f.loggedInRequest(t, authorizeURL(redirect)))

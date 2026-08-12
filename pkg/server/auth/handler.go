@@ -46,8 +46,11 @@ import (
 	"github.com/faroshq/faros-kedge/pkg/hub/kcp"
 )
 
-// defaultRateLimit is the default number of requests allowed per minute per IP.
-const defaultRateLimit = 20
+// defaultRateLimit is the default number of requests allowed per minute per
+// IP. Sized to tolerate several browsers reloading behind one NAT'd IP (each
+// portal reload hits /auth/session) while still smothering brute force on
+// the endpoints that keep the limiter.
+const defaultRateLimit = 60
 
 // defaultBurstDuration is the default time window for rate limiting.
 const defaultBurstDuration = time.Minute
@@ -430,9 +433,6 @@ func (h *Handler) HandleSessionBootstrap(w http.ResponseWriter, r *http.Request)
 			writeBrowserSessionJSON(w, session)
 			return
 		}
-		if err == nil {
-			err = browsersession.ErrInvalid
-		}
 		browsersession.ClearCookie(w)
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
@@ -484,8 +484,14 @@ func (h *Handler) Verifier() *oidc.IDTokenVerifier {
 // RegisterRoutes registers auth routes on the given gorilla/mux router.
 // Auth endpoints are protected by per-IP rate limiting to prevent brute force attacks.
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	router.HandleFunc(apiurl.PathAuthAuthorize, h.rateLimiter.middleware(h.HandleAuthorize)).Methods("GET")
-	router.HandleFunc(apiurl.PathAuthCallback, h.rateLimiter.middleware(h.HandleCallback)).Methods("GET")
+	// authorize/callback are deliberately NOT rate-limited (matching the
+	// pre-session-store wiring): they carry no guessable secret — authorize
+	// only mints a redirect to the IdP and callback consumes a one-use
+	// PKCE-bound state — while a per-IP budget breaks legitimate bursts
+	// (CI suites, NAT'd offices, several first-time users behind one IP).
+	// Brute-forceable endpoints (token login) keep their limiter.
+	router.HandleFunc(apiurl.PathAuthAuthorize, h.HandleAuthorize).Methods("GET")
+	router.HandleFunc(apiurl.PathAuthCallback, h.HandleCallback).Methods("GET")
 	router.HandleFunc(apiurl.PathAuthRefresh, h.rateLimiter.middleware(h.HandleRefresh)).Methods("POST")
 	h.RegisterBrowserSessionRoutes(router)
 }

@@ -464,7 +464,7 @@ func (h *Handler) renderError(w http.ResponseWriter, status int, title, detail s
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title><style>
+	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title><style>
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0c0a14;color:#e8e6f0;font:16px/1.5 system-ui,sans-serif}
 main{max-width:26rem;padding:2rem;text-align:center}
 h1{font-size:1.15rem;margin:0 0 .6rem}
