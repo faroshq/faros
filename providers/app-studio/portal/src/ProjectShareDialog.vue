@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Check, Copy, Link2, Loader2, Users, X } from 'lucide-vue-next'
+import { copyTextWithFallback } from './clipboard'
+import { confirmState } from './portalkit/confirm'
 import type { ProjectPublishingGrant, ProjectPublishingMember, ProjectPublishingMode } from './types'
+
+type ShareLoadState = 'idle' | 'loading' | 'partial' | 'ready' | 'error'
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -21,12 +25,18 @@ const props = withDefaults(defineProps<{
   busy?: boolean
   loading?: boolean
   error?: string | null
+  loadState?: ShareLoadState
+  loadError?: string | null
+  membersError?: string | null
 }>(), {
   publication: null,
   productionURL: '',
   busy: false,
   loading: false,
   error: null,
+  loadState: 'ready',
+  loadError: null,
+  membersError: null,
 })
 
 const emit = defineEmits<{
@@ -38,6 +48,7 @@ const emit = defineEmits<{
   (event: 'revoke', grant: string): void
   (event: 'disable'): void
   (event: 'open-production-settings'): void
+  (event: 'retry'): void
 }>()
 
 const selectedMember = ref('')
@@ -46,6 +57,8 @@ const copyState = ref<'idle' | 'copied' | 'error'>('idle')
 const initialMode = ref(props.mode)
 const modeTouched = ref(false)
 const dialogCloseButton = ref<HTMLButtonElement | null>(null)
+const linkInput = ref<HTMLInputElement | null>(null)
+const dialogRef = ref<HTMLElement | null>(null)
 
 const selectedMode = computed({
   get: () => props.mode,
@@ -54,7 +67,7 @@ const selectedMode = computed({
     emit('update:mode', mode)
   },
 })
-const link = computed(() => props.productionURL.trim())
+const link = computed(() => props.productionURL.trim() || props.publication?.url?.trim() || '')
 const activeGrants = computed(() => props.grants.filter((grant) => !grant.revoked))
 const availableMembers = computed(() => props.members.filter((member) => (
   !activeGrants.value.some((grant) => grant.user === member.user)
@@ -72,7 +85,7 @@ const primaryLabel = computed(() => {
 // block flipping public/invite-only. Only the initial publish of a
 // never-promoted project still waits for a ready production deployment.
 const canSave = computed(() => (
-  !props.loading && !props.busy && (props.published || props.productionReady)
+  !props.loading && props.loadState !== 'error' && !props.busy && (props.published || props.productionReady)
 ))
 // Grants are mutations against the saved restricted publication. A draft mode
 // must be saved first so a public publication cannot receive a viewer grant.
@@ -147,17 +160,40 @@ function primaryAction() {
 
 async function copyLink() {
   if (!link.value) return
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-    await navigator.clipboard.writeText(link.value)
+  if (await copyTextWithFallback(link.value)) {
     copyState.value = 'copied'
-  } catch {
-    copyState.value = 'error'
+    return
   }
+  copyState.value = 'error'
+  await nextTick()
+  linkInput.value?.focus()
+  linkInput.value?.select()
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (props.open && event.key === 'Escape') close()
+  // The shared confirm listener is attached to window, while this dialog's
+  // listener is on document. Check shared state directly because document
+  // bubbles before window; defaultPrevented is set too late to protect this
+  // underlying dialog on Escape.
+  if (!props.open || event.defaultPrevented || confirmState.open) return
+  if (event.key === 'Escape') {
+    close()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const focusable = Array.from(dialogRef.value?.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+  ) ?? [])
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 onMounted(() => {
@@ -177,6 +213,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKeydown))
       @click.self="close"
     >
       <section
+        ref="dialogRef"
         class="grid w-full max-w-lg gap-0 overflow-hidden rounded-lg border border-border-default bg-surface-raised shadow-xl"
         role="dialog"
         aria-modal="true"
@@ -206,11 +243,29 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKeydown))
             Checking sharing settings…
           </div>
 
+          <div v-else-if="loadState === 'error'" class="grid gap-3 rounded-md border border-danger/30 bg-danger-subtle px-3 py-3 text-[12px] leading-5 text-danger" role="alert">
+            <p>{{ loadError || 'Sharing settings could not be loaded.' }}</p>
+            <button type="button" class="justify-self-start text-[11px] font-semibold underline underline-offset-2" @click="emit('retry')">Retry</button>
+          </div>
+
           <template v-else>
+            <div v-if="loadState === 'partial'" class="grid gap-2 rounded-md border border-warning/30 bg-warning-subtle px-3 py-3 text-[12px] leading-5 text-warning" role="status">
+              <p>Some sharing details could not be refreshed. The data that did load is still available.</p>
+              <p v-if="loadError || membersError" class="text-[11px]">{{ loadError || membersError }}</p>
+              <button type="button" class="justify-self-start text-[11px] font-semibold underline underline-offset-2" @click="emit('retry')">Retry</button>
+            </div>
             <div v-if="link" class="grid gap-2 rounded-md border border-border-subtle bg-surface-overlay p-3">
               <div class="flex min-w-0 items-center gap-2">
                 <Link2 class="h-4 w-4 shrink-0 text-text-muted" :stroke-width="1.75" />
-                <a :href="link" target="_blank" rel="noopener noreferrer" class="min-w-0 truncate font-mono text-[12px] text-accent hover:underline">{{ link }}</a>
+                <input
+                  ref="linkInput"
+                  :value="link"
+                  readonly
+                  aria-label="Production app link"
+                  class="min-w-0 flex-1 truncate border-0 bg-transparent p-0 font-mono text-[12px] text-accent outline-none selection:bg-accent-subtle"
+                  @focus="($event.target as HTMLInputElement).select()"
+                >
+                <a :href="link" target="_blank" rel="noopener noreferrer" class="shrink-0 text-[11px] font-medium text-accent hover:underline">Open</a>
               </div>
             </div>
 
@@ -236,6 +291,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKeydown))
                 </div>
                 <p class="mt-1 text-[12px] leading-5 text-text-muted">Add viewers from the current organization.</p>
               </div>
+              <p v-if="membersError" class="rounded-md border border-warning/30 bg-warning-subtle px-2.5 py-2 text-[11px] leading-4 text-warning" role="status">
+                Viewer membership could not be refreshed. Existing viewers remain visible. <button type="button" class="font-semibold underline underline-offset-2" @click="emit('retry')">Retry</button>
+              </p>
               <p v-if="modeDirty" class="text-[11px] leading-4 text-warning" role="status">Save Restricted access before adding viewers.</p>
               <div class="flex flex-wrap items-center gap-2">
                 <select
@@ -334,7 +392,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKeydown))
               Copy link
             </button>
             <span v-if="copyState === 'copied'" class="text-[11px] text-success" role="status">Link copied.</span>
-            <span v-else-if="copyState === 'error'" class="text-[11px] text-danger" role="alert">Copy is unavailable in this browser.</span>
+            <span v-else-if="copyState === 'error'" class="text-[11px] text-danger" role="alert">Select the link above and copy it manually.</span>
             <button
               type="button"
               class="inline-flex h-8 items-center rounded-md border border-border-subtle bg-surface px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"

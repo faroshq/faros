@@ -1,3 +1,5 @@
+import type { JSONSchema } from './productionForm'
+
 export interface FarosContext {
   token?: string | null
   user?: { email?: string; sub?: string; userId?: string } | null
@@ -533,15 +535,34 @@ export interface ProjectBuildComponent {
   digest?: string
 }
 
+export interface ProjectBuildRunJob {
+  name?: string
+  status?: string
+  conclusion?: string
+  failureLog?: string
+}
+
+export interface ProjectBuildRun {
+  found: boolean
+  runID?: number
+  url?: string
+  headSHA?: string
+  status?: string
+  conclusion?: string
+  jobs?: ProjectBuildRunJob[]
+}
+
 // Deterministic build status: built | incomplete | none | unsupported.
 export interface ProjectBuildCheck {
   status: string
-  commit?: string
+  commitSHA?: string
   builder?: string
   registry?: string
   components?: ProjectBuildComponent[]
   missing?: string[]
   note: string
+  run?: ProjectBuildRun
+  runError?: string
 }
 
 // Result of GET /api/projects/{name}/promotion — gates the Promote to Prod
@@ -549,6 +570,10 @@ export interface ProjectBuildCheck {
 export interface ProjectPromotionReadiness {
   template?: string
   instance?: string
+  productionSchema?: JSONSchema
+  productionValues?: Record<string, unknown>
+  immutableProductionInputs?: string[]
+  requestedRolloutRevision?: string
   observedRolloutRevision?: string
   promotable: boolean
   build: ProjectBuildCheck

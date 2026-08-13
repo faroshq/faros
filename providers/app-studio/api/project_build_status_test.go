@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,89 @@ import (
 	asclient "github.com/faroshq/provider-app-studio/client"
 	"github.com/faroshq/provider-app-studio/tenant"
 )
+
+func TestFetchProjectBuildRunNormalizesStructuredCodeStatus(t *testing.T) {
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer caller-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"repositoryRef":"repo-a","found":true,"runID":42,"htmlURL":"https://example.test/actions/42","headSHA":"70aed526","status":"in_progress","jobs":[{"name":"web","status":"completed","conclusion":"success"},{"name":"api","status":"in_progress"}]}}}`)
+	}))
+	t.Cleanup(mcp.Close)
+
+	s := &Server{hubBase: mcp.URL}
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"}}}
+	req := httptest.NewRequest(http.MethodGet, "/promotion", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	run, err := s.fetchProjectBuildRun(context.Background(), identity{clusterID: "cluster-a", tenantPath: "root:tenant-a"}, p, req, "70aed526")
+	if err != nil {
+		t.Fatalf("fetchProjectBuildRun: %v", err)
+	}
+	if !run.Found || run.RunID != 42 || run.URL != "https://example.test/actions/42" || run.HeadSHA != "70aed526" || run.Status != "in_progress" {
+		t.Fatalf("normalized run = %#v", run)
+	}
+	if len(run.Jobs) != 2 || run.Jobs[1].Name != "api" {
+		t.Fatalf("normalized jobs = %#v", run.Jobs)
+	}
+}
+
+func TestObserveProjectBuildRunSingleflightsAndCachesExactCommit(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &Server{projectBuildRunResolver: func(_ context.Context, _ identity, _ *aiv1alpha1.Project, _ *http.Request, commit string) (*projectBuildRunObservation, error) {
+		mu.Lock()
+		calls++
+		if calls == 1 {
+			close(started)
+		}
+		mu.Unlock()
+		<-release
+		return &projectBuildRunObservation{Found: true, HeadSHA: commit, Status: "queued"}, nil
+	}}
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"}}}
+	id := identity{tenantPath: "root:tenant-a", clusterID: "cluster-a", user: "alice"}
+
+	results := make(chan *projectBuildRunObservation, 2)
+	for range 2 {
+		go func() {
+			run, errorText := s.observeProjectBuildRun(context.Background(), id, p, httptest.NewRequest(http.MethodGet, "/", nil), "70aed526")
+			if errorText != "" {
+				t.Errorf("errorText = %q", errorText)
+			}
+			results <- run
+		}()
+	}
+	<-started
+	close(release)
+	for range 2 {
+		if run := <-results; run == nil || run.HeadSHA != "70aed526" {
+			t.Fatalf("run = %#v", run)
+		}
+	}
+	// A third read is served by the short-lived cache.
+	if run, errorText := s.observeProjectBuildRun(context.Background(), id, p, nil, "70aed526"); run == nil || errorText != "" {
+		t.Fatalf("cached run = %#v, error = %q", run, errorText)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", calls)
+	}
+}
+
+func TestObserveProjectBuildRunDegradesLookupFailureWithoutChangingArtifacts(t *testing.T) {
+	s := &Server{projectBuildRunResolver: func(context.Context, identity, *aiv1alpha1.Project, *http.Request, string) (*projectBuildRunObservation, error) {
+		return nil, fmt.Errorf("github unavailable")
+	}}
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"}}}
+	run, errorText := s.observeProjectBuildRun(context.Background(), identity{tenantPath: "root:tenant-a", clusterID: "cluster-a"}, p, nil, "70aed526")
+	if run != nil || errorText != "Build status temporarily unavailable." {
+		t.Fatalf("run = %#v, error = %q", run, errorText)
+	}
+}
 
 // packageCR builds a minimal Code provider Package CR (as the crawler writes
 // it) for one component, with a single published version.

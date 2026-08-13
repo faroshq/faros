@@ -51,6 +51,8 @@ var templatesGVR = schema.GroupVersionResource{
 
 var templateResource = tenant.Resource{GVR: templatesGVR, Kind: "Template", Plural: "Templates"}
 
+const projectTemplateImmutableInputsAnnotation = "faros.sh/immutable-inputs"
+
 // projectTemplateInfo is the slice of an infrastructure Template App Studio
 // needs: the instance kind the development binding creates, and the declared
 // development components keyed by name with their workspace subdirectories.
@@ -61,6 +63,16 @@ type projectTemplateInfo struct {
 	APIVersion string
 	Kind       string
 	Resource   string
+
+	// ProductionSchema is the Template's tenant-facing production input
+	// contract. App Studio forwards it to the portal so production settings are
+	// rendered from the selected Template rather than from a provider-specific
+	// JSON blob.
+	ProductionSchema map[string]any
+
+	// ImmutableProductionInputs are tenant-facing schema paths that cannot be
+	// changed after the first production instance is created.
+	ImmutableProductionInputs []string
 
 	// Components maps a development component name to its contract. Non-empty
 	// iff the template declares spec.development.
@@ -138,6 +150,20 @@ func projectTemplateInfoFromUnstructured(obj *unstructured.Unstructured) (projec
 		return projectTemplateInfo{}, fmt.Errorf("template %q has an incomplete spec.instanceCRD", info.Name)
 	}
 	info.APIVersion = group + "/" + version
+
+	productionSchema, found, err := unstructured.NestedMap(obj.Object, "spec", "schema")
+	if err != nil {
+		return projectTemplateInfo{}, fmt.Errorf("template %q spec.schema is malformed: %w", info.Name, err)
+	}
+	if found {
+		info.ProductionSchema = productionSchema
+	}
+	for _, path := range strings.Split(obj.GetAnnotations()[projectTemplateImmutableInputsAnnotation], ",") {
+		if path = strings.TrimSpace(path); path != "" {
+			info.ImmutableProductionInputs = append(info.ImmutableProductionInputs, path)
+		}
+	}
+	sort.Strings(info.ImmutableProductionInputs)
 
 	components, found, err := unstructured.NestedMap(obj.Object, "spec", "development", "components")
 	if err != nil {

@@ -36,7 +36,7 @@ import {
 } from 'lucide-vue-next'
 import { api, isProjectAPIInitializingError, ProjectAPIRequestError } from './api'
 import PkConfirmDialog from './portalkit/ConfirmDialog.vue'
-import { confirmDialog } from './portalkit/confirm'
+import { confirmDialog, confirmState } from './portalkit/confirm'
 import {
   canSubmitCreatePrompt,
   createSetupItems,
@@ -132,6 +132,9 @@ import {
 } from './conversationResilience'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import ReleasePipeline from './ReleasePipeline.vue'
+import ProductionForm from './ProductionForm.vue'
+import { productionFormValuesFromSchema, type ProductionFormValues } from './productionForm'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import {
   activateWorkbenchTab,
@@ -159,7 +162,10 @@ import {
   promotionAcceptedFeedback,
   promotionPollExhaustedFeedback,
   promotionObservationMatches,
+  promotionPollDelay,
+  PROMOTION_POLL_MAX_DELAY_MS,
   promotionReadyFeedback,
+  releasePipelineView,
   type PromotionFeedback,
   type PromotionPollState,
 } from './promotionState'
@@ -468,8 +474,13 @@ const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
 const shareMode = ref<ProjectPublishingMode>('restricted')
 const publishing = ref<ProjectPublishing | null>(null)
 const publishingMembers = ref<ProjectPublishingMember[]>([])
+const publishingMembersLoaded = ref(false)
 const publishingActionBusy = ref(false)
 const publishingActionError = ref<string | null>(null)
+type PublishingLoadState = 'idle' | 'loading' | 'partial' | 'ready' | 'error'
+const publishingLoadState = ref<PublishingLoadState>('idle')
+const publishingLoadError = ref<string | null>(null)
+const publishingMembersError = ref<string | null>(null)
 const shareDialogOpen = ref(false)
 const shareButtonRef = ref<HTMLButtonElement | null>(null)
 const productionTechnicalOpen = ref(false)
@@ -481,11 +492,14 @@ const promotionBusy = ref(false)
 const publishingRefreshBusy = ref(false)
 const promotionError = ref<string | null>(null)
 const promotionFeedback = ref<PromotionFeedback | null>(null)
-const promotionValuesText = ref('')
+const promotionValues = ref<ProductionFormValues>({})
+const promotionValuesDirty = ref(false)
+const productionFormValid = ref(true)
 let promotionPollTimer: number | undefined
 let promotionPollState: PromotionPollState | null = null
 let promotionLastTarget: PromotionPollState | null = null
 let promotionLoadSerial = 0
+let promotionTransitionStartedAt = 0
 let publishingPollTimer: number | undefined
 let publishingLoadSerial = 0
 const conversationStatus = ref('')
@@ -1220,10 +1234,17 @@ watch(
     promotionError.value = null
     promotionPollState = null
     promotionLastTarget = null
+    promotionValues.value = {}
+    promotionValuesDirty.value = false
+    productionFormValid.value = true
     clearPromotionPoll()
     publishingLoadSerial += 1
     publishing.value = null
     publishingMembers.value = []
+    publishingMembersLoaded.value = false
+    publishingLoadState.value = 'idle'
+    publishingLoadError.value = null
+    publishingMembersError.value = null
     shareMode.value = 'restricted'
     projectSettingsPane.value = 'project'
     projectSettingsPaneAnnouncement.value = ''
@@ -1338,7 +1359,7 @@ watch(messages, async () => {
 })
 
 useEscapeKey(() => {
-  if (!showSettings.value || deleteProjectTarget.value) return
+  if (!showSettings.value || deleteProjectTarget.value || confirmState.open) return
   closeSettings()
 })
 
@@ -1569,26 +1590,17 @@ async function applyDevelopmentTemplate(template: string) {
 
 const promotionBuild = computed(() => promotion.value?.build ?? null)
 const promotionBuildStatus = computed(() => promotion.value?.build?.status ?? '')
-const promotionBuildLabel = computed(() => {
-  switch (promotionBuildStatus.value) {
-    case 'built':
-      return 'Built'
-    case 'incomplete':
-      return 'Partly built'
-    case 'none':
-      return 'No image yet'
-    case 'unsupported':
-      return 'No template'
-    default:
-      return 'Unknown'
-  }
-})
-const promotionComponents = computed(() => promotion.value?.build?.components ?? [])
-const canPromote = computed(() => !!promotion.value?.promotable && !promotionBusy.value)
+const releasePipeline = computed(() => releasePipelineView(promotion.value, {
+  published: publishing.value?.published,
+  ready: publishing.value?.publication?.ready,
+}))
+const releaseTakingLonger = ref(false)
+const canPromote = computed(() => !!promotion.value?.promotable && productionFormValid.value && !promotionBusy.value)
 const promotionDisabledReason = computed(() => {
   if (promotionBusy.value) return 'Promotion is in progress.'
   if (!selected.value?.name) return 'Select a project before checking its build status.'
   if (!promotion.value) return 'Checking the build status before enabling promotion…'
+  if (!productionFormValid.value) return 'Fix the highlighted production settings before deploying.'
   if (promotion.value.promotable) return ''
   const note = promotionBuild.value?.note?.trim()
   if (note) return note
@@ -1660,8 +1672,8 @@ const productionURLPlaceholder = computed(() => {
   return 'Production URL will appear when external access is ready.'
 })
 const promoteButtonLabel = computed(() => {
-  if (promotionBusy.value) return 'Promoting…'
-  return productionBinding.value ? 'Redeploy to production' : 'Promote to production'
+  if (promotionBusy.value) return 'Deploying…'
+  return productionBinding.value ? 'Redeploy to production' : 'Deploy to production'
 })
 
 function clearPromotionPoll() {
@@ -1679,19 +1691,42 @@ function promotionObservation(readiness: ProjectPromotionReadiness) {
   }
 }
 
+function syncProductionForm(readiness: ProjectPromotionReadiness) {
+  // Keep a locally edited form stable while status polling refreshes the
+  // deployment. Once the server has accepted a promotion, the next clean
+  // refresh hydrates from the persisted binding values again.
+  if (promotionValuesDirty.value) return
+  const imageInputs = (readiness.build.components ?? []).map((component) => component.imageInput).filter(Boolean)
+  promotionValues.value = productionFormValuesFromSchema(
+    readiness.productionSchema,
+    readiness.productionValues,
+    imageInputs,
+  )
+}
+
+function updateProductionForm(values: ProductionFormValues) {
+  promotionValues.value = values
+  promotionValuesDirty.value = true
+}
+
 function schedulePromotionPoll() {
   clearPromotionPoll()
   if (!productionSurfaceActive.value) return
   if (promotionPollState && promotionPollState.attempts < promotionPollState.maxAttempts) {
-    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, 4000)
+    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, promotionPollDelay(promotionPollState.attempts))
     return
   }
-  const prod = promotion.value?.production
-  // Poll while production is still coming up so the URL appears without a
-  // manual refresh; stop once it is serving.
-  const provisioning = !!prod && prod.phase !== 'Ready' && !prod.url
-  if (provisioning) {
-    promotionPollTimer = window.setTimeout(loadPromotion, 4000)
+  // Build and deploy transitions are durable server observations. Keep them
+  // fresh while Production/Share is visible, then back off without converting
+  // a slow registry observation into a false failure.
+  if (releasePipeline.value.transitional) {
+    if (!promotionTransitionStartedAt) promotionTransitionStartedAt = Date.now()
+    const elapsed = Date.now() - promotionTransitionStartedAt
+    releaseTakingLonger.value = elapsed >= 2 * 60 * 1000
+    promotionPollTimer = window.setTimeout(loadPromotion, releaseTakingLonger.value ? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay(0))
+  } else {
+    promotionTransitionStartedAt = 0
+    releaseTakingLonger.value = false
   }
 }
 
@@ -1726,6 +1761,7 @@ async function loadPromotion() {
     const readiness = await api.getPromotion(props.ctx, name)
     if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
     promotion.value = readiness
+    syncProductionForm(readiness)
     const observation = promotionObservation(readiness)
     if (pollAtStart && promotionPollState === pollAtStart) {
       const progress = advancePromotionPoll(pollAtStart, observation)
@@ -1767,31 +1803,58 @@ async function loadPublishing() {
     publishingLoadSerial += 1
     publishing.value = null
     publishingMembers.value = []
+    publishingMembersLoaded.value = false
+    publishingLoadState.value = 'idle'
+    publishingLoadError.value = null
+    publishingMembersError.value = null
     publishingActionError.value = null
     clearPublishingPoll()
     return
   }
   const requestSerial = ++publishingLoadSerial
-  try {
-    const [state, members] = await Promise.all([
-      api.getPublishing(props.ctx, name),
-      api.listPublishingMembers(props.ctx, name),
-    ])
-    if (requestSerial !== publishingLoadSerial || selected.value?.name !== name) return
-    publishing.value = state
-    publishingMembers.value = members
+  const stateWasLoaded = publishing.value !== null
+  const membersWereLoaded = publishingMembersLoaded.value
+  if (!stateWasLoaded && !membersWereLoaded) publishingLoadState.value = 'loading'
+  publishingLoadError.value = null
+  publishingMembersError.value = null
+
+  const [stateResult, membersResult] = await Promise.allSettled([
+    api.getPublishing(props.ctx, name),
+    api.listPublishingMembers(props.ctx, name),
+  ])
+  if (requestSerial !== publishingLoadSerial || selected.value?.name !== name) return
+
+  const stateSucceeded = stateResult.status === 'fulfilled'
+  const membersSucceeded = membersResult.status === 'fulfilled'
+  if (stateSucceeded) {
+    publishing.value = stateResult.value
     if (!shareDialogOpen.value) {
-      shareMode.value = publishingAccessSelection(state) === 'public' ? 'public' : 'restricted'
+      shareMode.value = publishingAccessSelection(stateResult.value) === 'public' ? 'public' : 'restricted'
     }
-    publishingActionError.value = null
-  } catch (err) {
-    if (requestSerial !== publishingLoadSerial || selected.value?.name !== name) return
-    if (!isProjectAPIInitializingError(err)) {
-      publishingActionError.value = err instanceof Error ? err.message : String(err)
-    }
+  } else if (!isProjectAPIInitializingError(stateResult.reason)) {
+    publishingLoadError.value = stateResult.reason instanceof Error ? stateResult.reason.message : String(stateResult.reason)
   }
+  if (membersSucceeded) {
+    publishingMembers.value = membersResult.value
+    publishingMembersLoaded.value = true
+  } else if (!isProjectAPIInitializingError(membersResult.reason)) {
+    publishingMembersError.value = membersResult.reason instanceof Error ? membersResult.reason.message : String(membersResult.reason)
+  }
+
+  const stateAvailable = publishing.value !== null
+  const membersAvailable = publishingMembersLoaded.value
+  publishingLoadState.value = stateSucceeded && membersSucceeded
+    ? 'ready'
+    : stateAvailable || membersAvailable
+    ? 'partial'
+    : 'error'
   if (requestSerial !== publishingLoadSerial || selected.value?.name !== name) return
   schedulePublishingPoll()
+}
+
+function retryPublishing() {
+  if (publishingActionBusy.value) return
+  void loadPublishing()
 }
 
 async function refreshProduction() {
@@ -1944,20 +2007,18 @@ async function promoteToProd() {
   // Invalidate a status request that may have started before this action. Its
   // old Ready response must not consume the new rollout's poll budget.
   promotionLoadSerial += 1
-  let values: Record<string, unknown> | undefined
-  const text = promotionValuesText.value.trim()
-  if (text) {
-    try {
-      values = JSON.parse(text) as Record<string, unknown>
-    } catch {
-      promotionError.value = 'Production settings must be valid JSON (an object of template inputs).'
-      return
-    }
-  }
+  const values = Object.keys(promotionValues.value).length > 0 ? promotionValues.value : undefined
   promotionBusy.value = true
   try {
     const result = await api.promoteProject(props.ctx, name, values)
     if (selected.value?.name !== name) return
+    if (promotion.value && result.rolloutRevision) {
+      promotion.value = {
+        ...promotion.value,
+        requestedRolloutRevision: result.rolloutRevision,
+      }
+    }
+    promotionValuesDirty.value = false
     promotionLastTarget = beginPromotionPoll(result)
     promotionPollState = promotionLastTarget
     promotionFeedback.value = promotionAcceptedFeedback(result)
@@ -1981,9 +2042,13 @@ watch(
     const [previousSurfaceActive, previousProjectName] = previous ?? [false, undefined]
     const surfaceOrProjectChanged = surfaceActive && (!previousSurfaceActive || projectName !== previousProjectName)
     if (surfaceOrProjectChanged) {
+      promotionTransitionStartedAt = 0
+      releaseTakingLonger.value = false
       void loadPromotion()
       void loadPublishing()
     } else if (!surfaceActive) {
+      promotionTransitionStartedAt = 0
+      releaseTakingLonger.value = false
       clearPromotionPoll()
       clearPublishingPoll()
     }
@@ -5990,6 +6055,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 </div>
                 <StatusBadge :status="productionOverview.label" :tone="productionOverview.tone" />
               </div>
+              <ReleasePipeline :pipeline="releasePipeline" :taking-longer="releaseTakingLonger" />
               <div v-if="productionPublicationReady" class="rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-[12px] leading-5 text-success" role="status">
                 {{ productionURL ? 'The publication is ready at the production URL.' : 'The publication is ready; the production link is still being resolved.' }}
               </div>
@@ -6067,19 +6133,31 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     <button type="button" class="inline-flex h-8 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-4 text-[12px] font-semibold text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60" :disabled="!canPromote || publishingActionBusy" @click="promoteToProd"><Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />Redeploy</button>
                   </div>
                 </div>
-                <div v-else class="grid gap-2 rounded-md border border-success/30 bg-success-subtle p-3 text-success">
-                  <div v-if="publishing && !publishing.published">
-                    <div class="text-[11px] font-semibold uppercase tracking-wide">Publication is ready</div>
-                    <div class="mt-0.5 text-[12px] leading-5">Open Share to choose who can view this production app. Redeploying later does not change access.</div>
-                  </div>
-                  <div v-else class="text-[12px]">Checking external access before showing the Share controls…</div>
+                <div v-else-if="productionDeployment.ready && publishing && !publishing.published" class="grid gap-2 rounded-md border border-success/30 bg-success-subtle p-3 text-success">
+                  <div class="text-[11px] font-semibold uppercase tracking-wide">Production is running</div>
+                  <div class="mt-0.5 text-[12px] leading-5">Open Share to choose who can access this production app. Redeploying later does not change access.</div>
                 </div>
-                <div v-if="!productionBinding || !productionDeployment.ready" class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning-subtle px-3 py-2 text-[11px] leading-4 text-warning">
-                  <span>{{ promotionDisabledReason || 'Production is not ready yet.' }}</span>
-                  <button v-if="canPromote" type="button" class="inline-flex h-7 items-center gap-1.5 rounded-md border border-warning/50 px-2.5 text-[11px] font-semibold text-warning transition hover:bg-warning/10 disabled:cursor-not-allowed disabled:opacity-60" :disabled="promotionBusy" @click="promoteToProd"><Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />{{ promoteButtonLabel }}</button>
+                <div v-if="canPromote && !productionDeployment.ready" class="flex justify-end">
+                  <button type="button" class="inline-flex h-8 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-4 text-[12px] font-semibold text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60" :disabled="promotionBusy" @click="promoteToProd"><Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />{{ promoteButtonLabel }}</button>
                 </div>
               </div>
               <div v-if="publishingActionError" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ publishingActionError }}</div>
+            </section>
+            <section class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Production settings">
+              <div>
+                <h3 class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Production settings</h3>
+                <p class="mt-1 text-[11px] leading-4 text-text-muted">These inputs come from the selected template. Platform-owned names, rollout revisions, and component images are managed automatically.</p>
+              </div>
+              <ProductionForm
+                :schema="promotion?.productionSchema ?? null"
+                :values="promotionValues"
+                :image-inputs="(promotion?.build.components ?? []).map(component => component.imageInput).filter(Boolean)"
+                :disabled="promotionBusy || !promotion?.productionSchema"
+                :immutable-paths="promotion?.immutableProductionInputs ?? []"
+                :existing-production="Boolean(productionBinding)"
+                @update:values="updateProductionForm"
+                @validity="productionFormValid = $event"
+              />
             </section>
             <div v-if="promotionError" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ promotionError }}</div>
             <section class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Technical details">
@@ -6096,16 +6174,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     <div class="grid gap-1 md:grid-cols-[150px_minmax(0,1fr)]"><dt class="text-text-muted">Suggested domain</dt><dd class="font-mono text-text-primary">{{ productionDefaultDomain }}</dd></div>
                   </dl>
                   <p class="text-[11px] leading-4 text-text-muted">The authoritative production URL appears above only after the publication reports Ready.</p>
-                </div>
-                <div class="grid gap-2">
-                  <div class="flex flex-wrap items-center justify-between gap-2"><div><div class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Build</div><div class="text-[11px] leading-4 text-text-muted">Commit the app and wait for every component image before promoting.</div></div><StatusBadge :status="promotionBuildLabel" /></div>
-                  <p v-if="promotionBuild?.note" class="text-[12px] leading-5 text-text-secondary">{{ promotionBuild.note }}</p>
-                  <ul v-if="promotionComponents.length" class="grid gap-1.5"><li v-for="component in promotionComponents" :key="component.name" class="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-surface-overlay px-2.5 py-1.5 text-[12px]"><span class="flex min-w-0 items-center gap-2"><span class="inline-block h-2 w-2 shrink-0 rounded-full" :class="component.built ? 'bg-success' : 'bg-warning'" /><span class="font-medium text-text-primary">{{ component.name }}</span></span><span class="truncate font-mono text-[11px] text-text-muted" :title="component.image || 'not built yet'">{{ component.built ? (component.digest || component.image) : 'not built' }}</span></li></ul>
-                </div>
-                <div class="grid gap-2">
-                  <div class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Production settings</div>
-                  <p class="text-[11px] leading-4 text-text-muted">Optional template inputs as JSON (for example ports or replicas). Leave blank to use template defaults.</p>
-                  <textarea v-model="promotionValuesText" class="min-h-20 w-full resize-y rounded-md border border-border-subtle bg-surface-overlay px-2.5 py-2 font-mono text-[12px] leading-5 text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50" placeholder='{ "frontendPort": 8080 }' spellcheck="false" />
                 </div>
                 <div v-if="productionBinding" class="grid gap-2"><div class="flex flex-wrap items-center justify-between gap-2"><div class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Provider binding</div><span class="font-mono text-[11px] text-text-muted">Revision {{ promotion?.observedRolloutRevision || 'not observed' }}</span></div><pre class="max-h-56 overflow-auto rounded-md border border-border-subtle bg-surface-overlay p-2.5 font-mono text-[11px] leading-4 text-text-secondary">{{ JSON.stringify(productionBinding, null, 2) }}</pre></div>
                 <div v-if="promotionFeedback" role="status" aria-live="polite" class="rounded-md border px-3 py-2 text-[12px] leading-5" :class="promotionFeedback.tone === 'success' ? 'border-success/30 bg-success-subtle text-success' : 'border-warning/30 bg-warning-subtle text-warning'">{{ promotionFeedback.message }}</div>
@@ -6321,8 +6389,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     :members="publishingMembers"
     :grants="publishing?.grants ?? []"
     :busy="publishingActionBusy"
-    :loading="publishing === null"
+    :loading="publishingLoadState === 'loading'"
     :error="publishingActionError"
+    :load-state="publishingLoadState"
+    :load-error="publishingLoadError"
+    :members-error="publishingMembersError"
     @close="closeShareDialog"
     @save="publishCurrentProject"
     @grant="grantCurrentProjectAccess"
@@ -6330,5 +6401,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     @revoke="revokeCurrentProjectAccess"
     @disable="unpublishCurrentProject"
     @open-production-settings="openProductionSettingsFromShare"
+    @retry="retryPublishing"
   />
 </template>

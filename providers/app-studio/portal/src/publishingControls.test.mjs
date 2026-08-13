@@ -4,6 +4,8 @@ import test from 'node:test'
 
 const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const dialog = await readFile(new URL('./ProjectShareDialog.vue', import.meta.url), 'utf8')
+const releasePipeline = await readFile(new URL('./ReleasePipeline.vue', import.meta.url), 'utf8')
+const promotionState = await readFile(new URL('./promotionState.ts', import.meta.url), 'utf8')
 
 test('keeps Production inside Project Settings and removes the standalone workbench surface', () => {
   assert.match(app, /type ProjectSettingsPane = 'project' \| 'production' \| 'model'/)
@@ -53,8 +55,11 @@ test('keeps Production focused on deployment and technical details inside Settin
   assert.match(pane, /Redeploy/)
   assert.match(pane, /Open app/)
   assert.match(pane, /aria-label="Technical details"/)
+  assert.match(pane, /<ReleasePipeline :pipeline="releasePipeline"/)
   assert.match(pane, /Redeploy updates the production deployment only\. It does not publish or change access\./)
-  assert.match(pane, /Publication is ready/)
+  assert.match(pane, /The publication is ready/)
+  assert.doesNotMatch(pane, /publishing && !publishing\.published[\s\S]{0,240}Publication is ready/)
+  assert.match(pane, /Production is running/)
   assert.match(pane, /bg-success-subtle[^\n]*text-success/)
   assert.match(pane, /publishing\?\.publication\?\.error && !publishing\?\.publication\?\.ready/)
   assert.match(pane, /publishingActionError[^\n]*text-danger/)
@@ -72,6 +77,20 @@ test('keeps Production focused on deployment and technical details inside Settin
   assert.doesNotMatch(pane, /Disable access/)
   assert.doesNotMatch(pane, /role="radiogroup"/)
   assert.doesNotMatch(pane, /@click="publishCurrentProject"/)
+  assert.match(pane, /<ProductionForm[\s\S]*:schema="promotion\?\.productionSchema \?\? null"/)
+  assert.match(pane, /Platform-owned names, rollout revisions, and component images are managed automatically\./)
+  assert.doesNotMatch(pane, /<textarea[^>]*promotionValuesText/)
+})
+
+test('renders release progress as an announced four-stage pipeline with build drill-through', () => {
+  for (const label of ['Commit', 'Build images', 'Deploy', 'Enable access']) {
+    assert.match(promotionState, new RegExp(`label: '${label}'`))
+  }
+  assert.match(releasePipeline, /aria-label="Release pipeline"/)
+  assert.match(releasePipeline, /aria-live=/)
+  assert.match(releasePipeline, /pipeline\.state === 'failed' \? 'alert' : 'status'/)
+  assert.match(releasePipeline, />View build<\/a>/)
+  assert.match(releasePipeline, /Taking longer than usual/)
 })
 
 test('treats a ready publication without a URL as calm success while Live remains URL-dependent', () => {
@@ -135,16 +154,34 @@ test('suppresses stale publication errors for a ready URL and keeps Copy link in
   const copyStart = dialog.indexOf('aria-label="Copy production link"')
   assert.ok(footerStart >= 0 && copyStart > footerStart)
   assert.match(dialog.slice(copyStart, copyStart + 240), /:disabled="!link \|\| busy \|\| loading"/)
-  assert.match(dialog, /await navigator\.clipboard\.writeText\(link\.value\)/)
+  assert.match(dialog, /copyTextWithFallback\(link\.value\)/)
+  assert.match(dialog, /props\.productionURL\.trim\(\) \|\| props\.publication\?\.url\?\.trim\(\)/)
+  assert.match(dialog, /aria-label="Production app link"/)
+  assert.match(dialog, /linkInput\.value\?\.select\(\)/)
   assert.match(dialog, /Link copied\./)
-  assert.match(dialog, /Copy is unavailable in this browser\./)
+  assert.match(dialog, /Select the link above and copy it manually\./)
+})
+
+test('keeps Share independently useful through partial loads and traps modal keyboard input', () => {
+  assert.match(app, /Promise\.allSettled\(\[\s*api\.getPublishing[\s\S]*api\.listPublishingMembers/)
+  assert.match(app, /publishingLoadState\.value = stateSucceeded && membersSucceeded[\s\S]*'partial'[\s\S]*'error'/)
+  assert.match(app, /:load-state="publishingLoadState"/)
+  assert.match(app, /@retry="retryPublishing"/)
+  assert.match(dialog, /loadState === 'error'/)
+  assert.match(dialog, /loadState === 'partial'/)
+  assert.match(dialog, /membersError/)
+  assert.match(dialog, /@click="emit\('retry'\)"/)
+  assert.match(dialog, /event\.defaultPrevented/)
+  assert.match(dialog, /event\.defaultPrevented \|\| confirmState\.open/)
+  assert.match(dialog, /querySelectorAll<HTMLElement>/)
+  assert.match(dialog, /event\.shiftKey && document\.activeElement === first/)
 })
 
 test('published apps can change access anytime; only first publish waits for production readiness', () => {
   // An access flip on a promoted app is an intent write — a rolling or
   // briefly-unready deployment must not block it (the publication state
   // machine reports Pending honestly while the gate converges).
-  assert.match(dialog, /!props\.loading && !props\.busy && \(props\.published \|\| props\.productionReady\)/)
+  assert.match(dialog, /!props\.loading && props\.loadState !== 'error' && !props\.busy && \(props\.published \|\| props\.productionReady\)/)
   // The deploy-first warning is reserved for never-promoted projects.
   assert.match(dialog, /v-if="!published && !productionReady"/)
   assert.match(dialog, /const modeDirty = computed\(\(\) => props\.published && selectedMode\.value !== initialMode\.value\)/)
@@ -161,6 +198,8 @@ test('restores the Share trigger after confirmed disable and uses one production
   assert.doesNotMatch(unpublish, /shareDialogOpen\.value = false/)
 
   assert.match(app, /const productionSurfaceActive = computed\(\(\) => productionSettingsVisible\.value \|\| shareDialogOpen\.value\)/)
+  assert.match(app, /if \(releasePipeline\.value\.transitional\)/)
+  assert.match(app, /releaseTakingLonger\.value \? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay\(0\)/)
   const watcherStart = app.indexOf('watch(\n  () => [productionSurfaceActive.value')
   const watcherEnd = app.indexOf('\n\n onBeforeUnmount', watcherStart)
   assert.ok(watcherStart >= 0)

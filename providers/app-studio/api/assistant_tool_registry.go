@@ -384,7 +384,7 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:         projectToolCheckProjectBuild,
-				Description:  "Check whether the project's launchable components have a built container image recorded in git. The per-component build runs in CI after commit_files and, on success, commits per-component image digests back to the repository; this tool reads them. Use it after committing to confirm the build succeeded before launching, and to drive the build-fix loop: status \"built\" means every component has an image (ready to launch); \"incomplete\"/\"none\" means some or all builds are still running or have failed — re-check shortly, and if they stay unbuilt inspect the failing component's build inputs and commit a fix.",
+				Description:  "Check whether the project's launchable components have exact-commit container images recorded as Code provider Package resources. The per-component build runs in CI after commit_files and publishes immutable images to the registry. Use it after committing to confirm artifact readiness before launching: status \"built\" means every component has an exact-commit image; \"incomplete\"/\"none\" means artifacts are not all observable yet and does not, by itself, prove CI failed.",
 				Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
 				Risk:         projectAssistantToolRiskRead,
 				ParallelSafe: true,

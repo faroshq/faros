@@ -28,10 +28,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -341,6 +343,42 @@ type projectBuildCheckComponent struct {
 	Tag        string `json:"tag,omitempty"`
 }
 
+// projectBuildRunObservation is explanatory evidence from the Code provider.
+// Artifact presence below remains authoritative: a completed CI run does not
+// make a release promotable until every exact-commit Package is observable.
+type projectBuildRunObservation struct {
+	Found      bool                            `json:"found"`
+	RunID      int64                           `json:"runID,omitempty"`
+	URL        string                          `json:"url,omitempty"`
+	HeadSHA    string                          `json:"headSHA,omitempty"`
+	Status     string                          `json:"status,omitempty"`
+	Conclusion string                          `json:"conclusion,omitempty"`
+	Jobs       []projectBuildRunJobObservation `json:"jobs,omitempty"`
+}
+
+type projectBuildRunJobObservation struct {
+	Name       string `json:"name,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	FailureLog string `json:"failureLog,omitempty"`
+}
+
+type projectBuildRunCacheEntry struct {
+	run       *projectBuildRunObservation
+	errorText string
+	expiresAt time.Time
+}
+
+type projectBuildRunInflight struct {
+	done chan struct{}
+}
+
+const (
+	projectBuildRunCacheTTL      = 8 * time.Second
+	projectBuildRunErrorCacheTTL = 3 * time.Second
+	projectBuildRunLookupTimeout = 12 * time.Second
+)
+
 // projectBuildCheckResult is the deterministic build status the assistant polls.
 type projectBuildCheckResult struct {
 	// Status is one of: built (every launchable component has a published
@@ -353,6 +391,103 @@ type projectBuildCheckResult struct {
 	Components []projectBuildCheckComponent `json:"components,omitempty"`
 	Missing    []string                     `json:"missing,omitempty"`
 	Note       string                       `json:"note"`
+	Run        *projectBuildRunObservation  `json:"run,omitempty"`
+	RunError   string                       `json:"runError,omitempty"`
+}
+
+// observeProjectBuildRun returns a short-lived, singleflight CI observation.
+// Failures are values rather than request failures so already-observed package
+// artifacts stay visible and authoritative when GitHub/Code is unavailable.
+func (s *Server) observeProjectBuildRun(ctx context.Context, id identity, p *aiv1alpha1.Project, r *http.Request, commitSHA string) (*projectBuildRunObservation, string) {
+	commitSHA = strings.TrimSpace(commitSHA)
+	repositoryRef := projectLinkedRepositoryRef(p)
+	if commitSHA == "" || repositoryRef == "" || strings.TrimSpace(id.clusterID) == "" {
+		return nil, ""
+	}
+	key := strings.Join([]string{id.tenantPath, id.user, repositoryRef, projectBuildWorkflowFileName, commitSHA}, "\x00")
+
+	for {
+		now := time.Now()
+		s.mu.Lock()
+		if entry, ok := s.projectBuildRunCache[key]; ok && now.Before(entry.expiresAt) {
+			s.mu.Unlock()
+			return entry.run, entry.errorText
+		}
+		if pending := s.projectBuildRunInflight[key]; pending != nil {
+			done := pending.done
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, "Build status temporarily unavailable."
+			}
+		}
+		if s.projectBuildRunCache == nil {
+			s.projectBuildRunCache = map[string]projectBuildRunCacheEntry{}
+		} else {
+			// This cache is process-local and keyed by immutable commits. Sweep
+			// expired entries when admitting a new lookup so long-lived providers
+			// do not retain every release ever observed.
+			for cacheKey, entry := range s.projectBuildRunCache {
+				if !now.Before(entry.expiresAt) {
+					delete(s.projectBuildRunCache, cacheKey)
+				}
+			}
+		}
+		if s.projectBuildRunInflight == nil {
+			s.projectBuildRunInflight = map[string]*projectBuildRunInflight{}
+		}
+		pending := &projectBuildRunInflight{done: make(chan struct{})}
+		s.projectBuildRunInflight[key] = pending
+		s.mu.Unlock()
+
+		lookupCtx, cancel := context.WithTimeout(ctx, projectBuildRunLookupTimeout)
+		resolver := s.projectBuildRunResolver
+		if resolver == nil {
+			resolver = s.fetchProjectBuildRun
+		}
+		run, err := resolver(lookupCtx, id, p, r, commitSHA)
+		cancel()
+		errorText := ""
+		ttl := projectBuildRunCacheTTL
+		if err != nil {
+			errorText = "Build status temporarily unavailable."
+			ttl = projectBuildRunErrorCacheTTL
+			run = nil
+		}
+
+		s.mu.Lock()
+		s.projectBuildRunCache[key] = projectBuildRunCacheEntry{run: run, errorText: errorText, expiresAt: time.Now().Add(ttl)}
+		delete(s.projectBuildRunInflight, key)
+		close(pending.done)
+		s.mu.Unlock()
+		return run, errorText
+	}
+}
+
+func (s *Server) fetchProjectBuildRun(ctx context.Context, id identity, p *aiv1alpha1.Project, r *http.Request, commitSHA string) (*projectBuildRunObservation, error) {
+	raw, err := s.getProjectBuildLogs(ctx, id, p, r, commitSHA)
+	if err != nil {
+		return nil, err
+	}
+	var wire struct {
+		Found      bool                            `json:"found"`
+		RunID      int64                           `json:"runID,omitempty"`
+		HTMLURL    string                          `json:"htmlURL,omitempty"`
+		HeadSHA    string                          `json:"headSHA,omitempty"`
+		Status     string                          `json:"status,omitempty"`
+		Conclusion string                          `json:"conclusion,omitempty"`
+		Jobs       []projectBuildRunJobObservation `json:"jobs,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		return nil, fmt.Errorf("decode Code build status: %w", err)
+	}
+	return &projectBuildRunObservation{
+		Found: wire.Found, RunID: wire.RunID, URL: strings.TrimSpace(wire.HTMLURL),
+		HeadSHA: strings.TrimSpace(wire.HeadSHA), Status: strings.TrimSpace(wire.Status),
+		Conclusion: strings.TrimSpace(wire.Conclusion), Jobs: wire.Jobs,
+	}, nil
 }
 
 // checkProjectBuild reports which of the project template's launchable
