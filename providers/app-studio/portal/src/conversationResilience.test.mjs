@@ -69,6 +69,7 @@ test('accepted start failures consume the rich draft and use server-derived conf
 
 test('App keeps central loading surfaces honest while project state hydrates', async () => {
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const productionLoadingSource = await readFile(new URL('./ProductionSettingsLoadingShell.vue', import.meta.url), 'utf8')
   assert.match(appSource, /const conversationLoading = computed\(\(\) => projectRouteLoading\.value \|\| threadHistoryLoading\.value \|\| !!selectingThreadID\.value\)/)
   assert.match(appSource, /function appContextFingerprint\(ctx: FarosContext \| null\)/)
   assert.match(appSource, /function projectContextFingerprint\(ctx: FarosContext \| null\)/)
@@ -94,8 +95,9 @@ test('App keeps central loading surfaces honest while project state hydrates', a
   assert.match(appSource, /Updating repositories…/)
   assert.match(appSource, /:loading="threadHistoryLoading \|\| projectOpenLoading"/)
   assert.match(appSource, /:selecting-thread-i-d="selectingThreadID"/)
-  assert.match(appSource, /v-if="promotionLoading && !promotion"[\s\S]*Loading release evidence/)
-  assert.match(appSource, /promotionLoading && !promotion[\s\S]*Loading deployment settings/)
+  assert.match(appSource, /<ProductionSettingsLoadingShell v-if="promotionLoading && !promotion"/)
+  assert.match(productionLoadingSource, /Loading production settings…/)
+  assert.match(productionLoadingSource, /aria-busy="true"/)
   assert.match(appSource, /Production status is unavailable\. Refresh to retry\./)
   assert.match(appSource, /Production settings are unavailable\. Refresh to retry\./)
   assert.match(appSource, /if \(isProjectAPIInitializingError\(err\)\)[\s\S]*promotionError\.value/)

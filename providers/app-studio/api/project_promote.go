@@ -141,6 +141,10 @@ func (s *Server) ensureProjectRegistryPullSecret(ctx context.Context, c *asclien
 const (
 	projectProductionEnvironmentName = "production"
 	projectProductionBindingName     = "prod"
+	// projectProductionHostnamePrefixPath is tenant-selected on the first
+	// production deployment, then becomes part of the instance's public
+	// identity. Re-promoting must not silently move that identity.
+	projectProductionHostnamePrefixPath = "expose.hostnamePrefix"
 	// projectRedeployRevisionField is a platform-owned input on the
 	// infrastructure Template instance. A fresh value is minted for every
 	// accepted promotion so a provider can roll only the application workload
@@ -156,6 +160,13 @@ var projectPlatformOwnedProductionFields = map[string]struct{}{
 	projectRedeployRevisionField: {},
 	"farosCluster":               {},
 	"credentialsSecretName":      {},
+}
+
+// Nested platform-owned fields need explicit paths because expose itself is a
+// mixed-ownership object: hostnamePrefix is a first-deploy tenant input, while
+// fqdn is stamped by the infrastructure controller.
+var projectPlatformOwnedProductionPaths = map[string]struct{}{
+	"expose.fqdn": {},
 }
 
 // projectPromoteRequest is the "Promote to Prod" form submission: the
@@ -242,17 +253,28 @@ func projectTemplateProdBinding(p *aiv1alpha1.Project, info projectTemplateInfo,
 // production configuration. Nested computed fields (for example expose.fqdn)
 // are removed recursively.
 func projectProductionInputValues(info projectTemplateInfo, images map[string]string, values map[string]any) map[string]any {
-	return filterProjectProductionObject(info.ProductionSchema, images, values)
+	return filterProjectProductionObject(info.ProductionSchema, images, values, "")
 }
 
-func filterProjectProductionObject(schema map[string]any, images map[string]string, values map[string]any) map[string]any {
+func filterProjectProductionObject(schema map[string]any, images map[string]string, values map[string]any, paths ...string) map[string]any {
 	if values == nil {
 		return map[string]any{}
+	}
+	path := ""
+	if len(paths) > 0 {
+		path = paths[0]
 	}
 	properties, _ := schema["properties"].(map[string]any)
 	out := make(map[string]any, len(values))
 	for name, value := range values {
+		fieldPath := name
+		if path != "" {
+			fieldPath = path + "." + name
+		}
 		if _, reserved := projectPlatformOwnedProductionFields[name]; reserved {
+			continue
+		}
+		if _, reserved := projectPlatformOwnedProductionPaths[fieldPath]; reserved {
 			continue
 		}
 		if _, imageOwned := images[name]; imageOwned {
@@ -263,20 +285,24 @@ func filterProjectProductionObject(schema map[string]any, images map[string]stri
 		if strings.HasPrefix(strings.TrimSpace(description), "Computed by the platform") {
 			continue
 		}
-		out[name] = filterProjectProductionValue(field, images, value)
+		out[name] = filterProjectProductionValue(field, images, value, fieldPath)
 	}
 	return out
 }
 
-func filterProjectProductionValue(schema map[string]any, images map[string]string, value any) any {
+func filterProjectProductionValue(schema map[string]any, images map[string]string, value any, paths ...string) any {
+	path := ""
+	if len(paths) > 0 {
+		path = paths[0]
+	}
 	switch typed := value.(type) {
 	case map[string]any:
-		return filterProjectProductionObject(schema, images, typed)
+		return filterProjectProductionObject(schema, images, typed, path)
 	case []any:
 		items, _ := schema["items"].(map[string]any)
 		out := make([]any, len(typed))
 		for i := range typed {
-			out[i] = filterProjectProductionValue(items, images, typed[i])
+			out[i] = filterProjectProductionValue(items, images, typed[i], path)
 		}
 		return out
 	default:
@@ -326,16 +352,60 @@ func projectSchemaDefault(schema map[string]any, path string) (any, bool) {
 	return value, ok
 }
 
+func projectSchemaPathDeclared(schema map[string]any, path string) bool {
+	current := schema
+	for _, segment := range strings.Split(path, ".") {
+		properties, _ := current["properties"].(map[string]any)
+		next, ok := properties[segment].(map[string]any)
+		if !ok {
+			return false
+		}
+		current = next
+	}
+	return true
+}
+
+func projectProductionImmutableInputPaths(info projectTemplateInfo) []string {
+	paths := append([]string(nil), info.ImmutableProductionInputs...)
+	if !projectSchemaPathDeclared(info.ProductionSchema, projectProductionHostnamePrefixPath) {
+		return paths
+	}
+	for _, path := range paths {
+		if path == projectProductionHostnamePrefixPath {
+			return paths
+		}
+	}
+	return append(paths, projectProductionHostnamePrefixPath)
+}
+
+func projectProductionHostnamePrefixDefault(p *aiv1alpha1.Project, info projectTemplateInfo) (any, bool) {
+	if value, ok := projectSchemaDefault(info.ProductionSchema, projectProductionHostnamePrefixPath); ok {
+		return value, true
+	}
+	if !projectSchemaPathDeclared(info.ProductionSchema, projectProductionHostnamePrefixPath) {
+		return nil, false
+	}
+	if instance := projectTemplateProdInstanceName(p); instance != "" {
+		// The infrastructure controller uses the instance name when the optional
+		// prefix is omitted. Treat that effective value as the first-deploy input.
+		return instance, true
+	}
+	return nil, false
+}
+
 func preserveAndValidateProjectImmutableInputs(p *aiv1alpha1.Project, info projectTemplateInfo, values map[string]any) error {
 	existing := findProjectProductionBinding(p)
-	if existing == nil || len(info.ImmutableProductionInputs) == 0 {
+	if existing == nil {
 		return nil
 	}
 	previous := projectBindingValues(existing)
-	for _, path := range info.ImmutableProductionInputs {
+	for _, path := range projectProductionImmutableInputPaths(info) {
 		oldValue, oldFound := projectNestedValue(previous, path)
 		if !oldFound {
 			oldValue, oldFound = projectSchemaDefault(info.ProductionSchema, path)
+		}
+		if !oldFound && path == projectProductionHostnamePrefixPath {
+			oldValue, oldFound = projectProductionHostnamePrefixDefault(p, info)
 		}
 		newValue, newFound := projectNestedValue(values, path)
 		if !newFound {
@@ -689,7 +759,7 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp.ProductionSchema = info.ProductionSchema
-		resp.ImmutableProductionInputs = info.ImmutableProductionInputs
+		resp.ImmutableProductionInputs = projectProductionImmutableInputPaths(info)
 	}
 	// CI explains absent artifacts but never overrides the Package-based gate.
 	// Keep lookup failure additive so a registry-ready release stays deployable.

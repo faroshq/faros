@@ -6,6 +6,7 @@ const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const dialog = await readFile(new URL('./ProjectShareDialog.vue', import.meta.url), 'utf8')
 const releasePipeline = await readFile(new URL('./ReleasePipeline.vue', import.meta.url), 'utf8')
 const promotionState = await readFile(new URL('./promotionState.ts', import.meta.url), 'utf8')
+const productionSettings = await readFile(new URL('./useProductionSettings.ts', import.meta.url), 'utf8')
 
 test('keeps Production inside Project Settings and removes the standalone workbench surface', () => {
   assert.match(app, /type ProjectSettingsPane = 'project' \| 'production' \| 'model'/)
@@ -122,19 +123,20 @@ test('renders release progress as an announced four-stage pipeline with build dr
 })
 
 test('keeps publication success deployment-scoped while Live remains URL-dependent', () => {
-  assert.match(app, /const productionPublicationReady = computed\(\(\) => Boolean\([\s\S]*productionBinding\.value[\s\S]*productionDeployment\.value\.ready[\s\S]*publishing\.value\?\.published[\s\S]*publishing\.value\.publication\?\.ready[\s\S]*\)\)/)
-  assert.match(app, /return \{ label: productionURL\.value \? 'Live' : 'Ready', tone: 'success' as const \}/)
-  assert.match(app, /productionPublicationReady\.value && !productionURL\.value/)
-  assert.match(app, /const productionPublicationStatus = computed\(\(\) => \{[\s\S]*if \(productionPublicationReady\.value\)[\s\S]*tone: 'success'/)
-  assert.match(app, /if \(publishing\.value\?\.publication\?\.error\) return \{ label: 'Error', tone: 'danger' as const \}/)
-  const overviewStart = app.indexOf('const productionOverview = computed')
-  const overviewEnd = app.indexOf('const productionOverviewDescription = computed', overviewStart)
+  assert.match(app, /useProductionSettings\(\{/)
+  assert.match(productionSettings, /const productionPublicationReady = computed\(\(\) => Boolean\([\s\S]*productionBinding\.value[\s\S]*productionDeployment\.value\.ready[\s\S]*input\.publishing\.value\?\.published[\s\S]*input\.publishing\.value\.publication\?\.ready[\s\S]*\)\)/)
+  assert.match(productionSettings, /return \{ label: productionURL\.value \? 'Live' : 'Ready', tone: 'success' \}/)
+  assert.match(productionSettings, /productionPublicationReady\.value && !productionURL\.value/)
+  assert.match(productionSettings, /const productionPublicationStatus = computed<ProductionStatusPresentation>\(\(\) => \{[\s\S]*if \(productionPublicationReady\.value\)[\s\S]*tone: 'success'/)
+  assert.match(productionSettings, /if \(input\.publishing\.value\?\.publication\?\.error\) return \{ label: 'Error', tone: 'danger' \}/)
+  const overviewStart = productionSettings.indexOf('const productionOverview = computed')
+  const overviewEnd = productionSettings.indexOf('const productionOverviewDescription = computed', overviewStart)
   assert.ok(overviewStart >= 0 && overviewEnd > overviewStart)
-  assert.match(app.slice(overviewStart, overviewEnd), /productionPublicationReady\.value[\s\S]*publishing\.value\.publication\?\.error/)
-  assert.match(app, /The publication is ready; the production link is still being resolved\./)
+  assert.match(productionSettings.slice(overviewStart, overviewEnd), /productionPublicationReady\.value[\s\S]*input\.publishing\.value\.publication\?\.error/)
+  assert.match(productionSettings, /The publication is ready; the production link is still being resolved\./)
   // A stale publication object must not make the not-yet-deployed panel claim
   // that the app is ready. The binding/readiness guard above is the boundary.
-  assert.match(app, /if \(!productionBinding\.value\) return \{ label: 'Not deployed'/)
+  assert.match(productionSettings, /if \(!productionBinding\.value\) return \{ label: 'Not deployed'/)
 })
 
 test('routes sharing through the modular dialog and current access contracts only', () => {

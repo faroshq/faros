@@ -10,6 +10,7 @@ const vite = await createServer({
 })
 const {
   fieldID,
+  productionFieldID,
   arrayInputValue,
   arrayInputValues,
   productionFormValuesFromSchema,
@@ -64,6 +65,17 @@ test('hydrates defaults for first render without overwriting explicit values', (
     emailDomains: [],
   })
   assert.equal(fieldID('database.size'), 'production-input-database-size')
+})
+
+test('recursive field ids include the full sibling object path', () => {
+  const databaseSize = productionFieldID('database', 'size')
+  const cacheSize = productionFieldID('cache', ['size'])
+
+  assert.equal(databaseSize, 'production-input-database-size')
+  assert.equal(cacheSize, 'production-input-cache-size')
+  assert.notEqual(databaseSize, cacheSize)
+  assert.equal(`${databaseSize}-description`, 'production-input-database-size-description')
+  assert.equal(`${cacheSize}-description`, 'production-input-cache-size-description')
 })
 
 test('converts array inputs to the schema item type', async () => {

@@ -585,7 +585,9 @@ export interface ProjectPromotionReadiness {
   production?: ProjectProviderBinding
 }
 
-// One of the four project lifecycle checkpoints (template, git, ci, production).
+// One of the four project lifecycle checkpoints. The API key remains `ci` for
+// compatibility, but its user-facing label is `Source`: it reports whether
+// project source has been committed, not whether CI is configured.
 // state: done | pending | blocked | error.
 export interface ProjectCheckpoint {
   key: string

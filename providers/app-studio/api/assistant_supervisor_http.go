@@ -373,6 +373,22 @@ func projectAssistantVerificationFromMetadata(value any) (projectAssistantVerifi
 	return verification, true
 }
 
+// projectAssistantMergeTerminalVerification retains all existing assistant
+// metadata while adding the verification receipt produced by the just-finished
+// preview inspection. The explicit stop/abort path runs through AbortWith,
+// which rebuilds terminal metadata from the current message; merging here
+// ensures evidence computed immediately before cancellation is not discarded.
+func projectAssistantMergeTerminalVerification(metadata map[string]any, verification *projectAssistantVerificationView) map[string]any {
+	if verification == nil {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[projectAssistantMetadataVerification] = *verification
+	return metadata
+}
+
 type projectAssistantProgressSnapshot struct {
 	Version          int      `json:"version"`
 	Messages         []string `json:"messages"`
@@ -995,8 +1011,12 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), adk.ErrStreamCanceled) {
 		state.status = "Interrupted"
 		state.abortReason = store.AssistantRunAbortReasonInterrupted
-		_, transitionErr := accumulator.supervisor.AbortWith(projectMessageScope(id.orgUUID, id.workspaceUUID, project), run.ID, func(run *store.AssistantRun, _ *store.Message) error {
+		_, transitionErr := accumulator.supervisor.AbortWith(projectMessageScope(id.orgUUID, id.workspaceUUID, project), run.ID, func(run *store.AssistantRun, message *store.Message) error {
 			run.AbortReason = store.AssistantRunAbortReasonInterrupted
+			if strings.TrimSpace(finalContent) != "" {
+				message.Content = finalContent
+			}
+			message.Metadata = projectAssistantMergeTerminalVerification(message.Metadata, state.verification)
 			return nil
 		})
 		recordSnapshotErr(transitionErr)

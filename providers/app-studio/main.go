@@ -7,8 +7,9 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 // app-studio is the runtime for the App Studio provider. It serves the project
-// REST + LLM API, the embedded App Studio portal, and the provider health
-// endpoint from a single port, and keeps the hub heartbeat alive.
+// REST + LLM API, the embedded App Studio portal, and the provider
+// liveness/readiness endpoints from a single port, and keeps the hub heartbeat
+// alive.
 //
 // Two surfaces share the port, split only by URL — the hub's CatalogEntry
 // routes the same Service to both proxies:
@@ -16,7 +17,8 @@
 //   - /, /main.js, /icon.svg, /assets/* — the portal micro-frontend (Vite
 //     build embedded via portal/dist, see assets.go). Mounted under
 //     /ui/providers/app-studio/.
-//   - /healthz, /api/projects/* — the backend API. Mounted under
+//   - /healthz, /readyz, /api/projects/* — the backend API, liveness probe, and
+//     controller-backed readiness probe. Mounted under
 //     /services/providers/app-studio/; the hub backend proxy strips that prefix
 //     and injects X-Faros-Tenant/X-Faros-User plus the caller's bearer token.
 package main

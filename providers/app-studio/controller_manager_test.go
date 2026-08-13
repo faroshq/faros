@@ -83,6 +83,10 @@ func TestRunControllerManagerRetriesSetupAndPostStartFailures(t *testing.T) {
 	var startCalls atomic.Int32
 	firstLoadDone := make(chan struct{})
 	firstStartDone := make(chan struct{})
+	firstRetryGateEntered := make(chan struct{})
+	allowFirstRetry := make(chan struct{})
+	secondRetryGateEntered := make(chan struct{})
+	allowSecondRetry := make(chan struct{})
 	secondReady := make(chan struct{})
 	done := make(chan struct{})
 
@@ -103,9 +107,33 @@ func TestRunControllerManagerRetriesSetupAndPostStartFailures(t *testing.T) {
 		<-startCtx.Done()
 		return startCtx.Err()
 	}
+	var retryGateCalls atomic.Int32
+	retryGate := func(retryCtx context.Context, _ time.Duration) bool {
+		call := retryGateCalls.Add(1)
+		switch call {
+		case 1:
+			close(firstRetryGateEntered)
+		case 2:
+			close(secondRetryGateEntered)
+		default:
+			return false
+		}
+		var release <-chan struct{}
+		if call == 1 {
+			release = allowFirstRetry
+		} else {
+			release = allowSecondRetry
+		}
+		select {
+		case <-release:
+			return true
+		case <-retryCtx.Done():
+			return false
+		}
+	}
 
 	go func() {
-		runControllerManager(ctx, health, loadConfig, start, controllerDeps{}, 10*time.Millisecond)
+		runControllerManagerWithRetryGate(ctx, health, loadConfig, start, controllerDeps{}, 15*time.Second, retryGate)
 		close(done)
 	}()
 
@@ -114,13 +142,29 @@ func TestRunControllerManagerRetriesSetupAndPostStartFailures(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("controller loop did not attempt initial setup")
 	}
-	waitForControllerState(t, health, controllerStateFailed)
+	select {
+	case <-firstRetryGateEntered:
+	case <-time.After(time.Second):
+		t.Fatal("controller loop did not enter the first retry gate")
+	}
+	if got := health.snapshot(); got.State != controllerStateFailed || got.Error != "provider kubeconfig is not bootstrapped" {
+		t.Fatalf("first failed controller health = %+v", got)
+	}
+	close(allowFirstRetry)
 	select {
 	case <-firstStartDone:
 	case <-time.After(time.Second):
 		t.Fatal("controller loop did not retry after setup failure")
 	}
-	waitForControllerState(t, health, controllerStateFailed)
+	select {
+	case <-secondRetryGateEntered:
+	case <-time.After(time.Second):
+		t.Fatal("controller loop did not enter the second retry gate")
+	}
+	if got := health.snapshot(); got.State != controllerStateFailed || got.Error != "manager exited after start" {
+		t.Fatalf("second failed controller health = %+v", got)
+	}
+	close(allowSecondRetry)
 	select {
 	case <-secondReady:
 	case <-time.After(time.Second):

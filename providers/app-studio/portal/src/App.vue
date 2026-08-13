@@ -97,9 +97,6 @@ import { MAX_ASSISTANT_COMPOSER_PARTS, projectAssistantComposerParts, type Assis
 import { assistantResourceSelectionKey } from './assistantResources'
 import PreviewActionsMenu from './PreviewActionsMenu.vue'
 import {
-  productionAccessState,
-  productionDeploymentDescription,
-  productionDeploymentState,
   publishingAccessSelection,
   shouldPollPublishing,
 } from './publishingState'
@@ -131,10 +128,10 @@ import {
   type ConversationConnectionState,
   type AssistantRun,
 } from './conversationResilience'
-import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import StatusBadge from '@/components/StatusBadge.vue'
+import StatusBadge from './portalkit/StatusBadge.vue'
 import ReleasePipeline from './ReleasePipeline.vue'
 import ProductionForm from './ProductionForm.vue'
+import ProductionSettingsLoadingShell from './ProductionSettingsLoadingShell.vue'
 import { productionFormValuesFromSchema, type ProductionFormValues } from './productionForm'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import {
@@ -178,10 +175,10 @@ import {
   promotionPollDelay,
   PROMOTION_POLL_MAX_DELAY_MS,
   promotionReadyFeedback,
-  releasePipelineView,
   type PromotionFeedback,
   type PromotionPollState,
 } from './promotionState'
+import { useProductionSettings } from './useProductionSettings'
 import type {
   DevelopmentTemplate,
   ImportRepository,
@@ -514,7 +511,6 @@ const projectSettingsDescription = ref('')
 const projectSettingsSaving = ref(false)
 const projectSettingsStatus = ref<string | null>(null)
 const projectSettingsError = ref<string | null>(null)
-const deleteProjectTarget = ref<Project | null>(null)
 const deletingProject = ref(false)
 const prompt = ref('')
 const selectedTurnSkills = ref<ProjectAssistantSkill[]>([])
@@ -746,7 +742,6 @@ function invalidateProjectContextState() {
   approvalModeSaving.value = false
   approvalModeError.value = null
   deletingProject.value = false
-  deleteProjectTarget.value = null
   showSettings.value = false
   shareDialogOpen.value = false
   projectSettingsSaving.value = false
@@ -1100,14 +1095,12 @@ const createPromptSubmitTitle = computed(() => {
 })
 const createSetupVisible = computed(() => !createSetupLoading.value && (createSetupItemsForPrompt.value.length > 0 || !!createReadinessError.value))
 const createSetupErrorMessage = computed(() => createReadinessError.value || '')
-const deleteProjectMessage = computed(() => {
-  const project = deleteProjectTarget.value
-  if (!project) return ''
+function deleteProjectMessage(project: Project): string {
   const projectName = project.displayName || project.name
   const repositoryName = project.repository?.name || project.repository?.ref
   const repositoryNote = repositoryName ? ` The associated repository resource (${repositoryName})` : ' The associated repository resource'
   return `Are you sure you want to delete ${projectName}? This removes the App Studio project and its conversation history.${repositoryNote} will be orphaned and will not be deleted.`
-})
+}
 const productionProjectName = computed(() => selected.value?.displayName || selected.value?.name || '')
 const productionProjectSlug = computed(() => projectToSlug(productionProjectName.value || 'app-studio-project'))
 const productionDefaultDomain = computed(() => `${productionProjectSlug.value}${PUBLISHING_DOMAIN_SUFFIX}`)
@@ -1713,7 +1706,7 @@ watch(messages, async () => {
 })
 
 useEscapeKey(() => {
-  if (!showSettings.value || deleteProjectTarget.value || confirmState.open) return
+  if (!showSettings.value || confirmState.open) return
   closeSettings()
 })
 
@@ -2093,110 +2086,31 @@ async function applyDevelopmentTemplate(template: string) {
   }
 }
 
-const promotionBuild = computed(() => promotion.value?.build ?? null)
-const promotionBuildStatus = computed(() => promotion.value?.build?.status ?? '')
-const releasePipeline = computed(() => releasePipelineView(promotion.value, {
-  published: publishing.value?.published,
-  ready: publishing.value?.publication?.ready,
-  url: productionURL.value,
-}))
 const releaseTakingLonger = ref(false)
-const canPromote = computed(() => !!promotion.value?.promotable && productionFormValid.value && !promotionBusy.value)
-const promotionDisabledReason = computed(() => {
-  if (promotionBusy.value) return 'Promotion is in progress.'
-  if (!selected.value?.name) return 'Select a project before checking its build status.'
-  if (promotionLoading.value && !promotion.value) return 'Loading production status before enabling promotion.'
-  if (promotionError.value && !promotion.value) return 'Production status is unavailable. Refresh to retry.'
-  if (!promotion.value) return 'Checking the build status before enabling promotion…'
-  if (!productionFormValid.value) return 'Fix the highlighted production settings before deploying.'
-  if (promotion.value.promotable) return ''
-  const note = promotionBuild.value?.note?.trim()
-  if (note) return note
-  switch (promotionBuildStatus.value) {
-    case 'incomplete':
-      return 'The build is incomplete; build every component before promoting.'
-    case 'none':
-      return 'No component image has been built yet; commit the project and wait for its build.'
-    case 'unsupported':
-      return 'This project has no production-capable template.'
-    default:
-      return 'The build is not ready for promotion.'
-  }
-})
-const productionBinding = computed(() => promotion.value?.production ?? null)
-const productionDeployment = computed(() => productionDeploymentState(productionBinding.value))
-const productionAccess = computed(() => productionAccessState(productionBinding.value, publishing.value))
-const productionURL = computed(() => productionAccess.value.url)
-// A publication record can outlive a failed/removed deployment. Only show a
-// ready-publication success once a production binding exists and is itself
-// Ready; this prevents stale access state from claiming a pre-deployment app
-// is ready or live.
-const productionPublicationReady = computed(() => Boolean(
-  productionBinding.value &&
-  productionDeployment.value.ready &&
-  publishing.value?.published &&
-  publishing.value.publication?.ready,
-))
-const productionDescription = computed(() => {
-  if (productionPublicationReady.value && !productionURL.value) {
-    return 'The publication is ready; the production link is still being resolved.'
-  }
-  return productionDeploymentDescription(productionBinding.value, publishing.value)
-})
-const productionPublicationStatus = computed(() => {
-  if (productionPublicationReady.value) {
-    return { label: productionURL.value ? 'Live' : 'Ready', tone: 'success' as const }
-  }
-  if (publishing.value?.publication?.error) return { label: 'Error', tone: 'danger' as const }
-  return { label: productionAccess.value.label, tone: productionAccess.value.tone }
-})
-const productionOverview = computed(() => {
-  if (promotionLoading.value && !promotion.value) return { label: 'Loading', tone: 'muted' as const }
-  if (promotionError.value && !promotion.value) return { label: 'Unavailable', tone: 'danger' as const }
-  if (!promotion.value) return { label: 'Awaiting status', tone: 'muted' as const }
-  if (!productionBinding.value) return { label: 'Not deployed', tone: 'muted' as const }
-  if (!productionDeployment.value.ready) {
-    return { label: productionDeployment.value.label, tone: productionDeployment.value.tone }
-  }
-  if (!publishing.value) return { label: 'Checking access', tone: 'muted' as const }
-  if (!publishing.value.published) return { label: 'Ready to publish', tone: 'success' as const }
-  if (productionPublicationReady.value) {
-    return { label: productionURL.value ? 'Live' : 'Ready', tone: 'success' as const }
-  }
-  if (publishing.value.publication?.error) return { label: 'Access error', tone: 'danger' as const }
-  return { label: 'Enabling access', tone: 'warning' as const }
-})
-const productionOverviewDescription = computed(() => {
-  if (promotionLoading.value && !promotion.value) return 'Checking the build, deployment, and release status for this project…'
-  if (promotionError.value && !promotion.value) return 'Production status could not be loaded. Refresh to try again.'
-  if (!promotion.value) return 'Production status will appear here once the project responds.'
-  if (!productionBinding.value) {
-    return 'No production deployment yet. Build every component before deploying this app.'
-  }
-  if (!productionDeployment.value.ready) return productionDescription.value
-  if (!publishing.value) return 'The production deployment is running. Checking external access…'
-  if (!publishing.value.published) {
-    return 'Ready to publish. The production deployment will keep running while you turn on external access.'
-  }
-  if (productionPublicationReady.value) return productionDescription.value
-  if (publishing.value.publication?.error) {
-    return `Production is running, but external access reported an error: ${publishing.value.publication.error}`
-  }
-  return productionDescription.value
-})
-const productionViewerCount = computed(() => {
-  if (!publishing.value?.published || publishing.value.publication?.mode !== 'restricted') return '—'
-  return String((publishing.value.grants ?? []).filter((grant) => !grant.revoked).length)
-})
-const productionURLPlaceholder = computed(() => {
-  if (!publishing.value) return 'Checking external access…'
-  if (productionPublicationReady.value && !productionURL.value) return 'Publication is ready; the production link is still being resolved.'
-  if (productionAccess.value.label === 'Offline') return 'No production URL is active.'
-  return 'Production URL will appear when external access is ready.'
-})
-const promoteButtonLabel = computed(() => {
-  if (promotionBusy.value) return 'Deploying…'
-  return productionBinding.value ? 'Redeploy to production' : 'Deploy to production'
+const {
+  releasePipeline,
+  canPromote,
+  promotionDisabledReason,
+  productionBinding,
+  productionDeployment,
+  productionAccess,
+  productionURL,
+  productionPublicationReady,
+  productionDescription,
+  productionPublicationStatus,
+  productionOverview,
+  productionOverviewDescription,
+  productionViewerCount,
+  productionURLPlaceholder,
+  promoteButtonLabel,
+} = useProductionSettings({
+  promotion,
+  publishing,
+  promotionLoading,
+  promotionBusy,
+  promotionError,
+  productionFormValid,
+  selectedProjectName: productionProjectName,
 })
 
 function clearPromotionPoll() {
@@ -4212,18 +4126,15 @@ function workbenchTabControlID(tab: WorkbenchTabDescriptor): string {
   return `app-studio-workbench-tab-${tab.id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 }
 
-function requestDeleteProject(project: Project) {
-  deleteProjectTarget.value = project
-}
-
-function closeDeleteProjectDialog() {
+async function requestDeleteProject(project: Project) {
   if (deletingProject.value) return
-  deleteProjectTarget.value = null
-}
-
-async function confirmDeleteProject() {
-  const project = deleteProjectTarget.value
-  if (!project) return
+  const confirmed = await confirmDialog({
+    title: 'Delete project?',
+    message: deleteProjectMessage(project),
+    confirmLabel: 'Delete project',
+    danger: true,
+  })
+  if (!confirmed) return
   const name = project.name
   const deletionScope = workbenchPersistenceScope(name)
   const deletionContextKey = workbenchPersistenceContextKey(deletionScope)
@@ -4249,7 +4160,6 @@ async function confirmDeleteProject() {
       resetWorkbench()
       showSettings.value = false
     }
-    deleteProjectTarget.value = null
     if (projects.value.length === 0) props.navigate(CREATE_PROJECT_ROUTE)
   } catch (e) {
     if (deleteRequestIsCurrent()) error.value = e instanceof Error ? e.message : String(e)
@@ -6555,8 +6465,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </button>
             </div>
           </div>
-          <div v-if="developmentSyncError || developmentPreviewAuthorizationError || developmentPreviewRecoveryError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
-            {{ developmentSyncError || developmentPreviewAuthorizationError || developmentPreviewRecoveryError }}
+          <div v-if="developmentSyncError || developmentPreviewAuthorizationError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive" aria-atomic="true">
+            {{ developmentSyncError || developmentPreviewAuthorizationError }}
           </div>
           <div v-else-if="developmentSyncStatus" class="rounded-md border border-success/30 bg-success-subtle p-3 text-[12px] text-success">
             {{ developmentSyncStatus }}
@@ -6583,6 +6493,9 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 			<div
 				v-if="developmentPreviewRecoveryError"
 				class="absolute inset-0 flex items-center justify-center bg-surface/95 p-6 text-center"
+				role="alert"
+				aria-live="assertive"
+				aria-atomic="true"
 			>
 				<div class="max-w-sm">
 					<div class="text-[13px] font-semibold text-text-primary">Preview did not finish loading</div>
@@ -7050,16 +6963,9 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <span><span class="font-semibold uppercase tracking-wide">Reviewed commit</span> <code class="font-mono text-text-secondary">{{ releasePipeline.commitSHA || 'No commit yet' }}</code></span>
                 <span><span class="font-semibold uppercase tracking-wide">Built images</span> <span class="font-mono text-text-secondary">{{ releasePipeline.builtCount }} / {{ releasePipeline.totalCount }}</span></span>
               </div>
-              <div v-if="promotionLoading && !promotion" class="grid min-h-[190px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay/50 p-3" role="status" aria-live="polite" aria-busy="true">
-                <div class="grid grid-cols-4 gap-2">
-                  <div v-for="step in 4" :key="step" class="shimmer h-10 rounded bg-surface-overlay" />
-                </div>
-                <div class="shimmer h-4 w-2/3 rounded bg-surface-overlay" />
-                <div class="shimmer h-3 w-full rounded bg-surface-overlay" />
-                <div class="shimmer h-3 w-4/5 rounded bg-surface-overlay" />
-                <div class="text-[12px] text-text-muted">Loading release evidence…</div>
-              </div>
-              <div v-else-if="!promotion && promotionError" class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+              <ProductionSettingsLoadingShell v-if="promotionLoading && !promotion" />
+              <template v-else>
+              <div v-if="!promotion && promotionError" class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
                 <div>{{ promotionError }}</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
               </div>
@@ -7071,12 +6977,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               <div v-if="productionPublicationReady" class="rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-[12px] leading-5 text-success" role="status">
                 {{ productionURL ? 'The publication is ready at the production URL.' : 'The publication is ready; the production link is still being resolved.' }}
               </div>
-              <div v-if="promotionLoading && !promotion" class="grid min-h-[120px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay p-3" role="status" aria-live="polite" aria-busy="true">
-                <div class="shimmer h-4 w-32 rounded bg-surface" />
-                <div class="shimmer h-8 w-full rounded bg-surface" />
-                <div class="text-[12px] text-text-muted">Loading deployment settings…</div>
-              </div>
-              <div v-else-if="promotion && productionAccess.label === 'Live'" class="grid gap-3">
+              <div v-if="promotion && productionAccess.label === 'Live'" class="grid gap-3">
                 <div class="flex min-w-0 items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay px-3 py-2.5">
                   <Link2 class="h-4 w-4 shrink-0 text-text-muted" :stroke-width="1.75" />
                   <a :href="productionURL" target="_blank" rel="noopener noreferrer" class="min-w-0 truncate font-mono text-[13px] font-medium text-accent hover:underline">{{ productionURL }}</a>
@@ -7163,8 +7064,9 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
               </div>
               <div v-if="publishingActionError" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ publishingActionError }}</div>
+              </template>
             </section>
-            <section class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Production settings">
+            <section v-if="!promotionLoading || promotion" class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Production settings">
               <div>
                 <h3 class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Production settings</h3>
                 <p class="mt-1 text-[11px] leading-4 text-text-muted">These inputs come from the selected template. Platform-owned names, rollout revisions, and component images are managed automatically.</p>
@@ -7180,12 +7082,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 @update:values="updateProductionForm"
                 @validity="productionFormValid = $event"
               />
-              <div v-else-if="promotionLoading && !promotion" class="grid min-h-[180px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay p-3" role="status" aria-live="polite" aria-busy="true">
-                <div class="shimmer h-4 w-40 rounded bg-surface" />
-                <div class="shimmer h-10 w-full rounded bg-surface" />
-                <div class="shimmer h-10 w-3/4 rounded bg-surface" />
-                <div class="text-[12px] text-text-muted">Loading production fields…</div>
-              </div>
               <div v-else class="flex min-h-[180px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert">
                 <div>Production settings are unavailable. Refresh to retry.</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
@@ -7417,15 +7313,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     </div>
   </Teleport>
 
-  <ConfirmDialog
-    v-if="deleteProjectTarget"
-    title="Delete project?"
-    :message="deleteProjectMessage"
-    confirm-label="Delete project"
-    :busy="deletingProject"
-    @cancel="closeDeleteProjectDialog"
-    @confirm="confirmDeleteProject"
-  />
   <Teleport to="body">
     <PkConfirmDialog />
   </Teleport>

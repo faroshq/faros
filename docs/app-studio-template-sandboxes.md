@@ -267,14 +267,14 @@ instance-level ones.
 The platform does not build images. The Template's scaffold ships
 **GitHub Actions workflows** that build and push each component's image from
 its `workspacePath` (so scaffold layout, `development.components`, and CI
-stay coupled on the Template — §6.3). The assistant's bootstrap context
-prompt instructs it to create and maintain these workflows as the project
-evolves (new component ⇒ new build job). Flipping an instance to
-`farosMode: production` supplies the CI-built image refs to the template's
-image fields, which become **optional while `farosMode: development`**
-(ignored by the dev overlay). Promotion mechanics — where image tags land,
-how the flip is triggered — are a follow-up design; this document only
-guarantees every project has buildable images from day one.
+stay coupled on the Template — §6.3). The Template declares the repository-
+owned workflow through `development.build.workflowPath`; App Studio observes
+and dispatches that workflow but does not synthesize, inject, or automatically
+repair it. Flipping an instance to `farosMode: production` supplies exact-
+commit, registry-backed image refs to the template's image fields, which are
+**optional while `farosMode: development`** (ignored by the dev overlay).
+Promotion is repeatable and updates the same production binding while keeping
+the development environment running.
 
 ### 4.2 Development loop: component-aware
 
@@ -377,8 +377,6 @@ BYO-compute validation.
   Deployments to zero after inactivity, wake on preview/sync) is deliberately
   deferred to its own design; nothing here precludes it, since the dev agent
   already fronts every component's traffic.
-- **Promotion mechanics.** How CI-built images flow back into a
-  `farosMode: production` flip (registries, tags, triggers) — see §4.1a.
 
 ## 9. Security notes
 

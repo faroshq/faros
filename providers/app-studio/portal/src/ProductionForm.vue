@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import {
-  fieldID,
+  productionFieldID,
   fieldLabel,
   arrayInputValue,
   arrayInputValues,
@@ -134,7 +134,11 @@ function isMap(field: JSONSchema): boolean {
 }
 
 function fieldDescriptionID(path: string[]): string | undefined {
-  return props.schema && path.length ? `${fieldID(path.join('.'))}-description` : undefined
+  return props.schema && path.length ? `${productionFieldID(props.pathPrefix, path)}-description` : undefined
+}
+
+function inputID(path: string | string[]): string {
+  return productionFieldID(props.pathPrefix, path)
 }
 </script>
 
@@ -167,18 +171,18 @@ function fieldDescriptionID(path: string[]): string | undefined {
         <legend class="px-1 text-[11px] font-semibold uppercase tracking-wide text-text-muted">{{ field.title || fieldLabel(name) }}</legend>
         <p v-if="field.description" :id="fieldDescriptionID([name])" class="text-[11px] leading-4 text-text-muted">{{ field.description }}</p>
         <div v-for="([key, value]) in mapEntries([name])" :key="key" class="flex items-center gap-2">
-          <label :for="fieldID(`${name}.${key}.key`)" class="sr-only">{{ fieldLabel(name) }} key</label>
+          <label :for="inputID(`${name}.${key}.key`)" class="sr-only">{{ fieldLabel(name) }} key</label>
           <input
-            :id="fieldID(`${name}.${key}.key`)"
+            :id="inputID(`${name}.${key}.key`)"
             :value="key"
             class="w-36 rounded-md border border-border-subtle bg-surface px-2.5 py-2 font-mono text-[12px] text-text-primary outline-none focus:border-accent/50 disabled:opacity-60"
             :disabled="fieldDisabled(name)"
             placeholder="KEY"
             @change="renameMapEntry([name], key, ($event.target as HTMLInputElement).value)"
           >
-          <label :for="fieldID(`${name}.${key}.value`)" class="sr-only">{{ fieldLabel(name) }} {{ key }} value</label>
+          <label :for="inputID(`${name}.${key}.value`)" class="sr-only">{{ fieldLabel(name) }} {{ key }} value</label>
           <input
-            :id="fieldID(`${name}.${key}.value`)"
+            :id="inputID(`${name}.${key}.value`)"
             :value="value"
             :aria-describedby="fieldDescriptionID([name])"
             class="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface px-2.5 py-2 font-mono text-[12px] text-text-primary outline-none focus:border-accent/50 disabled:opacity-60"
@@ -194,10 +198,10 @@ function fieldDescriptionID(path: string[]): string | undefined {
       </fieldset>
 
       <div v-else-if="field.type === 'array'" class="grid gap-1.5">
-        <label :for="fieldID(name)" class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{{ field.title || fieldLabel(name) }}</label>
+        <label :for="inputID(name)" class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{{ field.title || fieldLabel(name) }}</label>
         <p v-if="field.description" :id="fieldDescriptionID([name])" class="text-[11px] leading-4 text-text-muted">{{ field.description }}</p>
         <textarea
-          :id="fieldID(name)"
+          :id="inputID(name)"
           :value="arrayInputValue(scalarValue([name]))"
           :aria-describedby="fieldDescriptionID([name])"
           rows="3"
@@ -212,11 +216,11 @@ function fieldDescriptionID(path: string[]): string | undefined {
       </div>
 
       <div v-else class="grid gap-1.5">
-        <label :for="fieldID(name)" class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{{ field.title || fieldLabel(name) }}</label>
+        <label :for="inputID(name)" class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{{ field.title || fieldLabel(name) }}</label>
         <p v-if="field.description" :id="fieldDescriptionID([name])" class="text-[11px] leading-4 text-text-muted">{{ field.description }}</p>
         <select
           v-if="field.enum?.length"
-          :id="fieldID(name)"
+          :id="inputID(name)"
           :value="scalarValue([name]) ?? ''"
           :aria-describedby="fieldDescriptionID([name])"
           class="h-9 rounded-md border border-border-subtle bg-surface px-2.5 text-[13px] text-text-primary outline-none focus:border-accent/50 disabled:opacity-60"
@@ -229,7 +233,7 @@ function fieldDescriptionID(path: string[]): string | undefined {
         </select>
         <label v-else-if="field.type === 'boolean'" class="flex items-center gap-2 text-[13px] text-text-primary">
           <input
-            :id="fieldID(name)"
+            :id="inputID(name)"
             type="checkbox"
             :checked="Boolean(scalarValue([name]))"
             :aria-describedby="fieldDescriptionID([name])"
@@ -241,7 +245,7 @@ function fieldDescriptionID(path: string[]): string | undefined {
         </label>
         <input
           v-else
-          :id="fieldID(name)"
+          :id="inputID(name)"
           :type="inputType(field)"
           :value="scalarValue([name]) ?? ''"
           :aria-describedby="fieldDescriptionID([name])"

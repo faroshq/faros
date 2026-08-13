@@ -122,6 +122,17 @@ export function fieldID(path: string): string {
   return `production-input-${path.replace(/[^a-zA-Z0-9_-]/g, '-')}`
 }
 
+/**
+ * Builds the DOM id for a field rendered by a recursive ProductionForm.
+ * The prefix is part of the identity: two sibling objects may both expose a
+ * field named `size`, but their labels and descriptions must target different
+ * controls.
+ */
+export function productionFieldID(pathPrefix: string, path: string | string[]): string {
+  const suffix = Array.isArray(path) ? path.join('.') : path
+  return fieldID([pathPrefix, suffix].filter(Boolean).join('.'))
+}
+
 export function renameMapKey(values: Record<string, unknown>, oldKey: string, newKey: string): Record<string, unknown> {
   newKey = newKey.trim()
   if (!newKey || oldKey === newKey || (hasOwn(values, newKey) && newKey !== oldKey)) return { ...values }

@@ -115,7 +115,9 @@ func TestProjectProductionInputValuesExcludePlatformAndImageOwnedFields(t *testi
 			"farosCluster": map[string]any{"type": "string", "description": "Computed by the platform — do NOT set."},
 			"expose": map[string]any{"type": "object", "properties": map[string]any{
 				"hostnamePrefix": map[string]any{"type": "string"},
-				"fqdn":           map[string]any{"type": "string", "description": "Computed by the platform — do NOT set."},
+				// Keep the schema description neutral: fqdn is reserved by the
+				// explicit nested platform-ownership map, not by prose matching.
+				"fqdn": map[string]any{"type": "string", "description": "Public hostname"},
 			}},
 		},
 	}
@@ -129,6 +131,122 @@ func TestProjectProductionInputValuesExcludePlatformAndImageOwnedFields(t *testi
 	want := map[string]any{"access": "private", "expose": map[string]any{"hostnamePrefix": "shop"}}
 	if !reflect.DeepEqual(values, want) {
 		t.Fatalf("filtered production values = %#v, want %#v", values, want)
+	}
+}
+
+func TestProjectTemplateProdBindingLocksHostnamePrefixAfterFirstDeploy(t *testing.T) {
+	p := projectForPromote("shop")
+	info := applicationTemplateForPromote()
+	info.ProductionSchema = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":          map[string]any{"type": "string"},
+			"farosMode":     map[string]any{"type": "string"},
+			"frontendImage": map[string]any{"type": "string"},
+			"expose": map[string]any{"type": "object", "properties": map[string]any{
+				"hostnamePrefix": map[string]any{"type": "string"},
+				"fqdn":           map[string]any{"type": "string"},
+			}},
+		},
+		"required": []any{"name"},
+	}
+	images := map[string]string{"frontendImage": "frontend@sha256:built"}
+
+	first, err := projectTemplateProdBinding(p, info, images, map[string]any{
+		"expose": map[string]any{"hostnamePrefix": "shop-live"},
+	})
+	if err != nil {
+		t.Fatalf("initial hostname prefix: %v", err)
+	}
+	firstValues, err := aiv1alpha1BindingValues(first)
+	if err != nil {
+		t.Fatalf("decode initial binding: %v", err)
+	}
+	firstExpose, _ := firstValues["expose"].(map[string]any)
+	if firstExpose["hostnamePrefix"] != "shop-live" {
+		t.Fatalf("initial hostnamePrefix = %#v, want shop-live", firstExpose["hostnamePrefix"])
+	}
+	upsertProjectProductionBinding(p, first)
+
+	unchanged, err := projectTemplateProdBinding(p, info, images, map[string]any{
+		"expose": map[string]any{"hostnamePrefix": "shop-live"},
+	})
+	if err != nil {
+		t.Fatalf("unchanged hostname prefix on re-promote: %v", err)
+	}
+	unchangedValues, err := aiv1alpha1BindingValues(unchanged)
+	if err != nil {
+		t.Fatalf("decode unchanged binding: %v", err)
+	}
+	unchangedExpose, _ := unchangedValues["expose"].(map[string]any)
+	if unchangedExpose["hostnamePrefix"] != "shop-live" {
+		t.Fatalf("unchanged hostnamePrefix = %#v, want shop-live", unchangedExpose["hostnamePrefix"])
+	}
+
+	_, err = projectTemplateProdBinding(p, info, images, map[string]any{
+		"expose": map[string]any{"hostnamePrefix": "shop-new"},
+	})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || !strings.Contains(err.Error(), projectProductionHostnamePrefixPath) {
+		t.Fatalf("mutated hostname prefix error = %v, want immutable validation naming %s", err, projectProductionHostnamePrefixPath)
+	}
+}
+
+func TestProjectTemplateProdBindingDoesNotInjectUndeclaredHostnamePrefix(t *testing.T) {
+	p := projectForPromote("worker")
+	info := applicationTemplateForPromote()
+	info.ProductionSchema = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":                  map[string]any{"type": "string"},
+			"farosMode":             map[string]any{"type": "string"},
+			"farosRedeployRevision": map[string]any{"type": "string"},
+			"frontendImage":         map[string]any{"type": "string"},
+		},
+		"required":             []any{"name"},
+		"additionalProperties": false,
+	}
+	images := map[string]string{"frontendImage": "frontend@sha256:built"}
+
+	first, err := projectTemplateProdBinding(p, info, images, nil)
+	if err != nil {
+		t.Fatalf("initial production binding without exposure: %v", err)
+	}
+	upsertProjectProductionBinding(p, first)
+
+	repromoted, err := projectTemplateProdBinding(p, info, images, nil)
+	if err != nil {
+		t.Fatalf("re-promote without exposure: %v", err)
+	}
+	values, err := aiv1alpha1BindingValues(repromoted)
+	if err != nil {
+		t.Fatalf("decode re-promoted binding: %v", err)
+	}
+	if _, found := values["expose"]; found {
+		t.Fatalf("re-promote injected undeclared expose object: %#v", values["expose"])
+	}
+}
+
+func TestProjectProductionImmutableInputPathsAdvertiseDeclaredHostnamePrefixOnly(t *testing.T) {
+	base := projectTemplateInfo{ImmutableProductionInputs: []string{"database.size"}}
+	withoutExposure := projectProductionImmutableInputPaths(base)
+	if !reflect.DeepEqual(withoutExposure, []string{"database.size"}) {
+		t.Fatalf("immutable inputs without exposure = %#v, want only declared inputs", withoutExposure)
+	}
+
+	withExposure := base
+	withExposure.ProductionSchema = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"expose": map[string]any{"type": "object", "properties": map[string]any{
+				"hostnamePrefix": map[string]any{"type": "string"},
+			}},
+		},
+	}
+	got := projectProductionImmutableInputPaths(withExposure)
+	want := []string{"database.size", projectProductionHostnamePrefixPath}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("immutable inputs with exposure = %#v, want %#v", got, want)
 	}
 }
 

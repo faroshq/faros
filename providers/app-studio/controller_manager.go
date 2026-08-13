@@ -323,6 +323,35 @@ func runControllerManager(
 	deps controllerDeps,
 	retryInterval time.Duration,
 ) {
+	runControllerManagerWithRetryGate(ctx, health, loadConfig, start, deps, retryInterval, waitControllerRetry)
+}
+
+// waitControllerRetry is the production retry gate. Keeping the wait behind a
+// small function seam lets lifecycle tests release each retry explicitly and
+// assert failed/starting transitions without relying on timer scheduling.
+func waitControllerRetry(ctx context.Context, retryInterval time.Duration) bool {
+	if retryInterval < 0 {
+		retryInterval = 0
+	}
+	timer := time.NewTimer(retryInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func runControllerManagerWithRetryGate(
+	ctx context.Context,
+	health *controllerHealth,
+	loadConfig func() (*rest.Config, error),
+	start func(context.Context, *rest.Config, controllerDeps) error,
+	deps controllerDeps,
+	retryInterval time.Duration,
+	retryGate func(context.Context, time.Duration) bool,
+) {
 	if health == nil {
 		health = newControllerHealth(true)
 	}
@@ -362,16 +391,12 @@ func runControllerManager(
 		health.markFailed(err)
 		log.Printf("controller manager not ready (attempt %d): %v; retrying in %s", attempt, err, retryInterval)
 
-		if retryInterval < 0 {
-			retryInterval = 0
+		if retryGate == nil {
+			retryGate = waitControllerRetry
 		}
-		timer := time.NewTimer(retryInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !retryGate(ctx, retryInterval) {
 			health.markStopped(ctx.Err())
 			return
-		case <-timer.C:
 		}
 	}
 }
