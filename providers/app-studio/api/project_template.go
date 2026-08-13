@@ -84,6 +84,10 @@ type projectTemplateInfo struct {
 	// the assistant generates from scratch.
 	ScaffoldRepo string
 	ScaffoldRef  string
+
+	// BuildWorkflowPath is the repository-owned CI workflow declared by
+	// spec.development.build. Empty means the Template declares no CI.
+	BuildWorkflowPath string
 }
 
 // projectTemplateComponent is one development component's contract: where its
@@ -201,6 +205,8 @@ func projectTemplateInfoFromUnstructured(obj *unstructured.Unstructured) (projec
 	ref, _, _ := unstructured.NestedString(obj.Object, "spec", "development", "scaffold", "ref")
 	info.ScaffoldRepo = strings.TrimSpace(repo)
 	info.ScaffoldRef = strings.TrimSpace(ref)
+	workflowPath, _, _ := unstructured.NestedString(obj.Object, "spec", "development", "build", "workflowPath")
+	info.BuildWorkflowPath = strings.TrimSpace(workflowPath)
 
 	return info, nil
 }
@@ -747,11 +753,6 @@ func (s *Server) putProjectTemplate(w http.ResponseWriter, r *http.Request) {
 	// ordered queue. Failures are non-fatal because the instance may still be
 	// provisioning and operational verification will surface the blocker.
 	s.scheduleDevelopmentSyncAfterMutation(id, updated, projectToolSelectTemplate)
-
-	// Wire the CI build into the repository now that the project has a template
-	// (and, if bound, a repository). Best-effort: build setup can also be
-	// triggered from the Publish & Promote tab or the next commit.
-	_, _ = s.ensureProjectBuildConfig(r.Context(), id, updated, r)
 
 	raw, _ := json.Marshal(updated)
 	writeJSON(w, http.StatusOK, projectTemplateSelectResponse{

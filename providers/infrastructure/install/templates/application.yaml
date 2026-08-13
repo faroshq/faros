@@ -365,6 +365,10 @@ spec:
   # platform preview-console plugin when trusted keys are installed. Missing
   # plugin/config fails open and leaves the ordinary preview intact.
   development:
+    # CI is scaffold-owned. App Studio observes/dispatches this exact workflow
+    # path and never injects or rewrites build configuration.
+    build:
+      workflowPath: .github/workflows/build.yaml
     # Starter source new projects are seeded from: a working web+api+Postgres
     # hello-world honoring the full platform contract (PORT, same-origin
     # /api/*, DATABASE_URL with startup retry, dev+start scripts). Locked by

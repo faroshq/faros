@@ -347,9 +347,6 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 				// this and subsequent workspace mutations sync to the selected
 				// development target.
 				refreshProjectToolSnapshot(req.Project, updated)
-				// Wire the CI build into the repository now that a template is
-				// bound (best-effort; a no-op without a repository).
-				_, _ = server.ensureProjectBuildConfig(ctx, req.Identity, updated, req.HTTPRequest)
 				return projectAssistantToolJSONResult(map[string]any{
 					"template":     info.Name,
 					"components":   info.Components,
@@ -361,7 +358,7 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:         projectToolGetCheckpoints,
-				Description:  "Report the project's four lifecycle checkpoints — Template bound, Git established, CI committed, Production running — each with a state (done/pending/blocked/error), a human-readable reason, and remediation. Use this when the user explicitly asks \"where is this project\"/\"what's left\", or after a lifecycle-changing operation; do not poll it when the supplied current project snapshot already answers the question. For a pending checkpoint whose remediation.kind is \"auto\", call the named remediation.tool to advance it; for \"manual\", tell the user the exact action to take. Prefer advancing checkpoints in order (template → git → ci → production).",
+				Description:  "Report the project's four lifecycle checkpoints — Template bound, Git established, Source committed, Production running — each with a state (done/pending/blocked/error), a human-readable reason, and remediation. Use this when the user explicitly asks \"where is this project\"/\"what's left\", or after a lifecycle-changing operation; do not poll it when the supplied current project snapshot already answers the question. For a pending checkpoint whose remediation.kind is \"auto\", call the named remediation.tool to advance it; for \"manual\", tell the user the exact action to take. Prefer advancing checkpoints in order (template → git → source → production).",
 				Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
 				Risk:         projectAssistantToolRiskRead,
 				ParallelSafe: true,

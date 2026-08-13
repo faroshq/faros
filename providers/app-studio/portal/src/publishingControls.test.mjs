@@ -26,6 +26,30 @@ test('keeps Production inside Project Settings and removes the standalone workbe
   assert.doesNotMatch(app, /activeWorkbenchTab\?\.kind === 'publishing'/)
 })
 
+test('closes project settings before the landing route can render them as an LLM modal', () => {
+  const watcherStart = app.indexOf('watch(settingsProject, (project, previousProject) =>')
+  const watcherEnd = app.indexOf('\n\nuseEscapeKey', watcherStart)
+  assert.ok(watcherStart >= 0 && watcherEnd > watcherStart)
+  const watcher = app.slice(watcherStart, watcherEnd)
+
+  assert.match(watcher, /if \(!project && previousProject\)/)
+  assert.match(watcher, /showSettings\.value = false/)
+
+  const openStart = app.indexOf('async function openSettings()')
+  const openEnd = app.indexOf('function selectProjectSettingsPane', openStart)
+  assert.ok(openStart >= 0 && openEnd > openStart)
+  assert.match(app.slice(openStart, openEnd), /showSettings\.value = true/)
+})
+
+test('defers the project-settings Teleport until its restored workbench host exists', () => {
+  assert.match(app, /<Teleport defer :to="settingsInWorkbench \? '#app-studio-project-settings-host' : 'body'">/)
+  const hostStart = app.indexOf('v-show="!projectRouteLoading && !projectRouteFailure && activeWorkbenchTab?.kind === \'settings\'"')
+  const loadingPanelStart = app.indexOf('<template v-if="projectRouteLoading">', hostStart)
+  assert.ok(hostStart >= 0 && loadingPanelStart > hostStart)
+  assert.match(app.slice(hostStart, loadingPanelStart), /id="app-studio-project-settings-host"/)
+  assert.doesNotMatch(app, /v-else-if="activeWorkbenchTab\?\.kind === 'settings'"/)
+})
+
 test('keeps the plus in the scrolling tab strip and exposes a solid Share anchor', () => {
   const headerStart = app.indexOf('<header class="flex h-14')
   const panelStart = app.indexOf('<div\n        v-if="activeWorkbenchTab?.kind === \'launcher\'"', headerStart)
@@ -117,7 +141,7 @@ test('routes sharing through the modular dialog and current access contracts onl
   assert.match(app, /import ProjectShareDialog from '\.\/ProjectShareDialog\.vue'/)
   assert.match(app, /<ProjectShareDialog[\s\S]*v-model:mode="shareMode"[\s\S]*@save="publishCurrentProject"[\s\S]*@grant="grantCurrentProjectAccess"[\s\S]*@invite="inviteCurrentProjectAccess"[\s\S]*@revoke="revokeCurrentProjectAccess"[\s\S]*@disable="unpublishCurrentProject"/)
   assert.match(app, /@open-production-settings="openProductionSettingsFromShare"/)
-  assert.match(app, /api\.publishProject\(props\.ctx, name, shareMode\.value\)/)
+  assert.match(app, /const mode = shareMode\.value[\s\S]*api\.publishProject\(props\.ctx, name, mode\)/)
   assert.match(dialog, /General access/)
   assert.match(dialog, /value="restricted">Restricted/)
   assert.match(dialog, /value="public">Anyone with the link/)
@@ -184,6 +208,37 @@ test('keeps Share independently useful through partial loads and traps modal key
   assert.match(dialog, /event\.shiftKey && document\.activeElement === first/)
 })
 
+test('keeps members from a state-failed initial load but blocks publication mutations', () => {
+  assert.match(app, /const publishingStateAvailable = ref\(false\)/)
+  const loadStart = app.indexOf('async function loadPublishing()')
+  const loadEnd = app.indexOf('\n\nfunction retryPublishing()', loadStart)
+  assert.ok(loadStart >= 0 && loadEnd > loadStart)
+  const load = app.slice(loadStart, loadEnd)
+  assert.match(load, /const stateSucceeded = stateResult\.status === 'fulfilled'/)
+  assert.match(load, /const membersSucceeded = membersResult\.status === 'fulfilled'/)
+  assert.match(load, /if \(membersSucceeded\) \{[\s\S]*publishingMembers\.value = membersResult\.value[\s\S]*publishingMembersLoaded\.value = true/)
+  assert.match(load, /if \(stateSucceeded\) \{[\s\S]*publishingStateAvailable\.value = true/)
+  assert.match(load, /const stateAvailable = publishingStateAvailable\.value/)
+  assert.doesNotMatch(load, /if \(!stateSucceeded\) \{[\s\S]*publishingStateAvailable\.value = false/)
+  assert.match(load, /publishingLoadState\.value = stateSucceeded && membersSucceeded[\s\S]*'partial'[\s\S]*'error'/)
+  assert.match(app, /:publication-state-available="publishingStateAvailable"/)
+  for (const action of [
+    'setProductionVisibility',
+    'publishCurrentProject',
+    'unpublishCurrentProject',
+    'grantOrInviteProjectAccess',
+    'revokeCurrentProjectAccess',
+  ]) {
+    const actionStart = app.indexOf(`async function ${action}`)
+    assert.ok(actionStart >= 0, `${action} exists`)
+    const nextAction = app.indexOf('\nasync function ', actionStart + 1)
+    const actionSource = app.slice(actionStart, nextAction >= 0 ? nextAction : undefined)
+    assert.match(actionSource, /!publishingStateAvailable\.value/, `${action} requires known publication state`)
+  }
+  assert.match(app, /aria-label="Production visibility"\s+:disabled="publishingActionBusy \|\| !publishingStateAvailable"/)
+  assert.match(dialog, /props\.publicationStateAvailable &&[\s\S]*\(props\.published \|\| props\.productionReady\)/)
+})
+
 test('published apps can change access anytime; only first publish waits for production readiness', () => {
   // An access flip on a promoted app is an intent write — a rolling or
   // briefly-unready deployment must not block it (the publication state
@@ -192,7 +247,7 @@ test('published apps can change access anytime; only first publish waits for pro
   // The deploy-first warning is reserved for never-promoted projects.
   assert.match(dialog, /v-if="!published && !productionReady"/)
   assert.match(dialog, /const modeDirty = computed\(\(\) => props\.published && selectedMode\.value !== initialMode\.value\)/)
-  assert.match(dialog, /const canAddMember = computed\(\(\) => \(\s*savedRestricted\.value && !modeDirty\.value/s)
+  assert.match(dialog, /const canAddMember = computed\(\(\) => \(\s*props\.publicationStateAvailable && savedRestricted\.value && !modeDirty\.value/s)
 })
 
 test('restores the Share trigger after confirmed disable and uses one production-surface polling transition', () => {
@@ -251,4 +306,106 @@ test('layers the shared confirm dialog at body and restores Disable access focus
   assert.match(unpublish, /const disableAccessTrigger = document\.activeElement instanceof HTMLElement \? document\.activeElement : null/)
   assert.match(unpublish, /const confirmed = await confirmDialog\(/)
   assert.match(unpublish, /if \(!confirmed\) \{[\s\S]*await nextTick\(\)[\s\S]*disableAccessTrigger\?\.isConnected[\s\S]*disableAccessTrigger\.focus\(\)[\s\S]*return/)
+})
+
+test('closes inline Settings by removing its active tab through the normalized fallback', () => {
+  const closeStart = app.indexOf('function closeSettings()')
+  const closeEnd = app.indexOf('\n\nfunction syncProjectSettingsForm', closeStart)
+  assert.ok(closeStart >= 0 && closeEnd > closeStart)
+  const close = app.slice(closeStart, closeEnd)
+  assert.ok(close.includes('showSettings.value = false'))
+  assert.ok(close.includes("workbench.value.tabs.some((tab) => tab.id === 'settings')"))
+  assert.ok(close.includes("closeWorkbenchTabByID('settings')"))
+  assert.ok(app.includes('@click.self="closeSettings"'))
+  const escapeStart = app.indexOf('useEscapeKey(() => {')
+  const escapeEnd = app.indexOf('\n})', escapeStart)
+  assert.ok(escapeStart >= 0 && escapeEnd > escapeStart)
+  assert.ok(app.slice(escapeStart, escapeEnd).includes('closeSettings()'))
+
+  const tabCloseStart = app.indexOf('function closeWorkbenchTabByID')
+  const tabCloseEnd = app.indexOf('\n\nfunction startWorkbenchTabDrag', tabCloseStart)
+  assert.ok(tabCloseStart >= 0 && tabCloseEnd > tabCloseStart)
+  assert.ok(app.slice(tabCloseStart, tabCloseEnd).includes("workbench.value = closeWorkbenchTab(workbench.value, tabID)"))
+})
+
+test('guards project settings saves by serial, project, and context without stale busy cleanup', () => {
+  const saveStart = app.indexOf('async function saveProjectSettings()')
+  const saveEnd = app.indexOf('\n\nfunction enterProject', saveStart)
+  assert.ok(saveStart >= 0 && saveEnd > saveStart)
+  const save = app.slice(saveStart, saveEnd)
+  for (const contract of [
+    'const saveSerial = ++projectSettingsSaveSerial',
+    'const projectName = project.name',
+    'const contextFingerprint = projectContextFingerprint(props.ctx)',
+    'saveSerial === projectSettingsSaveSerial',
+    'contextFingerprint === projectContextFingerprint(props.ctx)',
+    'selected.value?.name === projectName',
+  ]) assert.ok(save.includes(contract), contract)
+  const requestIndex = save.indexOf('await api.patchProject')
+  const responseGuardIndex = save.indexOf('if (!isCurrentSave()) return', requestIndex)
+  const catchIndex = save.indexOf('} catch (e) {')
+  const catchGuardIndex = save.indexOf('if (!isCurrentSave()) return', catchIndex)
+  const finallyIndex = save.indexOf('} finally {')
+  assert.ok(requestIndex >= 0 && responseGuardIndex > requestIndex)
+  assert.ok(catchIndex > responseGuardIndex && catchGuardIndex > catchIndex)
+  assert.ok(finallyIndex > catchGuardIndex)
+  assert.ok(save.slice(finallyIndex).includes('if (isCurrentSave()) projectSettingsSaving.value = false'))
+})
+
+test('settles terminal project-list failures and keeps a visible Retry action', () => {
+  const loadStart = app.indexOf('async function load()')
+  const catchStart = app.indexOf('} catch (e) {', loadStart)
+  const finallyStart = app.indexOf('} finally {', catchStart)
+  assert.ok(loadStart >= 0 && catchStart > loadStart && finallyStart > catchStart)
+  const loadCatch = app.slice(catchStart, finallyStart)
+  assert.ok(loadCatch.indexOf('clearInitializationRetry()') < loadCatch.indexOf('initializing.value = false'))
+  assert.ok(loadCatch.includes("initializingMessage.value = 'App Studio is preparing this workspace...'"))
+  assert.ok(loadCatch.includes('projectsLoaded.value = true'))
+
+  const landingStart = app.indexOf('<div v-else-if="!isBuilderVisible"')
+  const errorStart = app.indexOf('<div v-if="error"', landingStart)
+  const skeletonStart = app.indexOf('<div v-if="(loading || !projectsLoaded) && projects.length === 0"', errorStart)
+  assert.ok(landingStart >= 0 && errorStart > landingStart && skeletonStart > errorStart)
+  const listError = app.slice(errorStart, skeletonStart)
+  assert.ok(listError.includes('@click="load"'))
+  assert.ok(app.slice(skeletonStart, app.indexOf('>', skeletonStart)).includes('projects.length === 0'))
+})
+
+test('commits a thread selection only after history succeeds and restores prior focus on failure', () => {
+  const selectStart = app.indexOf('async function selectAssistantThread')
+  const selectEnd = app.indexOf('\n\nasync function createAssistantThread', selectStart)
+  assert.ok(selectStart >= 0 && selectEnd > selectStart)
+  const select = app.slice(selectStart, selectEnd)
+  const requestIndex = select.indexOf('const items = await api.listAssistantThreadItems')
+  const commitIndex = select.indexOf('activeAssistantThreadID.value = threadID')
+  assert.ok(requestIndex >= 0 && commitIndex > requestIndex)
+  assert.ok(select.includes('const previousThreadID = activeAssistantThreadID.value'))
+  assert.ok(select.includes('let restorePriorThreadFocus = false'))
+  assert.ok(select.includes('restorePriorThreadFocus = true'))
+  assert.ok(select.includes('threadsWorkbenchRef.value?.focusActiveThread?.()'))
+  assert.ok(select.includes("selectingThreadID.value = ''"))
+})
+
+test('restores the opening Share mode on every unsaved exit while reflecting successful saves', () => {
+  const closeStart = dialog.indexOf('function close()')
+  const settingsStart = dialog.indexOf('function openProductionSettings()', closeStart)
+  assert.ok(closeStart >= 0 && settingsStart > closeStart)
+  const close = dialog.slice(closeStart, settingsStart)
+  assert.ok(close.includes('modeTouched.value && selectedMode.value !== initialMode.value'))
+  assert.ok(close.includes("emit('update:mode', initialMode.value)"))
+
+  const settingsEnd = dialog.indexOf('\n\nfunction addMember', settingsStart)
+  assert.ok(settingsEnd > settingsStart)
+  const settingsExit = dialog.slice(settingsStart, settingsEnd)
+  assert.ok(settingsExit.includes("emit('update:mode', initialMode.value)"))
+  assert.ok(settingsExit.includes("emit('open-production-settings')"))
+
+  const parentCloseStart = app.indexOf('function closeShareDialog()')
+  const parentSettingsStart = app.indexOf('function openProductionSettingsFromShare()', parentCloseStart)
+  assert.ok(parentCloseStart >= 0 && parentSettingsStart > parentCloseStart)
+  assert.ok(app.slice(parentCloseStart, parentSettingsStart).includes('restoreShareModeFromPublication()'))
+  const publishStart = app.indexOf('async function publishCurrentProject()')
+  const publishEnd = app.indexOf('\n\nasync function unpublishCurrentProject', publishStart)
+  assert.ok(publishEnd > publishStart)
+  assert.ok(app.slice(publishStart, publishEnd).includes("shareMode.value = state.publication?.mode === 'public' ? 'public' : mode"))
 })

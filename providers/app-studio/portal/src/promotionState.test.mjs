@@ -168,6 +168,26 @@ test('labels a partial artifact view when the run observation is unavailable', (
   assert.match(pipeline.detail, /api/)
 })
 
+test('stops transitional polling when CI status is unavailable without a usable run', () => {
+  const pipeline = releasePipelineView({
+    promotable: false,
+    build: {
+      status: 'incomplete', commitSHA: 'release123', note: '', missing: ['api'],
+      components: [
+        { name: 'web', imageInput: 'webImage', built: true },
+        { name: 'api', imageInput: 'apiImage', built: false },
+      ],
+      runError: 'Build status temporarily unavailable.',
+    },
+  })
+  assert.equal(pipeline.state, 'unavailable')
+  assert.equal(pipeline.tone, 'warning')
+  assert.equal(pipeline.transitional, false)
+  assert.match(pipeline.message, /Build status is temporarily unavailable/)
+  assert.match(pipeline.detail, /Build status temporarily unavailable/)
+  assert.equal(pipeline.steps.find((step) => step.key === 'build').state, 'pending')
+})
+
 test('does not claim an unpinned run failed when the host omits its head SHA', () => {
   const pipeline = releasePipelineView({
     promotable: false,

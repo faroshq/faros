@@ -128,6 +128,7 @@ import {
   replaceOptimisticUserMessage,
   reconcileAssistantRunInterrupt,
   reconcileAssistantRunTerminal,
+  type ConversationConnectionState,
   type AssistantRun,
 } from './conversationResilience'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -215,6 +216,44 @@ const props = defineProps<{
   ctx: FarosContext | null
   navigate: (path: string) => void
 }>()
+
+interface ProjectRequestGuard {
+  serial: number
+  contextFingerprint: string
+}
+
+function appContextFingerprint(ctx: FarosContext | null): string {
+  return JSON.stringify([
+    ctx?.token ?? '',
+    ctx?.tenant ?? '',
+    ctx?.orgUUID ?? '',
+    ctx?.workspaceUUID ?? '',
+    ctx?.user?.userId ?? '',
+    ctx?.user?.sub ?? '',
+    ctx?.user?.email ?? '',
+  ])
+}
+
+function projectContextFingerprint(ctx: FarosContext | null): string {
+  return JSON.stringify([
+    appContextFingerprint(ctx),
+    ctx?.subPath ?? '',
+  ])
+}
+
+function beginProjectRequest(): ProjectRequestGuard {
+  return { serial: ++projectLoadSerial, contextFingerprint: projectContextFingerprint(props.ctx) }
+}
+
+function currentProjectRequestGuard(): ProjectRequestGuard {
+  return { serial: projectLoadSerial, contextFingerprint: projectContextFingerprint(props.ctx) }
+}
+
+function projectRequestIsCurrent(guard: ProjectRequestGuard, projectName = ''): boolean {
+  return guard.serial === projectLoadSerial &&
+    guard.contextFingerprint === projectContextFingerprint(props.ctx) &&
+    (!projectName || selected.value?.name === projectName)
+}
 
 function assistantThreadFocusScope(projectName: string) {
   return {
@@ -409,33 +448,50 @@ const assistantSkillsWarnings = ref<string[]>([])
 let assistantSkillsLoadSerial = 0
 
 const conversationMessages = computed(() => projectMessagesForConversation(messages.value))
+function heldReviewPanel(kind: 'approval' | 'follow_up'): PendingApprovalView | PendingFollowUpView | null {
+  const hold = reviewPanelHold.value
+  const run = activeAssistantRun
+  if (!hold || hold.kind !== kind || !run || run.id !== hold.runID || !assistantRunRequiresLiveControls(run)) return null
+  const message = messages.value.find((candidate) => candidate.id === hold.message.id) ?? hold.message
+  const interrupt = message.interrupt && message.interrupt.interruptId === hold.interrupt.interruptId
+    ? { ...message.interrupt, status: 'pending' as const }
+    : { ...hold.interrupt, status: 'pending' as const }
+  return { message, interrupt } as PendingApprovalView | PendingFollowUpView
+}
+
 const pendingApproval = computed<PendingApprovalView | null>(() => {
   const currentMessages = messages.value
-  if (!assistantRunRequiresLiveControls(activeAssistantRun)) return null
-  for (let i = currentMessages.length - 1; i >= 0; i--) {
-    const message = currentMessages[i]
-    const interrupt = message.interrupt
-    if (interrupt?.status === 'pending' && interrupt.kind !== 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
-      return { message, interrupt }
+  if (assistantRunRequiresLiveControls(activeAssistantRun)) {
+    for (let i = currentMessages.length - 1; i >= 0; i--) {
+      const message = currentMessages[i]
+      const interrupt = message.interrupt
+      if (interrupt?.status === 'pending' && interrupt.kind !== 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
+        return { message, interrupt }
+      }
     }
   }
-  return null
+  return heldReviewPanel('approval') as PendingApprovalView | null
 })
 const pendingFollowUp = computed<PendingFollowUpView | null>(() => {
   const currentMessages = messages.value
-  if (!assistantRunRequiresLiveControls(activeAssistantRun)) return null
-  for (let i = currentMessages.length - 1; i >= 0; i--) {
-    const message = currentMessages[i]
-    const interrupt = message.interrupt
-    if (interrupt?.status === 'pending' && interrupt.kind === 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
-      return { message, interrupt }
+  if (assistantRunRequiresLiveControls(activeAssistantRun)) {
+    for (let i = currentMessages.length - 1; i >= 0; i--) {
+      const message = currentMessages[i]
+      const interrupt = message.interrupt
+      if (interrupt?.status === 'pending' && interrupt.kind === 'follow_up' && interrupt.action?.runId && interrupt.action.requestId) {
+        return { message, interrupt }
+      }
     }
   }
-  return null
+  return heldReviewPanel('follow_up') as PendingFollowUpView | null
 })
 const hasPendingReview = computed(() => pendingFollowUp.value !== null || pendingApproval.value !== null)
 const loading = ref(true)
 const projectsLoaded = ref(false)
+const projectOpenLoading = ref(false)
+const threadHistoryLoading = ref(false)
+const selectingThreadID = ref('')
+const conversationRefreshing = ref(false)
 const providersLoading = ref(false)
 const busy = ref(false)
 const messageStreaming = ref(false)
@@ -465,6 +521,7 @@ const selectedTurnSkills = ref<ProjectAssistantSkill[]>([])
 const selectedTurnResources = ref<ProjectAssistantContextResource[]>([])
 const assistantComposerParts = ref<ProjectAssistantContentPart[]>([])
 const assistantComposerRef = ref<{ focus: () => void; openPalette: () => void; closePalette: (restoreFocus?: boolean) => void } | null>(null)
+const threadsWorkbenchRef = ref<{ focusActiveThread?: () => void } | null>(null)
 const assistantIntent = ref<AssistantResponseMode>('default')
 const approvalMode = ref<ProjectAssistantApprovalMode>('on_request')
 const approvalModeLoading = ref(false)
@@ -489,9 +546,16 @@ const developmentPreviewRecoveryAttempt = ref(0)
 const developmentPreviewPendingLoadedStatus = ref<string | null>(null)
 const shareMode = ref<ProjectPublishingMode>('restricted')
 const publishing = ref<ProjectPublishing | null>(null)
+// A member list can be useful even when the publication read failed. Keep
+// this separate from the cached publication object so partial loads cannot
+// accidentally authorize a publish/access mutation from productionReady.
+const publishingStateAvailable = ref(false)
 const publishingMembers = ref<ProjectPublishingMember[]>([])
 const publishingMembersLoaded = ref(false)
 const publishingActionBusy = ref(false)
+type PublishingBusyAction = 'save' | 'grant' | 'invite' | 'revoke' | 'disable'
+const publishingBusyAction = ref<PublishingBusyAction | null>(null)
+const publishingBusyTarget = ref<string | null>(null)
 const publishingActionError = ref<string | null>(null)
 type PublishingLoadState = 'idle' | 'loading' | 'partial' | 'ready' | 'error'
 const publishingLoadState = ref<PublishingLoadState>('idle')
@@ -504,6 +568,7 @@ const productionTechnicalOpen = ref(false)
 // Promote to Prod (the production surface's deployment action): read build readiness +
 // the live production environment, and stand up / redeploy production.
 const promotion = ref<ProjectPromotionReadiness | null>(null)
+const promotionLoading = ref(false)
 const promotionBusy = ref(false)
 const publishingRefreshBusy = ref(false)
 const promotionError = ref<string | null>(null)
@@ -531,8 +596,14 @@ const createReadinessError = ref<string | null>(null)
 const importRepositories = ref<ImportRepository[]>([])
 const importSelectedRepository = ref('')
 const importBusy = ref(false)
+const importRepositoriesLoading = ref(false)
+const importRepositoriesError = ref<string | null>(null)
+let importRepositoriesLoadSerial = 0
 const importError = ref<string | null>(null)
 const developmentTemplates = ref<DevelopmentTemplate[]>([])
+const developmentTemplatesLoading = ref(false)
+const developmentTemplatesError = ref<string | null>(null)
+let developmentTemplatesLoadSerial = 0
 const developmentTemplateBusy = ref(false)
 const developmentHydrateBusy = ref(false)
 const workbench = ref(createDefaultWorkbenchState())
@@ -541,6 +612,7 @@ let workbenchHydrationProject = ''
 let workbenchHydrated = false
 const providerCatalogContextKey = ref<string | null>(null)
 const providerCatalogLoaded = ref(false)
+const providerCatalogError = ref<string | null>(null)
 let providerCatalogLoadSerial = 0
 const draggedWorkbenchTabID = ref<string | null>(null)
 const dragOverWorkbenchTabID = ref<string | null>(null)
@@ -553,6 +625,9 @@ const llmApiKey = ref('')
 const llmCredentialMode = ref<LLMCredentialMode>('api-key')
 const llmSaving = ref(false)
 const llmStatus = ref<string | null>(null)
+const llmSettingsLoading = ref(false)
+const llmSettingsError = ref<string | null>(null)
+let llmSettingsLoadSerial = 0
 const messagesRef = ref<HTMLDivElement | null>(null)
 const expandedMessageTimestampID = ref<string | null>(null)
 const expandedAssistantProgressIDs = ref<Set<string>>(new Set())
@@ -565,6 +640,8 @@ const toolHostRef = ref<HTMLDivElement | null>(null)
 const mountedToolEl = ref<HTMLElement | null>(null)
 const splitWidth = ref(readSplitWidth())
 let toolLoadSerial = 0
+let projectLoadSerial = 0
+let activeProjectContextFingerprint = ''
 let initializationRetryTimer: number | undefined
 let landingPlaceholderDelayTimer: number | undefined
 let landingPlaceholderTypingTimer: number | undefined
@@ -575,6 +652,7 @@ let developmentPreviewAuthorizationRetryTimer: number | undefined
 let developmentPreviewRecoveryTimer: number | undefined
 let developmentPreviewComponentMounted = true
 let assistantThreadRequestSerial = 0
+let createReadinessLoadSerial = 0
 const developmentPreviewRefreshController = new DevelopmentPreviewRefreshController<Project>({
   isMounted: () => developmentPreviewComponentMounted,
   selectedProjectName: () => selected.value?.name,
@@ -602,10 +680,143 @@ let projectCreateGeneration = 0
 let approvalModeLoadSerial = 0
 let approvalModeSaveSerial = 0
 let deleteProjectRequestSerial = 0
+let projectSettingsSaveSerial = 0
 
 function clearPendingFirstProjectSubmission() {
   projectCreateGeneration++
   pendingFirstProjectSubmission = null
+}
+
+function invalidateProjectContextState() {
+  const hasToken = Boolean(props.ctx?.token)
+  projectLoadSerial += 1
+  assistantSkillsLoadSerial += 1
+  promotionLoadSerial += 1
+  publishingLoadSerial += 1
+  importRepositoriesLoadSerial += 1
+  developmentTemplatesLoadSerial += 1
+  providerCatalogLoadSerial += 1
+  llmSettingsLoadSerial += 1
+  createReadinessLoadSerial += 1
+  toolLoadSerial += 1
+  developmentPreviewAuthorizationSerial += 1
+  assistantThreadRequestSerial += 1
+  approvalModeLoadSerial += 1
+  approvalModeSaveSerial += 1
+  deleteProjectRequestSerial += 1
+  projectSettingsSaveSerial += 1
+
+  clearInitializationRetry()
+  clearPromotionPoll()
+  clearPublishingPoll()
+  clearDevelopmentPreviewAuthorizationRetry()
+  clearDevelopmentPreviewRecovery()
+  developmentPreviewRefreshController.invalidate()
+  void previewConsoleController.disconnect()
+  assistantRunController.disconnect()
+  activeAssistantSubscription?.abort()
+  activeAssistantSubscription = null
+  for (const runID of Object.keys(assistantRunRevisions)) delete assistantRunRevisions[runID]
+  for (const runID of Object.keys(pendingAssistantStopRequestIDs)) delete pendingAssistantStopRequestIDs[runID]
+
+  activeProjectContextFingerprint = ''
+  activeAssistantRun = null
+  activeAssistantProject = ''
+  activeAssistantThreadID.value = ''
+  activeAssistantThreadSequence = 0
+  messageStreaming.value = false
+  conversationConnectionState.value = 'idle'
+  conversationRefreshing.value = false
+  conversationStatus.value = ''
+  reviewPanelHold.value = null
+  clearSelectedTurnAttachments()
+  selectedLandingCategory.value = null
+  selectingThreadID.value = ''
+  projectOpenLoading.value = hasToken && Boolean(selectedNameFromPath.value)
+  threadHistoryLoading.value = hasToken && Boolean(selectedNameFromPath.value)
+  loading.value = hasToken
+  projectsLoaded.value = false
+  initializing.value = false
+  error.value = null
+  busy.value = false
+  threadMutationBusy.value = false
+  threadError.value = null
+  prompt.value = ''
+  approvalModeLoading.value = false
+  approvalModeSaving.value = false
+  approvalModeError.value = null
+  deletingProject.value = false
+  deleteProjectTarget.value = null
+  showSettings.value = false
+  shareDialogOpen.value = false
+  projectSettingsSaving.value = false
+  projectSettingsStatus.value = null
+  projectSettingsError.value = null
+  promotionLoading.value = false
+  promotionBusy.value = false
+  publishingRefreshBusy.value = false
+  publishingActionBusy.value = false
+  publishingBusyAction.value = null
+  publishingBusyTarget.value = null
+  publishingActionError.value = null
+  publishingLoadState.value = 'idle'
+  publishingLoadError.value = null
+  publishingMembersError.value = null
+  importBusy.value = false
+  developmentSyncBusy.value = false
+  developmentSyncStatus.value = null
+  developmentSyncError.value = null
+  developmentPreviewAuthorizing.value = false
+  developmentPreviewAuthorizationError.value = null
+  developmentPreviewReadinessMessage.value = null
+  developmentPreviewOverrideURL.value = null
+  developmentPreviewAuthorizationKey.value = ''
+  resetDevelopmentPreviewDocumentState()
+  developmentTemplateBusy.value = false
+  developmentHydrateBusy.value = false
+  llmSaving.value = false
+  providersLoading.value = false
+  createReadinessLoading.value = false
+  importRepositoriesLoading.value = false
+  developmentTemplatesLoading.value = false
+  llmSettingsLoading.value = false
+  toolState.value = 'idle'
+  toolError.value = null
+  projectCreateGeneration += 1
+  pendingFirstProjectSubmission = null
+
+  projects.value = []
+  selected.value = null
+  messages.value = []
+  assistantThreads.value = []
+  resetAssistantSkillsState()
+  providers.value = []
+  providerCatalogLoaded.value = false
+  providerCatalogContextKey.value = null
+  providerCatalogError.value = null
+  promotion.value = null
+  promotionError.value = null
+  promotionFeedback.value = null
+  promotionPollState = null
+  promotionLastTarget = null
+  promotionValues.value = {}
+  promotionValuesDirty.value = false
+  publishing.value = null
+  publishingStateAvailable.value = false
+  publishingMembers.value = []
+  publishingMembersLoaded.value = false
+  shareMode.value = 'restricted'
+  importRepositories.value = []
+  importRepositoriesError.value = null
+  importSelectedRepository.value = ''
+  developmentTemplates.value = []
+  developmentTemplatesError.value = null
+  createReadiness.value = null
+  createReadinessError.value = null
+  llmSettings.value = null
+  llmSettingsError.value = null
+  llmStatus.value = null
+  resetWorkbench()
 }
 
 function resetAssistantSkillsState() {
@@ -650,6 +861,14 @@ async function loadAssistantSkills(projectName: string) {
 }
 
 const assistantRunRevisions: Record<string, AssistantRun> = {}
+const conversationConnectionState = ref<ConversationConnectionState>('idle')
+const reviewPanelHold = ref<{
+  kind: 'approval' | 'follow_up'
+  message: ProjectMessageView
+  interrupt: ProjectAssistantInterruptView
+  runID: string
+  decision?: 'allow' | 'deny'
+} | null>(null)
 
 function hydrateAssistantRuns(items: ProjectAssistantThreadItem[]) {
   const incoming = assistantThreadItemsToRuns(items) as Record<string, AssistantRun>
@@ -711,15 +930,22 @@ function rebindAssistantRunFromThreadItems(items: ProjectAssistantThreadItem[], 
 }
 
 const assistantRunController = new ConversationRunController({
+  onState: handleAssistantConnectionState,
   connect: async (runID, _afterRevision, setDisconnect) => {
     const projectName = selected.value?.name
     if (!projectName) return
+    const requestContextFingerprint = appContextFingerprint(props.ctx)
     const controller = new AbortController()
     activeAssistantSubscription = controller
     setDisconnect(() => controller.abort())
     if (!activeAssistantThreadID.value) throw new Error('active assistant thread is missing')
     await api.streamAssistantThread(props.ctx, projectName, activeAssistantThreadID.value, activeAssistantThreadSequence, (event) => {
-      if (selected.value?.name !== projectName || event.turnID && event.turnID !== runID) return
+      if (
+        appContextFingerprint(props.ctx) !== requestContextFingerprint ||
+        activeProjectContextFingerprint !== requestContextFingerprint ||
+        selected.value?.name !== projectName ||
+        event.turnID && event.turnID !== runID
+      ) return
       activeAssistantThreadSequence = Math.max(activeAssistantThreadSequence, event.sequence)
       applyAssistantThreadEvent(event, projectName, runID)
     }, controller.signal)
@@ -755,6 +981,17 @@ const assistantRunController = new ConversationRunController({
   clearTimeout: (timer) => window.clearTimeout(timer),
 })
 
+function handleAssistantConnectionState(state: ConversationConnectionState) {
+  conversationConnectionState.value = state
+  if (state === 'reconnecting') {
+    conversationStatus.value = 'Reconnecting'
+  } else if (state === 'connected' && conversationStatus.value === 'Reconnecting') {
+    conversationStatus.value = 'Working'
+  } else if (state === 'idle' && conversationStatus.value === 'Reconnecting') {
+    conversationStatus.value = ''
+  }
+}
+
 const routeSegment = computed(() => {
   const raw = (props.ctx?.subPath ?? '').split('/').filter(Boolean)[0] ?? ''
   try {
@@ -767,22 +1004,42 @@ const isProjectIndexRoute = computed(() => routeSegment.value === '')
 const isCreateRoute = computed(() => routeSegment.value === CREATE_PROJECT_ROUTE)
 const selectedNameFromPath = computed(() => (isCreateRoute.value ? '' : routeSegment.value))
 const isAppStudioLandingRoute = computed(() => isProjectIndexRoute.value || isCreateRoute.value)
+const projectRouteLoading = computed(() => Boolean(
+  projectOpenLoading.value ||
+  (
+    selectedNameFromPath.value &&
+    selected.value?.name !== selectedNameFromPath.value &&
+    !error.value &&
+    (loading.value || !projectsLoaded.value)
+  ),
+))
+const projectRouteFailure = computed(() => Boolean(
+  selectedNameFromPath.value &&
+  selected.value?.name !== selectedNameFromPath.value &&
+  !!error.value &&
+  !loading.value,
+))
+const projectRouteShellVisible = computed(() => projectRouteLoading.value || projectRouteFailure.value)
+const conversationLoading = computed(() => projectRouteLoading.value || threadHistoryLoading.value || !!selectingThreadID.value)
+const conversationInteractionBusy = computed(() => conversationLoading.value || conversationRefreshing.value || projectRouteFailure.value)
 const isBuilderVisible = computed(() => !isAppStudioLandingRoute.value || selected.value !== null)
 const showNewProjectComposer = computed(() => isCreateRoute.value)
 const chatPaneStyle = computed(() => ({ flexBasis: `${splitWidth.value}%` }))
 const assistantResumeBusy = computed(() => Object.keys(permissionBusy.value).length > 0 || Object.keys(followUpBusy.value).length > 0)
 const llmConfigured = computed(() => llmSettings.value?.configured ?? false)
-const canStartProjectFromPrompt = computed(() => canSubmitCreatePrompt(prompt.value, createReadiness.value) && llmConfigured.value)
+const canStartProjectFromPrompt = computed(() => !createSetupLoading.value && canSubmitCreatePrompt(prompt.value, createReadiness.value) && llmConfigured.value)
 const assistantComposerHasChipContent = computed(() => assistantComposerParts.value.some((part) => part.type !== 'text'))
 const canSendPrompt = computed(() =>
   (llmSettings.value?.configured ?? false) &&
   (prompt.value.trim().length > 0 || (!messageStreaming.value && assistantComposerHasChipContent.value)) &&
   (!messageStreaming.value || activeAssistantRun?.status === 'running') &&
   !assistantResumeBusy.value &&
+  !conversationInteractionBusy.value &&
+  !llmSettingsLoading.value &&
   !approvalModeLoading.value &&
   !approvalModeSaving.value,
 )
-const threadActionsDisabled = computed(() => messageStreaming.value || busy.value || threadMutationBusy.value)
+const threadActionsDisabled = computed(() => conversationInteractionBusy.value || messageStreaming.value || busy.value || threadMutationBusy.value)
 const settingsProject = computed(() => (isAppStudioLandingRoute.value ? null : selected.value))
 const settingsTitle = computed(() => (settingsProject.value ? 'Project settings' : 'LLM settings'))
 const settingsDescription = computed(() =>
@@ -815,6 +1072,7 @@ watch(activePlanMessage, (current, previous) => {
   lastPlanAnnouncementKey = ''
 })
 const conversationWorkingLabel = computed(() => {
+  if (conversationConnectionState.value === 'reconnecting') return 'Reconnecting'
   if (activeAssistantRun?.status === 'stopping') return 'Stopping'
   if (activeAssistantRun?.status === 'pending_permission') return 'Waiting for approval'
   if (activeAssistantRun?.status === 'pending_input') return 'Waiting for your answer'
@@ -834,11 +1092,13 @@ const createSetupItemsForPrompt = computed(() => createSetupItems({
   llmConfigured: llmConfigured.value,
   checkingGit: createReadinessChecking.value,
 }))
+const createSetupLoading = computed(() => createReadinessChecking.value || llmSettingsLoading.value)
 const createPromptSubmitTitle = computed(() => {
+  if (createSetupLoading.value) return 'Checking workspace setup'
   if (createSetupItemsForPrompt.value.length > 0) return 'Complete setup before creating a project'
   return prompt.value.trim() ? 'Create project and send prompt' : 'Describe what you want to build'
 })
-const createSetupVisible = computed(() => createSetupItemsForPrompt.value.length > 0 || !!createReadinessError.value)
+const createSetupVisible = computed(() => !createSetupLoading.value && (createSetupItemsForPrompt.value.length > 0 || !!createReadinessError.value))
 const createSetupErrorMessage = computed(() => createReadinessError.value || '')
 const deleteProjectMessage = computed(() => {
   const project = deleteProjectTarget.value
@@ -1239,52 +1499,43 @@ onMounted(() => {
 })
 
 watch(
-  () => [props.ctx?.token, props.ctx?.subPath],
+  () => props.ctx?.subPath ?? '',
   () => {
+    // A route change can leave the previous project's stream mounted until
+    // the replacement project has hydrated. Detach that stream immediately,
+    // while keeping the split-pane shell visible for the replacement load.
+    if (selected.value?.name && selected.value.name !== selectedNameFromPath.value) {
+      assistantThreadRequestSerial += 1
+      assistantRunController.disconnect()
+      activeAssistantSubscription?.abort()
+      activeAssistantSubscription = null
+      activeAssistantRun = null
+      activeAssistantProject = ''
+      activeAssistantThreadID.value = ''
+      activeProjectContextFingerprint = ''
+      activeAssistantThreadSequence = 0
+      messageStreaming.value = false
+      conversationRefreshing.value = false
+      conversationStatus.value = ''
+      reviewPanelHold.value = null
+      selectingThreadID.value = ''
+      selected.value = null
+      messages.value = []
+      assistantThreads.value = []
+      resetWorkbench()
+    }
     void load()
   },
+  { flush: 'sync' },
 )
 
 watch(
-  () => props.ctx?.token,
-  () => {
-    void loadProviders()
-    void loadCreateReadiness()
-    void loadLLMSettings()
-    void loadImportRepositories()
-    void loadDevelopmentTemplates()
-  },
-)
-
-watch(
-  () => [
-    props.ctx?.tenant ?? '',
-    props.ctx?.orgUUID ?? '',
-    props.ctx?.workspaceUUID ?? '',
-    props.ctx?.user?.userId ?? '',
-    props.ctx?.user?.sub ?? '',
-    props.ctx?.user?.email ?? '',
-  ] as const,
+  () => appContextFingerprint(props.ctx),
   () => {
     // A tenant/user transition must invalidate the old layout before any
     // asynchronous project/catalog response can arrive. Otherwise a pending
     // default or old project's tabs could be written under the new scope.
-    invalidateWorkbenchHydration()
-    // Discard project/thread responses started under the previous identity.
-    approvalModeLoadSerial += 1
-    assistantThreadRequestSerial += 1
-    if (deletingProject.value) {
-      // An in-flight delete belongs to the previous tenant scope. Cancel its
-      // local UI state; its completion still removes the captured old key but
-      // must not update the newly selected tenant's project list.
-      deletingProject.value = false
-      deleteProjectTarget.value = null
-      busy.value = false
-    }
-    deleteProjectRequestSerial += 1
-    providerCatalogLoaded.value = false
-    providerCatalogContextKey.value = null
-    providers.value = []
+    invalidateProjectContextState()
     void load()
     void loadProviders()
     void loadCreateReadiness()
@@ -1292,14 +1543,20 @@ watch(
     void loadImportRepositories()
     void loadDevelopmentTemplates()
   },
+  { flush: 'sync' },
 )
 
 watch(
   () => selected.value?.name,
   () => {
+    // A project transition invalidates any in-flight settings write even if
+    // navigation later returns to the same route before the old response
+    // arrives.
+    projectSettingsSaveSerial += 1
     const shareWasOpen = shareDialogOpen.value
     promotionLoadSerial += 1
     promotion.value = null
+    promotionLoading.value = false
     promotionFeedback.value = null
     promotionError.value = null
     promotionPollState = null
@@ -1310,6 +1567,7 @@ watch(
     clearPromotionPoll()
     publishingLoadSerial += 1
     publishing.value = null
+    publishingStateAvailable.value = false
     publishingMembers.value = []
     publishingMembersLoaded.value = false
     publishingLoadState.value = 'idle'
@@ -1318,7 +1576,10 @@ watch(
     shareMode.value = 'restricted'
     projectSettingsPane.value = 'project'
     projectSettingsPaneAnnouncement.value = ''
+    projectSettingsSaving.value = false
     publishingActionError.value = null
+    publishingBusyAction.value = null
+    publishingBusyTarget.value = null
     shareDialogOpen.value = false
     productionTechnicalOpen.value = false
     clearPublishingPoll()
@@ -1336,6 +1597,7 @@ watch(
     clearDevelopmentPreviewAuthorizationRetry()
 	resetDevelopmentPreviewDocumentState()
     developmentPreviewFrameKey.value += 1
+    reviewPanelHold.value = null
   },
 )
 
@@ -1433,7 +1695,15 @@ watch(llmCredentialMode, () => {
   llmModel.value = normalizeLLMModelInput(llmProvider.value, llmModel.value, llmCredentialMode.value)
 })
 
-watch(settingsProject, () => {
+watch(settingsProject, (project, previousProject) => {
+  // Project Settings is rendered inside the active project's workbench. When
+  // navigation leaves that project for the App Studio landing page, close the
+  // project-scoped surface before Teleport can move it to body and reinterpret
+  // it as the workspace-level LLM settings modal.
+  if (!project && previousProject) {
+    showSettings.value = false
+    return
+  }
   if (showSettings.value) syncProjectSettingsForm()
 })
 
@@ -1473,10 +1743,44 @@ onBeforeUnmount(() => {
 })
 
 async function load() {
-  if (!props.ctx?.token) return
-  if (messageStreaming.value && selected.value && selectedNameFromPath.value === selected.value.name) {
+  const requestGuard = beginProjectRequest()
+  selectingThreadID.value = ''
+  if (!props.ctx?.token) {
+    clearInitializationRetry()
+    initializing.value = false
+    loading.value = false
+    projectsLoaded.value = false
+    projectOpenLoading.value = false
+    threadHistoryLoading.value = false
+    assistantThreadRequestSerial += 1
+    assistantRunController.disconnect()
+    activeAssistantSubscription?.abort()
+    activeAssistantSubscription = null
+    activeAssistantRun = null
+    activeAssistantProject = ''
+    activeAssistantThreadID.value = ''
+    messageStreaming.value = false
+    conversationRefreshing.value = false
+    conversationStatus.value = ''
+    reviewPanelHold.value = null
+    activeProjectContextFingerprint = ''
+    projects.value = []
+    selected.value = null
+    messages.value = []
+    assistantThreads.value = []
+    return
+  }
+  if (
+    messageStreaming.value &&
+    selected.value &&
+    selectedNameFromPath.value === selected.value.name &&
+    activeProjectContextFingerprint === appContextFingerprint(props.ctx) &&
+    projectRequestIsCurrent(requestGuard, selected.value.name)
+  ) {
     loading.value = false
     projectsLoaded.value = true
+    projectOpenLoading.value = false
+    threadHistoryLoading.value = false
     return
   }
   clearInitializationRetry()
@@ -1484,11 +1788,16 @@ async function load() {
   projectsLoaded.value = false
   error.value = null
   try {
-    projects.value = await api.listProjects(props.ctx)
+    const projectList = await api.listProjects(props.ctx)
+    if (!projectRequestIsCurrent(requestGuard)) return
+    projects.value = projectList
     projectsLoaded.value = true
     initializing.value = false
     if (isCreateRoute.value) {
 	  clearPendingFirstProjectSubmission()
+      activeProjectContextFingerprint = ''
+      projectOpenLoading.value = false
+      threadHistoryLoading.value = false
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
@@ -1498,7 +1807,10 @@ async function load() {
       resetWorkbench()
       return
     }
-    if (projects.value.length === 0) {
+    if (projectList.length === 0) {
+      activeProjectContextFingerprint = ''
+      projectOpenLoading.value = false
+      threadHistoryLoading.value = false
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
@@ -1512,9 +1824,12 @@ async function load() {
     const pathName = selectedNameFromPath.value
     if (pathName) {
 	  if (pendingFirstProjectSubmission && pathName !== pendingFirstProjectSubmission.projectName) clearPendingFirstProjectSubmission()
-      await openProject(pathName, false)
+      await openProject(pathName, false, requestGuard)
     } else {
 	  clearPendingFirstProjectSubmission()
+      activeProjectContextFingerprint = ''
+      projectOpenLoading.value = false
+      threadHistoryLoading.value = false
       assistantRunController.disconnect()
       activeAssistantSubscription?.abort()
       activeAssistantRun = null
@@ -1524,10 +1839,22 @@ async function load() {
       resetWorkbench()
     }
   } catch (e) {
+    if (!projectRequestIsCurrent(requestGuard)) return
     if (handleProjectAPIInitializing(e)) return
+    clearInitializationRetry()
+    initializing.value = false
+    initializingMessage.value = 'App Studio is preparing this workspace...'
     error.value = e instanceof Error ? e.message : String(e)
+    // A terminal list failure must leave the landing surface in a settled
+    // state. Keep any cached projects visible and expose the error/retry
+    // affordance instead of leaving the skeleton branch mounted forever.
+    projectsLoaded.value = true
   } finally {
-    loading.value = false
+    if (projectRequestIsCurrent(requestGuard)) {
+      loading.value = false
+      projectOpenLoading.value = false
+      threadHistoryLoading.value = false
+    }
   }
 }
 
@@ -1575,8 +1902,20 @@ function resetDevelopmentPreviewDocumentState() {
 
 async function loadProviders() {
   const serial = ++providerCatalogLoadSerial
-  providerCatalogLoaded.value = false
-  providerCatalogContextKey.value = null
+  const requestContextKey = props.ctx?.token
+    ? workbenchCatalogContextFingerprint(workbenchPersistenceContext())
+    : null
+  const hasCurrentCatalog = Boolean(
+    requestContextKey &&
+    providerCatalogLoaded.value &&
+    providerCatalogContextKey.value === requestContextKey,
+  )
+  if (!hasCurrentCatalog) {
+    providerCatalogLoaded.value = false
+    providerCatalogContextKey.value = null
+    providers.value = []
+  }
+  providerCatalogError.value = null
   if (!props.ctx?.token) {
     // Invalidate the prior catalog even when logout means there is no request
     // to start. An older in-flight response must fail the serial check above.
@@ -1584,7 +1923,6 @@ async function loadProviders() {
     providersLoading.value = false
     return
   }
-  const requestContextKey = workbenchCatalogContextFingerprint(workbenchPersistenceContext())
   providersLoading.value = true
   try {
     const catalog = await api.listProviders(props.ctx)
@@ -1593,59 +1931,108 @@ async function loadProviders() {
     providers.value = catalog
     providerCatalogLoaded.value = true
     providerCatalogContextKey.value = requestContextKey
+    providerCatalogError.value = null
     reconcileCurrentWorkbenchProviders()
   } catch (e) {
     if (serial !== providerCatalogLoadSerial) return
-    toolError.value = e instanceof Error ? e.message : String(e)
+    providerCatalogError.value = e instanceof Error ? e.message : String(e)
   } finally {
     if (serial === providerCatalogLoadSerial) providersLoading.value = false
   }
 }
 
 async function loadCreateReadiness() {
-  if (!props.ctx?.token) return
+  const serial = ++createReadinessLoadSerial
+  if (!props.ctx?.token) {
+    createReadinessLoading.value = false
+    createReadiness.value = null
+    createReadinessError.value = null
+    return
+  }
   createReadinessLoading.value = true
   createReadinessError.value = null
   try {
-    createReadiness.value = await api.getProjectCreateReadiness(props.ctx)
+    const readiness = await api.getProjectCreateReadiness(props.ctx)
+    if (serial !== createReadinessLoadSerial) return
+    createReadiness.value = readiness
   } catch (e) {
+    if (serial !== createReadinessLoadSerial) return
     if (handleProjectAPIInitializing(e)) return
     createReadiness.value = null
     createReadinessError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    createReadinessLoading.value = false
+    if (serial === createReadinessLoadSerial) createReadinessLoading.value = false
   }
 }
 
 async function loadLLMSettings() {
-  if (!props.ctx?.token) return
+  const serial = ++llmSettingsLoadSerial
+  if (!props.ctx?.token) {
+    llmSettingsLoading.value = false
+    llmSettings.value = null
+    llmSettingsError.value = null
+    return
+  }
+  llmSettingsLoading.value = true
+  llmSettingsError.value = null
+  llmStatus.value = null
   try {
     const settings = await api.getLLMSettings(props.ctx)
+    if (serial !== llmSettingsLoadSerial) return
     applyLLMSettings(settings)
   } catch (e) {
+    if (serial !== llmSettingsLoadSerial) return
     if (handleProjectAPIInitializing(e)) return
-    llmStatus.value = e instanceof Error ? e.message : String(e)
+    llmSettingsError.value = e instanceof Error ? e.message : String(e)
+    llmStatus.value = llmSettingsError.value
+  } finally {
+    if (serial === llmSettingsLoadSerial) llmSettingsLoading.value = false
   }
 }
 
 async function loadImportRepositories() {
-  if (!props.ctx?.token) return
-  try {
-    importRepositories.value = await api.listImportRepositories(props.ctx)
-  } catch (e) {
-    if (handleProjectAPIInitializing(e)) return
-    // Import stays hidden when the list is unavailable; not a landing error.
+  const serial = ++importRepositoriesLoadSerial
+  if (!props.ctx?.token) {
+    importRepositoriesLoading.value = false
     importRepositories.value = []
+    importRepositoriesError.value = null
+    return
+  }
+  importRepositoriesLoading.value = true
+  importRepositoriesError.value = null
+  try {
+    const repositories = await api.listImportRepositories(props.ctx)
+    if (serial !== importRepositoriesLoadSerial) return
+    importRepositories.value = repositories
+  } catch (e) {
+    if (serial !== importRepositoriesLoadSerial) return
+    if (handleProjectAPIInitializing(e)) return
+    importRepositoriesError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    if (serial === importRepositoriesLoadSerial) importRepositoriesLoading.value = false
   }
 }
 
 async function loadDevelopmentTemplates() {
-  if (!props.ctx?.token) return
-  try {
-    developmentTemplates.value = await api.listDevelopmentTemplates(props.ctx)
-  } catch (e) {
-    if (handleProjectAPIInitializing(e)) return
+  const serial = ++developmentTemplatesLoadSerial
+  if (!props.ctx?.token) {
+    developmentTemplatesLoading.value = false
     developmentTemplates.value = []
+    developmentTemplatesError.value = null
+    return
+  }
+  developmentTemplatesLoading.value = true
+  developmentTemplatesError.value = null
+  try {
+    const templates = await api.listDevelopmentTemplates(props.ctx)
+    if (serial !== developmentTemplatesLoadSerial) return
+    developmentTemplates.value = templates
+  } catch (e) {
+    if (serial !== developmentTemplatesLoadSerial) return
+    if (handleProjectAPIInitializing(e)) return
+    developmentTemplatesError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    if (serial === developmentTemplatesLoadSerial) developmentTemplatesLoading.value = false
   }
 }
 
@@ -1718,6 +2105,8 @@ const canPromote = computed(() => !!promotion.value?.promotable && productionFor
 const promotionDisabledReason = computed(() => {
   if (promotionBusy.value) return 'Promotion is in progress.'
   if (!selected.value?.name) return 'Select a project before checking its build status.'
+  if (promotionLoading.value && !promotion.value) return 'Loading production status before enabling promotion.'
+  if (promotionError.value && !promotion.value) return 'Production status is unavailable. Refresh to retry.'
   if (!promotion.value) return 'Checking the build status before enabling promotion…'
   if (!productionFormValid.value) return 'Fix the highlighted production settings before deploying.'
   if (promotion.value.promotable) return ''
@@ -1762,6 +2151,9 @@ const productionPublicationStatus = computed(() => {
   return { label: productionAccess.value.label, tone: productionAccess.value.tone }
 })
 const productionOverview = computed(() => {
+  if (promotionLoading.value && !promotion.value) return { label: 'Loading', tone: 'muted' as const }
+  if (promotionError.value && !promotion.value) return { label: 'Unavailable', tone: 'danger' as const }
+  if (!promotion.value) return { label: 'Awaiting status', tone: 'muted' as const }
   if (!productionBinding.value) return { label: 'Not deployed', tone: 'muted' as const }
   if (!productionDeployment.value.ready) {
     return { label: productionDeployment.value.label, tone: productionDeployment.value.tone }
@@ -1775,6 +2167,9 @@ const productionOverview = computed(() => {
   return { label: 'Enabling access', tone: 'warning' as const }
 })
 const productionOverviewDescription = computed(() => {
+  if (promotionLoading.value && !promotion.value) return 'Checking the build, deployment, and release status for this project…'
+  if (promotionError.value && !promotion.value) return 'Production status could not be loaded. Refresh to try again.'
+  if (!promotion.value) return 'Production status will appear here once the project responds.'
   if (!productionBinding.value) {
     return 'No production deployment yet. Build every component before deploying this app.'
   }
@@ -1876,6 +2271,7 @@ async function loadPromotion() {
   const name = selected.value?.name
   if (!name) {
     promotion.value = null
+    promotionLoading.value = false
     promotionFeedback.value = null
     promotionPollState = null
     promotionLastTarget = null
@@ -1885,6 +2281,9 @@ async function loadPromotion() {
   }
   const requestSerial = ++promotionLoadSerial
   const pollAtStart = promotionPollState
+  const firstHydration = promotion.value === null
+  if (firstHydration) promotionLoading.value = true
+  promotionError.value = null
   try {
     const readiness = await api.getPromotion(props.ctx, name)
     if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
@@ -1912,8 +2311,11 @@ async function loadPromotion() {
     // A successful acknowledgement must not survive an error for the same
     // project: it would make a failed refresh look like a completed rollout.
     promotionFeedback.value = null
-    if (!isProjectAPIInitializingError(err)) {
-      promotionError.value = err instanceof Error ? err.message : String(err)
+    const detail = err instanceof Error ? err.message.trim() : String(err).trim()
+    if (isProjectAPIInitializingError(err)) {
+      promotionError.value = detail || 'App Studio is still preparing this workspace. Retry production status in a moment.'
+    } else {
+      promotionError.value = detail || 'Production status is unavailable. Refresh to retry.'
     }
     if (pollAtStart && promotionPollState === pollAtStart) {
       const progress = advancePromotionPoll(pollAtStart, null)
@@ -1922,6 +2324,7 @@ async function loadPromotion() {
     }
   }
   if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
+  if (requestSerial === promotionLoadSerial) promotionLoading.value = false
   schedulePromotionPoll()
 }
 
@@ -1930,6 +2333,7 @@ async function loadPublishing() {
   if (!name) {
     publishingLoadSerial += 1
     publishing.value = null
+    publishingStateAvailable.value = false
     publishingMembers.value = []
     publishingMembersLoaded.value = false
     publishingLoadState.value = 'idle'
@@ -1940,7 +2344,7 @@ async function loadPublishing() {
     return
   }
   const requestSerial = ++publishingLoadSerial
-  const stateWasLoaded = publishing.value !== null
+  const stateWasLoaded = publishingStateAvailable.value
   const membersWereLoaded = publishingMembersLoaded.value
   if (!stateWasLoaded && !membersWereLoaded) publishingLoadState.value = 'loading'
   publishingLoadError.value = null
@@ -1956,6 +2360,7 @@ async function loadPublishing() {
   const membersSucceeded = membersResult.status === 'fulfilled'
   if (stateSucceeded) {
     publishing.value = stateResult.value
+    publishingStateAvailable.value = true
     if (!shareDialogOpen.value) {
       shareMode.value = publishingAccessSelection(stateResult.value) === 'public' ? 'public' : 'restricted'
     }
@@ -1969,7 +2374,7 @@ async function loadPublishing() {
     publishingMembersError.value = membersResult.reason instanceof Error ? membersResult.reason.message : String(membersResult.reason)
   }
 
-  const stateAvailable = publishing.value !== null
+  const stateAvailable = publishingStateAvailable.value
   const membersAvailable = publishingMembersLoaded.value
   publishingLoadState.value = stateSucceeded && membersSucceeded
     ? 'ready'
@@ -1983,6 +2388,18 @@ async function loadPublishing() {
 function retryPublishing() {
   if (publishingActionBusy.value) return
   void loadPublishing()
+}
+
+function beginPublishingAction(action: PublishingBusyAction, target: string | null = null) {
+  publishingActionBusy.value = true
+  publishingBusyAction.value = action
+  publishingBusyTarget.value = target
+}
+
+function finishPublishingAction() {
+  publishingActionBusy.value = false
+  publishingBusyAction.value = null
+  publishingBusyTarget.value = null
 }
 
 async function refreshProduction() {
@@ -2000,8 +2417,8 @@ async function refreshProduction() {
 // in the Share dialog; visibility itself is a one-select decision.
 async function setProductionVisibility(mode: ProjectPublishingMode) {
   const name = selected.value?.name
-  if (!name || publishingActionBusy.value) return
-  publishingActionBusy.value = true
+  if (!name || !publishingStateAvailable.value || publishingActionBusy.value) return
+  beginPublishingAction('save', mode)
   publishingActionError.value = null
   try {
     const state = await api.publishProject(props.ctx, name, mode)
@@ -2014,7 +2431,7 @@ async function setProductionVisibility(mode: ProjectPublishingMode) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
     }
   } finally {
-    publishingActionBusy.value = false
+    finishPublishingAction()
   }
 }
 
@@ -2025,26 +2442,31 @@ function onProductionVisibilityChange(event: Event) {
 
 async function publishCurrentProject() {
   const name = selected.value?.name
-  if (!name || publishingActionBusy.value) return
-  publishingActionBusy.value = true
+  if (!name || !publishingStateAvailable.value || publishingActionBusy.value) return
+  const mode = shareMode.value
+  beginPublishingAction('save', mode)
   publishingActionError.value = null
   try {
-    const state = await api.publishProject(props.ctx, name, shareMode.value)
+    const state = await api.publishProject(props.ctx, name, mode)
     if (selected.value?.name !== name) return
     publishing.value = state
+    // Share stays open after a successful save. Reflect the acknowledged
+    // publication immediately; the background refresh intentionally does not
+    // overwrite a live Share draft while the dialog is open.
+    shareMode.value = state.publication?.mode === 'public' ? 'public' : mode
     await loadPublishing()
   } catch (err) {
     if (selected.value?.name === name) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
     }
   } finally {
-    publishingActionBusy.value = false
+    finishPublishingAction()
   }
 }
 
 async function unpublishCurrentProject() {
   const name = selected.value?.name
-  if (!name || publishingActionBusy.value) return
+  if (!name || !publishingStateAvailable.value || publishingActionBusy.value) return
   const disableAccessTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
   const confirmed = await confirmDialog({
     title: 'Disable external access?',
@@ -2058,7 +2480,7 @@ async function unpublishCurrentProject() {
     return
   }
   if (selected.value?.name !== name) return
-  publishingActionBusy.value = true
+  beginPublishingAction('disable', name)
   publishingActionError.value = null
   let disableSucceeded = false
   try {
@@ -2073,6 +2495,8 @@ async function unpublishCurrentProject() {
     }
   } finally {
     publishingActionBusy.value = false
+    publishingBusyAction.value = null
+    publishingBusyTarget.value = null
     if (disableSucceeded) closeShareDialog()
   }
 }
@@ -2090,8 +2514,8 @@ async function inviteCurrentProjectAccess(email: string) {
 async function grantOrInviteProjectAccess(user: string, invite: boolean) {
   const name = selected.value?.name
   const selectedUser = user.trim()
-  if (!name || !selectedUser || publishingActionBusy.value) return
-  publishingActionBusy.value = true
+  if (!name || !publishingStateAvailable.value || !selectedUser || publishingActionBusy.value) return
+  beginPublishingAction(invite ? 'invite' : 'grant', selectedUser)
   publishingActionError.value = null
   try {
     await api.grantPublishingAccess(props.ctx, name, selectedUser, invite)
@@ -2102,14 +2526,14 @@ async function grantOrInviteProjectAccess(user: string, invite: boolean) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
     }
   } finally {
-    publishingActionBusy.value = false
+    finishPublishingAction()
   }
 }
 
 async function revokeCurrentProjectAccess(grant: string) {
   const name = selected.value?.name
-  if (!name || publishingActionBusy.value) return
-  publishingActionBusy.value = true
+  if (!name || !publishingStateAvailable.value || publishingActionBusy.value) return
+  beginPublishingAction('revoke', grant)
   publishingActionError.value = null
   try {
     await api.revokePublishingAccess(props.ctx, name, grant)
@@ -2120,7 +2544,7 @@ async function revokeCurrentProjectAccess(grant: string) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
     }
   } finally {
-    publishingActionBusy.value = false
+    finishPublishingAction()
   }
 }
 
@@ -2580,6 +3004,7 @@ async function createProjectAndStartConversation(
       submission = firstProjectSubmissionWithProject(submission, projectName)
       pendingFirstProjectSubmission = submission
       selected.value = created
+      activeProjectContextFingerprint = appContextFingerprint(props.ctx)
       initializeWorkbenchForNewProject(projectName)
       messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
       props.navigate(encodeURIComponent(projectName))
@@ -2684,6 +3109,12 @@ function selectProjectSettingsPane(pane: ProjectSettingsPane) {
 function closeSettings() {
   if (projectSettingsSaving.value || llmSaving.value) return
   showSettings.value = false
+  if (settingsProject.value && workbench.value.tabs.some((tab) => tab.id === 'settings')) {
+    // Closing the inline surface also closes its workbench tab. The shared
+    // workbench transition chooses and persists the nearest valid fallback,
+    // so Escape/backdrop cannot leave an empty active settings host behind.
+    closeWorkbenchTabByID('settings')
+  }
 }
 
 function syncProjectSettingsForm() {
@@ -2706,9 +3137,16 @@ async function saveProjectSettings() {
     return
   }
 
+  const saveSerial = ++projectSettingsSaveSerial
+  const projectName = project.name
+  const contextFingerprint = projectContextFingerprint(props.ctx)
+  const isCurrentSave = () => saveSerial === projectSettingsSaveSerial &&
+    contextFingerprint === projectContextFingerprint(props.ctx) &&
+    selected.value?.name === projectName
   projectSettingsSaving.value = true
   try {
-    const updated = await api.patchProject(props.ctx, project.name, { displayName, description })
+    const updated = await api.patchProject(props.ctx, projectName, { displayName, description })
+    if (!isCurrentSave()) return
     selected.value = updated
     const idx = projects.value.findIndex((item) => item.name === updated.name)
     if (idx >= 0) {
@@ -2719,15 +3157,29 @@ async function saveProjectSettings() {
     projectSettingsDescription.value = updated.description ?? ''
     projectSettingsStatus.value = 'Project details saved.'
   } catch (e) {
+    if (!isCurrentSave()) return
     if (handleProjectAPIInitializing(e)) return
     projectSettingsError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    projectSettingsSaving.value = false
+    if (isCurrentSave()) projectSettingsSaving.value = false
   }
 }
 
-async function openProject(name: string, updateURL = true) {
+function enterProject(project: Project) {
+  // The project card already has enough durable metadata to render the normal
+  // workspace frame. Seed it before navigation so the gallery is replaced by
+  // the split pane in the same render cycle as the click; route hydration then
+  // fills the conversation and active workbench without a blank interstitial.
+  selected.value = project
+  projectOpenLoading.value = true
+  threadHistoryLoading.value = true
+  error.value = null
+  props.navigate(encodeURIComponent(project.name))
+}
+
+async function openProject(name: string, updateURL = true, requestGuardOverride?: ProjectRequestGuard) {
   if (!name) return
+  const requestGuard = requestGuardOverride ?? beginProjectRequest()
   const assistantThreadLoadSerial = ++assistantThreadRequestSerial
   const approvalRequestSerial = ++approvalModeLoadSerial
   approvalModeSaveSerial += 1
@@ -2735,12 +3187,22 @@ async function openProject(name: string, updateURL = true) {
   approvalModeSaving.value = false
   approvalModeError.value = null
   threadError.value = null
+  projectOpenLoading.value = true
+  threadHistoryLoading.value = true
+  selectingThreadID.value = ''
   if (selected.value?.name !== name) {
     assistantRunController.disconnect()
     activeAssistantSubscription?.abort()
     activeAssistantRun = null
     activeAssistantProject = ''
     messageStreaming.value = false
+    selected.value = null
+    messages.value = []
+    assistantThreads.value = []
+    activeAssistantThreadID.value = ''
+    activeProjectContextFingerprint = ''
+    reviewPanelHold.value = null
+    resetWorkbench()
   }
   error.value = null
   try {
@@ -2748,29 +3210,43 @@ async function openProject(name: string, updateURL = true) {
       api.getProject(props.ctx, name),
       api.listAssistantThreads(props.ctx, name),
       api.getAssistantApprovalMode(props.ctx, name).catch((preferenceError: unknown) => {
-        if (approvalRequestSerial === approvalModeLoadSerial) {
+        if (approvalRequestSerial === approvalModeLoadSerial && projectRequestIsCurrent(requestGuard)) {
           approvalModeError.value = preferenceError instanceof Error ? preferenceError.message : String(preferenceError)
         }
         return null
       }),
     ])
-    if (approvalRequestSerial !== approvalModeLoadSerial || assistantThreadLoadSerial !== assistantThreadRequestSerial) return
+    if (
+      !projectRequestIsCurrent(requestGuard) ||
+      approvalRequestSerial !== approvalModeLoadSerial ||
+      assistantThreadLoadSerial !== assistantThreadRequestSerial
+    ) return
     selected.value = project
+    activeProjectContextFingerprint = appContextFingerprint(props.ctx)
     hydrateWorkbenchForProject(name)
     assistantThreads.value = threads
     activeAssistantThreadID.value = restoreAssistantThreadFocus(assistantThreadFocusScope(name), threads)
     const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, name, activeAssistantThreadID.value) : []
-    if (assistantThreadLoadSerial !== assistantThreadRequestSerial || selected.value?.name !== name) return
+    if (
+      !projectRequestIsCurrent(requestGuard, name) ||
+      assistantThreadLoadSerial !== assistantThreadRequestSerial
+    ) return
     activeAssistantThreadSequence = maxAssistantThreadSequence(threadItems)
     messages.value = projectAssistantThreadItems(threadItems, name)
     approvalMode.value = preference?.mode ?? 'on_request'
-    await recoverAssistantConversation(name)
+    await recoverAssistantConversation(name, requestGuard)
+    if (!projectRequestIsCurrent(requestGuard, name)) return
     if (updateURL) props.navigate(encodeURIComponent(name))
   } catch (e) {
+    if (!projectRequestIsCurrent(requestGuard)) return
     if (handleProjectAPIInitializing(e)) return
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
-    if (approvalRequestSerial === approvalModeLoadSerial) approvalModeLoading.value = false
+    if (projectRequestIsCurrent(requestGuard) && approvalRequestSerial === approvalModeLoadSerial) approvalModeLoading.value = false
+    if (projectRequestIsCurrent(requestGuard) && assistantThreadLoadSerial === assistantThreadRequestSerial) {
+      projectOpenLoading.value = false
+      threadHistoryLoading.value = false
+    }
   }
 }
 
@@ -2794,34 +3270,51 @@ async function selectApprovalMode(mode: ProjectAssistantApprovalMode) {
 
 async function refreshSelectedProjectConversation(projectName: string) {
   if (!projectName || selected.value?.name !== projectName) return
+  const requestGuard = beginProjectRequest()
   const assistantThreadLoadSerial = ++assistantThreadRequestSerial
-  const [project, threads, projectList] = await Promise.all([
-    api.getProject(props.ctx, projectName),
-    api.listAssistantThreads(props.ctx, projectName),
-    api.listProjects(props.ctx),
-  ])
-  if (assistantThreadLoadSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName) return
-  selected.value = project
-  assistantThreads.value = threads
-  threadError.value = null
-  const currentThreadID = threads.some((thread) => thread.id === activeAssistantThreadID.value)
-    ? activeAssistantThreadID.value
-    : restoreAssistantThreadFocus(assistantThreadFocusScope(projectName), threads)
-  activeAssistantThreadID.value = currentThreadID
-  persistAssistantThreadFocus(assistantThreadFocusScope(projectName), currentThreadID)
-  const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, projectName, activeAssistantThreadID.value) : []
-  if (assistantThreadLoadSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName) return
-  activeAssistantThreadSequence = maxAssistantThreadSequence(threadItems)
-  // A refresh can race the live stream. Merge the durable list into the live
-  // projection while this project/run is still active so a newer delta or
-  // commentary item is never rolled back to the request's earlier snapshot.
-  messages.value = projectAssistantThreadItems(
-    threadItems,
-    projectName,
-    messageStreaming.value && activeAssistantProject === projectName,
-  )
-  projects.value = projectList
-  await recoverAssistantConversation(projectName)
+  selectingThreadID.value = ''
+  conversationRefreshing.value = true
+  try {
+    const [project, threads, projectList] = await Promise.all([
+      api.getProject(props.ctx, projectName),
+      api.listAssistantThreads(props.ctx, projectName),
+      api.listProjects(props.ctx),
+    ])
+    if (
+      !projectRequestIsCurrent(requestGuard, projectName) ||
+      assistantThreadLoadSerial !== assistantThreadRequestSerial
+    ) return
+    selected.value = project
+    activeProjectContextFingerprint = appContextFingerprint(props.ctx)
+    assistantThreads.value = threads
+    threadError.value = null
+    const currentThreadID = threads.some((thread) => thread.id === activeAssistantThreadID.value)
+      ? activeAssistantThreadID.value
+      : restoreAssistantThreadFocus(assistantThreadFocusScope(projectName), threads)
+    activeAssistantThreadID.value = currentThreadID
+    persistAssistantThreadFocus(assistantThreadFocusScope(projectName), currentThreadID)
+    const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, projectName, activeAssistantThreadID.value) : []
+    if (
+      !projectRequestIsCurrent(requestGuard, projectName) ||
+      assistantThreadLoadSerial !== assistantThreadRequestSerial
+    ) return
+    activeAssistantThreadSequence = maxAssistantThreadSequence(threadItems)
+    // A refresh can race the live stream. Merge the durable list into the live
+    // projection while this project/run is still active so a newer delta or
+    // commentary item is never rolled back to the request's earlier snapshot.
+    messages.value = projectAssistantThreadItems(
+      threadItems,
+      projectName,
+      messageStreaming.value && activeAssistantProject === projectName,
+    )
+    projects.value = projectList
+    await recoverAssistantConversation(projectName, requestGuard)
+  } finally {
+    if (
+      projectRequestIsCurrent(requestGuard, projectName) &&
+      assistantThreadLoadSerial === assistantThreadRequestSerial
+    ) conversationRefreshing.value = false
+  }
 }
 
 function selectAssistantResponseMode(mode: AssistantResponseMode) {
@@ -2892,28 +3385,59 @@ function updateAssistantThreadFromEvent(threadID: string, patch: Partial<Project
 
 async function selectAssistantThread(threadID: string) {
   const projectName = selected.value?.name
-  if (!projectName || !threadID || messageStreaming.value || busy.value) return
+  if (!projectName || !threadID || messageStreaming.value || busy.value || conversationInteractionBusy.value) return
   if (threadID === activeAssistantThreadID.value) {
     persistAssistantThreadFocus(assistantThreadFocusScope(projectName), threadID)
     return
   }
+  const previousThreadID = activeAssistantThreadID.value
+  const requestGuard = beginProjectRequest()
   const assistantThreadLoadSerial = ++assistantThreadRequestSerial
-  assistantRunController.disconnect()
-  activeAssistantSubscription?.abort()
-  activeAssistantRun = null
-  activeAssistantProject = ''
-  activeAssistantThreadID.value = threadID
-  persistAssistantThreadFocus(assistantThreadFocusScope(projectName), threadID)
+  selectingThreadID.value = threadID
+  threadHistoryLoading.value = true
   threadError.value = null
+  let restorePriorThreadFocus = false
   try {
     const items = await api.listAssistantThreadItems(props.ctx, projectName, threadID)
-    if (assistantThreadLoadSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName || activeAssistantThreadID.value !== threadID) return
+    if (
+      !projectRequestIsCurrent(requestGuard, projectName) ||
+      assistantThreadLoadSerial !== assistantThreadRequestSerial ||
+      activeAssistantThreadID.value !== previousThreadID
+    ) return
+    // Do not strand the UI on a target thread until its history has loaded.
+    // Commit the selection only after the request succeeds; a failure keeps
+    // the prior thread, conversation, stream, and focus valid.
+    assistantRunController.disconnect()
+    activeAssistantSubscription?.abort()
+    activeAssistantRun = null
+    activeAssistantProject = ''
+    activeAssistantThreadID.value = threadID
+    persistAssistantThreadFocus(assistantThreadFocusScope(projectName), threadID)
+    reviewPanelHold.value = null
     activeAssistantThreadSequence = maxAssistantThreadSequence(items)
     messages.value = projectAssistantThreadItems(items, projectName)
     messageStreaming.value = false
   } catch (e) {
-    if (assistantThreadLoadSerial === assistantThreadRequestSerial && selected.value?.name === projectName && activeAssistantThreadID.value === threadID) {
+    if (
+      projectRequestIsCurrent(requestGuard, projectName) &&
+      assistantThreadLoadSerial === assistantThreadRequestSerial &&
+      (activeAssistantThreadID.value === threadID || activeAssistantThreadID.value === previousThreadID)
+    ) {
       threadError.value = e instanceof Error ? e.message : String(e)
+      restorePriorThreadFocus = true
+    }
+  } finally {
+    if (
+      projectRequestIsCurrent(requestGuard, projectName) &&
+      assistantThreadLoadSerial === assistantThreadRequestSerial &&
+      selectingThreadID.value === threadID
+    ) {
+      selectingThreadID.value = ''
+      threadHistoryLoading.value = false
+      if (restorePriorThreadFocus) {
+        await nextTick()
+        threadsWorkbenchRef.value?.focusActiveThread?.()
+      }
     }
   }
 }
@@ -2983,6 +3507,7 @@ async function deleteAssistantThread(threadID: string) {
     activeAssistantRun = null
     activeAssistantProject = ''
     messageStreaming.value = false
+    reviewPanelHold.value = null
     messages.value = []
     if (nextThread) {
       await selectAssistantThread(nextThread.id)
@@ -3066,6 +3591,7 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
   else assistantRunController.disconnect()
   messageStreaming.value = requiresLiveControls
   if (assistantRunTerminal(normalized.run.status) && acceptedTerminal) {
+    if (reviewPanelHold.value?.runID === normalized.run.id) reviewPanelHold.value = null
     conversationStatus.value = ''
     assistantRunController.disconnect()
     if (normalized.message.metadata?.previewRefreshNeeded === true) {
@@ -3080,14 +3606,17 @@ function applyAssistantSnapshot(snapshot: ProjectAssistantSnapshot, projectName 
   return accepted
 }
 
-async function recoverAssistantConversation(projectName: string): Promise<{ accepted: boolean; current: AssistantRun | undefined } | undefined> {
-  if (selected.value?.name !== projectName || !activeAssistantThreadID.value) return undefined
+async function recoverAssistantConversation(
+  projectName: string,
+  requestGuard: ProjectRequestGuard = currentProjectRequestGuard(),
+): Promise<{ accepted: boolean; current: AssistantRun | undefined } | undefined> {
+  if (!projectRequestIsCurrent(requestGuard, projectName) || !activeAssistantThreadID.value) return undefined
   const threadID = activeAssistantThreadID.value
   const expectedRunID = activeAssistantProject === projectName ? activeAssistantRun?.id ?? '' : ''
   const turn = await api.getActiveAssistantTurn(props.ctx, projectName, threadID)
-  if (selected.value?.name !== projectName || activeAssistantThreadID.value !== threadID) return undefined
+  if (!projectRequestIsCurrent(requestGuard, projectName) || activeAssistantThreadID.value !== threadID) return undefined
   const items = await api.listAssistantThreadItems(props.ctx, projectName, threadID)
-  if (selected.value?.name !== projectName || activeAssistantThreadID.value !== threadID) return undefined
+  if (!projectRequestIsCurrent(requestGuard, projectName) || activeAssistantThreadID.value !== threadID) return undefined
   activeAssistantThreadSequence = maxAssistantThreadSequence(items)
   messages.value = projectAssistantThreadItems(items, projectName, Boolean(turn))
   // A 204 means the stream may have missed its terminal event. The durable
@@ -3115,6 +3644,7 @@ async function recoverAssistantConversation(projectName: string): Promise<{ acce
     activeAssistantProject = ''
     messageStreaming.value = false
     conversationStatus.value = ''
+    reviewPanelHold.value = null
     return { accepted: false, current: materialized }
   }
   const assistantItem = [...items].reverse().find((item) => item.turnID === turn.id && item.type === 'agentMessage' && item.phase !== 'commentary')
@@ -3475,8 +4005,15 @@ function openShareDialog() {
   shareDialogOpen.value = true
 }
 
+function restoreShareModeFromPublication() {
+  shareMode.value = publishing.value?.published && publishing.value.publication?.mode === 'public'
+    ? 'public'
+    : 'restricted'
+}
+
 function closeShareDialog() {
   if (publishingActionBusy.value) return
+  restoreShareModeFromPublication()
   shareDialogOpen.value = false
   void nextTick(() => shareButtonRef.value?.focus())
   if (!productionSettingsVisible.value) {
@@ -3487,6 +4024,10 @@ function closeShareDialog() {
 
 function openProductionSettingsFromShare() {
   if (publishingActionBusy.value) return
+  // Production settings is another Share exit path. Treat an edited access
+  // mode as a draft here too, so navigating away cannot leak it into the next
+  // publish action.
+  restoreShareModeFromPublication()
   shareDialogOpen.value = false
   projectSettingsPane.value = 'production'
   projectSettingsPaneAnnouncement.value = 'Production settings opened from Share.'
@@ -3590,6 +4131,7 @@ function activateWorkbenchTabByID(tabID: string) {
 }
 
 function closeWorkbenchTabByID(tabID: string) {
+  if (tabID === 'settings') showSettings.value = false
   workbench.value = closeWorkbenchTab(workbench.value, tabID)
 }
 
@@ -3723,7 +4265,7 @@ async function sendMessage() {
   const content = prompt.value.trim()
   const steeringActiveRun = messageStreaming.value && activeAssistantRun?.status === 'running'
   const hasStructuredContent = !steeringActiveRun && assistantComposerParts.value.some((part) => part.type !== 'text')
-  if ((!content && !hasStructuredContent) || !selected.value || !llmSettings.value?.configured || (messageStreaming.value && !steeringActiveRun) || assistantResumeBusy.value || approvalModeLoading.value || approvalModeSaving.value) return
+  if ((!content && !hasStructuredContent) || !selected.value || !llmSettings.value?.configured || conversationInteractionBusy.value || llmSettingsLoading.value || (messageStreaming.value && !steeringActiveRun) || assistantResumeBusy.value || approvalModeLoading.value || approvalModeSaving.value) return
   const projectName = selected.value.name
   const turnSkills = steeringActiveRun ? [] : [...selectedTurnSkills.value]
   const turnResources = steeringActiveRun ? [] : [...selectedTurnResources.value]
@@ -3898,7 +4440,7 @@ async function sendMessage() {
 }
 
 function cancelMessageStream() {
-  if (!activeAssistantRun || assistantRunTerminal(activeAssistantRun.status)) return
+  if (!activeAssistantRun?.id || assistantRunTerminal(activeAssistantRun.status)) return
   void assistantRunController.stop().catch((e) => { error.value = e instanceof Error ? e.message : String(e) })
 }
 
@@ -3911,6 +4453,7 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
 
   permissionErrors.value = { ...permissionErrors.value, [key]: '' }
   permissionBusy.value = { ...permissionBusy.value, [key]: decision }
+  reviewPanelHold.value = { kind: 'approval', message, interrupt, runID: runID, decision }
   conversationStatus.value = 'Working'
   let responseApplied = false
   try {
@@ -3920,6 +4463,7 @@ async function resolveToolPermission(message: ProjectMessageView, interrupt: Pro
     responseApplied = true
     await refreshSelectedProjectConversation(projectName)
   } catch (e) {
+    if (!responseApplied && reviewPanelHold.value?.interrupt.interruptId === interrupt.interruptId) reviewPanelHold.value = null
     await handleResumeFailure(projectName, key, e, {
       panelMessage: responseApplied ? 'Approval updated, but the conversation did not refresh. Reopen this project.' : 'Could not update approval. Try again.',
       setPanelError: (message) => {
@@ -3954,6 +4498,7 @@ async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: Proj
 
   followUpErrors.value = { ...followUpErrors.value, [key]: '' }
   followUpBusy.value = { ...followUpBusy.value, [key]: true }
+  reviewPanelHold.value = { kind: 'follow_up', message, interrupt, runID }
   conversationStatus.value = 'Working'
   let responseApplied = false
   try {
@@ -3966,6 +4511,7 @@ async function submitFollowUpAnswer(message: ProjectMessageView, interrupt: Proj
     delete storedAnswers[key]
     followUpAnswers.value = storedAnswers
   } catch (e) {
+    if (!responseApplied && reviewPanelHold.value?.interrupt.interruptId === interrupt.interruptId) reviewPanelHold.value = null
     await handleResumeFailure(projectName, key, e, {
       panelMessage: responseApplied ? 'Answer sent, but the conversation did not refresh. Reopen this project.' : 'Could not send answer. Try again.',
       setPanelError: (message) => {
@@ -4776,7 +5322,16 @@ function permissionKey(interrupt: ProjectAssistantUIInterruptRequest): string {
 }
 
 function permissionBusyState(interrupt: ProjectAssistantUIInterruptRequest): 'allow' | 'deny' | undefined {
-  return permissionBusy.value[permissionKey(interrupt)]
+  const current = permissionBusy.value[permissionKey(interrupt)]
+  if (current) return current
+  const hold = reviewPanelHold.value
+  if (
+    hold?.kind === 'approval' &&
+    hold.interrupt.interruptId === interrupt.interruptId &&
+    activeAssistantRun?.id === hold.runID &&
+    assistantRunRequiresLiveControls(activeAssistantRun)
+  ) return hold.decision ?? 'allow'
+  return undefined
 }
 
 function permissionError(interrupt: ProjectAssistantUIInterruptRequest): string {
@@ -4788,7 +5343,14 @@ function followUpKey(interrupt: ProjectAssistantUIInterruptRequest): string {
 }
 
 function followUpBusyState(interrupt: ProjectAssistantUIInterruptRequest): boolean {
-  return !!followUpBusy.value[followUpKey(interrupt)]
+  if (followUpBusy.value[followUpKey(interrupt)]) return true
+  const hold = reviewPanelHold.value
+  return Boolean(
+    hold?.kind === 'follow_up' &&
+    hold.interrupt.interruptId === interrupt.interruptId &&
+    activeAssistantRun?.id === hold.runID &&
+    assistantRunRequiresLiveControls(activeAssistantRun),
+  )
 }
 
 function followUpError(interrupt: ProjectAssistantUIInterruptRequest): string {
@@ -4812,7 +5374,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 <template>
   <div class="sr-only" aria-live="polite" aria-atomic="true">{{ assistantPlanAnnouncement }}</div>
 
-  <div v-if="initializing && !loading" class="flex h-full min-h-0 items-center justify-center bg-surface px-6 text-text-primary">
+  <div v-if="initializing && !loading && !selectedNameFromPath" class="flex h-full min-h-0 items-center justify-center bg-surface px-6 text-text-primary" role="status" aria-live="polite" aria-busy="true">
     <div class="flex max-w-md items-start gap-3 rounded-lg border border-border-subtle bg-surface-raised/70 p-4 text-[13px] text-text-muted">
       <Loader2 class="mt-0.5 h-4 w-4 shrink-0 animate-spin text-accent" :stroke-width="1.75" />
       <div>
@@ -4883,7 +5445,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           </button>
         </div>
 
-        <div v-if="error" class="mb-4 max-w-[720px] rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
+        <div v-if="error" class="mb-4 flex max-w-[720px] flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
           <template v-if="isMissingCodeConnectionError(error)">
             You need to
             <a :href="CODE_CONNECTIONS_URL" class="font-medium underline underline-offset-2 hover:text-danger/80">
@@ -4892,11 +5454,19 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             before you can continue.
           </template>
           <template v-else>{{ error }}</template>
+          <button type="button" class="font-medium underline underline-offset-2" :disabled="loading" @click="load">Retry</button>
         </div>
 
-        <div v-if="loading || !projectsLoaded" class="flex items-center gap-2 py-8 text-[13px] text-text-muted">
-          <Loader2 class="h-4 w-4 animate-spin" :stroke-width="1.75" />
-          Loading projects...
+        <div v-if="(loading || !projectsLoaded) && projects.length === 0" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8" role="status" aria-live="polite" aria-busy="true">
+          <article v-for="skeleton in 6" :key="skeleton" class="overflow-hidden rounded-lg border border-border-subtle bg-surface-raised" aria-hidden="true">
+            <div class="shimmer aspect-[16/9] border-b border-border-subtle bg-surface" />
+            <div class="grid gap-2 p-3">
+              <div class="shimmer h-4 w-2/3 rounded bg-surface-overlay" />
+              <div class="shimmer h-3 w-full rounded bg-surface-overlay" />
+              <div class="shimmer h-3 w-4/5 rounded bg-surface-overlay" />
+              <div class="shimmer mt-2 h-3 w-1/3 rounded bg-surface-overlay" />
+            </div>
+          </article>
         </div>
 
         <div v-else-if="filteredProjects.length" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8">
@@ -4905,7 +5475,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             :key="project.name"
             class="group relative overflow-hidden rounded-lg border border-border-subtle bg-surface-raised transition hover:border-accent/40 hover:bg-surface-overlay"
           >
-            <button class="block w-full text-left" @click="openProject(project.name)">
+            <button class="block w-full text-left" @click="enterProject(project)">
               <div class="relative aspect-[16/9] overflow-hidden border-b border-border-subtle bg-surface">
                 <div class="absolute inset-0 grid grid-cols-4 gap-px bg-border-subtle/70 p-px">
                   <div class="col-span-1 bg-surface-raised" />
@@ -4954,7 +5524,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </div>
 
         <div v-else class="flex min-h-[260px] max-w-[520px] items-center justify-center rounded-lg border border-dashed border-border-subtle bg-surface-raised/50 p-8 text-center text-[13px] text-text-muted">
-          {{ projects.length === 0 ? 'Preparing new project...' : 'No projects match this search.' }}
+          {{ error ? 'No projects available.' : projects.length === 0 ? 'Preparing new project...' : 'No projects match this search.' }}
         </div>
       </section>
 
@@ -5024,8 +5594,12 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   </button>
                 </div>
               </div>
+              <div v-if="createSetupLoading" class="mt-3 flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-raised/70 p-3 text-[12px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+                <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" />
+                Checking workspace setup…
+              </div>
               <div
-                v-if="createSetupVisible"
+                v-else-if="createSetupVisible"
                 class="mt-3 rounded-lg border border-border-subtle bg-surface-raised/70 p-3 text-left"
               >
                 <div class="mb-2 flex items-center gap-2 text-[12px] font-semibold text-text-primary">
@@ -5101,15 +5675,32 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </button>
             </div>
 
-            <div v-if="importRepositories.length > 0" class="mt-6 rounded-md border border-border-subtle bg-surface p-3">
+            <div v-if="importRepositoriesLoading || importRepositories.length > 0 || importRepositoriesError" class="mt-6 rounded-md border border-border-subtle bg-surface p-3" :aria-busy="importRepositoriesLoading" aria-live="polite">
               <div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase text-text-muted">
                 <GitBranch class="h-3.5 w-3.5" :stroke-width="1.75" />
                 Or import an existing repository
               </div>
-              <div class="flex flex-wrap items-center gap-2">
+              <div v-if="importRepositoriesLoading && importRepositories.length === 0" class="grid gap-2" role="status">
+                <div class="shimmer h-8 w-full rounded bg-surface-overlay" />
+                <div class="text-[12px] text-text-muted">Loading repositories…</div>
+              </div>
+              <div v-else-if="importRepositoriesError && importRepositories.length === 0" class="flex flex-wrap items-center gap-2 text-[12px] text-danger" role="alert">
+                <span>{{ importRepositoriesError }}</span>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadImportRepositories">Retry</button>
+              </div>
+              <div v-else class="flex flex-wrap items-center gap-2">
+                <div v-if="importRepositoriesLoading" class="flex w-full items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay px-2.5 py-2 text-[11px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" />
+                  Updating repositories…
+                </div>
+                <div v-if="importRepositoriesError" class="flex w-full flex-wrap items-center gap-2 text-[12px] text-danger" role="alert">
+                  <span>{{ importRepositoriesError }}</span>
+                  <button type="button" class="font-medium underline underline-offset-2" @click="loadImportRepositories">Retry</button>
+                </div>
                 <select
                   v-model="importSelectedRepository"
                   class="h-8 min-w-[220px] flex-1 rounded-md border border-border-subtle bg-surface px-2 text-[12px] text-text-primary"
+                  :disabled="importRepositoriesLoading || importBusy"
                 >
                   <option value="" disabled>Select a repository…</option>
                   <option v-for="repo in importRepositories" :key="repo.ref" :value="repo.ref">
@@ -5119,7 +5710,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <button
                   type="button"
                   class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
-                  :disabled="!importSelectedRepository || importBusy"
+                  :disabled="!importSelectedRepository || importBusy || importRepositoriesLoading"
                   @click="importRepositoryProject"
                 >
                   <Loader2 v-if="importBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />
@@ -5164,7 +5755,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     </div>
   </div>
 
-  <div v-else ref="workspaceRef" data-app-studio-workspace class="flex h-full min-h-0 w-full overflow-hidden bg-surface-raised/70 flex-col md:flex-row">
+  <div v-else ref="workspaceRef" data-app-studio-workspace class="flex h-full min-h-0 w-full overflow-hidden bg-surface-raised/70 flex-col md:flex-row" :aria-busy="conversationLoading || conversationRefreshing">
     <section
       class="flex min-h-[360px] min-w-0 flex-col border-b border-border-subtle md:min-h-0 md:border-b-0 md:border-r"
       :style="chatPaneStyle"
@@ -5174,10 +5765,12 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <MessageSquare class="h-4 w-4 text-accent" :stroke-width="1.75" />
         </div>
         <div class="min-w-0 flex-1">
-          <div class="truncate text-[13px] font-semibold text-text-primary">
+          <div v-if="!selected" class="shimmer h-3.5 w-32 rounded bg-surface-overlay" aria-hidden="true" />
+          <div v-else class="truncate text-[13px] font-semibold text-text-primary">
             {{ selected?.displayName || 'Project' }}
           </div>
-          <div class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-text-muted">
+          <div v-if="!selected" class="mt-2 shimmer h-2.5 w-48 rounded bg-surface-overlay" aria-hidden="true" />
+          <div v-else class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-text-muted">
             <template v-if="selected?.repository">
               <GitBranch class="h-3 w-3 shrink-0" :stroke-width="2" />
               <span class="truncate">{{ selected.repository.name || selected.repository.ref }}</span>
@@ -5189,7 +5782,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </div>
       </header>
 
-      <div v-if="error" class="mx-3 mt-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
+      <div v-if="error && !projectRouteFailure" class="mx-3 mt-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
         <template v-if="isMissingCodeConnectionError(error)">
           You need to
           <a :href="CODE_CONNECTIONS_URL" class="font-medium underline underline-offset-2 hover:text-danger/80">
@@ -5200,15 +5793,34 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         <template v-else>{{ error }}</template>
       </div>
 
-      <template v-if="selected">
+      <template v-if="selected || projectRouteShellVisible">
         <div class="relative min-h-0 flex-1">
           <div
             ref="messagesRef"
             class="h-full overflow-auto px-4 py-3"
             :class="activePlanMessage ? 'md:pb-16' : ''"
-            :aria-busy="messageStreaming"
+            :aria-busy="messageStreaming || conversationLoading || conversationRefreshing"
           >
-          <div v-if="messages.length === 0" class="flex min-h-full items-center justify-center py-6">
+          <div v-if="projectRouteFailure" class="flex min-h-full items-center justify-center py-6">
+            <div class="w-full max-w-[720px] rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+              <div class="font-medium">Project unavailable</div>
+              <div class="mt-1">{{ error }}</div>
+              <button type="button" class="mt-3 font-medium underline underline-offset-2" @click="load">Retry project load</button>
+            </div>
+          </div>
+          <div v-else-if="conversationRefreshing" class="sticky top-0 z-10 mb-3 flex items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay/90 px-3 py-2 text-[11px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+            <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" />
+            Updating conversation…
+          </div>
+          <div v-if="conversationLoading" class="flex min-h-full items-center justify-center py-6" role="status" aria-live="polite" aria-busy="true">
+            <div class="w-full max-w-[720px] rounded-lg border border-border-subtle bg-surface-raised/70 p-4">
+              <div class="shimmer h-4 w-40 rounded bg-surface-overlay" />
+              <div class="mt-3 shimmer h-3 w-4/5 rounded bg-surface-overlay" />
+              <div class="mt-2 shimmer h-3 w-3/5 rounded bg-surface-overlay" />
+              <div class="mt-5 text-[12px] text-text-muted">Loading conversation history…</div>
+            </div>
+          </div>
+          <div v-else-if="messages.length === 0" class="flex min-h-full items-center justify-center py-6">
             <div class="w-full max-w-[720px] rounded-lg border border-border-subtle bg-surface-raised/70 p-4">
               <div class="flex items-start gap-3">
                 <div
@@ -5220,16 +5832,24 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 </div>
                 <div class="min-w-0 flex-1">
                   <div class="text-[13px] font-semibold text-text-primary">
-                    {{ llmSettings?.configured ? 'Ready to start' : 'Set up LLM to start chatting' }}
+                    {{ llmSettingsLoading ? 'Loading model settings' : llmSettingsError ? 'Model settings unavailable' : llmSettings?.configured ? 'Ready to start' : 'Set up LLM to start chatting' }}
                   </div>
                   <p class="mt-1 max-w-2xl text-[12px] leading-5 text-text-muted">
                     {{
-                      llmSettings?.configured
+                      llmSettingsLoading
+                        ? 'Checking the model configuration before enabling chat.'
+                        : llmSettingsError
+                          ? llmSettingsError
+                          : llmSettings?.configured
                         ? 'The project is ready. Try a starter prompt or write your own message below.'
                         : 'App Studio needs an LLM key before the first message can be sent. Open settings to add one, then come back here to start the conversation.'
                     }}
                   </p>
-                  <div v-if="!llmSettings?.configured" class="mt-3">
+                  <div v-if="llmSettingsError" class="mt-3 flex flex-wrap items-center gap-2 text-[12px] text-danger" role="alert">
+                    <span>{{ llmSettingsError }}</span>
+                    <button type="button" class="font-medium underline underline-offset-2" @click="loadLLMSettings">Retry</button>
+                  </div>
+                  <div v-else-if="!llmSettingsLoading && !llmSettings?.configured" class="mt-3">
                     <button
                       type="button"
                       class="inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[12px] font-medium text-accent transition hover:bg-accent/20"
@@ -5609,7 +6229,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               :selected-resources="selectedTurnResources"
               :ctx="props.ctx"
               :providers="providers"
-              :disabled="busy || assistantResumeBusy"
+              :disabled="busy || assistantResumeBusy || conversationInteractionBusy || llmSettingsLoading"
               :active-run="messageStreaming"
               @update:content-parts="updateAssistantComposerParts"
               @update:selected-skills="updateAssistantComposerSkills"
@@ -5620,19 +6240,19 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               <template #controls>
                 <ResponseModePicker
                   :mode="assistantIntent"
-                  :disabled="messageStreaming || loading"
+                  :disabled="messageStreaming || loading || conversationInteractionBusy || llmSettingsLoading"
                   @select-mode="selectAssistantResponseMode"
                 />
                 <ApprovalModePicker
                   :mode="approvalMode"
                   :busy="approvalModeLoading || approvalModeSaving"
-                  :disabled="messageStreaming || loading || approvalModeLoading || approvalModeSaving"
+                  :disabled="messageStreaming || loading || conversationInteractionBusy || llmSettingsLoading || approvalModeLoading || approvalModeSaving"
                   @select="selectApprovalMode"
                 />
               </template>
             </AssistantRichComposer>
             <button
-              v-if="messageStreaming && !prompt.trim() && activeAssistantRun?.status !== 'stopping'"
+              v-if="messageStreaming && !!activeAssistantRun?.id && !assistantRunTerminal(activeAssistantRun?.status) && !prompt.trim() && activeAssistantRun?.status !== 'stopping'"
               type="button"
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md border border-danger/30 bg-danger-subtle text-danger transition hover:bg-danger-subtle/80"
               title="Stop generating"
@@ -5654,7 +6274,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             <button
               v-else
               class="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-md bg-accent text-white shadow-[0_0_16px_var(--color-accent-glow)] transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-surface-hover disabled:text-text-muted disabled:opacity-100 disabled:shadow-none"
-              :disabled="busy || !canSendPrompt"
+              :disabled="busy || conversationInteractionBusy || !canSendPrompt"
               :title="llmSettings?.configured ? 'Send' : 'Configure LLM settings before sending'"
               :aria-label="llmSettings?.configured ? 'Send' : 'Configure LLM settings before sending'"
             >
@@ -5770,6 +6390,44 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           </div>
       </header>
 
+      <div
+        v-show="!projectRouteLoading && !projectRouteFailure && activeWorkbenchTab?.kind === 'settings'"
+        class="min-h-0 flex-1 overflow-hidden"
+        role="tabpanel"
+        :id="activeWorkbenchTab?.kind === 'settings' ? workbenchTabPanelID(activeWorkbenchTab) : undefined"
+        :aria-labelledby="activeWorkbenchTab?.kind === 'settings' ? workbenchTabControlID(activeWorkbenchTab) : undefined"
+      >
+        <div id="app-studio-project-settings-host" class="h-full min-h-0 overflow-hidden" />
+      </div>
+
+      <template v-if="projectRouteLoading">
+        <div class="min-h-0 flex-1 overflow-auto p-4" role="status" aria-live="polite" aria-busy="true">
+          <div class="grid gap-3 rounded-md border border-border-subtle bg-surface-raised/70 p-4">
+            <div class="shimmer h-4 w-36 rounded bg-surface-overlay" />
+            <div class="shimmer h-3 w-3/4 rounded bg-surface-overlay" />
+            <div class="mt-2 grid gap-2">
+              <div class="shimmer h-20 rounded-md bg-surface-overlay" />
+              <div class="shimmer h-3 w-5/6 rounded bg-surface-overlay" />
+              <div class="shimmer h-3 w-2/3 rounded bg-surface-overlay" />
+            </div>
+            <div class="mt-2 grid grid-cols-2 gap-2">
+              <div class="shimmer h-12 rounded-md bg-surface-overlay" />
+              <div class="shimmer h-12 rounded-md bg-surface-overlay" />
+            </div>
+            <div class="text-[12px] text-text-muted">Loading project workspace…</div>
+          </div>
+        </div>
+      </template>
+      <template v-else-if="projectRouteFailure">
+        <div class="min-h-0 flex-1 overflow-auto p-4">
+          <div class="rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+            <div class="font-medium">Project workspace unavailable</div>
+            <div class="mt-1">{{ error }}</div>
+            <button type="button" class="mt-3 font-medium underline underline-offset-2" @click="load">Retry project load</button>
+          </div>
+        </div>
+      </template>
+      <template v-else>
       <div
         v-if="activeWorkbenchTab?.kind === 'launcher'"
         class="min-h-0 flex-1 overflow-auto p-4"
@@ -5903,6 +6561,14 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <div v-else-if="developmentSyncStatus" class="rounded-md border border-success/30 bg-success-subtle p-3 text-[12px] text-success">
             {{ developmentSyncStatus }}
           </div>
+          <div v-if="developmentTemplatesLoading" class="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay px-3 py-2 text-[12px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+            <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" />
+            Loading development templates…
+          </div>
+          <div v-else-if="developmentTemplatesError" class="flex flex-wrap items-center gap-2 rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] text-danger" role="alert">
+            <span>{{ developmentTemplatesError }}</span>
+            <button type="button" class="font-medium underline underline-offset-2" @click="loadDevelopmentTemplates">Retry</button>
+          </div>
           <div v-if="developmentPreviewURL" class="relative min-h-0 flex-1 overflow-hidden rounded-md border border-border-subtle bg-surface">
             <iframe
               ref="developmentPreviewFrameRef"
@@ -5924,6 +6590,18 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 					<button type="button" class="mt-3 rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[12px] font-medium text-text-primary hover:bg-surface-hover" @click="retryDevelopmentPreview">
 						Retry preview
 					</button>
+				</div>
+			</div>
+			<div
+				v-else-if="developmentPreviewDocumentState === 'connecting' || developmentPreviewPhase === 'Starting' || developmentPreviewPhase === 'Loading'"
+				class="absolute inset-0 flex items-center justify-center bg-surface/80 p-6 text-center"
+				role="status"
+				aria-live="polite"
+				aria-busy="true"
+			>
+				<div class="flex items-center gap-2 text-[13px] text-text-secondary">
+					<Loader2 class="h-4 w-4 animate-spin text-accent" :stroke-width="1.75" />
+					Connecting to preview…
 				</div>
 			</div>
           </div>
@@ -5975,8 +6653,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         :aria-labelledby="workbenchTabControlID(activeWorkbenchTab)"
       >
         <ThreadsWorkbench
+          ref="threadsWorkbenchRef"
           :threads="assistantThreads"
           :active-thread-i-d="activeAssistantThreadID"
+          :loading="threadHistoryLoading || projectOpenLoading"
+          :selecting-thread-i-d="selectingThreadID"
           :disabled="threadActionsDisabled"
           :busy="threadMutationBusy"
           :error="threadError"
@@ -5985,16 +6666,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           @rename="renameAssistantThread"
           @delete="deleteAssistantThread"
         />
-      </div>
-
-      <div
-        v-else-if="activeWorkbenchTab?.kind === 'settings'"
-        class="min-h-0 flex-1 overflow-hidden"
-        role="tabpanel"
-        :id="workbenchTabPanelID(activeWorkbenchTab)"
-        :aria-labelledby="workbenchTabControlID(activeWorkbenchTab)"
-      >
-        <div id="app-studio-project-settings-host" class="h-full min-h-0 overflow-hidden" />
       </div>
 
       <div
@@ -6140,14 +6811,19 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             <X class="h-3.5 w-3.5" :stroke-width="1.75" />
           </button>
         </div>
-        <div v-if="toolError" class="mb-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
-          {{ toolError }}
+        <div v-if="providerCatalogError" class="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert">
+          <span>{{ providerCatalogError }}</span>
+          <button type="button" class="font-medium underline underline-offset-2" @click="loadProviders">Retry</button>
         </div>
-        <div v-if="providersLoading" class="flex items-center gap-2 p-3 text-[13px] text-text-muted">
+        <div v-if="providersLoading && !providerCatalogLoaded" class="flex min-h-40 items-center justify-center gap-2 rounded-md border border-dashed border-border-subtle p-3 text-[13px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
           <Loader2 class="h-4 w-4 animate-spin" :stroke-width="1.75" />
           Loading provider views...
         </div>
-        <div v-else class="grid gap-1.5">
+        <div v-else-if="providerCatalogLoaded || !providerCatalogError" class="grid gap-1.5">
+          <div v-if="providersLoading" class="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay px-3 py-2 text-[11px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+            <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" />
+            Updating provider catalog…
+          </div>
           <button
             v-for="tool in filteredProviderTools"
             :key="tool.id"
@@ -6164,7 +6840,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             </div>
             <PanelRight class="h-4 w-4 shrink-0 text-text-muted opacity-0 transition group-hover:opacity-100" :stroke-width="1.75" />
           </button>
-          <div v-if="!providersLoading && filteredProviderTools.length === 0" class="p-4 text-center text-[13px] text-text-muted">
+          <div v-if="!providersLoading && filteredProviderTools.length === 0" class="p-4 text-center text-[13px] text-text-muted" role="status">
             No provider views found.
           </div>
         </div>
@@ -6193,6 +6869,32 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         :aria-labelledby="workbenchTabControlID(activeWorkbenchTab)"
       >
         <div
+          v-if="providerCatalogError && providerCatalogLoaded"
+          class="absolute inset-x-3 top-3 z-20 flex flex-wrap items-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger"
+          role="alert"
+        >
+          <span>{{ providerCatalogError }}</span>
+          <button type="button" class="font-medium underline underline-offset-2" @click="loadProviders">Retry</button>
+        </div>
+        <div
+          v-else-if="!providerCatalogLoaded && providersLoading"
+          class="absolute inset-0 z-20 flex items-center justify-center bg-surface/90 text-[13px] text-text-muted"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <Loader2 class="mr-2 h-4 w-4 animate-spin" :stroke-width="1.75" />
+          Loading provider catalog…
+        </div>
+        <div
+          v-else-if="providerCatalogError && !activeProviderTool"
+          class="absolute inset-3 z-20 flex flex-col items-start gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger"
+          role="alert"
+        >
+          <span>{{ providerCatalogError }}</span>
+          <button type="button" class="font-medium underline underline-offset-2" @click="loadProviders">Retry</button>
+        </div>
+        <div
           v-if="toolState === 'loading'"
           class="absolute inset-0 z-10 flex items-center justify-center bg-surface/80 text-[13px] text-text-muted"
         >
@@ -6207,10 +6909,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </div>
         <div ref="toolHostRef" class="h-full min-h-0 w-full overflow-auto p-3" />
       </div>
+      </template>
     </section>
   </div>
 
-  <Teleport :to="settingsInWorkbench ? '#app-studio-project-settings-host' : 'body'">
+  <Teleport defer :to="settingsInWorkbench ? '#app-studio-project-settings-host' : 'body'">
     <div
       v-if="showSettings"
       :class="settingsInWorkbench
@@ -6332,7 +7035,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             aria-labelledby="project-settings-tab-production"
             class="grid gap-3 outline-none"
           >
-            <section class="grid gap-3 rounded-md border border-accent/30 bg-surface p-4" aria-label="Production overview">
+            <section class="grid gap-3 rounded-md border border-accent/30 bg-surface p-4" aria-label="Production overview" :aria-busy="promotionLoading && !promotion">
               <div class="flex min-w-0 items-start justify-between gap-3">
                 <div class="min-w-0">
                   <div class="flex items-center gap-2">
@@ -6347,11 +7050,33 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <span><span class="font-semibold uppercase tracking-wide">Reviewed commit</span> <code class="font-mono text-text-secondary">{{ releasePipeline.commitSHA || 'No commit yet' }}</code></span>
                 <span><span class="font-semibold uppercase tracking-wide">Built images</span> <span class="font-mono text-text-secondary">{{ releasePipeline.builtCount }} / {{ releasePipeline.totalCount }}</span></span>
               </div>
-              <ReleasePipeline :pipeline="releasePipeline" :taking-longer="releaseTakingLonger" />
+              <div v-if="promotionLoading && !promotion" class="grid min-h-[190px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay/50 p-3" role="status" aria-live="polite" aria-busy="true">
+                <div class="grid grid-cols-4 gap-2">
+                  <div v-for="step in 4" :key="step" class="shimmer h-10 rounded bg-surface-overlay" />
+                </div>
+                <div class="shimmer h-4 w-2/3 rounded bg-surface-overlay" />
+                <div class="shimmer h-3 w-full rounded bg-surface-overlay" />
+                <div class="shimmer h-3 w-4/5 rounded bg-surface-overlay" />
+                <div class="text-[12px] text-text-muted">Loading release evidence…</div>
+              </div>
+              <div v-else-if="!promotion && promotionError" class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+                <div>{{ promotionError }}</div>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
+              </div>
+              <ReleasePipeline :pipeline="releasePipeline" :taking-longer="releaseTakingLonger" v-else-if="promotion" />
+              <div v-else class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+                <div>Production status is unavailable. Refresh to retry.</div>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
+              </div>
               <div v-if="productionPublicationReady" class="rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-[12px] leading-5 text-success" role="status">
                 {{ productionURL ? 'The publication is ready at the production URL.' : 'The publication is ready; the production link is still being resolved.' }}
               </div>
-              <div v-if="productionAccess.label === 'Live'" class="grid gap-3">
+              <div v-if="promotionLoading && !promotion" class="grid min-h-[120px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay p-3" role="status" aria-live="polite" aria-busy="true">
+                <div class="shimmer h-4 w-32 rounded bg-surface" />
+                <div class="shimmer h-8 w-full rounded bg-surface" />
+                <div class="text-[12px] text-text-muted">Loading deployment settings…</div>
+              </div>
+              <div v-else-if="promotion && productionAccess.label === 'Live'" class="grid gap-3">
                 <div class="flex min-w-0 items-center gap-2 rounded-md border border-border-subtle bg-surface-overlay px-3 py-2.5">
                   <Link2 class="h-4 w-4 shrink-0 text-text-muted" :stroke-width="1.75" />
                   <a :href="productionURL" target="_blank" rel="noopener noreferrer" class="min-w-0 truncate font-mono text-[13px] font-medium text-accent hover:underline">{{ productionURL }}</a>
@@ -6364,7 +7089,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                         :value="publishing?.publication?.mode === 'public' ? 'public' : 'restricted'"
                         class="h-8 w-full rounded-md border border-border-subtle bg-surface px-2 text-[12px] font-medium text-text-primary outline-none transition focus:border-accent/50 disabled:cursor-not-allowed disabled:opacity-60"
                         aria-label="Production visibility"
-                        :disabled="publishingActionBusy"
+                        :disabled="publishingActionBusy || !publishingStateAvailable"
                         @change="onProductionVisibilityChange"
                       >
                         <option value="restricted">Invite-only</option>
@@ -6395,7 +7120,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   </button>
                 </div>
               </div>
-              <div v-else class="grid gap-3">
+              <div v-else-if="promotion" class="grid gap-3">
                 <div v-if="publishing?.published" class="grid gap-2 rounded-md border border-border-subtle bg-surface-overlay p-3">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div>
@@ -6412,7 +7137,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                       :value="publishing?.publication?.mode === 'public' ? 'public' : 'restricted'"
                       class="h-8 w-full rounded-md border border-border-subtle bg-surface px-2 text-[12px] font-medium text-text-primary outline-none transition focus:border-accent/50 disabled:cursor-not-allowed disabled:opacity-60"
                       aria-label="Production visibility"
-                      :disabled="publishingActionBusy"
+                      :disabled="publishingActionBusy || !publishingStateAvailable"
                       @change="onProductionVisibilityChange"
                     >
                       <option value="restricted">Invite-only</option>
@@ -6433,6 +7158,10 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   <button type="button" class="inline-flex h-8 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-4 text-[12px] font-semibold text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60" :disabled="promotionBusy" @click="promoteToProd"><Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />{{ promoteButtonLabel }}</button>
                 </div>
               </div>
+              <div v-else class="flex min-h-[120px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert">
+                <div>Deployment status is unavailable. Refresh to retry.</div>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
+              </div>
               <div v-if="publishingActionError" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ publishingActionError }}</div>
             </section>
             <section class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Production settings">
@@ -6441,6 +7170,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <p class="mt-1 text-[11px] leading-4 text-text-muted">These inputs come from the selected template. Platform-owned names, rollout revisions, and component images are managed automatically.</p>
               </div>
               <ProductionForm
+                v-if="promotion"
                 :schema="promotion?.productionSchema ?? null"
                 :values="promotionValues"
                 :image-inputs="(promotion?.build.components ?? []).map(component => component.imageInput).filter(Boolean)"
@@ -6450,6 +7180,16 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 @update:values="updateProductionForm"
                 @validity="productionFormValid = $event"
               />
+              <div v-else-if="promotionLoading && !promotion" class="grid min-h-[180px] content-start gap-3 rounded-md border border-border-subtle bg-surface-overlay p-3" role="status" aria-live="polite" aria-busy="true">
+                <div class="shimmer h-4 w-40 rounded bg-surface" />
+                <div class="shimmer h-10 w-full rounded bg-surface" />
+                <div class="shimmer h-10 w-3/4 rounded bg-surface" />
+                <div class="text-[12px] text-text-muted">Loading production fields…</div>
+              </div>
+              <div v-else class="flex min-h-[180px] flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert">
+                <div>Production settings are unavailable. Refresh to retry.</div>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
+              </div>
             </section>
             <div v-if="promotionError" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ promotionError }}</div>
             <section class="grid gap-3 rounded-md border border-border-subtle bg-surface p-3" aria-label="Technical details">
@@ -6488,6 +7228,25 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">LLM</div>
               <p class="text-[12px] text-text-muted">Configure the model credentials App Studio uses for this workspace.</p>
             </section>
+
+            <div v-if="llmSettingsLoading && !llmSettings" class="grid min-h-64 content-start gap-3 rounded-md border border-dashed border-border-subtle bg-surface p-4" role="status" aria-live="polite" aria-busy="true">
+              <div class="shimmer h-4 w-36 rounded bg-surface-overlay" />
+              <div class="shimmer h-10 w-full rounded bg-surface-overlay" />
+              <div class="shimmer h-10 w-full rounded bg-surface-overlay" />
+              <div class="text-[12px] text-text-muted">Loading model settings…</div>
+            </div>
+            <div v-else-if="llmSettingsError && !llmSettings" class="flex min-h-64 flex-col items-start justify-center gap-2 rounded-md border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
+              <div>{{ llmSettingsError }}</div>
+              <button type="button" class="font-medium underline underline-offset-2" @click="loadLLMSettings">Retry</button>
+            </div>
+            <div v-else class="grid gap-4">
+              <div v-if="llmSettingsLoading" class="flex items-center gap-2 text-[11px] text-text-muted" role="status" aria-live="polite" aria-busy="true">
+                <Loader2 class="h-3.5 w-3.5 animate-spin text-accent" :stroke-width="1.75" /> Refreshing model settings…
+              </div>
+              <div v-if="llmSettingsError" class="flex flex-wrap items-center gap-2 rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] text-danger" role="alert">
+                <span>{{ llmSettingsError }}</span>
+                <button type="button" class="font-medium underline underline-offset-2" @click="loadLLMSettings">Retry</button>
+              </div>
 
             <section class="grid gap-2">
               <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">Provider</div>
@@ -6631,6 +7390,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 </button>
               </div>
             </footer>
+            </div>
           </form>
 
           <footer v-if="settingsProject && projectSettingsPane === 'project'" class="flex flex-wrap items-center justify-between gap-3 border-t border-border-subtle pt-4">
@@ -6675,12 +7435,15 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     :project-name="productionProjectName"
     v-model:mode="shareMode"
     :published="Boolean(publishing?.published)"
+    :publication-state-available="publishingStateAvailable"
     :publication="publishing?.publication"
     :production-url="productionURL"
     :production-ready="Boolean(productionBinding && productionDeployment.ready)"
     :members="publishingMembers"
     :grants="publishing?.grants ?? []"
     :busy="publishingActionBusy"
+    :busy-action="publishingBusyAction"
+    :busy-target="publishingBusyTarget ?? undefined"
     :loading="publishingLoadState === 'loading'"
     :error="publishingActionError"
     :load-state="publishingLoadState"

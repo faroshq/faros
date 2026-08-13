@@ -88,6 +88,8 @@ development:
     repository: https://github.com/faroshq/scaffold-web-api
     ref: v1                          # incl. .github/workflows building each
                                      # component's image (see §4.1a)
+  build:
+    workflowPath: .github/workflows/build.yaml
 ```
 
 Rules:
@@ -106,6 +108,12 @@ Rules:
   process by default; `rules` name path patterns that require a command first.
   `strategy: container` is the escape hatch for toolchains that cannot hot
   reload in place.
+- `build.workflowPath` is an optional, typed declaration of repository-owned
+  GitHub Actions CI. It must name a `.yml` or `.yaml` file directly under
+  `.github/workflows/`. App Studio observes and dispatches that path but never
+  creates, edits, or repairs it. A Template without the declaration has no
+  declared CI; compatibility lookup for existing projects is an App Studio
+  migration concern, not Template ownership.
 
 **Instance dev mode.** Instances gain a platform-reserved spec field
 `farosMode: production | development` (injected into every template's CRD

@@ -160,9 +160,11 @@ single-replica-only due to no durable run lease; four list-response shapes and
    the billing meter's starting line.
 3. **Provision.** On approval, concurrently: create `Project`, create/adopt the
    repo (code provider), provision the template with `farosMode: development`,
-   hydrate the workspace from the scaffold tag, run the initial commit, write
-   `.faros/build.json` + the Railpack workflow. The portal shows the four
-   lifecycle checkpoints (template / git / ci / production) filling in.
+   hydrate the workspace from the scaffold tag, and run the initial commit.
+   The scaffold owns its declared `spec.development.build.workflowPath`; App
+   Studio neither generates nor injects CI. The portal shows the four
+   lifecycle checkpoints (template / git / source / production) filling in;
+   the source checkpoint retains the historic `ci` API key for compatibility.
 4. **Studio.** Chat + file tools + `dev_sync` + preview pane (instance
    `status.url`) + logs/verify tools. Undo = workspace snapshot restore.
 5. **Ship.** `check_build` waits for digests; **Promote** creates/updates the
@@ -391,9 +393,9 @@ gate. app-studio stays untouched and running throughout.
 
   What remains for build: resolve each component's digest from the Code
   provider's `Package.status.versions[]` by the tag `sha-<committedRevision>`
-  into `Project.status.build`, mirror run state into the `ci` checkpoint via
-  `RepositoryBuildStatus` (including the failure-log tail, so the model can
-  fix its own build), and prefill/enforce promote from those digests. One more
+  into `Project.status.build`, expose `RepositoryBuildStatus` alongside the
+  source checkpoint (including the failure-log tail, so the model can fix its
+  own build), and prefill/enforce promote from those digests. One more
   gap: Actions-published ghcr packages are private, so production needs an
   imagePullSecret minted from the connection token (app-studio's
   cross-provider bridge pattern) before a promoted image will pull.
@@ -436,7 +438,8 @@ gate. app-studio stays untouched and running throughout.
   one description. vibe-studio fails loudly when a scaffold's layout matches
   no component. Rationale: the name/path duality caused repeated bugs (sync
   routing, then `get_logs api` vs component `backend`). **Breaking**:
-  existing instances and `.faros/build.json` must be recreated.
+  existing instances must be recreated. Build workflow ownership now lives in
+  each scaffold and is declared by the Template.
 
 Non-goals for v1: multi-user collaboration on one session, browser-console
 capture (returns as an infra dataplane verb), per-message billing/metering

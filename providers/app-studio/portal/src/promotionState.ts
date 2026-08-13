@@ -43,6 +43,7 @@ export type ReleasePipelineState =
   | 'queued'
   | 'running'
   | 'finalizing'
+  | 'unavailable'
   | 'failed'
   | 'ready'
   | 'deploying'
@@ -143,6 +144,10 @@ export function releasePipelineView(
   const partial = builtCount > 0 && builtCount < totalCount
   const artifactLag = !!run?.found && runMatchesCommit && runStatus === 'completed' && conclusion === 'success' && build?.status !== 'built'
   const accessLive = !!access.published && !!access.ready && !!clean(access.url)
+  // runError is an observability failure, not evidence that CI failed. When
+  // there is no usable exact-commit run and artifacts are still incomplete,
+  // stop presenting the build as an active transition so polling can settle.
+  const runObservationUnavailable = !!build?.runError && build.status !== 'built' && !runMatchesCommit
 
   let state: ReleasePipelineState
   let tone: ReleasePipelineTone
@@ -184,6 +189,11 @@ export function releasePipelineView(
     tone = 'success'
     message = currentProductionReady ? 'A new release is ready for production.' : 'Release ready for production.'
     detail = `${currentProductionReady ? `Current production remains online at ${shortSHA(observedRevision || requestedRevision) || 'its observed revision'}. ` : ''}All ${totalCount} component image${totalCount === 1 ? '' : 's'} are available for ${shortSHA(commitSHA)}.`
+  } else if (runObservationUnavailable) {
+    state = 'unavailable'
+    tone = 'warning'
+    message = 'Build status is temporarily unavailable.'
+    detail = `${build?.runError} Exact-commit release artifacts remain the promotion authority; refresh to retry the status lookup.`
   } else if (run?.found && runMatchesCommit && runStatus === 'completed' && failedConclusion(conclusion)) {
     state = 'failed'
     tone = 'danger'
@@ -234,7 +244,7 @@ export function releasePipelineView(
   // build error while the production provider reports its own terminal state.
   const buildFailed = state === 'failed' && !productionFailed && build?.status !== 'built'
   const buildDone = build?.status === 'built'
-  const buildCurrent = !buildDone && state !== 'needs_commit'
+  const buildCurrent = !buildDone && !['needs_commit', 'unavailable'].includes(state)
   const steps: ReleasePipelineStep[] = [
     { key: 'commit', label: 'Commit', state: commitSHA ? 'done' : 'current', detail: commitSHA ? shortSHA(commitSHA) : undefined },
     { key: 'build', label: 'Build images', state: buildFailed ? 'error' : buildDone ? 'done' : buildCurrent ? 'current' : 'pending', detail: totalCount ? `${builtCount} of ${totalCount}` : undefined },
