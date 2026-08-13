@@ -42,6 +42,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,6 +56,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+	"k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/pkg/browsersession"
 )
@@ -142,6 +144,12 @@ type Config struct {
 	// (e.g. "apps.faros.example"). Redirects are only issued to hosts
 	// directly under this zone. Empty disables the endpoints.
 	AppsDomain string
+	// Codes persists the one-use authorization codes. It defaults to a
+	// bounded process-local map, which is only correct for a single hub
+	// replica: authorize and exchange are separate requests and a scaled hub
+	// serves them from different pods. Supply a shared store (see
+	// pkg/hub/sharedstore) whenever the hub runs more than one replica.
+	Codes CodeStore
 	// LoginPath is the hub-relative path of the interactive login page an
 	// unauthenticated browser is sent to. Defaults to "/ui/login" (the
 	// portal SPA is mounted under /ui/).
@@ -159,16 +167,26 @@ type Handler struct {
 	loginPath  string
 	now        func() time.Time
 	random     io.Reader
-
-	mu    sync.Mutex
-	codes map[string]codeRecord
+	codes      CodeStore
 }
 
-type codeRecord struct {
-	ref          InstanceRef
-	redirectHost string
-	identity     browsersession.Identity
-	expiresAt    time.Time
+// CodeRecord is what authorize binds a code to and exchange verifies against.
+// It carries identity metadata only — never a credential.
+type CodeRecord struct {
+	Ref          InstanceRef
+	RedirectHost string
+	Identity     browsersession.Identity
+	ExpiresAt    time.Time
+}
+
+// CodeStore persists one-use authorization codes between the browser's
+// authorize hop and the access proxy's server-to-server exchange.
+//
+// Take MUST be atomic across every hub replica: a code that two callers can
+// redeem is a replayable app sign-in.
+type CodeStore interface {
+	Put(ctx context.Context, code string, record CodeRecord) error
+	Take(ctx context.Context, code string) (CodeRecord, bool)
 }
 
 // New validates cfg and returns a Handler.
@@ -190,7 +208,7 @@ func New(cfg Config) (*Handler, error) {
 		loginPath:  cfg.LoginPath,
 		now:        cfg.Now,
 		random:     cfg.Random,
-		codes:      map[string]codeRecord{},
+		codes:      cfg.Codes,
 	}
 	if h.loginPath == "" {
 		h.loginPath = "/ui/login"
@@ -200,6 +218,11 @@ func New(cfg Config) (*Handler, error) {
 	}
 	if h.random == nil {
 		h.random = rand.Reader
+	}
+	if h.codes == nil {
+		// Read the clock through the handler rather than capturing it, so a
+		// test that swaps h.now after construction also moves the store's clock.
+		h.codes = newMemoryCodeStore(func() time.Time { return h.now() })
 	}
 	return h, nil
 }
@@ -215,6 +238,41 @@ func (h *Handler) RegisterRoutes(router *mux.Router, limit func(http.HandlerFunc
 	}
 	router.HandleFunc(AuthorizePath, wrap(h.HandleAuthorize)).Methods("GET")
 	router.HandleFunc(ExchangePath, wrap(h.HandleExchange)).Methods("POST")
+}
+
+// retriedParam marks an authorize URL that has already been through the login
+// bounce once. It rides in the `next` URL the portal returns to, so it survives
+// exactly one round trip and needs no server-side state.
+const retriedParam = "faros_retried"
+
+// withRetriedMarker returns the request URI with the retry marker set. The
+// marker is additive: cluster/group/resource/name/state/redirect_uri are
+// untouched, so the authorize request that comes back validates identically.
+func withRetriedMarker(u *url.URL) string {
+	marked := *u
+	q := marked.Query()
+	q.Set(retriedParam, "1")
+	marked.RawQuery = q.Encode()
+	return marked.RequestURI()
+}
+
+// resolveFailureReason classifies why a session did not resolve, for the log
+// line only. The three cases have very different causes — no cookie at all
+// points at the browser or a cross-site hop, a missing record points at the
+// store, and an expired one is routine — and they were previously
+// indistinguishable from outside.
+func resolveFailureReason(r *http.Request, err error) string {
+	if _, cookieErr := r.Cookie(browsersession.CookieName); cookieErr != nil {
+		return "request carried no " + browsersession.CookieName + " cookie"
+	}
+	switch {
+	case errors.Is(err, browsersession.ErrExpired):
+		return "session expired"
+	case errors.Is(err, browsersession.ErrNotFound):
+		return "cookie present but no session record found (issued by another store, or already revoked)"
+	default:
+		return "session lookup failed: " + err.Error()
+	}
 }
 
 // HandleAuthorize is the browser entry point.
@@ -240,11 +298,29 @@ func (h *Handler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	session, err := h.sessions.ResolveRequest(r)
 	if err != nil {
+		logger := klog.FromContext(r.Context())
+		// One bounce through login is the normal path for an anonymous browser
+		// (and for every browser at once after the session store changes, when
+		// no existing cookie resolves any more). A SECOND unresolved session on
+		// a request that already came back from login means the hand-off is not
+		// working, and redirecting again spins the browser between the hub and
+		// the portal at request speed — this loop has been observed minting
+		// ~8 sessions/second until the per-IP rate limiter stopped it. Stop it
+		// here instead: the limiter is a backstop, not a control.
+		if q.Get(retriedParam) != "" {
+			logger.Info("app authorize: session still unresolved after login, refusing to bounce again",
+				"reason", resolveFailureReason(r, err), "app", ref.Name)
+			h.renderError(w, http.StatusUnauthorized, "Sign-in could not be completed",
+				"The sign-in did not carry a usable session. Check that cookies are enabled for this site, then open the app again.")
+			return
+		}
 		// No usable shared session: send the browser through the normal hub
 		// login. The portal redirects back to this exact hub-relative URL
 		// afterwards, so the flow resumes with a fresh session cookie.
+		logger.V(2).Info("app authorize: no usable session, sending to login",
+			"reason", resolveFailureReason(r, err), "app", ref.Name)
 		browsersession.ClearCookie(w)
-		next := r.URL.RequestURI() // hub-relative; never an absolute URL
+		next := withRetriedMarker(r.URL) // hub-relative; never an absolute URL
 		http.Redirect(w, r, h.loginPath+"?next="+url.QueryEscape(next), http.StatusFound)
 		return
 	}
@@ -265,7 +341,7 @@ func (h *Handler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// gate exchanges with its configured external host verbatim (e.g.
 	// "app.example:10443" behind a port-forwarded local Gateway), and a
 	// hostname-only binding would 410 every exchange and loop the browser.
-	code, err := h.mintCode(ref, redirect.Host, session.Identity)
+	code, err := h.mintCode(r.Context(), ref, redirect.Host, session.Identity)
 	if err != nil {
 		h.renderError(w, http.StatusInternalServerError, "App access is unavailable",
 			"The platform could not complete sign-in. Try again shortly.")
@@ -316,8 +392,8 @@ func (h *Handler) HandleExchange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "malformed exchange request", http.StatusBadRequest)
 		return
 	}
-	record, ok := h.consumeCode(req.Code)
-	if !ok || record.ref.key() != ref.key() || !strings.EqualFold(record.redirectHost, req.Host) {
+	record, ok := h.codes.Take(r.Context(), req.Code)
+	if !ok || record.Ref.key() != ref.key() || !strings.EqualFold(record.RedirectHost, req.Host) {
 		// Expired, replayed, or bound to different coordinates. 410 tells the
 		// proxy to restart the authorize flow rather than retry.
 		http.Error(w, "sign-in expired", http.StatusGone)
@@ -326,9 +402,9 @@ func (h *Handler) HandleExchange(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ExchangeResponse{
 		Allowed:           true,
-		UserID:            record.identity.UserID,
-		Email:             record.identity.Email,
-		Name:              record.identity.Name,
+		UserID:            record.Identity.UserID,
+		Email:             record.Identity.Email,
+		Name:              record.Identity.Name,
 		SessionTTLSeconds: int64(sessionTTL / time.Second),
 	})
 }
@@ -393,61 +469,82 @@ func (h *Handler) validateRedirect(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func (h *Handler) mintCode(ref InstanceRef, redirectHost string, identity browsersession.Identity) (string, error) {
+func (h *Handler) mintCode(ctx context.Context, ref InstanceRef, redirectHost string, identity browsersession.Identity) (string, error) {
 	buf := make([]byte, 32)
 	if _, err := io.ReadFull(h.random, buf); err != nil {
 		return "", err
 	}
 	code := base64.RawURLEncoding.EncodeToString(buf)
-	now := h.now()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cleanupLocked(now)
-	for len(h.codes) >= maxCodes {
-		h.evictOldestLocked()
+	record := CodeRecord{
+		Ref:          ref,
+		RedirectHost: strings.ToLower(redirectHost),
+		Identity:     identity,
+		ExpiresAt:    h.now().Add(codeTTL),
 	}
-	h.codes[code] = codeRecord{
-		ref:          ref,
-		redirectHost: strings.ToLower(redirectHost),
-		identity:     identity,
-		expiresAt:    now.Add(codeTTL),
+	if err := h.codes.Put(ctx, code, record); err != nil {
+		return "", err
 	}
 	return code, nil
 }
 
-func (h *Handler) consumeCode(code string) (codeRecord, bool) {
-	now := h.now()
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	record, ok := h.codes[code]
-	if !ok {
-		return codeRecord{}, false
+// memoryCodeStore is the default, process-local CodeStore. Correct for a
+// single hub replica only — see Config.Codes.
+type memoryCodeStore struct {
+	now func() time.Time
+
+	mu    sync.Mutex
+	codes map[string]CodeRecord
+}
+
+func newMemoryCodeStore(now func() time.Time) *memoryCodeStore {
+	return &memoryCodeStore{now: now, codes: map[string]CodeRecord{}}
+}
+
+func (m *memoryCodeStore) Put(_ context.Context, code string, record CodeRecord) error {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupLocked(now)
+	for len(m.codes) >= maxCodes {
+		m.evictOldestLocked()
 	}
-	delete(h.codes, code)
-	if now.After(record.expiresAt) {
-		return codeRecord{}, false
+	m.codes[code] = record
+	return nil
+}
+
+func (m *memoryCodeStore) Take(_ context.Context, code string) (CodeRecord, bool) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.codes[code]
+	if !ok {
+		return CodeRecord{}, false
+	}
+	delete(m.codes, code)
+	if now.After(record.ExpiresAt) {
+		return CodeRecord{}, false
 	}
 	return record, true
 }
 
-func (h *Handler) cleanupLocked(now time.Time) {
-	for k, v := range h.codes {
-		if now.After(v.expiresAt) {
-			delete(h.codes, k)
+func (m *memoryCodeStore) cleanupLocked(now time.Time) {
+	for k, v := range m.codes {
+		if now.After(v.ExpiresAt) {
+			delete(m.codes, k)
 		}
 	}
 }
 
-func (h *Handler) evictOldestLocked() {
+func (m *memoryCodeStore) evictOldestLocked() {
 	var oldestKey string
 	var oldest time.Time
-	for k, v := range h.codes {
-		if oldestKey == "" || v.expiresAt.Before(oldest) {
-			oldestKey, oldest = k, v.expiresAt
+	for k, v := range m.codes {
+		if oldestKey == "" || v.ExpiresAt.Before(oldest) {
+			oldestKey, oldest = k, v.ExpiresAt
 		}
 	}
 	if oldestKey != "" {
-		delete(h.codes, oldestKey)
+		delete(m.codes, oldestKey)
 	}
 }
 

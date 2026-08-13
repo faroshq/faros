@@ -84,6 +84,14 @@ type Provider struct {
 	// via SetWorkspaceCluster after provisioning; empty until then.
 	WorkspaceCluster string
 
+	// CatalogEntryCluster is the logical cluster the provider's CatalogEntry
+	// was observed in, recorded by the catalog reconciler from the multicluster
+	// request. The heartbeat recorder patches the entry there; a fixed
+	// workspace path is wrong, because each provider's `init` registers its
+	// entry in the provider's own workspace. Empty until the catalog watch has
+	// seen the entry.
+	CatalogEntryCluster string
+
 	// LocalUIAssets, when non-nil, is an embedded fs.FS that the UI proxy
 	// serves under /ui/providers/{Name}/* instead of forwarding to UIURL.
 	// Populated for first-party providers whose Vite-built portal/dist is
@@ -96,9 +104,11 @@ type Provider struct {
 	// The catalog controller sets this; the sweeper does not touch it.
 	EndpointsValid bool
 
-	// LastHeartbeat is updated by the POST /api/providers/{name}/heartbeat
-	// handler. Zero until the first heartbeat (or for providers that don't
-	// heartbeat at all).
+	// LastHeartbeat is the provider's most recent beat. It is set both by the
+	// POST /api/providers/{name}/heartbeat handler on the replica that served
+	// it and by the catalog reconciler from CatalogEntry.status.lastHeartbeat,
+	// which is how the signal reaches replicas that did not serve the beat.
+	// Zero until the first heartbeat (or for providers that don't heartbeat).
 	LastHeartbeat time.Time
 	// ReportedVersion is the version string the provider pod sent in its
 	// most recent heartbeat — may diverge from Version during a chart
@@ -401,21 +411,36 @@ func (r *Registry) List() []Provider {
 }
 
 // Upsert replaces the spec-derived fields of the registry record for p.Name
-// (or inserts a new record). Heartbeat-tracked fields (LastHeartbeat,
-// ReportedVersion, HeartbeatRequired, HeartbeatStale) are preserved across
-// upserts so reconcile churn doesn't lose a provider's liveness state.
+// (or inserts a new record).
+//
+// Liveness is merged, not overwritten. p.LastHeartbeat carries what the
+// CatalogEntry status says (the cross-replica signal); the record may already
+// hold a newer beat this replica served directly, or one whose status write was
+// throttled. Taking the later of the two keeps the merge monotone, so neither
+// source can move a provider backwards in time and flip it stale. HeartbeatStale
+// stays a purely local verdict, recomputed by the sweeper from these timestamps.
 func (r *Registry) Upsert(p Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing, ok := r.byName[p.Name]; ok {
-		p.LastHeartbeat = existing.LastHeartbeat
-		p.ReportedVersion = existing.ReportedVersion
-		p.HeartbeatRequired = existing.HeartbeatRequired
+		if existing.LastHeartbeat.After(p.LastHeartbeat) {
+			// The reported version belongs to the beat it arrived with, so it
+			// travels with the timestamp that wins.
+			p.LastHeartbeat = existing.LastHeartbeat
+			if existing.ReportedVersion != "" {
+				p.ReportedVersion = existing.ReportedVersion
+			}
+		}
+		// A provider that has ever heartbeated is expected to keep doing so.
+		p.HeartbeatRequired = p.HeartbeatRequired || existing.HeartbeatRequired
 		p.HeartbeatStale = existing.HeartbeatStale
 		if p.WorkspaceCluster == "" {
 			// Provisioning sets this after the Upsert in the same reconcile;
 			// don't lose it on the next reconcile's fresh Provider value.
 			p.WorkspaceCluster = existing.WorkspaceCluster
+		}
+		if p.CatalogEntryCluster == "" {
+			p.CatalogEntryCluster = existing.CatalogEntryCluster
 		}
 	}
 	cp := p
@@ -451,6 +476,19 @@ func cloneProvider(p Provider) Provider {
 	}
 	p.AssistantSkills = cloneProviderAssistantSkills(p.AssistantSkills)
 	return p
+}
+
+// CatalogEntryCluster returns the logical cluster the provider's CatalogEntry
+// lives in, and whether it is known yet. It satisfies the heartbeat recorder's
+// ClusterResolver.
+func (r *Registry) CatalogEntryCluster(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.byName[name]
+	if !ok || p.CatalogEntryCluster == "" {
+		return "", false
+	}
+	return p.CatalogEntryCluster, true
 }
 
 // SetWorkspaceCluster records the logical cluster ID of the provider's
