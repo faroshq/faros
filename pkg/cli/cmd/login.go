@@ -172,7 +172,7 @@ func runStaticTokenLogin(hubURL, token string, insecure bool) error {
 
 	fmt.Printf("Login successful! Logged in as %s (user: %s)\n", loginResp.Email, loginResp.UserID)
 	fmt.Printf("Kubeconfig context %q has been set.\n", contextName)
-	fmt.Printf("Run: kubectl --context=%s get edges\n", contextName)
+	fmt.Printf("Run: kubectl --context=%q get edges\n", contextName)
 	return nil
 }
 
@@ -235,7 +235,7 @@ func runLogin(ctx context.Context, hubURL string, insecure bool) error {
 
 	fmt.Printf("Login successful! Logged in as %s (user: %s)\n", resp.Email, resp.UserID)
 	fmt.Printf("Kubeconfig context %q has been set.\n", contextName)
-	fmt.Printf("Run: kubectl --context=%s get edges\n", contextName)
+	fmt.Printf("Run: kubectl --context=%q get edges\n", contextName)
 	return nil
 }
 
