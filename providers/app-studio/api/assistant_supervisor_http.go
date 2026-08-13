@@ -290,10 +290,88 @@ const (
 	projectAssistantMetadataPlan                 = "assistantPlan"
 	projectAssistantMetadataInitialBuild         = "assistantInitialBuild"
 	projectAssistantMetadataProgress             = "assistantProgress"
+	projectAssistantMetadataVerification         = "assistantVerification"
 	projectAssistantProgressMaxMessages          = 32
 	projectAssistantWorkedDurationMaxMS          = int64((7 * 24 * time.Hour) / time.Millisecond)
 	projectAssistantTraceMaxSequence             = 10_000
 )
+
+type projectAssistantVerificationView struct {
+	Outcome               string `json:"outcome"`
+	RenderedStateObserved bool   `json:"renderedStateObserved,omitempty"`
+	InteractionVerified   bool   `json:"interactionVerified,omitempty"`
+	AssertionsObserved    bool   `json:"assertionsObserved,omitempty"`
+	AssertionsPassed      bool   `json:"assertionsPassed,omitempty"`
+	AssertionCount        int    `json:"assertionCount,omitempty"`
+	FailedAssertionCount  int    `json:"failedAssertionCount,omitempty"`
+}
+
+func projectAssistantVerificationFromCompletionEvidence(evidence projectAssistantCompletionEvidence) projectAssistantVerificationView {
+	outcome := strings.TrimSpace(evidence.PreviewEvidenceOutcome)
+	if outcome == "" {
+		switch {
+		case evidence.LatestMutationVerified || evidence.VerificationOutcome == "ready":
+			outcome = "runtime_verified"
+		case evidence.VerificationOutcome == "stale":
+			outcome = "stale"
+		case evidence.VerificationOutcome == "not_ready" || evidence.VerificationOutcome == "unavailable":
+			outcome = "failed"
+		default:
+			outcome = "not_verified"
+		}
+	}
+	switch outcome {
+	case "interactions_verified", "rendered_verified", "runtime_verified", "failed", "stale", "not_verified":
+	default:
+		outcome = "not_verified"
+	}
+	return projectAssistantVerificationView{
+		Outcome:               outcome,
+		RenderedStateObserved: evidence.PreviewRenderedStateObserved,
+		InteractionVerified:   evidence.PreviewInteractionVerified,
+		AssertionsObserved:    evidence.PreviewAssertionsObserved,
+		AssertionsPassed:      evidence.PreviewAssertionsPassed,
+		AssertionCount:        evidence.PreviewAssertionCount,
+		FailedAssertionCount:  evidence.PreviewFailedAssertionCount,
+	}
+}
+
+func projectAssistantVerificationFromMetadata(value any) (projectAssistantVerificationView, bool) {
+	if value == nil {
+		return projectAssistantVerificationView{}, false
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return projectAssistantVerificationView{}, false
+	}
+	var verification projectAssistantVerificationView
+	if json.Unmarshal(raw, &verification) != nil {
+		return projectAssistantVerificationView{}, false
+	}
+	switch verification.Outcome {
+	case "interactions_verified", "rendered_verified", "runtime_verified", "failed", "stale", "not_verified":
+	default:
+		return projectAssistantVerificationView{}, false
+	}
+	if verification.AssertionCount < 0 || verification.AssertionCount > 12 ||
+		verification.FailedAssertionCount < 0 || verification.FailedAssertionCount > verification.AssertionCount {
+		return projectAssistantVerificationView{}, false
+	}
+	if verification.AssertionsPassed && (!verification.AssertionsObserved || verification.AssertionCount == 0 || verification.FailedAssertionCount != 0) {
+		return projectAssistantVerificationView{}, false
+	}
+	switch verification.Outcome {
+	case "interactions_verified":
+		if !verification.RenderedStateObserved || !verification.InteractionVerified {
+			return projectAssistantVerificationView{}, false
+		}
+	case "rendered_verified":
+		if !verification.RenderedStateObserved || verification.InteractionVerified {
+			return projectAssistantVerificationView{}, false
+		}
+	}
+	return verification, true
+}
 
 type projectAssistantProgressSnapshot struct {
 	Version          int      `json:"version"`
@@ -337,6 +415,9 @@ func projectAssistantDurableMetadataFromExisting(run store.AssistantRun, status 
 	}
 	if progress, ok := projectAssistantProgressSnapshotFromMetadata(existing[projectAssistantMetadataProgress]); ok {
 		metadata[projectAssistantMetadataProgress] = *progress
+	}
+	if verification, ok := projectAssistantVerificationFromMetadata(existing[projectAssistantMetadataVerification]); ok {
+		metadata[projectAssistantMetadataVerification] = verification
 	}
 	preview, _ := existing[projectAssistantMetadataPreviewRefreshNeeded].(bool)
 	metadata[projectAssistantMetadataRunID] = run.ID
@@ -493,6 +574,7 @@ type projectAssistantDurableMetadataState struct {
 	workSegmentStarted time.Time
 	terminalError      json.RawMessage
 	abortReason        store.AssistantRunAbortReason
+	verification       *projectAssistantVerificationView
 }
 
 func (s *projectAssistantDurableMetadataState) appendProgress(message string) bool {
@@ -688,6 +770,11 @@ func (s *Server) persistProjectAssistantDurableMetadata(ctx context.Context, acc
 		} else if progress, ok := projectAssistantProgressSnapshotFromMetadata(message.Metadata[projectAssistantMetadataProgress]); ok {
 			metadata[projectAssistantMetadataProgress] = *progress
 		}
+		if state.verification != nil {
+			metadata[projectAssistantMetadataVerification] = *state.verification
+		} else if verification, ok := projectAssistantVerificationFromMetadata(message.Metadata[projectAssistantMetadataVerification]); ok {
+			metadata[projectAssistantMetadataVerification] = verification
+		}
 		message.Metadata = metadata
 	})
 }
@@ -862,6 +949,8 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 	contentText := content.String()
 	callbackMu.Unlock()
 	state.initialBuild = state.initialBuild || result.InitialBuild
+	verification := projectAssistantVerificationFromCompletionEvidence(result.CompletionEvidence)
+	state.verification = &verification
 	reply := result.Content
 	engineCompleted := err == nil
 	finalContent := s.projectAssistantRunTerminalContent(

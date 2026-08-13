@@ -533,6 +533,8 @@ export interface ProjectBuildComponent {
   built: boolean
   image?: string
   digest?: string
+  /** Human-facing immutable tag that identifies the reviewed commit. */
+  tag?: string
 }
 
 export interface ProjectBuildRunJob {
@@ -547,14 +549,17 @@ export interface ProjectBuildRun {
   runID?: number
   url?: string
   headSHA?: string
-  status?: string
-  conclusion?: string
+  status?: 'queued' | 'in_progress' | 'completed' | string
+  conclusion?: 'success' | 'failure' | 'cancelled' | 'neutral' | 'skipped' | string
   jobs?: ProjectBuildRunJob[]
 }
 
-// Deterministic build status: built | incomplete | none | unsupported.
+export type ProjectBuildCheckStatus = 'built' | 'incomplete' | 'none' | 'unsupported'
+
+// Deterministic artifact status. The workflow run below is explanatory only;
+// exact-commit Package images remain the promotion authority.
 export interface ProjectBuildCheck {
-  status: string
+  status: ProjectBuildCheckStatus
   commitSHA?: string
   builder?: string
   registry?: string

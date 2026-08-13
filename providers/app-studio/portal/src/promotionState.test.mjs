@@ -73,6 +73,15 @@ test('uses bounded backoff delays for slow production convergence', () => {
   assert.equal(promotionPollDelay(8), 15000)
 })
 
+test('keeps promotion disabled before a reviewed commit exists', () => {
+  const pipeline = releasePipelineView(null)
+  assert.equal(pipeline.state, 'needs_commit')
+  assert.equal(pipeline.transitional, false)
+  assert.match(pipeline.message, /Commit your latest changes/)
+  assert.equal(pipeline.steps.find((step) => step.key === 'commit').state, 'current')
+  assert.equal(pipeline.steps.find((step) => step.key === 'build').state, 'pending')
+})
+
 test('feedback identifies the returned instance and rollout revision', () => {
   const feedback = promotionAcceptedFeedback({ instance: 'demo-prod', rolloutRevision: '12' })
   assert.equal(feedback.tone, 'success')
@@ -133,10 +142,58 @@ test('distinguishes queued, partial running, finalizing, and failed exact-commit
   assert.equal(running.state, 'running')
   assert.match(running.message, /1 of 2/)
   assert.deepEqual(running.missing, ['api'])
+  assert.equal(running.partial, true)
+  assert.equal(running.artifactLag, false)
   assert.equal(releasePipelineView(readiness({ status: 'completed', conclusion: 'success' })).state, 'finalizing')
+  assert.equal(releasePipelineView(readiness({ status: 'completed', conclusion: 'success' })).artifactLag, true)
   const failed = releasePipelineView(readiness({ status: 'completed', conclusion: 'failure' }))
   assert.equal(failed.state, 'failed')
   assert.equal(failed.transitional, false)
+})
+
+test('labels a partial artifact view when the run observation is unavailable', () => {
+  const pipeline = releasePipelineView({
+    promotable: false,
+    build: {
+      status: 'incomplete', commitSHA: 'release123', note: '', missing: ['api'],
+      components: [
+        { name: 'web', imageInput: 'webImage', built: true },
+        { name: 'api', imageInput: 'apiImage', built: false },
+      ],
+    },
+  })
+  assert.equal(pipeline.state, 'waiting')
+  assert.equal(pipeline.partial, true)
+  assert.match(pipeline.message, /Partial release artifacts.*1 of 2/)
+  assert.match(pipeline.detail, /api/)
+})
+
+test('does not claim an unpinned run failed when the host omits its head SHA', () => {
+  const pipeline = releasePipelineView({
+    promotable: false,
+    build: {
+      status: 'none', commitSHA: 'release123', note: '', missing: ['web'],
+      components: [{ name: 'web', imageInput: 'webImage', built: false }],
+      run: { found: true, status: 'completed', conclusion: 'failure' },
+    },
+  })
+  assert.equal(pipeline.state, 'waiting')
+  assert.doesNotMatch(pipeline.message, /failed/i)
+  assert.match(pipeline.detail, /did not report its commit/)
+})
+
+test('only marks external access done when a ready publication has a URL', () => {
+  const readiness = {
+    promotable: true,
+    build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
+    production: { name: 'demo-prod', phase: 'Ready' },
+  }
+  const resolving = releasePipelineView(readiness, { published: true, ready: true })
+  assert.equal(resolving.steps.find((step) => step.key === 'access').state, 'current')
+  assert.match(resolving.message, /Resolving external access/)
+  const live = releasePipelineView(readiness, { published: true, ready: true, url: 'https://demo.example.test' })
+  assert.equal(live.steps.find((step) => step.key === 'access').state, 'done')
+  assert.match(live.message, /external access enabled/)
 })
 
 test('does not use a stale workflow run to explain the selected commit', () => {

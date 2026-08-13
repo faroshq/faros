@@ -34,12 +34,16 @@ const config = computed(() => {
     case 'succeeded':
     case 'committed':
     case 'active':
+	case 'loaded':
       return { cls: 'k-badge--success', icon: CheckCircle }
     case 'scheduling':
     case 'pending':
     case 'provisioning':
     case 'running':
     case 'status unavailable':
+	case 'loading':
+	case 'starting':
+	case 'loaded unverified':
       return { cls: 'k-badge--warning', icon: Clock }
     case 'terminating':
     case 'failed':

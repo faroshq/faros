@@ -404,7 +404,7 @@ func (s *Server) observeProjectBuildRun(ctx context.Context, id identity, p *aiv
 	if commitSHA == "" || repositoryRef == "" || strings.TrimSpace(id.clusterID) == "" {
 		return nil, ""
 	}
-	key := strings.Join([]string{id.tenantPath, id.user, repositoryRef, projectBuildWorkflowFileName, commitSHA}, "\x00")
+	key := strings.Join([]string{id.tenantPath, id.clusterID, id.user, repositoryRef, projectBuildWorkflowFileName, commitSHA}, "\x00")
 
 	for {
 		now := time.Now()

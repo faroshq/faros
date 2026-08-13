@@ -243,6 +243,37 @@ func TestProjectAssistantDurableMetadataFromExistingPreservesPlanAcrossTransitio
 	}
 }
 
+func TestProjectAssistantVerificationMetadataSeparatesRunAndEvidenceOutcome(t *testing.T) {
+	interaction := projectAssistantVerificationFromCompletionEvidence(projectAssistantCompletionEvidence{
+		PreviewEvidenceOutcome:       "interactions_verified",
+		PreviewRenderedStateObserved: true,
+		PreviewInteractionVerified:   true,
+	})
+	if interaction.Outcome != "interactions_verified" || !interaction.RenderedStateObserved || !interaction.InteractionVerified {
+		t.Fatalf("interaction verification = %#v", interaction)
+	}
+	if got := projectAssistantVerificationFromCompletionEvidence(projectAssistantCompletionEvidence{}); got.Outcome != "not_verified" {
+		t.Fatalf("empty evidence outcome = %q, want not_verified", got.Outcome)
+	}
+	if got := projectAssistantVerificationFromCompletionEvidence(projectAssistantCompletionEvidence{LatestMutationVerified: true}); got.Outcome != "runtime_verified" {
+		t.Fatalf("runtime-only outcome = %q, want runtime_verified", got.Outcome)
+	}
+	if got := projectAssistantVerificationFromCompletionEvidence(projectAssistantCompletionEvidence{VerificationOutcome: "ready"}); got.Outcome != "runtime_verified" {
+		t.Fatalf("ready no-mutation outcome = %q, want runtime_verified", got.Outcome)
+	}
+
+	existing := map[string]any{projectAssistantMetadataVerification: interaction}
+	metadata := projectAssistantDurableMetadataFromExisting(
+		store.AssistantRun{ID: "run-1", Status: store.AssistantRunStatusCompleted, Revision: 2},
+		"Completed",
+		false,
+		existing,
+	)
+	if !reflect.DeepEqual(metadata[projectAssistantMetadataVerification], interaction) {
+		t.Fatalf("verification metadata = %#v, want %#v", metadata[projectAssistantMetadataVerification], interaction)
+	}
+}
+
 func TestProjectAssistantProgressMetadataIsBoundedAndPreserved(t *testing.T) {
 	valid := projectAssistantProgressSnapshot{
 		Version:          1,

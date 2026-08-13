@@ -150,12 +150,24 @@ import {
   type WorkbenchTabDescriptor,
 } from './workbench'
 import {
+  reconcileWorkbenchProviderTabs,
+  readWorkbenchPersistence,
+  removeWorkbenchPersistence,
+  resolveWorkbenchProviderTool,
+  restoreWorkbenchState,
+  workbenchCatalogContextFingerprint,
+  workbenchPersistenceContextKey,
+  workbenchPersistenceStorageKey,
+  writeWorkbenchPersistence,
+  type WorkbenchPersistenceScope,
+} from './workbenchPersistence'
+import {
   developmentPreviewDisplayPhase,
   developmentPreviewShouldRefreshOnWake,
   developmentPreviewSyncStatus,
 } from './previewState'
 import { DevelopmentPreviewRefreshController } from './previewRefresh'
-import { PreviewConsoleController } from './previewConsole'
+import { PreviewConsoleController, type PreviewConsoleConnectionState } from './previewConsole'
 import {
   advancePromotionPoll,
   beginPromotionPoll,
@@ -471,6 +483,10 @@ const developmentPreviewOverrideURL = ref<string | null>(null)
 const developmentPreviewAuthorizationKey = ref('')
 const developmentPreviewFrameKey = ref(0)
 const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
+const developmentPreviewDocumentState = ref<PreviewConsoleConnectionState>('disabled')
+const developmentPreviewRecoveryError = ref<string | null>(null)
+const developmentPreviewRecoveryAttempt = ref(0)
+const developmentPreviewPendingLoadedStatus = ref<string | null>(null)
 const shareMode = ref<ProjectPublishingMode>('restricted')
 const publishing = ref<ProjectPublishing | null>(null)
 const publishingMembers = ref<ProjectPublishingMember[]>([])
@@ -520,6 +536,12 @@ const developmentTemplates = ref<DevelopmentTemplate[]>([])
 const developmentTemplateBusy = ref(false)
 const developmentHydrateBusy = ref(false)
 const workbench = ref(createDefaultWorkbenchState())
+let workbenchHydrationScopeKey: string | null = null
+let workbenchHydrationProject = ''
+let workbenchHydrated = false
+const providerCatalogContextKey = ref<string | null>(null)
+const providerCatalogLoaded = ref(false)
+let providerCatalogLoadSerial = 0
 const draggedWorkbenchTabID = ref<string | null>(null)
 const dragOverWorkbenchTabID = ref<string | null>(null)
 const dragOverWorkbenchTabPlacement = ref<WorkbenchTabDropPlacement>('before')
@@ -550,6 +572,7 @@ let assistantDurationTimer: number | undefined
 let landingPlaceholderIndex = 0
 let developmentPreviewAuthorizationSerial = 0
 let developmentPreviewAuthorizationRetryTimer: number | undefined
+let developmentPreviewRecoveryTimer: number | undefined
 let developmentPreviewComponentMounted = true
 let assistantThreadRequestSerial = 0
 const developmentPreviewRefreshController = new DevelopmentPreviewRefreshController<Project>({
@@ -566,7 +589,7 @@ const previewConsoleController = new PreviewConsoleController({
     deleteSession: (project, sessionID) => api.deletePreviewConsoleSession(props.ctx, project, sessionID),
   },
   getFrame: () => developmentPreviewFrameRef.value,
-  onState: () => undefined,
+  onState: handleDevelopmentPreviewConsoleState,
 })
 let activeAssistantSubscription: AbortController | null = null
 let activeAssistantRun: AssistantRun | null = null
@@ -578,6 +601,7 @@ let pendingFirstProjectSubmission: ReturnType<typeof newFirstProjectSubmission> 
 let projectCreateGeneration = 0
 let approvalModeLoadSerial = 0
 let approvalModeSaveSerial = 0
+let deleteProjectRequestSerial = 0
 
 function clearPendingFirstProjectSubmission() {
   projectCreateGeneration++
@@ -951,6 +975,10 @@ const filteredProjects = computed(() => {
 })
 
 const providerTools = computed<ProviderTool[]>(() => {
+  // The provider array can outlive an org/workspace/user transition while a
+  // replacement catalog request is in flight. Never expose that old catalog
+  // to the workbench or let it resolve a restored provider placeholder.
+  if (!providerCatalogMatchesCurrentContext()) return []
   const out: ProviderTool[] = []
   for (const provider of providers.value) {
     if (!provider.ready || !provider.hasUI || provider.name === 'app-studio') continue
@@ -983,10 +1011,11 @@ const activeProviderToolRef = computed(() => {
 })
 
 const activeProviderTool = computed<ProviderTool | null>(() => {
-  const toolRef = activeProviderToolRef.value
-  if (!toolRef) return null
-  const tool = providerTools.value.find((item) => item.id === toolRef.id)
-  return tool ? { ...tool, path: toolRef.path } : null
+  return resolveWorkbenchProviderTool(
+    activeProviderToolRef.value,
+    providerTools.value,
+    providerCatalogMatchesCurrentContext(),
+  )
 })
 
 const workbenchLauncherQueryNormalized = computed(() => workbenchLauncherQuery.value.trim().toLowerCase())
@@ -1163,6 +1192,9 @@ const developmentPreviewPhase = computed(() => {
   return developmentPreviewDisplayPhase({
     previewURL: developmentPreviewURL.value,
     authorizationError: developmentPreviewAuthorizationError.value || '',
+	documentState: developmentPreviewDocumentState.value,
+	recoveryExhausted: !!developmentPreviewRecoveryError.value,
+	starting: developmentPreviewAuthorizing.value || !!developmentPreviewReadinessMessage.value,
   })
 })
 
@@ -1225,6 +1257,44 @@ watch(
 )
 
 watch(
+  () => [
+    props.ctx?.tenant ?? '',
+    props.ctx?.orgUUID ?? '',
+    props.ctx?.workspaceUUID ?? '',
+    props.ctx?.user?.userId ?? '',
+    props.ctx?.user?.sub ?? '',
+    props.ctx?.user?.email ?? '',
+  ] as const,
+  () => {
+    // A tenant/user transition must invalidate the old layout before any
+    // asynchronous project/catalog response can arrive. Otherwise a pending
+    // default or old project's tabs could be written under the new scope.
+    invalidateWorkbenchHydration()
+    // Discard project/thread responses started under the previous identity.
+    approvalModeLoadSerial += 1
+    assistantThreadRequestSerial += 1
+    if (deletingProject.value) {
+      // An in-flight delete belongs to the previous tenant scope. Cancel its
+      // local UI state; its completion still removes the captured old key but
+      // must not update the newly selected tenant's project list.
+      deletingProject.value = false
+      deleteProjectTarget.value = null
+      busy.value = false
+    }
+    deleteProjectRequestSerial += 1
+    providerCatalogLoaded.value = false
+    providerCatalogContextKey.value = null
+    providers.value = []
+    void load()
+    void loadProviders()
+    void loadCreateReadiness()
+    void loadLLMSettings()
+    void loadImportRepositories()
+    void loadDevelopmentTemplates()
+  },
+)
+
+watch(
   () => selected.value?.name,
   () => {
     const shareWasOpen = shareDialogOpen.value
@@ -1264,6 +1334,7 @@ watch(
     developmentPreviewOverrideURL.value = null
     developmentPreviewAuthorizationKey.value = ''
     clearDevelopmentPreviewAuthorizationRetry()
+	resetDevelopmentPreviewDocumentState()
     developmentPreviewFrameKey.value += 1
   },
 )
@@ -1320,6 +1391,19 @@ watch(
 )
 
 watch(
+  workbench,
+  (state) => {
+    if (!workbenchHydrated || !selected.value?.name) return
+    const scope = workbenchPersistenceScope(selected.value.name)
+    if (!scope) return
+    const scopeKey = workbenchPersistenceStorageKey(scope)
+    if (!scopeKey || scopeKey !== workbenchHydrationScopeKey) return
+    writeWorkbenchPersistence(scope, state)
+  },
+  { deep: true },
+)
+
+watch(
   () => [
     activeProviderToolRef.value?.path,
     props.ctx?.token,
@@ -1370,6 +1454,7 @@ onBeforeUnmount(() => {
   previewConsoleController.destroy()
   clearInitializationRetry()
   clearDevelopmentPreviewAuthorizationRetry()
+	clearDevelopmentPreviewRecovery()
   clearLandingPlaceholderRotation()
   if (assistantDurationTimer !== undefined) window.clearInterval(assistantDurationTimer)
   assistantWorkedDurationClock.clear()
@@ -1473,15 +1558,47 @@ function clearDevelopmentPreviewAuthorizationRetry() {
   developmentPreviewAuthorizationRetryTimer = undefined
 }
 
+function clearDevelopmentPreviewRecovery() {
+	if (developmentPreviewRecoveryTimer !== undefined) {
+		window.clearTimeout(developmentPreviewRecoveryTimer)
+		developmentPreviewRecoveryTimer = undefined
+	}
+}
+
+function resetDevelopmentPreviewDocumentState() {
+	clearDevelopmentPreviewRecovery()
+	developmentPreviewDocumentState.value = 'disabled'
+	developmentPreviewRecoveryError.value = null
+	developmentPreviewRecoveryAttempt.value = 0
+	developmentPreviewPendingLoadedStatus.value = null
+}
+
 async function loadProviders() {
-  if (!props.ctx?.token) return
+  const serial = ++providerCatalogLoadSerial
+  providerCatalogLoaded.value = false
+  providerCatalogContextKey.value = null
+  if (!props.ctx?.token) {
+    // Invalidate the prior catalog even when logout means there is no request
+    // to start. An older in-flight response must fail the serial check above.
+    providers.value = []
+    providersLoading.value = false
+    return
+  }
+  const requestContextKey = workbenchCatalogContextFingerprint(workbenchPersistenceContext())
   providersLoading.value = true
   try {
-    providers.value = await api.listProviders(props.ctx)
+    const catalog = await api.listProviders(props.ctx)
+    if (serial !== providerCatalogLoadSerial) return
+    if (requestContextKey !== workbenchCatalogContextFingerprint(workbenchPersistenceContext())) return
+    providers.value = catalog
+    providerCatalogLoaded.value = true
+    providerCatalogContextKey.value = requestContextKey
+    reconcileCurrentWorkbenchProviders()
   } catch (e) {
+    if (serial !== providerCatalogLoadSerial) return
     toolError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    providersLoading.value = false
+    if (serial === providerCatalogLoadSerial) providersLoading.value = false
   }
 }
 
@@ -1545,6 +1662,7 @@ async function importRepositoryProject() {
     importSelectedRepository.value = ''
     selected.value = project
     resetWorkbench()
+    initializeWorkbenchForNewProject(project.name)
     props.navigate(encodeURIComponent(project.name))
     void load()
     void loadImportRepositories()
@@ -1593,6 +1711,7 @@ const promotionBuildStatus = computed(() => promotion.value?.build?.status ?? ''
 const releasePipeline = computed(() => releasePipelineView(promotion.value, {
   published: publishing.value?.published,
   ready: publishing.value?.publication?.ready,
+  url: productionURL.value,
 }))
 const releaseTakingLonger = ref(false)
 const canPromote = computed(() => !!promotion.value?.promotable && productionFormValid.value && !promotionBusy.value)
@@ -1619,7 +1738,16 @@ const productionBinding = computed(() => promotion.value?.production ?? null)
 const productionDeployment = computed(() => productionDeploymentState(productionBinding.value))
 const productionAccess = computed(() => productionAccessState(productionBinding.value, publishing.value))
 const productionURL = computed(() => productionAccess.value.url)
-const productionPublicationReady = computed(() => Boolean(publishing.value?.published && publishing.value.publication?.ready))
+// A publication record can outlive a failed/removed deployment. Only show a
+// ready-publication success once a production binding exists and is itself
+// Ready; this prevents stale access state from claiming a pre-deployment app
+// is ready or live.
+const productionPublicationReady = computed(() => Boolean(
+  productionBinding.value &&
+  productionDeployment.value.ready &&
+  publishing.value?.published &&
+  publishing.value.publication?.ready,
+))
 const productionDescription = computed(() => {
   if (productionPublicationReady.value && !productionURL.value) {
     return 'The publication is ready; the production link is still being resolved.'
@@ -2452,6 +2580,7 @@ async function createProjectAndStartConversation(
       submission = firstProjectSubmissionWithProject(submission, projectName)
       pendingFirstProjectSubmission = submission
       selected.value = created
+      initializeWorkbenchForNewProject(projectName)
       messages.value = messages.value.map((message) => ({ ...message, projectID: projectName }))
       props.navigate(encodeURIComponent(projectName))
     }
@@ -2627,6 +2756,7 @@ async function openProject(name: string, updateURL = true) {
     ])
     if (approvalRequestSerial !== approvalModeLoadSerial || assistantThreadLoadSerial !== assistantThreadRequestSerial) return
     selected.value = project
+    hydrateWorkbenchForProject(name)
     assistantThreads.value = threads
     activeAssistantThreadID.value = restoreAssistantThreadFocus(assistantThreadFocusScope(name), threads)
     const threadItems = activeAssistantThreadID.value ? await api.listAssistantThreadItems(props.ctx, name, activeAssistantThreadID.value) : []
@@ -3069,6 +3199,8 @@ async function syncDevelopmentPreviewForProject(projectName: string | undefined,
 	developmentSyncStatus.value = null
 	developmentSyncError.value = null
 	try {
+		resetDevelopmentPreviewDocumentState()
+		developmentPreviewPendingLoadedStatus.value = successStatus
 		await api.syncDevelopment(props.ctx, projectName)
 		const project = await api.getProject(props.ctx, projectName)
 		if (!developmentPreviewComponentMounted || selected.value?.name !== projectName) return
@@ -3083,6 +3215,7 @@ async function syncDevelopmentPreviewForProject(projectName: string | undefined,
 			previewURL: developmentPreviewURL.value,
 			readinessMessage: developmentPreviewReadinessMessage.value || '',
 			authorizationError: developmentPreviewAuthorizationError.value || '',
+			documentState: developmentPreviewDocumentState.value,
 		}, successStatus)
 	} catch (e) {
 		developmentSyncError.value = e instanceof Error ? e.message : String(e)
@@ -3148,6 +3281,7 @@ async function authorizeDevelopmentPreview(options: { force?: boolean } = {}) {
     developmentPreviewOverrideURL.value = null
     developmentPreviewAuthorizationKey.value = ''
     clearDevelopmentPreviewAuthorizationRetry()
+	resetDevelopmentPreviewDocumentState()
     return
   }
   const key = developmentPreviewKey(projectName, rawURL)
@@ -3173,6 +3307,7 @@ async function authorizeDevelopmentPreviewRequest(projectName: string, key: stri
       developmentPreviewOverrideURL.value = null
       developmentPreviewAuthorizationKey.value = key
       developmentPreviewReadinessMessage.value = authorization.message || 'Preview is getting ready. The development instance is not serving traffic yet.'
+	  developmentPreviewDocumentState.value = 'connecting'
       scheduleDevelopmentPreviewAuthorizationRetry(projectName, key)
       return
     }
@@ -3200,6 +3335,8 @@ function applyDevelopmentPreviewAuthorization(projectName: string, authorization
   developmentPreviewAuthorizationKey.value = key
   developmentPreviewReadinessMessage.value = null
   clearDevelopmentPreviewAuthorizationRetry()
+	developmentPreviewDocumentState.value = 'connecting'
+	developmentPreviewRecoveryError.value = null
   developmentPreviewFrameKey.value += 1
 }
 
@@ -3256,9 +3393,55 @@ function projectDevelopmentPreviewString(result: unknown, key: 'message' | 'reas
 }
 
 function handleDevelopmentPreviewFrameLoad() {
-  refreshDevelopmentPreviewAuthorizationIfNeeded()
   const projectName = selected.value?.name
-  if (projectName) void previewConsoleController.connect(projectName)
+	if (projectName) {
+		developmentPreviewDocumentState.value = 'connecting'
+		void previewConsoleController.connect(projectName)
+	}
+}
+
+function handleDevelopmentPreviewConsoleState(state: PreviewConsoleConnectionState) {
+	developmentPreviewDocumentState.value = state
+	if (state === 'connected') {
+		clearDevelopmentPreviewRecovery()
+		developmentPreviewRecoveryAttempt.value = 0
+		developmentPreviewRecoveryError.value = null
+		if (developmentPreviewPendingLoadedStatus.value) {
+			developmentSyncStatus.value = developmentPreviewPendingLoadedStatus.value
+			developmentPreviewPendingLoadedStatus.value = null
+		}
+		return
+	}
+	if (state === 'disabled' && developmentPreviewPendingLoadedStatus.value) {
+		developmentSyncStatus.value = 'Synced project files. Preview loaded; document verification is unavailable.'
+		developmentPreviewPendingLoadedStatus.value = null
+		return
+	}
+	if (state === 'unavailable') scheduleDevelopmentPreviewRecovery()
+}
+
+function scheduleDevelopmentPreviewRecovery() {
+	if (!developmentPreviewComponentMounted || !developmentPreviewNeedsAuthorization.value || !developmentPreviewURL.value || developmentPreviewRecoveryTimer !== undefined) return
+	const delays = [1_000, 2_000, 4_000]
+	const attempt = developmentPreviewRecoveryAttempt.value
+	if (attempt >= delays.length) {
+		developmentPreviewRecoveryError.value = 'The preview document did not finish loading. The development runtime may still be starting.'
+		return
+	}
+	const projectName = selected.value?.name
+	if (!projectName) return
+	developmentPreviewRecoveryAttempt.value = attempt + 1
+	developmentPreviewRecoveryTimer = window.setTimeout(() => {
+		developmentPreviewRecoveryTimer = undefined
+		if (!developmentPreviewComponentMounted || selected.value?.name !== projectName) return
+		void authorizeDevelopmentPreview({ force: true })
+	}, delays[attempt])
+}
+
+function retryDevelopmentPreview() {
+	resetDevelopmentPreviewDocumentState()
+	developmentPreviewDocumentState.value = 'connecting'
+	void authorizeDevelopmentPreview({ force: true })
 }
 
 function handleDevelopmentPreviewVisibilityChange() {
@@ -3276,7 +3459,10 @@ function refreshDevelopmentPreviewAuthorizationIfNeeded() {
     authorizing: developmentPreviewAuthorizing.value,
     previewURL: developmentPreviewURL.value,
     authorizationError: developmentPreviewAuthorizationError.value || '',
+	documentState: developmentPreviewDocumentState.value,
+	recoveryExhausted: !!developmentPreviewRecoveryError.value,
   })) return
+	clearDevelopmentPreviewRecovery()
   void authorizeDevelopmentPreview({ force: true })
 }
 
@@ -3309,8 +3495,75 @@ function openProductionSettingsFromShare() {
   void nextTick(() => productionSettingsPaneRef.value?.focus())
 }
 
-function resetWorkbench() {
+function workbenchPersistenceContext() {
+  return {
+    tenant: props.ctx?.tenant,
+    orgUUID: props.ctx?.orgUUID,
+    workspaceUUID: props.ctx?.workspaceUUID,
+    userSub: props.ctx?.user?.userId || props.ctx?.user?.sub || props.ctx?.user?.email,
+  }
+}
+
+function workbenchPersistenceScope(project: string): WorkbenchPersistenceScope {
+  return { ...workbenchPersistenceContext(), project }
+}
+
+function providerCatalogMatchesCurrentContext(): boolean {
+  const currentContextKey = workbenchCatalogContextFingerprint(workbenchPersistenceContext())
+  return providerCatalogLoaded.value && providerCatalogContextKey.value === currentContextKey
+}
+
+function invalidateWorkbenchHydration() {
+  workbenchHydrationScopeKey = null
+  workbenchHydrationProject = ''
+  workbenchHydrated = false
   workbench.value = createDefaultWorkbenchState()
+}
+
+/**
+ * Restore a project's stable layout only after the routed project is known.
+ * During a catalog outage provider identities remain as inert placeholders;
+ * the successful catalog pass below supplies canonical metadata and pruning.
+ */
+function hydrateWorkbenchForProject(projectName: string) {
+  const scope = workbenchPersistenceScope(projectName)
+  const scopeKey = workbenchPersistenceStorageKey(scope)
+  workbenchHydrated = false
+  workbenchHydrationProject = projectName
+  workbenchHydrationScopeKey = scopeKey
+  const persisted = readWorkbenchPersistence(scope)
+  const catalogTools = providerCatalogMatchesCurrentContext() ? providerTools.value : []
+  workbench.value = restoreWorkbenchState(persisted, catalogTools)
+  workbenchHydrated = true
+  if (providerCatalogMatchesCurrentContext()) reconcileCurrentWorkbenchProviders()
+}
+
+/** Creation and landing flows intentionally start from the canonical default. */
+function initializeWorkbenchForNewProject(projectName: string) {
+  workbenchHydrated = false
+  workbenchHydrationProject = projectName
+  workbenchHydrationScopeKey = workbenchPersistenceStorageKey(workbenchPersistenceScope(projectName))
+  workbench.value = createDefaultWorkbenchState()
+  workbenchHydrated = true
+}
+
+function reconcileCurrentWorkbenchProviders() {
+  if (!selected.value?.name || !workbenchHydrated || workbenchHydrationProject !== selected.value.name) return
+  if (!providerCatalogMatchesCurrentContext()) return
+  workbench.value = reconcileWorkbenchProviderTabs(workbench.value, providerTools.value)
+  remountActiveProviderToolAfterReconciliation()
+}
+
+function remountActiveProviderToolAfterReconciliation() {
+  if (activeWorkbenchTab.value?.kind !== 'provider') return
+  toolLoadSerial += 1
+  void nextTick(() => {
+    if (activeWorkbenchTab.value?.kind === 'provider') void mountActiveProviderTool()
+  })
+}
+
+function resetWorkbench() {
+  invalidateWorkbenchHydration()
 }
 
 function openBuiltInWorkbenchTab(kind: WorkbenchBuiltInTab) {
@@ -3430,12 +3683,23 @@ async function confirmDeleteProject() {
   const project = deleteProjectTarget.value
   if (!project) return
   const name = project.name
+  const deletionScope = workbenchPersistenceScope(name)
+  const deletionContextKey = workbenchPersistenceContextKey(deletionScope)
+  const requestSerial = ++deleteProjectRequestSerial
+  const deleteRequestIsCurrent = () =>
+    requestSerial === deleteProjectRequestSerial &&
+    deletionContextKey === workbenchPersistenceContextKey(workbenchPersistenceContext())
   busy.value = true
   deletingProject.value = true
   error.value = null
   try {
     await api.deleteProject(props.ctx, name)
+    // Use the scope captured before the await. The active identity may have
+    // changed while the server deleted the old project.
+    removeWorkbenchPersistence(deletionScope)
+    if (!deleteRequestIsCurrent()) return
     projects.value = await api.listProjects(props.ctx)
+    if (!deleteRequestIsCurrent()) return
     if (selected.value?.name === name) {
       selected.value = null
       messages.value = []
@@ -3446,10 +3710,12 @@ async function confirmDeleteProject() {
     deleteProjectTarget.value = null
     if (projects.value.length === 0) props.navigate(CREATE_PROJECT_ROUTE)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    if (deleteRequestIsCurrent()) error.value = e instanceof Error ? e.message : String(e)
   } finally {
-    deletingProject.value = false
-    busy.value = false
+    if (requestSerial === deleteProjectRequestSerial) {
+      deletingProject.value = false
+      busy.value = false
+    }
   }
 }
 
@@ -3957,6 +4223,7 @@ function applyAssistantThreadEvent(event: ProjectAssistantThreadEvent, projectNa
           ...(rawItem.phase ? { assistantPhase: rawItem.phase } : {}),
         } : {}),
         ...(role === 'assistant' && rawItem.data?.assistantProgress ? { assistantProgress: rawItem.data.assistantProgress } : {}),
+		...(role === 'assistant' && rawItem.data?.assistantVerification ? { assistantVerification: rawItem.data.assistantVerification } : {}),
       }
       const projected = toProjectMessageView({
         id: messageID,
@@ -4203,6 +4470,15 @@ function openToolFull() {
 }
 
 async function mountActiveProviderTool() {
+  if (!providerCatalogMatchesCurrentContext()) {
+    // A restored provider tab may remain visible while its catalog is being
+    // refreshed. Do not turn its old descriptor into a mounted element until
+    // the current identity's catalog has loaded successfully.
+    toolState.value = 'idle'
+    toolError.value = null
+    detachMountedTool()
+    return
+  }
   const tool = activeProviderTool.value
   const host = toolHostRef.value
   if (!activeProviderToolRef.value) return
@@ -5621,13 +5897,13 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </button>
             </div>
           </div>
-          <div v-if="developmentSyncError || developmentPreviewAuthorizationError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
-            {{ developmentSyncError || developmentPreviewAuthorizationError }}
+          <div v-if="developmentSyncError || developmentPreviewAuthorizationError || developmentPreviewRecoveryError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
+            {{ developmentSyncError || developmentPreviewAuthorizationError || developmentPreviewRecoveryError }}
           </div>
           <div v-else-if="developmentSyncStatus" class="rounded-md border border-success/30 bg-success-subtle p-3 text-[12px] text-success">
             {{ developmentSyncStatus }}
           </div>
-          <div v-if="developmentPreviewURL" class="min-h-0 flex-1 overflow-hidden rounded-md border border-border-subtle bg-surface">
+          <div v-if="developmentPreviewURL" class="relative min-h-0 flex-1 overflow-hidden rounded-md border border-border-subtle bg-surface">
             <iframe
               ref="developmentPreviewFrameRef"
               :key="developmentPreviewFrameKey"
@@ -5638,6 +5914,18 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               class="h-full min-h-[360px] w-full border-0 bg-white"
               @load="handleDevelopmentPreviewFrameLoad"
             />
+			<div
+				v-if="developmentPreviewRecoveryError"
+				class="absolute inset-0 flex items-center justify-center bg-surface/95 p-6 text-center"
+			>
+				<div class="max-w-sm">
+					<div class="text-[13px] font-semibold text-text-primary">Preview did not finish loading</div>
+					<div class="mt-1 text-[12px] leading-5 text-text-muted">The runtime may still be starting. Retry now or use Sync to restart it.</div>
+					<button type="button" class="mt-3 rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[12px] font-medium text-text-primary hover:bg-surface-hover" @click="retryDevelopmentPreview">
+						Retry preview
+					</button>
+				</div>
+			</div>
           </div>
           <div v-else class="flex min-h-[360px] flex-1 items-center justify-center rounded-md border border-border-subtle bg-surface/80 p-6 text-center">
             <div class="max-w-xs">
@@ -6054,6 +6342,10 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   <p class="mt-1 max-w-2xl text-[12px] leading-5 text-text-muted">{{ productionOverviewDescription }}</p>
                 </div>
                 <StatusBadge :status="productionOverview.label" :tone="productionOverview.tone" />
+              </div>
+              <div v-if="promotion" class="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-border-subtle bg-surface-overlay px-3 py-2 text-[11px] text-text-muted" aria-label="Release evidence">
+                <span><span class="font-semibold uppercase tracking-wide">Reviewed commit</span> <code class="font-mono text-text-secondary">{{ releasePipeline.commitSHA || 'No commit yet' }}</code></span>
+                <span><span class="font-semibold uppercase tracking-wide">Built images</span> <span class="font-mono text-text-secondary">{{ releasePipeline.builtCount }} / {{ releasePipeline.totalCount }}</span></span>
               </div>
               <ReleasePipeline :pipeline="releasePipeline" :taking-longer="releaseTakingLonger" />
               <div v-if="productionPublicationReady" class="rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-[12px] leading-5 text-success" role="status">

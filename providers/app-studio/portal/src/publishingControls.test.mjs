@@ -52,6 +52,10 @@ test('keeps Production focused on deployment and technical details inside Settin
   assert.ok(productionStart >= 0 && productionEnd > productionStart)
   const pane = app.slice(productionStart, productionEnd)
   assert.match(pane, /aria-label="Production overview"/)
+  assert.match(pane, /aria-label="Release evidence"/)
+  assert.match(pane, /Reviewed commit/)
+  assert.match(pane, /Built images/)
+  assert.match(pane, /releasePipeline\.builtCount[\s\S]*releasePipeline\.totalCount/)
   assert.match(pane, /Redeploy/)
   assert.match(pane, /Open app/)
   assert.match(pane, /aria-label="Technical details"/)
@@ -93,8 +97,8 @@ test('renders release progress as an announced four-stage pipeline with build dr
   assert.match(releasePipeline, /Taking longer than usual/)
 })
 
-test('treats a ready publication without a URL as calm success while Live remains URL-dependent', () => {
-  assert.match(app, /const productionPublicationReady = computed\(\(\) => Boolean\(publishing\.value\?\.published && publishing\.value\.publication\?\.ready\)\)/)
+test('keeps publication success deployment-scoped while Live remains URL-dependent', () => {
+  assert.match(app, /const productionPublicationReady = computed\(\(\) => Boolean\([\s\S]*productionBinding\.value[\s\S]*productionDeployment\.value\.ready[\s\S]*publishing\.value\?\.published[\s\S]*publishing\.value\.publication\?\.ready[\s\S]*\)\)/)
   assert.match(app, /return \{ label: productionURL\.value \? 'Live' : 'Ready', tone: 'success' as const \}/)
   assert.match(app, /productionPublicationReady\.value && !productionURL\.value/)
   assert.match(app, /const productionPublicationStatus = computed\(\(\) => \{[\s\S]*if \(productionPublicationReady\.value\)[\s\S]*tone: 'success'/)
@@ -104,6 +108,9 @@ test('treats a ready publication without a URL as calm success while Live remain
   assert.ok(overviewStart >= 0 && overviewEnd > overviewStart)
   assert.match(app.slice(overviewStart, overviewEnd), /productionPublicationReady\.value[\s\S]*publishing\.value\.publication\?\.error/)
   assert.match(app, /The publication is ready; the production link is still being resolved\./)
+  // A stale publication object must not make the not-yet-deployed panel claim
+  // that the app is ready. The binding/readiness guard above is the boundary.
+  assert.match(app, /if \(!productionBinding\.value\) return \{ label: 'Not deployed'/)
 })
 
 test('routes sharing through the modular dialog and current access contracts only', () => {

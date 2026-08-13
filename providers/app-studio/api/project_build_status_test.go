@@ -43,6 +43,22 @@ func TestFetchProjectBuildRunNormalizesStructuredCodeStatus(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer caller-token" {
 			t.Fatalf("Authorization = %q", got)
 		}
+		var request struct {
+			Params struct {
+				Arguments struct {
+					RepositoryRef    string `json:"repositoryRef"`
+					WorkflowFileName string `json:"workflowFileName"`
+					Ref              string `json:"ref"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode MCP request: %v", err)
+		}
+		args := request.Params.Arguments
+		if args.RepositoryRef != "repo-a" || args.WorkflowFileName != projectBuildWorkflowFileName || args.Ref != "70aed526" {
+			t.Fatalf("build status arguments = %#v, want repository/workflow/exact reviewed ref", args)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"repositoryRef":"repo-a","found":true,"runID":42,"htmlURL":"https://example.test/actions/42","headSHA":"70aed526","status":"in_progress","jobs":[{"name":"web","status":"completed","conclusion":"success"},{"name":"api","status":"in_progress"}]}}}`)
 	}))
@@ -107,6 +123,36 @@ func TestObserveProjectBuildRunSingleflightsAndCachesExactCommit(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("resolver calls = %d, want 1", calls)
+	}
+}
+
+func TestObserveProjectBuildRunCacheScopesClusterIdentity(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	s := &Server{projectBuildRunResolver: func(_ context.Context, id identity, _ *aiv1alpha1.Project, _ *http.Request, commit string) (*projectBuildRunObservation, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return &projectBuildRunObservation{Found: true, RunID: int64(calls), HeadSHA: commit + "-" + id.clusterID, Status: "queued"}, nil
+	}}
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"}}}
+	commit := "70aed526"
+
+	first, firstErr := s.observeProjectBuildRun(context.Background(), identity{tenantPath: "root:tenant-a", clusterID: "cluster-a", user: "alice"}, p, nil, commit)
+	second, secondErr := s.observeProjectBuildRun(context.Background(), identity{tenantPath: "root:tenant-a", clusterID: "cluster-b", user: "alice"}, p, nil, commit)
+	if firstErr != "" || secondErr != "" {
+		t.Fatalf("errors = %q, %q", firstErr, secondErr)
+	}
+	if first == nil || first.RunID != 1 || first.HeadSHA != commit+"-cluster-a" {
+		t.Fatalf("first run = %#v", first)
+	}
+	if second == nil || second.RunID != 2 || second.HeadSHA != commit+"-cluster-b" {
+		t.Fatalf("second run = %#v; cache must not cross cluster identities", second)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want one per cluster", calls)
 	}
 }
 

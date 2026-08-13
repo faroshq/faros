@@ -70,6 +70,10 @@ export interface ReleasePipelineView {
   buildURL: string
   builtCount: number
   totalCount: number
+  /** Some component images are visible, but the exact release is incomplete. */
+  partial: boolean
+  /** CI completed successfully while registry Package observations lag. */
+  artifactLag: boolean
   missing: string[]
   steps: ReleasePipelineStep[]
 }
@@ -77,6 +81,8 @@ export interface ReleasePipelineView {
 export interface ReleaseAccessObservation {
   published?: boolean
   ready?: boolean
+  /** The access URL is the semantic boundary for the Live label. */
+  url?: string | null
 }
 
 function clean(value: string | null | undefined): string {
@@ -128,7 +134,15 @@ export function releasePipelineView(
   const currentProductionReady = productionPhase === 'ready' && rolloutConverged
   const selectedReleaseDeployed = !!readiness && currentProductionReady && selectedReleaseMatchesProduction(readiness, components)
   const deploying = !!readiness?.production && !currentProductionReady
-  const runMatchesCommit = !clean(run?.headSHA) || clean(run?.headSHA) === commitSHA
+  // A workflow lookup is explanatory evidence, not the promotion gate. It is
+  // still only allowed to explain a release when the provider echoed the
+  // exact reviewed SHA requested through code__build_status. A missing SHA is
+  // deliberately inconclusive so a stale/ambiguous run cannot claim failure.
+  const runHeadSHA = clean(run?.headSHA)
+  const runMatchesCommit = !!commitSHA && !!runHeadSHA && runHeadSHA === commitSHA
+  const partial = builtCount > 0 && builtCount < totalCount
+  const artifactLag = !!run?.found && runMatchesCommit && runStatus === 'completed' && conclusion === 'success' && build?.status !== 'built'
+  const accessLive = !!access.published && !!access.ready && !!clean(access.url)
 
   let state: ReleasePipelineState
   let tone: ReleasePipelineTone
@@ -145,9 +159,11 @@ export function releasePipelineView(
   } else if (selectedReleaseDeployed) {
     state = 'production_ready'
     tone = 'success'
-    message = access.published && access.ready
+    message = accessLive
       ? 'Production is running with external access enabled.'
-      : 'Production is running. Choose who can access it.'
+      : access.published
+        ? 'Production is running. Resolving external access…'
+        : 'Production is running. Choose who can access it.'
     detail = requestedRevision
       ? `Requested rollout ${shortSHA(requestedRevision)} is observed in production${observedRevision ? ` at ${shortSHA(observedRevision)}` : ''}. Redeploying a newer release does not change the current access policy.`
       : 'Redeploying a newer release does not change the current access policy.'
@@ -177,7 +193,9 @@ export function releasePipelineView(
     state = 'waiting'
     tone = 'warning'
     message = `Committed ${shortSHA(commitSHA)}. Waiting for its build to start…`
-    detail = `The observed workflow run belongs to ${shortSHA(clean(run.headSHA)) || 'another commit'}; it cannot explain or unlock this release.`
+    detail = runHeadSHA
+      ? `The observed workflow run belongs to ${shortSHA(runHeadSHA)}; it cannot explain or unlock this release.`
+      : 'The workflow did not report its commit; it cannot explain or unlock this release yet.'
   } else if (run?.found && runStatus === 'queued') {
     state = 'queued'
     tone = 'warning'
@@ -193,6 +211,13 @@ export function releasePipelineView(
     tone = 'warning'
     message = 'Build succeeded. Finalizing release images…'
     detail = missing.length ? `The registry is still indexing ${missing.join(', ')}.` : 'Waiting for registry package observations.'
+  } else if (build?.status === 'incomplete') {
+    state = 'waiting'
+    tone = 'warning'
+    message = `Partial release artifacts — ${builtCount} of ${totalCount} ready.`
+    detail = missing.length
+      ? `Waiting for ${missing.join(', ')}. The exact-commit build remains the promotion authority.`
+      : 'Waiting for the remaining exact-commit release images.'
   } else {
     state = 'waiting'
     tone = 'warning'
@@ -214,13 +239,14 @@ export function releasePipelineView(
     { key: 'commit', label: 'Commit', state: commitSHA ? 'done' : 'current', detail: commitSHA ? shortSHA(commitSHA) : undefined },
     { key: 'build', label: 'Build images', state: buildFailed ? 'error' : buildDone ? 'done' : buildCurrent ? 'current' : 'pending', detail: totalCount ? `${builtCount} of ${totalCount}` : undefined },
     { key: 'deploy', label: 'Deploy', state: selectedReleaseDeployed ? 'done' : productionFailed ? 'error' : deploying || state === 'ready' ? 'current' : 'pending', detail: requestedRevision ? `requested ${shortSHA(requestedRevision)} / observed ${shortSHA(observedRevision) || '—'}` : undefined },
-    { key: 'access', label: 'Enable access', state: access.published && access.ready ? 'done' : selectedReleaseDeployed ? 'current' : 'pending' },
+    { key: 'access', label: 'Enable access', state: accessLive ? 'done' : selectedReleaseDeployed ? 'current' : 'pending' },
   ]
 
   return {
     state, tone, message, detail,
     transitional: ['waiting', 'queued', 'running', 'finalizing', 'deploying'].includes(state),
     commitSHA, requestedRevision, observedRevision, buildURL: clean(run?.url), builtCount, totalCount, missing, steps,
+    partial, artifactLag,
   }
 }
 
