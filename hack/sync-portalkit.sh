@@ -144,3 +144,13 @@ for p in "${VUE_PORTALS[@]}"; do
   cp "$TS_SRC/toast.ts" "$ROOT/$p/src/portalkit/toast.ts"
   echo "synced tenant.ts, toast.ts -> $p/src/portalkit"
 done
+
+# dashboardtile.ts is the shared scaffolding behind every provider's
+# <faros-dashboard-tile-*> element. Plain TS for the same reason as tenant.ts,
+# and vendored into every portal that ships (or may ship) a tile.
+for p in "${VUE_PORTALS[@]}" "${TS_PORTALS[@]}"; do
+  # The console itself mounts tiles rather than providing one.
+  [[ "$p" == "portal" ]] && continue
+  cp "$TS_SRC/dashboardtile.ts" "$ROOT/$p/src/portalkit/dashboardtile.ts"
+  echo "synced dashboardtile.ts -> $p/src/portalkit"
+done
