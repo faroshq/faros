@@ -67,7 +67,7 @@ watch(
 )
 
 watch(
-  () => [theme.mode, auth.token, auth.clusterName] as const,
+  () => [theme.resolved, auth.token, auth.clusterName] as const,
   () => pushContext(),
 )
 
@@ -132,7 +132,8 @@ function pushContext() {
     token: auth.token,
     user: auth.user,
     tenant: auth.clusterName,
-    theme: theme.mode,
+    // Resolved, not the raw mode — see ProviderFrame.pushContext.
+    theme: theme.resolved,
     basePath: `/ui/providers/${props.provider.name}`,
   }
 }
