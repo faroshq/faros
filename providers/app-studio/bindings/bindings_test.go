@@ -332,10 +332,10 @@ func TestPreviewAccessDefaultsToPrivate(t *testing.T) {
 		"nil project":  nil,
 		"unset policy": {},
 		"explicitly private": {Spec: aiv1alpha1.ProjectSpec{
-			Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePrivate}},
+			Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePrivate}},
 		}},
 		"shared is not public": {Spec: aiv1alpha1.ProjectSpec{
-			Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModeShared}},
+			Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModeShared}},
 		}},
 	} {
 		if got := PreviewAccess(project); got != AccessPrivate {
@@ -344,7 +344,7 @@ func TestPreviewAccessDefaultsToPrivate(t *testing.T) {
 	}
 
 	public := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
-		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
+		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
 	}}
 	if got := PreviewAccess(public); got != AccessPublic {
 		t.Errorf("PreviewAccess = %q, want %q", got, AccessPublic)

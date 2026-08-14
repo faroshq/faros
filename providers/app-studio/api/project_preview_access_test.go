@@ -21,7 +21,7 @@ import (
 // "re-apply" cannot be allowed to widen access as a side effect.
 func TestRequestedPreviewModePreservesCurrentOnEmptyBody(t *testing.T) {
 	public := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
-		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
+		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
 	}}
 	if got, err := requestedPreviewMode("", public); err != nil || got != aiv1alpha1.ProjectSharingModePublic {
 		t.Fatalf("empty body on a public preview = %q, %v; want public preserved", got, err)
@@ -51,13 +51,13 @@ func TestRequestedPreviewModeVocabulary(t *testing.T) {
 // a user who just switched to Restricted would be told the app is public.
 func TestPreviewRuntimeDesiredAccessTracksPolicyNotBinding(t *testing.T) {
 	private := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
-		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePrivate}},
+		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePrivate}},
 	}}
 	if got := bindings.PreviewAccess(private); got != accessPrivate {
 		t.Fatalf("PreviewAccess = %q, want %q so grants are permitted", got, accessPrivate)
 	}
 	public := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
-		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
+		Sharing: aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
 	}}
 	if got := bindings.PreviewAccess(public); got != accessPublic {
 		t.Fatalf("PreviewAccess = %q, want %q so grants are refused", got, accessPublic)
