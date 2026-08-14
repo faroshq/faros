@@ -9,7 +9,7 @@
 // version live — and they live in different environments, so the tile reads
 // them off the environment list rather than the project phase.
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from './api'
 import type { FarosContext, Project, ProjectEnvironment } from './types'
 import {
@@ -18,10 +18,30 @@ import {
   isBenignTileError,
   mostRecent,
   navigateFromTile,
+  tileClass,
   tileErrorText,
   type TileContext,
   type TilePoller,
 } from './portalkit/dashboardtile'
+import { ic } from './portalkit/icons'
+
+// Inline chevron — provider bundles are self-contained (no shared icon lib),
+// the same reason the infrastructure tile inlines its own.
+const ChevronRight = (props: { class?: string }) =>
+  h(
+    'svg',
+    {
+      xmlns: 'http://www.w3.org/2000/svg',
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      class: props.class,
+    },
+    [h('path', { d: 'm9 18 6-6-6-6' })],
+  )
 
 const props = defineProps<{ context: TileContext | null }>()
 
@@ -94,54 +114,62 @@ watch(() => props.context, () => poller?.refresh())
 </script>
 
 <template>
-  <div ref="rootRef" class="space-y-3">
-    <div v-if="loading" class="text-[11px] text-text-muted">Loading projects&hellip;</div>
-    <div v-else-if="error" class="text-[11px] text-danger">Failed to load: {{ error }}</div>
+  <div ref="rootRef" :class="tileClass.root">
+    <div v-if="loading" :class="tileClass.message">Loading projects&hellip;</div>
+    <div v-else-if="error" :class="tileClass.error">Failed to load: {{ error }}</div>
 
     <template v-else>
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-        <span class="inline-flex items-center gap-1 text-text-primary">
-          <span class="font-semibold tabular-nums">{{ stats.total }}</span>
-          <span class="text-text-muted">{{ stats.total === 1 ? 'project' : 'projects' }}</span>
+      <div :class="tileClass.stats">
+        <span :class="[tileClass.stat, tileClass.statTotal]">
+          <span v-html="ic('package', tileClass.statIcon)" />
+          <span :class="tileClass.statNum">{{ stats.total }}</span>
+          <span :class="tileClass.statLabel">{{ stats.total === 1 ? 'project' : 'projects' }}</span>
         </span>
-        <span class="inline-flex items-center gap-1 text-text-muted">
+        <span :class="[tileClass.stat, tileClass.statMuted]">
+          <span v-html="ic('eye', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.previewReady }}</span>
           <span>preview up</span>
         </span>
-        <span v-if="stats.productionReady > 0" class="inline-flex items-center gap-1 text-success">
+        <span v-if="stats.productionReady > 0" :class="[tileClass.stat, tileClass.statOk]">
+          <span v-html="ic('check', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.productionReady }}</span>
-          <span>in production</span>
+          <span :class="tileClass.statLabel">in production</span>
         </span>
       </div>
 
-      <ul v-if="rows.length" class="space-y-1">
-        <li v-for="row in rows" :key="row.project.name">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-[11px] transition hover:bg-surface-hover"
-            @click="navigateFromTile(rootRef, row.project.name)"
-          >
-            <span class="min-w-0 truncate text-text-primary">
-              {{ row.project.displayName || row.project.name }}
-            </span>
-            <span class="flex shrink-0 items-center gap-1.5">
+      <div v-if="rows.length">
+        <div :class="tileClass.sectionLabel">Recent</div>
+        <ul :class="tileClass.list">
+          <li v-for="row in rows" :key="row.project.name">
+            <button
+              type="button"
+              :class="tileClass.row"
+              @click="navigateFromTile(rootRef, row.project.name)"
+            >
+              <!-- The dot is the development preview: every project has one,
+                   so it is the only state that can be read the same way on
+                   every row. Production is the exception (most projects are
+                   never promoted) and stays a chip, shown only when it exists
+                   — a project with no production has nothing to be red about. -->
               <span
-                class="rounded px-1 py-px text-[10px] uppercase tracking-wide"
-                :class="row.preview ? 'bg-success/15 text-success' : 'bg-surface-hover text-text-muted'"
-              >dev</span>
-              <!-- A project that was never promoted has no production state to
-                   report, so it shows nothing rather than a misleading red. -->
+                :class="[tileClass.rowDot, row.preview ? 'bg-success' : 'bg-text-muted']"
+                aria-hidden="true"
+              />
+              <span :class="tileClass.rowPrimary">
+                {{ row.project.displayName || row.project.name }}
+              </span>
               <span
                 v-if="row.promoted"
-                class="rounded px-1 py-px text-[10px] uppercase tracking-wide"
+                class="shrink-0 rounded px-1 py-px text-[10px] uppercase tracking-wide"
                 :class="row.production ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'"
               >prod</span>
-            </span>
-          </button>
-        </li>
-      </ul>
+              <ChevronRight :class="tileClass.chevron" />
+            </button>
+          </li>
+        </ul>
+      </div>
 
-      <p v-else class="text-[11px] text-text-muted">No projects yet — create one to get started.</p>
+      <div v-else :class="tileClass.empty">No projects yet — create one to get started.</div>
     </template>
   </div>
 </template>

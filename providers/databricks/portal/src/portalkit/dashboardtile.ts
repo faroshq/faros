@@ -16,6 +16,56 @@
 // Deliberately plain TypeScript, like the rest of portalkit: it is synced into
 // vanilla-TS and Vue portals alike, so it must not import a framework.
 
+// tileClass is the ONE visual vocabulary every dashboard tile renders with.
+//
+// Tiles are cards sitting side by side in one grid, so a tile that invents its
+// own row padding, border or type scale reads as a different product. These
+// were previously inline in the infrastructure tile — the first one written —
+// and every tile added afterwards approximated them by eye. Naming them here
+// means a change lands everywhere at once.
+//
+// Tailwind scans this file (it is vendored into each portal's src/), so the
+// literal strings still generate their utilities.
+export const tileClass = {
+  // Vertical rhythm of the whole tile body.
+  root: 'space-y-3',
+  // The headline row: counts and status chips, wrapping on narrow cards.
+  stats: 'flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]',
+  // One chip inside that row. Every chip is glyph + number + word, in that
+  // order — a row where some chips carry an icon and others do not reads as
+  // two different components sharing a card.
+  stat: 'inline-flex items-center gap-1',
+  statIcon: 'h-3 w-3 shrink-0',
+  // Tones. `statTotal` is the neutral headline count; the rest carry meaning,
+  // so a tile should reach for them only when the number is actionable.
+  statTotal: 'text-text-primary',
+  statOk: 'text-success',
+  statWarn: 'text-warning',
+  statBad: 'text-danger',
+  statMuted: 'text-text-muted',
+  // The number itself: tabular so counts do not jitter as they poll.
+  statNum: 'font-semibold tabular-nums',
+  statLabel: 'text-text-muted',
+  // Small caps heading above a list ("Recent", "Offline first", …).
+  sectionLabel: 'mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted',
+  list: 'space-y-1',
+  // One clickable row. `group` drives the chevron's hover motion.
+  row: 'group flex w-full items-center gap-2 rounded-lg border border-border-subtle bg-surface-overlay/40 px-2.5 py-1.5 text-left transition-colors hover:bg-accent/[0.04]',
+  // Primary identifier — takes the slack and truncates.
+  rowPrimary: 'min-w-0 flex-1 truncate text-[12px] text-text-primary',
+  // Secondary fact (phase, age, template) — never truncates the primary away.
+  rowSecondary: 'shrink-0 truncate text-[10px] text-text-muted/70',
+  // Leading status indicator on a row. One dot, one meaning, same size on
+  // every tile — rows that lead with a full icon on one card and a dot on the
+  // next read as two different lists.
+  rowDot: 'h-1.5 w-1.5 shrink-0 rounded-full',
+  chevron: 'h-3 w-3 shrink-0 text-text-muted/30 transition-all group-hover:translate-x-0.5 group-hover:text-accent/60',
+  // Empty state: dashed, so it reads as "nothing here" rather than a row.
+  empty: 'rounded-lg border border-dashed border-border-subtle p-3 text-center text-[11px] text-text-muted',
+  message: 'text-[11px] text-text-muted',
+  error: 'text-[11px] text-danger',
+} as const
+
 // TileContext is the subset of farosContext a tile needs. The console pushes
 // the full object; tiles only ever read these.
 export interface TileContext {
@@ -109,15 +159,31 @@ export interface TilePoller {
 // createTilePoller owns the load-now-then-poll lifecycle, including the
 // overlap guard: a slow load must not stack up behind the interval, which is
 // how a tile against a struggling backend turns into a request flood.
+//
+// A refresh that arrives mid-load is COALESCED, not dropped. Dropping it looks
+// harmless until you notice the sequence every tile actually starts with: the
+// element is appended (poller starts, loads with no context yet, renders
+// empty), and the console pushes farosContext in the very next statement. That
+// refresh lands while the first load is still settling, so discarding it left
+// the tile showing its empty state until the next interval — or forever, if
+// the context never changes again.
 export function createTilePoller(load: () => Promise<void>, intervalMs = TILE_POLL_MS): TilePoller {
   let handle: ReturnType<typeof setInterval> | null = null
   let inFlight = false
+  let queued = false
 
   const run = () => {
-    if (inFlight) return
+    if (inFlight) {
+      queued = true
+      return
+    }
     inFlight = true
     void load().finally(() => {
       inFlight = false
+      if (queued) {
+        queued = false
+        run()
+      }
     })
   }
 

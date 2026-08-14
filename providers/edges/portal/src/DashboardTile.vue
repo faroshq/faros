@@ -9,7 +9,7 @@
 // is therefore "N of M connected" rather than a bare total, because the ratio
 // is the fact worth glancing at.
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listEdges, setTenant, setToken } from './api'
 import type { Edge } from './types'
 import {
@@ -18,10 +18,30 @@ import {
   hasWorkspaceContext,
   isBenignTileError,
   navigateFromTile,
+  tileClass,
   tileErrorText,
   type TileContext,
   type TilePoller,
 } from './portalkit/dashboardtile'
+import { ic } from './portalkit/icons'
+
+// Inline chevron — provider bundles are self-contained (no shared icon lib),
+// the same reason the infrastructure tile inlines its own.
+const ChevronRight = (props: { class?: string }) =>
+  h(
+    'svg',
+    {
+      xmlns: 'http://www.w3.org/2000/svg',
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      class: props.class,
+    },
+    [h('path', { d: 'm9 18 6-6-6-6' })],
+  )
 
 const props = defineProps<{ context: TileContext | null }>()
 
@@ -94,48 +114,52 @@ watch(() => props.context, () => poller?.refresh())
 </script>
 
 <template>
-  <div ref="rootRef" class="space-y-3">
-    <div v-if="loading" class="text-[11px] text-text-muted">Loading edges&hellip;</div>
-    <div v-else-if="error" class="text-[11px] text-danger">Failed to load: {{ error }}</div>
+  <div ref="rootRef" :class="tileClass.root">
+    <div v-if="loading" :class="tileClass.message">Loading edges&hellip;</div>
+    <div v-else-if="error" :class="tileClass.error">Failed to load: {{ error }}</div>
 
     <template v-else>
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-        <span class="inline-flex items-center gap-1 text-text-primary">
-          <span class="font-semibold tabular-nums">{{ stats.connected }}</span>
-          <span class="text-text-muted">of</span>
+      <div :class="tileClass.stats">
+        <span :class="[tileClass.stat, tileClass.statTotal]">
+          <span v-html="ic('check', tileClass.statIcon)" />
+          <span :class="tileClass.statNum">{{ stats.connected }}</span>
+          <span :class="tileClass.statLabel">of</span>
           <span class="tabular-nums">{{ stats.total }}</span>
-          <span class="text-text-muted">connected</span>
+          <span :class="tileClass.statLabel">connected</span>
         </span>
-        <span v-if="stats.offline > 0" class="inline-flex items-center gap-1 text-danger">
+        <span v-if="stats.offline > 0" :class="[tileClass.stat, tileClass.statBad]">
+          <span v-html="ic('alert-triangle', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.offline }}</span>
-          <span>offline</span>
+          <span :class="tileClass.statLabel">offline</span>
         </span>
       </div>
 
-      <ul v-if="rows.length" class="space-y-1">
-        <li v-for="edge in rows" :key="`${edge.type}/${edge.name}`">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-[11px] transition hover:bg-surface-hover"
-            @click="navigateFromTile(rootRef, `${edge.name}?type=${edge.type}`)"
-          >
-            <span class="flex min-w-0 items-center gap-1.5">
+      <div v-if="rows.length">
+        <!-- Named for the ordering, which is the point of this list: the edge
+             you need to look at is the one that stopped reporting. -->
+        <div :class="tileClass.sectionLabel">Least recently seen</div>
+        <ul :class="tileClass.list">
+          <li v-for="edge in rows" :key="`${edge.type}/${edge.name}`">
+            <button
+              type="button"
+              :class="tileClass.row"
+              @click="navigateFromTile(rootRef, `${edge.name}?type=${edge.type}`)"
+            >
               <span
-                class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="edge.connected ? 'bg-success' : 'bg-danger'"
+                :class="[tileClass.rowDot, edge.connected ? 'bg-success' : 'bg-danger']"
                 aria-hidden="true"
               />
-              <span class="min-w-0 truncate font-mono text-text-primary">{{ edge.name }}</span>
-            </span>
-            <span
-              class="shrink-0 tabular-nums"
-              :class="edge.connected ? 'text-text-muted' : 'text-danger'"
-            >{{ age(edge.lastHeartbeatTime) }}</span>
-          </button>
-        </li>
-      </ul>
+              <span :class="tileClass.rowPrimary">{{ edge.name }}</span>
+              <span
+                :class="[tileClass.rowSecondary, edge.connected ? '' : 'text-danger']"
+              >{{ age(edge.lastHeartbeatTime) }}</span>
+              <ChevronRight :class="tileClass.chevron" />
+            </button>
+          </li>
+        </ul>
+      </div>
 
-      <p v-else class="text-[11px] text-text-muted">No edges enrolled yet.</p>
+      <div v-else :class="tileClass.empty">No edges enrolled yet.</div>
     </template>
   </div>
 </template>

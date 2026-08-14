@@ -13,7 +13,7 @@
 // Read-only, and silent about a workspace that has not been bootstrapped: see
 // portalkit/dashboardtile.
 
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, setTenant, setToken } from './api'
 import type { Connection, Repository } from './types'
 import {
@@ -22,10 +22,30 @@ import {
   isBenignTileError,
   mostRecent,
   navigateFromTile,
+  tileClass,
   tileErrorText,
   type TileContext,
   type TilePoller,
 } from './portalkit/dashboardtile'
+import { ic } from './portalkit/icons'
+
+// Inline chevron — provider bundles are self-contained (no shared icon lib),
+// the same reason the infrastructure tile inlines its own.
+const ChevronRight = (props: { class?: string }) =>
+  h(
+    'svg',
+    {
+      xmlns: 'http://www.w3.org/2000/svg',
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      class: props.class,
+    },
+    [h('path', { d: 'm9 18 6-6-6-6' })],
+  )
 
 const props = defineProps<{ context: TileContext | null }>()
 
@@ -83,52 +103,65 @@ watch(() => props.context, () => poller?.refresh())
 </script>
 
 <template>
-  <div ref="rootRef" class="space-y-3">
-    <div v-if="loading" class="text-[11px] text-text-muted">Loading repositories&hellip;</div>
-    <div v-else-if="error" class="text-[11px] text-danger">Failed to load: {{ error }}</div>
+  <div ref="rootRef" :class="tileClass.root">
+    <div v-if="loading" :class="tileClass.message">Loading repositories&hellip;</div>
+    <div v-else-if="error" :class="tileClass.error">Failed to load: {{ error }}</div>
 
     <template v-else>
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-        <span class="inline-flex items-center gap-1 text-text-primary">
-          <span class="font-semibold tabular-nums">{{ stats.repos }}</span>
-          <span class="text-text-muted">{{ stats.repos === 1 ? 'repository' : 'repositories' }}</span>
+      <div :class="tileClass.stats">
+        <span :class="[tileClass.stat, tileClass.statTotal]">
+          <span v-html="ic('package', tileClass.statIcon)" />
+          <span :class="tileClass.statNum">{{ stats.repos }}</span>
+          <span :class="tileClass.statLabel">{{ stats.repos === 1 ? 'repository' : 'repositories' }}</span>
         </span>
-        <span class="inline-flex items-center gap-1 text-text-muted">
+        <span :class="[tileClass.stat, tileClass.statMuted]">
+          <span v-html="ic('link', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.connections }}</span>
           <span>{{ stats.connections === 1 ? 'connection' : 'connections' }}</span>
         </span>
         <!-- A broken connection is the failure everything else inherits, so it
              is the one number that earns colour on this tile. -->
-        <span v-if="stats.broken > 0" class="inline-flex items-center gap-1 text-danger">
+        <span v-if="stats.broken > 0" :class="[tileClass.stat, tileClass.statBad]">
+          <span v-html="ic('alert-triangle', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.broken }}</span>
-          <span>not validated</span>
+          <span :class="tileClass.statLabel">not validated</span>
         </span>
-        <span v-if="stats.notReady > 0" class="inline-flex items-center gap-1 text-warning">
+        <span v-if="stats.notReady > 0" :class="[tileClass.stat, tileClass.statWarn]">
+          <span v-html="ic('clock', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.notReady }}</span>
-          <span>not ready</span>
+          <span :class="tileClass.statLabel">not ready</span>
         </span>
       </div>
 
-      <ul v-if="rows.length" class="space-y-1">
-        <li v-for="repo in rows" :key="repo.name">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-[11px] transition hover:bg-surface-hover"
-            @click="navigateFromTile(rootRef, `repositories/${repo.name}`)"
-          >
-            <span class="min-w-0 truncate font-mono text-text-primary">{{ repo.repo || repo.name }}</span>
-            <span
-              class="shrink-0 tabular-nums"
-              :class="repo.ready ? 'text-success' : 'text-warning'"
-            >{{ repo.ready ? 'ready' : 'pending' }}</span>
-          </button>
-        </li>
-      </ul>
+      <div v-if="rows.length">
+        <div :class="tileClass.sectionLabel">Repositories</div>
+        <ul :class="tileClass.list">
+          <li v-for="repo in rows" :key="repo.name">
+            <button
+              type="button"
+              :class="tileClass.row"
+              @click="navigateFromTile(rootRef, `repositories/${repo.name}`)"
+            >
+              <!-- Dot carries the ready state; repeating it as a word would
+                   be two indicators for one fact. The trailing slot shows the
+                   connection instead, which is what you actually need when a
+                   repository is not ready. -->
+              <span
+                :class="[tileClass.rowDot, repo.ready ? 'bg-success' : 'bg-warning']"
+                aria-hidden="true"
+              />
+              <span :class="tileClass.rowPrimary">{{ repo.repo || repo.name }}</span>
+              <span :class="tileClass.rowSecondary">{{ repo.connectionRef }}</span>
+              <ChevronRight :class="tileClass.chevron" />
+            </button>
+          </li>
+        </ul>
+      </div>
 
-      <p v-else-if="stats.connections === 0" class="text-[11px] text-text-muted">
+      <div v-else-if="stats.connections === 0" :class="tileClass.empty">
         No git connection yet — connect a provider to create repositories.
-      </p>
-      <p v-else class="text-[11px] text-text-muted">No repositories yet.</p>
+      </div>
+      <div v-else :class="tileClass.empty">No repositories yet.</div>
     </template>
   </div>
 </template>
