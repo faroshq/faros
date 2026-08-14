@@ -2136,6 +2136,11 @@ KRO_SEED_DIR ?= providers/infrastructure/examples/rgds
 E2E_KRO_KIND_NAME ?= faros-kro-e2e
 E2E_KRO_KUBECONFIG ?= $(CURDIR)/.faros-kro-e2e.kubeconfig
 GATEWAY_API_VERSION ?= v1.2.1
+INFRAKUBE_POC_COMMIT := 2fed999fb3c30e8415da5489eb8cf1eec8b765f0
+INFRAKUBE_POC_IMAGE_TAG := $(shell printf '%s' $(INFRAKUBE_POC_COMMIT) | cut -c1-12)
+INFRAKUBE_POC_CONTROLLER_IMAGE ?= faros/infrakube:$(INFRAKUBE_POC_IMAGE_TAG)
+INFRAKUBE_POC_TASK_IMAGE ?= faros/infrakube-task:$(INFRAKUBE_POC_IMAGE_TAG)
+INFRAKUBE_POC_INSTALL := providers/infrastructure/test/e2e/infrakube/install.sh
 
 ## Bring up the management kro cluster + install kro (fork w/ multicluster) +
 ## register the cluster as a self-member + seed RGDs. Idempotent: re-running
@@ -2269,6 +2274,23 @@ e2e-infrastructure-run: ## Run the infra template RGD-acceptance e2e against $(E
 		go test -tags e2e -count=1 -timeout 15m ./backend/kro/ -run TestE2E -v
 
 e2e-infrastructure: e2e-infrastructure-up e2e-infrastructure-run ## Bring up kro + run the infra template e2e (then `make e2e-infrastructure-down`)
+
+.PHONY: e2e-infrastructure-terraform-state e2e-infrastructure-terraform-state-up e2e-infrastructure-terraform-state-run
+
+e2e-infrastructure-terraform-state-up: e2e-infrastructure-up ## Build + install pinned Infrakube into the infrastructure e2e cluster
+	KUBECONFIG=$(E2E_KRO_KUBECONFIG) \
+	KIND_CLUSTER_NAME=$(E2E_KRO_KIND_NAME) \
+	INFRAKUBE_COMMIT=$(INFRAKUBE_POC_COMMIT) \
+	CONTROLLER_IMAGE=$(INFRAKUBE_POC_CONTROLLER_IMAGE) \
+	TASK_IMAGE=$(INFRAKUBE_POC_TASK_IMAGE) \
+		$(INFRAKUBE_POC_INSTALL)
+
+e2e-infrastructure-terraform-state-run: ## Assess the Kubernetes backend state lifecycle through KRO and Infrakube
+	cd providers/infrastructure && \
+		KUBECONFIG=$(E2E_KRO_KUBECONFIG) FAROS_E2E_INFRAKUBE=1 \
+		go test -tags e2e -count=1 -timeout 20m ./backend/kro/ -run '^TestE2EInfrakubeTerraformStateLifecycle$$' -v
+
+e2e-infrastructure-terraform-state: e2e-infrastructure-terraform-state-up e2e-infrastructure-terraform-state-run ## Run the Terraform state assessment (then `make e2e-infrastructure-down`)
 
 # --- In-cluster variants (no separate kind cluster) ---
 # Used by Tiltfile.cluster, which already manages a kind cluster for kcp.
