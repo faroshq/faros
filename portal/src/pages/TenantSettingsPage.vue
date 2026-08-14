@@ -48,6 +48,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import AppLayout from '@/components/AppLayout.vue'
 import MemberList from '@/components/MemberList.vue'
 import { useTenantStore, type AppAccessGrantRow, type MemberRow, type SARow, type TokenResponse, type WorkspaceRow } from '@/stores/tenant'
+import { useProvidersStore } from '@/stores/providers'
 import { confirmDialog } from '@/portalkit/confirm'
 import { toast } from '@/portalkit/toast'
 import {
@@ -70,6 +71,7 @@ import {
 } from 'lucide-vue-next'
 
 const tenant = useTenantStore()
+const providers = useProvidersStore()
 
 // ===== Selection ============================================================
 
@@ -562,6 +564,18 @@ async function onRemoveWsMember(user: string) {
 const appAccessGrants = ref<AppAccessGrantRow[]>([])
 const appAccessLoading = ref(false)
 const appAccessBusy = ref<Record<string, boolean>>({})
+
+// The card renders only when it's relevant to THIS workspace: App Studio is
+// enabled here, or grants actually exist. The second clause is load-bearing —
+// disabling App Studio does not delete previously-written grants (they're
+// plain workspace RBAC), and access that keeps working must stay visible and
+// revocable rather than becoming invisible the moment the provider goes away.
+// Without the first clause the card advertises an App Studio feature in
+// workspaces that never had it, which reads as a leak even though the list
+// itself is always scoped to this workspace's own grants.
+const showAppAccess = computed(
+  () => appAccessGrants.value.length > 0 || providers.isEnabled('app-studio'),
+)
 
 async function reloadAppAccessGrants() {
   if (sel.value?.kind !== 'ws') {
@@ -1208,7 +1222,7 @@ function fmtDate(s?: string | null): string {
             </section>
 
             <!-- App access grants -->
-            <section class="rounded-xl border border-border-subtle bg-surface-raised/60 p-5">
+            <section v-if="showAppAccess" class="rounded-xl border border-border-subtle bg-surface-raised/60 p-5">
               <h3 class="mb-1 text-sm font-semibold text-text-primary">App access</h3>
               <p class="mb-3 text-[12px] text-text-muted">
                 People invited to open <span class="font-medium text-text-secondary">private published apps</span>
