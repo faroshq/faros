@@ -85,6 +85,9 @@ spec:
             - --serving-key-file=/tls/tls.key
             {{- end }}
             - --hub-external-url={{ required "hub.hubExternalURL is required" .Values.hub.hubExternalURL }}
+            {{- if .Values.hub.providerInternalURL }}
+            - --provider-internal-url={{ .Values.hub.providerInternalURL }}
+            {{- end }}
             {{- if .Values.hub.publishedAppsDomain }}
             - --published-apps-domain={{ .Values.hub.publishedAppsDomain }}
             {{- end }}
