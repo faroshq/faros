@@ -35,6 +35,8 @@ already excludes `test/e2e`.)
 | hub REST + MCP | `https://localhost:9443` | `FAROS_E2E_HUB_URL` |
 | infrastructure `/mcp` | `http://localhost:8082` | `FAROS_E2E_INFRA_URL` |
 | hub static token | `dev-token` | `FAROS_E2E_STATIC_TOKEN` |
+| operator/KRO runtime kubeconfig | `.faros-cluster.kubeconfig` | `FAROS_E2E_TILT_RUNTIME_KUBECONFIG` |
+| operator namespace | `faros-infrastructure-operator` | `FAROS_E2E_TILT_OPERATOR_NAMESPACE` |
 
 ## What it asserts
 
@@ -50,6 +52,62 @@ already excludes `test/e2e`.)
 - **Tenant isolation** (`TestTenantIsolationRequiresIdentity`) — a tool call
   with no caller identity (no `X-Faros-Tenant`, no bearer token) is refused
   rather than silently acting cross-tenant.
+
+## Config Connector composition steel-thread (opt-in)
+
+Run the focused composition test only after the operator-managed runtime is up:
+
+```sh
+make e2e-tilt-cluster-config-connector
+```
+
+`TestConfigConnectorComposition` verifies the operator's
+`InfrastructureProvider` lifecycle (`Bootstrapped`, `KroReleased`,
+`ProviderDeployed`, and `Registered`), applies a test-owned minimal
+`storage.cnrm.cloud.google.com/v1beta1` `StorageBucket` CRD, and creates a
+test-only `Template` whose `GCSBucket` instance composes to a KRO-labeled
+runtime `StorageBucket` child. The assertion checks the child's `location` and
+`uniformBucketLevelAccess` values.
+
+This is deliberately a composition-only check. It does not install or fake a
+Config Connector controller, configure `ConfigConnectorContext` or cloud IAM,
+contact GCP, or prove that a real bucket is reconciled. If a non-test-owned
+StorageBucket CRD is already installed, the test skips rather than replacing
+it. Direct package execution also skips cleanly when the Tilt stack or runtime
+kubeconfig is absent.
+
+### Real Pub/Sub create/delete extension
+
+The explicitly opted-in real-cloud target installs the checksum-pinned Config
+Connector 1.153.0 operator in cluster mode, runs the same infrastructure
+operator and multicluster KRO path with a native `PubSubTopic` child, and then
+deletes the Faros parent:
+
+```sh
+export FAROS_E2E_GCP_PROJECT='disposable-test-project'
+export FAROS_E2E_GCP_CREDENTIALS_FILE='/absolute/path/to/service-account.json'
+make e2e-tilt-cluster-config-connector-gcp
+```
+
+The service account must be able to mint OAuth tokens and create, get, and
+delete Pub/Sub topics in the selected disposable project; the Pub/Sub API must
+already be enabled. The credential file is read locally, imported only into the
+runtime cluster's `cnrm-system/gsa-key` Secret, and never copied into the
+repository. The installer is idempotent. It intentionally leaves Config
+Connector installed after the test, but the test removes every test-owned
+Template, RGD, tenant workspace/binding, parent instance, child CR, and cloud
+topic.
+
+`TestConfigConnectorGCPPubSubLifecycle` requires the child to report
+`Ready=True` at its current generation. A direct authenticated Pub/Sub REST GET
+must then return HTTP 200. After deleting the Faros parent, both Kubernetes
+objects must be NotFound and the same REST GET must return HTTP 404. Failure
+cleanup can directly delete only the exact `faros-kcc-e2e-<hex>` topic and must
+also prove HTTP 404; it never removes finalizers.
+
+To rerun without reinstalling the operator, use
+`make e2e-tilt-cluster-config-connector-gcp-run`. Setting the real-cloud opt-in
+without both required environment variables is a failure, not a skip.
 
 ## Possible follow-ups
 
