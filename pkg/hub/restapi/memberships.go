@@ -262,7 +262,7 @@ func (h *Handler) listWorkspaceMemberships(w http.ResponseWriter, r *http.Reques
 			out = append(out, MembershipView{
 				User: idx.Name, RBACIdentity: meta.RBACIdentity,
 				Email: meta.Email, UserDisplayName: meta.DisplayName,
-				Role: e.Role,
+				Role:    e.Role,
 				OrgUUID: e.OrgUUID, WorkspaceUUID: e.WorkspaceUUID,
 				OrgDisplayName: e.OrgDisplayName, WorkspaceDisplayName: e.WorkspaceDisplayName,
 			})
