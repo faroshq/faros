@@ -556,7 +556,7 @@ func mintConfigConnectorGCPAccessToken(t *testing.T, credentialJSON []byte) stri
 	if err != nil {
 		t.Fatal("GCP token exchange failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GCP token exchange returned HTTP %d", resp.StatusCode)
 	}
@@ -614,7 +614,7 @@ func getConfigConnectorPubSubTopic(accessToken, resource string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode, nil
 }
@@ -639,7 +639,7 @@ func deleteConfigConnectorPubSubTopic(accessToken, resource string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("Pub/Sub delete returned HTTP %d", resp.StatusCode)
