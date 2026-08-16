@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -58,6 +59,7 @@ const (
 	configConnectorName                 = "configconnector.core.cnrm.cloud.google.com"
 	configConnectorPubSubCRDName        = "pubsubtopics.pubsub.cnrm.cloud.google.com"
 	configConnectorPubSubTemplatePrefix = "gcp-pubsub-steel-thread-"
+	configConnectorPubSubTemplateName   = "gcp-pubsub-topic"
 	configConnectorPubSubWorkspacePref  = "e2e-pubsub-"
 	configConnectorPubSubNode           = "pubSubTopic"
 	configConnectorPubSubResource       = "gcppubsubtopics"
@@ -74,12 +76,42 @@ var (
 	configConnectorTopicPattern   = regexp.MustCompile(`^faros-kcc-e2e-[0-9a-f]{8}$`)
 )
 
-// TestConfigConnectorGCPPubSubLifecycle is the explicit real-cloud extension
+// TestConfigConnectorGCPPubSubLifecycle is the isolated real-cloud extension
 // of TestConfigConnectorComposition. It is selected only by its dedicated Make
 // target because it installs no fake CRD and creates a billable cloud resource.
 func TestConfigConnectorGCPPubSubLifecycle(t *testing.T) {
+	runConfigConnectorGCPPubSubLifecycle(t, false)
+}
+
+// TestConfigConnectorGCPPubSubSmoke uses the stable Template enabled by the
+// manual Tilt action. It deliberately does not create or update that Template;
+// the only cloud object it owns is the generated Pub/Sub topic.
+func TestConfigConnectorGCPPubSubSmoke(t *testing.T) {
+	runConfigConnectorGCPPubSubLifecycle(t, true)
+}
+
+// TestConfigConnectorPubSubTemplateFixture is a read-only guard that runs
+// without a Tilt stack. The real-cloud tests must consume this exact YAML
+// rather than carrying a second, drift-prone Go representation.
+func TestConfigConnectorPubSubTemplateFixture(t *testing.T) {
+	template := configConnectorPubSubTemplate(t, configConnectorPubSubTemplateName)
+	resource, found, err := unstructured.NestedString(template.Object, "spec", "instanceCRD", "resource")
+	if err != nil || !found || resource != configConnectorPubSubResource {
+		t.Fatalf("fixture instanceCRD.resource = %q (found=%t err=%v), want %q", resource, found, err, configConnectorPubSubResource)
+	}
+	resources, found, err := unstructured.NestedSlice(template.Object, "spec", "backendConfig", "resources")
+	if err != nil || !found || len(resources) != 1 {
+		t.Fatalf("fixture backendConfig.resources = %#v (found=%t err=%v), want one resource", resources, found, err)
+	}
+	resourceObject, ok := resources[0].(map[string]any)
+	if !ok || resourceObject["id"] != configConnectorPubSubNode {
+		t.Fatalf("fixture backendConfig resource = %#v, want id %q", resources[0], configConnectorPubSubNode)
+	}
+}
+
+func runConfigConnectorGCPPubSubLifecycle(t *testing.T, useEnabledTemplate bool) {
 	if os.Getenv(configConnectorGCPOptIn) != "1" {
-		t.Skip("run only through make e2e-tilt-cluster-config-connector-gcp")
+		t.Skip("run only through an explicit Config Connector Make target")
 	}
 
 	projectID := os.Getenv(configConnectorGCPProjectEnv)
@@ -121,6 +153,9 @@ func TestConfigConnectorGCPPubSubLifecycle(t *testing.T) {
 		t.Fatalf("refusing topic name %q because the preflight REST GET returned HTTP %d instead of 404", topicName, initialStatus)
 	}
 	templateName := configConnectorPubSubTemplatePrefix + shortNonce()
+	if useEnabledTemplate {
+		templateName = configConnectorPubSubTemplateName
+	}
 	workspaceName := configConnectorPubSubWorkspacePref + shortNonce()
 
 	var (
@@ -208,10 +243,12 @@ func TestConfigConnectorGCPPubSubLifecycle(t *testing.T) {
 		}
 	})
 
-	if _, err := providerClient.Resource(configConnectorTemplateGVR).Create(context.Background(), configConnectorPubSubTemplate(templateName), metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create test Template %q: %v", templateName, err)
+	if !useEnabledTemplate {
+		if _, err := providerClient.Resource(configConnectorTemplateGVR).Create(context.Background(), configConnectorPubSubTemplate(t, templateName), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create test Template %q: %v", templateName, err)
+		}
+		templateCreated = true
 	}
-	templateCreated = true
 	if !waitTilt(t, configConnectorGCPWait, func() (bool, string) {
 		got, err := providerClient.Resource(configConnectorTemplateGVR).Get(context.Background(), templateName, metav1.GetOptions{})
 		if err != nil {
@@ -386,50 +423,26 @@ func requiredConfigConnectorRuntimeClient(t *testing.T) dynamic.Interface {
 	return client
 }
 
-func configConnectorPubSubTemplate(name string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": infraGroup + "/v1alpha1",
-		"kind":       "Template",
-		"metadata": map[string]any{
-			"name":   name,
-			"labels": map[string]any{configConnectorTestLabel: configConnectorTestLabelValue},
-		},
-		"spec": map[string]any{
-			"displayName": "GCP Pub/Sub Config Connector steel thread",
-			"description": "Test-only KRO composition of a real Config Connector PubSubTopic.",
-			"category":    "Test",
-			"version":     "0.0.1",
-			"backend":     "kro",
-			"instanceCRD": map[string]any{
-				"group": infraGroup, "version": "v1alpha1", "resource": configConnectorPubSubResource, "kind": "GCPPubSubTopic",
-			},
-			"schema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"projectID": map[string]any{"type": "string"},
-					"topicName": map[string]any{"type": "string"},
-				},
-				"required": []any{"projectID", "topicName"},
-			},
-			"backendConfig": map[string]any{
-				"resources": []any{map[string]any{
-					"id": configConnectorPubSubNode,
-					"template": map[string]any{
-						"apiVersion": "pubsub.cnrm.cloud.google.com/v1beta1",
-						"kind":       "PubSubTopic",
-						"metadata": map[string]any{
-							"name":      "${schema.spec.topicName}",
-							"namespace": "default",
-							"annotations": map[string]any{
-								"cnrm.cloud.google.com/project-id": "${schema.spec.projectID}",
-							},
-						},
-						"spec": map[string]any{},
-					},
-				}},
-			},
-		},
-	}}
+func configConnectorPubSubTemplate(t *testing.T, name string) *unstructured.Unstructured {
+	t.Helper()
+	path := filepath.Join(repoRoot, "providers/infrastructure/contrib/config-connector/pubsub-template.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read Config Connector Pub/Sub Template fixture %q: %v", path, err)
+	}
+	var object map[string]any
+	if err := yaml.Unmarshal(raw, &object); err != nil {
+		t.Fatalf("decode Config Connector Pub/Sub Template fixture %q: %v", path, err)
+	}
+	template := &unstructured.Unstructured{Object: object}
+	if template.GetAPIVersion() != infraGroup+"/v1alpha1" || template.GetKind() != "Template" {
+		t.Fatalf("Config Connector Pub/Sub Template fixture has type %s/%s", template.GetAPIVersion(), template.GetKind())
+	}
+	if template.GetName() != configConnectorPubSubTemplateName {
+		t.Fatalf("Config Connector Pub/Sub Template fixture name = %q, want %q", template.GetName(), configConnectorPubSubTemplateName)
+	}
+	template.SetName(name)
+	return template
 }
 
 func waitConfigConnectorChildReady(t *testing.T, runtimeClient dynamic.Interface, namespace, name string) {
