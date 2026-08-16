@@ -23,6 +23,39 @@ const GROUP_FIELD = 'infrastructure_faros_sh'
 
 let bearerToken: string | null = null
 let clusterName: string | null = null
+let contextGeneration = 0
+
+interface ApiContext {
+  token: string | null
+  cluster: string
+  generation: number | null
+  authorityKey: string
+}
+
+export interface PortalApiContext {
+  token?: string | null
+  tenant?: string | null
+}
+
+function authorityKey(cluster: string, token: string | null): string {
+  // Length-prefix the cluster so two distinct context pairs cannot alias. This
+  // key is internal only; it is never logged or persisted.
+  return `${cluster.length}:${cluster}:${token ?? ''}`
+}
+
+export function setContext(context: PortalApiContext) {
+  const nextToken = context.token || null
+  const nextCluster = context.tenant || null
+  if (nextToken === bearerToken && nextCluster === clusterName) return
+  const tenantChanged = nextCluster !== clusterName
+  bearerToken = nextToken
+  clusterName = nextCluster
+  contextGeneration += 1
+  if (tenantChanged) {
+    // eslint-disable-next-line no-console
+    console.debug('[infrastructure] tenant clusterName →', nextCluster)
+  }
+}
 
 // setBasePath is a no-op: the gateway path is built from the cluster name, not
 // the provider basePath. Kept so App.vue's watcher type-checks.
@@ -30,56 +63,113 @@ export function setBasePath(_ctxBasePath?: string | null) {
   void _ctxBasePath
 }
 export function setToken(token?: string | null) {
-  bearerToken = token || null
+  setContext({ token, tenant: clusterName })
 }
 export function setTenant(name?: string | null) {
-  const next = name || null
-  if (next !== clusterName) {
-    // eslint-disable-next-line no-console
-    console.debug('[infrastructure] tenant clusterName →', next)
+  setContext({ token: bearerToken, tenant: name })
+}
+
+function captureContext(explicit?: PortalApiContext): ApiContext {
+  const cluster = explicit ? explicit.tenant || null : clusterName
+  const token = explicit ? explicit.token || null : bearerToken
+  if (!cluster) {
+    throw <ErrorResponse>{ reason: 'TenantMissing', message: 'no workspace selected' }
   }
-  clusterName = next
+  return {
+    token,
+    cluster,
+    generation: explicit ? null : contextGeneration,
+    authorityKey: authorityKey(cluster, token),
+  }
+}
+
+function assertContextCurrent(context: ApiContext): void {
+  // Explicit contexts are immutable request snapshots owned by their caller
+  // (the independently mounted dashboard tile). Global contexts are owned by
+  // App.vue and must still be invalidated on a workspace/token transition.
+  if (context.generation !== null &&
+    (context.generation !== contextGeneration || context.cluster !== clusterName || context.token !== bearerToken)) {
+    throw <ErrorResponse>{ reason: 'ContextChanged', message: 'workspace context changed while the request was in flight' }
+  }
+}
+
+export function isContextChangedError(error: unknown): boolean {
+  return (error as { reason?: string }).reason === 'ContextChanged'
+}
+
+function protocolError(message: string): ErrorResponse {
+  return { reason: 'ProtocolError', message }
 }
 
 // ── GraphQL transport ───────────────────────────────────────────────────────
 // graphqlQuery POSTs a query/mutation to /graphql/<cluster> and returns data,
 // mapping gateway errors onto the {reason,message} contract the views branch on.
-async function graphqlQuery<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  if (!clusterName) {
-    throw <ErrorResponse>{ reason: 'TenantMissing', message: 'no workspace selected' }
-  }
+async function graphqlQuery<T>(context: ApiContext, query: string, variables: Record<string, unknown> = {}): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' }
-  if (bearerToken) headers['Authorization'] = 'Bearer ' + bearerToken
-  const res = await fetch('/graphql/' + clusterName, {
+  if (context.token) headers['Authorization'] = 'Bearer ' + context.token
+  const res = await fetch('/graphql/' + context.cluster, {
     method: 'POST',
     credentials: 'same-origin',
     headers,
     body: JSON.stringify({ query, variables }),
   })
   const text = await res.text()
+  assertContextCurrent(context)
   if (!res.ok) {
-    throw <ErrorResponse>{ reason: res.status === 404 ? 'NotFound' : 'HTTPError', message: text || res.statusText }
+    throw <ErrorResponse>{ reason: 'HTTPError', message: `${res.status}: ${text || res.statusText}` }
   }
-  const body = (text ? JSON.parse(text) : {}) as { data?: T; errors?: { message: string }[] }
-  if (body.errors && body.errors.length) {
-    const message = body.errors.map(e => e.message).join('; ')
-    let reason = 'GraphQLError'
-    if (/not\s*found|notfound/i.test(message)) reason = 'NotFound'
-    else if (/apibinding|no matches for kind|forbidden/i.test(message)) reason = 'APIBindingMissing'
-    throw <ErrorResponse>{ reason, message }
+  let parsed: unknown
+  try {
+    parsed = text ? JSON.parse(text) : null
+  } catch {
+    throw protocolError('GraphQL gateway returned malformed JSON')
   }
-  return (body.data ?? {}) as T
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw protocolError('GraphQL gateway returned an invalid response envelope')
+  }
+  const body = parsed as { data?: T; errors?: unknown }
+  if ('errors' in body) {
+    if (!Array.isArray(body.errors)) {
+      throw protocolError('GraphQL gateway response included a malformed errors field')
+    }
+    if (body.errors.length) {
+      const messages = body.errors.map(error => {
+        if (!error || typeof error !== 'object' || Array.isArray(error) || typeof (error as { message?: unknown }).message !== 'string') {
+          throw protocolError('GraphQL gateway response included a malformed error entry')
+        }
+        return (error as { message: string }).message
+      })
+      const message = messages.join('; ')
+      const reason = /apibinding|no matches for kind/i.test(message) ? 'APIBindingMissing' : 'GraphQLError'
+      throw <ErrorResponse>{ reason, message }
+    }
+  }
+  if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
+    throw protocolError('GraphQL gateway response did not include an object data field')
+  }
+  return body.data
 }
 
 // applyCR applies a manifest (create-or-update) via the gateway's applyYaml and
 // returns the resulting object (applyYaml serialises it as a JSON string).
-async function applyCR(manifest: Record<string, unknown>): Promise<RawObject> {
+async function applyCR(context: ApiContext, manifest: Record<string, unknown>): Promise<RawObject> {
   const data = await graphqlQuery<{ applyYaml?: unknown }>(
+    context,
     'mutation($y: String!) { applyYaml(yaml: $y) }',
     { y: JSON.stringify(manifest) },
   )
   const raw = data.applyYaml
-  return (typeof raw === 'string' ? JSON.parse(raw || '{}') : raw ?? {}) as RawObject
+  if (raw === undefined || raw === null) throw protocolError('applyYaml response was missing')
+  try {
+    const object = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (!object || typeof object !== 'object' || Array.isArray(object)) {
+      throw protocolError('applyYaml returned an invalid resource')
+    }
+    return object as RawObject
+  } catch (error) {
+    if ((error as ErrorResponse).reason === 'ProtocolError') throw error
+    throw protocolError('applyYaml returned malformed JSON')
+  }
 }
 
 // Infra<V> shapes a gateway response nested under the infra group/version. The
@@ -91,9 +181,11 @@ interface RawObject {
   apiVersion?: string
   kind?: string
   metadata?: {
+    uid?: string
     name?: string
     namespace?: string
     creationTimestamp?: string
+    generation?: number
     labels?: Record<string, string>
   }
   spec?: Record<string, unknown>
@@ -103,50 +195,64 @@ interface RawObject {
   status?: {
     phase?: string
     message?: string
+    observedGeneration?: number
     conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>
     [k: string]: unknown
   }
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
+function parseOptionalObject<T extends Record<string, unknown>>(value: unknown, field: string): T | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  let parsed = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      throw protocolError(`Template ${field} contained malformed JSON`)
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw protocolError(`Template ${field} was not an object`)
+  }
+  return parsed as T
+}
+
+function parseOptionalPresentationObject<T extends Record<string, unknown>>(value: unknown, field: string): T | undefined {
+  try {
+    return parseOptionalObject<T>(value, field)
+  } catch (error) {
+    // Presentation metadata is deliberately non-authoritative. A malformed
+    // optional view/default payload falls back to the standard rendering; the
+    // resource/envelope itself is still validated strictly everywhere else.
+    if ((error as ErrorResponse).reason === 'ProtocolError') return undefined
+    throw error
+  }
+}
+
 function templateFromGQL(name: string, spec: Record<string, unknown>): Template {
+  if (!name) throw protocolError('Template item was missing metadata.name')
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw protocolError(`Template ${name} was missing an object spec`)
+  }
+  if (spec.instanceCRD !== undefined &&
+    (!spec.instanceCRD || typeof spec.instanceCRD !== 'object' || Array.isArray(spec.instanceCRD))) {
+    throw protocolError(`Template ${name} instanceCRD was not an object`)
+  }
   const instanceCRD = (spec.instanceCRD ?? {}) as { kind?: string }
+  if (typeof instanceCRD.kind !== 'string' || !instanceCRD.kind) {
+    throw protocolError(`Template ${name} was missing instanceCRD.kind`)
+  }
   // spec.schema is a preserve-unknown-fields field → the gateway returns it as a
   // JSON string (JSONString scalar); parse it back into the JSONSchema object.
-  let inputsSchema: JSONSchema = { type: 'object', properties: {} }
-  if (typeof spec.schema === 'string' && spec.schema) {
-    try {
-      inputsSchema = JSON.parse(spec.schema) as JSONSchema
-    } catch {
-      // leave the empty default
-    }
-  } else if (spec.schema && typeof spec.schema === 'object') {
-    inputsSchema = spec.schema as JSONSchema
-  }
+  const inputsSchema = parseOptionalObject<JSONSchema & Record<string, unknown>>(spec.schema, 'schema')
+  if (!inputsSchema) throw protocolError(`Template ${name} was missing schema`)
   // sampleValues is a preserve-unknown-fields field too → same JSONString
   // treatment as schema: parse the string form, accept an object as-is.
-  let sampleValues: Record<string, unknown> | undefined
-  if (typeof spec.sampleValues === 'string' && spec.sampleValues) {
-    try {
-      sampleValues = JSON.parse(spec.sampleValues) as Record<string, unknown>
-    } catch {
-      // leave undefined — the form just starts empty
-    }
-  } else if (spec.sampleValues && typeof spec.sampleValues === 'object') {
-    sampleValues = spec.sampleValues as Record<string, unknown>
-  }
+  const sampleValues = parseOptionalPresentationObject<Record<string, unknown>>(spec.sampleValues, 'sampleValues')
   // view is a preserve-unknown-fields field → JSONString from the gateway;
   // same parse-the-string / accept-an-object treatment as schema/sampleValues.
-  let view: TemplateView | undefined
-  if (typeof spec.view === 'string' && spec.view) {
-    try {
-      view = JSON.parse(spec.view) as TemplateView
-    } catch {
-      // leave undefined — instances fall back to the default rendering
-    }
-  } else if (spec.view && typeof spec.view === 'object') {
-    view = spec.view as TemplateView
-  }
+  const view = parseOptionalPresentationObject<TemplateView & Record<string, unknown>>(spec.view, 'view')
   return {
     name,
     displayName: (spec.displayName as string) || name,
@@ -167,15 +273,30 @@ function templateFromGQL(name: string, spec: Record<string, unknown>): Template 
 // status) into the Instance shape the views read. The originating Template is
 // taken from the faros.sh/template label, falling back to the kind.
 function instanceFromObj(c: RawObject, templateByKind: Map<string, string>): Instance {
-  const labels = c.metadata?.labels ?? {}
+  if (!c || typeof c !== 'object' || Array.isArray(c) || !c.metadata || typeof c.metadata !== 'object' || !c.metadata.name) {
+    throw protocolError('Instance item was missing metadata.name')
+  }
+  if (c.status !== undefined && (!c.status || typeof c.status !== 'object' || Array.isArray(c.status))) {
+    throw protocolError(`Instance ${c.metadata.name} status was not an object`)
+  }
+  if (c.status?.conditions !== undefined && !Array.isArray(c.status.conditions)) {
+    throw protocolError(`Instance ${c.metadata.name} conditions was not an array`)
+  }
+  const labels = c.metadata.labels ?? {}
   const tmpl = labels['faros.sh/template'] || (c.kind ? templateByKind.get(c.kind) ?? c.kind : '')
-  const conditions = (c.status?.conditions ?? []).map(cond => ({
-    type: cond.type,
-    status: cond.status,
-    reason: cond.reason,
-    message: cond.message,
-    time: cond.lastTransitionTime,
-  }))
+  const conditions = (c.status?.conditions ?? []).map((condition, index) => {
+    if (!condition || typeof condition !== 'object' ||
+      typeof condition.type !== 'string' || typeof condition.status !== 'string') {
+      throw protocolError(`Instance ${c.metadata!.name} condition ${index} had an invalid shape`)
+    }
+    return {
+      type: condition.type,
+      status: condition.status,
+      reason: condition.reason,
+      message: condition.message,
+      time: condition.lastTransitionTime,
+    }
+  })
   // status outputs: everything under .status except the conditions/children
   // arrays (promoted to their own fields), so a View can reference status.*.
   let status: Record<string, unknown> | undefined
@@ -185,16 +306,27 @@ function instanceFromObj(c: RawObject, templateByKind: Map<string, string>): Ins
     void _ch
     if (Object.keys(rest).length > 0) status = rest
   }
+  const generation = c.metadata?.generation
+  const observedGeneration = typeof c.status?.observedGeneration === 'number'
+    ? c.status.observedGeneration
+    : undefined
+  const reconciled = generation === undefined || (observedGeneration !== undefined && observedGeneration >= generation)
+  const reportedPhase = c.status?.phase || (conditions.find(x => x.type === 'Ready')?.status === 'True' ? 'Ready' : 'Pending')
   return {
-    name: c.metadata?.name ?? '',
-    namespace: c.metadata?.namespace ?? '',
+    uid: c.metadata?.uid,
+    name: c.metadata.name,
+    namespace: c.metadata.namespace ?? '',
     template: tmpl,
-    phase: c.status?.phase || (conditions.find(x => x.type === 'Ready')?.status === 'True' ? 'Ready' : 'Pending'),
-    message: c.status?.message,
+    phase: reconciled ? reportedPhase : 'Pending',
+    message: c.status?.message || (!reconciled && generation !== undefined
+      ? `Waiting for the controller to observe generation ${generation}.`
+      : undefined),
     conditions,
     values: c.spec,
     status,
-    createdAt: c.metadata?.creationTimestamp ?? '',
+    createdAt: c.metadata.creationTimestamp ?? '',
+    generation,
+    observedGeneration,
   }
 }
 
@@ -210,20 +342,26 @@ interface InfraIndex {
   // in the workspace, so a Template with no bound CRD is naturally skipped).
   listFieldByKind: Map<string, string>
 }
-let cachedIndex: InfraIndex | null = null
+// Both the independently mounted provider page and dashboard tile use this
+// module. Cache discovery by the complete authority identity so staggered host
+// context delivery cannot reuse another workspace/caller's Templates.
+const cachedIndexes = new Map<string, InfraIndex>()
 const INDEX_TTL_MS = 10_000
 
 // introspectVersionFields walks Query → infrastructure_faros_sh → v1alpha1
 // in a single introspection query and returns its fields with (unwrapped) type
 // names, so we can map each instance kind to its list field.
-async function introspectVersionFields(): Promise<Array<{ name: string; typeName: string }>> {
+async function introspectVersionFields(context: ApiContext): Promise<Array<{ name: string; typeName: string }>> {
   const q = `{ __type(name: "Query") { fields { name type { fields { name type { name fields { name type { name kind ofType { name kind } } } } } } } } }`
   const data = await graphqlQuery<{
     __type?: { fields?: Array<{ name: string; type?: { fields?: Array<{ name: string; type?: { fields?: Array<{ name: string; type?: { name?: string; ofType?: { name?: string } } }> } }> } }> }
-  }>(q)
+  }>(context, q)
   const group = (data.__type?.fields ?? []).find(f => f.name === GROUP_FIELD)
   const version = (group?.type?.fields ?? []).find(f => f.name === VERSION)
-  return (version?.type?.fields ?? []).map(f => ({
+  if (!group || !version || !Array.isArray(version.type?.fields)) {
+    throw protocolError('GraphQL introspection did not expose the infrastructure API version')
+  }
+  return version.type.fields.map(f => ({
     name: f.name,
     typeName: f.type?.ofType?.name ?? f.type?.name ?? '',
   }))
@@ -234,21 +372,29 @@ async function introspectVersionFields(): Promise<Array<{ name: string; typeName
 // is a hard GraphQL error that would break the whole catalog/provision query. So
 // select it optimistically and, on that specific error, remember it's missing and
 // retry without it (degrading to no form pre-fill). null = not yet probed.
-let sampleValuesSupported: boolean | null = null
-// view, like sampleValues, is a recent Template field. A gateway built from an
-// older CRD has no such field and rejects the whole query if we select it, so we
-// probe optimistically and drop it on that specific error. null = not yet probed.
-let viewSupported: boolean | null = null
-// exposure gets the same optimistic-probe treatment; without it the catalog
-// pill degrades to the 'internal' default rather than the query failing.
-let exposureSupported: boolean | null = null
+interface CapabilityState {
+  sampleValuesSupported: boolean | null
+  viewSupported: boolean | null
+  exposureSupported: boolean | null
+}
+const capabilityByAuthority = new Map<string, CapabilityState>()
+
+function capabilities(context: ApiContext): CapabilityState {
+  let state = capabilityByAuthority.get(context.authorityKey)
+  if (!state) {
+    state = { sampleValuesSupported: null, viewSupported: null, exposureSupported: null }
+    capabilityByAuthority.set(context.authorityKey, state)
+  }
+  return state
+}
 
 // templateSpec is the shared Template spec selection set. sampleValues/view/
 // exposure are omitted once we've learned the gateway doesn't expose them.
-function templateSpec(): string {
-  const sv = sampleValuesSupported === false ? '' : ' sampleValues'
-  const vw = viewSupported === false ? '' : ' view'
-  const ex = exposureSupported === false ? '' : ' exposure'
+function templateSpec(context: ApiContext): string {
+  const state = capabilities(context)
+  const sv = state.sampleValuesSupported === false ? '' : ' sampleValues'
+  const vw = state.viewSupported === false ? '' : ' view'
+  const ex = state.exposureSupported === false ? '' : ' exposure'
   return `displayName description category version iconURL backend instanceCRD { group version resource kind } schema${sv}${vw}${ex}`
 }
 
@@ -256,22 +402,23 @@ function templateSpec(): string {
 // the gateway rejects an optional field (older CRD) by remembering it's missing
 // and rebuilding the selection without it. Loops so a gateway missing both
 // sampleValues and view degrades in two passes rather than failing.
-async function templateQuery<T>(make: (spec: string) => string, variables: Record<string, unknown> = {}): Promise<T> {
+async function templateQuery<T>(context: ApiContext, make: (spec: string) => string, variables: Record<string, unknown> = {}): Promise<T> {
+  const state = capabilities(context)
   for (;;) {
     try {
-      return await graphqlQuery<T>(make(templateSpec()), variables)
+      return await graphqlQuery<T>(context, make(templateSpec(context)), variables)
     } catch (e) {
       const msg = (e as { message?: string }).message ?? ''
-      if (sampleValuesSupported !== false && msg.includes('sampleValues')) {
-        sampleValuesSupported = false
+      if (state.sampleValuesSupported !== false && /Cannot query field ["']sampleValues["']/i.test(msg)) {
+        state.sampleValuesSupported = false
         continue
       }
-      if (viewSupported !== false && msg.includes('view')) {
-        viewSupported = false
+      if (state.viewSupported !== false && /Cannot query field ["']view["']/i.test(msg)) {
+        state.viewSupported = false
         continue
       }
-      if (exposureSupported !== false && msg.includes('exposure')) {
-        exposureSupported = false
+      if (state.exposureSupported !== false && /Cannot query field ["']exposure["']/i.test(msg)) {
+        state.exposureSupported = false
         continue
       }
       throw e
@@ -279,16 +426,28 @@ async function templateQuery<T>(make: (spec: string) => string, variables: Recor
   }
 }
 
-async function refreshIndex(): Promise<InfraIndex> {
+async function refreshIndex(context: ApiContext): Promise<InfraIndex> {
   const [tmplData, versionFields] = await Promise.all([
     templateQuery<Infra<{ Templates?: { items?: Array<{ metadata: { name: string }; spec: Record<string, unknown> }> } }>>(
+      context,
       spec => `{ ${GROUP_FIELD} { ${VERSION} { Templates { items { metadata { name } spec { ${spec} } } } } } }`,
     ),
-    introspectVersionFields(),
+    introspectVersionFields(context),
   ])
 
-  const items = tmplData[GROUP_FIELD]?.[VERSION]?.Templates?.items ?? []
-  const templates = items.map(t => templateFromGQL(t.metadata.name, t.spec ?? {}))
+  const templateList = tmplData[GROUP_FIELD]?.[VERSION]?.Templates
+  if (!templateList || !Array.isArray(templateList.items)) {
+    throw protocolError('Template list response was missing its items array')
+  }
+  const items = templateList.items
+  const templates = items.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) ||
+      !item.metadata || typeof item.metadata !== 'object' || typeof item.metadata.name !== 'string' ||
+      !item.spec || typeof item.spec !== 'object' || Array.isArray(item.spec)) {
+      throw protocolError(`Template list item ${index} had an invalid shape`)
+    }
+    return templateFromGQL(item.metadata.name, item.spec)
+  })
   const templateByKind = new Map<string, string>()
   for (const t of templates) if (t.kind) templateByKind.set(t.kind, t.name)
 
@@ -313,13 +472,16 @@ async function refreshIndex(): Promise<InfraIndex> {
     if (lf) listFieldByKind.set(kind, lf)
   }
 
-  cachedIndex = { fetchedAt: Date.now(), templates, templateByKind, listFieldByKind }
-  return cachedIndex
+  assertContextCurrent(context)
+  const index = { fetchedAt: Date.now(), templates, templateByKind, listFieldByKind }
+  cachedIndexes.set(context.authorityKey, index)
+  return index
 }
 
-async function getIndex(force = false): Promise<InfraIndex> {
-  if (!force && cachedIndex && Date.now() - cachedIndex.fetchedAt < INDEX_TTL_MS) return cachedIndex
-  return refreshIndex()
+async function getIndex(context: ApiContext, force = false): Promise<InfraIndex> {
+  const cached = cachedIndexes.get(context.authorityKey)
+  if (!force && cached && Date.now() - cached.fetchedAt < INDEX_TTL_MS) return cached
+  return refreshIndex(context)
 }
 
 // Build the wire manifest for a per-template instance CR. The kind/apiVersion
@@ -334,23 +496,76 @@ function buildInstanceManifest(kind: string, name: string, templateName: string,
   }
 }
 
+function versionPayload<V extends object>(data: Infra<V>, operation: string): V {
+  const group = data[GROUP_FIELD]
+  const version = group?.[VERSION]
+  if (!version || typeof version !== 'object' || Array.isArray(version)) {
+    throw protocolError(`${operation} response was missing the infrastructure API version`)
+  }
+  return version
+}
+
+function parseYamlResource(text: string, operation: string): RawObject {
+  try {
+    const object = yamlLoad(text)
+    if (!object || typeof object !== 'object' || Array.isArray(object)) {
+      throw protocolError(`${operation} returned an invalid YAML resource`)
+    }
+    return object as RawObject
+  } catch (error) {
+    if ((error as ErrorResponse).reason === 'ProtocolError') throw error
+    throw protocolError(`${operation} returned malformed YAML`)
+  }
+}
+
+async function getInstanceInContext(context: ApiContext, name: string, idx: InfraIndex): Promise<Instance> {
+  const kinds = [...idx.listFieldByKind.keys()]
+  const probes = kinds.map(async kind => {
+    const data = await graphqlQuery<Infra<Record<string, string | null>>>(
+      context,
+      `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${kind}Yaml(name: $n) } } }`,
+      { n: name },
+    )
+    const version = versionPayload(data, `${kind} read`)
+    const field = kind + 'Yaml'
+    if (!(field in version)) throw protocolError(`${kind} read response was missing ${field}`)
+    const text = version[field]
+    if (text === null) return null
+    if (typeof text !== 'string' || !text) throw protocolError(`${kind} read returned invalid YAML data`)
+    return parseYamlResource(text, `${kind} read`)
+  })
+  const found = (await Promise.all(probes)).find(Boolean)
+  assertContextCurrent(context)
+  if (!found) throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'instance ' + name + ' not found' }
+  return instanceFromObj(found, idx.templateByKind)
+}
+
 export const api = {
-  async listTemplates(filter: { category?: string; cloud?: string } = {}): Promise<{ items: Template[] }> {
-    const idx = await refreshIndex()
+  async listTemplates(filter: { category?: string; cloud?: string } = {}, explicitContext?: PortalApiContext): Promise<{ items: Template[] }> {
+    const context = captureContext(explicitContext)
+    const idx = await refreshIndex(context)
     let items = idx.templates
     if (filter.category) items = items.filter(t => t.category === filter.category)
     if (filter.cloud) items = items.filter(t => t.cloud === filter.cloud)
     return { items }
   },
 
-  async getTemplate(name: string): Promise<{ template: Template }> {
+  async getTemplate(name: string, explicitContext?: PortalApiContext): Promise<{ template: Template }> {
+    const context = captureContext(explicitContext)
     const data = await templateQuery<Infra<{ Template?: { metadata: { name: string }; spec: Record<string, unknown> } }>>(
+      context,
       spec => `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { Template(name: $n) { metadata { name } spec { ${spec} } } } } }`,
       { n: name },
     )
-    const t = data[GROUP_FIELD]?.[VERSION]?.Template
+    const version = versionPayload(data, 'Template read')
+    if (!('Template' in version)) throw protocolError('Template read response was missing Template')
+    const t = version.Template
     if (!t) throw <ErrorResponse>{ reason: 'TemplateNotFound', message: 'template ' + name + ' not found' }
-    return { template: templateFromGQL(t.metadata.name, t.spec ?? {}) }
+    if (!t.metadata || typeof t.metadata !== 'object' || typeof t.metadata.name !== 'string' ||
+      !t.spec || typeof t.spec !== 'object' || Array.isArray(t.spec)) {
+      throw protocolError('Template read returned an invalid resource shape')
+    }
+    return { template: templateFromGQL(t.metadata.name, t.spec) }
   },
 
   async createInstance(body: {
@@ -359,100 +574,105 @@ export const api = {
     name: string
     values: Record<string, unknown>
   }): Promise<Instance> {
-    const idx = await getIndex()
+    const context = captureContext()
+    const idx = await getIndex(context)
     const tmpl = idx.templates.find(t => t.name === body.templateName)
     if (!tmpl || !tmpl.kind) {
       throw <ErrorResponse>{ reason: 'TemplateNotFound', message: 'template ' + body.templateName + ' not found' }
     }
     const manifest = buildInstanceManifest(tmpl.kind, body.name, body.templateName, body.values)
-    const created = await applyCR(manifest)
+    const created = await applyCR(context, manifest)
+    assertContextCurrent(context)
     return instanceFromObj(created, idx.templateByKind)
   },
 
-  async listInstances(): Promise<{ items: Instance[] }> {
-    const idx = await getIndex()
+  async listInstances(explicitContext?: PortalApiContext): Promise<{ items: Instance[]; templates: Template[] }> {
+    const context = captureContext(explicitContext)
+    const idx = await getIndex(context)
     const kinds = [...idx.listFieldByKind.keys()]
-    if (kinds.length === 0) return { items: [] }
+    if (kinds.length === 0) {
+      if (idx.templates.some(template => !!template.kind)) {
+        throw <ErrorResponse>{ reason: 'ProviderNotReady', message: 'instance APIs are not established in this workspace yet' }
+      }
+      return { items: [], templates: idx.templates }
+    }
     // One LIST per established kind, in parallel. metadata + status only — the
     // list view never needs the (arbitrary) spec, so we don't select it.
-    const SEL = 'items { metadata { name namespace creationTimestamp labels } status { phase message conditions { type status reason message lastTransitionTime } } }'
+    const SEL = 'items { metadata { uid name namespace creationTimestamp generation labels } status { phase message observedGeneration conditions { type status reason message lastTransitionTime } } }'
     const lists = await Promise.all(
       kinds.map(async kind => {
         const field = idx.listFieldByKind.get(kind)!
-        try {
-          const data = await graphqlQuery<Infra<Record<string, { items?: RawObject[] }>>>(
-            `{ ${GROUP_FIELD} { ${VERSION} { ${field} { ${SEL} } } } }`,
-          )
-          return data[GROUP_FIELD]?.[VERSION]?.[field]?.items ?? []
-        } catch (e) {
-          if ((e as ErrorResponse).reason === 'NotFound') return []
-          throw e
+        const data = await graphqlQuery<Infra<Record<string, { items?: RawObject[] }>>>(
+          context,
+          `{ ${GROUP_FIELD} { ${VERSION} { ${field} { ${SEL} } } } }`,
+        )
+        const list = versionPayload(data, `${kind} list`)[field]
+        if (!list || !Array.isArray(list.items)) {
+          throw protocolError(`${kind} list response was missing its items array`)
         }
+        return list.items
       }),
     )
     const items = lists.flat().map(c => instanceFromObj(c, idx.templateByKind))
     // Enrich instances whose template defines columns referencing spec.*/status.*
     // — the LIST above selects only metadata + status phase/conditions, so fetch
     // the full object (incl. arbitrary spec/status) via the <Kind>Yaml escape
-    // hatch for just those instances. Runs in parallel; failures leave the cell
-    // empty rather than breaking the table.
+    // hatch for just those instances. Runs in parallel; disappearance between
+    // reads leaves the cell empty, while transport/protocol failures keep the
+    // previous table snapshot stale rather than presenting partial data.
     await Promise.all(
       items.map(async i => {
         const tmpl = idx.templates.find(t => t.name === i.template)
         if (!tmpl?.kind || !columnsNeedInstanceData(tmpl.view)) return
-        try {
-          const data = await graphqlQuery<Infra<Record<string, string>>>(
-            `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${tmpl.kind}Yaml(name: $n) } } }`,
-            { n: i.name },
-          )
-          const text = data[GROUP_FIELD]?.[VERSION]?.[tmpl.kind + 'Yaml']
-          if (!text) return
-          const full = instanceFromObj(yamlLoad(text) as RawObject, idx.templateByKind)
-          i.values = full.values
-          i.status = full.status
-        } catch {
-          // leave unenriched
-        }
+        const data = await graphqlQuery<Infra<Record<string, string | null>>>(
+          context,
+          `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${tmpl.kind}Yaml(name: $n) } } }`,
+          { n: i.name },
+        )
+        const version = versionPayload(data, `${tmpl.kind} enrichment`)
+        const field = tmpl.kind + 'Yaml'
+        if (!(field in version)) throw protocolError(`${tmpl.kind} enrichment response was missing ${field}`)
+        const text = version[field]
+        if (text === null) return // resource disappeared after the list snapshot
+        if (typeof text !== 'string' || !text) throw protocolError(`${tmpl.kind} enrichment returned invalid YAML data`)
+        const full = instanceFromObj(parseYamlResource(text, `${tmpl.kind} enrichment`), idx.templateByKind)
+        i.values = full.values
+        i.status = full.status
       }),
     )
-    return { items }
+    assertContextCurrent(context)
+    return { items, templates: idx.templates }
   },
 
   async getInstance(name: string): Promise<Instance> {
-    // The CR's kind isn't on the URL, so probe each established kind's raw
-    // <Kind>Yaml in parallel and take the first hit. Yaml gives the full object
-    // (incl. the arbitrary spec) without needing its schema.
-    const idx = await getIndex()
-    const kinds = [...idx.listFieldByKind.keys()]
-    const probes = kinds.map(async kind => {
-      try {
-        const data = await graphqlQuery<Infra<Record<string, string>>>(
-          `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${kind}Yaml(name: $n) } } }`,
-          { n: name },
-        )
-        const text = data[GROUP_FIELD]?.[VERSION]?.[kind + 'Yaml']
-        return text ? (yamlLoad(text) as RawObject) : null
-      } catch (e) {
-        if ((e as ErrorResponse).reason === 'NotFound') return null
-        throw e
-      }
-    })
-    const found = (await Promise.all(probes)).find(Boolean)
-    if (!found) throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'instance ' + name + ' not found' }
-    return instanceFromObj(found, idx.templateByKind)
+    const context = captureContext()
+    const idx = await getIndex(context)
+    return getInstanceInContext(context, name, idx)
+  },
+
+  async getInstanceDetail(name: string): Promise<{ instance: Instance; template?: Template }> {
+    const context = captureContext()
+    const idx = await getIndex(context)
+    const instance = await getInstanceInContext(context, name, idx)
+    return { instance, template: idx.templates.find(template => template.name === instance.template) }
   },
 
   async deleteInstance(name: string): Promise<void> {
-    const idx = await getIndex()
+    const context = captureContext()
+    const idx = await getIndex(context)
     // Resolve which kind the CR is, then delete<Kind>.
-    const inst = await this.getInstance(name)
+    const inst = await getInstanceInContext(context, name, idx)
     const kind = idx.templates.find(t => t.name === inst.template)?.kind
     if (!kind) {
       throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'cannot resolve kind for ' + name }
     }
-    await graphqlQuery(
+    const data = await graphqlQuery<Infra<Record<string, unknown>>>(
+      context,
       `mutation($n: String!) { ${GROUP_FIELD} { ${VERSION} { delete${kind}(name: $n) } } }`,
       { n: name },
     )
+    const version = versionPayload(data, `${kind} delete`)
+    if (!(`delete${kind}` in version)) throw protocolError(`${kind} delete response was missing its result`)
+    assertContextCurrent(context)
   },
 }

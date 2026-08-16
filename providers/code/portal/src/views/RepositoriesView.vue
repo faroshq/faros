@@ -1,15 +1,36 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
 import type { Connection, ErrorResponse, Repository } from '../types'
+import ResourceTable from '../portalkit/ResourceTable.vue'
+import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
+import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
+import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 
 const emit = defineEmits<{ (e: 'open', name: string): void }>()
 
 const repos = ref<Repository[]>([])
 const connections = ref<Connection[]>([])
 const error = ref<string | null>(null)
+const mutationError = ref<string | null>(null)
 const loading = ref(false)
+const loaded = ref(false)
+const connectionsError = ref<string | null>(null)
+const connectionsLoading = ref(false)
+const connectionsLoaded = ref(false)
+const operations = createOperationLocks()
+const columns = [
+  { key: 'name', label: 'Name' },
+  { key: 'connectionRef', label: 'Connection' },
+  { key: 'visibility', label: 'Visibility' },
+  { key: 'url', label: 'URL' },
+  { key: 'status', label: 'Status' },
+  { key: 'actions', label: '' },
+]
+const rows = computed<Array<Record<string, unknown>>>(() => repos.value
+  .filter(repo => !operations.isTombstoned(operationKey('repository', repo.name), repo.uid))
+  .map(repo => ({ ...repo, url: repo.htmlURL || '', status: repo.ready ? 'ready' : 'pending', actions: '' })))
 
 const showForm = ref(false)
 const name = ref('')
@@ -22,37 +43,46 @@ const submitting = ref(false)
 const formError = ref<string | null>(null)
 
 let timer: number | undefined
+let mounted = false
+let repoRefresh!: LatestRefreshController
+let connectionRefresh!: LatestRefreshController
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const [r, c] = await Promise.all([api.listRepositories(), api.listConnections()])
-    repos.value = r
-    connections.value = c
-    // Default to (and recover to) a connection that actually exists — otherwise
-    // a stale ref (e.g. a since-deleted connection) silently sticks and the
-    // Repository fails to reconcile with "connection not found".
-    if (c.length && !c.some(x => x.name === connectionRef.value)) {
-      connectionRef.value = c[0].name
-    }
-  } catch (e) {
-    const err = e as ErrorResponse
-    error.value = err.reason === 'TenantMissing' ? null : `${err.reason}: ${err.message}`
-  } finally {
-    loading.value = false
-  }
+function errMessage(e: unknown): string {
+  const err = e as ErrorResponse
+  return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
+}
+
+function loadRepositories() {
+  repoRefresh.request()
+}
+
+function loadConnections() {
+  connectionRefresh.request()
+}
+
+function load() {
+  loadRepositories()
+  loadConnections()
+}
+
+function openRepository(row: Record<string, unknown>) {
+  const resourceName = String(row.name)
+  if (!operations.isLocked(operationKey('repository', resourceName))) emit('open', resourceName)
 }
 
 async function submit() {
   formError.value = null
+  if (!loaded.value || !connectionsLoaded.value) {
+    formError.value = 'Repository data is still loading. Retry failed reads before creating a repository.'
+    return
+  }
   if (!name.value || !connectionRef.value) {
     formError.value = 'name and connection are required'
     return
   }
   submitting.value = true
   try {
-    await api.createRepository({
+    const created = await api.createRepository({
       name: name.value,
       connectionRef: connectionRef.value,
       repo: repo.value || undefined,
@@ -60,39 +90,89 @@ async function submit() {
       description: description.value || undefined,
       autoInit: autoInit.value,
     })
+    repos.value = [...repos.value.filter(item => item.name !== created.name), created]
+    loaded.value = true
     name.value = repo.value = description.value = ''
     showForm.value = false
-    await load()
+    loadRepositories()
   } catch (e) {
-    const err = e as ErrorResponse
-    formError.value = `${err.reason}: ${err.message}`
+    formError.value = errMessage(e)
   } finally {
     submitting.value = false
   }
 }
 
-async function remove(r: Repository) {
+async function remove(row: Record<string, unknown>) {
+  const repository = row as unknown as Repository
   const ok = await confirmDialog({
-    title: `Delete repository "${r.repo}"?`,
+    title: `Delete repository "${repository.repo}"?`,
     message: 'This removes the repository on the git host. This cannot be undone.',
     confirmLabel: 'Delete',
     danger: true,
   })
-  if (!ok) return
+  if (!ok || !mounted) return
+  const lock = operationKey('repository', repository.name)
+  if (!operations.acquire(lock, 'deleting')) return
+  mutationError.value = null
   try {
-    await api.deleteRepository(r.name)
-    await load()
+    await api.deleteRepository(repository.name)
+    operations.tombstone(lock, repository.uid)
+    repos.value = repos.value.filter(item => item.name !== repository.name)
+    loadRepositories()
   } catch (e) {
-    const err = e as ErrorResponse
-    error.value = `${err.reason}: ${err.message}`
+    mutationError.value = errMessage(e)
+  } finally {
+    operations.release(lock)
   }
 }
 
+repoRefresh = createLatestRefreshController(async requestID => {
+  loading.value = true
+  try {
+    const next = await api.listRepositories()
+    if (!repoRefresh.isCurrent(requestID)) return
+    repos.value = next
+    operations.reconcile('repository', next)
+    loaded.value = true
+    error.value = null
+  } catch (e) {
+    if (!repoRefresh.isCurrent(requestID)) return
+    const err = e as ErrorResponse
+    error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
+  } finally {
+    if (repoRefresh.isCurrent(requestID)) loading.value = false
+  }
+})
+
+connectionRefresh = createLatestRefreshController(async requestID => {
+  connectionsLoading.value = true
+  try {
+    const next = await api.listConnections()
+    if (!connectionRefresh.isCurrent(requestID)) return
+    connections.value = next
+    connectionsLoaded.value = true
+    connectionsError.value = null
+    if (next.length && !next.some(item => item.name === connectionRef.value)) connectionRef.value = next[0].name
+  } catch (e) {
+    if (!connectionRefresh.isCurrent(requestID)) return
+    const err = e as ErrorResponse
+    connectionsError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
+  } finally {
+    if (connectionRefresh.isCurrent(requestID)) connectionsLoading.value = false
+  }
+})
+
 onMounted(() => {
+  mounted = true
   load()
   timer = window.setInterval(load, 5000)
 })
-onUnmounted(() => window.clearInterval(timer))
+onUnmounted(() => {
+  mounted = false
+  window.clearInterval(timer)
+  repoRefresh.stop()
+  connectionRefresh.stop()
+})
 </script>
 
 <template>
@@ -102,19 +182,25 @@ onUnmounted(() => window.clearInterval(timer))
         <h2 class="page-title">Repositories</h2>
         <p class="page-meta">Repositories the provider manages on the git host. Click one to manage deploy keys and collaborators.</p>
       </div>
-      <button class="primary" :disabled="!connections.length" @click="showForm = !showForm">
+      <button class="primary" :disabled="!loaded || !connectionsLoaded || !connections.length" @click="showForm = !showForm">
         {{ showForm ? 'Cancel' : 'New repository' }}
       </button>
     </header>
 
-    <p v-if="!connections.length" class="empty">Add a connection first, then create repositories under it.</p>
+    <span v-if="connectionsLoading && !connectionsLoaded" class="sr-only" role="status" aria-live="polite">Loading connections…</span>
+    <div v-if="connectionsError" class="error read-error" role="alert" aria-live="assertive">
+      <span>{{ connectionsLoaded ? 'Showing cached connection choices. ' : '' }}{{ connectionsError }}</span>
+      <button class="secondary" type="button" @click="loadConnections">Retry connections</button>
+    </div>
+    <span v-else-if="connectionsLoading && connectionsLoaded" class="sr-only" role="status" aria-live="polite">Updating connections…</span>
+    <p v-if="connectionsLoaded && !connections.length" class="empty">Add a connection first, then create repositories under it.</p>
 
     <div v-if="showForm" class="panel">
       <h3 class="panel-title">New repository</h3>
       <form class="form" @submit.prevent="submit">
         <div class="field">
           <span class="field-label">Connection</span>
-          <select v-model="connectionRef">
+          <select v-model="connectionRef" :disabled="connectionsLoading && !connectionsLoaded">
             <option v-for="c in connections" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
           </select>
         </div>
@@ -132,34 +218,41 @@ onUnmounted(() => window.clearInterval(timer))
         <label class="field field-check"><input v-model="autoInit" type="checkbox" /> Initialize with a README</label>
         <div class="actions">
           <button class="primary" type="submit" :disabled="submitting">{{ submitting ? 'Creating…' : 'Create' }}</button>
-          <span v-if="formError" class="error">{{ formError }}</span>
+          <span v-if="formError" class="error" role="alert">{{ formError }}</span>
         </div>
       </form>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
-    <p v-else-if="loading && !repos.length" class="muted">Loading…</p>
-    <p v-else-if="!repos.length" class="empty">No repositories yet.</p>
-
-    <div v-else class="panel">
-      <table class="table">
-        <thead>
-          <tr><th>Name</th><th>Connection</th><th>Visibility</th><th>URL</th><th>Status</th><th class="right"></th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="r in repos" :key="r.name">
-            <td><button class="link" @click="emit('open', r.name)">{{ r.repo }}</button></td>
-            <td>{{ r.connectionRef }}</td>
-            <td>{{ r.visibility }}</td>
-            <td><a v-if="r.htmlURL" :href="r.htmlURL" target="_blank" rel="noopener">open ↗</a><span v-else class="muted">—</span></td>
-            <td>
-              <span v-if="r.ready" class="badge ok">ready</span>
-              <span v-else class="badge warn" :title="r.message">pending</span>
-            </td>
-            <td class="right"><button class="danger" @click="remove(r)">Delete</button></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
+    <ResourceTable
+      :columns="columns"
+      :rows="rows"
+      row-key="name"
+      :loaded="loaded"
+      :loading="loading"
+      :error="error"
+      :stale="loaded && !!error"
+      retryable
+      empty-text="No repositories yet."
+      @retry="loadRepositories"
+      @row-click="openRepository"
+    >
+      <template #name="{ value, row }"><button class="link" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
+      <template #connectionRef="{ value }">{{ value }}</template>
+      <template #visibility="{ value }">{{ value }}</template>
+      <template #url="{ row }"><a v-if="row.htmlURL" :href="String(row.htmlURL)" target="_blank" rel="noopener" @click.stop>open ↗</a><span v-else class="muted">—</span></template>
+      <template #status="{ row }"><StatusBadge :status="String(row.status)" :title="String(row.message || '')" /></template>
+      <template #actions="{ row }">
+        <div class="row-actions">
+          <ResourceTableDeleteButton
+            :label="`Delete repository ${String(row.repo || row.name)}`"
+            :busy-label="`Deleting repository ${String(row.repo || row.name)}…`"
+            :busy="operations.phase(operationKey('repository', String(row.name))) === 'deleting'"
+            :disabled="operations.isLocked(operationKey('repository', String(row.name)))"
+            @click="remove(row)"
+          />
+        </div>
+      </template>
+    </ResourceTable>
   </section>
 </template>

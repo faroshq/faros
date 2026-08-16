@@ -16,9 +16,11 @@
 // nothing), we just render an empty state instead of bubbling errors.
 
 import { computed, onMounted, onUnmounted, ref, watch, h } from 'vue'
-import { api, setTenant, setToken } from './api'
+import { api, isContextChangedError } from './api'
 import { tileClass } from './portalkit/dashboardtile'
 import { ic } from './portalkit/icons'
+import { createLatestRefreshController } from './refresh'
+import type { Instance } from './types'
 
 // Inline icon components — the provider's portal bundle is
 // intentionally self-contained (no parent node_modules symlink) so we
@@ -55,19 +57,12 @@ interface FarosContext {
   basePath?: string
 }
 
-interface Instance {
-  name: string
-  namespace: string
-  template: string
-  phase: string
-  createdAt: string
-}
-
 const props = defineProps<{ context: FarosContext | null }>()
 const rootRef = ref<HTMLElement | null>(null)
 
 const instances = ref<Instance[]>([])
-const loading = ref(true)
+const loading = ref(false)
+const loaded = ref(false)
 const error = ref<string | null>(null)
 let pollHandle: number | null = null
 
@@ -90,23 +85,34 @@ const recent = computed(() =>
 // pushes the same token + tenant (auth.clusterName) to every mounted
 // element, so even when the tile and the full provider page are open
 // at the same time both end up with the same module state.
-async function refresh() {
+const refresh = createLatestRefreshController(async requestID => {
   const ctx = props.context
-  if (!ctx?.tenant) {
+  if (!ctx) {
+    if (refresh.isCurrent(requestID)) loading.value = true
+    return
+  }
+  if (!ctx.tenant) {
     // No workspace selected yet — render the empty state rather than
     // querying the gateway without a cluster.
     instances.value = []
     error.value = null
     loading.value = false
+    loaded.value = true
     return
   }
-  setToken(ctx.token ?? null)
-  setTenant(ctx.tenant ?? null)
+  loading.value = true
   try {
-    const r = await api.listInstances()
+    // Pass an immutable request context instead of mutating the full provider
+    // app's module-global authority. The dashboard and page are independently
+    // mounted custom elements and can receive host context updates in either
+    // order.
+    const r = await api.listInstances({ token: ctx.token, tenant: ctx.tenant })
+    if (!refresh.isCurrent(requestID)) return
     instances.value = r.items
     error.value = null
+    loaded.value = true
   } catch (e) {
+    if (!refresh.isCurrent(requestID) || isContextChangedError(e)) return
     const err = e as { reason?: string; message?: string } | Error
     const reason = (err as { reason?: string }).reason
     const message = (err as { message?: string }).message ?? String(err)
@@ -115,15 +121,19 @@ async function refresh() {
       // empty tile is the right state, not an error banner.
       instances.value = []
       error.value = null
+      loaded.value = true
     } else {
       error.value = `${reason ?? 'Error'} — ${message}`
-      instances.value = []
       // eslint-disable-next-line no-console
       console.warn('infrastructure tile listInstances failed', err)
     }
   } finally {
-    loading.value = false
+    if (refresh.isCurrent(requestID)) loading.value = false
   }
+})
+
+function load(): Promise<void> {
+  return refresh.request()
 }
 
 function dispatchNavigate(path: string) {
@@ -135,15 +145,26 @@ function dispatchNavigate(path: string) {
 }
 
 onMounted(() => {
-  refresh()
   // 30s poll matches the catalog/instance list cadence in the main app —
   // anything tighter wastes the hub roundtrips for a tile users glance at.
-  pollHandle = window.setInterval(refresh, 30000)
+  pollHandle = window.setInterval(() => { void load() }, 30000)
 })
 onUnmounted(() => {
   if (pollHandle !== null) window.clearInterval(pollHandle)
+  refresh.stop()
 })
-watch(() => props.context, refresh)
+watch(
+  () => [props.context === null, props.context?.tenant, props.context?.token, props.context?.basePath] as const,
+  () => {
+    refresh.invalidate()
+    instances.value = []
+    error.value = null
+    loaded.value = false
+    loading.value = props.context === null
+    void load()
+  },
+  { immediate: true },
+)
 
 // Phase → dot colour. Unknown phases fall through to the neutral bucket so a
 // future kro phase string doesn't render as "Failed" by mistake.
@@ -158,11 +179,22 @@ function dotFor(phase: string) {
 </script>
 
 <template>
-  <div ref="rootRef" :class="tileClass.root">
-    <div v-if="loading" :class="tileClass.message">Loading instances&hellip;</div>
-    <div v-else-if="error" :class="tileClass.error">Failed to load: {{ error }}</div>
+  <div ref="rootRef" :class="tileClass.root" :aria-busy="loading">
+    <div v-if="!loaded && loading" class="space-y-2" role="status" aria-live="polite" aria-busy="true" aria-label="Loading infrastructure instances">
+      <div class="shimmer h-3 w-32 rounded" aria-hidden="true" />
+      <div v-for="i in 4" :key="i" class="shimmer h-7 w-full rounded" aria-hidden="true" />
+    </div>
+    <div v-else-if="!loaded && error" :class="tileClass.error" role="alert" aria-live="assertive">
+      Failed to load: {{ error }}
+      <button type="button" class="ml-2 font-medium underline" @click="load">Retry</button>
+    </div>
 
     <template v-else>
+      <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating infrastructure instances…</span>
+      <div v-if="error" :class="tileClass.error" role="alert" aria-live="assertive">
+        Showing the last successful result. {{ error }}
+        <button type="button" class="ml-2 font-medium underline" @click="load">Retry</button>
+      </div>
       <!-- Slim horizontal status row (matches the clusters/edges tiles): a
            single inline line of icon + count + label chips rather than four
            stacked boxes, so the tile stays compact. -->

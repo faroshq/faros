@@ -1,38 +1,34 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
 import type { ConnectionDetail, ErrorResponse } from '../types'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
 import { confirmDialog } from '../portalkit/confirm'
+import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 
 const props = defineProps<{ name: string }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const conn = ref<ConnectionDetail | null>(null)
 const error = ref<string | null>(null)
-const loading = ref(false)
-
+const mutationError = ref<string | null>(null)
+const loading = ref(true)
+const loaded = ref(false)
+const operations = createOperationLocks()
 let timer: number | undefined
+let mounted = false
+let refresh!: LatestRefreshController
 
-// The Validated condition is the one that gates "pending" vs "validated".
 const validated = computed(() => conn.value?.conditions.find(c => c.type === 'Validated'))
-
-// reconciled is false when the controller has not yet observed the current spec
-// generation — i.e. the connection is genuinely still being processed, as
-// opposed to having failed validation.
 const reconciled = computed(() =>
   !!conn.value &&
   conn.value.observedGeneration !== undefined &&
   conn.value.generation !== undefined &&
   conn.value.observedGeneration >= conn.value.generation,
 )
-
-// hint explains the current pending state in plain language so the user knows
-// what to fix, keyed off the reason the controller recorded.
 const hint = computed(() => {
   const c = conn.value
-  if (!c) return ''
-  if (c.validated) return ''
+  if (!c || c.validated) return ''
   if (!c.conditions.length || !reconciled.value) {
     return 'Waiting for the connection controller to validate the credential. This usually takes a few seconds after creation.'
   }
@@ -50,53 +46,90 @@ const hint = computed(() => {
   }
 })
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    conn.value = await api.getConnection(props.name)
-  } catch (e) {
-    const err = e as ErrorResponse
-    if (err.reason !== 'TenantMissing') error.value = `${err.reason}: ${err.message}`
-  } finally {
-    loading.value = false
-  }
+function errMessage(e: unknown): string {
+  const err = e as ErrorResponse
+  return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
+}
+
+function load() {
+  refresh.request()
 }
 
 async function remove() {
-  if (!conn.value) return
+  const connection = conn.value
+  if (!connection) return
   const ok = await confirmDialog({
-    title: `Delete connection "${conn.value.name}"?`,
+    title: `Delete connection "${connection.name}"?`,
     message: 'Repositories using it will stop reconciling.',
     confirmLabel: 'Delete',
     danger: true,
   })
-  if (!ok) return
+  if (!ok || !mounted) return
+  const lock = operationKey('connection', connection.name)
+  if (!operations.acquire(lock, 'deleting')) return
+  mutationError.value = null
   try {
-    await api.deleteConnection(conn.value.name)
+    await api.deleteConnection(connection.name)
+    operations.tombstone(lock, connection.uid)
     emit('back')
   } catch (e) {
-    error.value = (e as ErrorResponse).message
+    mutationError.value = errMessage(e)
+  } finally {
+    operations.release(lock)
   }
 }
 
+refresh = createLatestRefreshController(async requestID => {
+  loading.value = true
+  try {
+    const next = await api.getConnection(props.name)
+    if (!refresh.isCurrent(requestID)) return
+    conn.value = next
+    loaded.value = true
+    error.value = null
+  } catch (e) {
+    if (!refresh.isCurrent(requestID)) return
+    const err = e as ErrorResponse
+    error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
+  } finally {
+    if (refresh.isCurrent(requestID)) loading.value = false
+  }
+})
+
+watch(() => props.name, () => {
+  conn.value = null
+  error.value = null
+  mutationError.value = null
+  loaded.value = false
+  loading.value = true
+  refresh.invalidate()
+  load()
+})
+
 onMounted(() => {
+  mounted = true
   load()
   timer = window.setInterval(load, 5000)
 })
-onUnmounted(() => window.clearInterval(timer))
+onUnmounted(() => {
+  mounted = false
+  window.clearInterval(timer)
+  refresh.stop()
+})
 </script>
 
 <template>
-  <section class="page">
-    <button class="link back" @click="emit('back')">← Connections</button>
+  <section class="page" :aria-busy="loading">
+    <button class="link back" type="button" @click="emit('back')">← Connections</button>
 
     <header class="page-head">
       <div>
         <h2 class="page-title">{{ conn?.name || name }}</h2>
         <p class="page-meta">
           <span v-if="conn?.login">authenticated as <code>{{ conn.login }}</code></span>
-          <span v-else class="muted">not validated yet</span>
+          <span v-else-if="conn" class="muted">not validated yet</span>
+          <span v-else-if="loading" class="muted">Loading connection details…</span>
+          <span v-else class="muted">Connection details unavailable</span>
         </p>
       </div>
       <span v-if="conn" :class="['badge', conn.validated ? 'ok' : 'warn']" :title="conn.message">
@@ -104,17 +137,26 @@ onUnmounted(() => window.clearInterval(timer))
       </span>
     </header>
 
-    <p v-if="error" class="error">{{ error }}</p>
-    <p v-else-if="loading && !conn" class="muted">Loading…</p>
+    <div v-if="error && !conn" class="error read-error" role="alert" aria-live="assertive">
+      <span>{{ error }}</span>
+      <button class="secondary" type="button" @click="load">Retry</button>
+    </div>
+    <div v-else-if="loading && !conn" class="detail-loading" role="status" aria-live="polite" aria-label="Loading connection details" aria-busy="true">
+      <div v-for="i in 4" :key="i" class="shimmer detail-loading-line" />
+    </div>
+    <div v-if="error && conn" class="error read-error" role="alert" aria-live="assertive">
+      <span>Showing cached connection data. {{ error }}</span>
+      <button class="secondary" type="button" @click="load">Retry</button>
+    </div>
+    <span v-else-if="loading && loaded" class="sr-only" role="status" aria-live="polite">Updating connection…</span>
+    <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
 
-    <template v-else-if="conn">
-      <!-- Why it's pending -->
+    <template v-if="conn">
       <div v-if="!conn.validated && hint" class="panel">
         <h3 class="panel-title">Status</h3>
         <p class="muted">{{ hint }}</p>
       </div>
 
-      <!-- Overview -->
       <div class="panel">
         <h3 class="panel-title">Overview</h3>
         <dl class="props">
@@ -130,8 +172,8 @@ onUnmounted(() => window.clearInterval(timer))
           <dt>Secret</dt>
           <dd>
             <code>{{ conn.secretName }}</code>
-            <span class="muted" v-if="conn.secretNamespace"> · ns <code>{{ conn.secretNamespace }}</code></span>
-            <span class="muted" v-if="conn.secretKey"> · key <code>{{ conn.secretKey }}</code></span>
+            <span v-if="conn.secretNamespace" class="muted"> · ns <code>{{ conn.secretNamespace }}</code></span>
+            <span v-if="conn.secretKey" class="muted"> · key <code>{{ conn.secretKey }}</code></span>
           </dd>
           <dt v-if="conn.baseURL">Base URL</dt><dd v-if="conn.baseURL"><code>{{ conn.baseURL }}</code></dd>
           <dt v-if="conn.observedGeneration !== undefined">Reconciled</dt>
@@ -142,7 +184,6 @@ onUnmounted(() => window.clearInterval(timer))
         </dl>
       </div>
 
-      <!-- Conditions -->
       <ConditionsPanel
         :conditions="conn.conditions"
         :generation="conn.generation"
@@ -151,7 +192,9 @@ onUnmounted(() => window.clearInterval(timer))
       />
 
       <div class="actions">
-        <button class="danger" @click="remove">Delete connection</button>
+        <button class="danger" type="button" :disabled="operations.isLocked(operationKey('connection', conn.name))" @click="remove">
+          {{ operations.phase(operationKey('connection', conn.name)) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
+        </button>
       </div>
     </template>
   </section>
