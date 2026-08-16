@@ -139,9 +139,6 @@ func TestE2ESeedTemplates(t *testing.T) {
 				t.Fatalf("read %s: %v", entry.Name(), err)
 			}
 			tmpl := decodeTemplate(t, raw)
-			if tmpl.Name == "terraform-stack" && os.Getenv("FAROS_E2E_INFRAKUBE") != "1" {
-				t.Skip("requires the Infrakube CRDs, controller, and task image; run make e2e-infrastructure-terraform-state")
-			}
 
 			rgd, err := buildRGD(tmpl, testTokens())
 			if err != nil {

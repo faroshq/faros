@@ -1,7 +1,11 @@
+# This opt-in development fixture lives outside install/templates so ordinary
+# provider bootstrap never advertises Terraform or requires Infrakube.
 apiVersion: infrastructure.faros.sh/v1alpha1
 kind: Template
 metadata:
   name: terraform-stack
+  labels:
+    faros.sh/terraform-runtime: infrakube
 spec:
   displayName: "Terraform stack (Infrakube POC)"
   description: "Proof-of-concept Terraform execution through an externally installed Infrakube controller. The module is embedded and pinned to Terraform 1.5.7; it creates a terraform_data resource without requiring cloud credentials."
@@ -21,9 +25,10 @@ spec:
       INPUTS: name identifies the Infrakube Terraform child and its isolated
       state; message is stored in a terraform_data resource.
 
-      DELETION: deleting the Faros instance deletes the Terraform child.
-      Infrakube's delete finalizer then runs Terraform destroy because
-      ignoreDelete is explicitly false.
+      DELETION: deleting the Faros instance deletes the Terraform child and
+      Infrakube runs Terraform destroy because ignoreDelete is explicitly
+      false. The empty Kubernetes-backend state Secret and Lease are retained
+      for recovery; an operator must remove them under its retention policy.
     prerequisites:
       - "The KRO runtime cluster has the infrakube.galleybytes.com/v1 Terraform CRD and a healthy Infrakube controller."
       - "The Infrakube controller is configured with a pinned task image, task pods can download Terraform 1.5.7, and the runtime cluster has a default StorageClass for Infrakube's PVC."
@@ -31,7 +36,7 @@ spec:
     outputs:
       - "status.phase is Infrakube's current Terraform workflow phase."
       - "status.message and status.resourceID are the only Terraform outputs projected into the Faros instance status."
-      - "status.runtimeNamespace identifies the KRO-materialized namespace that also owns this instance's Terraform state."
+      - "status.runtimeNamespace identifies the KRO-materialized namespace that also owns this instance's retained Terraform state."
   view:
     columns:
       - header: Phase

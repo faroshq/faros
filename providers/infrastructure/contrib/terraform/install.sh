@@ -8,22 +8,22 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-set -o errexit
-set -o nounset
-set -o pipefail
+set -euo pipefail
 
-: "${KUBECONFIG:?KUBECONFIG must point at the task-owned infrastructure e2e cluster}"
-: "${KIND_CLUSTER_NAME:?KIND_CLUSTER_NAME is required}"
+: "${FAROS_E2E_TILT_RUNTIME_KUBECONFIG:?FAROS_E2E_TILT_RUNTIME_KUBECONFIG is required}"
+: "${FAROS_TERRAFORM_KIND_CLUSTER_NAME:?FAROS_TERRAFORM_KIND_CLUSTER_NAME is required}"
 : "${INFRAKUBE_COMMIT:?INFRAKUBE_COMMIT is required}"
 : "${CONTROLLER_IMAGE:?CONTROLLER_IMAGE is required}"
 : "${TASK_IMAGE:?TASK_IMAGE is required}"
 
 INFRAKUBE_REPOSITORY="${INFRAKUBE_REPOSITORY:-https://github.com/cwilhit/infrakube-multicluster.git}"
 BUILD_CACHE_ROOT="${CODEX_BUILD_CACHE_ROOT:-/var/tmp/codex-build}"
+RUNTIME_KUBECONFIG="${FAROS_E2E_TILT_RUNTIME_KUBECONFIG}"
+KIND_CLUSTER_NAME="${FAROS_TERRAFORM_KIND_CLUSTER_NAME}"
 
 for tool in docker git kind kubectl sed; do
   command -v "${tool}" >/dev/null || {
-    echo "${tool} is required for the Infrakube POC e2e" >&2
+    echo "${tool} is required for the Terraform through Infrakube demonstration" >&2
     exit 1
   }
 done
@@ -80,15 +80,15 @@ kind load docker-image --name "${KIND_CLUSTER_NAME}" "${CONTROLLER_IMAGE}"
 kind load docker-image --name "${KIND_CLUSTER_NAME}" "${TASK_IMAGE}"
 
 echo ">>> installing manifests from pinned Infrakube source"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/namespace.yaml"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/crds/"
-kubectl --kubeconfig "${KUBECONFIG}" wait --for=condition=Established \
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/namespace.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/crds/"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" wait --for=condition=Established \
   crd/terraforms.infrakube.galleybytes.com crd/tofus.infrakube.galleybytes.com --timeout=120s
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/serviceaccount.yaml"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/clusterrole.yaml"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/clusterrolebinding.yaml"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/pvc.yaml"
-kubectl --kubeconfig "${KUBECONFIG}" apply -f "${source_dir}/deploy/service.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/serviceaccount.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/clusterrole.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/clusterrolebinding.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/pvc.yaml"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f "${source_dir}/deploy/service.yaml"
 
 # Render the deployment with the local pinned image before it reaches the API
 # server. The upstream manifest names :latest, and this POC must never start or
@@ -97,10 +97,10 @@ sed \
   -e "s|image: \"ghcr.io/galleybytes/infrakube:latest\"|image: \"${CONTROLLER_IMAGE}\"|" \
   -e 's|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|' \
   "${source_dir}/deploy/deployment.yaml" | \
-  kubectl --kubeconfig "${KUBECONFIG}" apply -f -
+  kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" apply -f -
 
 controller_args="$(printf '[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--zap-log-level=debug","--zap-encoder=console","--auto-download=true","--tf-download-base-url=https://releases.hashicorp.com/terraform","--tofu-download-base-url=https://github.com/opentofu/opentofu/releases/download","--task-image=%s"]}]' "${TASK_IMAGE}")"
-kubectl --kubeconfig "${KUBECONFIG}" -n infrakube-system patch deployment infrakube --type=json -p "${controller_args}"
-kubectl --kubeconfig "${KUBECONFIG}" -n infrakube-system rollout status deployment/infrakube --timeout=180s
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" -n infrakube-system patch deployment infrakube --type=json -p "${controller_args}"
+kubectl --kubeconfig "${RUNTIME_KUBECONFIG}" -n infrakube-system rollout status deployment/infrakube --timeout=180s
 
 echo ">>> pinned Infrakube controller and task image are ready"
