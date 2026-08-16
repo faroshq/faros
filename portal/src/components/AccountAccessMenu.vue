@@ -64,6 +64,7 @@ const positionReady = ref(false)
 const position = ref({ top: 0, left: 0 })
 
 let positionFrame: number | null = null
+let disposed = false
 const panelId = useId()
 
 const email = computed(() => auth.user?.email?.trim() || 'Authenticated user')
@@ -189,21 +190,6 @@ function onPanelKeydown(event: KeyboardEvent) {
     event.preventDefault()
     event.stopPropagation()
     closeMenu(true)
-    return
-  }
-
-  if (event.key !== 'Tab') return
-
-  const items = getFocusableItems()
-  if (!items.length) return
-
-  const current = items.indexOf(document.activeElement as HTMLElement)
-  if (event.shiftKey && current === 0) {
-    event.preventDefault()
-    items[items.length - 1]?.focus()
-  } else if (!event.shiftKey && current === items.length - 1) {
-    event.preventDefault()
-    items[0]?.focus()
   }
 }
 
@@ -215,6 +201,13 @@ function onDocumentKeydown(event: KeyboardEvent) {
 }
 
 function onDocumentPointerdown(event: PointerEvent) {
+  const target = event.target as Node | null
+  if (!target) return
+  if (triggerRef.value?.contains(target) || panelRef.value?.contains(target)) return
+  closeMenu()
+}
+
+function onDocumentFocusin(event: FocusEvent) {
   const target = event.target as Node | null
   if (!target) return
   if (triggerRef.value?.contains(target) || panelRef.value?.contains(target)) return
@@ -237,11 +230,14 @@ watch(isOpen, async (open) => {
   if (open) {
     positionReady.value = false
     await nextTick()
+    if (!isOpen.value || disposed) return
     updatePosition()
     await nextTick()
+    if (!isOpen.value || disposed) return
     focusFirstItem()
     document.addEventListener('pointerdown', onDocumentPointerdown, true)
     document.addEventListener('keydown', onDocumentKeydown)
+    document.addEventListener('focusin', onDocumentFocusin)
     window.addEventListener('resize', positionPopover, { passive: true })
     window.addEventListener('scroll', positionPopover, { capture: true, passive: true })
   } else {
@@ -256,6 +252,7 @@ watch(isOpen, async (open) => {
     }
     document.removeEventListener('pointerdown', onDocumentPointerdown, true)
     document.removeEventListener('keydown', onDocumentKeydown)
+    document.removeEventListener('focusin', onDocumentFocusin)
   }
 })
 
@@ -263,11 +260,13 @@ watch(() => route.fullPath, onRouteNavigation)
 watch(() => props.expanded, positionPopover)
 
 onBeforeUnmount(() => {
+  disposed = true
   if (typeof window !== 'undefined' && positionFrame !== null) {
     window.cancelAnimationFrame(positionFrame)
   }
   document.removeEventListener('pointerdown', onDocumentPointerdown, true)
   document.removeEventListener('keydown', onDocumentKeydown)
+  document.removeEventListener('focusin', onDocumentFocusin)
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', positionPopover)
     window.removeEventListener('scroll', positionPopover, true)
