@@ -58,7 +58,7 @@ const (
 	configConnectorGCPCredentialsEnv    = "FAROS_E2E_GCP_CREDENTIALS_FILE"
 	configConnectorName                 = "configconnector.core.cnrm.cloud.google.com"
 	configConnectorPubSubCRDName        = "pubsubtopics.pubsub.cnrm.cloud.google.com"
-	configConnectorPubSubTemplatePrefix = "gcp-pubsub-steel-thread-"
+	configConnectorPubSubTemplatePrefix = "gcp-pubsub-kcc-demo-"
 	configConnectorPubSubTemplateName   = "gcp-pubsub-topic"
 	configConnectorPubSubWorkspacePref  = "e2e-pubsub-"
 	configConnectorPubSubNode           = "pubSubTopic"

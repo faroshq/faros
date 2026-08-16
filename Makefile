@@ -954,10 +954,10 @@ e2e-tilt-cluster: ## Run Tilt-cluster provider e2e (requires `make tilt-cluster`
 	}
 	go test ./test/e2e/suites/tiltcluster/... -v -timeout $(E2E_TILT_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
-## Opt-in Config Connector composition steel-thread against the operator-managed
-## Tilt runtime. The test creates only a minimal StorageBucket CRD; it does not
-## install Config Connector or contact GCP. Override the runtime kubeconfig or
-## operator namespace when using a non-default Tilt stack.
+## Opt-in demonstration of using Config Connector CRDs with the infrastructure
+## operator's KRO runtime. The test creates only a minimal StorageBucket CRD; it
+## does not install Config Connector or contact GCP. Override the runtime
+## kubeconfig or operator namespace when using a non-default Tilt stack.
 .PHONY: e2e-tilt-cluster-config-connector
 e2e-tilt-cluster-config-connector: ## Run the opt-in Config Connector composition e2e
 	@test -f "$(E2E_TILT_KCP_KUBECONFIG)" || { \
@@ -982,12 +982,12 @@ e2e-tilt-cluster-config-connector: ## Run the opt-in Config Connector compositio
 	FAROS_E2E_TILT_OPERATOR_NAMESPACE="$(E2E_TILT_OPERATOR_NAMESPACE)" \
 		go test ./test/e2e/suites/tiltcluster/... -run '^TestConfigConnectorComposition$$' -v -timeout $(E2E_TILT_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
-## Real-cloud extension of the composition steel thread. Installation imports
-## the caller-supplied service-account JSON into the runtime cluster, installs a
-## checksum-pinned Config Connector operator, and waits for the PubSubTopic API.
-## The run target then proves Pub/Sub creation and deletion independently via
-## Google's REST API. Both targets are deliberately separate from the fake-CRD
-## composition test above.
+## Real-cloud extension of the infrastructure-operator Config Connector
+## demonstration. Installation imports the caller-supplied service-account JSON
+## into the runtime cluster, installs a checksum-pinned Config Connector
+## operator, and waits for the PubSubTopic API. The run target then proves
+## Pub/Sub creation and deletion independently via Google's REST API. Both
+## targets are deliberately separate from the fake-CRD composition test above.
 .PHONY: e2e-tilt-cluster-config-connector-gcp-install e2e-tilt-cluster-config-connector-gcp-run e2e-tilt-cluster-config-connector-gcp
 e2e-tilt-cluster-config-connector-gcp-install: ## Install pinned Config Connector for the real Pub/Sub E2E
 	@test -f "$(E2E_TILT_RUNTIME_KUBECONFIG)" || { \

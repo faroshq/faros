@@ -54,11 +54,11 @@ var (
 const (
 	configConnectorOperatorNamespace = "faros-infrastructure-operator"
 	configConnectorOperatorName      = "infrastructure"
-	configConnectorTemplatePrefix    = "gcs-bucket-steel-thread-"
+	configConnectorTemplatePrefix    = "gcs-bucket-kcc-demo-"
 	configConnectorWorkspacePrefix   = "e2e-gcs-"
 	configConnectorStorageBucketNode = "storageBucket"
 	configConnectorTestLabel         = "faros.sh/e2e-config-connector"
-	configConnectorTestLabelValue    = "steel-thread"
+	configConnectorTestLabelValue    = "infra-operator-kcc-demo"
 
 	configConnectorWait = 3 * time.Minute
 	configConnectorPoll = 2 * time.Second
@@ -69,8 +69,9 @@ const (
 	kroNodeIDLabel     = "kro.run/node-id"
 )
 
-// TestConfigConnectorComposition proves the opt-in Config Connector steel
-// thread against the operator-managed Tilt runtime:
+// TestConfigConnectorComposition demonstrates how the infrastructure operator
+// can publish a Template whose KRO graph creates a Config Connector CR in the
+// operator-managed Tilt runtime:
 //
 //	InfrastructureProvider Ready -> test-owned StorageBucket CRD -> Template
 //	Ready -> KRO GraphAccepted -> isolated tenant/APIExport binding ->
@@ -419,8 +420,8 @@ func configConnectorTemplate(name string) *unstructured.Unstructured {
 			},
 		},
 		"spec": map[string]any{
-			"displayName": "GCS bucket composition steel-thread",
-			"description": "Test-only composition from a tenant GCSBucket to a StorageBucket CR.",
+			"displayName": "GCS bucket Config Connector composition demo",
+			"description": "Test-only infrastructure operator composition from a tenant GCSBucket to a Config Connector StorageBucket CR.",
 			"category":    "Test",
 			"version":     "0.0.1",
 			"backend":     "kro",

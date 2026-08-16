@@ -53,7 +53,12 @@ already excludes `test/e2e`.)
   with no caller identity (no `X-Faros-Tenant`, no bearer token) is refused
   rather than silently acting cross-tenant.
 
-## Config Connector composition steel-thread (opt-in)
+## Using Config Connector with the infrastructure operator (opt-in)
+
+This example demonstrates how an infrastructure provider `Template` can use
+the operator-managed KRO runtime to compose Google Config Connector resources.
+It has a credential-free composition check for the infrastructure operator
+contract and a manual real-cloud workflow that creates and deletes Pub/Sub.
 
 Run the focused composition test only after the operator-managed runtime is up:
 
@@ -67,7 +72,8 @@ make e2e-tilt-cluster-config-connector
 `storage.cnrm.cloud.google.com/v1beta1` `StorageBucket` CRD, and creates a
 test-only `Template` whose `GCSBucket` instance composes to a KRO-labeled
 runtime `StorageBucket` child. The assertion checks the child's `location` and
-`uniformBucketLevelAccess` values.
+`uniformBucketLevelAccess` values. This is the same composition boundary used
+when a real Config Connector controller reconciles that child into GCP.
 
 This is deliberately a composition-only check. It does not install or fake a
 Config Connector controller, configure `ConfigConnectorContext` or cloud IAM,
@@ -76,7 +82,7 @@ StorageBucket CRD is already installed, the test skips rather than replacing
 it. Direct package execution also skips cleanly when the Tilt stack or runtime
 kubeconfig is absent.
 
-### Real Pub/Sub create/delete extension (manual Tilt workflow)
+### Real Pub/Sub create/delete demonstration (manual Tilt workflow)
 
 Config Connector is not part of ordinary `make tilt-cluster`. The Tiltfile
 surfaces three manual resources, all default-off and independent of the
