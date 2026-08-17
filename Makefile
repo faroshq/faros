@@ -334,6 +334,7 @@ test-provider-readiness:
 	cd providers/code && go test ./...
 	cd providers/databricks && go test ./...
 	cd providers/edges && go test ./...
+	cd providers/kuery && go test ./...
 	cd providers/quickstart && go test ./...
 
 test-util:
@@ -1303,7 +1304,7 @@ run-provider-kuery: build-kuery-provider kuery-db-up ## Run the kuery provider (
 	KUERY_STORE_DSN="$$STORE_DSN" \
 		$(BINDIR)/kuery-provider
 
-install-provider-kuery: ## Apply kuery Provider + CatalogEntry into root:faros:providers
+install-provider-kuery: ## Apply kuery Provider onboarding record
 	@test -f $(KUERY_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KUERY_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1312,7 +1313,7 @@ install-provider-kuery: ## Apply kuery Provider + CatalogEntry into root:faros:p
 	kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
 		--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(KUERY_PROVIDER_MANIFEST) -f $(KUERY_MANIFEST)
+		apply -f $(KUERY_PROVIDER_MANIFEST)
 
 ## Dev bootstrap for the engagement controller. The Provider controller writes
 ## the minted kubeconfig into a Secret in root:faros:providers, but host-binary
@@ -1339,33 +1340,33 @@ init-provider-kuery: build-kuery-provider ## Bootstrap kuery APIExport (schemas+
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(KUERY_KCP_SERVER)/clusters/$(KUERY_WORKSPACE_PATH)" "$$TOKEN" \
 		> $(KUERY_RUNTIME_KUBECONFIG)
-	@# kcp requires kuery's first-party edges permissionClaim to carry the
-	@# identityHash of the export that serves edges. Tenants consume edges
-	@# through the core.faros.sh binding, so resolve core.faros.sh's
-	@# identityHash from system:controllers (override via KUERY_EDGES_IDENTITY_HASH).
+	@# kcp requires kuery's KubernetesCluster permissionClaim to carry the
+	@# identityHash of the edges provider export (override via
+	@# KUERY_EDGES_IDENTITY_HASH).
 	@# The slice + bind grant are created inside install.Bootstrap using the
 	@# provider SA (cluster-admin → has `bind`), not the admin kubeconfig.
 	@echo "Running kuery-provider init (schemas + APIExport + endpoint slice + bind grant)"
 	@HASH="$(KUERY_EDGES_IDENTITY_HASH)"; \
 	if [ -z "$$HASH" ]; then \
 		HASH=$$(kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
-			--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:controllers \
+			--server=$(KUERY_KCP_SERVER)/clusters/root:faros:providers:edges \
 			--insecure-skip-tls-verify \
-			get apiexport core.faros.sh -o jsonpath='{.status.identityHash}'); \
-		echo "resolved edges identityHash from core.faros.sh: $$HASH"; \
+			get apiexport edges.providers.faros.sh -o jsonpath='{.status.identityHash}'); \
+		echo "resolved edges identityHash from edges.providers.faros.sh: $$HASH"; \
 	fi; \
-	test -n "$$HASH" || { echo "could not resolve core.faros.sh identityHash — is the hub bootstrapped?"; exit 1; }; \
+	test -n "$$HASH" || { echo "could not resolve edges.providers.faros.sh identityHash — is the edges provider initialized?"; exit 1; }; \
 	FAROS_PROVIDER_KUBECONFIG=$(KUERY_RUNTIME_KUBECONFIG) \
 	KUERY_WORKSPACE_PATH=$(KUERY_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(KUERY_SCHEMAS_DIR) \
 	KUERY_EDGES_IDENTITY_HASH=$$HASH \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(KUERY_MANIFEST)) \
 		$(BINDIR)/kuery-provider init
 
-uninstall-provider-kuery: ## Delete kuery CatalogEntry + Provider (full teardown)
+uninstall-provider-kuery: ## Delete kuery Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
 		--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(KUERY_MANIFEST) -f $(KUERY_PROVIDER_MANIFEST)
+		delete -f $(KUERY_PROVIDER_MANIFEST)
 
 # --- Provider infrastructure (local dev) ---
 # Mirror of the quickstart pattern above. Distinct port (8082) so both

@@ -1483,9 +1483,10 @@ local_resource(
 
 local_resource(
     'kuery-init',
-    cmd=('KUERY_KCP_KUBECONFIG={kc} KUERY_KCP_SERVER={sv} ' +
-         'make init-provider-kuery').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+    cmd=('{rewrite} && KUERY_KCP_KUBECONFIG={kc} KUERY_KCP_SERVER={sv} ' +
+         'KUERY_MANIFEST={mf} make init-provider-kuery').format(
+             rewrite=KUERY_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=KUERY_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'kuery-register'],
