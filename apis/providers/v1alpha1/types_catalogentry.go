@@ -515,10 +515,11 @@ type ProviderPermissionClaim struct {
 	Verbs []string `json:"verbs,omitempty"`
 
 	// IdentitySource identifies the trusted workspace whose current APIExport
-	// identity must match this claim's identityHash. It is required for Faros
-	// API groups, whose resources are not built in to Kubernetes. Platform
-	// sources resolve only from the hub-owned controllers workspace. Provider
-	// sources resolve only from the named provider child workspace.
+	// identity must match this claim's identityHash. It is required whenever
+	// the target APIExport claim has a non-empty identityHash and must be absent
+	// for identity-less built-in Kubernetes APIs. Platform sources resolve only
+	// from the hub-owned controllers workspace. Provider sources resolve only
+	// from the named provider child workspace.
 	// +optional
 	IdentitySource *ProviderPermissionClaimIdentitySource `json:"identitySource,omitempty"`
 
