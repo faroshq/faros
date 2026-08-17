@@ -7,6 +7,15 @@ export interface Template {
   name: string
   displayName: string
   description: string
+  // Ready is true only when the Template controller has reported a
+  // current-generation aggregate Ready condition and its backend is ready.
+  // Unready Templates remain visible in the catalog for diagnostics, but the
+  // portal must not offer them for provisioning.
+  ready: boolean
+  readinessMessage?: string
+  generation?: number
+  observedGeneration?: number
+  conditions?: TemplateCondition[]
   category?: string
   cloud?: string
   version?: string
@@ -22,6 +31,15 @@ export interface Template {
   // tells the portal how to render this template's instances (extra list
   // columns + grouped detail fields). Absent → default raw-values rendering.
   view?: TemplateView
+}
+
+export interface TemplateCondition {
+  type: string
+  status: string
+  observedGeneration?: number
+  reason?: string
+  message?: string
+  time?: string
 }
 
 export type TemplateExposure = 'internal' | 'optional' | 'public'
@@ -77,9 +95,11 @@ export interface JSONSchema {
 }
 
 export interface Instance {
+  uid?: string
   name: string
   namespace: string
   template: string
+  deletionTimestamp?: string
   phase: string
   message?: string
   conditions?: InstanceCondition[]
@@ -91,11 +111,14 @@ export interface Instance {
   // promoted to their own fields and excluded here.
   status?: Record<string, unknown>
   createdAt: string
+  generation?: number
+  observedGeneration?: number
 }
 
 export interface InstanceCondition {
   type: string
   status: string
+  observedGeneration?: number
   reason?: string
   message?: string
   time?: string

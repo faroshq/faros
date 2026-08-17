@@ -22,7 +22,13 @@ const exposure = computed(() => {
 </script>
 
 <template>
-  <button class="template-card" @click="$emit('select', template.name)">
+  <button
+    class="template-card"
+    :class="{ 'is-unavailable': !template.ready }"
+    :disabled="!template.ready"
+    :aria-describedby="!template.ready ? `template-${template.name}-readiness` : undefined"
+    @click="$emit('select', template.name)"
+  >
     <div class="template-card-head">
       <div class="template-card-title">{{ template.displayName || template.name }}</div>
       <span v-if="template.cloud" class="cloud-pill">{{ template.cloud }}</span>
@@ -40,6 +46,15 @@ const exposure = computed(() => {
       </span>
     </div>
     <p class="template-card-desc">{{ template.description }}</p>
+    <p
+      v-if="!template.ready"
+      :id="`template-${template.name}-readiness`"
+      class="template-readiness"
+      role="status"
+    >
+      <span class="badge warn">Unavailable</span>
+      <span>{{ template.readinessMessage }}</span>
+    </p>
     <div class="template-card-foot">
       <span class="kind">{{ template.kind }}</span>
       <span v-if="template.version" class="version">v{{ template.version }}</span>
