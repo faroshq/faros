@@ -4,10 +4,11 @@ import { api } from '../api'
 import type { ConnectionDetail, ErrorResponse } from '../types'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
 
-const props = defineProps<{ name: string }>()
+const props = defineProps<{ name: string; deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
+const deletionScope = 'connection'
 
 const conn = ref<ConnectionDetail | null>(null)
 const error = ref<string | null>(null)
@@ -20,6 +21,9 @@ let mounted = false
 let refresh!: LatestRefreshController
 
 const validated = computed(() => conn.value?.conditions.find(c => c.type === 'Validated'))
+const deleting = computed(() => !!conn.value && (
+  !!conn.value.deletionTimestamp || props.deletions.has(deletionScope, conn.value.name, conn.value.uid)
+))
 const reconciled = computed(() =>
   !!conn.value &&
   conn.value.observedGeneration !== undefined &&
@@ -57,7 +61,7 @@ function load() {
 
 async function remove() {
   const connection = conn.value
-  if (!connection) return
+  if (!connection || deleting.value) return
   const ok = await confirmDialog({
     title: `Delete connection "${connection.name}"?`,
     message: 'Repositories using it will stop reconciling.',
@@ -70,7 +74,7 @@ async function remove() {
   mutationError.value = null
   try {
     await api.deleteConnection(connection.name)
-    operations.tombstone(lock, connection.uid)
+    props.deletions.acknowledge(deletionScope, connection.name, connection.uid)
     emit('back')
   } catch (e) {
     mutationError.value = errMessage(e)
@@ -85,11 +89,17 @@ refresh = createLatestRefreshController(async requestID => {
     const next = await api.getConnection(props.name)
     if (!refresh.isCurrent(requestID)) return
     conn.value = next
+    if (next.deletionTimestamp) props.deletions.acknowledge(deletionScope, next.name, next.uid)
     loaded.value = true
     error.value = null
   } catch (e) {
     if (!refresh.isCurrent(requestID)) return
     const err = e as ErrorResponse
+    if (err.reason === 'NotFound' && (deleting.value || props.deletions.has(deletionScope, props.name))) {
+      conn.value = null
+      emit('back')
+      return
+    }
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
     if (refresh.isCurrent(requestID)) loading.value = false
@@ -132,8 +142,8 @@ onUnmounted(() => {
           <span v-else class="muted">Connection details unavailable</span>
         </p>
       </div>
-      <span v-if="conn" :class="['badge', conn.validated ? 'ok' : 'warn']" :title="conn.message">
-        {{ conn.validated ? 'validated' : 'pending' }}
+      <span v-if="conn" :class="['badge', !deleting && conn.validated ? 'ok' : 'warn']" :title="conn.message">
+        {{ deleting ? 'Deleting' : conn.validated ? 'validated' : 'pending' }}
       </span>
     </header>
 
@@ -152,7 +162,7 @@ onUnmounted(() => {
     <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
 
     <template v-if="conn">
-      <div v-if="!conn.validated && hint" class="panel">
+      <div v-if="!deleting && !conn.validated && hint" class="panel">
         <h3 class="panel-title">Status</h3>
         <p class="muted">{{ hint }}</p>
       </div>
@@ -192,8 +202,8 @@ onUnmounted(() => {
       />
 
       <div class="actions">
-        <button class="danger" type="button" :disabled="operations.isLocked(operationKey('connection', conn.name))" @click="remove">
-          {{ operations.phase(operationKey('connection', conn.name)) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
+        <button class="danger" type="button" :disabled="deleting || operations.isLocked(operationKey('connection', conn.name))" @click="remove">
+          {{ deleting || operations.phase(operationKey('connection', conn.name)) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
         </button>
       </div>
     </template>

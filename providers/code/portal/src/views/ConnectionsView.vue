@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../api'
+import { api, normalizeResourceName } from '../api'
 import type { Connection, ErrorResponse } from '../types'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
 
+const props = defineProps<{ deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'open', name: string): void }>()
+const deletionScope = 'connection'
 
 const connections = ref<Connection[]>([])
 const error = ref<string | null>(null)
@@ -24,8 +26,14 @@ const columns = [
   { key: 'actions', label: '' },
 ]
 const rows = computed<Array<Record<string, unknown>>>(() => connections.value
-  .filter(connection => !operations.isTombstoned(operationKey('connection', connection.name), connection.uid))
-  .map(connection => ({ ...connection, status: connection.validated ? 'ready' : 'pending', actions: '' })))
+  .map(connection => {
+    const deleting = isDeleting(connection)
+    return { ...connection, deleting, status: deleting ? 'Deleting' : connection.validated ? 'ready' : 'pending', actions: '' }
+  }))
+
+function isDeleting(connection: Pick<Connection, 'name' | 'uid' | 'deletionTimestamp'>): boolean {
+  return !!connection.deletionTimestamp || props.deletions.has(deletionScope, connection.name, connection.uid)
+}
 
 // connect form
 const showForm = ref(false)
@@ -131,7 +139,7 @@ function load() {
 
 function openConnection(row: Record<string, unknown>) {
   const resourceName = String(row.name)
-  if (!operations.isLocked(operationKey('connection', resourceName))) emit('open', resourceName)
+  if (!row.deleting && !operations.isLocked(operationKey('connection', resourceName))) emit('open', resourceName)
 }
 
 async function submit() {
@@ -142,6 +150,11 @@ async function submit() {
   }
   if (!name.value || !owner.value || !token.value) {
     formError.value = 'name, owner, and token are required'
+    return
+  }
+  const existing = connections.value.find(connection => connection.name === normalizeResourceName(name.value))
+  if (existing && isDeleting(existing)) {
+    formError.value = `Connection "${existing.name}" is still deleting. Wait for it to disappear before reconnecting.`
     return
   }
   submitting.value = true
@@ -161,6 +174,7 @@ async function submit() {
 
 async function remove(row: Record<string, unknown>) {
   const connection = row as unknown as Connection
+  if (isDeleting(connection)) return
   const ok = await confirmDialog({
     title: `Delete connection "${connection.name}"?`,
     message: 'Repositories using it will stop reconciling.',
@@ -173,8 +187,7 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteConnection(connection.name)
-    operations.tombstone(lock, connection.uid)
-    connections.value = connections.value.filter(item => item.name !== connection.name)
+    props.deletions.acknowledge(deletionScope, connection.name, connection.uid)
     load()
   } catch (e) {
     mutationError.value = errMessage(e)
@@ -189,7 +202,8 @@ refresh = createLatestRefreshController(async requestID => {
     const next = await api.listConnections()
     if (!refresh.isCurrent(requestID)) return
     connections.value = next
-    operations.reconcile('connection', next)
+    next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+    props.deletions.reconcile(deletionScope, next)
     loaded.value = true
     error.value = null
   } catch (e) {
@@ -275,17 +289,17 @@ onUnmounted(() => {
       @retry="load"
       @row-click="openConnection"
     >
-      <template #name="{ value, row }"><button class="link" type="button" @click.stop="openConnection(row)">{{ value }}</button></template>
+      <template #name="{ value, row }"><span v-if="row.deleting">{{ value }}</span><button v-else class="link" type="button" @click.stop="openConnection(row)">{{ value }}</button></template>
       <template #owner="{ value }">{{ value }}</template>
       <template #login="{ value }">{{ value || '—' }}</template>
-      <template #status="{ row }"><StatusBadge :status="String(row.status)" :title="String(row.message || '')" /></template>
+      <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
       <template #actions="{ row }">
         <div class="row-actions">
           <ResourceTableDeleteButton
             :label="`Delete connection ${String(row.name)}`"
             :busy-label="`Deleting connection ${String(row.name)}…`"
-            :busy="operations.phase(operationKey('connection', String(row.name))) === 'deleting'"
-            :disabled="operations.isLocked(operationKey('connection', String(row.name)))"
+            :busy="Boolean(row.deleting) || operations.phase(operationKey('connection', String(row.name))) === 'deleting'"
+            :disabled="Boolean(row.deleting) || operations.isLocked(operationKey('connection', String(row.name)))"
             @click="remove(row)"
           />
         </div>

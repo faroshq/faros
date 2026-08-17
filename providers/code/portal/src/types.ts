@@ -20,6 +20,7 @@ export interface ErrorResponse {
 export interface Connection {
   name: string
   uid?: string
+  deletionTimestamp?: string
   generation?: number
   observedGeneration?: number
   provider: string
@@ -58,6 +59,7 @@ export interface ConnectionDetail extends Connection {
 export interface Repository {
   name: string
   uid?: string
+  deletionTimestamp?: string
   generation?: number
   observedGeneration?: number
   connectionRef: string
@@ -84,6 +86,7 @@ export interface RepositoryDetail extends Repository {
 export interface DeployKey {
   name: string
   uid?: string
+  deletionTimestamp?: string
   generation?: number
   observedGeneration?: number
   repositoryRef: string
@@ -99,6 +102,7 @@ export interface DeployKey {
 export interface Collaborator {
   name: string
   uid?: string
+  deletionTimestamp?: string
   generation?: number
   observedGeneration?: number
   repositoryRef: string
@@ -117,6 +121,7 @@ export interface Collaborator {
 export interface Package {
   name: string
   uid?: string
+  deletionTimestamp?: string
   generation?: number
   observedGeneration?: number
   type: string

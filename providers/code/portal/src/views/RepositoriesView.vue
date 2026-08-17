@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../api'
+import { api, normalizeResourceName } from '../api'
 import type { Connection, ErrorResponse, Repository } from '../types'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
 
+const props = defineProps<{ deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'open', name: string): void }>()
+const deletionScope = 'repository'
 
 const repos = ref<Repository[]>([])
 const connections = ref<Connection[]>([])
@@ -29,8 +31,17 @@ const columns = [
   { key: 'actions', label: '' },
 ]
 const rows = computed<Array<Record<string, unknown>>>(() => repos.value
-  .filter(repo => !operations.isTombstoned(operationKey('repository', repo.name), repo.uid))
-  .map(repo => ({ ...repo, url: repo.htmlURL || '', status: repo.ready ? 'ready' : 'pending', actions: '' })))
+  .map(repository => {
+    const deleting = isDeleting(repository)
+    return { ...repository, deleting, url: repository.htmlURL || '', status: deleting ? 'Deleting' : repository.ready ? 'ready' : 'pending', actions: '' }
+  }))
+
+function isDeleting(repository: Pick<Repository, 'name' | 'uid' | 'deletionTimestamp'>): boolean {
+  return !!repository.deletionTimestamp || props.deletions.has(deletionScope, repository.name, repository.uid)
+}
+const connectionChoices = computed(() => connections.value.filter(connection => (
+  !connection.deletionTimestamp && !props.deletions.has('connection', connection.name, connection.uid)
+)))
 
 const showForm = ref(false)
 const name = ref('')
@@ -67,7 +78,7 @@ function load() {
 
 function openRepository(row: Record<string, unknown>) {
   const resourceName = String(row.name)
-  if (!operations.isLocked(operationKey('repository', resourceName))) emit('open', resourceName)
+  if (!row.deleting && !operations.isLocked(operationKey('repository', resourceName))) emit('open', resourceName)
 }
 
 async function submit() {
@@ -78,6 +89,15 @@ async function submit() {
   }
   if (!name.value || !connectionRef.value) {
     formError.value = 'name and connection are required'
+    return
+  }
+  if (!connectionChoices.value.some(connection => connection.name === connectionRef.value)) {
+    formError.value = 'Select an active connection before creating a repository.'
+    return
+  }
+  const existing = repos.value.find(repository => repository.name === normalizeResourceName(name.value))
+  if (existing && isDeleting(existing)) {
+    formError.value = `Repository "${existing.name}" is still deleting. Wait for it to disappear before recreating it.`
     return
   }
   submitting.value = true
@@ -104,6 +124,7 @@ async function submit() {
 
 async function remove(row: Record<string, unknown>) {
   const repository = row as unknown as Repository
+  if (isDeleting(repository)) return
   const ok = await confirmDialog({
     title: `Delete repository "${repository.repo}"?`,
     message: 'This removes the repository on the git host. This cannot be undone.',
@@ -116,8 +137,7 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteRepository(repository.name)
-    operations.tombstone(lock, repository.uid)
-    repos.value = repos.value.filter(item => item.name !== repository.name)
+    props.deletions.acknowledge(deletionScope, repository.name, repository.uid)
     loadRepositories()
   } catch (e) {
     mutationError.value = errMessage(e)
@@ -132,7 +152,8 @@ repoRefresh = createLatestRefreshController(async requestID => {
     const next = await api.listRepositories()
     if (!repoRefresh.isCurrent(requestID)) return
     repos.value = next
-    operations.reconcile('repository', next)
+    next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+    props.deletions.reconcile(deletionScope, next)
     loaded.value = true
     error.value = null
   } catch (e) {
@@ -150,9 +171,12 @@ connectionRefresh = createLatestRefreshController(async requestID => {
     const next = await api.listConnections()
     if (!connectionRefresh.isCurrent(requestID)) return
     connections.value = next
+    next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge('connection', item.name, item.uid))
+    props.deletions.reconcile('connection', next)
     connectionsLoaded.value = true
     connectionsError.value = null
-    if (next.length && !next.some(item => item.name === connectionRef.value)) connectionRef.value = next[0].name
+    const available = next.filter(item => !item.deletionTimestamp && !props.deletions.has('connection', item.name, item.uid))
+    if (!available.some(item => item.name === connectionRef.value)) connectionRef.value = available[0]?.name || ''
   } catch (e) {
     if (!connectionRefresh.isCurrent(requestID)) return
     const err = e as ErrorResponse
@@ -182,7 +206,7 @@ onUnmounted(() => {
         <h2 class="page-title">Repositories</h2>
         <p class="page-meta">Repositories the provider manages on the git host. Click one to manage deploy keys and collaborators.</p>
       </div>
-      <button class="primary" :disabled="!loaded || !connectionsLoaded || !connections.length" @click="showForm = !showForm">
+      <button class="primary" :disabled="!loaded || !connectionsLoaded || !connectionChoices.length" @click="showForm = !showForm">
         {{ showForm ? 'Cancel' : 'New repository' }}
       </button>
     </header>
@@ -193,7 +217,7 @@ onUnmounted(() => {
       <button class="secondary" type="button" @click="loadConnections">Retry connections</button>
     </div>
     <span v-else-if="connectionsLoading && connectionsLoaded" class="sr-only" role="status" aria-live="polite">Updating connections…</span>
-    <p v-if="connectionsLoaded && !connections.length" class="empty">Add a connection first, then create repositories under it.</p>
+    <p v-if="connectionsLoaded && !connectionChoices.length" class="empty">Add a ready connection first, then create repositories under it.</p>
 
     <div v-if="showForm" class="panel">
       <h3 class="panel-title">New repository</h3>
@@ -201,7 +225,7 @@ onUnmounted(() => {
         <div class="field">
           <span class="field-label">Connection</span>
           <select v-model="connectionRef" :disabled="connectionsLoading && !connectionsLoaded">
-            <option v-for="c in connections" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
+            <option v-for="c in connectionChoices" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
           </select>
         </div>
         <div class="field"><span class="field-label">Object name</span><input v-model="name" placeholder="my-service" autocomplete="off" /></div>
@@ -237,18 +261,18 @@ onUnmounted(() => {
       @retry="loadRepositories"
       @row-click="openRepository"
     >
-      <template #name="{ value, row }"><button class="link" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
+      <template #name="{ value, row }"><span v-if="row.deleting">{{ row.repo || value }}</span><button v-else class="link" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
       <template #connectionRef="{ value }">{{ value }}</template>
       <template #visibility="{ value }">{{ value }}</template>
-      <template #url="{ row }"><a v-if="row.htmlURL" :href="String(row.htmlURL)" target="_blank" rel="noopener" @click.stop>open ↗</a><span v-else class="muted">—</span></template>
-      <template #status="{ row }"><StatusBadge :status="String(row.status)" :title="String(row.message || '')" /></template>
+      <template #url="{ row }"><a v-if="row.htmlURL && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener" @click.stop>open ↗</a><span v-else class="muted">—</span></template>
+      <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
       <template #actions="{ row }">
         <div class="row-actions">
           <ResourceTableDeleteButton
             :label="`Delete repository ${String(row.repo || row.name)}`"
             :busy-label="`Deleting repository ${String(row.repo || row.name)}…`"
-            :busy="operations.phase(operationKey('repository', String(row.name))) === 'deleting'"
-            :disabled="operations.isLocked(operationKey('repository', String(row.name)))"
+            :busy="Boolean(row.deleting) || operations.phase(operationKey('repository', String(row.name))) === 'deleting'"
+            :disabled="Boolean(row.deleting) || operations.isLocked(operationKey('repository', String(row.name)))"
             @click="remove(row)"
           />
         </div>

@@ -104,6 +104,112 @@ describe.each([
   })
 })
 
+describe.each([
+  ['Connection', 'connections.code.faros.sh', api.getConnection],
+  ['Repository', 'repositories.code.faros.sh', api.getRepository],
+] as const)('get%s', (kind, resource, get) => {
+  it('normalizes the exact Kubernetes resource NotFound', async () => {
+    setAPIContext({ tenant: `get-${kind.toLowerCase()}-missing`, token: `token-${kind}` })
+    vi.stubGlobal('fetch', vi.fn(async () => graphqlError(`${resource} "demo" not found`)))
+
+    await expect(get('demo')).rejects.toMatchObject({
+      reason: 'NotFound',
+      message: `${kind} "demo" not found`,
+    })
+  })
+
+  it('preserves lookalike GraphQL failures', async () => {
+    setAPIContext({ tenant: `get-${kind.toLowerCase()}-lookalike`, token: `token-${kind}` })
+    vi.stubGlobal('fetch', vi.fn(async () => graphqlError(
+      `${resource} "demo" not found while resolving authorization`,
+    )))
+
+    await expect(get('demo')).rejects.toMatchObject({ reason: 'GraphQLError' })
+  })
+})
+
+describe('Kubernetes deletion state', () => {
+  const deletionTimestamp = '2026-08-17T12:34:56Z'
+  const resources = [
+    {
+      listField: 'Connections',
+      load: () => api.listConnections(),
+      item: {
+        metadata: { name: 'connection', uid: 'connection-uid', deletionTimestamp },
+        spec: { provider: 'github', type: 'pat', owner: 'faros', secretRef: { name: 'token' } },
+      },
+    },
+    {
+      listField: 'Repositories',
+      load: () => api.listRepositories(),
+      item: {
+        metadata: { name: 'repository', uid: 'repository-uid', deletionTimestamp },
+        spec: { connectionRef: 'connection', name: 'repository' },
+      },
+    },
+    {
+      listField: 'DeployKeys',
+      load: () => api.listDeployKeys('repository'),
+      item: {
+        metadata: { name: 'deploy-key', uid: 'deploy-key-uid', deletionTimestamp },
+        spec: { repositoryRef: 'repository' },
+      },
+    },
+    {
+      listField: 'Collaborators',
+      load: () => api.listCollaborators('repository'),
+      item: {
+        metadata: { name: 'collaborator', uid: 'collaborator-uid', deletionTimestamp },
+        spec: { repositoryRef: 'repository', username: 'octocat' },
+      },
+    },
+    {
+      listField: 'Packages',
+      load: () => api.listAllPackages(),
+      item: {
+        metadata: { name: 'package-cr', uid: 'package-uid', deletionTimestamp },
+        spec: { repositoryRef: 'repository' },
+        status: { packageName: 'package', type: 'container' },
+      },
+    },
+  ] satisfies Array<{
+    listField: string
+    load: () => Promise<Array<{ deletionTimestamp?: string }>>
+    item: Record<string, unknown>
+  }>
+
+  it.each(resources)('selects and maps deletionTimestamp for $listField', async ({ listField, load, item }) => {
+    setAPIContext({ tenant: `terminating-${listField}`, token: `token-${listField}` })
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const call = request(init)
+      expect(call.query).toContain('deletionTimestamp')
+      return response({ data: { code_faros_sh: { v1alpha1: { [listField]: { items: [item] } } } } })
+    }))
+
+    await expect(load()).resolves.toMatchObject([{ deletionTimestamp }])
+  })
+
+  it('rejects a malformed deletionTimestamp', async () => {
+    setAPIContext({ tenant: 'malformed-deletion-time', token: 'malformed-token' })
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      data: {
+        code_faros_sh: {
+          v1alpha1: {
+            Connections: {
+              items: [{
+                metadata: { name: 'connection', uid: 'connection-uid', deletionTimestamp: 42 },
+                spec: { provider: 'github', type: 'pat', owner: 'faros', secretRef: { name: 'token' } },
+              }],
+            },
+          },
+        },
+      },
+    })))
+
+    await expect(api.listConnections()).rejects.toMatchObject({ reason: 'ProtocolError' })
+  })
+})
+
 describe('oauthConfig', () => {
   it('does not advertise an enabled OAuth flow without a start URL', async () => {
     setAPIContext({ tenant: 'oauth-config', token: 'oauth-token' })

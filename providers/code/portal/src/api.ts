@@ -76,6 +76,7 @@ interface KCPMetadata {
   resourceVersion?: string | null
   generation?: number | null
   creationTimestamp?: string | null
+  deletionTimestamp?: string | null
 }
 interface KCPCondition {
   type: string
@@ -136,6 +137,7 @@ function validateRawCR(
   }
   validateOptionalString(metadata.resourceVersion, `${label} metadata.resourceVersion`)
   validateOptionalString(metadata.creationTimestamp, `${label} metadata.creationTimestamp`)
+  validateOptionalString(metadata.deletionTimestamp, `${label} metadata.deletionTimestamp`)
   if (metadata.generation !== undefined && metadata.generation !== null &&
     (typeof metadata.generation !== 'number' || !Number.isSafeInteger(metadata.generation) || metadata.generation < 0)) {
     throw protocolError(`${label} metadata.generation had an invalid shape`)
@@ -369,6 +371,7 @@ function connFromCR(cr: RawCR): Connection {
   return {
     name: cr.metadata.name,
     uid: cr.metadata.uid,
+    deletionTimestamp: cr.metadata.deletionTimestamp ?? undefined,
     generation: reconciliation.generation,
     observedGeneration: reconciliation.observedGeneration,
     provider: String(spec.provider ?? ''),
@@ -412,6 +415,7 @@ function repoFromCR(cr: RawCR): Repository {
   return {
     name: cr.metadata.name,
     uid: cr.metadata.uid,
+    deletionTimestamp: cr.metadata.deletionTimestamp ?? undefined,
     generation: reconciliation.generation,
     observedGeneration: reconciliation.observedGeneration,
     connectionRef: String(spec.connectionRef ?? ''),
@@ -454,6 +458,7 @@ function keyFromCR(cr: RawCR): DeployKey {
   return {
     name: cr.metadata.name,
     uid: cr.metadata.uid,
+    deletionTimestamp: cr.metadata.deletionTimestamp ?? undefined,
     generation: reconciliation.generation,
     observedGeneration: reconciliation.observedGeneration,
     repositoryRef: String(spec.repositoryRef ?? ''),
@@ -473,6 +478,7 @@ function pkgFromCR(cr: RawCR): Package {
   return {
     name: String(status.packageName ?? ''),
     uid: cr.metadata.uid,
+    deletionTimestamp: cr.metadata.deletionTimestamp ?? undefined,
     generation: reconciliation.generation,
     observedGeneration: reconciliation.observedGeneration,
     type: String(status.type ?? ''),
@@ -497,6 +503,7 @@ function collabFromCR(cr: RawCR): Collaborator {
   return {
     name: cr.metadata.name,
     uid: cr.metadata.uid,
+    deletionTimestamp: cr.metadata.deletionTimestamp ?? undefined,
     generation: reconciliation.generation,
     observedGeneration: reconciliation.observedGeneration,
     repositoryRef: String(spec.repositoryRef ?? ''),
@@ -509,7 +516,7 @@ function collabFromCR(cr: RawCR): Collaborator {
 }
 
 // dns1123 turns arbitrary text into a safe object name.
-function dns1123(s: string): string {
+export function normalizeResourceName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 253) || 'x'
 }
 
@@ -583,16 +590,16 @@ async function deleteCodeResource(kind: CodeResourceKind, resource: string, name
 // is the GraphQL field code_faros_sh (dots → underscores), list fields are
 // the capitalised plural (Connections), single-get is the capitalised singular
 // (Connection(name: …)).
-const GQL_META = 'metadata { name uid resourceVersion generation creationTimestamp }'
+const GQL_META = 'metadata { name uid resourceVersion generation creationTimestamp deletionTimestamp }'
 const GQL_COND = 'conditions { type status reason message }'
 const F_CONNECTION = `${GQL_META} spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration ${GQL_COND} }`
 // Detail fragment: adds generation/observedGeneration and per-condition
 // lastTransitionTime so the detail view can explain why a connection is pending.
-const F_CONNECTION_DETAIL = `metadata { name uid resourceVersion generation creationTimestamp } spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration conditions { type status reason message lastTransitionTime } }`
+const F_CONNECTION_DETAIL = `${GQL_META} spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration conditions { type status reason message lastTransitionTime } }`
 const F_REPOSITORY = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch autoInit } status { repoID htmlURL cloneURL sshURL observedGeneration ${GQL_COND} }`
 // Detail fragment: adds generation/observedGeneration and per-condition
 // lastTransitionTime so the detail view can explain why a repository is pending.
-const F_REPOSITORY_DETAIL = `metadata { name uid resourceVersion generation creationTimestamp } spec { connectionRef name owner visibility description defaultBranch autoInit } status { repoID htmlURL cloneURL sshURL observedGeneration conditions { type status reason message lastTransitionTime } }`
+const F_REPOSITORY_DETAIL = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch autoInit } status { repoID htmlURL cloneURL sshURL observedGeneration conditions { type status reason message lastTransitionTime } }`
 const F_DEPLOYKEY = `${GQL_META} spec { repositoryRef title publicKey readOnly } status { keyID secretRef { name } observedGeneration ${GQL_COND} }`
 const F_COLLABORATOR = `${GQL_META} spec { repositoryRef username permission } status { invitationID observedGeneration ${GQL_COND} }`
 const F_PACKAGE = `${GQL_META} spec { repositoryRef } status { packageName type visibility htmlURL versionCount updatedAt observedGeneration ${GQL_COND} }`
@@ -642,11 +649,20 @@ async function gqlList(kind: string, fields: string, labelselector?: string, con
   return list.items.map((item, index) => validateResourceForKind(item, resourceKind, `${kind} list item ${index}`))
 }
 
-// gqlGet fetches a single named object (capitalised-singular field). Throws a
-// NotFound ErrorResponse when the gateway returns null.
-async function gqlGet(kind: CodeResourceKind, name: string, fields: string, context?: APIRequestContext): Promise<RawCR> {
+// gqlGet fetches a single named object (capitalised-singular field). The
+// gateway may represent absence as either null data or an exact Kubernetes
+// GraphQL error; both become the stable portal NotFound contract.
+async function gqlGet(kind: CodeResourceKind, resource: string, name: string, fields: string, context?: APIRequestContext): Promise<RawCR> {
   const query = `query($n: String!) { code_faros_sh { v1alpha1 { ${kind}(name: $n) { ${fields} } } } }`
-  const data = await graphqlQuery<unknown>(query, { n: name }, context)
+  let data: unknown
+  try {
+    data = await graphqlQuery<unknown>(query, { n: name }, context)
+  } catch (error) {
+    if (isKubernetesGraphQLNotFound(error, `${resource}.${GROUP}`, name)) {
+      throw <ErrorResponse>{ reason: 'NotFound', message: `${kind} "${name}" not found` }
+    }
+    throw error
+  }
   const version = codeVersionPayload(data, `${kind} get`)
   if (!hasOwn(version, kind)) {
     throw protocolError(`${kind} get response was missing ${kind}`)
@@ -665,7 +681,7 @@ export const api = {
   // getConnection fetches one Connection with the full spec/status the detail
   // view renders — used to diagnose a connection stuck in "pending".
   async getConnection(name: string): Promise<ConnectionDetail> {
-    return connDetailFromCR(await gqlGet('Connection', name, F_CONNECTION_DETAIL))
+    return connDetailFromCR(await gqlGet('Connection', 'connections', name, F_CONNECTION_DETAIL))
   },
 
   // connect creates the Connection, then the token Secret it references — in
@@ -676,7 +692,7 @@ export const api = {
   // so reconnecting never trips over leftovers from a prior connection.
   async connect(input: { name: string; owner: string; token: string; baseURL?: string; type?: 'pat' | 'oauth' }): Promise<Connection> {
     const context = captureRequestContext()
-    const name = dns1123(input.name)
+    const name = normalizeResourceName(input.name)
     const secretName = name + '-token'
     // 1) Connection referencing the (not-yet-created) Secret.
     const spec: Record<string, unknown> = {
@@ -746,7 +762,7 @@ export const api = {
   },
 
   async getRepository(name: string): Promise<RepositoryDetail> {
-    return repoDetailFromCR(await gqlGet('Repository', name, F_REPOSITORY_DETAIL))
+    return repoDetailFromCR(await gqlGet('Repository', 'repositories', name, F_REPOSITORY_DETAIL))
   },
 
   async createRepository(input: {
@@ -757,7 +773,7 @@ export const api = {
     description?: string
     autoInit?: boolean
   }): Promise<Repository> {
-    const name = dns1123(input.name)
+    const name = normalizeResourceName(input.name)
     const spec: Record<string, unknown> = {
       connectionRef: input.connectionRef,
       name: input.repo || input.name,
@@ -809,7 +825,7 @@ export const api = {
     publicKey?: string
     readOnly?: boolean
   }): Promise<DeployKey> {
-    const name = dns1123(input.repositoryRef + '-' + (input.title || 'key') + '-' + shortRand())
+    const name = normalizeResourceName(input.repositoryRef + '-' + (input.title || 'key') + '-' + shortRand())
     const spec: Record<string, unknown> = { repositoryRef: input.repositoryRef }
     if (input.title) spec.title = input.title
     if (input.publicKey) spec.publicKey = input.publicKey
@@ -837,7 +853,7 @@ export const api = {
     username: string
     permission?: string
   }): Promise<Collaborator> {
-    const name = dns1123(input.repositoryRef + '-' + input.username)
+    const name = normalizeResourceName(input.repositoryRef + '-' + input.username)
     const spec: Record<string, unknown> = {
       repositoryRef: input.repositoryRef,
       username: input.username,
