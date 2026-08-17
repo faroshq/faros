@@ -49,35 +49,32 @@ type fakeOps struct {
 	mu sync.Mutex
 
 	// Storage
-	orgWorkspaces         map[string]bool              // orgUUID set
-	orgMemberships        map[string]map[string]string // orgUUID → user → role
-	childWorkspaces       map[string]map[string]bool   // orgUUID → wsUUID set
-	wsDisplayNames        map[wsKey]string             // (org,ws) → display
-	wsDeletionAnnos       map[wsKey]time.Time          // (org,ws) → timestamp
-	mcpServerCalls        map[wsKey]int                // (org,ws) → count
-	farosBindingCalls     map[wsKey]int                // (org,ws) → count
-	workspaceAdmins       map[wsKey]map[string]bool    // (org,ws) → rbacIdentity set
-	providerBindings      map[wsKey]map[string]string  // (org,ws) → provider → binding name
-	providerBindingClaims map[wsKey]map[string][]kcp.ProviderBindingClaim
-	providerBindCalls     map[wsKey]int // (org,ws) → count
-	providerBindErr       error
+	orgWorkspaces     map[string]bool              // orgUUID set
+	orgMemberships    map[string]map[string]string // orgUUID → user → role
+	childWorkspaces   map[string]map[string]bool   // orgUUID → wsUUID set
+	wsDisplayNames    map[wsKey]string             // (org,ws) → display
+	wsDeletionAnnos   map[wsKey]time.Time          // (org,ws) → timestamp
+	mcpServerCalls    map[wsKey]int                // (org,ws) → count
+	farosBindingCalls map[wsKey]int                // (org,ws) → count
+	workspaceAdmins   map[wsKey]map[string]bool    // (org,ws) → rbacIdentity set
+	providerBindings  map[wsKey]map[string]string  // (org,ws) → provider → binding name
+	providerBindCalls map[wsKey]int                // (org,ws) → count
 }
 
 type wsKey struct{ Org, WS string }
 
 func newFakeOps() *fakeOps {
 	return &fakeOps{
-		orgWorkspaces:         map[string]bool{},
-		orgMemberships:        map[string]map[string]string{},
-		childWorkspaces:       map[string]map[string]bool{},
-		wsDisplayNames:        map[wsKey]string{},
-		wsDeletionAnnos:       map[wsKey]time.Time{},
-		mcpServerCalls:        map[wsKey]int{},
-		farosBindingCalls:     map[wsKey]int{},
-		workspaceAdmins:       map[wsKey]map[string]bool{},
-		providerBindings:      map[wsKey]map[string]string{},
-		providerBindingClaims: map[wsKey]map[string][]kcp.ProviderBindingClaim{},
-		providerBindCalls:     map[wsKey]int{},
+		orgWorkspaces:     map[string]bool{},
+		orgMemberships:    map[string]map[string]string{},
+		childWorkspaces:   map[string]map[string]bool{},
+		wsDisplayNames:    map[wsKey]string{},
+		wsDeletionAnnos:   map[wsKey]time.Time{},
+		mcpServerCalls:    map[wsKey]int{},
+		farosBindingCalls: map[wsKey]int{},
+		workspaceAdmins:   map[wsKey]map[string]bool{},
+		providerBindings:  map[wsKey]map[string]string{},
+		providerBindCalls: map[wsKey]int{},
 	}
 }
 
@@ -169,46 +166,27 @@ func (f *fakeOps) EnsureChildWorkspaceDefaultMCPServer(_ context.Context, orgUUI
 // provider-enable handler. The handler is exercised via its own
 // dedicated tests; for the existing org/workspace flows it just needs
 // to not error.
-func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, bindingName, _, _ string, _ []hubproviders.APIExportResource, claims []kcp.ProviderClaim) error {
+func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, bindingName, _, _ string, _ []kcp.ProviderClaim) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := wsKey{orgUUID, wsUUID}
-	f.providerBindCalls[key]++
-	if f.providerBindErr != nil {
-		return f.providerBindErr
-	}
 	if f.providerBindings[key] == nil {
 		f.providerBindings[key] = map[string]string{}
 	}
 	f.providerBindings[key][bindingName] = bindingName
-	if f.providerBindingClaims[key] == nil {
-		f.providerBindingClaims[key] = map[string][]kcp.ProviderBindingClaim{}
-	}
-	bindingClaims := make([]kcp.ProviderBindingClaim, 0, len(claims))
-	for _, claim := range claims {
-		state := "Rejected"
-		if claim.Accepted {
-			state = "Accepted"
-		}
-		bindingClaims = append(bindingClaims, kcp.ProviderBindingClaim{
-			Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...), State: state,
-		})
-	}
-	f.providerBindingClaims[key][bindingName] = bindingClaims
+	f.providerBindCalls[key]++
 	return nil
 }
 
 // ListProviderAPIBindings is the test stub for the read-side provider-enable
 // handler. It returns a copy so handlers cannot mutate fake state by accident.
-func (f *fakeOps) ListProviderAPIBindings(_ context.Context, orgUUID, wsUUID string) (map[string]kcp.ProviderAPIBinding, error) {
+func (f *fakeOps) ListProviderAPIBindings(_ context.Context, orgUUID, wsUUID string) (map[string]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := wsKey{orgUUID, wsUUID}
-	out := make(map[string]kcp.ProviderAPIBinding, len(f.providerBindings[key]))
+	out := make(map[string]string, len(f.providerBindings[key]))
 	for providerName, bindingName := range f.providerBindings[key] {
-		out[providerName] = kcp.ProviderAPIBinding{
-			Name: bindingName, PermissionClaims: append([]kcp.ProviderBindingClaim(nil), f.providerBindingClaims[key][providerName]...),
-		}
+		out[providerName] = bindingName
 	}
 	return out, nil
 }
@@ -217,7 +195,6 @@ func (f *fakeOps) DeleteProviderAPIBinding(_ context.Context, orgUUID, wsUUID, p
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.providerBindings[wsKey{orgUUID, wsUUID}], providerName)
-	delete(f.providerBindingClaims[wsKey{orgUUID, wsUUID}], providerName)
 	return nil
 }
 
@@ -227,115 +204,6 @@ func (f *fakeOps) EnsureProviderEdgeProxyGrant(_ context.Context, _, _, _, _ str
 
 func (f *fakeOps) RemoveProviderEdgeProxyGrant(_ context.Context, _, _, _ string) error {
 	return nil
-}
-
-func TestProviderBindingNeedsClaimReview(t *testing.T) {
-	tests := []struct {
-		name     string
-		binding  kcp.ProviderAPIBinding
-		declared []hubproviders.PermissionClaim
-		want     bool
-	}{
-		{
-			name: "matching tuple ignores verb order and acceptance state",
-			binding: kcp.ProviderAPIBinding{PermissionClaims: []kcp.ProviderBindingClaim{
-				{Resource: "secrets", Verbs: []string{"list", "get"}, State: "Rejected"},
-			}},
-			declared: []hubproviders.PermissionClaim{{Resource: "secrets", Verbs: []string{"get", "list"}}},
-		},
-		{
-			name: "additive agents claims require review",
-			binding: kcp.ProviderAPIBinding{PermissionClaims: []kcp.ProviderBindingClaim{
-				{Resource: "secrets", Verbs: []string{"get"}, State: "Accepted"},
-			}},
-			declared: []hubproviders.PermissionClaim{
-				{Resource: "secrets", Verbs: []string{"get"}},
-				{Group: "authentication.k8s.io", Resource: "tokenreviews", Verbs: []string{"create"}},
-			},
-			want: true,
-		},
-		{
-			name: "kuery group resource replacement requires review",
-			binding: kcp.ProviderAPIBinding{PermissionClaims: []kcp.ProviderBindingClaim{
-				{Group: "faros.sh", Resource: "edges", Verbs: []string{"get", "list"}, State: "Accepted"},
-			}},
-			declared: []hubproviders.PermissionClaim{
-				{Group: "edges.faros.sh", Resource: "kubernetesclusters", Verbs: []string{"get", "list"}},
-			},
-			want: true,
-		},
-		{
-			name: "kcp identity mismatch requires review",
-			binding: kcp.ProviderAPIBinding{
-				PermissionClaims:           []kcp.ProviderBindingClaim{{Resource: "secrets", Verbs: []string{"get"}, State: "Accepted"}},
-				PermissionClaimsValidKnown: true,
-			},
-			declared: []hubproviders.PermissionClaim{{Resource: "secrets", Verbs: []string{"get"}}},
-			want:     true,
-		},
-		{
-			name: "duplicate binding claims require review",
-			binding: kcp.ProviderAPIBinding{PermissionClaims: []kcp.ProviderBindingClaim{
-				{Resource: "secrets", Verbs: []string{"get"}, State: "Accepted"},
-				{Resource: "secrets", Verbs: []string{"get"}, State: "Rejected"},
-			}},
-			declared: []hubproviders.PermissionClaim{{Resource: "secrets", Verbs: []string{"get"}}},
-			want:     true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := providerBindingNeedsClaimReview(tt.binding, tt.declared); got != tt.want {
-				t.Fatalf("providerBindingNeedsClaimReview() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestListEnabledProvidersReportsClaimReviewWithoutMutatingBinding(t *testing.T) {
-	mgr, ops, _ := newTestManager(t)
-	key := wsKey{"org-a", "ws-1"}
-	ops.providerBindings[key] = map[string]string{"agents": "agents"}
-	ops.providerBindingClaims[key] = map[string][]kcp.ProviderBindingClaim{
-		"agents": {{Resource: "secrets", Verbs: []string{"get"}, State: "Accepted"}},
-	}
-	reg := hubproviders.NewRegistry()
-	reg.Upsert(hubproviders.Provider{
-		Name: "agents",
-		PermissionClaims: []hubproviders.PermissionClaim{
-			{Resource: "secrets", Verbs: []string{"get"}},
-			{Group: "authentication.k8s.io", Resource: "tokenreviews", Verbs: []string{"create"}},
-		},
-	})
-	mgr.WithProviderRegistry(reg)
-	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/api/orgs/org-a/workspaces/ws-1/providers/enabled")
-	if err != nil {
-		t.Fatalf("GET enabled providers: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, payload)
-	}
-	var got ListEnabledProvidersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if got.BindingNamesByProvider["agents"] != "agents" {
-		t.Fatalf("binding name = %q", got.BindingNamesByProvider["agents"])
-	}
-	if !got.ClaimReviewRequiredByProvider["agents"] {
-		t.Fatalf("claim review not reported: %#v", got)
-	}
-	if !got.ClaimDecisionsByProvider["agents"]["/secrets"] {
-		t.Fatalf("existing acceptance decision not returned: %#v", got.ClaimDecisionsByProvider)
-	}
-	if len(ops.providerBindingClaims[key]["agents"]) != 1 {
-		t.Fatal("read-side inventory mutated the existing binding")
-	}
 }
 
 func (f *fakeOps) ListAppAccessGrants(_ context.Context, _, _ string) ([]kcp.AppAccessGrant, error) {
@@ -1042,105 +910,14 @@ func TestSelfLeaveOrg(t *testing.T) {
 
 // ===== Provider enable tests =====
 
-func TestProviderBindingMutationsRequireWorkspaceAdmin(t *testing.T) {
-	t.Run("enable and re-accept", func(t *testing.T) {
-		mgr, ops, _ := newTestManager(t)
-		reg := hubproviders.NewRegistry()
-		reg.Upsert(hubproviders.Provider{
-			Name: "agents", APIExportPath: "root:faros:providers:agents", APIExportName: "agents.faros.sh", APIExportReady: true,
-		})
-		mgr.WithProviderRegistry(reg)
-		srv := newTestServer(t, mgr, memberTC("bob", "org-a", "ws-1"))
-		defer srv.Close()
-
-		resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/agents/enable", "application/json", jsonBody([]byte(`{"acceptedClaims":[]}`)))
-		if err != nil {
-			t.Fatalf("POST enable: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
-		}
-		if ops.providerBindCalls[wsKey{"org-a", "ws-1"}] != 0 {
-			t.Fatal("non-admin request mutated an APIBinding")
-		}
-	})
-
-	t.Run("disable", func(t *testing.T) {
-		mgr, ops, _ := newTestManager(t)
-		key := wsKey{"org-a", "ws-1"}
-		ops.providerBindings[key] = map[string]string{"agents": "agents"}
-		srv := newTestServer(t, mgr, memberTC("bob", "org-a", "ws-1"))
-		defer srv.Close()
-
-		resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/agents/disable", "application/json", nil)
-		if err != nil {
-			t.Fatalf("POST disable: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
-		}
-		if ops.providerBindings[key]["agents"] != "agents" {
-			t.Fatal("non-admin request deleted an APIBinding")
-		}
-	})
-}
-
-func TestEnableProviderRequiresCatalogApprovalForUntrustedClaims(t *testing.T) {
-	for _, tt := range []struct {
-		name       string
-		approved   bool
-		wantStatus int
-		wantCalls  int
-	}{
-		{name: "not approved", wantStatus: http.StatusForbidden},
-		{name: "catalog owner approved", approved: true, wantStatus: http.StatusOK, wantCalls: 1},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			mgr, ops, _ := newTestManager(t)
-			reg := hubproviders.NewRegistry()
-			reg.Upsert(hubproviders.Provider{
-				Name:                 "vendor",
-				APIExportPath:        "root:faros:providers:vendor",
-				APIExportName:        "vendor.example.com",
-				APIExportReady:       true,
-				AllowUntrustedClaims: tt.approved,
-				PermissionClaims: []hubproviders.PermissionClaim{
-					{Resource: "secrets", Verbs: []string{"get"}},
-				},
-			})
-			mgr.WithProviderRegistry(reg)
-			srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-			defer srv.Close()
-
-			body := []byte(`{"acceptedClaims":[{"resource":"secrets"}]}`)
-			resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/vendor/enable", "application/json", jsonBody(body))
-			if err != nil {
-				t.Fatalf("POST enable: %v", err)
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != tt.wantStatus {
-				payload, _ := io.ReadAll(resp.Body)
-				t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, tt.wantStatus, payload)
-			}
-			if calls := ops.providerBindCalls[wsKey{"org-a", "ws-1"}]; calls != tt.wantCalls {
-				t.Fatalf("APIBinding calls = %d, want %d", calls, tt.wantCalls)
-			}
-		})
-	}
-}
-
 func TestEnableProvider_BlocksMissingDependencies(t *testing.T) {
 	mgr, ops, _ := newTestManager(t)
 	reg := hubproviders.NewRegistry()
 	reg.Upsert(hubproviders.Provider{
-		Name:           "app-studio",
-		APIExportPath:  "root:providers:app-studio",
-		APIExportName:  "app-studio",
-		APIExportReady: true,
-		EndpointsValid: true,
-		Dependencies:   []hubproviders.Dependency{{Name: "code"}},
+		Name:          "app-studio",
+		APIExportPath: "root:providers:app-studio",
+		APIExportName: "app-studio",
+		Dependencies:  []hubproviders.Dependency{{Name: "code"}},
 	})
 	mgr.WithProviderRegistry(reg)
 	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
@@ -1171,12 +948,10 @@ func TestEnableProvider_AllowsSatisfiedDependencies(t *testing.T) {
 	ops.providerBindings[key] = map[string]string{"code": "code"}
 	reg := hubproviders.NewRegistry()
 	reg.Upsert(hubproviders.Provider{
-		Name:           "app-studio",
-		APIExportPath:  "root:providers:app-studio",
-		APIExportName:  "app-studio",
-		APIExportReady: true,
-		EndpointsValid: true,
-		Dependencies:   []hubproviders.Dependency{{Name: "code"}},
+		Name:          "app-studio",
+		APIExportPath: "root:providers:app-studio",
+		APIExportName: "app-studio",
+		Dependencies:  []hubproviders.Dependency{{Name: "code"}},
 	})
 	mgr.WithProviderRegistry(reg)
 	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
@@ -1198,133 +973,6 @@ func TestEnableProvider_AllowsSatisfiedDependencies(t *testing.T) {
 	}
 	if got := ops.providerBindings[key]["app-studio"]; got != "app-studio" {
 		t.Fatalf("provider binding = %q, want app-studio", got)
-	}
-}
-
-func TestEnableProviderAllowsAPIExportOnlyProvider(t *testing.T) {
-	mgr, ops, _ := newTestManager(t)
-	reg := hubproviders.NewRegistry()
-	reg.Upsert(hubproviders.Provider{
-		Name:           "database",
-		APIExportPath:  "root:providers:database",
-		APIExportName:  "database.providers.faros.sh",
-		APIExportReady: true,
-	})
-	mgr.WithProviderRegistry(reg)
-	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-	defer srv.Close()
-
-	body, _ := json.Marshal(EnableProviderRequest{})
-	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/database/enable", "application/json", jsonBody(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status: got %d, want 200; body=%s", resp.StatusCode, payload)
-	}
-	if got := ops.providerBindings[wsKey{"org-a", "ws-1"}]["database"]; got != "database" {
-		t.Fatalf("provider binding = %q", got)
-	}
-}
-
-func TestEnableProviderRejectsUnverifiedAPIExport(t *testing.T) {
-	mgr, ops, _ := newTestManager(t)
-	reg := hubproviders.NewRegistry()
-	reg.Upsert(hubproviders.Provider{
-		Name:          "database",
-		APIExportPath: "root:providers:database",
-		APIExportName: "database.providers.faros.sh",
-	})
-	mgr.WithProviderRegistry(reg)
-	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-	defer srv.Close()
-
-	body, _ := json.Marshal(EnableProviderRequest{})
-	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/database/enable", "application/json", jsonBody(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusConflict {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status: got %d, want 409; body=%s", resp.StatusCode, payload)
-	}
-	if ops.providerBindCalls[wsKey{"org-a", "ws-1"}] != 0 {
-		t.Fatal("EnsureProviderAPIBinding called before APIExport verification")
-	}
-}
-
-func TestEnableProviderRejectsAPIExportDriftAtMutationBoundary(t *testing.T) {
-	mgr, ops, _ := newTestManager(t)
-	ops.providerBindErr = apierrors.NewConflict(
-		schema.GroupResource{Group: "apis.kcp.io", Resource: "apiexports"},
-		"database.providers.faros.sh",
-		fmt.Errorf("permission claim identityHash drifted"),
-	)
-	reg := hubproviders.NewRegistry()
-	reg.Upsert(hubproviders.Provider{
-		Name:              "database",
-		APIExportPath:     "root:faros:providers:database",
-		APIExportName:     "database.providers.faros.sh",
-		APIExportReady:    true, // cached catalog verdict is intentionally stale
-		RequiredResources: []hubproviders.APIExportResource{{Group: "database.faros.sh", Name: "databases"}},
-	})
-	mgr.WithProviderRegistry(reg)
-	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-	defer srv.Close()
-
-	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/database/enable", "application/json", jsonBody([]byte(`{"acceptedClaims":[]}`)))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusConflict {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want 409; body=%s", resp.StatusCode, payload)
-	}
-	key := wsKey{"org-a", "ws-1"}
-	if ops.providerBindCalls[key] != 1 {
-		t.Fatalf("mutation-boundary verification calls = %d, want 1", ops.providerBindCalls[key])
-	}
-	if _, created := ops.providerBindings[key]["database"]; created {
-		t.Fatal("drifted APIExport created an APIBinding")
-	}
-}
-
-func TestEnableProviderRejectsProviderThatIsNotReady(t *testing.T) {
-	mgr, ops, _ := newTestManager(t)
-	reg := hubproviders.NewRegistry()
-	reg.Upsert(hubproviders.Provider{
-		Name:                  "infrastructure",
-		APIExportPath:         "root:providers:infrastructure",
-		APIExportName:         "infrastructure.providers.faros.sh",
-		APIExportReady:        true,
-		EndpointsValid:        true,
-		BackendHealthRequired: true,
-		BackendHealthy:        false,
-	})
-	mgr.WithProviderRegistry(reg)
-	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-	defer srv.Close()
-
-	body, _ := json.Marshal(EnableProviderRequest{})
-	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/infrastructure/enable", "application/json", jsonBody(body))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusConflict {
-		payload, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status: got %d, want 409; body=%s", resp.StatusCode, payload)
-	}
-	payload, _ := io.ReadAll(resp.Body)
-	if !bytes.Contains(payload, []byte(`"reason":"Conflict"`)) || !bytes.Contains(payload, []byte("retry shortly")) {
-		t.Fatalf("response %q is not the typed retryable conflict", payload)
-	}
-	if ops.providerBindCalls[wsKey{"org-a", "ws-1"}] != 0 {
-		t.Fatal("EnsureProviderAPIBinding called for a non-ready provider")
 	}
 }
 

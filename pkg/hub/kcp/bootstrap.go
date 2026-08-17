@@ -36,7 +36,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/config/kcp"
@@ -54,9 +53,6 @@ var (
 	}
 	apiExportGVR = schema.GroupVersionResource{
 		Group: "apis.kcp.io", Version: "v1alpha1", Resource: "apiexports",
-	}
-	apiExportV1Alpha2GVR = schema.GroupVersionResource{
-		Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apiexports",
 	}
 	apiBindingGVR = schema.GroupVersionResource{
 		Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings",
@@ -224,19 +220,9 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("creating system:providers client: %w", err)
 	}
 	for _, exportName := range []string{"providers.faros.sh", "admin.faros.sh"} {
-		if err := ensureExportBinding(ctx, systemProvidersDynamic, controllersDynamic, kcppaths.SystemControllers, exportName); err != nil {
+		if err := ensureExportBinding(ctx, systemProvidersDynamic, kcppaths.SystemControllers, exportName); err != nil {
 			return fmt.Errorf("binding %s in system:providers: %w", exportName, err)
 		}
-	}
-	// Existing provider workspaces received providers.faros.sh through their
-	// WorkspaceType when they were created. A generated CatalogEntry schema is
-	// immutable, so after an API shape change ask the pinned kcp binding
-	// reconciler to replace status.boundResources with the export's current
-	// schema reference. This is an in-place upgrade: deleting the APIBinding
-	// would prune the provider's sole CatalogEntry and is never safe here. A
-	// broken provider workspace is isolated and cannot block hub startup.
-	if err := b.ensureProviderCatalogBindingsCurrent(ctx, controllersDynamic); err != nil {
-		return fmt.Errorf("upgrading provider CatalogEntry bindings: %w", err)
 	}
 
 	// 5c. First-party CatalogEntries — the portal's MCP / Edges /
@@ -329,11 +315,7 @@ func (b *Bootstrapper) ensureTenancyObjectsBinding(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating system:tenants client: %w", err)
 	}
-	exportDynamic, err := dynamic.NewForConfig(configForPath(b.config, kcppaths.SystemControllers))
-	if err != nil {
-		return fmt.Errorf("creating system:controllers client: %w", err)
-	}
-	return ensureExportBinding(ctx, tenancyDynamic, exportDynamic, kcppaths.SystemControllers, "tenants.faros.sh")
+	return ensureExportBinding(ctx, tenancyDynamic, kcppaths.SystemControllers, "tenants.faros.sh")
 }
 
 // UsersConfig returns a rest.Config targeting root:faros:system:tenants, where
@@ -1385,20 +1367,11 @@ func ensureBuiltinCatalogEntries(ctx context.Context, providersDynamic dynamic.I
 }
 
 // ensureExportBinding creates (idempotently) an APIBinding in the workspace the
-// given dynamic client targets, pointing at exportName located at exportPath,
-// and waits until its bound schema references match the current APIExport.
+// given dynamic client targets, pointing at exportName located at exportPath.
 // Used to bind platform exports (in system:controllers) into the workspaces
 // that hold their objects (system:providers, system:tenants). Without the
 // binding, kcp serves the export's schemas only to workspaces that bound it.
-func ensureExportBinding(ctx context.Context, bindDynamic, exportDynamic dynamic.Interface, exportPath, exportName string) error {
-	export, err := exportDynamic.Resource(apiExportV1Alpha2GVR).Get(ctx, exportName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("getting %s APIExport: %w", exportName, err)
-	}
-	expected, err := apiExportBindingSchemas(export)
-	if err != nil {
-		return fmt.Errorf("reading %s APIExport schemas: %w", exportName, err)
-	}
+func ensureExportBinding(ctx context.Context, bindDynamic dynamic.Interface, exportPath, exportName string) error {
 	bindingName := exportName
 
 	existing, err := bindDynamic.Resource(apiBindingGVR).List(ctx, metav1.ListOptions{})
@@ -1409,8 +1382,7 @@ func ensureExportBinding(ctx context.Context, bindDynamic, exportDynamic dynamic
 		path, _, _ := unstructured.NestedString(b.Object, "spec", "reference", "export", "path")
 		name, _, _ := unstructured.NestedString(b.Object, "spec", "reference", "export", "name")
 		if path == exportPath && name == exportName {
-			bindingName = b.GetName()
-			return waitForAPIBindingSchemas(ctx, bindDynamic, bindingName, expected)
+			return nil
 		}
 	}
 
@@ -1433,129 +1405,8 @@ func ensureExportBinding(ctx context.Context, bindDynamic, exportDynamic dynamic
 	if err != nil {
 		return fmt.Errorf("converting %s APIBinding to unstructured: %w", exportName, err)
 	}
-	if _, err := bindDynamic.Resource(apiBindingGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating %s APIBinding: %w", exportName, err)
-		}
-		// A same-named binding can point at a different export. Ignoring
-		// AlreadyExists and waiting for the desired schemas would turn that
-		// deterministic collision into a 60-second bootstrap timeout (and an
-		// onboarded provider could repeat it to wedge hub startup). Fail fast and
-		// leave the existing object untouched.
-		existing, getErr := bindDynamic.Resource(apiBindingGVR).Get(ctx, bindingName, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("getting colliding %s APIBinding: %w", exportName, getErr)
-		}
-		existingPath, _, _ := unstructured.NestedString(existing.Object, "spec", "reference", "export", "path")
-		existingName, _, _ := unstructured.NestedString(existing.Object, "spec", "reference", "export", "name")
-		if existingPath != exportPath || existingName != exportName {
-			return fmt.Errorf("APIBinding %q already references %s|%s, not %s|%s", bindingName, existingPath, existingName, exportPath, exportName)
-		}
-	}
-	return waitForAPIBindingSchemas(ctx, bindDynamic, bindingName, expected)
-}
-
-type apiBindingSchema struct {
-	Group    string
-	Resource string
-	Schema   string
-}
-
-func apiExportBindingSchemas(export *unstructured.Unstructured) ([]apiBindingSchema, error) {
-	resources, found, err := unstructured.NestedSlice(export.Object, "spec", "resources")
-	if err != nil {
-		return nil, err
-	}
-	if !found || len(resources) == 0 {
-		return nil, fmt.Errorf("spec.resources is empty")
-	}
-	out := make([]apiBindingSchema, 0, len(resources))
-	for _, raw := range resources {
-		resource, ok := raw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("spec.resources contains a non-object entry")
-		}
-		group, _ := resource["group"].(string)
-		name, _ := resource["name"].(string)
-		schemaName, _ := resource["schema"].(string)
-		if name == "" || schemaName == "" {
-			return nil, fmt.Errorf("spec.resources contains an incomplete resource reference")
-		}
-		out = append(out, apiBindingSchema{Group: group, Resource: name, Schema: schemaName})
-	}
-	return out, nil
-}
-
-func waitForAPIBindingSchemas(ctx context.Context, client dynamic.Interface, name string, expected []apiBindingSchema) error {
-	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 60*time.Second, true, func(ctx context.Context) (bool, error) {
-		binding, err := client.Resource(apiBindingGVR).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		return apiBindingUsesSchemas(binding, expected), nil
-	})
-}
-
-func apiBindingUsesSchemas(binding *unstructured.Unstructured, expected []apiBindingSchema) bool {
-	bound, found, err := unstructured.NestedSlice(binding.Object, "status", "boundResources")
-	if err != nil || !found {
-		return false
-	}
-	current := make(map[string]string, len(bound))
-	for _, raw := range bound {
-		resource, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		group, _ := resource["group"].(string)
-		name, _ := resource["resource"].(string)
-		schemaName, _, _ := unstructured.NestedString(resource, "schema", "name")
-		current[group+"/"+name] = schemaName
-	}
-	// kcp reconciles APIExport changes into existing APIBindings by replacing the
-	// BoundAPIResource for the same group/resource. It currently retains entries
-	// for resources removed from the export, though, so readiness must require the
-	// current export's resources without requiring an exact status set.
-	for _, want := range expected {
-		if current[want.Group+"/"+want.Resource] != want.Schema {
-			return false
-		}
-	}
-	return true
-}
-
-func (b *Bootstrapper) ensureProviderCatalogBindingsCurrent(ctx context.Context, exportDynamic dynamic.Interface) error {
-	parent, err := dynamic.NewForConfig(configForPath(b.config, kcppaths.ProvidersParent))
-	if err != nil {
-		return fmt.Errorf("creating provider parent client: %w", err)
-	}
-	workspaces, err := parent.Resource(workspaceGVR).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("listing provider workspaces: %w", err)
-	}
-	for i := range workspaces.Items {
-		workspace := &workspaces.Items[i]
-		phase, _, _ := unstructured.NestedString(workspace.Object, "status", "phase")
-		if phase != "Ready" {
-			continue
-		}
-		workspacePath := kcppaths.ProvidersParent + ":" + workspace.GetName()
-		providerDynamic, err := dynamic.NewForConfig(configForPath(b.config, workspacePath))
-		if err != nil {
-			// A provider workspace is an external trust boundary. Its local
-			// objects must not be able to prevent the hub from starting or keep
-			// unrelated providers unavailable. Leave this provider unreadable;
-			// the catalog controller will keep it out of the ready registry.
-			klog.FromContext(ctx).Error(err, "skipping provider CatalogEntry binding upgrade", "workspace", workspacePath)
-			continue
-		}
-		if err := ensureExportBinding(ctx, providerDynamic, exportDynamic, kcppaths.SystemControllers, "providers.faros.sh"); err != nil {
-			klog.FromContext(ctx).Error(err, "skipping provider CatalogEntry binding upgrade", "workspace", workspacePath)
-			continue
-		}
+	if _, err := bindDynamic.Resource(apiBindingGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating %s APIBinding: %w", exportName, err)
 	}
 	return nil
 }
@@ -1673,17 +1524,16 @@ func waitForWorkspaceReady(ctx context.Context, client dynamic.Interface, name s
 // EnsureProviderAPIBinding — one entry per permission claim the
 // provider DECLARED in its CatalogEntry, plus a flag whether the
 // user accepted or rejected it in the Enable confirmation dialog.
-// Mirrors the consent-bearing portion of providers.PermissionClaim.
+// Mirrors providers.PermissionClaim but lives here so the bootstrap
+// package stays free of an import on pkg/hub/providers.
 type ProviderClaim struct {
-	Group                  string
-	Resource               string
-	Verbs                  []string
-	Accepted               bool
-	IdentitySourceKind     string
-	IdentitySourceProvider string
+	Group    string
+	Resource string
+	Verbs    []string
+	Accepted bool
 }
 
-// EnsureProviderAPIBinding creates or reconciles an
+// EnsureProviderAPIBinding creates (or no-ops on AlreadyExists) an
 // APIBinding named `bindingName` in the child workspace
 // root:faros:tenants:{orgUUID}:{wsUUID}, pointing at exportPath/exportName.
 //
@@ -1697,12 +1547,12 @@ type ProviderClaim struct {
 // side via the kcp-admin client sidesteps that pre-check.
 //
 // PermissionClaims state: Accepted iff the user ticked the claim in
-// the confirmation dialog, Rejected otherwise. kcp keeps rejected or newly
-// added claims unapplied while preserving the binding and its bound APIs.
+// the confirmation dialog, Rejected otherwise. kcp refuses to mark
+// the binding Bound when any provider-required claim is Rejected, so
+// the response surfaces the mismatch to the user automatically.
 func (b *Bootstrapper) EnsureProviderAPIBinding(
 	ctx context.Context,
 	orgUUID, wsUUID, bindingName, exportPath, exportName string,
-	requiredResources []providers.APIExportResource,
 	claims []ProviderClaim,
 ) error {
 	if orgUUID == "" || wsUUID == "" {
@@ -1717,49 +1567,22 @@ func (b *Bootstrapper) EnsureProviderAPIBinding(
 		return fmt.Errorf("creating child workspace client: %w", err)
 	}
 
-	// Revalidate the complete provider-owned export immediately at the mutation
-	// boundary. The registry's readiness bit is an intentionally cached routing
-	// signal; it is not authorization because the provider can mutate its
-	// APIExport between catalog reconciles. Claim identities below come from this
-	// exact verified snapshot, never from a second untrusted read.
-	verificationClaims := make([]providers.PermissionClaim, 0, len(claims))
-	for _, claim := range claims {
-		verificationClaims = append(verificationClaims, providers.PermissionClaim{
-			Group:                  claim.Group,
-			Resource:               claim.Resource,
-			Verbs:                  append([]string(nil), claim.Verbs...),
-			IdentitySourceKind:     claim.IdentitySourceKind,
-			IdentitySourceProvider: claim.IdentitySourceProvider,
-		})
-	}
-	verified, err := providers.NewProvisioner(b.config).VerifyAPIExport(ctx, exportPath, exportName, requiredResources, verificationClaims)
+	// kcp marks the binding's PermissionClaimsValid=False (and refuses to
+	// surface the claimed resource through the export's virtual workspace)
+	// unless a claim on a non-built-in type carries the SAME identityHash the
+	// export it binds to declares for that claim. Rather than re-derive the
+	// hash by scanning sibling APIExports — which races core.faros.sh
+	// regeneration and previously left edges claims with an empty hash, so the
+	// bound provider saw zero claimed objects (e.g. kuery engaged no edges) —
+	// read it straight from the export we're binding to. That value is the one
+	// kcp validates against, and the provisioner (ApplyAPIExport) has already
+	// resolved and stamped it; we wait for it below if provisioning is still in
+	// flight.
+	identities, err := b.exportClaimIdentities(ctx, exportPath, exportName, claims)
 	if err != nil {
-		return errors.NewConflict(
-			schema.GroupResource{Group: "apis.kcp.io", Resource: "apiexports"},
-			exportName,
-			fmt.Errorf("provider APIExport contract changed or is not ready: %w", err),
-		)
+		return err
 	}
 
-	binding := providerAPIBindingFromVerifiedSnapshot(bindingName, exportPath, exportName, claims, verified)
-	u, err := toUnstructured(binding)
-	if err != nil {
-		return fmt.Errorf("converting APIBinding to unstructured: %w", err)
-	}
-	if err := reconcileProviderAPIBinding(ctx, wsClient.Resource(apiBindingGVR), u); err != nil {
-		return fmt.Errorf("reconciling APIBinding %q in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
-	}
-	if err := waitForAPIBindingBound(ctx, wsClient, bindingName); err != nil {
-		return fmt.Errorf("waiting for APIBinding %q to bind in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
-	}
-	return nil
-}
-
-func providerAPIBindingFromVerifiedSnapshot(
-	bindingName, exportPath, exportName string,
-	claims []ProviderClaim,
-	verified providers.VerifiedAPIExport,
-) *apisv1alpha2.APIBinding {
 	specClaims := make([]apisv1alpha2.AcceptablePermissionClaim, 0, len(claims))
 	for _, c := range claims {
 		state := apisv1alpha2.ClaimRejected
@@ -1774,7 +1597,7 @@ func providerAPIBindingFromVerifiedSnapshot(
 						Resource: c.Resource,
 					},
 					Verbs:        c.Verbs,
-					IdentityHash: verified.ClaimIdentityHashes[c.Group+"/"+c.Resource],
+					IdentityHash: identities[c.Group+"/"+c.Resource],
 				},
 				Selector: apisv1alpha2.PermissionClaimSelector{MatchAll: true},
 			},
@@ -1782,7 +1605,7 @@ func providerAPIBindingFromVerifiedSnapshot(
 		})
 	}
 
-	return &apisv1alpha2.APIBinding{
+	binding := &apisv1alpha2.APIBinding{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: apisv1alpha2.SchemeGroupVersion.String(),
 			Kind:       "APIBinding",
@@ -1798,76 +1621,83 @@ func providerAPIBindingFromVerifiedSnapshot(
 			PermissionClaims: specClaims,
 		},
 	}
+	u, err := toUnstructured(binding)
+	if err != nil {
+		return fmt.Errorf("converting APIBinding to unstructured: %w", err)
+	}
+	if _, err := wsClient.Resource(apiBindingGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating APIBinding %q in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
+	}
+	if err := waitForAPIBindingBound(ctx, wsClient, bindingName); err != nil {
+		return fmt.Errorf("waiting for APIBinding %q to bind in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
+	}
+	return nil
 }
 
-// reconcileProviderAPIBinding creates desired or updates the permission-claim
-// decisions on an existing binding in place. The update path is reached only
-// from the tenant-authorized Enable endpoint after its confirmation dialog has
-// submitted the complete current claim set. This is the re-accept migration for
-// additive provider claims: it never deletes the binding (and therefore never
-// risks deleting or hiding bound resources), and it never silently grants a
-// claim that was not present in that explicit request.
+// exportClaimIdentities returns, per claim, the identityHash the bound
+// APIExport (exportPath/exportName) declares for it — keyed "group/resource".
+// This is the value kcp validates the binding's claim against, so sourcing it
+// from the export (rather than re-deriving it by scanning sibling APIExports'
+// spec.resources, which races core.faros.sh regeneration and silently yielded
+// an empty hash → PermissionClaimsValid=False → the provider sees zero claimed
+// objects) keeps the two in lockstep by construction.
 //
-// The export reference is immutable in kcp. Treat a same-name binding pointing
-// somewhere else as a conflict instead of trying to adopt or rewrite it.
-func reconcileProviderAPIBinding(ctx context.Context, resource dynamic.ResourceInterface, desired *unstructured.Unstructured) error {
-	if _, err := resource.Create(ctx, desired, metav1.CreateOptions{}); err == nil {
-		return nil
-	} else if !errors.IsAlreadyExists(err) {
-		return err
+// The provisioner (ApplyAPIExport) resolves and stamps these identities on the
+// export. A first-party faros claim (*.faros.sh) MUST end up with a non-empty
+// hash; if the export does not carry one yet, provisioning is still in flight
+// (it races the Enable call), so we poll rather than write an empty hash.
+// Built-in / kcp-system claims (core k8s, apis.kcp.io, empty group) legitimately
+// carry no identity, so a missing/empty entry for those is the terminal answer.
+func (b *Bootstrapper) exportClaimIdentities(ctx context.Context, exportPath, exportName string, claims []ProviderClaim) (map[string]string, error) {
+	exportConfig := configForPath(b.config, exportPath)
+	exportClient, err := dynamic.NewForConfig(exportConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating export workspace client for %s: %w", exportPath, err)
 	}
 
-	desiredPath, _, _ := unstructured.NestedString(desired.Object, "spec", "reference", "export", "path")
-	desiredName, _, _ := unstructured.NestedString(desired.Object, "spec", "reference", "export", "name")
-	desiredClaims, _, _ := unstructured.NestedSlice(desired.Object, "spec", "permissionClaims")
+	key := func(group, resource string) string { return group + "/" + resource }
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		existing, err := resource.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	out := map[string]string{}
+	lookup := func(ctx context.Context) (bool, error) {
+		ex, err := exportClient.Resource(apiExportGVR).Get(ctx, exportName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			// The export itself doesn't exist yet. After the bootstrap split the
+			// provider's own init (Helm init-container) creates the APIExport, and
+			// that races a tenant clicking Enable — so keep polling until it
+			// appears rather than hard-failing the whole Enable on the first miss.
+			return false, nil
+		}
 		if err != nil {
-			return err
+			return false, fmt.Errorf("getting APIExport %q in %s: %w", exportName, exportPath, err)
 		}
-		existingPath, _, _ := unstructured.NestedString(existing.Object, "spec", "reference", "export", "path")
-		existingName, _, _ := unstructured.NestedString(existing.Object, "spec", "reference", "export", "name")
-		if existingPath != desiredPath || existingName != desiredName {
-			return errors.NewConflict(
-				schema.GroupResource{Group: apisv1alpha2.SchemeGroupVersion.Group, Resource: "apibindings"},
-				desired.GetName(),
-				fmt.Errorf("already references %s|%s, not %s|%s", existingPath, existingName, desiredPath, desiredName),
-			)
+		pcs, _, _ := unstructured.NestedSlice(ex.Object, "spec", "permissionClaims")
+		got := map[string]string{}
+		for _, pc := range pcs {
+			m, ok := pc.(map[string]any)
+			if !ok {
+				continue
+			}
+			g, _ := m["group"].(string)
+			r, _ := m["resource"].(string)
+			h, _, _ := unstructured.NestedString(m, "identityHash")
+			got[key(g, r)] = h
 		}
-		existingClaims, _, _ := unstructured.NestedSlice(existing.Object, "spec", "permissionClaims")
-		if reflect.DeepEqual(existingClaims, desiredClaims) {
-			return nil
+		// Wait for the provisioner to stamp every first-party claim's identity.
+		for _, c := range claims {
+			if strings.HasSuffix(c.Group, ".faros.sh") && got[key(c.Group, c.Resource)] == "" {
+				return false, nil
+			}
 		}
-		if err := unstructured.SetNestedSlice(existing.Object, desiredClaims, "spec", "permissionClaims"); err != nil {
-			return fmt.Errorf("setting APIBinding permission claims: %w", err)
-		}
-		_, err = resource.Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	})
-}
+		out = got
+		return true, nil
+	}
 
-// ProviderAPIBinding summarizes the binding state needed by the provider
-// catalog. PermissionClaims contains the binding's current decisions so the hub
-// can detect when an installed provider added or changed a claim and require an
-// explicit re-accept before granting it.
-type ProviderAPIBinding struct {
-	Name                       string
-	PermissionClaims           []ProviderBindingClaim
-	PermissionClaimsValid      bool
-	PermissionClaimsValidKnown bool
-}
-
-// ProviderBindingClaim is the contract-relevant portion of one APIBinding
-// permission-claim decision. State is intentionally retained: callers may show
-// the tenant what it accepted, but claim-contract drift compares only the
-// group/resource/verbs tuple so an intentional rejection is not mistaken for a
-// stale claim set.
-type ProviderBindingClaim struct {
-	Group    string
-	Resource string
-	Verbs    []string
-	State    string
+	// immediate=true returns on the first hit in the common case where the
+	// export is already fully provisioned; otherwise poll until it is.
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, 90*time.Second, true, lookup); err != nil {
+		return nil, fmt.Errorf("APIExport %q (%s) not yet created, or its permissionClaims not yet stamped with identityHashes, by the provider init: %w", exportName, exportPath, err)
+	}
+	return out, nil
 }
 
 // ListProviderAPIBindings returns the set of Bound provider APIBindings
@@ -1884,7 +1714,7 @@ type ProviderBindingClaim struct {
 // status.phase is Bound. The trailing segment is the provider name; the binding's own
 // metadata.name is the value (existing convention is binding.name ==
 // provider.name).
-func (b *Bootstrapper) ListProviderAPIBindings(ctx context.Context, orgUUID, wsUUID string) (map[string]ProviderAPIBinding, error) {
+func (b *Bootstrapper) ListProviderAPIBindings(ctx context.Context, orgUUID, wsUUID string) (map[string]string, error) {
 	if orgUUID == "" || wsUUID == "" {
 		return nil, fmt.Errorf("ListProviderAPIBindings: orgUUID and wsUUID are required")
 	}
@@ -1897,7 +1727,7 @@ func (b *Bootstrapper) ListProviderAPIBindings(ctx context.Context, orgUUID, wsU
 	if err != nil {
 		return nil, fmt.Errorf("listing APIBindings in %s/%s: %w", orgUUID, wsUUID, err)
 	}
-	out := make(map[string]ProviderAPIBinding, len(list.Items))
+	out := make(map[string]string, len(list.Items))
 	for _, item := range list.Items {
 		path, _, _ := unstructured.NestedString(item.Object, "spec", "reference", "export", "path")
 		const prefix = "root:faros:providers:"
@@ -1909,39 +1739,9 @@ func (b *Bootstrapper) ListProviderAPIBindings(ctx context.Context, orgUUID, wsU
 			continue
 		}
 		providerName := path[len(prefix):]
-		out[providerName] = providerAPIBindingFromUnstructured(&item)
+		out[providerName] = item.GetName()
 	}
 	return out, nil
-}
-
-func providerAPIBindingFromUnstructured(item *unstructured.Unstructured) ProviderAPIBinding {
-	binding := ProviderAPIBinding{Name: item.GetName()}
-	conditions, _, _ := unstructured.NestedSlice(item.Object, "status", "conditions")
-	for _, rawCondition := range conditions {
-		condition, ok := rawCondition.(map[string]any)
-		if !ok || condition["type"] != string(apisv1alpha2.PermissionClaimsValid) {
-			continue
-		}
-		status, _ := condition["status"].(string)
-		binding.PermissionClaimsValidKnown = status == "True" || status == "False"
-		binding.PermissionClaimsValid = status == "True"
-		break
-	}
-	claims, _, _ := unstructured.NestedSlice(item.Object, "spec", "permissionClaims")
-	for _, rawClaim := range claims {
-		claim, ok := rawClaim.(map[string]any)
-		if !ok {
-			continue
-		}
-		group, _, _ := unstructured.NestedString(claim, "group")
-		resource, _, _ := unstructured.NestedString(claim, "resource")
-		verbs, _, _ := unstructured.NestedStringSlice(claim, "verbs")
-		state, _, _ := unstructured.NestedString(claim, "state")
-		binding.PermissionClaims = append(binding.PermissionClaims, ProviderBindingClaim{
-			Group: group, Resource: resource, Verbs: verbs, State: state,
-		})
-	}
-	return binding
 }
 
 // DeleteProviderAPIBinding removes the named provider APIBinding from the
@@ -1976,92 +1776,10 @@ func edgeProxyGrantName(providerName string) string {
 	return "faros:provider:" + providerName + ":edges-proxy"
 }
 
-// edgeProxyGrantRules returns the tenant-workspace privileges needed by a
-// provider that consumes the edges data plane. Ordinary consumers (currently
-// kuery) need only workspace admission plus the proxy subresource on
-// KubernetesCluster. The edges provider itself also owns the agent tunnel and
-// lifecycle controllers, so it retains the direct API/status/credential
-// privileges those controllers require.
-func edgeProxyGrantRules(providerName string) []any {
-	rules := []any{
-		map[string]any{
-			"nonResourceURLs": []any{"/"},
-			"verbs":           []any{"access"},
-		},
-		map[string]any{
-			"apiGroups": []any{"edges.faros.sh"},
-			"resources": []any{"kubernetesclusters"},
-			"verbs":     []any{"proxy"},
-		},
-	}
-	if providerName != "edges" {
-		return rules
-	}
-
-	return []any{
-		rules[0],
-		map[string]any{
-			"apiGroups": []any{"edges.faros.sh"},
-			"resources": []any{"kubernetesclusters", "linuxservers"},
-			"verbs":     []any{"get", "list", "watch", "proxy"},
-		},
-		map[string]any{
-			"apiGroups": []any{"edges.faros.sh"},
-			"resources": []any{"kubernetesclusters/status", "linuxservers/status"},
-			"verbs":     []any{"get", "update", "patch"},
-		},
-		map[string]any{
-			"apiGroups": []any{""},
-			"resources": []any{"secrets"},
-			"verbs":     []any{"get", "list", "watch", "create", "update"},
-		},
-		map[string]any{
-			"apiGroups": []any{""},
-			"resources": []any{"namespaces"},
-			"verbs":     []any{"get", "create"},
-		},
-		map[string]any{
-			"apiGroups": []any{"authentication.k8s.io"},
-			"resources": []any{"tokenreviews"},
-			"verbs":     []any{"create"},
-		},
-		map[string]any{
-			"apiGroups": []any{"authorization.k8s.io"},
-			"resources": []any{"subjectaccessreviews"},
-			"verbs":     []any{"create"},
-		},
-	}
-}
-
-func edgeProxyGrantSubjects(providerName, subject string) []any {
-	subjects := []any{
-		map[string]any{
-			"apiGroup": "rbac.authorization.k8s.io",
-			"kind":     "User",
-			"name":     subject,
-		},
-	}
-	// Only the edges provider needs compatibility with legacy tunnel tokens
-	// that did not carry a verified home-cluster claim. Consumer providers use
-	// their cluster-qualified identity exclusively; binding their local fallback
-	// would grant an unrelated tenant-local ServiceAccount the same proxy access.
-	if providerName == "edges" {
-		if local, ok := identity.LocalFromQualified(subject); ok {
-			subjects = append(subjects, map[string]any{
-				"apiGroup": "rbac.authorization.k8s.io",
-				"kind":     "User",
-				"name":     local,
-			})
-		}
-	}
-	return subjects
-}
-
 // EnsureProviderEdgeProxyGrant grants `subject` (the provider SA's
-// cluster-qualified identity — see pkg/util/identity) access to the edges data
-// plane in the child workspace root:faros:tenants:{orgUUID}:{wsUUID}. Consumer
-// providers receive only KubernetesCluster proxy access; the edges provider's
-// own controllers receive the additional lifecycle privileges they require.
+// cluster-qualified identity — see pkg/util/identity) the "proxy" verb on the
+// edges provider's group (edges.faros.sh, resources kubernetesclusters +
+// linuxservers) in the child workspace root:faros:tenants:{orgUUID}:{wsUUID}.
 // The edges provider's tunnel edgeproxy handler SAR-checks exactly this tuple
 // (provider-sdk/tunnel/auth.go), so the grant is what lets a provider with
 // CatalogEntry spec.edgeProxyAccess open background connections to the tenant's
@@ -2083,7 +1801,82 @@ func (b *Bootstrapper) EnsureProviderEdgeProxyGrant(ctx context.Context, orgUUID
 		"apiVersion": "rbac.authorization.k8s.io/v1",
 		"kind":       "ClusterRole",
 		"metadata":   map[string]any{"name": name},
-		"rules":      edgeProxyGrantRules(providerName),
+		"rules": []any{
+			// Workspace access: kcp's workspaceContentAuthorizer requires
+			// the "access" verb on "/" before any resource RBAC is even
+			// consulted, and a foreign SA is not covered by the tenant
+			// workspace's system:authenticated grants (faros's SAR also
+			// drops its groups). Same pairing kcp's own cross-workspace SA
+			// e2e uses (TestAPIResourceSchemaVirtualWorkspaceAuthorization).
+			map[string]any{
+				"nonResourceURLs": []any{"/"},
+				"verbs":           []any{"access"},
+			},
+			// The edge plane is the single `edges` provider owning both kinds
+			// under one group edges.faros.sh. Using its OWN SA it reads +
+			// writes the edge CR DIRECTLY in the tenant workspace
+			// (kcpurl.ClusterURL, not the APIExport VW):
+			//   - get/list/watch on the kinds: validate the agent's bootstrap
+			//     join token against status.joinToken (else the tunnel is
+			//     rejected "invalid join token") + read SSH creds for edgeproxy.
+			//   - update/patch on the /status subresource: markEdgeConnected
+			//     flips status.connected/phase and clears status.joinToken when
+			//     the agent tunnel comes up (else the edge stays AwaitingAgent /
+			//     connected=false forever).
+			//   - proxy on the kinds: the SDK tunnel's edgeproxy consumer SAR.
+			// Bound to the provider SA's cluster-qualified identity (see
+			// pkg/util/identity).
+			map[string]any{
+				"apiGroups": []any{"edges.faros.sh"},
+				"resources": []any{"kubernetesclusters", "linuxservers"},
+				"verbs":     []any{"get", "list", "watch", "proxy"},
+			},
+			map[string]any{
+				"apiGroups": []any{"edges.faros.sh"},
+				"resources": []any{"kubernetesclusters/status", "linuxservers/status"},
+				"verbs":     []any{"get", "update", "patch"},
+			},
+			// The tunnel reads AND writes Secrets + Namespaces DIRECTLY with the
+			// provider SA (not the VW):
+			//   - read: token-exchange reads the agent's SA kubeconfig Secret
+			//     (edge-<name>-kubeconfig) + SSH-cred lookups read
+			//     spec.sshCredentialsRef Secrets.
+			//   - create/update: on a SERVER edge's connect, markEdgeConnected →
+			//     storeSSHCredentials creates a namespace + a
+			//     <edge>-ssh-credentials Secret and records it in
+			//     status.sshCredentials. Without create access the Secret write
+			//     403s, status.sshCredentials stays null, and the SSH handler has
+			//     no creds → openAgentSSHTunnel fails → the browser terminal shows
+			//     "session ended".
+			map[string]any{
+				"apiGroups": []any{""},
+				"resources": []any{"secrets"},
+				"verbs":     []any{"get", "list", "watch", "create", "update"},
+			},
+			map[string]any{
+				"apiGroups": []any{""},
+				"resources": []any{"namespaces"},
+				"verbs":     []any{"get", "create"},
+			},
+			// When an agent RECONNECTS with its SA token (after token-exchange),
+			// the tunnel authenticates it via delegated authn/authz: a TokenReview
+			// + SubjectAccessReview run with the provider SA in the tenant
+			// workspace. The provider SA must be able to CREATE those review
+			// objects — otherwise authorizeFn errors and the reconnect is rejected
+			// (bad handshake), even though the JOIN-token first connect (which
+			// only reads the CR) succeeds. This is the "initial join works,
+			// follow-up SA-token connect fails" case.
+			map[string]any{
+				"apiGroups": []any{"authentication.k8s.io"},
+				"resources": []any{"tokenreviews"},
+				"verbs":     []any{"create"},
+			},
+			map[string]any{
+				"apiGroups": []any{"authorization.k8s.io"},
+				"resources": []any{"subjectaccessreviews"},
+				"verbs":     []any{"create"},
+			},
+		},
 	}}
 	if _, err := wsClient.Resource(clusterRoleGVR).Create(ctx, role, metav1.CreateOptions{}); err != nil {
 		if !errors.IsAlreadyExists(err) {
@@ -2108,11 +1901,27 @@ func (b *Bootstrapper) EnsureProviderEdgeProxyGrant(ctx context.Context, orgUUID
 		}
 	}
 
-	// Bind the qualified identity (the correct cross-workspace form). The edges
-	// provider additionally keeps its unqualified local fallback for legacy
-	// agent tunnel tokens; ordinary consumer providers must never receive that
-	// fallback because it aliases a tenant-local ServiceAccount.
-	wantSubjects := edgeProxyGrantSubjects(providerName, subject)
+	// Bind the qualified identity (the correct cross-workspace form) AND its
+	// un-qualified local fallback. On the tunnel's direct CR-read path kcp only
+	// qualifies the provider SA when its token carries a verified home-cluster
+	// claim; when it doesn't (e.g. a legacy token not yet stamped by the token
+	// controller), the request authorizes as the plain
+	// system:serviceaccount:{ns}:{name}. Binding both makes the grant match
+	// either way, so the join-token validation isn't rejected as "invalid".
+	wantSubjects := []any{
+		map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io",
+			"kind":     "User",
+			"name":     subject,
+		},
+	}
+	if local, ok := identity.LocalFromQualified(subject); ok {
+		wantSubjects = append(wantSubjects, map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io",
+			"kind":     "User",
+			"name":     local,
+		})
+	}
 	crb := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "rbac.authorization.k8s.io/v1",
 		"kind":       "ClusterRoleBinding",
