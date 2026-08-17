@@ -1,6 +1,6 @@
 .PHONY: sync-portalkit verify-portalkit
 .PHONY: build-access-proxy docker-build-access-proxy
-.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed dev-kro-register-self e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
+.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks build-deployments-provider codegen-deployments-provider run-provider-deployments install-provider-deployments init-provider-deployments uninstall-provider-deployments test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed dev-kro-register-self e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
 
 BINDIR ?= bin
 GOFLAGS ?=
@@ -210,6 +210,9 @@ build-databricks-provider-portal: ## Build the Databricks provider's micro-front
 build-databricks-provider: build-databricks-provider-portal ## Build the Databricks provider binary (portal embedded)
 	cd providers/databricks && go build $(GOFLAGS) -ldflags "-X main.buildVersion=$(VERSION)" -o $(CURDIR)/$(BINDIR)/databricks-provider .
 
+build-deployments-provider: ## Build the deployments provider binary
+	cd providers/deployments && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/deployments-provider .
+
 test-databricks-provider-chart: ## Lint and render both supported Databricks bootstrap modes
 	@set -eu; \
 		tmp_parent="$${CODEX_BUILD_CACHE_ROOT:-/var/tmp/codex-build}"; \
@@ -276,7 +279,7 @@ codegen-code-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for the co
 		$(CURDIR)/$(CONTROLLER_GEN) crd paths="./apis/..." \
 			output:crd:artifacts:config=$(CURDIR)/providers/code/config/crds
 	./hack/apigen.sh --input-dir providers/code/config/crds --output-dir providers/code/config/kcp
-	@for r in connections repositories repositorycommits repositorycheckouts repositorybuildstatuses deploykeys collaborators packages; do \
+	@for r in connections repositories repositorycommits repositorycheckouts repositorybuildstatuses repositorysyncs changerequests deploykeys collaborators packages; do \
 		cp providers/code/config/kcp/apiresourceschema-$$r.code.faros.sh.yaml \
 		   providers/code/deploy/chart/files/schemas/$$r.code.faros.sh.yaml; \
 	done
@@ -323,6 +326,19 @@ codegen-databricks-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for 
 	done
 	./hack/ensure-boilerplate.sh
 
+codegen-deployments-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for the deployments provider's local API (+ chart schemas)
+	@mkdir -p providers/deployments/config/crds providers/deployments/config/kcp providers/deployments/deploy/chart/files/schemas
+	cd providers/deployments && \
+		$(CURDIR)/$(CONTROLLER_GEN) object paths="./apis/..." && \
+		$(CURDIR)/$(CONTROLLER_GEN) crd paths="./apis/..." \
+			output:crd:artifacts:config=$(CURDIR)/providers/deployments/config/crds
+	./hack/apigen.sh --input-dir providers/deployments/config/crds --output-dir providers/deployments/config/kcp
+	@for r in deployments releases; do \
+		cp providers/deployments/config/kcp/apiresourceschema-$$r.deployments.faros.sh.yaml \
+		   providers/deployments/deploy/chart/files/schemas/$$r.deployments.faros.sh.yaml; \
+	done
+	./hack/ensure-boilerplate.sh
+
 test:
 	go test $(shell go list ./... | grep -v '/test/e2e')
 
@@ -349,7 +365,7 @@ verify-boilerplate: ## Verify license boilerplate on all Go files
 crds: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Generate CRDs and kcp APIResourceSchemas
 	./hack/update-codegen-crds.sh
 
-codegen: crds codegen-code-provider codegen-app-studio-provider codegen-databricks-provider codegen-infrastructure-provider boilerplate ## Generate all (CRDs + kcp resources + provider schemas + boilerplate)
+codegen: crds codegen-code-provider codegen-app-studio-provider codegen-databricks-provider codegen-deployments-provider codegen-infrastructure-provider boilerplate ## Generate all (CRDs + kcp resources + provider schemas + boilerplate)
 
 verify-codegen: codegen ## Verify codegen is up to date
 	@if ! git diff --quiet HEAD; then \
@@ -1310,6 +1326,23 @@ KROMC_KCP_SERVER ?= https://localhost:6443
 KROMC_MANIFEST ?= providers/infrastructure/manifest.yaml
 KROMC_PROVIDER_MANIFEST ?= providers/infrastructure/provider.yaml
 
+# --- Deployments provider (local dev) ---
+# The provider is intentionally UI-less: Code RepositorySync (or kubectl and
+# legacy App Studio projects) writes Release and Deployment CRs, while this
+# standalone process owns reconciliation and the stable deployment status
+# contract. Keep its port separate from the existing provider processes.
+DEPLOYMENTS_PORT ?= 8093
+DEPLOYMENTS_HUB_URL ?= https://localhost:9443
+DEPLOYMENTS_TOKEN ?= $(STATIC_AUTH_TOKEN)
+DEPLOYMENTS_KCP_KUBECONFIG ?= $(KCP_DATA_DIR)/admin.kubeconfig
+DEPLOYMENTS_KCP_SERVER ?= https://localhost:6443
+DEPLOYMENTS_MANIFEST ?= providers/deployments/manifest.yaml
+DEPLOYMENTS_PROVIDER_MANIFEST ?= providers/deployments/provider.yaml
+DEPLOYMENTS_WORKSPACE_PATH ?= root:faros:providers:deployments
+DEPLOYMENTS_RUNTIME_KUBECONFIG ?= $(KCP_DATA_DIR)/deployments-runtime.kubeconfig
+DEPLOYMENTS_SCHEMAS_DIR ?= $(CURDIR)/providers/deployments/deploy/chart/files/schemas
+DEPLOYMENTS_INFRA_IDENTITY_HASH ?=
+
 # --- App Studio provider (local dev) ---
 # Same pattern as quickstart/infrastructure/code: local dev applies the
 # checked-in manifest.yaml; the Helm chart's CatalogEntry is for in-cluster
@@ -1620,12 +1653,18 @@ init-provider-app-studio: build-app-studio-provider ## Bootstrap App Studio APIE
 		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:providers:code \
 		--insecure-skip-tls-verify \
 		get apiexport code.providers.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
-	if [ -z "$$CODE_HASH" ]; then echo "WARNING: could not discover the code APIExport identityHash — the repositories claim will be hash-less"; fi; \
+	test -n "$$CODE_HASH" || { echo "could not discover code APIExport identityHash; install/init code first or set APP_STUDIO_CODE_IDENTITY_HASH"; exit 1; }; \
+	DEPLOYMENTS_HASH=$${APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(APP_STUDIO_KCP_KUBECONFIG) \
+		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:providers:deployments \
+		--insecure-skip-tls-verify \
+		get apiexport deployments.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
+	test -n "$$DEPLOYMENTS_HASH" || { echo "could not discover deployments APIExport identityHash; install/init deployments first or set APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"; exit 1; }; \
 	FAROS_PROVIDER_KUBECONFIG=$(APP_STUDIO_PROVIDER_KUBECONFIG) \
 	APP_STUDIO_WORKSPACE_PATH=$(APP_STUDIO_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(APP_STUDIO_SCHEMAS_DIR) \
 	APP_STUDIO_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
 	APP_STUDIO_CODE_IDENTITY_HASH="$$CODE_HASH" \
+	APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH="$$DEPLOYMENTS_HASH" \
 		$(BINDIR)/app-studio-provider init
 
 ## Delete the App Studio CatalogEntry. Useful while iterating on the chart.
@@ -1925,7 +1964,9 @@ init-provider-infrastructure: build-infrastructure-provider ## Bootstrap infrast
 		$(BINDIR)/infrastructure-provider init
 
 # ── code provider (git repository management) ──────────────────────────────
-# Local-dev flow mirrors the infrastructure provider:
+# Local-dev flow mirrors the infrastructure provider. Initialize the
+# deployments provider first: RepositorySync projects its Release/Deployment
+# APIs and Code init fails closed without that APIExport identity.
 #   Terminal 1: make run-hub-embedded-static          # hub + embedded kcp
 #   Terminal 2: make install-provider-code            # admin: register entry
 #   Terminal 3: make run-provider-code                # tenant: run binary
@@ -1933,6 +1974,7 @@ CODE_PORT ?= 8083
 CODE_MANIFEST ?= providers/code/manifest.yaml
 CODE_PROVIDER_MANIFEST ?= providers/code/provider.yaml
 CODE_RUNTIME_KUBECONFIG ?= $(KCP_DATA_DIR)/code-runtime.kubeconfig
+CODE_DEPLOYMENTS_IDENTITY_HASH ?=
 
 run-provider-code: build-code-provider ## Run the code provider (requires: make run-hub-embedded-static + make install-provider-code)
 	@echo "Starting code provider on :$(CODE_PORT) (hub $(KROMC_HUB_URL))"
@@ -1997,9 +2039,15 @@ init-provider-code: build-code-provider ## Write the dev kubeconfig + ensure the
 		kubectl --kubeconfig=$(CODE_RUNTIME_KUBECONFIG) config set-cluster "$$CL" \
 			--server=$(KROMC_KCP_SERVER)/clusters/$(CODE_WORKSPACE_PATH) \
 			--insecure-skip-tls-verify=true >/dev/null
+	@DEPLOYMENTS_HASH=$${CODE_DEPLOYMENTS_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
+		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:providers:deployments \
+		--insecure-skip-tls-verify \
+		get apiexport deployments.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
+	test -n "$$DEPLOYMENTS_HASH" || { echo "could not discover deployments APIExport identityHash; install/init deployments first or set CODE_DEPLOYMENTS_IDENTITY_HASH"; exit 1; }; \
 	FAROS_PROVIDER_KUBECONFIG=$(CODE_RUNTIME_KUBECONFIG) \
 	CODE_WORKSPACE_PATH=$(CODE_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/code/deploy/chart/files/schemas \
+	CODE_DEPLOYMENTS_IDENTITY_HASH="$$DEPLOYMENTS_HASH" \
 		$(BINDIR)/code-provider init
 
 # --- Provider Databricks (local dev) ---
@@ -2054,6 +2102,67 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 	DATABRICKS_WORKSPACE_PATH=$(DATABRICKS_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/databricks/deploy/chart/files/schemas \
 		$(BINDIR)/databricks-provider init
+
+# --- Deployments provider (release/deployment reconciliation POC) ---
+# Local flow:
+#   Terminal 1: make run-hub-embedded-static
+#   Terminal 2: make install-provider-deployments
+#   Terminal 3: make init-provider-deployments
+#   Terminal 4: make run-provider-deployments
+run-provider-deployments: build-deployments-provider ## Run the deployments provider (requires hub + install + init)
+	@echo "Starting deployments provider on :$(DEPLOYMENTS_PORT) (hub $(DEPLOYMENTS_HUB_URL))"
+	PORT=$(DEPLOYMENTS_PORT) \
+	FAROS_HUB_URL=$(DEPLOYMENTS_HUB_URL) \
+	FAROS_HUB_TOKEN=$(DEPLOYMENTS_TOKEN) \
+	FAROS_HUB_INSECURE=true \
+	FAROS_PROVIDER_NAME=deployments \
+	DEPLOYMENTS_WORKSPACE_PATH=$(DEPLOYMENTS_WORKSPACE_PATH) \
+	FAROS_PROVIDER_KUBECONFIG=$${FAROS_PROVIDER_KUBECONFIG:-$(DEPLOYMENTS_RUNTIME_KUBECONFIG)} \
+		$(BINDIR)/deployments-provider serve
+
+install-provider-deployments: ## Apply the deployments Provider + CatalogEntry into root:faros:providers
+	@test -f $(DEPLOYMENTS_KCP_KUBECONFIG) || { \
+		echo "kubeconfig not found at $(DEPLOYMENTS_KCP_KUBECONFIG)"; \
+		echo "start the hub first with: make run-hub-embedded-static"; \
+		exit 1; \
+	}
+	kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
+		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/root:faros:system:providers \
+		--insecure-skip-tls-verify \
+		apply -f $(DEPLOYMENTS_PROVIDER_MANIFEST) -f $(DEPLOYMENTS_MANIFEST)
+
+init-provider-deployments: build-deployments-provider ## Bootstrap deployments APIExport + write dev provider kubeconfig
+	@test -f $(DEPLOYMENTS_KCP_KUBECONFIG) || { \
+		echo "kubeconfig not found at $(DEPLOYMENTS_KCP_KUBECONFIG)"; \
+		echo "start the hub first with: make run-hub-embedded-static"; \
+		exit 1; \
+	}
+	@echo "Reading provider-token from $(DEPLOYMENTS_WORKSPACE_PATH) and writing $(DEPLOYMENTS_RUNTIME_KUBECONFIG)"
+	@TOKEN=$$(kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
+		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/$(DEPLOYMENTS_WORKSPACE_PATH) \
+		--insecure-skip-tls-verify \
+		get secret -n default provider-token -o jsonpath='{.data.token}' | base64 -d); \
+	test -n "$$TOKEN" || { echo "provider-token Secret empty — wait for the Provider controller to provision the workspace"; exit 1; }; \
+	mkdir -p $(KCP_DATA_DIR); \
+	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
+		"$(DEPLOYMENTS_KCP_SERVER)/clusters/$(DEPLOYMENTS_WORKSPACE_PATH)" "$$TOKEN" \
+		> $(DEPLOYMENTS_RUNTIME_KUBECONFIG)
+	@INFRA_HASH=$${DEPLOYMENTS_INFRA_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
+		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/root:faros:providers:infrastructure \
+		--insecure-skip-tls-verify \
+		get apiexport infrastructure.providers.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
+	test -n "$$INFRA_HASH" || { echo "could not discover infrastructure APIExport identityHash; install/init infrastructure first or set DEPLOYMENTS_INFRA_IDENTITY_HASH"; exit 1; }; \
+	FAROS_PROVIDER_KUBECONFIG=$(DEPLOYMENTS_RUNTIME_KUBECONFIG) \
+	DEPLOYMENTS_WORKSPACE_PATH=$(DEPLOYMENTS_WORKSPACE_PATH) \
+	FAROS_SCHEMAS_DIR=$(DEPLOYMENTS_SCHEMAS_DIR) \
+	DEPLOYMENTS_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
+		$(BINDIR)/deployments-provider init
+
+uninstall-provider-deployments: ## Delete the deployments CatalogEntry + Provider (full teardown)
+	-kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
+		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/root:faros:system:providers \
+		--insecure-skip-tls-verify \
+		delete -f $(DEPLOYMENTS_MANIFEST) -f $(DEPLOYMENTS_PROVIDER_MANIFEST)
 
 # --- Experimental: run the infrastructure provider as a POD (init-container
 #     bootstrap) instead of a host binary. Exercises the full hub-minted
@@ -2368,6 +2477,11 @@ help-dev: ## Show development environment options
 	@echo "  Terminal B: make run-provider-app-studio       - Run the provider"
 	@echo "  Then open https://localhost:9443/ui/providers (Enable the provider)"
 	@echo ""
+	@echo "DEPLOYMENTS PROVIDER POC (after Infrastructure is initialized):"
+	@echo "  Terminal A: make install-provider-deployments  - Apply Provider + CatalogEntry"
+	@echo "  Terminal B: make init-provider-deployments     - Bootstrap schemas and claims"
+	@echo "  Terminal C: make run-provider-deployments      - Run the headless reconciler (:8093)"
+	@echo ""
 	@echo "ENVIRONMENT VARIABLES:"
 	@echo "  STATIC_AUTH_TOKEN  - Token for static auth (default: dev-token)"
 	@echo "  KCP_DATA_DIR       - Directory for kcp data (default: .kcp)"
@@ -2377,6 +2491,9 @@ help-dev: ## Show development environment options
 	@echo "  APP_STUDIO_HUB_URL - Hub URL the provider heartbeats to (default: https://localhost:9443)"
 	@echo "  APP_STUDIO_DEV_DATABASE_URL - Local App Studio Postgres DSN (default: postgres://appstudio:appstudio@localhost:55432/appstudio?sslmode=disable)"
 	@echo "  APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true - Force non-durable App Studio message store"
+	@echo "  DEPLOYMENTS_PORT   - Port the deployments provider listens on (default: 8093)"
+	@echo "  DEPLOYMENTS_INFRA_IDENTITY_HASH - Infrastructure APIExport identity hash (auto-discovered by init)"
+	@echo "  CODE_DEPLOYMENTS_IDENTITY_HASH - Deployments APIExport identity hash (auto-discovered by Code init)"
 	@echo ""
 
 DOCKER_PLATFORM ?= linux/amd64

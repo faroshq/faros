@@ -527,7 +527,38 @@ func (s *Server) productionRuntime(ctx context.Context, c *asclient.Client, p *a
 	if err != nil {
 		return appAccessRuntime{}, err
 	}
-	desired, _ := values[accessValueField].(string)
+	desiredValues := values
+	if projectIsDeploymentBinding(binding) {
+		configuration, _ := values["configuration"].(map[string]any)
+		desiredValues = configuration
+		backend, found, backendErr := unstructured.NestedMap(obj.Object, "status", "backendRef")
+		if backendErr != nil || !found {
+			return appAccessRuntime{}, newValidationError("production deployment has no resolved backend resource")
+		}
+		backendRef := &aiv1alpha1.ProjectProviderResourceReference{}
+		backendRef.APIVersion, _ = backend["apiVersion"].(string)
+		backendRef.Kind, _ = backend["kind"].(string)
+		backendRef.Resource, _ = backend["resource"].(string)
+		backendRef.Name, _ = backend["name"].(string)
+		backendUID, _ := backend["uid"].(string)
+		backendGVR, backendGVRErr := projectProviderResourceGVR(backendRef)
+		if backendGVRErr != nil {
+			return appAccessRuntime{}, fmt.Errorf("production deployment backendRef: %w", backendGVRErr)
+		}
+		if strings.TrimSpace(backendRef.Name) == "" {
+			return appAccessRuntime{}, newValidationError("production deployment backendRef has no resource name")
+		}
+		obj, err = c.Resource(tenant.Resource{GVR: backendGVR, Kind: backendRef.Kind, Plural: backendRef.Resource}, "").Get(ctx, backendRef.Name, metav1.GetOptions{})
+		if err != nil {
+			return appAccessRuntime{}, err
+		}
+		if backendUID = strings.TrimSpace(backendUID); backendUID != "" && backendUID != string(obj.GetUID()) {
+			return appAccessRuntime{}, newValidationError("production deployment backend resource identity changed; wait for deployment reconciliation")
+		}
+		ref = backendRef
+		name = strings.TrimSpace(backendRef.Name)
+	}
+	desired, _ := desiredValues[accessValueField].(string)
 	if desired == "" {
 		desired = accessPublic
 	}
@@ -544,11 +575,14 @@ func (s *Server) productionRuntime(ctx context.Context, c *asclient.Client, p *a
 	}, nil
 }
 
-// setProductionAccess merges the access value into the production binding's
-// values and updates the Project. The Project reconciler applies the changed
-// binding to the live instance; the template gate picks the value up as an
-// in-place env change.
+// setProductionAccess merges the access value into Deployment configuration
+// (or the legacy binding's flat values) and updates the Project. Publishing
+// remains an independently authored access change; it never replaces the
+// release or rollout identity.
 func (s *Server) setProductionAccess(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, access string) (*aiv1alpha1.Project, error) {
+	if projectProductionIsGitManaged(p) {
+		return nil, newValidationError("production access is Git-managed; propose the access change through a promotion pull request")
+	}
 	next := p.DeepCopy()
 	binding := findProjectProductionBinding(next)
 	if binding == nil || binding.ResourceRef == nil {
@@ -561,10 +595,19 @@ func (s *Server) setProductionAccess(ctx context.Context, c *asclient.Client, p 
 	if values == nil {
 		values = map[string]any{}
 	}
-	if current, _ := values[accessValueField].(string); current == access {
+	targetValues := values
+	if projectIsDeploymentBinding(binding) {
+		configuration, _ := values["configuration"].(map[string]any)
+		if configuration == nil {
+			configuration = map[string]any{}
+			values["configuration"] = configuration
+		}
+		targetValues = configuration
+	}
+	if current, _ := targetValues[accessValueField].(string); current == access {
 		return next, nil
 	}
-	values[accessValueField] = access
+	targetValues[accessValueField] = access
 	raw, err := json.Marshal(values)
 	if err != nil {
 		return nil, err
@@ -586,6 +629,9 @@ func requestedAccessValue(requested string, p *aiv1alpha1.Project) (string, erro
 		binding := findProjectProductionBinding(p)
 		if binding != nil {
 			if values, err := projectProviderBindingValues(*binding); err == nil {
+				if projectIsDeploymentBinding(binding) {
+					values, _ = values["configuration"].(map[string]any)
+				}
 				if current, _ := values[accessValueField].(string); current == accessPublic {
 					return accessPublic, nil
 				}

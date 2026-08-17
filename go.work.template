@@ -25,4 +25,5 @@ use (
 	./providers/kuery
 	./providers/app-studio
 	./providers/databricks
+	./providers/deployments
 )

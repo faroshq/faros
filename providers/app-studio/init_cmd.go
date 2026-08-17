@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	sdkinstall "github.com/faroshq/provider-sdk/install"
 )
@@ -59,7 +60,7 @@ func runInitCmd(ctx context.Context) error {
 	if infraHash == "" {
 		log.Printf("WARNING: APP_STUDIO_INFRA_IDENTITY_HASH is empty — the instance permission claims will have no identityHash and tenant Enable will not engage instance lifecycling")
 	}
-	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceClaimResources)+6)
+	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceClaimResources)+8)
 	for _, r := range instanceClaimResources {
 		claims = append(claims, sdkinstall.PermissionClaim{
 			Group:        "infrastructure.faros.sh",
@@ -71,16 +72,19 @@ func runInitCmd(ctx context.Context) error {
 	// Repository creation (git backing) — the Project reconciler creates
 	// Repository CRs; commits go through the code provider's MCP as the
 	// project's ServiceAccount (commit bundles are code-provider-local).
-	codeHash := os.Getenv("APP_STUDIO_CODE_IDENTITY_HASH")
+	codeHash := strings.TrimSpace(os.Getenv("APP_STUDIO_CODE_IDENTITY_HASH"))
 	if codeHash == "" {
-		log.Printf("WARNING: APP_STUDIO_CODE_IDENTITY_HASH is empty — the repositories claim will have no identityHash and the reconciler cannot create repositories")
+		return fmt.Errorf("APP_STUDIO_CODE_IDENTITY_HASH is required")
 	}
-	claims = append(claims, sdkinstall.PermissionClaim{
-		Group:        "code.faros.sh",
-		Resource:     "repositories",
-		Verbs:        []string{"get", "list", "watch", "create", "update", "patch"},
-		IdentityHash: codeHash,
-	})
+	claims = append(claims, codePermissionClaims(codeHash)...)
+	// Production intent is expressed through immutable Releases and owned
+	// Deployments. The deployment provider translates those into the selected
+	// backend; App Studio no longer owns production Infrastructure instances.
+	deploymentClaims, err := deploymentPermissionClaims(os.Getenv("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"))
+	if err != nil {
+		return err
+	}
+	claims = append(claims, deploymentClaims...)
 	// Per-project ServiceAccount identity: repository commits run in the
 	// reconciler long after the request that caused the edits, so they act as
 	// an identity of their own rather than borrowing the user's bearer. Also:
@@ -113,4 +117,48 @@ func runInitCmd(ctx context.Context) error {
 	}
 	log.Printf("app-studio init: workspace bootstrapped (export=%s path=%s schemas=%s catalogEntry=%s claims=%d)", apiExportName, workspacePath, schemasDir, catalogEntryFile, len(claims))
 	return nil
+}
+
+func codePermissionClaims(identityHash string) []sdkinstall.PermissionClaim {
+	return []sdkinstall.PermissionClaim{
+		{
+			Group:        "code.faros.sh",
+			Resource:     "repositories",
+			Verbs:        []string{"get", "list", "watch", "create", "update", "patch"},
+			IdentityHash: identityHash,
+		},
+		{
+			Group:        "code.faros.sh",
+			Resource:     "repositorysyncs",
+			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			IdentityHash: identityHash,
+		},
+		{
+			Group:        "code.faros.sh",
+			Resource:     "changerequests",
+			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			IdentityHash: identityHash,
+		},
+	}
+}
+
+func deploymentPermissionClaims(identityHash string) ([]sdkinstall.PermissionClaim, error) {
+	hash := strings.TrimSpace(identityHash)
+	if hash == "" {
+		return nil, fmt.Errorf("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH is required")
+	}
+	return []sdkinstall.PermissionClaim{
+		{
+			Group:        "deployments.faros.sh",
+			Resource:     "releases",
+			Verbs:        []string{"get", "list", "watch", "create"},
+			IdentityHash: hash,
+		},
+		{
+			Group:        "deployments.faros.sh",
+			Resource:     "deployments",
+			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			IdentityHash: hash,
+		},
+	}, nil
 }

@@ -1,0 +1,17 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: deployments.faros.sh
+spec:
+  resources:
+  - group: deployments.faros.sh
+    name: deployments
+    schema: v260817-28ab3066.deployments.deployments.faros.sh
+    storage:
+      crd: {}
+  - group: deployments.faros.sh
+    name: releases
+    schema: v260817-28ab3066.releases.deployments.faros.sh
+    storage:
+      crd: {}
+status: {}

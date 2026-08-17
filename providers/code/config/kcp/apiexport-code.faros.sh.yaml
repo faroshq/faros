@@ -5,6 +5,11 @@ metadata:
 spec:
   resources:
   - group: code.faros.sh
+    name: changerequests
+    schema: v260817-28ab3066.changerequests.code.faros.sh
+    storage:
+      crd: {}
+  - group: code.faros.sh
     name: collaborators
     schema: v260609-fc69fa2.collaborators.code.faros.sh
     storage:
@@ -41,7 +46,12 @@ spec:
       crd: {}
   - group: code.faros.sh
     name: repositorycommits
-    schema: v260802-8d0bfc17.repositorycommits.code.faros.sh
+    schema: v260817-28ab3066.repositorycommits.code.faros.sh
+    storage:
+      crd: {}
+  - group: code.faros.sh
+    name: repositorysyncs
+    schema: v260817-28ab3066.repositorysyncs.code.faros.sh
     storage:
       crd: {}
 status: {}

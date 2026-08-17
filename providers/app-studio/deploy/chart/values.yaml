@@ -44,10 +44,15 @@ apiExport:
   # without it — with an empty value the Project reconciler cannot create
   # instances in tenant workspaces.
   infraIdentityHash: ""
-  # Same, for the code provider's APIExport (code.providers.faros.sh):
-  # backs the repositories claim the Project reconciler needs to create the
-  # git backing repo.
+  # REQUIRED: identityHash of the code provider's APIExport
+  # (code.providers.faros.sh). New projects require Repository,
+  # RepositorySync, and ChangeRequest authority; chart rendering fails while
+  # this is empty rather than booting a partially functional GitOps flow.
   codeIdentityHash: ""
+  # REQUIRED: identityHash of the deployments provider's APIExport
+  # (deployments.faros.sh). Chart rendering fails while empty so App Studio
+  # cannot bootstrap unauthorizable Release and Deployment claims.
+  deploymentsIdentityHash: ""
 
 # Secret holding the workspace-admin kubeconfig minted by the platform admin
 # via /bonkers (admin onboarding). Consumed by both the init container and the

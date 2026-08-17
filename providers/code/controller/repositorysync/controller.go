@@ -1,0 +1,605 @@
+/*
+Copyright 2026 The Faros Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+*/
+
+// Package repositorysync projects reviewed deployment YAML from Git into the
+// tenant workspace. It owns desired-state ingestion only; the Deployments
+// provider remains the sole runtime reconciler.
+package repositorysync
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"path"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+
+	codev1alpha1 "github.com/faroshq/provider-code/apis/v1alpha1"
+	"github.com/faroshq/provider-code/backend"
+	"github.com/faroshq/provider-code/controller/shared"
+)
+
+const (
+	ownerAnnotation          = "code.faros.sh/repository-sync"
+	pathAnnotation           = "code.faros.sh/source-path"
+	revisionAnnotation       = "code.faros.sh/config-revision"
+	deletionPolicyAnnotation = "code.faros.sh/applied-deletion-policy"
+	repositorySyncFinalizer  = "code.faros.sh/repository-sync-cleanup"
+	defaultPath              = ".faros"
+	defaultInterval          = 30 * time.Second
+	maxFiles                 = 500
+	maxFileBytes             = 256 << 10
+	maxTotalBytes            = 16 << 20
+)
+
+var deploymentsGV = schema.GroupVersion{Group: "deployments.faros.sh", Version: "v1alpha1"}
+
+type Reconciler struct {
+	Manager  mcmanager.Manager
+	Backends *backend.Registry
+}
+
+func (r *Reconciler) SetupWithManager(mgr mcmanager.Manager) error {
+	r.Manager = mgr
+	return mcbuilder.ControllerManagedBy(mgr).Named("code-repositorysyncs").For(&codev1alpha1.RepositorySync{}).Complete(r)
+}
+
+func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+	c, err := shared.ClusterClient(ctx, r.Manager, req.ClusterName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	var sync codev1alpha1.RepositorySync
+	if err := c.Get(ctx, req.NamespacedName, &sync); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if !sync.DeletionTimestamp.IsZero() {
+		if !containsString(sync.Finalizers, repositorySyncFinalizer) {
+			return ctrl.Result{}, nil
+		}
+		pending, err := cleanupInventory(ctx, c, &sync)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		sync.Finalizers = removeString(sync.Finalizers, repositorySyncFinalizer)
+		if err := c.Update(ctx, &sync); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if !containsString(sync.Finalizers, repositorySyncFinalizer) {
+		sync.Finalizers = append(sync.Finalizers, repositorySyncFinalizer)
+		if err := c.Update(ctx, &sync); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	interval := defaultInterval
+	if sync.Spec.IntervalSeconds > 0 {
+		interval = time.Duration(sync.Spec.IntervalSeconds) * time.Second
+	}
+	revision, inventory, reconcileErr := r.sync(ctx, c, &sync)
+	next := sync.DeepCopy()
+	next.Status.ObservedGeneration = sync.Generation
+	next.Status.ObservedRevision = revision
+	if reconcileErr != nil {
+		next.Status.Phase = codev1alpha1.RepositorySyncPhaseFailed
+		shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionFalse, codev1alpha1.ReasonError, reconcileErr.Error(), sync.Generation)
+		if err := updateStatus(ctx, c, next); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: interval}, nil
+	}
+	next.Status.Phase = codev1alpha1.RepositorySyncPhaseReady
+	next.Status.AppliedRevision = revision
+	next.Status.Inventory = inventory
+	shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionTrue, codev1alpha1.ReasonReady, "Repository configuration applied.", sync.Generation)
+	if err := updateStatus(ctx, c, next); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+func (r *Reconciler) sync(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync) (string, []codev1alpha1.RepositorySyncInventoryItem, error) {
+	if r.Backends == nil {
+		return "", nil, fmt.Errorf("git backends are unavailable")
+	}
+	repo, err := shared.ResolveRepository(ctx, c, sync.Spec.RepositoryRef)
+	if err != nil {
+		return "", nil, err
+	}
+	conn, err := shared.ResolveConnection(ctx, c, repo.Spec.ConnectionRef)
+	if err != nil {
+		return "", nil, err
+	}
+	b, ok := r.Backends.Get(string(conn.Spec.Provider))
+	if !ok {
+		return "", nil, fmt.Errorf("git provider %q is not registered", conn.Spec.Provider)
+	}
+	reader, ok := b.(backend.RepositoryReader)
+	if !ok {
+		return "", nil, fmt.Errorf("git provider %q does not support reading files", conn.Spec.Provider)
+	}
+	cred, err := shared.ResolveCredential(ctx, c, conn)
+	if err != nil {
+		return "", nil, err
+	}
+	checkout, err := reader.CheckoutFiles(ctx, conn, cred, repo, backend.RepositoryCheckoutInput{Ref: sync.Spec.Ref, MaxFiles: maxFiles, MaxFileBytes: maxFileBytes, MaxTotalBytes: maxTotalBytes})
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.TrimSpace(checkout.CommitSHA) == "" {
+		return "", nil, fmt.Errorf("git backend resolved the repository without a commit SHA")
+	}
+	root, err := cleanRoot(sync.Spec.Path)
+	if err != nil {
+		return checkout.CommitSHA, nil, err
+	}
+	for _, skipped := range checkout.Skipped {
+		if strings.Contains(skipped, "tree truncated") || withinRoot(skipped, root) {
+			return checkout.CommitSHA, nil, fmt.Errorf("source tree is incomplete: %q was skipped", skipped)
+		}
+	}
+	docs, err := parseDocuments(checkout.Files, root)
+	if err != nil {
+		return checkout.CommitSHA, nil, err
+	}
+	for _, doc := range docs {
+		if doc.GetKind() == "Deployment" {
+			if err := unstructured.SetNestedField(doc.Object, checkout.CommitSHA, "spec", "rolloutID"); err != nil {
+				return checkout.CommitSHA, nil, err
+			}
+		}
+	}
+	inventory, err := applyDocuments(ctx, c, sync, checkout.CommitSHA, docs)
+	if err != nil {
+		return checkout.CommitSHA, nil, err
+	}
+	if sync.Spec.Prune {
+		if err := prune(ctx, c, sync, inventory); err != nil {
+			return checkout.CommitSHA, nil, err
+		}
+	}
+	sort.Slice(inventory, func(i, j int) bool {
+		if inventory[i].Kind == inventory[j].Kind {
+			return inventory[i].Name < inventory[j].Name
+		}
+		return inventory[i].Kind < inventory[j].Kind
+	})
+	return checkout.CommitSHA, inventory, nil
+}
+
+func applyDocuments(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, revision string, docs []sourcedDocument) ([]codev1alpha1.RepositorySyncInventoryItem, error) {
+	if err := validateDocuments(ctx, c, sync, docs); err != nil {
+		return nil, err
+	}
+	ordered := append([]sourcedDocument(nil), docs...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].GetKind() == "Release" && ordered[j].GetKind() != "Release" })
+	inventory := make([]codev1alpha1.RepositorySyncInventoryItem, 0, len(docs))
+	for _, doc := range ordered {
+		item, err := applyDocument(ctx, c, sync, revision, doc)
+		if err != nil {
+			return nil, err
+		}
+		inventory = append(inventory, item)
+	}
+	return inventory, nil
+}
+
+type sourcedDocument struct {
+	*unstructured.Unstructured
+	sourcePath string
+}
+
+func parseDocuments(files []backend.RepositoryCommitFile, root string) ([]sourcedDocument, error) {
+	var out []sourcedDocument
+	seen := map[string]string{}
+	for _, file := range files {
+		if file.Delete || !withinRoot(file.Path, root) || (path.Ext(file.Path) != ".yaml" && path.Ext(file.Path) != ".yml") {
+			continue
+		}
+		dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewBufferString(file.Content), 64<<10)
+		for index := 1; ; index++ {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, fmt.Errorf("parse %s document %d: %w", file.Path, index, err)
+			}
+			if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+				continue
+			}
+			var object map[string]any
+			if err := json.Unmarshal(raw, &object); err != nil {
+				return nil, fmt.Errorf("decode %s document %d: %w", file.Path, index, err)
+			}
+			u := &unstructured.Unstructured{Object: object}
+			if u.GetAPIVersion() != deploymentsGV.String() || (u.GetKind() != "Release" && u.GetKind() != "Deployment") {
+				return nil, fmt.Errorf("%s document %d: only %s Release and Deployment are allowed", file.Path, index, deploymentsGV.String())
+			}
+			if strings.TrimSpace(u.GetName()) == "" {
+				return nil, fmt.Errorf("%s document %d: metadata.name is required", file.Path, index)
+			}
+			if problems := utilvalidation.IsDNS1123Subdomain(u.GetName()); len(problems) > 0 {
+				return nil, fmt.Errorf("%s document %d: metadata.name is invalid: %s", file.Path, index, strings.Join(problems, ", "))
+			}
+			if _, found, err := unstructured.NestedMap(u.Object, "spec"); err != nil || !found {
+				return nil, fmt.Errorf("%s document %d: spec is required", file.Path, index)
+			}
+			if err := validateGitMetadata(u); err != nil {
+				return nil, fmt.Errorf("%s document %d: %w", file.Path, index, err)
+			}
+			// Git controls identity + spec, not Kubernetes lifecycle metadata.
+			u.Object["metadata"] = map[string]any{"name": u.GetName()}
+			key := u.GetKind() + "/" + u.GetName()
+			if prior, ok := seen[key]; ok {
+				return nil, fmt.Errorf("duplicate %s in %s and %s", key, prior, file.Path)
+			}
+			seen[key] = file.Path
+			out = append(out, sourcedDocument{Unstructured: u, sourcePath: file.Path})
+		}
+	}
+	return out, nil
+}
+
+func validateGitMetadata(u *unstructured.Unstructured) error {
+	if _, found := u.Object["status"]; found {
+		return fmt.Errorf("status is controller-owned and must not be supplied")
+	}
+	if u.GetNamespace() != "" {
+		return fmt.Errorf("metadata.namespace is not allowed for cluster-scoped resources")
+	}
+	if len(u.GetOwnerReferences()) > 0 {
+		return fmt.Errorf("metadata.ownerReferences is not allowed")
+	}
+	if len(u.GetFinalizers()) > 0 {
+		return fmt.Errorf("metadata.finalizers is not allowed")
+	}
+	for key := range u.GetAnnotations() {
+		if strings.HasPrefix(key, "code.faros.sh/") {
+			return fmt.Errorf("reserved annotation %q is not allowed", key)
+		}
+	}
+	metadata, _, _ := unstructured.NestedMap(u.Object, "metadata")
+	for _, field := range []string{"uid", "resourceVersion", "generation", "creationTimestamp", "deletionTimestamp", "managedFields"} {
+		if _, ok := metadata[field]; ok {
+			return fmt.Errorf("metadata.%s is server-owned and must not be supplied", field)
+		}
+	}
+	return nil
+}
+
+// validateDocuments performs every deterministic and workspace lookup before
+// the first write, so a malformed later document cannot partially apply an
+// otherwise valid-looking revision.
+func validateDocuments(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, docs []sourcedDocument) error {
+	releases := map[string]bool{}
+	for _, doc := range docs {
+		if doc.GetKind() == "Release" {
+			releases[doc.GetName()] = true
+			if err := validateRelease(doc.Unstructured); err != nil {
+				return fmt.Errorf("%s: %w", doc.sourcePath, err)
+			}
+		}
+	}
+	// Preflight collisions for the complete desired set before any create or
+	// update. applyDocument repeats these checks to close the read/write race.
+	for _, doc := range docs {
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(deploymentsGV.WithKind(doc.GetKind()))
+		err := c.Get(ctx, client.ObjectKey{Name: doc.GetName()}, existing)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("preflight %s %q: %w", doc.GetKind(), doc.GetName(), err)
+		}
+		if existing.GetAnnotations()[ownerAnnotation] != sync.Name {
+			return fmt.Errorf("%s %q is not owned by RepositorySync %q", doc.GetKind(), doc.GetName(), sync.Name)
+		}
+		if doc.GetKind() == "Release" && !reflect.DeepEqual(existing.Object["spec"], doc.Object["spec"]) {
+			return fmt.Errorf("immutable Release %q already exists with different spec", doc.GetName())
+		}
+	}
+	for _, doc := range docs {
+		if doc.GetKind() != "Deployment" {
+			continue
+		}
+		releaseRef, err := validateDeployment(doc.Unstructured)
+		if err != nil {
+			return fmt.Errorf("%s: %w", doc.sourcePath, err)
+		}
+		if releases[releaseRef] {
+			continue
+		}
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(deploymentsGV.WithKind("Release"))
+		if err := c.Get(ctx, client.ObjectKey{Name: releaseRef}, existing); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("%s: Deployment references Release %q absent from this revision and workspace", doc.sourcePath, releaseRef)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRelease(u *unstructured.Unstructured) error {
+	repositoryRef, found, _ := unstructured.NestedString(u.Object, "spec", "source", "repositoryRef")
+	if !found || strings.TrimSpace(repositoryRef) == "" {
+		return fmt.Errorf("Release spec.source.repositoryRef is required")
+	}
+	revision, found, _ := unstructured.NestedString(u.Object, "spec", "source", "revision")
+	if !found || strings.TrimSpace(revision) == "" {
+		return fmt.Errorf("Release spec.source.revision is required")
+	}
+	blueprint, found, _ := unstructured.NestedString(u.Object, "spec", "blueprintRef", "name")
+	if !found || strings.TrimSpace(blueprint) == "" {
+		return fmt.Errorf("Release spec.blueprintRef.name is required")
+	}
+	artifacts, found, err := unstructured.NestedSlice(u.Object, "spec", "artifacts")
+	if err != nil || !found {
+		return fmt.Errorf("Release spec.artifacts must be a list")
+	}
+	seen := map[string]bool{}
+	for i, raw := range artifacts {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("Release spec.artifacts[%d] must be an object", i)
+		}
+		name, _ := item["name"].(string)
+		image, _ := item["image"].(string)
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(image) == "" {
+			return fmt.Errorf("Release spec.artifacts[%d].name and image are required", i)
+		}
+		if seen[name] {
+			return fmt.Errorf("Release artifact name %q is duplicated", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+func validateDeployment(u *unstructured.Unstructured) (string, error) {
+	releaseRef, found, _ := unstructured.NestedString(u.Object, "spec", "releaseRef")
+	if !found || strings.TrimSpace(releaseRef) == "" {
+		return "", fmt.Errorf("Deployment spec.releaseRef is required")
+	}
+	class, _, _ := unstructured.NestedString(u.Object, "spec", "className")
+	if class != "" && class != "kro-direct" {
+		return "", fmt.Errorf("Deployment spec.className %q is unsupported", class)
+	}
+	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
+	if mode != "" && mode != "development" && mode != "production" {
+		return "", fmt.Errorf("Deployment spec.mode %q is invalid", mode)
+	}
+	policy, _, _ := unstructured.NestedString(u.Object, "spec", "deletionPolicy")
+	if policy != "" && policy != "Retain" && policy != "Delete" {
+		return "", fmt.Errorf("Deployment spec.deletionPolicy %q is invalid", policy)
+	}
+	if config, found, err := unstructured.NestedFieldNoCopy(u.Object, "spec", "configuration"); err != nil {
+		return "", err
+	} else if found {
+		if _, ok := config.(map[string]any); !ok {
+			return "", fmt.Errorf("Deployment spec.configuration must be an object")
+		}
+	}
+	return releaseRef, nil
+}
+
+func applyDocument(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, revision string, doc sourcedDocument) (codev1alpha1.RepositorySyncInventoryItem, error) {
+	doc.SetGroupVersionKind(deploymentsGV.WithKind(doc.GetKind()))
+	annotations := doc.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[ownerAnnotation], annotations[pathAnnotation], annotations[revisionAnnotation] = sync.Name, doc.sourcePath, revision
+	if doc.GetKind() == "Deployment" {
+		policy, _, _ := unstructured.NestedString(doc.Object, "spec", "deletionPolicy")
+		annotations[deletionPolicyAnnotation] = policy
+	}
+	doc.SetAnnotations(annotations)
+	key := client.ObjectKey{Name: doc.GetName()}
+	current := &unstructured.Unstructured{}
+	current.SetGroupVersionKind(doc.GroupVersionKind())
+	err := c.Get(ctx, key, current)
+	if apierrors.IsNotFound(err) {
+		if err := c.Create(ctx, doc.Unstructured); err != nil {
+			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("create %s %q: %w", doc.GetKind(), doc.GetName(), err)
+		}
+		current = doc.Unstructured
+	} else if err != nil {
+		return codev1alpha1.RepositorySyncInventoryItem{}, err
+	} else if doc.GetKind() == "Release" {
+		if !reflect.DeepEqual(current.Object["spec"], doc.Object["spec"]) {
+			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("immutable Release %q already exists with different spec", doc.GetName())
+		}
+		if owner := current.GetAnnotations()[ownerAnnotation]; owner != sync.Name {
+			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Release %q is owned by RepositorySync %q", doc.GetName(), owner)
+		}
+		merged := current.GetAnnotations()
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range annotations {
+			merged[k] = v
+		}
+		current.SetAnnotations(merged)
+		if err := c.Update(ctx, current); err != nil {
+			return codev1alpha1.RepositorySyncInventoryItem{}, err
+		}
+	} else {
+		if owner := current.GetAnnotations()[ownerAnnotation]; owner != sync.Name {
+			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Deployment %q is owned by RepositorySync %q", doc.GetName(), owner)
+		}
+		current.Object["spec"] = doc.Object["spec"]
+		merged := current.GetAnnotations()
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range annotations {
+			merged[k] = v
+		}
+		current.SetAnnotations(merged)
+		if err := c.Update(ctx, current); err != nil {
+			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("update Deployment %q: %w", doc.GetName(), err)
+		}
+	}
+	return codev1alpha1.RepositorySyncInventoryItem{APIVersion: deploymentsGV.String(), Kind: doc.GetKind(), Resource: strings.ToLower(doc.GetKind()) + "s", Name: doc.GetName(), UID: string(current.GetUID())}, nil
+}
+
+func prune(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, desired []codev1alpha1.RepositorySyncInventoryItem) error {
+	wanted := map[string]bool{}
+	for _, item := range desired {
+		wanted[item.Kind+"/"+item.Name] = true
+	}
+	for _, old := range sync.Status.Inventory {
+		if wanted[old.Kind+"/"+old.Name] {
+			continue
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(deploymentsGV.WithKind(old.Kind))
+		if err := c.Get(ctx, client.ObjectKey{Name: old.Name}, u); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if u.GetAnnotations()[ownerAnnotation] != sync.Name {
+			continue
+		}
+		if old.Kind == "Deployment" && u.GetAnnotations()[deletionPolicyAnnotation] == "Delete" {
+			if err := c.Delete(ctx, u); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+			continue
+		}
+		annotations := u.GetAnnotations()
+		delete(annotations, ownerAnnotation)
+		delete(annotations, pathAnnotation)
+		delete(annotations, revisionAnnotation)
+		delete(annotations, deletionPolicyAnnotation)
+		u.SetAnnotations(annotations)
+		if err := c.Update(ctx, u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cleanupInventory finalizes every object this sync last recorded. The
+// applied-deletion-policy annotation is controller-authored from the last
+// applied Git spec, so a later out-of-band spec edit cannot turn retention
+// into deletion during Project teardown.
+func cleanupInventory(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync) (bool, error) {
+	pending := false
+	for _, item := range sync.Status.Inventory {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(deploymentsGV.WithKind(item.Kind))
+		if err := c.Get(ctx, client.ObjectKey{Name: item.Name}, u); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		annotations := u.GetAnnotations()
+		if annotations[ownerAnnotation] != sync.Name {
+			continue
+		}
+		if item.Kind == "Deployment" && annotations[deletionPolicyAnnotation] == "Delete" {
+			if u.GetDeletionTimestamp() != nil {
+				pending = true
+				continue
+			}
+			if err := c.Delete(ctx, u); err != nil && !apierrors.IsNotFound(err) {
+				return false, err
+			}
+			pending = true
+			continue
+		}
+		delete(annotations, ownerAnnotation)
+		delete(annotations, pathAnnotation)
+		delete(annotations, revisionAnnotation)
+		delete(annotations, deletionPolicyAnnotation)
+		u.SetAnnotations(annotations)
+		if err := c.Update(ctx, u); err != nil {
+			return false, err
+		}
+	}
+	return pending, nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+func removeString(values []string, remove string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value != remove {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func cleanRoot(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = defaultPath
+	}
+	cleaned := path.Clean(value)
+	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return "", fmt.Errorf("sync path %q must be a repository-relative subdirectory", value)
+	}
+	return cleaned, nil
+}
+func withinRoot(value, root string) bool {
+	cleaned := path.Clean(value)
+	return cleaned == root || strings.HasPrefix(cleaned, root+"/")
+}
+func updateStatus(ctx context.Context, c client.Client, next *codev1alpha1.RepositorySync) error {
+	var current codev1alpha1.RepositorySync
+	if err := c.Get(ctx, client.ObjectKey{Name: next.Name}, &current); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(current.Status, next.Status) {
+		return nil
+	}
+	current.Status = next.Status
+	return c.Status().Update(ctx, &current)
+}

@@ -1,0 +1,6 @@
+apiVersion: admin.faros.sh/v1alpha1
+kind: Provider
+metadata:
+  name: deployments
+spec:
+  displayName: "Deployments"

@@ -17,6 +17,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,6 +26,98 @@ import (
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
+
+func TestGitManagedScaffoldIncludesTrackedEnvironmentInventoryWithoutStarterSource(t *testing.T) {
+	store := workspace.NewFileStore(t.TempDir())
+	s := &Server{workspaces: store}
+	id := identity{orgUUID: "org-1", workspaceUUID: "ws-1"}
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("uid-1")},
+		Spec: aiv1alpha1.ProjectSpec{
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+			Sharing:    privateProjectSharingSpec(),
+			Delivery:   testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps),
+		},
+	}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	info := projectTemplateInfo{Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications"}
+	seeded, err := s.seedProjectScaffold(context.Background(), id, p, info)
+	if err != nil {
+		t.Fatalf("seedProjectScaffold: %v", err)
+	}
+	if seeded != 2 {
+		t.Fatalf("seeded = %d, want Release and Deployment", seeded)
+	}
+	scope := projectWorkspaceScope(id, p)
+	for path, required := range map[string][]string{
+		".faros/releases/development.yaml":                {"kind: Release", "revision: bootstrap"},
+		".faros/environments/development/deployment.yaml": {"kind: Deployment", "mode: development", "deletionPolicy: Retain"},
+	} {
+		file, err := store.ReadFile(context.Background(), scope, workspace.ReadOptions{Path: path})
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, fragment := range required {
+			if !strings.Contains(file.Content, fragment) {
+				t.Errorf("%s missing %q:\n%s", path, fragment, file.Content)
+			}
+		}
+	}
+	dirty, err := store.UncommittedPaths(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirty) != 2 {
+		t.Fatalf("uncommitted paths = %v, want both .faros files tracked", dirty)
+	}
+}
+
+func TestGitManagedScaffoldTracksStarterSourceAndEnvironmentInventoryTogether(t *testing.T) {
+	srv := giteaStyleArchive(t, map[string]string{"web/index.html": "<h1>hello</h1>"})
+	defer srv.Close()
+	store := workspace.NewFileStore(t.TempDir())
+	s := &Server{workspaces: store}
+	id := identity{orgUUID: "org-1", workspaceUUID: "ws-1"}
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("uid-1")},
+		Spec: aiv1alpha1.ProjectSpec{
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+			Sharing:    privateProjectSharingSpec(),
+			Delivery:   testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps),
+		},
+	}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	info := projectTemplateInfo{
+		Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+		ScaffoldRepo: srv.URL + "/team/starter", Components: map[string]projectTemplateComponent{"web": {WorkspacePath: "web"}},
+	}
+	seeded, err := s.seedProjectScaffold(context.Background(), id, p, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seeded != 3 {
+		t.Fatalf("seeded = %d, want source plus two environment files", seeded)
+	}
+	dirty, err := store.UncommittedPaths(context.Background(), projectWorkspaceScope(id, p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"web/index.html":                                  true,
+		".faros/releases/development.yaml":                true,
+		".faros/environments/development/deployment.yaml": true,
+	}
+	for _, path := range dirty {
+		delete(want, path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("initial dirty set missing %v; got %v", want, dirty)
+	}
+}
 
 // giteaStyleArchive serves a gzip tarball with a <root>/ prefix, the
 // convention the non-github scaffold path expects.

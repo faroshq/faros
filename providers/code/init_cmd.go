@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	sdkinstall "github.com/faroshq/provider-sdk/install"
 
@@ -45,12 +46,16 @@ func runInitCmd(ctx context.Context) error {
 	// here). Empty → skip.
 	catalogEntryFile := os.Getenv("FAROS_CATALOGENTRY_FILE")
 
+	claims, err := codeClaims(os.Getenv("CODE_DEPLOYMENTS_IDENTITY_HASH"))
+	if err != nil {
+		return err
+	}
 	if err := sdkinstall.Bootstrap(ctx, sdkinstall.Options{
 		Config:           config,
 		ExportName:       install.APIExportName,
 		WorkspacePath:    workspacePath,
 		SchemasDir:       schemasDir,
-		Claims:           codeClaims(),
+		Claims:           claims,
 		CatalogEntryFile: catalogEntryFile,
 	}); err != nil {
 		return fmt.Errorf("provider workspace bootstrap: %w", err)
@@ -63,11 +68,17 @@ func runInitCmd(ctx context.Context) error {
 // secrets claim is a built-in k8s type (empty group), so it needs no
 // identityHash. The controllers read each Connection's PAT Secret and write the
 // generated DeployKey private-key Secret, hence the write verbs.
-func codeClaims() []sdkinstall.PermissionClaim {
+func codeClaims(deploymentsIdentityHash string) ([]sdkinstall.PermissionClaim, error) {
+	hash := strings.TrimSpace(deploymentsIdentityHash)
+	if hash == "" {
+		return nil, fmt.Errorf("CODE_DEPLOYMENTS_IDENTITY_HASH is required")
+	}
 	return []sdkinstall.PermissionClaim{
 		{
 			Resource: "secrets",
 			Verbs:    []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
-	}
+		{Group: "deployments.faros.sh", Resource: "releases", Verbs: []string{"get", "list", "watch", "create", "update", "patch"}, IdentityHash: hash},
+		{Group: "deployments.faros.sh", Resource: "deployments", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}, IdentityHash: hash},
+	}, nil
 }

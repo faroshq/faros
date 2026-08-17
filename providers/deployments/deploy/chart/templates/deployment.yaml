@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deployments.fullname" . }}
+  labels:
+    {{- include "deployments.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "deployments.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "deployments.labels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: init
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          args: ["init"]
+          env:
+            - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
+            - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ .Values.infrastructureIdentityHash | quote }} }
+            - { name: FAROS_SCHEMAS_DIR, value: /etc/faros/schemas }
+            {{- if .Values.catalogEntry.enabled }}
+            - { name: FAROS_CATALOGENTRY_FILE, value: /etc/faros/catalogentry/catalogentry.yaml }
+            {{- end }}
+          volumeMounts:
+            - { name: kubeconfig, mountPath: /var/run/secrets/faros, readOnly: true }
+            {{- if .Values.catalogEntry.enabled }}
+            - { name: catalogentry, mountPath: /etc/faros/catalogentry, readOnly: true }
+            {{- end }}
+      containers:
+        - name: provider
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          args: ["serve"]
+          ports:
+            - { name: http, containerPort: 8093 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+          env:
+            - { name: PORT, value: "8093" }
+            - { name: FAROS_PROVIDER_NAME, value: deployments }
+            - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
+            - { name: FAROS_HUB_URL, value: {{ .Values.hub.url | quote }} }
+            {{- if .Values.hub.insecure }}
+            - { name: FAROS_HUB_INSECURE, value: "true" }
+            {{- end }}
+            {{- if .Values.hub.tokenSecretRef.name }}
+            - name: FAROS_HUB_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.hub.tokenSecretRef.name }}, key: {{ .Values.hub.tokenSecretRef.key }} }
+            {{- end }}
+          volumeMounts:
+            - { name: kubeconfig, mountPath: /var/run/secrets/faros, readOnly: true }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: kubeconfig
+          secret:
+            secretName: {{ .Values.providerKubeconfig.secretName }}
+            items: [{ key: kubeconfig, path: kubeconfig }]
+        {{- if .Values.catalogEntry.enabled }}
+        - name: catalogentry
+          configMap: { name: {{ include "deployments.fullname" . }}-catalogentry }
+        {{- end }}

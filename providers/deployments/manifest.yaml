@@ -1,0 +1,32 @@
+apiVersion: providers.faros.sh/v1alpha1
+kind: CatalogEntry
+metadata:
+  name: deployments
+spec:
+  displayName: "Deployments"
+  description: "Reconcile immutable application releases into production runtimes."
+  vendor: "faros"
+  version: "0.1.0"
+  category: "Developer"
+  backend:
+    url: "http://localhost:8093"
+    healthPath: "/readyz"
+  apiExport:
+    name: "deployments.faros.sh"
+    permissionClaims:
+      - group: infrastructure.faros.sh
+        resource: templates
+        verbs: [get, list, watch]
+        tenantScoped: true
+      - group: infrastructure.faros.sh
+        resource: applications
+        verbs: [get, list, watch, create, update, patch, delete]
+        tenantScoped: true
+      - group: infrastructure.faros.sh
+        resource: simplewebapps
+        verbs: [get, list, watch, create, update, patch, delete]
+        tenantScoped: true
+      - group: infrastructure.faros.sh
+        resource: workers
+        verbs: [get, list, watch, create, update, patch, delete]
+        tenantScoped: true

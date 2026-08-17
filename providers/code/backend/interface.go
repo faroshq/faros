@@ -61,8 +61,34 @@ type RepositoryCommitFile struct {
 type RepositoryCommitInput struct {
 	Message        string
 	Branch         string
+	BaseRef        string
 	IdempotencyKey string
 	Files          []RepositoryCommitFile
+}
+
+// ChangeRequestInput is the host-neutral desired pull/merge request.
+type ChangeRequestInput struct {
+	BaseBranch string
+	HeadBranch string
+	Title      string
+	Body       string
+}
+
+// ChangeRequestResult is the current host-observed review state.
+type ChangeRequestResult struct {
+	Number    int64
+	URL       string
+	HeadSHA   string
+	Approvals int32
+	Open      bool
+	Merged    bool
+	MergeSHA  string
+}
+
+// ChangeRequester is implemented by git hosts that support reviewed changes.
+type ChangeRequester interface {
+	EnsureChangeRequest(context.Context, *codev1alpha1.Connection, Credential, *codev1alpha1.Repository, ChangeRequestInput) (ChangeRequestResult, error)
+	MergeChangeRequest(context.Context, *codev1alpha1.Connection, Credential, *codev1alpha1.Repository, int64, string) (ChangeRequestResult, error)
 }
 
 // RepositoryCommitResult is what a backend returns after moving the branch ref.

@@ -16,19 +16,20 @@ limitations under the License.
 
 // Promote to production (Phase D of the build→launch loop). "Production" is
 // not a mode flip on the Project — it is a SECOND environment alongside the
-// development sandbox: an artifact-mode ProjectEnvironment bound to a
-// "<project>-prod" instance of the SAME template, provisioned with
-// farosMode: production and each template imageInput set to the digest the
-// per-component build recorded in git. The user promotes explicitly ("Promote
-// to Prod") once the sandbox looks good and the build is green; promotion is
-// repeatable (re-promote redeploys the latest digests). The dev sandbox keeps
-// running untouched — see docs/app-studio-template-sandboxes.md.
+// development sandbox. Promotion records the exact reviewed source/artifacts
+// in an immutable Release and owns a "<project>-prod" Deployment through the
+// deployment provider. The provider's kro-direct class preserves today's
+// Infrastructure Template backend while moving its lifecycle behind a stable
+// deployment contract. The dev sandbox keeps running as a direct
+// Infrastructure binding — see docs/app-studio-template-sandboxes.md.
 
 package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -44,14 +46,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
+	"github.com/faroshq/provider-app-studio/tenant"
 )
 
 // projectRegistryPullSecretName is the tenant Secret (holding a ghcr
-// dockerconfigjson) the infrastructure provider bridges into the runtime
-// namespace for a production instance. Convention shared with infra:
+// dockerconfigjson) the kro-direct deployment driver currently expects the
+// infrastructure provider to bridge into the runtime namespace. This is a POC
+// compatibility path: registry credentials ultimately belong behind the
+// deployment-provider boundary. The transitional convention remains
 // "<instance>-registry" in the tenant default namespace.
 func projectRegistryPullSecretName(instanceName string) string {
 	return instanceName + "-registry"
@@ -151,6 +157,14 @@ const (
 	// pods without recreating the production instance (or its database).
 	projectRedeployRevisionField = "farosRedeployRevision"
 
+	projectDeploymentProvider   = "deployments"
+	projectDeploymentAPIVersion = "deployments.faros.sh/v1alpha1"
+	projectDeploymentKind       = "Deployment"
+	projectDeploymentResource   = "deployments"
+	projectReleaseKind          = "Release"
+	projectReleaseResource      = "releases"
+	projectDeploymentClassName  = "kro-direct"
+
 	projectToolPromoteProject = "promote_project"
 )
 
@@ -161,6 +175,10 @@ var projectPlatformOwnedProductionFields = map[string]struct{}{
 	"farosCluster":               {},
 	"credentialsSecretName":      {},
 }
+
+var (
+	projectReleaseGVR = schema.GroupVersionResource{Group: "deployments.faros.sh", Version: "v1alpha1", Resource: projectReleaseResource}
+)
 
 // Nested platform-owned fields need explicit paths because expose itself is a
 // mixed-ownership object: hostnamePrefix is a first-deploy tenant input, while
@@ -182,8 +200,15 @@ type projectPromoteResponse struct {
 	Environment     string                       `json:"environment"`
 	Instance        string                       `json:"instance"`
 	RolloutRevision string                       `json:"rolloutRevision"`
+	GitOps          *projectGitOpsPromotionView  `json:"gitOps,omitempty"`
 	Components      []projectBuildCheckComponent `json:"components,omitempty"`
 	Project         json.RawMessage              `json:"project,omitempty"`
+}
+
+type projectGitOpsPromotionView struct {
+	Phase         string `json:"phase"`
+	ChangeRequest string `json:"changeRequest"`
+	Branch        string `json:"branch"`
 }
 
 // newProjectRedeployRevision mints an opaque, non-secret rollout token. It is
@@ -245,6 +270,152 @@ func projectTemplateProdBinding(p *aiv1alpha1.Project, info projectTemplateInfo,
 		},
 		Values: runtime.RawExtension{Raw: raw},
 	}, nil
+}
+
+type projectReleaseArtifact struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+}
+
+type projectReleaseSpec struct {
+	Source struct {
+		RepositoryRef string `json:"repositoryRef"`
+		Revision      string `json:"revision"`
+	} `json:"source"`
+	BlueprintRef struct {
+		Name string `json:"name"`
+	} `json:"blueprintRef"`
+	Artifacts []projectReleaseArtifact `json:"artifacts"`
+}
+
+// projectDeploymentProdBinding validates the exact same Infrastructure
+// Template production schema as the legacy direct binding, then stores only
+// tenant-authored inputs under Deployment.spec.configuration. Images and the
+// reviewed source revision are immutable Release inputs; rolloutID is the
+// mutable redeploy trigger.
+func projectDeploymentProdBinding(p *aiv1alpha1.Project, info projectTemplateInfo, releaseName string, images map[string]string, values map[string]any, rolloutID string) (aiv1alpha1.ProjectProviderBindingSpec, error) {
+	name := projectTemplateProdInstanceName(p)
+	if name == "" {
+		return aiv1alpha1.ProjectProviderBindingSpec{}, fmt.Errorf("project has no name")
+	}
+	configuration := projectProductionInputValues(info, images, values)
+	if err := preserveAndValidateProjectImmutableInputs(p, info, configuration); err != nil {
+		return aiv1alpha1.ProjectProviderBindingSpec{}, err
+	}
+	validated := make(map[string]any, len(configuration)+len(images)+3)
+	for key, value := range configuration {
+		validated[key] = value
+	}
+	for imageInput, image := range images {
+		validated[imageInput] = image
+	}
+	validated["name"] = name
+	validated["farosMode"] = "production"
+	validated[projectRedeployRevisionField] = rolloutID
+	if err := validateProjectProductionValue(info.ProductionSchema, validated, "production settings"); err != nil {
+		return aiv1alpha1.ProjectProviderBindingSpec{}, newValidationError(err.Error())
+	}
+	raw, err := json.Marshal(map[string]any{
+		"releaseRef":    releaseName,
+		"className":     projectDeploymentClassName,
+		"configuration": configuration,
+		"rolloutID":     rolloutID,
+	})
+	if err != nil {
+		return aiv1alpha1.ProjectProviderBindingSpec{}, err
+	}
+	return aiv1alpha1.ProjectProviderBindingSpec{
+		Name:     projectProductionBindingName,
+		Provider: projectDeploymentProvider,
+		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+			Name:       name,
+			APIVersion: projectDeploymentAPIVersion,
+			Kind:       projectDeploymentKind,
+			Resource:   projectDeploymentResource,
+		},
+		Values: runtime.RawExtension{Raw: raw},
+	}, nil
+}
+
+func projectReleaseForPromotion(p *aiv1alpha1.Project, info projectTemplateInfo, commitSHA string, images map[string]string) (string, projectReleaseSpec, error) {
+	var spec projectReleaseSpec
+	if p == nil || p.Spec.Repository == nil || strings.TrimSpace(p.Spec.Repository.RepositoryRef) == "" {
+		return "", spec, newValidationError("project has no linked repository to release")
+	}
+	spec.Source.RepositoryRef = strings.TrimSpace(p.Spec.Repository.RepositoryRef)
+	spec.Source.Revision = strings.TrimSpace(commitSHA)
+	spec.BlueprintRef.Name = strings.TrimSpace(p.Spec.Template.Name)
+	for name, image := range images {
+		spec.Artifacts = append(spec.Artifacts, projectReleaseArtifact{Name: name, Image: image})
+	}
+	sort.Slice(spec.Artifacts, func(i, j int) bool { return spec.Artifacts[i].Name < spec.Artifacts[j].Name })
+	canonical, err := json.Marshal(spec)
+	if err != nil {
+		return "", spec, err
+	}
+	digest := sha256.Sum256(canonical)
+	prefix := strings.TrimSuffix(strings.TrimSpace(p.Name), "-")
+	if len(prefix) > 50 {
+		prefix = strings.TrimSuffix(prefix[:50], "-")
+	}
+	return prefix + "-" + hex.EncodeToString(digest[:])[:12], spec, nil
+}
+
+func ensureProjectRelease(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, name string, spec projectReleaseSpec) error {
+	desiredRaw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	var desired map[string]any
+	if err := json.Unmarshal(desiredRaw, &desired); err != nil {
+		return err
+	}
+	resource := c.Resource(tenant.Resource{GVR: projectReleaseGVR, Kind: projectReleaseKind, Plural: "Releases"}, "")
+	existing, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return verifyProjectReleaseSpec(name, existing, desired)
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": projectDeploymentAPIVersion,
+		"kind":       projectReleaseKind,
+		"metadata":   map[string]any{"name": name},
+		"spec":       desired,
+	}}
+	if owner := bindingsOwnerReference(p); owner != nil {
+		obj.SetOwnerReferences([]metav1.OwnerReference{*owner})
+	}
+	_, err = resource.Create(ctx, obj, metav1.CreateOptions{})
+	if !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	existing, err = resource.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	return verifyProjectReleaseSpec(name, existing, desired)
+}
+
+func verifyProjectReleaseSpec(name string, release *unstructured.Unstructured, desired map[string]any) error {
+	observed, found, err := unstructured.NestedMap(release.Object, "spec")
+	if err != nil || !found {
+		return fmt.Errorf("existing Release %q has no readable spec", name)
+	}
+	if !reflect.DeepEqual(observed, desired) {
+		return fmt.Errorf("immutable Release %q already exists with different contents", name)
+	}
+	return nil
+}
+
+func bindingsOwnerReference(p *aiv1alpha1.Project) *metav1.OwnerReference {
+	if p == nil || p.UID == "" {
+		return nil
+	}
+	controller := true
+	return &metav1.OwnerReference{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project", Name: p.Name, UID: p.UID, Controller: &controller}
 }
 
 // projectProductionInputValues keeps the promotion boundary honest even when
@@ -398,7 +569,7 @@ func preserveAndValidateProjectImmutableInputs(p *aiv1alpha1.Project, info proje
 	if existing == nil {
 		return nil
 	}
-	previous := projectBindingValues(existing)
+	previous := projectProductionConfiguration(existing)
 	for _, path := range projectProductionImmutableInputPaths(info) {
 		oldValue, oldFound := projectNestedValue(previous, path)
 		if !oldFound {
@@ -558,8 +729,29 @@ func projectBindingValues(binding *aiv1alpha1.ProjectProviderBindingSpec) map[st
 	return values
 }
 
+func projectIsDeploymentBinding(binding *aiv1alpha1.ProjectProviderBindingSpec) bool {
+	return binding != nil && binding.ResourceRef != nil &&
+		binding.Provider == projectDeploymentProvider &&
+		binding.ResourceRef.APIVersion == projectDeploymentAPIVersion &&
+		binding.ResourceRef.Kind == projectDeploymentKind &&
+		binding.ResourceRef.Resource == projectDeploymentResource
+}
+
+func projectProductionConfiguration(binding *aiv1alpha1.ProjectProviderBindingSpec) map[string]any {
+	values := projectBindingValues(binding)
+	if !projectIsDeploymentBinding(binding) {
+		return values
+	}
+	configuration, _ := values["configuration"].(map[string]any)
+	return configuration
+}
+
 func projectRequestedRedeployRevision(binding *aiv1alpha1.ProjectProviderBindingSpec) string {
 	values := projectBindingValues(binding)
+	if projectIsDeploymentBinding(binding) {
+		revision, _ := values["rolloutID"].(string)
+		return strings.TrimSpace(revision)
+	}
 	revision, _ := values[projectRedeployRevisionField].(string)
 	return strings.TrimSpace(revision)
 }
@@ -599,9 +791,11 @@ func (s *Server) promoteProject(ctx context.Context, c *asclient.Client, id iden
 	}
 
 	images := make(map[string]string, len(check.Components))
+	artifacts := make(map[string]string, len(check.Components))
 	for _, comp := range check.Components {
 		if comp.ImageInput != "" && comp.Image != "" {
 			images[comp.ImageInput] = comp.Image
+			artifacts[comp.Name] = comp.Image
 		}
 	}
 	if len(images) == 0 {
@@ -609,19 +803,53 @@ func (s *Server) promoteProject(ctx context.Context, c *asclient.Client, id iden
 	}
 
 	rolloutRevision := newProjectRedeployRevision()
-	binding, err := projectTemplateProdBinding(p, info, images, values, rolloutRevision)
+	releaseName, releaseSpec, err := projectReleaseForPromotion(p, info, check.CommitSHA, artifacts)
 	if err != nil {
+		return nil, projectPromoteResponse{}, err
+	}
+	binding, err := projectDeploymentProdBinding(p, info, releaseName, images, values, rolloutRevision)
+	if err != nil {
+		return nil, projectPromoteResponse{}, err
+	}
+	if projectProductionIsGitManaged(p) {
+		deploymentValues := projectBindingValues(&binding)
+		configuration, _ := deploymentValues["configuration"].(map[string]any)
+		gitBinding, gitView, err := s.proposeProjectGitOpsPromotion(ctx, c, id, p, httpReq, releaseName, releaseSpec, configuration)
+		if err != nil {
+			return nil, projectPromoteResponse{}, err
+		}
+		next := p.DeepCopy()
+		upsertProjectProductionBinding(next, gitBinding)
+		// Registry credential delivery remains outside Git: secret material is
+		// runtime authority, not desired configuration committed to a repo.
+		_ = s.ensureProjectRegistryPullSecret(ctx, c, p)
+		updated, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, projectPromoteResponse{}, err
+		}
+		raw, _ := json.Marshal(updated)
+		return updated, projectPromoteResponse{
+			Environment: projectProductionEnvironmentName,
+			Instance:    projectTemplateProdInstanceName(p),
+			// No rollout exists until the PR merges and RepositorySync records
+			// the immutable configuration revision.
+			RolloutRevision: "",
+			GitOps:          &gitView,
+			Components:      check.Components,
+			Project:         raw,
+		}, nil
+	}
+	if err := ensureProjectRelease(ctx, c, p, releaseName, releaseSpec); err != nil {
 		return nil, projectPromoteResponse{}, err
 	}
 
 	next := p.DeepCopy()
 	upsertProjectProductionBinding(next, binding)
 
-	// Mint a ghcr image-pull credential (from the Code connection's token) as a
-	// tenant Secret so the infrastructure provider can bridge it into the
-	// runtime namespace — production images are private packages the runtime
-	// cluster cannot otherwise pull. Best-effort: a public image needs none, so
-	// a failure here must not block promotion.
+	// Transitional POC compatibility: mint the pull credential expected by the
+	// current kro-direct/Infrastructure backend. The deployment provider should
+	// own this boundary once registry credential delivery is part of its target
+	// contract. Best-effort remains intentional because public images need none.
 	_ = s.ensureProjectRegistryPullSecret(ctx, c, p)
 
 	updated, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
@@ -654,7 +882,9 @@ func upsertProjectProductionBinding(p *aiv1alpha1.Project, binding aiv1alpha1.Pr
 		}
 		kept := env.Bindings[:0]
 		for _, b := range env.Bindings {
-			if strings.TrimSpace(b.Name) == projectProductionBindingName && b.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+			managedReference := b.Kind == aiv1alpha1.ProjectBindingKindProviderReference && projectIsDeploymentBinding(&b)
+			if strings.TrimSpace(b.Name) == projectProductionBindingName &&
+				(b.Kind != aiv1alpha1.ProjectBindingKindProviderReference || managedReference) {
 				continue
 			}
 			kept = append(kept, b)
@@ -720,7 +950,8 @@ func findProjectProductionBinding(p *aiv1alpha1.Project) *aiv1alpha1.ProjectProv
 			continue
 		}
 		for j := range env.Bindings {
-			if strings.TrimSpace(env.Bindings[j].Name) == projectProductionBindingName && env.Bindings[j].Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+			if strings.TrimSpace(env.Bindings[j].Name) == projectProductionBindingName &&
+				(env.Bindings[j].Kind != aiv1alpha1.ProjectBindingKindProviderReference || projectIsDeploymentBinding(&env.Bindings[j])) {
 				return &env.Bindings[j]
 			}
 		}
@@ -768,7 +999,7 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 	// (development) environment status surface, so read the production
 	// binding's status directly for its phase and serving URL.
 	if prod := findProjectProductionBinding(p); prod != nil {
-		resp.ProductionValues = projectBindingValues(prod)
+		resp.ProductionValues = projectProductionConfiguration(prod)
 		resp.RequestedRolloutRevision = projectRequestedRedeployRevision(prod)
 		st := projectProviderBindingStatus(r.Context(), c, p, *prod, id)
 		resp.Production = &st
@@ -776,15 +1007,39 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 		// so clients can distinguish the old Ready deployment from a rollout
 		// revision the Project controller has actually delivered downstream.
 		if instance, observeErr := observeProjectProviderBinding(r.Context(), c, p, *prod, id); observeErr == nil {
+			if projectProductionIsGitManaged(p) && projectIsDeploymentBinding(prod) {
+				if configuration, rolloutID := projectGitOpsObservedProduction(instance); configuration != nil {
+					resp.ProductionValues = configuration
+					if rolloutID != "" {
+						resp.RequestedRolloutRevision = rolloutID
+					}
+				}
+			}
 			resp.ObservedRolloutRevision = projectObservedRedeployRevision(instance)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func projectGitOpsObservedProduction(instance *unstructured.Unstructured) (map[string]any, string) {
+	if instance == nil {
+		return nil, ""
+	}
+	configuration, found, err := unstructured.NestedMap(instance.Object, "spec", "configuration")
+	if err != nil || !found {
+		return nil, ""
+	}
+	rolloutID, _, _ := unstructured.NestedString(instance.Object, "spec", "rolloutID")
+	return configuration, strings.TrimSpace(rolloutID)
+}
+
 func projectObservedRedeployRevision(instance *unstructured.Unstructured) string {
 	if instance == nil {
 		return ""
+	}
+	if instance.GetAPIVersion() == projectDeploymentAPIVersion && instance.GetKind() == projectDeploymentKind {
+		revision, _, _ := unstructured.NestedString(instance.Object, "status", "observedRolloutID")
+		return strings.TrimSpace(revision)
 	}
 	revision, _, _ := unstructured.NestedString(instance.Object, "spec", projectRedeployRevisionField)
 	return strings.TrimSpace(revision)

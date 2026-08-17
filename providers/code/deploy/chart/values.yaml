@@ -38,6 +38,10 @@ hub:
 providerKubeconfig:
   secretName: faros-provider-kubeconfig
 
+# REQUIRED: identityHash of deployments.faros.sh. RepositorySync writes only
+# the claimed Release and Deployment resources in tenant workspaces.
+deploymentsIdentityHash: ""
+
 # GitHub "Connect with GitHub" OAuth App (optional). When enabled, the portal
 # shows a "Connect with GitHub" button and mints OAuth tokens (with read:packages
 # so the repository Packages panel works). Leave disabled to use pasted Personal

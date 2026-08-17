@@ -37,6 +37,7 @@ spec:
   dependencies:
     - name: code
     - name: infrastructure
+    - name: deployments
   ui:
     # Dev loopback port (PORT / Tiltfile run-provider-app-studio). 8085 to
     # avoid colliding with quickstart (8081) and kuery (8084).
@@ -57,6 +58,16 @@ spec:
     # tenant APIBinding at Enable time; a claim missing here is silently
     # denied at reconcile.
     permissionClaims:
+      # Immutable release evidence and deployment desired state. The deployment
+      # provider owns translation to Infrastructure (or another CD backend).
+      - resource: releases
+        group: deployments.faros.sh
+        verbs: ["get", "list", "watch", "create"]
+        tenantScoped: true
+      - resource: deployments
+        group: deployments.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        tenantScoped: true
       # Infrastructure instances the Project reconciler lifecycles from a
       # project's live bindings.
       - resource: applications
@@ -87,6 +98,14 @@ spec:
       - resource: repositories
         group: code.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch"]
+        tenantScoped: true
+      - resource: repositorysyncs
+        group: code.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        tenantScoped: true
+      - resource: changerequests
+        group: code.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
       # Per-project ServiceAccount identity for reconciler commits, plus
       # per-workspace LLM credential Secrets.

@@ -635,6 +635,8 @@ func TestRecoverConcurrentCommitReturnsHeadWhenRacedBaseRemovedDeletion(t *testi
 
 func TestCommitFilesRecoversWhenConcurrentCreateRefAlreadyAppliedDesiredTree(t *testing.T) {
 	const (
+		baseTreeSHA    = "tree-base"
+		baseCommitSHA  = "commit-base"
 		desiredTreeSHA = "tree-desired"
 		nextCommitSHA  = "commit-next"
 		idempotencyKey = "commit-uid"
@@ -652,6 +654,16 @@ func TestCommitFilesRecoversWhenConcurrentCreateRefAlreadyAppliedDesiredTree(t *
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"ref":"refs/heads/main","object":{"type":"commit","sha":%q}}`, nextCommitSHA)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/commits/main" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q}`, baseCommitSHA)
+			return
+		}
+		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits/"+baseCommitSHA && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"sha":%q,"tree":{"sha":%q}}`, baseCommitSHA, baseTreeSHA)
 			return
 		}
 		if r.URL.Path == "/api/v3/repos/acme/widgets/git/commits/"+nextCommitSHA && r.Method == http.MethodGet {
@@ -701,6 +713,45 @@ func TestCommitFilesRecoversWhenConcurrentCreateRefAlreadyAppliedDesiredTree(t *
 	}
 	if getRefCalls != 2 {
 		t.Fatalf("get ref calls = %d, want initial miss + recovery", getRefCalls)
+	}
+}
+
+func TestCommitFilesForksMissingBranchFromBaseRef(t *testing.T) {
+	var commitBody, refBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/git/ref/heads/faros/update":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/commits/main":
+			_, _ = w.Write([]byte(`{"sha":"base-sha"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/git/commits/base-sha":
+			_, _ = w.Write([]byte(`{"sha":"base-sha","tree":{"sha":"base-tree"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/git/trees":
+			_, _ = w.Write([]byte(`{"sha":"next-tree"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/git/commits":
+			commitBody = mustReadRequestBody(t, r)
+			_, _ = w.Write([]byte(`{"sha":"next-sha","tree":{"sha":"next-tree"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/git/refs":
+			refBody = mustReadRequestBody(t, r)
+			_, _ = w.Write([]byte(`{"ref":"refs/heads/faros/update","object":{"sha":"next-sha"}}`))
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	result, err := New().CommitFiles(context.Background(), &codev1alpha1.Connection{Spec: codev1alpha1.ConnectionSpec{Owner: "acme", BaseURL: srv.URL}}, backend.Credential{Token: "token"}, &codev1alpha1.Repository{Spec: codev1alpha1.RepositorySpec{Name: "widgets", DefaultBranch: "main"}}, backend.RepositoryCommitInput{Branch: "faros/update", BaseRef: "main", Files: []backend.RepositoryCommitFile{{Path: ".faros/deployment.yaml", Content: "desired"}}})
+	if err != nil {
+		t.Fatalf("CommitFiles returned error: %v", err)
+	}
+	if result.Branch != "faros/update" || result.CommitSHA != "next-sha" {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(commitBody, `"parents":["base-sha"]`) {
+		t.Fatalf("commit did not parent from base history: %s", commitBody)
+	}
+	if !strings.Contains(refBody, `"ref":"refs/heads/faros/update"`) || !strings.Contains(refBody, `"sha":"next-sha"`) {
+		t.Fatalf("new branch ref body = %s", refBody)
 	}
 }
 

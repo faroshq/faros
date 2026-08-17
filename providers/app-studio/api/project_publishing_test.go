@@ -46,13 +46,18 @@ func publishingTestDynamic(objects ...runtime.Object) *fake.FakeDynamicClient {
 	return fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			asclient.ProjectGVR:     "ProjectList",
-			publishingTestTargetGVR: "ApplicationList",
-			clusterRoleGVR:          "ClusterRoleList",
-			clusterRoleBindingGVR:   "ClusterRoleBindingList",
+			asclient.ProjectGVR:           "ProjectList",
+			publishingTestTargetGVR:       "ApplicationList",
+			projectDeploymentGVRForTest(): "DeploymentList",
+			clusterRoleGVR:                "ClusterRoleList",
+			clusterRoleBindingGVR:         "ClusterRoleBindingList",
 		},
 		objects...,
 	)
+}
+
+func projectDeploymentGVRForTest() schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: "deployments.faros.sh", Version: "v1alpha1", Resource: "deployments"}
 }
 
 func publishingTestServer(t *testing.T, dyn *fake.FakeDynamicClient, members ...publishingMember) *mux.Router {
@@ -99,6 +104,56 @@ func publishingTestProjectTyped(name, uid, access string) *aiv1alpha1.Project {
 func publishingTestProject(name, uid, access string) *unstructured.Unstructured {
 	object, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(publishingTestProjectTyped(name, uid, access))
 	return &unstructured.Unstructured{Object: object}
+}
+
+func publishingTestDeploymentProject(name, uid, access string) *unstructured.Unstructured {
+	configuration := map[string]any{"replicas": float64(2)}
+	if access != "" {
+		configuration["access"] = access
+	}
+	p := &aiv1alpha1.Project{
+		TypeMeta:   metav1.TypeMeta{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(uid)},
+		Spec: aiv1alpha1.ProjectSpec{
+			Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: projectProductionEnvironmentName,
+				Mode: aiv1alpha1.ProjectEnvironmentModeArtifact,
+				Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+					Name: projectProductionBindingName, Provider: projectDeploymentProvider,
+					Kind: aiv1alpha1.ProjectBindingKindProviderResource,
+					ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+						Name: name + "-prod", APIVersion: projectDeploymentAPIVersion, Kind: projectDeploymentKind, Resource: projectDeploymentResource,
+					},
+					Values: rawJSONForPublishing(map[string]any{
+						"releaseRef": "release-abc", "className": projectDeploymentClassName,
+						"configuration": configuration, "rolloutID": "rollout-1",
+					}),
+				}},
+			}},
+		},
+	}
+	object, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(p)
+	return &unstructured.Unstructured{Object: object}
+}
+
+func publishingTestDeployment(name, backendUID string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": projectDeploymentAPIVersion,
+		"kind":       projectDeploymentKind,
+		"metadata":   map[string]any{"name": name},
+		"status": map[string]any{
+			"phase": "Ready",
+			"url":   "https://" + name + "-abc.apps.test",
+			"backendRef": map[string]any{
+				"apiVersion": publishingTestTargetGVR.GroupVersion().String(),
+				"kind":       "Application",
+				"resource":   "applications",
+				"name":       name,
+				"uid":        backendUID,
+			},
+		},
+	}}
 }
 
 func publishingTestTarget(name, uid, specAccess, url string) *unstructured.Unstructured {
@@ -224,6 +279,74 @@ func TestPublishReportsPendingUntilInstanceConverges(t *testing.T) {
 	}
 }
 
+func TestDeploymentPublishingResolvesBackendAndMutatesConfigurationOnly(t *testing.T) {
+	dyn := publishingTestDynamic(
+		publishingTestDeploymentProject("demo", "project-uid", "private"),
+		publishingTestDeployment("demo-prod", "runtime-uid-1"),
+		publishingTestTarget("demo-prod", "runtime-uid-1", "public", "https://demo-prod-abc.apps.test"),
+	)
+	router := publishingTestServer(t, dyn)
+	rec := publishingDo(t, router, http.MethodPost, "/api/projects/demo/publishing", `{"mode":"public"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish deployment status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body projectPublishingResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Publication == nil || !body.Publication.Ready || body.Publication.UID != "runtime-uid-1" ||
+		body.Publication.Target.APIVersion != publishingTestTargetGVR.GroupVersion().String() ||
+		body.Publication.Target.Resource != "applications" {
+		t.Fatalf("deployment publication = %+v, want resolved Infrastructure backend", body.Publication)
+	}
+	stored, err := dyn.Resource(asclient.ProjectGVR).Get(context.Background(), "demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environments, _, _ := unstructured.NestedSlice(stored.Object, "spec", "environments")
+	environment, _ := environments[0].(map[string]any)
+	bindings, _ := environment["bindings"].([]any)
+	binding, _ := bindings[0].(map[string]any)
+	bindingValues, _ := binding["values"].(map[string]any)
+	configuration, _ := bindingValues["configuration"].(map[string]any)
+	if configuration["access"] != "public" || configuration["replicas"] != float64(2) {
+		t.Fatalf("deployment configuration = %#v", configuration)
+	}
+	if bindingValues["releaseRef"] != "release-abc" || bindingValues["rolloutID"] != "rollout-1" {
+		t.Fatalf("publishing mutated deployment identity: %#v", bindingValues)
+	}
+	if _, flatAccess := bindingValues["access"]; flatAccess {
+		t.Fatalf("publishing wrote legacy flat access onto Deployment: %#v", bindingValues)
+	}
+}
+
+func TestDeploymentGrantTargetsResolvedBackendAccessSubresource(t *testing.T) {
+	dyn := publishingTestDynamic(
+		publishingTestDeploymentProject("demo", "project-uid", "private"),
+		publishingTestDeployment("demo-prod", "runtime-uid-1"),
+		publishingTestTarget("demo-prod", "runtime-uid-1", "private", "https://demo-prod-abc.apps.test"),
+	)
+	router := publishingTestServer(t, dyn, publishingMember{User: "bob", RBACIdentity: "faros:bob@example.com", Role: "member"})
+	rec := publishingDo(t, router, http.MethodPost, "/api/projects/demo/publishing/grants", `{"user":"bob"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deployment grant status = %d: %s", rec.Code, rec.Body.String())
+	}
+	role, err := dyn.Resource(clusterRoleGVR).Get(context.Background(), appAccessRoleName("demo-prod"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, _, _ := unstructured.NestedSlice(role.Object, "rules")
+	rule, _ := rules[0].(map[string]any)
+	groups, _ := rule["apiGroups"].([]any)
+	resources, _ := rule["resources"].([]any)
+	names, _ := rule["resourceNames"].([]any)
+	if len(groups) != 1 || groups[0] != publishingTestTargetGVR.Group ||
+		len(resources) != 1 || resources[0] != "applications/access" ||
+		len(names) != 1 || names[0] != "demo-prod" {
+		t.Fatalf("resolved backend access rule = %#v", rule)
+	}
+}
+
 func TestUnpublishedProjectReportsNotPublished(t *testing.T) {
 	project := &aiv1alpha1.Project{
 		TypeMeta:   metav1.TypeMeta{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project"},
@@ -246,6 +369,23 @@ func TestUnpublishedProjectReportsNotPublished(t *testing.T) {
 	rec = publishingDo(t, router, http.MethodPost, "/api/projects/demo/publishing", `{"mode":"public"}`)
 	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("publish without production status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProductionGitOpsRejectsDirectPublishingMutation(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Spec: aiv1alpha1.ProjectSpec{
+		Delivery:   defaultProjectDelivery(),
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+	}}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	if findProjectProductionBinding(p) != nil {
+		t.Fatal("a ready RepositorySync/configuration binding must not be presented as a deployed production binding")
+	}
+	updated, err := (&Server{}).setProductionAccess(context.Background(), nil, p, accessPublic)
+	if err == nil || !strings.Contains(err.Error(), "Git-managed") {
+		t.Fatalf("setProductionAccess = %#v, %v; want production GitOps ownership rejection", updated, err)
 	}
 }
 

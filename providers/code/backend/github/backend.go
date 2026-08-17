@@ -203,7 +203,34 @@ func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection
 	if ref != nil && ref.GetObject() != nil {
 		headSHA = ref.GetObject().GetSHA()
 	}
-	if headSHA != "" && strings.TrimSpace(input.IdempotencyKey) != "" {
+	// A new feature branch must always fork from existing history. Creating an
+	// empty-root branch makes reviewed config changes silently discard the
+	// application tree when merged.
+	if headSHA == "" {
+		baseRef := strings.TrimSpace(input.BaseRef)
+		if baseRef == "" {
+			baseRef = strings.TrimSpace(repo.Spec.DefaultBranch)
+		}
+		if baseRef == "" {
+			hostRepo, getResp, getErr := c.Repositories.Get(ctx, org, repo.Spec.Name)
+			if getErr != nil {
+				return backend.RepositoryCommitResult{}, classify(getResp, getErr)
+			}
+			baseRef = strings.TrimSpace(hostRepo.GetDefaultBranch())
+		}
+		if baseRef == "" {
+			return backend.RepositoryCommitResult{}, errors.New("github: target branch does not exist and no base ref is available")
+		}
+		baseCommit, getResp, getErr := c.Repositories.GetCommit(ctx, org, repo.Spec.Name, baseRef, nil)
+		if getErr != nil {
+			return backend.RepositoryCommitResult{}, fmt.Errorf("github: resolve base ref %q: %w", baseRef, classify(getResp, getErr))
+		}
+		headSHA = baseCommit.GetSHA()
+		if headSHA == "" {
+			return backend.RepositoryCommitResult{}, fmt.Errorf("github: base ref %q resolved without a commit SHA", baseRef)
+		}
+	}
+	if ref != nil && strings.TrimSpace(input.IdempotencyKey) != "" {
 		prior, found, err := findRepositoryCommitByIdempotencyKey(ctx, c, org, repo.Spec.Name, branch, input.IdempotencyKey)
 		if err != nil {
 			return backend.RepositoryCommitResult{}, err
@@ -273,7 +300,7 @@ func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection
 			SHA: commit.SHA,
 		},
 	}
-	if headSHA == "" {
+	if ref == nil {
 		_, resp, err = c.Git.CreateRef(ctx, org, repo.Spec.Name, nextRef)
 	} else {
 		_, resp, err = c.Git.UpdateRef(ctx, org, repo.Spec.Name, nextRef, false)

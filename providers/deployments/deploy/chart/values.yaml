@@ -1,0 +1,19 @@
+image:
+  repository: ghcr.io/faroshq/faros-deployments-provider
+  tag: ""
+  pullPolicy: IfNotPresent
+replicaCount: 1
+service:
+  port: 8093
+providerKubeconfig:
+  secretName: faros-provider-kubeconfig
+infrastructureIdentityHash: ""
+hub:
+  url: https://faros-hub.faros.svc.cluster.local:9443
+  tokenSecretRef:
+    name: faros-deployments-hub-token
+    key: token
+  insecure: false
+catalogEntry:
+  enabled: true
+resources: {}

@@ -20,17 +20,94 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/tenant"
 )
+
+func TestGitManagedPromotionCreatesChangeRequestWithoutDirectDeploymentWrites(t *testing.T) {
+	base := metav1.Now().Time
+	p := projectForPromoteWithRepository("shop", "repo-a")
+	p.Spec.DisplayName = "Shop"
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	client := newProjectBuildProvenanceClient(p,
+		[]*unstructured.Unstructured{repositoryCommitForBuildTest("current", "repo-a", "repo-a", "Succeeded", "commit-current", base)},
+		[]*unstructured.Unstructured{
+			projectBuildPackageForTest("repo-a", "frontend", "ghcr.io/acme/shop/frontend", map[string]any{"digest": "sha256:front", "tags": []any{"sha-commit-current"}}),
+			projectBuildPackageForTest("repo-a", "backend", "ghcr.io/acme/shop/backend", map[string]any{"digest": "sha256:back", "tags": []any{"sha-commit-current"}}),
+		},
+	)
+	var commitArguments map[string]any
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Params.Name != projectToolCodeCommitFiles {
+			t.Fatalf("MCP tool = %q", envelope.Params.Name)
+		}
+		commitArguments = envelope.Params.Arguments
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"committed"}]}}`))
+	}))
+	defer mcp.Close()
+
+	persisted, err := client.Projects().Get(context.Background(), p.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	promoted, response, err := (&Server{hubBase: mcp.URL}).promoteProject(
+		context.Background(), client, identity{clusterID: "cluster-a", tenantPath: "root:tenant-a"}, persisted, request,
+		map[string]any{"frontendPort": float64(8080), "backendPort": float64(3000)},
+	)
+	if err != nil {
+		t.Fatalf("promoteProject: %v", err)
+	}
+	if response.GitOps == nil || response.GitOps.Phase != "PendingApproval" || response.GitOps.ChangeRequest == "" {
+		t.Fatalf("GitOps response = %+v", response.GitOps)
+	}
+	if commitArguments["baseRef"] != projectGitOpsDefaultBranch || !strings.HasPrefix(commitArguments["branch"].(string), "faros/promote-") {
+		t.Fatalf("commit arguments = %#v", commitArguments)
+	}
+	binding := findProjectProductionBinding(promoted)
+	if binding == nil || binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || !projectIsDeploymentBinding(binding) {
+		t.Fatalf("production binding = %+v, want read-only Deployment reference", binding)
+	}
+	changeRequest, err := client.Resource(tenant.Resource{GVR: projectChangeRequestGVR, Kind: projectChangeRequestKind, Plural: "ChangeRequests"}, "").Get(context.Background(), response.GitOps.ChangeRequest, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ChangeRequest: %v", err)
+	}
+	if policy, _, _ := unstructured.NestedString(changeRequest.Object, "spec", "mergePolicy"); policy != "AfterApproval" {
+		t.Fatalf("merge policy = %q", policy)
+	}
+	if _, err := client.Resource(tenant.Resource{GVR: projectReleaseGVR, Kind: projectReleaseKind, Plural: "Releases"}, "").Get(context.Background(), projectBindingValues(binding)["releaseRef"].(string), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("direct Release read error = %v, want NotFound", err)
+	}
+	deploymentGVR := schema.GroupVersionResource{Group: "deployments.faros.sh", Version: "v1alpha1", Resource: "deployments"}
+	if _, err := client.Resource(tenant.Resource{GVR: deploymentGVR, Kind: projectDeploymentKind, Plural: "Deployments"}, "").Get(context.Background(), projectTemplateProdInstanceName(p), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("direct Deployment read error = %v, want NotFound", err)
+	}
+}
 
 func applicationTemplateForPromote() projectTemplateInfo {
 	info := applicationTemplateInfo()
@@ -360,6 +437,87 @@ func TestProjectRequestedRedeployRevisionReadsPersistedProductionValues(t *testi
 	}
 }
 
+func TestProjectDeploymentBindingUsesNestedConfigurationAndRolloutID(t *testing.T) {
+	p := projectForPromote("shop")
+	info := applicationTemplateForPromote()
+	images := map[string]string{
+		"frontendImage": "ghcr.io/acme/shop/frontend@sha256:aaa",
+		"backendImage":  "ghcr.io/acme/shop/backend@sha256:bbb",
+	}
+	binding, err := projectDeploymentProdBinding(p, info, "shop-release-abc", images, map[string]any{
+		"frontendPort": 8080,
+		"name":         "attacker",
+		"farosMode":    "development",
+	}, "rollout-42")
+	if err != nil {
+		t.Fatalf("projectDeploymentProdBinding: %v", err)
+	}
+	if binding.Provider != projectDeploymentProvider || binding.ResourceRef == nil ||
+		binding.ResourceRef.APIVersion != projectDeploymentAPIVersion ||
+		binding.ResourceRef.Kind != projectDeploymentKind ||
+		binding.ResourceRef.Resource != projectDeploymentResource ||
+		binding.ResourceRef.Name != "shop-prod" {
+		t.Fatalf("deployment binding = %+v", binding)
+	}
+	values, err := aiv1alpha1BindingValues(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["releaseRef"] != "shop-release-abc" || values["className"] != projectDeploymentClassName || values["rolloutID"] != "rollout-42" {
+		t.Fatalf("deployment values = %#v", values)
+	}
+	configuration, _ := values["configuration"].(map[string]any)
+	if configuration["frontendPort"] != float64(8080) {
+		t.Fatalf("configuration = %#v, want tenant production input", configuration)
+	}
+	for _, reserved := range []string{"name", "farosMode", "frontendImage", "backendImage", projectRedeployRevisionField} {
+		if _, found := configuration[reserved]; found {
+			t.Fatalf("configuration retained platform-owned %q: %#v", reserved, configuration)
+		}
+	}
+	if got := projectProductionConfiguration(&binding); !reflect.DeepEqual(got, configuration) {
+		t.Fatalf("production configuration = %#v, want %#v", got, configuration)
+	}
+	if got := projectRequestedRedeployRevision(&binding); got != "rollout-42" {
+		t.Fatalf("requested rollout = %q, want rollout-42", got)
+	}
+}
+
+func TestProjectReleaseForPromotionIsDeterministicAndArtifactOrdered(t *testing.T) {
+	p := projectForPromoteWithRepository("shop", "repo-a")
+	info := applicationTemplateForPromote()
+	firstName, first, err := projectReleaseForPromotion(p, info, "commit-abc", map[string]string{
+		"frontend": "frontend@sha256:aaa",
+		"backend":  "backend@sha256:bbb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondName, second, err := projectReleaseForPromotion(p, info, "commit-abc", map[string]string{
+		"backend":  "backend@sha256:bbb",
+		"frontend": "frontend@sha256:aaa",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstName != secondName || !reflect.DeepEqual(first, second) {
+		t.Fatalf("release is not deterministic: %q %#v / %q %#v", firstName, first, secondName, second)
+	}
+	if first.Source.RepositoryRef != "repo-a" || first.Source.Revision != "commit-abc" || first.BlueprintRef.Name != "application" {
+		t.Fatalf("release source/blueprint = %#v", first)
+	}
+	if len(first.Artifacts) != 2 || first.Artifacts[0].Name != "backend" || first.Artifacts[1].Name != "frontend" {
+		t.Fatalf("release artifacts = %#v, want stable component-name ordering", first.Artifacts)
+	}
+	changedName, _, err := projectReleaseForPromotion(p, info, "commit-def", map[string]string{"frontend": "frontend@sha256:aaa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedName == firstName {
+		t.Fatalf("different release evidence reused name %q", firstName)
+	}
+}
+
 func TestProjectTemplateProdBindingMintsDistinctRevisionsAndHonorsExplicitRevision(t *testing.T) {
 	p := projectForPromote("shop")
 	images := map[string]string{"frontendImage": "frontend@sha256:aaa"}
@@ -432,6 +590,25 @@ func TestProjectObservedRedeployRevisionReadsProviderInstanceSpec(t *testing.T) 
 	}
 	if got := projectObservedRedeployRevision(nil); got != "" {
 		t.Fatalf("nil instance revision = %q, want empty", got)
+	}
+	deployment := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": projectDeploymentAPIVersion,
+		"kind":       projectDeploymentKind,
+		"status":     map[string]any{"observedRolloutID": " deployment-rollout-42 "},
+	}}
+	if got := projectObservedRedeployRevision(deployment); got != "deployment-rollout-42" {
+		t.Fatalf("deployment observed rollout = %q, want deployment-rollout-42", got)
+	}
+}
+
+func TestGitOpsProductionReadUsesLiveDeploymentInsteadOfProjectSnapshot(t *testing.T) {
+	instance := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"configuration": map[string]any{"replicas": int64(4)},
+		"rolloutID":     "merged-config-sha",
+	}}}
+	configuration, rolloutID := projectGitOpsObservedProduction(instance)
+	if !reflect.DeepEqual(configuration, map[string]any{"replicas": int64(4)}) || rolloutID != "merged-config-sha" {
+		t.Fatalf("observed configuration = %#v rollout = %q", configuration, rolloutID)
 	}
 }
 
@@ -507,13 +684,48 @@ func TestProjectBuildAndPromotionRequireExactReviewedCommitImages(t *testing.T) 
 				t.Fatalf("build status = %q, want %q (check=%+v)", check.Status, tc.wantBuild, check)
 			}
 
-			_, _, promoteErr := (&Server{}).promoteProject(context.Background(), client, identity{}, persisted, nil, nil)
+			promoted, response, promoteErr := (&Server{}).promoteProject(context.Background(), client, identity{}, persisted, nil, nil)
 			if tc.wantPromotErr {
 				if promoteErr == nil || !strings.Contains(promoteErr.Error(), "not ready to promote") {
 					t.Fatalf("promoteProject error = %v, want not-ready validation error", promoteErr)
 				}
 			} else if promoteErr != nil {
 				t.Fatalf("promoteProject returned error for complete exact tags: %v", promoteErr)
+			} else {
+				binding := findProjectProductionBinding(promoted)
+				if !projectIsDeploymentBinding(binding) {
+					t.Fatalf("promotion binding = %+v, want deployment provider", binding)
+				}
+				values := projectBindingValues(binding)
+				releaseName, _ := values["releaseRef"].(string)
+				if releaseName == "" || values["rolloutID"] != response.RolloutRevision {
+					t.Fatalf("promotion values = %#v, response = %+v", values, response)
+				}
+				release, getErr := client.Resource(tenant.Resource{GVR: projectReleaseGVR, Kind: projectReleaseKind, Plural: "Releases"}, "").Get(context.Background(), releaseName, metav1.GetOptions{})
+				if getErr != nil {
+					t.Fatalf("get immutable release: %v", getErr)
+				}
+				if revision, _, _ := unstructured.NestedString(release.Object, "spec", "source", "revision"); revision != "commit-current" {
+					t.Fatalf("release revision = %q, want commit-current", revision)
+				}
+				artifacts, _, _ := unstructured.NestedSlice(release.Object, "spec", "artifacts")
+				if len(artifacts) != 2 {
+					t.Fatalf("release artifacts = %#v, want exact two-component evidence", artifacts)
+				}
+
+				// Re-promoting the same exact evidence reuses the immutable Release
+				// while minting a fresh rollout identity.
+				again, secondResponse, secondErr := (&Server{}).promoteProject(context.Background(), client, identity{}, promoted, nil, nil)
+				if secondErr != nil {
+					t.Fatalf("re-promote exact release: %v", secondErr)
+				}
+				secondValues := projectBindingValues(findProjectProductionBinding(again))
+				if secondValues["releaseRef"] != releaseName {
+					t.Fatalf("re-promote releaseRef = %#v, want %q", secondValues["releaseRef"], releaseName)
+				}
+				if secondResponse.RolloutRevision == response.RolloutRevision {
+					t.Fatalf("re-promote rolloutID reused %q", response.RolloutRevision)
+				}
 			}
 		})
 	}
@@ -555,6 +767,30 @@ func TestUpsertProjectProductionBindingAddsThenReplaces(t *testing.T) {
 	dev := findEnv(t, p, projectDevelopmentEnvironmentName)
 	if len(dev.Bindings) != 1 || dev.Bindings[0].Name != projectDevelopmentBindingName {
 		t.Fatalf("dev environment disturbed: %+v", dev)
+	}
+}
+
+func TestUpsertProjectProductionBindingReplacesGitManagedReference(t *testing.T) {
+	p := projectForPromoteWithRepository("shop", "repo-a")
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	first, err := projectGitOpsProductionBinding(p, map[string]any{"releaseRef": "release-a", "configuration": map[string]any{"replicas": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := projectGitOpsProductionBinding(p, map[string]any{"releaseRef": "release-b", "configuration": map[string]any{"replicas": 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upsertProjectProductionBinding(p, first)
+	upsertProjectProductionBinding(p, second)
+	production := findEnv(t, p, projectProductionEnvironmentName)
+	if len(production.Bindings) != 1 {
+		t.Fatalf("production bindings = %+v, want one current Git reference", production.Bindings)
+	}
+	if values := projectBindingValues(&production.Bindings[0]); values["releaseRef"] != "release-b" {
+		t.Fatalf("production snapshot = %#v, want release-b", values)
 	}
 }
 

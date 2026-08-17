@@ -4,6 +4,7 @@ import type {
   FarosContext,
   ListResponse,
   Project,
+  ProjectDeliveryPolicy,
   ProjectHydrateResult,
   ProjectAssistantRunMode,
   ProjectAssistantReviewTarget,
@@ -339,6 +340,7 @@ export const api = {
       inferDevelopmentTemplate?: boolean
       connectionRef?: string
       existingRepositoryRef?: string
+      delivery?: ProjectDeliveryPolicy
     },
   ): Promise<Project> {
     return request<Project>(ctx, 'POST', baseURL(ctx), body)
@@ -358,6 +360,7 @@ export const api = {
       inferDevelopmentTemplate?: boolean
       connectionRef?: string
       existingRepositoryRef?: string
+      delivery?: ProjectDeliveryPolicy
     },
     onStatus: (message: string) => void,
     signal?: AbortSignal,

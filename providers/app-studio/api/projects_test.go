@@ -27,6 +27,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
@@ -43,6 +44,172 @@ func TestProjectInitialBootstrapPromptDigestDoesNotExposePrompt(t *testing.T) {
 	digest := projectInitialBootstrapPromptDigest("Build a todo app")
 	if digest == projectInitialBootstrapPromptDigest("Build an unbounded platform") || digest == "Build a todo app" {
 		t.Fatalf("prompt digest did not distinguish or conceal the creation prompt: %q", digest)
+	}
+}
+
+func testProjectDelivery(development, production aiv1alpha1.ProjectDeliveryMode) *aiv1alpha1.ProjectDeliverySpec {
+	return &aiv1alpha1.ProjectDeliverySpec{
+		Development: aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: development},
+		Production:  aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: production},
+	}
+}
+
+func TestProjectDeliveryForCreateDefaultsAndRejectsUnsafeAdoption(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested *aiv1alpha1.ProjectDeliverySpec
+		adopted   bool
+		wantDev   aiv1alpha1.ProjectDeliveryMode
+		wantProd  aiv1alpha1.ProjectDeliveryMode
+		wantErr   string
+	}{
+		{name: "new repository defaults hybrid", wantDev: aiv1alpha1.ProjectDeliveryModeDirect, wantProd: aiv1alpha1.ProjectDeliveryModeGitOps},
+		{name: "new repository explicitly Direct", requested: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeDirect), wantDev: aiv1alpha1.ProjectDeliveryModeDirect, wantProd: aiv1alpha1.ProjectDeliveryModeDirect},
+		{name: "explicit GitOps development and Direct production", requested: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeDirect), wantDev: aiv1alpha1.ProjectDeliveryModeGitOps, wantProd: aiv1alpha1.ProjectDeliveryModeDirect},
+		{name: "explicit GitOps development and production", requested: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps), wantDev: aiv1alpha1.ProjectDeliveryModeGitOps, wantProd: aiv1alpha1.ProjectDeliveryModeGitOps},
+		{name: "adopted repository defaults Direct", adopted: true, wantDev: aiv1alpha1.ProjectDeliveryModeDirect, wantProd: aiv1alpha1.ProjectDeliveryModeDirect},
+		{name: "adopted repository rejects any GitOps", requested: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps), adopted: true, wantErr: "bootstrap migration"},
+		{name: "unknown mode rejected", requested: testProjectDelivery("Automatic", aiv1alpha1.ProjectDeliveryModeDirect), wantErr: "Direct or GitOps"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delivery, err := projectDeliveryForCreate(tt.requested, tt.adopted)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if delivery.Development.Mode != tt.wantDev || delivery.Production.Mode != tt.wantProd {
+				t.Fatalf("delivery = %+v, want development=%q production=%q", delivery, tt.wantDev, tt.wantProd)
+			}
+			if (tt.wantDev == aiv1alpha1.ProjectDeliveryModeGitOps || tt.wantProd == aiv1alpha1.ProjectDeliveryModeGitOps) && delivery.GitOps == nil {
+				t.Fatal("GitOps defaults are missing")
+			}
+		})
+	}
+}
+
+func TestProjectDeliveryUsesPolicyNotBindings(t *testing.T) {
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo"},
+		Environments: []aiv1alpha1.ProjectEnvironmentSpec{{Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+			Name: projectGitOpsBindingName,
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+				APIVersion: projectRepositorySyncAPIVersion, Resource: projectRepositorySyncResource,
+			},
+		}}}},
+	}}
+	if projectHasGitOps(p) {
+		t.Fatal("an omitted delivery policy must remain Direct even when a stale RepositorySync binding exists")
+	}
+	p.Spec.Delivery = defaultProjectDelivery()
+	p.Spec.Environments = nil
+	if !projectHasGitOps(p) {
+		t.Fatal("GitOps policy must remain authoritative when its RepositorySync binding is missing")
+	}
+	view := effectiveProjectDeliverySpec(&aiv1alpha1.Project{})
+	if view.Development.Mode != aiv1alpha1.ProjectDeliveryModeDirect || view.Production.Mode != aiv1alpha1.ProjectDeliveryModeDirect {
+		t.Fatalf("legacy effective delivery = %+v, want Direct everywhere", view)
+	}
+}
+
+func TestEnableProjectGitOpsIsIdempotent(t *testing.T) {
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec:       aiv1alpha1.ProjectSpec{Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo"}},
+	}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, environment := range p.Spec.Environments {
+		for _, binding := range environment.Bindings {
+			if binding.Name == projectGitOpsBindingName {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("GitOps bindings = %d, want one after repeated enable", count)
+	}
+}
+
+func TestCreateProjectExplicitDirectKeepsWritableDevelopmentBinding(t *testing.T) {
+	client := newProjectCreationTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		applicationTemplateObject(),
+	)
+	created, err := (&Server{workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequest(
+		context.Background(), client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{
+			DisplayName: "Direct Demo", ConnectionRef: "github", TemplateName: "application",
+			Delivery: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeDirect),
+		}, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.Delivery == nil || projectHasGitOps(created) {
+		t.Fatalf("delivery = %+v, want Direct", created.Spec.Delivery)
+	}
+	if len(created.Spec.Environments) != 1 || len(created.Spec.Environments[0].Bindings) != 1 {
+		t.Fatalf("environments = %+v, want development only", created.Spec.Environments)
+	}
+	binding := created.Spec.Environments[0].Bindings[0]
+	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource {
+		t.Fatalf("development binding kind = %q, want providerResource", binding.Kind)
+	}
+	files, err := (&Server{workspaces: workspace.NewFileStore(t.TempDir())}).seedProjectScaffold(
+		context.Background(), identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, created, projectTemplateInfo{Name: "application"},
+	)
+	if err != nil || files != 0 {
+		t.Fatalf("direct .faros scaffold = %d, %v, want none", files, err)
+	}
+}
+
+func TestCreateProjectAdoptionDefaultsDirectAndRejectsGitOps(t *testing.T) {
+	newClient := func() *asclient.Client {
+		return newProjectCreationTestClient(codeRepositoryObject("existing", "existing-app", "github", true))
+	}
+	client := newClient()
+	created, err := (&Server{}).createProjectFromRequest(
+		context.Background(), client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{ExistingRepositoryRef: "existing"}, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Spec.Delivery == nil || projectHasGitOps(created) {
+		t.Fatalf("adopted delivery = %+v, want Direct", created.Spec.Delivery)
+	}
+	if len(created.Spec.Environments) != 1 || len(created.Spec.Environments[0].Bindings) != 0 {
+		t.Fatalf("adopted environments = %+v, want no GitOps binding", created.Spec.Environments)
+	}
+
+	client = newClient()
+	_, err = (&Server{}).createProjectFromRequest(
+		context.Background(), client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{ExistingRepositoryRef: "existing", Delivery: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps)}, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "bootstrap migration") {
+		t.Fatalf("explicit adopted GitOps error = %v, want bootstrap migration rejection", err)
+	}
+	projects, listErr := client.Projects().List(context.Background(), metav1.ListOptions{})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(projects.Items) != 0 {
+		t.Fatalf("projects = %+v, want no side effect after rejected adoption", projects.Items)
 	}
 }
 
@@ -66,7 +233,7 @@ func TestCreateProjectPreflightTemplateCreatesBindingAndInstance(t *testing.T) {
 		Naming:       projectNamingResult{DisplayName: "Customer Portal", RepositoryName: "customer-portal"},
 		TemplateName: "application",
 	}
-	created, err := (&Server{actionsExternalURL: "https://actions.example.test"}).createProjectFromRequestWithPreflight(
+	created, err := (&Server{actionsExternalURL: "https://actions.example.test", workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequestWithPreflight(
 		context.Background(),
 		client,
 		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
@@ -81,25 +248,166 @@ func TestCreateProjectPreflightTemplateCreatesBindingAndInstance(t *testing.T) {
 	if created.Spec.Template == nil || created.Spec.Template.Name != "application" {
 		t.Fatalf("created template = %+v, want application", created.Spec.Template)
 	}
-	if len(created.Spec.Environments) != 1 || len(created.Spec.Environments[0].Bindings) != 1 {
-		t.Fatalf("created environments = %+v, want one development binding", created.Spec.Environments)
+	if created.Spec.Delivery == nil || projectDevelopmentDeliveryMode(created) != aiv1alpha1.ProjectDeliveryModeDirect || projectProductionDeliveryMode(created) != aiv1alpha1.ProjectDeliveryModeGitOps {
+		t.Fatalf("created delivery = %+v, want Direct development and GitOps production", created.Spec.Delivery)
+	}
+	if len(created.Spec.Environments) != 2 || len(created.Spec.Environments[0].Bindings) != 1 || len(created.Spec.Environments[1].Bindings) != 1 {
+		t.Fatalf("created environments = %+v, want development plus GitOps configuration", created.Spec.Environments)
 	}
 	binding := created.Spec.Environments[0].Bindings[0]
-	if binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
+	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
 		t.Fatalf("created binding = %+v, want %s-dev", binding, created.Name)
 	}
-	// Instances are materialized by the Project reconciler, not the handler.
-	// The write contract here is a self-contained binding: the desired
-	// instance must be derivable from the spec alone.
-	want, gvr, err := bindings.Desired(created, binding)
+	// The Project reconciler owns both the direct development runtime and the
+	// production RepositorySync without overlapping writers.
+	want, gvr, err := bindings.Desired(created, created.Spec.Environments[1].Bindings[0])
 	if err != nil {
-		t.Fatalf("binding is not self-contained: %v", err)
+		t.Fatalf("GitOps binding is not self-contained: %v", err)
 	}
-	if gvr.Resource != "applications" || gvr.Group != "infrastructure.faros.sh" {
-		t.Fatalf("binding GVR = %v, want applications.infrastructure.faros.sh", gvr)
+	if gvr.Resource != projectRepositorySyncResource || gvr.Group != codeAPIGroup {
+		t.Fatalf("binding GVR = %v, want repositorysyncs.code.faros.sh", gvr)
 	}
-	if want.GetName() != created.Name+"-dev" {
-		t.Fatalf("desired instance name = %q, want %s-dev", want.GetName(), created.Name)
+	if want.GetName() != created.Name+"-gitops" {
+		t.Fatalf("desired sync name = %q, want %s-gitops", want.GetName(), created.Name)
+	}
+}
+
+func TestCreateDefaultHybridProjectSeedsStarterSourceWithoutDevelopmentInventory(t *testing.T) {
+	scaffoldServer := giteaStyleArchive(t, map[string]string{"web/index.html": "<h1>ready</h1>"})
+	defer scaffoldServer.Close()
+	template := applicationTemplateObject()
+	if err := unstructured.SetNestedMap(template.Object, map[string]any{
+		"repository": scaffoldServer.URL + "/team/starter",
+		"ref":        "main",
+	}, "spec", "development", "scaffold"); err != nil {
+		t.Fatal(err)
+	}
+	client := newProjectCreationTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		template,
+	)
+	files := workspace.NewFileStore(t.TempDir())
+	id := identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
+	created, err := (&Server{workspaces: files}).createProjectFromRequestWithPreflight(
+		context.Background(), client, id,
+		CreateProjectRequest{DisplayName: "Demo", ConnectionRef: "github", TemplateName: "application"}, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := projectWorkspaceScope(id, created)
+	listed, err := files.ListFiles(context.Background(), scope, workspace.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"web/index.html": true}
+	for _, file := range listed.Files {
+		delete(want, file.Path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("initial workspace is missing %v; files = %+v", want, listed.Files)
+	}
+	dirty, err := files.UncommittedPaths(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirty) != 1 || dirty[0] != "web/index.html" {
+		t.Fatalf("initial dirty paths = %v, want starter source only and no development .faros files", dirty)
+	}
+}
+
+func TestCreateExplicitGitOpsDevelopmentUsesReferenceAndTrackedInventory(t *testing.T) {
+	client := newProjectCreationTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		applicationTemplateObject(),
+	)
+	files := workspace.NewFileStore(t.TempDir())
+	id := identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"}
+	created, err := (&Server{workspaces: files}).createProjectFromRequestWithPreflight(
+		context.Background(), client, id,
+		CreateProjectRequest{
+			DisplayName: "GitOps Demo", ConnectionRef: "github", TemplateName: "application",
+			Delivery: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps),
+		}, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := created.Spec.Environments[0].Bindings[0]
+	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
+		t.Fatalf("development binding = %+v, want Git-owned reference", binding)
+	}
+	listed, err := files.ListFiles(context.Background(), projectWorkspaceScope(id, created), workspace.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		".faros/releases/development.yaml":                true,
+		".faros/environments/development/deployment.yaml": true,
+	}
+	for _, file := range listed.Files {
+		delete(want, file.Path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("explicit GitOps development is missing inventory %v; files = %+v", want, listed.Files)
+	}
+}
+
+func TestCreateDefaultHybridToleratesUnavailableDevelopmentScaffold(t *testing.T) {
+	scaffoldServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer scaffoldServer.Close()
+	template := applicationTemplateObject()
+	if err := unstructured.SetNestedMap(template.Object, map[string]any{
+		"repository": scaffoldServer.URL + "/team/starter",
+		"ref":        "main",
+	}, "spec", "development", "scaffold"); err != nil {
+		t.Fatal(err)
+	}
+	client := newProjectCreationTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		template,
+	)
+	created, err := (&Server{workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequestWithPreflight(
+		context.Background(), client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{DisplayName: "Demo", ConnectionRef: "github", TemplateName: "application"}, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projectDevelopmentIsGitManaged(created) || !projectProductionIsGitManaged(created) {
+		t.Fatalf("delivery = %+v, want Direct development and GitOps production", created.Spec.Delivery)
+	}
+	projects, listErr := client.Projects().List(context.Background(), metav1.ListOptions{})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(projects.Items) != 1 {
+		t.Fatalf("projects = %+v, want hybrid project to survive optional development scaffold failure", projects.Items)
+	}
+}
+
+func TestCreateExplicitGitOpsDevelopmentFailsIfEnvironmentScaffoldCannotBePersisted(t *testing.T) {
+	client := newProjectCreationTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		applicationTemplateObject(),
+	)
+	_, err := (&Server{}).createProjectFromRequestWithPreflight(
+		context.Background(), client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{DisplayName: "Demo", ConnectionRef: "github", TemplateName: "application", Delivery: testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps)}, nil, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "workspace store is required") {
+		t.Fatalf("create error = %v, want truthful GitOps scaffold failure", err)
+	}
+	projects, listErr := client.Projects().List(context.Background(), metav1.ListOptions{})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(projects.Items) != 0 {
+		t.Fatalf("projects = %+v, want cleanup after GitOps scaffold failure", projects.Items)
 	}
 }
 
@@ -118,6 +426,7 @@ func TestCreateProjectLivePathListsCatalogCallsPreflightOnceAndCreatesInstance(t
 	server := &Server{
 		actionsExternalURL: "https://actions.example.test",
 		store:              store.NewMemoryStore(),
+		workspaces:         workspace.NewFileStore(t.TempDir()),
 		projectCreatePreflight: func(_ context.Context, _ *asclient.Client, prompt string, templates []projectDevelopmentTemplateView) (projectCreatePreflight, error) {
 			calls++
 			if prompt != "Build a frontend and backend customer portal." {
@@ -155,15 +464,12 @@ func TestCreateProjectLivePathListsCatalogCallsPreflightOnceAndCreatesInstance(t
 	}
 	// Instances are materialized by the Project reconciler, not the handler:
 	// assert the spec-only contract (a self-contained development binding).
-	if len(created.Spec.Environments) != 1 || len(created.Spec.Environments[0].Bindings) != 1 {
-		t.Fatalf("created environments = %+v, want one development binding", created.Spec.Environments)
+	if len(created.Spec.Environments) != 2 || len(created.Spec.Environments[0].Bindings) != 1 {
+		t.Fatalf("created environments = %+v, want development plus GitOps configuration", created.Spec.Environments)
 	}
-	want, gvr, err := bindings.Desired(created, created.Spec.Environments[0].Bindings[0])
-	if err != nil {
-		t.Fatalf("binding is not self-contained: %v", err)
-	}
-	if gvr.Resource != "applications" || want.GetName() != created.Name+"-dev" {
-		t.Fatalf("desired instance = %s/%s, want applications/%s-dev", gvr.Resource, want.GetName(), created.Name)
+	binding := created.Spec.Environments[0].Bindings[0]
+	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
+		t.Fatalf("development binding = %+v, want direct provider resource %s-dev", binding, created.Name)
 	}
 }
 
@@ -225,7 +531,7 @@ func TestCreateProjectInvalidInferredTemplateFallsBackUnbound(t *testing.T) {
 		Naming:       projectNamingResult{DisplayName: "Customer Portal", RepositoryName: "customer-portal"},
 		TemplateName: "invented-template",
 	}
-	created, err := (&Server{actionsExternalURL: "https://actions.example.test"}).createProjectFromRequestWithPreflight(
+	created, err := (&Server{actionsExternalURL: "https://actions.example.test", workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequestWithPreflight(
 		context.Background(),
 		client,
 		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
@@ -251,7 +557,7 @@ func TestCreateProjectPreflightTemplateRequiresExplicitInferenceAuthorization(t 
 		Naming:       projectNamingResult{DisplayName: "Customer Portal", RepositoryName: "customer-portal"},
 		TemplateName: "application",
 	}
-	created, err := (&Server{actionsExternalURL: "https://actions.example.test"}).createProjectFromRequestWithPreflight(
+	created, err := (&Server{actionsExternalURL: "https://actions.example.test", workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequestWithPreflight(
 		context.Background(),
 		client,
 		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
@@ -277,7 +583,7 @@ func TestCreateProjectExplicitTemplateTakesPrecedenceOverPreflight(t *testing.T)
 		Naming:       projectNamingResult{DisplayName: "Customer Portal", RepositoryName: "customer-portal"},
 		TemplateName: "invented-template",
 	}
-	created, err := (&Server{actionsExternalURL: "https://actions.example.test"}).createProjectFromRequestWithPreflight(
+	created, err := (&Server{actionsExternalURL: "https://actions.example.test", workspaces: workspace.NewFileStore(t.TempDir())}).createProjectFromRequestWithPreflight(
 		context.Background(),
 		client,
 		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
@@ -382,7 +688,7 @@ func newProjectCreationTestClient(objects ...runtime.Object) *asclient.Client {
 }
 
 func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDynamicClient {
-	return fake.NewSimpleDynamicClientWithCustomListKinds(
+	client := fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
 			asclient.ProjectGVR: "ProjectList",
@@ -395,6 +701,14 @@ func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDy
 		},
 		objects...,
 	)
+	client.PrependReactor("create", "projects", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		object := action.(k8stesting.CreateAction).GetObject()
+		if object.(metav1.Object).GetUID() == "" {
+			object.(metav1.Object).SetUID("project-uid-test")
+		}
+		return false, nil, nil
+	})
+	return client
 }
 
 func TestGenerateProjectAssistantStreamWithStartUsesInitialCreationGrant(t *testing.T) {

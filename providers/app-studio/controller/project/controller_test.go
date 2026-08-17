@@ -92,6 +92,136 @@ func TestProviderBindingsSpansAllEnvironmentModes(t *testing.T) {
 	}
 }
 
+func TestProviderBindingsEnforcesDeliveryWriter(t *testing.T) {
+	runtimeBinding := binding("development")
+	syncBinding := binding("gitops")
+	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.ResourceRef.Resource = "repositorysyncs"
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Environments: []aiv1alpha1.ProjectEnvironmentSpec{
+		{Name: projectDevelopmentEnvironmentName, Bindings: []aiv1alpha1.ProjectProviderBindingSpec{runtimeBinding}},
+		{Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding}},
+		{Name: "production", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+			Name: "prod", Provider: "deployments", Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{APIVersion: "deployments.faros.sh/v1alpha1", Kind: "Deployment", Resource: "deployments", Name: "demo-prod"},
+		}}},
+	}}}
+
+	direct := providerBindings(project)
+	if len(direct) != 1 || len(direct[0].bindings) != 1 || direct[0].bindings[0].Name != "development" {
+		t.Fatalf("Direct bindings = %+v, want runtime only", direct)
+	}
+	project.Spec.Delivery = controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps)
+	gitOps := providerBindings(project)
+	if len(gitOps) != 2 || gitOps[0].bindings[0].Name != "development" || gitOps[1].bindings[0].Name != "gitops" {
+		t.Fatalf("hybrid bindings = %+v, want direct development plus RepositorySync and no Git-owned production reference", gitOps)
+	}
+	project.Spec.Delivery = controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps)
+	allGitOps := providerBindings(project)
+	if len(allGitOps) != 1 || allGitOps[0].bindings[0].Name != "gitops" {
+		t.Fatalf("all-GitOps bindings = %+v, want RepositorySync only", allGitOps)
+	}
+}
+
+func TestGitOpsProductionRejectsConflictingDirectWriter(t *testing.T) {
+	syncBinding := binding("gitops")
+	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.ResourceRef.Resource = "repositorysyncs"
+	production := binding("prod")
+	production.Provider = "deployments"
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Delivery:   controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps),
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{
+				{Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding}},
+				{Name: "production", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{production}},
+			},
+		},
+	}
+	err := validateDeliveryBindings(project, providerBindings(project))
+	if err == nil || !strings.Contains(err.Error(), "direct writer") {
+		t.Fatalf("validation error = %v, want conflicting production writer failure", err)
+	}
+}
+
+func controllerTestDelivery(development, production aiv1alpha1.ProjectDeliveryMode) *aiv1alpha1.ProjectDeliverySpec {
+	return &aiv1alpha1.ProjectDeliverySpec{
+		Development: aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: development},
+		Production:  aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: production},
+	}
+}
+
+func TestGitOpsDeliveryRequiresRepositorySync(t *testing.T) {
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Delivery:   controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps),
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+		},
+	}
+	if err := validateDeliveryBindings(project, providerBindings(project)); err == nil || !strings.Contains(err.Error(), "no owning RepositorySync") {
+		t.Fatalf("validation error = %v, want missing RepositorySync", err)
+	}
+}
+
+func TestDirectDeliveryRejectsStaleRepositorySync(t *testing.T) {
+	syncBinding := binding("gitops")
+	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.ResourceRef.Resource = "repositorysyncs"
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy"},
+		Spec: aiv1alpha1.ProjectSpec{Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+			Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding},
+		}}},
+	}
+	if err := validateDeliveryBindings(project, providerBindings(project)); err == nil || !strings.Contains(err.Error(), "explicit migration or cleanup") {
+		t.Fatalf("validation error = %v, want stale RepositorySync failure", err)
+	}
+}
+
+func TestGitOpsDeliveryRequiresRepository(t *testing.T) {
+	syncBinding := binding("gitops")
+	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.ResourceRef.Resource = "repositorysyncs"
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Delivery: controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps),
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding},
+			}},
+		},
+	}
+	if err := validateDeliveryBindings(project, providerBindings(project)); err == nil || !strings.Contains(err.Error(), "has no repository") {
+		t.Fatalf("validation error = %v, want missing repository", err)
+	}
+}
+
+func TestGitOpsPreviewPolicyDoesNotMutateReadOnlyBinding(t *testing.T) {
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Delivery: controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeDirect),
+		Sharing:  aiv1alpha1.ProjectSharingSpec{Preview: aiv1alpha1.ProjectPreviewSharingPolicy{Mode: aiv1alpha1.ProjectSharingModePublic}},
+		Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+			Name: projectDevelopmentEnvironmentName,
+			Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
+				Name: projectDevelopmentBindingName, Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+				Values: runtime.RawExtension{Raw: []byte(`{"access":"private"}`)},
+			}},
+		}},
+	}}
+	changed, err := reconcileDevelopmentPreviewPolicy(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("GitOps preview reconciliation reported a binding mutation")
+	}
+	if got := string(project.Spec.Environments[0].Bindings[0].Values.Raw); got != `{"access":"private"}` {
+		t.Fatalf("read-only binding values = %s, want unchanged", got)
+	}
+}
+
 func TestReconcileDevelopmentPreviewPolicy(t *testing.T) {
 	projectWith := func(mode aiv1alpha1.ProjectSharingMode, values string, observedURL string) *aiv1alpha1.Project {
 		p := &aiv1alpha1.Project{

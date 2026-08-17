@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260802-8d0bfc17.repositorycommits.code.faros.sh
+  name: v260817-28ab3066.repositorycommits.code.faros.sh
 spec:
   group: code.faros.sh
   names:
@@ -59,6 +59,13 @@ spec:
         spec:
           description: RepositoryCommitSpec is the desired commit operation.
           properties:
+            baseRef:
+              description: |-
+                BaseRef is the branch, tag, or commit used when Branch does not yet
+                exist. Empty resolves to the repository default branch. It is ignored
+                once Branch exists.
+              maxLength: 255
+              type: string
             branch:
               description: |-
                 Branch overrides the repository default branch. Empty uses the

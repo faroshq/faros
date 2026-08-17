@@ -142,6 +142,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	res, err := committer.CommitFiles(ctx, conn, cred, repo, backend.RepositoryCommitInput{
 		Message:        commit.Spec.Message,
 		Branch:         commit.Spec.Branch,
+		BaseRef:        commit.Spec.BaseRef,
 		IdempotencyKey: repositoryCommitIdempotencyKey(&commit),
 		Files:          files,
 	})

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260814-102b8331.projects.ai.faros.sh
+  name: v260817-28ab3066.projects.ai.faros.sh
 spec:
   group: ai.faros.sh
   names:
@@ -50,6 +50,78 @@ spec:
         spec:
           description: ProjectSpec defines user-authored Project state.
           properties:
+            delivery:
+              description: |-
+                Delivery declares the desired-state writer independently for development
+                and production. Empty means Direct for both environments for projects
+                created before this field existed. The policy is selected at creation time
+                and is immutable; moving either environment between writers requires a
+                future migration workflow that can transfer ownership without racing
+                reconciliation.
+              properties:
+                development:
+                  description: Development selects the writer for the mutable development
+                    sandbox.
+                  properties:
+                    mode:
+                      description: Mode selects exactly one desired-state writer.
+                      enum:
+                      - Direct
+                      - GitOps
+                      type: string
+                  required:
+                  - mode
+                  type: object
+                gitOps:
+                  description: |-
+                    GitOps configures the shared repository location and review gate used by
+                    every GitOps environment. repositoryRef is inherited from spec.repository
+                    rather than copied.
+                  properties:
+                    changePolicy:
+                      description: ChangePolicy controls how App Studio proposes configuration
+                        changes.
+                      enum:
+                      - PullRequest
+                      type: string
+                    path:
+                      description: Path is the repository-relative root containing
+                        Faros manifests.
+                      maxLength: 512
+                      minLength: 1
+                      type: string
+                    ref:
+                      description: Ref is the branch RepositorySync observes and ChangeRequests
+                        target.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    requiredApprovals:
+                      description: |-
+                        RequiredApprovals is the minimum approval count before a proposed change
+                        may merge. The Git host remains authoritative for branch protection.
+                      format: int32
+                      maximum: 100
+                      minimum: 1
+                      type: integer
+                  type: object
+                production:
+                  description: Production selects the writer for promoted production
+                    deployments.
+                  properties:
+                    mode:
+                      description: Mode selects exactly one desired-state writer.
+                      enum:
+                      - Direct
+                      - GitOps
+                      type: string
+                  required:
+                  - mode
+                  type: object
+              required:
+              - development
+              - production
+              type: object
             description:
               description: Description is a short project summary.
               maxLength: 2048
@@ -300,6 +372,11 @@ spec:
           required:
           - displayName
           type: object
+          x-kubernetes-validations:
+          - message: delivery policy is immutable; use a delivery migration workflow
+            rule: '!has(oldSelf.delivery) ? (!has(self.delivery) || (self.delivery.development.mode
+              == ''Direct'' && self.delivery.production.mode == ''Direct'')) : self.delivery
+              == oldSelf.delivery'
         status:
           description: ProjectStatus defines the observed Project state.
           properties:

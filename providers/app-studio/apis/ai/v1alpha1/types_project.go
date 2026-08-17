@@ -52,6 +52,7 @@ type Project struct {
 }
 
 // ProjectSpec defines user-authored Project state.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.delivery) ? (!has(self.delivery) || (self.delivery.development.mode == 'Direct' && self.delivery.production.mode == 'Direct')) : self.delivery == oldSelf.delivery",message="delivery policy is immutable; use a delivery migration workflow"
 type ProjectSpec struct {
 	// DisplayName is the human-readable project title.
 	// +kubebuilder:validation:Required
@@ -67,6 +68,15 @@ type ProjectSpec struct {
 	// Repository records the Code provider repository backing this Project.
 	// +optional
 	Repository *ProjectRepositoryBinding `json:"repository,omitempty"`
+
+	// Delivery declares the desired-state writer independently for development
+	// and production. Empty means Direct for both environments for projects
+	// created before this field existed. The policy is selected at creation time
+	// and is immutable; moving either environment between writers requires a
+	// future migration workflow that can transfer ownership without racing
+	// reconciliation.
+	// +optional
+	Delivery *ProjectDeliverySpec `json:"delivery,omitempty"`
 
 	// Template names the infrastructure Template whose instance backs this
 	// Project's development environment (docs/app-studio-template-sandboxes.md).
@@ -93,6 +103,74 @@ type ProjectSpec struct {
 	// implementation details.
 	// +optional
 	Environments []ProjectEnvironmentSpec `json:"environments,omitempty"`
+}
+
+type ProjectDeliveryMode string
+
+const (
+	// ProjectDeliveryModeDirect makes App Studio the desired-state writer.
+	ProjectDeliveryModeDirect ProjectDeliveryMode = "Direct"
+	// ProjectDeliveryModeGitOps makes the configured Git branch authoritative;
+	// App Studio proposes changes and RepositorySync applies merged state.
+	ProjectDeliveryModeGitOps ProjectDeliveryMode = "GitOps"
+)
+
+type ProjectGitOpsChangePolicy string
+
+const (
+	ProjectGitOpsChangePolicyPullRequest ProjectGitOpsChangePolicy = "PullRequest"
+)
+
+// ProjectEnvironmentDeliverySpec selects one environment's desired-state writer.
+type ProjectEnvironmentDeliverySpec struct {
+	// Mode selects exactly one desired-state writer.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=Direct;GitOps
+	Mode ProjectDeliveryMode `json:"mode"`
+}
+
+// ProjectDeliverySpec selects the Project's environment delivery contracts.
+type ProjectDeliverySpec struct {
+	// Development selects the writer for the mutable development sandbox.
+	// +kubebuilder:validation:Required
+	Development ProjectEnvironmentDeliverySpec `json:"development"`
+
+	// Production selects the writer for promoted production deployments.
+	// +kubebuilder:validation:Required
+	Production ProjectEnvironmentDeliverySpec `json:"production"`
+
+	// GitOps configures the shared repository location and review gate used by
+	// every GitOps environment. repositoryRef is inherited from spec.repository
+	// rather than copied.
+	// +optional
+	GitOps *ProjectGitOpsDeliverySpec `json:"gitOps,omitempty"`
+}
+
+// ProjectGitOpsDeliverySpec configures Git-owned environment manifests.
+type ProjectGitOpsDeliverySpec struct {
+	// Ref is the branch RepositorySync observes and ChangeRequests target.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Ref string `json:"ref,omitempty"`
+
+	// Path is the repository-relative root containing Faros manifests.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Path string `json:"path,omitempty"`
+
+	// ChangePolicy controls how App Studio proposes configuration changes.
+	// +optional
+	// +kubebuilder:validation:Enum=PullRequest
+	ChangePolicy ProjectGitOpsChangePolicy `json:"changePolicy,omitempty"`
+
+	// RequiredApprovals is the minimum approval count before a proposed change
+	// may merge. The Git host remains authoritative for branch protection.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	RequiredApprovals int32 `json:"requiredApprovals,omitempty"`
 }
 
 type ProjectSharingMode string

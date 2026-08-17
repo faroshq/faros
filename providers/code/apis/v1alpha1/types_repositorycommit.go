@@ -68,6 +68,13 @@ type RepositoryCommitSpec struct {
 	// +kubebuilder:validation:MaxLength=255
 	Branch string `json:"branch,omitempty"`
 
+	// BaseRef is the branch, tag, or commit used when Branch does not yet
+	// exist. Empty resolves to the repository default branch. It is ignored
+	// once Branch exists.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	BaseRef string `json:"baseRef,omitempty"`
+
 	// Message is the commit message. Empty lets the backend choose a default.
 	// +optional
 	// +kubebuilder:validation:MaxLength=512

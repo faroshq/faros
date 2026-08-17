@@ -11,11 +11,57 @@ You may obtain a copy of the License at
 package api
 
 import (
+	"context"
+	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	"github.com/faroshq/provider-app-studio/bindings"
 )
+
+func TestGitManagedPreviewAccessRefusesDirectProjectMutation(t *testing.T) {
+	p := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+		Delivery:   testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps),
+	}}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := (&Server{}).setPreviewSharingMode(context.Background(), nil, p, aiv1alpha1.ProjectSharingModePublic)
+	if err == nil || !strings.Contains(err.Error(), "Git-managed") {
+		t.Fatalf("setPreviewSharingMode = %#v, %v; want explicit Git ownership error", updated, err)
+	}
+}
+
+func TestHybridDeliveryKeepsDevelopmentPreviewAndTemplateDirectlyWritable(t *testing.T) {
+	p := &aiv1alpha1.Project{
+		TypeMeta:   metav1.TypeMeta{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Delivery: defaultProjectDelivery(),
+			Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+		},
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newProjectCreationTestClient(&unstructured.Unstructured{Object: object})
+	updated, err := (&Server{}).setPreviewSharingMode(context.Background(), client, p, aiv1alpha1.ProjectSharingModePublic)
+	if err != nil {
+		t.Fatalf("hybrid preview mutation: %v", err)
+	}
+	if updated.Spec.Sharing.Preview.Mode != aiv1alpha1.ProjectSharingModePublic {
+		t.Fatalf("preview mode = %q, want public", updated.Spec.Sharing.Preview.Mode)
+	}
+	if err := validateProjectGitOpsTemplateChange(updated, "worker"); err != nil {
+		t.Fatalf("hybrid development template change was incorrectly treated as Git-owned: %v", err)
+	}
+}
 
 // An empty request body must preserve the current mode. A POST that means
 // "re-apply" cannot be allowed to widen access as a side effect.

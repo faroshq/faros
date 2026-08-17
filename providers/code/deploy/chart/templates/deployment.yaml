@@ -38,6 +38,8 @@ spec:
               value: /var/run/secrets/faros/faros-provider-kubeconfig
             - name: FAROS_SCHEMAS_DIR
               value: /etc/faros/schemas
+            - name: CODE_DEPLOYMENTS_IDENTITY_HASH
+              value: {{ required "deploymentsIdentityHash is required" .Values.deploymentsIdentityHash | quote }}
             {{- if .Values.catalogEntry.enabled }}
             # The CatalogEntry is a kcp resource, so the chart cannot apply it to
             # the hosting cluster. It is rendered into a ConfigMap (mounted below)

@@ -30,6 +30,8 @@ data:
       vendor: "faros"
       version: {{ .Chart.AppVersion | quote }}
       category: "Developer"
+      dependencies:
+        - name: deployments
       iconURL: "/ui/providers/code/icon.svg"
       ui:
         url: "http://{{ include "code.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
@@ -48,6 +50,14 @@ data:
         name: "code.providers.faros.sh"
         permissionClaims:
           - resource: secrets
+            verbs: [get, list, watch, create, update, patch, delete]
+            tenantScoped: true
+          - group: deployments.faros.sh
+            resource: releases
+            verbs: [get, list, watch, create, update, patch]
+            tenantScoped: true
+          - group: deployments.faros.sh
+            resource: deployments
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
 {{- end }}

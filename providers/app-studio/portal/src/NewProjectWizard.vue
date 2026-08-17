@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Check, Layers, Loader2, Package, Sparkles } from 'lucide-vue-next'
-import type { FarosContext, ProjectPlan } from './types'
+import { ArrowLeft, ArrowRight, Check, GitPullRequest, Layers, Loader2, Package, Sparkles, Zap } from 'lucide-vue-next'
+import type { FarosContext, ProjectDeliveryPolicy, ProjectPlan } from './types'
 import { api } from './api'
 
 // The wizard owns planning and review only. Project creation stays in App.vue
@@ -20,7 +20,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   // create carries the confirmed intake for the parent to run.
-  create: [payload: { prompt: string; templateName?: string; displayName?: string }]
+  create: [payload: {
+    prompt: string
+    templateName?: string
+    displayName?: string
+    delivery: ProjectDeliveryPolicy
+  }]
   cancel: []
 }>()
 
@@ -33,6 +38,7 @@ const error = ref<string | null>(null)
 const plan = ref<ProjectPlan | null>(null)
 const chosenTemplate = ref<string>('')
 const displayName = ref('')
+const deliveryPreset = ref<'reviewed-production' | 'direct'>('reviewed-production')
 let planRequestSerial = 0
 
 const hasInitialPrompt = computed(() => Boolean(props.initialPrompt?.trim()))
@@ -102,6 +108,9 @@ function confirmCreate() {
     prompt: prompt.value.trim(),
     templateName: chosenTemplate.value || undefined,
     displayName: displayName.value.trim() || undefined,
+    delivery: deliveryPreset.value === 'reviewed-production'
+      ? { development: { mode: 'Direct' }, production: { mode: 'GitOps' } }
+      : { development: { mode: 'Direct' }, production: { mode: 'Direct' } },
   })
 }
 
@@ -341,6 +350,35 @@ watch(
           </div>
         </div>
       </div>
+
+      <fieldset class="grid gap-3 rounded-lg border border-border-subtle bg-surface p-4">
+        <legend class="px-1 text-[12px] font-medium text-text-secondary">Delivery workflow</legend>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label
+            class="flex cursor-pointer items-start gap-3 rounded-md border p-3 transition"
+            :class="deliveryPreset === 'reviewed-production' ? 'border-accent bg-accent/10' : 'border-border-subtle bg-surface-raised hover:bg-surface-hover'"
+          >
+            <input v-model="deliveryPreset" class="sr-only" type="radio" value="reviewed-production" />
+            <GitPullRequest class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" />
+            <span>
+              <span class="block text-[13px] font-semibold text-text-primary">Reviewed production <span class="font-mono text-[10px] text-accent">Recommended</span></span>
+              <span class="mt-1 block text-[12px] leading-5 text-text-muted">Develop directly in App Studio. Promote production changes through reviewed pull requests.</span>
+            </span>
+          </label>
+          <label
+            class="flex cursor-pointer items-start gap-3 rounded-md border p-3 transition"
+            :class="deliveryPreset === 'direct' ? 'border-accent bg-accent/10' : 'border-border-subtle bg-surface-raised hover:bg-surface-hover'"
+          >
+            <input v-model="deliveryPreset" class="sr-only" type="radio" value="direct" />
+            <Zap class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" />
+            <span>
+              <span class="block text-[13px] font-semibold text-text-primary">Direct everywhere</span>
+              <span class="mt-1 block text-[12px] leading-5 text-text-muted">App Studio applies both development and production changes without a pull-request gate.</span>
+            </span>
+          </label>
+        </div>
+        <p class="text-[11px] leading-4 text-text-muted">This choice cannot be changed after creation until a safe ownership migration is available.</p>
+      </fieldset>
 
       <p v-if="disabled && disabledReason" role="alert" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] text-danger">{{ disabledReason }}</p>
 

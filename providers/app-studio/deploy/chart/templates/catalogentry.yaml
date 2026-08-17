@@ -15,6 +15,7 @@ spec:
   dependencies:
     - name: code
     - name: infrastructure
+    - name: deployments
   ui:
     url: {{ default (printf "http://%s.%s.svc.cluster.local:%v" (include "appstudio.fullname" .) .Release.Namespace .Values.service.port) .Values.catalogEntry.uiURL | quote }}
     indexPath: "/"
@@ -33,6 +34,16 @@ spec:
     # the hub writes these into the tenant APIBinding at Enable time; a claim
     # missing here is silently denied at reconcile.
     permissionClaims:
+      # Immutable release evidence and deployment desired state. The deployment
+      # provider owns translation to Infrastructure (or another CD backend).
+      - resource: releases
+        group: deployments.faros.sh
+        verbs: ["get", "list", "watch", "create"]
+        tenantScoped: true
+      - resource: deployments
+        group: deployments.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        tenantScoped: true
       # Infrastructure instances the Project reconciler lifecycles from a
       # project's live bindings.
       - resource: applications
@@ -58,6 +69,14 @@ spec:
       - resource: repositories
         group: code.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch"]
+        tenantScoped: true
+      - resource: repositorysyncs
+        group: code.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        tenantScoped: true
+      - resource: changerequests
+        group: code.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
       - resource: serviceaccounts
         verbs: ["get", "list", "watch", "create", "delete"]

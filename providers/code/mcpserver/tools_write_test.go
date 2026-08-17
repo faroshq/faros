@@ -148,6 +148,15 @@ func TestRepositoryCommitObjectKeepsAuthoritativeRepositoryLabel(t *testing.T) {
 	}
 }
 
+func TestRepositoryCommitObjectCarriesBranchBaseRef(t *testing.T) {
+	repo := &codev1alpha1.Repository{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}
+	obj := repositoryCommitObject(repo, commitbundle.BundleRef{Name: "bundle", Digest: "sha256:abc"}, commitFilesInput{RepositoryRef: "demo", Branch: "faros/update", BaseRef: "main"})
+	baseRef, found, err := unstructured.NestedString(obj.Object, "spec", "baseRef")
+	if err != nil || !found || baseRef != "main" {
+		t.Fatalf("baseRef = %q, found=%v, err=%v", baseRef, found, err)
+	}
+}
+
 func TestRepositoryCommitBundleStorageScope(t *testing.T) {
 	obj := &unstructured.Unstructured{}
 	obj.SetAnnotations(map[string]string{"kcp.io/cluster": " logical-cluster "})

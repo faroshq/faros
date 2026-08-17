@@ -307,6 +307,19 @@ export interface ProjectAssistantFollowUpQuestionOption {
   description: string
 }
 
+export type ProjectDeliveryMode = 'Direct' | 'GitOps'
+
+export interface ProjectDeliveryPolicy {
+  development: { mode: ProjectDeliveryMode }
+  production: { mode: ProjectDeliveryMode }
+  gitOps?: {
+    ref?: string
+    path?: string
+    changePolicy?: 'PullRequest'
+    requiredApprovals?: number
+  }
+}
+
 export interface Project {
   name: string
   displayName: string
@@ -323,6 +336,7 @@ export interface Project {
     ready?: boolean
     commits?: ProjectRepositoryCommit[]
   }
+  delivery?: ProjectDeliveryPolicy
   memory?: ProjectMemory
   sharing?: {
     preview?: { mode?: 'private' | 'public' }

@@ -452,6 +452,23 @@ func TestApplyProjectDevelopmentTemplateBuildsInitialBindingIdempotently(t *test
 	}
 }
 
+func TestGitManagedTemplateSwitchFailsBeforeProjectAndGitDiverge(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}, Spec: aiv1alpha1.ProjectSpec{
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "shop"},
+		Template:   &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+		Delivery:   testProjectDelivery(aiv1alpha1.ProjectDeliveryModeGitOps, aiv1alpha1.ProjectDeliveryModeGitOps),
+	}}
+	if err := enableProjectGitOps(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProjectGitOpsTemplateChange(p, "worker"); err == nil || !strings.Contains(err.Error(), "Git-managed") {
+		t.Fatalf("template switch error = %v, want explicit Git ownership error", err)
+	}
+	if err := validateProjectGitOpsTemplateChange(p, "application"); err != nil {
+		t.Fatalf("idempotent template selection: %v", err)
+	}
+}
+
 func TestDevelopmentTemplateViews(t *testing.T) {
 	withDev := applicationTemplateObject()
 	_ = unstructured.SetNestedField(withDev.Object, "Web application", "spec", "displayName")

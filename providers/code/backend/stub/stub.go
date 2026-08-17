@@ -94,6 +94,14 @@ func (b *Backend) CommitFiles(_ context.Context, conn *codev1alpha1.Connection, 
 	}, nil
 }
 
+func (b *Backend) EnsureChangeRequest(_ context.Context, _ *codev1alpha1.Connection, _ backend.Credential, _ *codev1alpha1.Repository, input backend.ChangeRequestInput) (backend.ChangeRequestResult, error) {
+	return backend.ChangeRequestResult{Number: 1, URL: "https://stub.example/pull/1", HeadSHA: "stub-head", Open: true}, nil
+}
+
+func (b *Backend) MergeChangeRequest(_ context.Context, _ *codev1alpha1.Connection, _ backend.Credential, _ *codev1alpha1.Repository, number int64, _ string) (backend.ChangeRequestResult, error) {
+	return backend.ChangeRequestResult{Number: number, URL: "https://stub.example/pull/1", HeadSHA: "stub-head", Merged: true, MergeSHA: "stub-merge"}, nil
+}
+
 func (b *Backend) EnsureDeployKey(_ context.Context, _ *codev1alpha1.Connection, _ backend.Credential, repo *codev1alpha1.Repository, key *codev1alpha1.DeployKey, publicKey string) (backend.DeployKeyResult, error) {
 	if publicKey == "" {
 		return backend.DeployKeyResult{}, fmt.Errorf("stub: no public key supplied for deploy key %q", key.Name)

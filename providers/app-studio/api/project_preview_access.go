@@ -125,6 +125,9 @@ func currentPreviewMode(p *aiv1alpha1.Project) aiv1alpha1.ProjectSharingMode {
 }
 
 func (s *Server) setPreviewSharingMode(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, mode aiv1alpha1.ProjectSharingMode) (*aiv1alpha1.Project, error) {
+	if projectDevelopmentIsGitManaged(p) {
+		return nil, newValidationError("development preview access is Git-managed; propose the .faros configuration change through Git")
+	}
 	if currentPreviewMode(p) == mode {
 		return p, nil
 	}
@@ -267,8 +270,12 @@ func findProjectDevelopmentBinding(p *aiv1alpha1.Project) *aiv1alpha1.ProjectPro
 			continue
 		}
 		for j := range env.Bindings {
-			if strings.TrimSpace(env.Bindings[j].Name) == projectDevelopmentBindingName &&
-				env.Bindings[j].Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+			binding := &env.Bindings[j]
+			gitManagedReference := projectDevelopmentIsGitManaged(p) && binding.Kind == aiv1alpha1.ProjectBindingKindProviderReference &&
+				binding.Provider == projectDevelopmentProviderAppStudio && binding.ResourceRef != nil &&
+				binding.ResourceRef.Name == projectTemplateInstanceName(p)
+			if strings.TrimSpace(binding.Name) == projectDevelopmentBindingName &&
+				(binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || gitManagedReference) {
 				return &env.Bindings[j]
 			}
 		}

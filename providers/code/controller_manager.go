@@ -41,6 +41,7 @@ import (
 
 	"github.com/faroshq/provider-code/backend"
 	"github.com/faroshq/provider-code/commitbundle"
+	"github.com/faroshq/provider-code/controller/changerequest"
 	"github.com/faroshq/provider-code/controller/collaborator"
 	"github.com/faroshq/provider-code/controller/connection"
 	"github.com/faroshq/provider-code/controller/deploykey"
@@ -49,6 +50,7 @@ import (
 	"github.com/faroshq/provider-code/controller/repositorybuildstatus"
 	"github.com/faroshq/provider-code/controller/repositorycheckout"
 	"github.com/faroshq/provider-code/controller/repositorycommit"
+	"github.com/faroshq/provider-code/controller/repositorysync"
 	"github.com/faroshq/provider-code/install"
 	codescheme "github.com/faroshq/provider-code/scheme"
 )
@@ -108,6 +110,12 @@ func startControllerManager(ctx context.Context, config *rest.Config, registry *
 	}
 	if err := (&repositorycommit.Reconciler{Backends: registry, Bundles: bundles}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("repositorycommit controller: %w", err)
+	}
+	if err := (&changerequest.Reconciler{Backends: registry}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("changerequest controller: %w", err)
+	}
+	if err := (&repositorysync.Reconciler{Backends: registry}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("repositorysync controller: %w", err)
 	}
 	if err := (&repositorycheckout.Reconciler{Backends: registry, Bundles: bundles}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("repositorycheckout controller: %w", err)

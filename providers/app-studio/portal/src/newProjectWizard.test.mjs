@@ -67,6 +67,10 @@ test('review contract preserves the idea and exposes editable name/template and 
   assert.match(wizardSource, /<span[^>]*>Project name<\/span>[\s\S]*v-model="displayName"/)
   assert.match(wizardSource, /<span[^>]*>Template<\/span>[\s\S]*v-model="chosenTemplate"/)
   assert.match(wizardSource, /Starter-code impact/)
+	assert.match(wizardSource, /Delivery workflow/)
+	assert.match(wizardSource, /Reviewed production/)
+	assert.match(wizardSource, /Direct everywhere/)
+	assert.match(wizardSource, /cannot be changed after creation/)
   assert.match(wizardSource, /Starter code will be attached[\s\S]*working placeholder/)
   assert.match(wizardSource, /No starter code will be attached[\s\S]*build from an empty project/)
   assert.match(wizardSource, /Create &amp; open thread/)
@@ -101,7 +105,7 @@ test('planning failures remain honest and retain retry/edit affordances for a su
 })
 
 test('confirmed review emits the exact durable create payload and honors the disabled gate', () => {
-  assert.match(wizardSource, /function confirmCreate\(\) \{[\s\S]*if \(props\.disabled\) return[\s\S]*emit\('create', \{[\s\S]*prompt: prompt\.value\.trim\(\),[\s\S]*templateName: chosenTemplate\.value \|\| undefined,[\s\S]*displayName: displayName\.value\.trim\(\) \|\| undefined,[\s\S]*\}\)[\s\S]*\}/)
+  assert.match(wizardSource, /function confirmCreate\(\) \{[\s\S]*if \(props\.disabled\) return[\s\S]*emit\('create', \{[\s\S]*prompt: prompt\.value\.trim\(\),[\s\S]*templateName: chosenTemplate\.value \|\| undefined,[\s\S]*displayName: displayName\.value\.trim\(\) \|\| undefined,[\s\S]*delivery: deliveryPreset\.value === 'reviewed-production'[\s\S]*development: \{ mode: 'Direct' \}[\s\S]*production: \{ mode: 'GitOps' \}[\s\S]*\}\)[\s\S]*\}/)
   assert.match(wizardSource, /@click="confirmCreate"/)
   assert.match(wizardSource, /:disabled="disabled"/)
 })
@@ -129,10 +133,11 @@ test('wizard handoff keeps the existing readiness and project/thread start path 
   assert.match(handoff, /wizardOpen\.value = false/)
   assert.match(handoff, /prompt\.value = payload\.prompt/)
   assert.match(handoff, /await ensureCreateSetupReady\(\)/)
-  assert.match(handoff, /createProjectAndStartConversation\(payload\.prompt, \{[\s\S]*templateName: payload\.templateName,[\s\S]*displayName: payload\.displayName/)
+  assert.match(handoff, /createProjectAndStartConversation\(payload\.prompt, \{[\s\S]*templateName: payload\.templateName,[\s\S]*displayName: payload\.displayName,[\s\S]*delivery: payload\.delivery/)
 
   const startPath = appSource.slice(appSource.indexOf('async function createProjectAndStartConversation('))
   assert.match(startPath, /api\.createProjectStream\(props\.ctx, \{/)
+	assert.match(startPath, /delivery: createOverrides\?\.delivery/)
   assert.match(startPath, /api\.createAssistantThread\(props\.ctx, projectName\)/)
   assert.match(startPath, /api\.startAssistantTurn\(props\.ctx, projectName, thread\.id, \{/)
 })

@@ -124,6 +124,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	if !p.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, c, &p)
 	}
+	bound := providerBindings(&p)
+	if err := validateDeliveryBindings(&p, bound); err != nil {
+		// Validate the single-writer contract before normalizing Project fields or
+		// converging any provider resource. An operator must migrate/clean stale
+		// bindings explicitly; the reconciler never guesses ownership.
+		return ctrl.Result{}, err
+	}
 	previewPolicyChanged, err := reconcileDevelopmentPreviewPolicy(&p)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -135,7 +142,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	bound := providerBindings(&p)
+	bound = providerBindings(&p)
 	hasRepository := p.Spec.Repository != nil && p.Spec.Repository.RepositoryRef != ""
 	if len(bound) == 0 && !hasRepository {
 		// Nothing to lifecycle yet.
@@ -275,6 +282,12 @@ func reconcileDevelopmentPreviewPolicy(p *aiv1alpha1.Project) (bool, error) {
 		changed = true
 	}
 	desiredAccess := bindings.PreviewAccessForMode(normalized)
+	if projectDeliveryModeForEnvironment(p, projectDevelopmentEnvironmentName) == aiv1alpha1.ProjectDeliveryModeGitOps {
+		// Git owns the referenced development Deployment configuration. Sharing
+		// policy may still be normalized above, but this controller must never
+		// project it into a read-only binding and become a second writer.
+		return changed, nil
+	}
 	for envIndex := range p.Spec.Environments {
 		env := &p.Spec.Environments[envIndex]
 		for bindingIndex := range env.Bindings {
@@ -546,16 +559,28 @@ type boundEnv struct {
 	bindings []aiv1alpha1.ProjectProviderBindingSpec
 }
 
-// providerBindings selects every environment's provider-resource bindings —
-// live (development) AND artifact (production) alike. Promotion is a spec
-// write appending the production binding; converging it here is what
-// provisions the production instance (the HTTP layer no longer does).
+// providerBindings selects exactly the resources App Studio owns for each
+// environment. Direct environments retain writable runtime bindings while one
+// RepositorySync is reconciled concurrently for any GitOps environment.
+// Git-owned runtime bindings are non-owning provider references and are ignored.
 func providerBindings(p *aiv1alpha1.Project) []boundEnv {
+	if p == nil {
+		return nil
+	}
 	var out []boundEnv
+	usesGitOps := projectUsesGitOps(p)
 	for _, env := range p.Spec.Environments {
 		var bs []aiv1alpha1.ProjectProviderBindingSpec
 		for _, binding := range env.Bindings {
 			if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil {
+				continue
+			}
+			isRepositorySync := isRepositorySyncBinding(binding)
+			if isRepositorySync {
+				if !usesGitOps {
+					continue
+				}
+			} else if projectDeliveryModeForEnvironment(p, env.Name) != aiv1alpha1.ProjectDeliveryModeDirect {
 				continue
 			}
 			bs = append(bs, binding)
@@ -566,4 +591,82 @@ func providerBindings(p *aiv1alpha1.Project) []boundEnv {
 		out = append(out, boundEnv{spec: env, bindings: bs})
 	}
 	return out
+}
+
+func isRepositorySyncBinding(binding aiv1alpha1.ProjectProviderBindingSpec) bool {
+	return binding.ResourceRef != nil && binding.ResourceRef.APIVersion == "code.faros.sh/v1alpha1" &&
+		binding.ResourceRef.Resource == "repositorysyncs"
+}
+
+func projectDeliveryModeForEnvironment(p *aiv1alpha1.Project, environment string) aiv1alpha1.ProjectDeliveryMode {
+	if p == nil || p.Spec.Delivery == nil {
+		return aiv1alpha1.ProjectDeliveryModeDirect
+	}
+	switch strings.TrimSpace(environment) {
+	case projectDevelopmentEnvironmentName:
+		if p.Spec.Delivery.Development.Mode != "" {
+			return p.Spec.Delivery.Development.Mode
+		}
+	case "production":
+		if p.Spec.Delivery.Production.Mode != "" {
+			return p.Spec.Delivery.Production.Mode
+		}
+	}
+	return aiv1alpha1.ProjectDeliveryModeDirect
+}
+
+func projectUsesGitOps(p *aiv1alpha1.Project) bool {
+	return projectDeliveryModeForEnvironment(p, projectDevelopmentEnvironmentName) == aiv1alpha1.ProjectDeliveryModeGitOps ||
+		projectDeliveryModeForEnvironment(p, "production") == aiv1alpha1.ProjectDeliveryModeGitOps
+}
+
+func isPrimaryEnvironmentBinding(environment string, binding aiv1alpha1.ProjectProviderBindingSpec) bool {
+	switch strings.TrimSpace(environment) {
+	case projectDevelopmentEnvironmentName:
+		return strings.TrimSpace(binding.Name) == projectDevelopmentBindingName && strings.TrimSpace(binding.Provider) == projectDevelopmentProvider
+	case "production":
+		return strings.TrimSpace(binding.Name) == "prod"
+	default:
+		return false
+	}
+}
+
+func validateDeliveryBindings(p *aiv1alpha1.Project, bound []boundEnv) error {
+	if p == nil {
+		return nil
+	}
+	usesGitOps := projectUsesGitOps(p)
+	repositorySyncs := 0
+	for _, environment := range p.Spec.Environments {
+		for _, binding := range environment.Bindings {
+			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderResource && isRepositorySyncBinding(binding) {
+				repositorySyncs++
+				continue
+			}
+			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderResource &&
+				isPrimaryEnvironmentBinding(environment.Name, binding) &&
+				projectDeliveryModeForEnvironment(p, environment.Name) == aiv1alpha1.ProjectDeliveryModeGitOps {
+				return fmt.Errorf("Project %q declares GitOps delivery for %s but still has a direct writer binding %q; explicit migration or cleanup is required", p.Name, environment.Name, binding.Name)
+			}
+		}
+	}
+	if !usesGitOps {
+		if repositorySyncs > 0 {
+			return fmt.Errorf("Project %q uses Direct delivery for every environment but still declares an owning RepositorySync binding; explicit migration or cleanup is required", p.Name)
+		}
+		return nil
+	}
+	if p.Spec.Repository != nil && p.Spec.Repository.Adopted {
+		return fmt.Errorf("Project %q uses an adopted repository but declares GitOps delivery without a bootstrap migration", p.Name)
+	}
+	if p.Spec.Repository == nil || strings.TrimSpace(p.Spec.Repository.RepositoryRef) == "" {
+		return fmt.Errorf("Project %q declares GitOps delivery but has no repository", p.Name)
+	}
+	if repositorySyncs == 0 {
+		return fmt.Errorf("Project %q declares GitOps delivery but has no owning RepositorySync binding", p.Name)
+	}
+	if repositorySyncs > 1 {
+		return fmt.Errorf("Project %q declares %d owning RepositorySync bindings; exactly one writer is required", p.Name, repositorySyncs)
+	}
+	return nil
 }

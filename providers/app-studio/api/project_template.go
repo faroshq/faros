@@ -377,10 +377,17 @@ func projectTemplateDevBindingWithContext(p *aiv1alpha1.Project, info projectTem
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, err
 	}
+	bindingKind := aiv1alpha1.ProjectBindingKindProviderResource
+	if projectDevelopmentIsGitManaged(p) {
+		// RepositorySync owns the development Deployment and its Infrastructure
+		// backend. The Project keeps a read-only reference so preview and live
+		// workspace sync continue addressing the same deterministic backend.
+		bindingKind = aiv1alpha1.ProjectBindingKindProviderReference
+	}
 	return aiv1alpha1.ProjectProviderBindingSpec{
 		Name:     projectDevelopmentBindingName,
 		Provider: projectDevelopmentProviderAppStudio,
-		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		Kind:     bindingKind,
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
 			Name:       name,
 			APIVersion: info.APIVersion,
@@ -422,7 +429,11 @@ func applyProjectDevelopmentTemplateWithContext(p *aiv1alpha1.Project, info proj
 		}
 		kept := env.Bindings[:0]
 		for _, existing := range env.Bindings {
-			if strings.TrimSpace(existing.Name) == projectDevelopmentBindingName && existing.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+			managedReference := projectDevelopmentIsGitManaged(p) && existing.Kind == aiv1alpha1.ProjectBindingKindProviderReference &&
+				existing.Provider == projectDevelopmentProviderAppStudio && existing.ResourceRef != nil &&
+				existing.ResourceRef.Name == projectTemplateInstanceName(p)
+			if strings.TrimSpace(existing.Name) == projectDevelopmentBindingName &&
+				(existing.Kind != aiv1alpha1.ProjectBindingKindProviderReference || managedReference) {
 				continue
 			}
 			kept = append(kept, existing)
@@ -531,9 +542,15 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 		// project whose template was bound before the seed step existed (or
 		// whose earlier seed failed).
 		if _, err := s.seedProjectScaffold(ctx, id, p, info); err != nil {
+			if projectDevelopmentIsGitManaged(p) {
+				return nil, projectTemplateInfo{}, fmt.Errorf("write Git-managed environment scaffold: %w", err)
+			}
 			klog.V(1).Infof("scaffold seed on re-select for %s: %v", p.Name, err)
 		}
 		return projectWithLiveBindingStatus(ctx, c, p, id), info, nil
+	}
+	if err := validateProjectGitOpsTemplateChange(p, info.Name); err != nil {
+		return nil, projectTemplateInfo{}, err
 	}
 
 	// Tear down the previous development instance before rewriting the spec:
@@ -560,11 +577,25 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 	// on an already-populated workspace, so switching templates never
 	// clobbers existing code.
 	if _, err := s.seedProjectScaffold(ctx, id, updated, info); err != nil {
+		if projectDevelopmentIsGitManaged(updated) {
+			return nil, projectTemplateInfo{}, fmt.Errorf("write Git-managed environment scaffold: %w", err)
+		}
 		klog.V(1).Infof("scaffold seed on template select for %s: %v", updated.Name, err)
 	}
 	// The Project reconciler converges the new binding into an instance; the
 	// response reports it Pending until the mirror catches up.
 	return updated, info, nil
+}
+
+func validateProjectGitOpsTemplateChange(p *aiv1alpha1.Project, nextTemplate string) error {
+	if !projectDevelopmentIsGitManaged(p) || p.Spec.Template == nil {
+		return nil
+	}
+	current := strings.TrimSpace(p.Spec.Template.Name)
+	if current == "" || current == strings.TrimSpace(nextTemplate) {
+		return nil
+	}
+	return newValidationError("development template changes are Git-managed; propose the .faros manifest change through Git")
 }
 
 // deleteProjectDevelopmentBindingResources deletes the instances behind the

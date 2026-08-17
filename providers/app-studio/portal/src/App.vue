@@ -185,6 +185,7 @@ import type {
   ImportRepository,
   FarosContext,
   Project,
+  ProjectDeliveryPolicy,
   ProjectAssistantSnapshot,
   ProjectAssistantApprovalMode,
   ProjectAssistantActionFeedItem,
@@ -2947,13 +2948,14 @@ async function onWizardCancel() {
   promptRef.value?.setSelectionRange(prompt.value.length, prompt.value.length)
 }
 
-async function onWizardCreate(payload: { prompt: string; templateName?: string; displayName?: string }) {
+async function onWizardCreate(payload: { prompt: string; templateName?: string; displayName?: string; delivery: ProjectDeliveryPolicy }) {
   wizardOpen.value = false
   prompt.value = payload.prompt
   if (!await ensureCreateSetupReady()) return
   await createProjectAndStartConversation(payload.prompt, {
     templateName: payload.templateName,
     displayName: payload.displayName,
+    delivery: payload.delivery,
   })
 }
 
@@ -2968,7 +2970,11 @@ async function ensureCreateSetupReady(): Promise<boolean> {
 
 async function createProjectAndStartConversation(
   content: string,
-  createOverrides?: { templateName?: string; displayName?: string },
+  createOverrides?: {
+    templateName?: string
+    displayName?: string
+    delivery?: ProjectDeliveryPolicy
+  },
 ) {
   const retry = pendingFirstProjectSubmission?.projectName && pendingFirstProjectSubmission.content === content
   let submission = retry
@@ -3017,6 +3023,7 @@ async function createProjectAndStartConversation(
         templateName: createOverrides?.templateName,
         displayName: createOverrides?.displayName,
         inferDevelopmentTemplate: !createOverrides?.templateName,
+		delivery: createOverrides?.delivery,
       }, (message) => {
         if (current()) conversationStatus.value = message
       })

@@ -50,6 +50,11 @@ type CreateProjectRequest struct {
 	TemplateName             string `json:"templateName,omitempty"`
 	InferDevelopmentTemplate bool   `json:"inferDevelopmentTemplate,omitempty"`
 	ConnectionRef            string `json:"connectionRef,omitempty"`
+	// Delivery selects immutable desired-state writers independently for
+	// development and production. Empty defaults to Direct development plus
+	// GitOps production for a new repository, and Direct everywhere for an
+	// adopted repository. Existing stored Projects with no policy remain Direct.
+	Delivery *aiv1alpha1.ProjectDeliverySpec `json:"delivery,omitempty"`
 
 	// ExistingRepositoryRef imports an existing Code Repository instead of
 	// creating one: the project adopts the repository (claims it, never
@@ -93,17 +98,18 @@ func (s *Server) consumeProjectInitialBootstrap(ctx context.Context, scope store
 }
 
 type ProjectView struct {
-	Name         string                        `json:"name"`
-	DisplayName  string                        `json:"displayName"`
-	Description  string                        `json:"description,omitempty"`
-	Phase        string                        `json:"phase,omitempty"`
-	Template     string                        `json:"template,omitempty"`
-	Repository   *ProjectRepositoryView        `json:"repository,omitempty"`
-	Memory       aiv1alpha1.ProjectMemory      `json:"memory,omitempty"`
-	Sharing      aiv1alpha1.ProjectSharingSpec `json:"sharing,omitempty"`
-	Environments []ProjectEnvironmentView      `json:"environments,omitempty"`
-	CreatedAt    time.Time                     `json:"createdAt"`
-	UpdatedAt    *time.Time                    `json:"updatedAt,omitempty"`
+	Name         string                         `json:"name"`
+	DisplayName  string                         `json:"displayName"`
+	Description  string                         `json:"description,omitempty"`
+	Phase        string                         `json:"phase,omitempty"`
+	Template     string                         `json:"template,omitempty"`
+	Repository   *ProjectRepositoryView         `json:"repository,omitempty"`
+	Delivery     aiv1alpha1.ProjectDeliverySpec `json:"delivery"`
+	Memory       aiv1alpha1.ProjectMemory       `json:"memory,omitempty"`
+	Sharing      aiv1alpha1.ProjectSharingSpec  `json:"sharing,omitempty"`
+	Environments []ProjectEnvironmentView       `json:"environments,omitempty"`
+	CreatedAt    time.Time                      `json:"createdAt"`
+	UpdatedAt    *time.Time                     `json:"updatedAt,omitempty"`
 }
 
 type ProjectEnvironmentView struct {
@@ -342,6 +348,10 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 			req.DisplayName = plan.Name
 		}
 	}
+	delivery, err := projectDeliveryForCreate(req.Delivery, adoptedPlan != nil)
+	if err != nil {
+		return nil, err
+	}
 	repoBase := slugifyProjectName(req.DisplayName)
 	if preflight != nil {
 		req.DisplayName = preflight.Naming.DisplayName
@@ -427,6 +437,15 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 			UpdatedAt: &now,
 		},
 	}
+	p.Spec.Delivery = delivery
+	if projectDeliveryUsesGitOps(delivery) {
+		// Any GitOps environment derives one durable RepositorySync registration.
+		// Direct environments remain separate writable bindings, so the writers do
+		// not overlap.
+		if err := enableProjectGitOps(p); err != nil {
+			return nil, err
+		}
+	}
 	if selectedTemplate != nil {
 		if err := s.applyProjectDevelopmentTemplateWithIdentity(p, *selectedTemplate, id); err != nil {
 			return nil, err
@@ -469,9 +488,21 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 	}
 	// Wizard step: attach the template's scaffold so the project opens on a
 	// runnable placeholder. Skipped for adopted repos (they hydrate from the
-	// imported tree below). Best-effort — never fails creation.
+	// imported tree below). Production-only GitOps does not alter this
+	// development bootstrap; explicit GitOps development additionally requires
+	// its initial inventory.
 	if !repoPlan.Adopted && selectedTemplate != nil {
-		s.emitScaffoldSeed(ctx, id, created, *selectedTemplate, onStatus, c)
+		// Fetch starter source while the workspace is still empty. Explicit
+		// GitOps development includes its files in this seed; the idempotent pass
+		// below fills them in when a scaffold-less template is used.
+		if err := s.emitScaffoldSeed(ctx, id, created, *selectedTemplate, onStatus, c); err != nil {
+			s.cleanupCreatedProjectSetup(ctx, c, id, created)
+			return nil, err
+		}
+		if err := s.ensureProjectGitOpsScaffold(ctx, id, created, *selectedTemplate); err != nil {
+			s.cleanupCreatedProjectSetup(ctx, c, id, created)
+			return nil, err
+		}
 	}
 	// Instances are provisioned by the Project reconciler converging the spec
 	// just written; the immediate response reports them Pending and the
@@ -1585,6 +1616,7 @@ func projectView(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project,
 		Description:  p.Spec.Description,
 		Phase:        p.Status.Phase,
 		Repository:   projectRepositoryView(ctx, c, p),
+		Delivery:     effectiveProjectDeliverySpec(p),
 		Memory:       p.Spec.Memory,
 		Sharing:      effectiveProjectSharingSpec(p.Spec.Sharing),
 		Environments: projectEnvironmentViews(p),

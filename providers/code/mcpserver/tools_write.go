@@ -69,6 +69,7 @@ type commitFilesInput struct {
 	RepositoryRef string            `json:"repositoryRef" jsonschema:"Name of the managed Repository CR to commit into"`
 	Message       string            `json:"message,omitempty" jsonschema:"Commit message; defaults to a generated update message"`
 	Branch        string            `json:"branch,omitempty" jsonschema:"Branch name; defaults to the Repository defaultBranch, then main"`
+	BaseRef       string            `json:"baseRef,omitempty" jsonschema:"Base branch, tag, or commit used only when branch does not exist; defaults to the Repository default branch"`
 	Files         []commitFileInput `json:"files,omitempty" jsonschema:"Files to write in this commit"`
 	DeletePaths   []string          `json:"deletePaths,omitempty" jsonschema:"Repository-relative file paths to delete in this commit"`
 }
@@ -408,6 +409,7 @@ func repositoryCommitObject(repo *codev1alpha1.Repository, bundle commitbundle.B
 	}
 	putIf(spec, "message", in.Message)
 	putIf(spec, "branch", in.Branch)
+	putIf(spec, "baseRef", in.BaseRef)
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": codev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "RepositoryCommit",

@@ -20,6 +20,8 @@ spec:
   vendor: "faros"
   version: "0.1.0"
   category: "Developer"
+  dependencies:
+    - name: deployments
   iconURL: "/ui/providers/code/icon.svg"
   # Local dev (Tilt / Makefile): the provider binary runs on the host at
   # PORT=8083 — distinct from quickstart (:8081) and infrastructure (:8082).
@@ -46,5 +48,13 @@ spec:
     # on Enable.
     permissionClaims:
       - resource: secrets
+        verbs: [get, list, watch, create, update, patch, delete]
+        tenantScoped: true
+      - group: deployments.faros.sh
+        resource: releases
+        verbs: [get, list, watch, create, update, patch]
+        tenantScoped: true
+      - group: deployments.faros.sh
+        resource: deployments
         verbs: [get, list, watch, create, update, patch, delete]
         tenantScoped: true

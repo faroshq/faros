@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"k8s.io/klog/v2"
 
@@ -36,24 +37,57 @@ import (
 // project the assistant can still build — never fail creation over it.
 // Returns the number of files seeded (0 when nothing was seeded).
 func (s *Server) seedProjectScaffold(ctx context.Context, id identity, p *aiv1alpha1.Project, info projectTemplateInfo) (int, error) {
-	if s.workspaces == nil || p == nil || info.ScaffoldRepo == "" {
+	if s.workspaces == nil || p == nil || (info.ScaffoldRepo == "" && !projectDevelopmentIsGitManaged(p)) {
 		return 0, nil
 	}
 	scope := projectWorkspaceScope(id, p)
 
-	// Do not clobber a workspace that already has content (re-create races, an
-	// adopted repo hydrate, or a prior seed).
+	// Starter source is only attached to an empty workspace. Explicit GitOps
+	// development inventory is narrower and may be added without replacing
+	// existing application source. The default Direct development policy never
+	// writes development Release/Deployment YAML.
 	existing, err := s.workspaces.ListFiles(ctx, scope, workspace.ListOptions{})
-	if err == nil && len(existing.Files) > 0 {
-		return 0, nil
+	workspacePopulated := false
+	gitOpsRoot := projectGitOpsDeliverySettings(p).Path + "/"
+	if err == nil {
+		for _, current := range existing.Files {
+			if !projectDevelopmentIsGitManaged(p) || !strings.HasPrefix(current.Path, gitOpsRoot) {
+				workspacePopulated = true
+				break
+			}
+		}
 	}
-
-	files, err := scaffold.Fetch(ctx, info.ScaffoldRepo, info.ScaffoldRef)
+	files := make([]workspace.File, 0)
+	if !workspacePopulated && info.ScaffoldRepo != "" {
+		files, err = scaffold.Fetch(ctx, info.ScaffoldRepo, info.ScaffoldRef)
+		if err != nil {
+			return 0, fmt.Errorf("fetching scaffold %s@%s: %w", info.ScaffoldRepo, info.ScaffoldRef, err)
+		}
+		if err := scaffold.CheckLayout(info.WorkspacePaths(), files); err != nil {
+			return 0, err
+		}
+	}
+	gitOpsFiles, err := projectGitOpsDevelopmentFiles(p, info)
 	if err != nil {
-		return 0, fmt.Errorf("fetching scaffold %s@%s: %w", info.ScaffoldRepo, info.ScaffoldRef, err)
-	}
-	if err := scaffold.CheckLayout(info.WorkspacePaths(), files); err != nil {
 		return 0, err
+	}
+	if workspacePopulated {
+		for _, candidate := range gitOpsFiles {
+			for _, current := range existing.Files {
+				if current.Path == candidate.Path {
+					candidate.Path = ""
+					break
+				}
+			}
+			if candidate.Path != "" {
+				files = append(files, candidate)
+			}
+		}
+	} else {
+		files = append(files, gitOpsFiles...)
+	}
+	if len(files) == 0 {
+		return 0, nil
 	}
 	if err := s.workspaces.ApplyFiles(ctx, scope, files); err != nil {
 		return 0, fmt.Errorf("seeding workspace: %w", err)
@@ -73,6 +107,50 @@ func (s *Server) seedProjectScaffold(ctx context.Context, id identity, p *aiv1al
 		return 0, fmt.Errorf("tracking seeded files: %w", err)
 	}
 	return len(files), nil
+}
+
+// ensureProjectGitOpsScaffold writes explicit GitOps development inventory
+// independently of optional starter source. Production-only GitOps returns an
+// empty file set: RepositorySync safely accepts that until first promotion.
+func (s *Server) ensureProjectGitOpsScaffold(ctx context.Context, id identity, p *aiv1alpha1.Project, info projectTemplateInfo) error {
+	files, err := projectGitOpsDevelopmentFiles(p, info)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	if s.workspaces == nil {
+		return fmt.Errorf("workspace store is required to bootstrap Git-managed development configuration")
+	}
+	scope := projectWorkspaceScope(id, p)
+	existing, listErr := s.workspaces.ListFiles(ctx, scope, workspace.ListOptions{})
+	if listErr != nil {
+		return fmt.Errorf("list workspace before GitOps bootstrap: %w", listErr)
+	}
+	byPath := make(map[string]struct{}, len(existing.Files))
+	for _, current := range existing.Files {
+		byPath[current.Path] = struct{}{}
+	}
+	pending := make([]workspace.File, 0, len(files))
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if _, found := byPath[file.Path]; found {
+			continue
+		}
+		pending = append(pending, file)
+		paths = append(paths, file.Path)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	if err := s.workspaces.ApplyFiles(ctx, scope, pending); err != nil {
+		return fmt.Errorf("write GitOps development scaffold: %w", err)
+	}
+	if _, err := s.workspaces.AddUncommittedPaths(ctx, scope, paths); err != nil {
+		return fmt.Errorf("track GitOps development scaffold: %w", err)
+	}
+	return nil
 }
 
 // reseedProjectScaffold is POST /api/projects/{project}/scaffold — re-attach
@@ -109,20 +187,31 @@ func (s *Server) reseedProjectScaffold(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// emitScaffoldSeed runs the seed step during creation with a wizard status
-// line, downgrading any failure to a warning (creation must not fail here).
-func (s *Server) emitScaffoldSeed(ctx context.Context, id identity, p *aiv1alpha1.Project, info projectTemplateInfo, onStatus projectCreationStatusFunc, c *asclient.Client) {
+// emitScaffoldSeed runs the seed step during creation with wizard status.
+// Production GitOps must not make development bootstrap stricter: the default
+// hybrid can safely start without .faros manifests. Explicit GitOps development
+// still requires the promised source and inventory to land together.
+func (s *Server) emitScaffoldSeed(ctx context.Context, id identity, p *aiv1alpha1.Project, info projectTemplateInfo, onStatus projectCreationStatusFunc, c *asclient.Client) error {
 	if info.ScaffoldRepo == "" {
-		return
+		return nil
 	}
-	_ = emitProjectCreationStatus(onStatus, "Attaching scaffold to "+info.Name)
+	if err := emitProjectCreationStatus(onStatus, "Attaching scaffold to "+info.Name); err != nil {
+		return err
+	}
 	seeded, err := s.seedProjectScaffold(ctx, id, p, info)
 	if err != nil {
 		klog.V(1).Infof("scaffold seed failed for project %s (template %s): %v", p.Name, info.Name, err)
+		if projectDevelopmentIsGitManaged(p) {
+			_ = emitProjectCreationStatus(onStatus, "Scaffold unavailable — project creation stopped")
+			return fmt.Errorf("attach required project scaffold: %w", err)
+		}
 		_ = emitProjectCreationStatus(onStatus, "Scaffold unavailable — starting from an empty project")
-		return
+		return nil
 	}
 	if seeded > 0 {
-		_ = emitProjectCreationStatus(onStatus, fmt.Sprintf("Scaffold attached (%d files)", seeded))
+		if err := emitProjectCreationStatus(onStatus, fmt.Sprintf("Scaffold attached (%d files)", seeded)); err != nil {
+			return err
+		}
 	}
+	return nil
 }

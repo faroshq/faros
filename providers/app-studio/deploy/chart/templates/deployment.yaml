@@ -55,10 +55,10 @@ spec:
             - name: APP_STUDIO_INFRA_IDENTITY_HASH
               value: {{ .Values.apiExport.infraIdentityHash | quote }}
             {{- end }}
-            {{- if .Values.apiExport.codeIdentityHash }}
             - name: APP_STUDIO_CODE_IDENTITY_HASH
-              value: {{ .Values.apiExport.codeIdentityHash | quote }}
-            {{- end }}
+              value: {{ required "apiExport.codeIdentityHash is required for App Studio repository and GitOps claims" .Values.apiExport.codeIdentityHash | quote }}
+            - name: APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH
+              value: {{ required "apiExport.deploymentsIdentityHash is required for App Studio Release and Deployment claims" .Values.apiExport.deploymentsIdentityHash | quote }}
             {{- if $catalogEntryConfigMap }}
             # The CatalogEntry is a kcp resource, so the chart cannot apply it to
             # the hosting cluster. It is rendered into a ConfigMap (mounted below)
