@@ -85,6 +85,34 @@ func TestHeartbeatPersistIsThrottled(t *testing.T) {
 	}
 }
 
+// Throttling must be measured from the last persisted beat, not the last local
+// beat. Otherwise a provider beating faster than the threshold continuously
+// moves the local timestamp forward and never refreshes other hub replicas.
+func TestHeartbeatEventuallyPersistsDuringSustainedFastBeats(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{Name: "cost", EndpointsValid: true})
+
+	current := time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC)
+	writes := 0
+	handler := newHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
+		writes++
+		return nil
+	}, logr.Discard(), func() time.Time { return current })
+
+	beatEvery := heartbeatPersistThreshold / 3
+	for range 5 {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, heartbeatRequestFor("cost"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		current = current.Add(beatEvery)
+	}
+	if writes != 2 {
+		t.Fatalf("status writes = %d, want 2 (initial beat plus threshold refresh)", writes)
+	}
+}
+
 // If the beat cannot be shared, reporting success would leave every other
 // replica timing out a healthy provider with nothing in the logs.
 func TestHeartbeatFailsWhenPersistFails(t *testing.T) {
