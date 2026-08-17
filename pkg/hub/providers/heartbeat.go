@@ -54,11 +54,9 @@ type HeartbeatRecorder func(ctx context.Context, name, version string, at time.T
 const heartbeatPersistThreshold = HeartbeatTTL / 6
 
 // NewHeartbeatHandler returns an http.Handler serving
-// POST /api/providers/{name}/heartbeat. Auth is enforced by the faros auth
-// middleware mounted upstream of this handler — any bearer token faros
-// accepts will be accepted as a valid heartbeat sender in Phase 1C. Phase
-// 1D will tighten this to "must be the provider's own SA token" once SA
-// minting is in place.
+// POST /api/providers/{name}/heartbeat. It accepts beats only for providers
+// already present in the registry; authentication, when configured by the
+// deployment, is outside this handler.
 //
 // record may be nil (no kcp configured), in which case liveness stays local to
 // this process and the hub must not be scaled beyond one replica.

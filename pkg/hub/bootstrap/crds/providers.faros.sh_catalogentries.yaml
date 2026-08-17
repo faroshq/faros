@@ -43,9 +43,9 @@ spec:
           "catalogentries.providers.faros.sh" — no redundant "Provider"
           prefix on the kind itself.
 
-          Phase 1A note: workspace/ServiceAccount/Secret provisioning and inline
-          APIResourceSchema apply are NOT yet implemented (see docs/providers.md).
-          This iteration only honors spec.ui.url and spec.backend.url to route HTTP.
+          Provider workspace objects are owned by provider init. The hub observes the
+          declared APIExport contract and runtime endpoints to gate tenant Enable and
+          request routing.
         properties:
           apiVersion:
             description: |-
@@ -253,8 +253,8 @@ spec:
                 x-kubernetes-list-type: map
               apiExport:
                 description: |-
-                  APIExport declares the provider's kcp APIExport. Not yet honored by
-                  the hub (Phase 1B will wire it up).
+                  APIExport declares the provider-owned kcp APIExport that the hub verifies
+                  before allowing tenant Enable.
                 properties:
                   name:
                     description: |-
@@ -278,6 +278,36 @@ spec:
                         group:
                           description: Group is the API group (empty for core).
                           type: string
+                        identitySource:
+                          description: |-
+                            IdentitySource identifies the trusted workspace whose current APIExport
+                            identity must match this claim's identityHash. It is required whenever
+                            the target APIExport claim has a non-empty identityHash and must be absent
+                            for identity-less built-in Kubernetes APIs. Platform sources resolve only
+                            from the hub-owned controllers workspace. Provider sources resolve only
+                            from the named provider child workspace.
+                          properties:
+                            kind:
+                              description: Kind selects a hub-owned platform export
+                                or an onboarded provider export.
+                              enum:
+                              - Platform
+                              - Provider
+                              type: string
+                            provider:
+                              description: |-
+                                Provider is the provider workspace name for a Provider source. The hub
+                                derives its full workspace path; arbitrary paths are never accepted.
+                              minLength: 1
+                              type: string
+                          required:
+                          - kind
+                          type: object
+                          x-kubernetes-validations:
+                          - message: provider is required only for Provider identity
+                              sources
+                            rule: 'self.kind == ''Provider'' ? has(self.provider)
+                              : !has(self.provider)'
                         resource:
                           description: Resource is the resource name (plural).
                           minLength: 1
@@ -298,8 +328,40 @@ spec:
                       - resource
                       type: object
                     type: array
+                  requiredResources:
+                    description: |-
+                      RequiredResources is the stable minimum set of APIs that must be present
+                      in the provider-owned APIExport before tenants may bind it. Providers that
+                      add resources dynamically declare only their bootstrap APIs here; dynamic
+                      additions are allowed and are still validated by the hub before readiness.
+                    items:
+                      description: |-
+                        ProviderAPIExportResource identifies one stable API resource that must be
+                        published by a provider's APIExport before the provider is ready to enable.
+                      properties:
+                        group:
+                          default: ""
+                          description: Group is the API group. Use the empty string
+                            for the core API group.
+                          type: string
+                        name:
+                          description: Name is the plural resource name exposed by
+                            the APIExport.
+                          minLength: 1
+                          type: string
+                      required:
+                      - group
+                      - name
+                      type: object
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - group
+                    - name
+                    x-kubernetes-list-type: map
                 required:
                 - name
+                - requiredResources
                 type: object
               assistantSkills:
                 description: |-

@@ -275,7 +275,7 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider not found: "+name, http.StatusNotFound)
 		return
 	}
-	if !prov.Ready() {
+	if !prov.RuntimeReady() {
 		http.Error(w, "provider not ready: "+name, http.StatusServiceUnavailable)
 		return
 	}

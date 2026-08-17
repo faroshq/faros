@@ -25,10 +25,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/gorilla/mux"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/faroshq/faros/pkg/hub/kcp"
 	"github.com/faroshq/faros/pkg/hub/providers"
@@ -38,8 +41,7 @@ import (
 // EnableProviderRequest is the body of POST .../providers/{name}/enable.
 // Mirrors the dialog state — for each declared permission claim, whether
 // the user accepted it. Claims the user didn't tick are sent through to
-// kcp as state=Rejected, which prevents the binding from going Bound
-// and surfaces the mismatch to the user.
+// kcp as state=Rejected and remain unapplied.
 type EnableProviderRequest struct {
 	AcceptedClaims []AcceptedClaim `json:"acceptedClaims"`
 }
@@ -73,7 +75,7 @@ type EnableProviderResponse struct {
 // Idempotent: AlreadyExists is treated as success so the portal can
 // safely re-issue on retry.
 func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
-	tc, ok := h.requireTenantContext(w, r, true /* workspace */, false /* admin not required */)
+	tc, ok := h.requireTenantContext(w, r, true /* workspace */, true /* admin required */)
 	if !ok {
 		return
 	}
@@ -100,6 +102,14 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 		// "enabled" implicitly. The portal shouldn't have shown an
 		// Enable button for these; this branch is defense in depth.
 		writeStatus(w, http.StatusBadRequest, "BadRequest", "provider "+providerName+" declares no APIExport to bind")
+		return
+	}
+	if !prov.Ready() {
+		// Provider readiness is owned by the hub registry (endpoint parsing,
+		// backend healthPath, and heartbeat freshness). Refuse before creating
+		// any tenant state; 409 + "retry shortly" is the existing typed,
+		// retryable Enable contract consumed by the portal.
+		writeStatus(w, http.StatusConflict, "Conflict", "provider "+providerName+" is not ready — retry shortly")
 		return
 	}
 	missing, err := h.missingProviderDependencies(r.Context(), tc.OrgUUID, tc.WorkspaceUUID, prov.Dependencies)
@@ -129,11 +139,18 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 
 	claims := make([]kcp.ProviderClaim, 0, len(prov.PermissionClaims))
 	for _, declared := range prov.PermissionClaims {
+		isAccepted := accepted[acceptedKey(declared.Group, declared.Resource)]
+		if isAccepted && !declared.TenantScoped && !prov.AllowUntrustedClaims {
+			writeStatus(w, http.StatusForbidden, "Forbidden", "provider "+providerName+" claim "+acceptedKey(declared.Group, declared.Resource)+" is not tenant-scoped and has not been approved by the catalog owner")
+			return
+		}
 		claims = append(claims, kcp.ProviderClaim{
-			Group:    declared.Group,
-			Resource: declared.Resource,
-			Verbs:    declared.Verbs,
-			Accepted: accepted[acceptedKey(declared.Group, declared.Resource)],
+			Group:                  declared.Group,
+			Resource:               declared.Resource,
+			Verbs:                  declared.Verbs,
+			Accepted:               isAccepted,
+			IdentitySourceKind:     declared.IdentitySourceKind,
+			IdentitySourceProvider: declared.IdentitySourceProvider,
 		})
 	}
 
@@ -157,8 +174,13 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 		providerName, // binding name matches provider name (existing convention from portal/src/stores/providers.ts:283)
 		prov.APIExportPath,
 		prov.APIExportName,
+		prov.RequiredResources,
 		claims,
 	); err != nil {
+		if apierrors.IsConflict(err) {
+			writeStatus(w, http.StatusConflict, "Conflict", "provider "+providerName+" APIExport changed or is not ready — retry shortly")
+			return
+		}
 		writeStatus(w, http.StatusInternalServerError, "InternalError", "ensure APIBinding: "+err.Error())
 		return
 	}
@@ -223,7 +245,7 @@ func (h *Handler) missingProviderDependencies(ctx context.Context, orgUUID, wsUU
 // plus a new one: the RBAC teardown must happen with kcp-admin credentials
 // the tenant doesn't hold.
 func (h *Handler) disableProvider(w http.ResponseWriter, r *http.Request) {
-	tc, ok := h.requireTenantContext(w, r, true /* workspace */, false /* admin not required */)
+	tc, ok := h.requireTenantContext(w, r, true /* workspace */, true /* admin required */)
 	if !ok {
 		return
 	}
@@ -251,7 +273,9 @@ func (h *Handler) disableProvider(w http.ResponseWriter, r *http.Request) {
 // kept as a map so the portal can do "is provider X enabled" lookups in
 // O(1) without indexing client-side.
 type ListEnabledProvidersResponse struct {
-	BindingNamesByProvider map[string]string `json:"bindingNamesByProvider"`
+	BindingNamesByProvider        map[string]string          `json:"bindingNamesByProvider"`
+	ClaimReviewRequiredByProvider map[string]bool            `json:"claimReviewRequiredByProvider,omitempty"`
+	ClaimDecisionsByProvider      map[string]map[string]bool `json:"claimDecisionsByProvider,omitempty"`
 }
 
 // listEnabledProviders handles GET /api/orgs/{org}/workspaces/{ws}/providers/enabled.
@@ -276,7 +300,58 @@ func (h *Handler) listEnabledProviders(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, http.StatusInternalServerError, "InternalError", "list APIBindings: "+err.Error())
 		return
 	}
+	bindingNames := make(map[string]string, len(bindings))
+	claimReviewRequired := make(map[string]bool)
+	claimDecisions := make(map[string]map[string]bool, len(bindings))
+	for providerName, binding := range bindings {
+		bindingNames[providerName] = binding.Name
+		decisions := make(map[string]bool, len(binding.PermissionClaims))
+		for _, claim := range binding.PermissionClaims {
+			decisions[claim.Group+"/"+claim.Resource] = claim.State == string(apisv1alpha2.ClaimAccepted)
+		}
+		claimDecisions[providerName] = decisions
+		if h.mgr.providers != nil {
+			if provider, found := h.mgr.providers.Get(providerName); found && providerBindingNeedsClaimReview(binding, provider.PermissionClaims) {
+				claimReviewRequired[providerName] = true
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(ListEnabledProvidersResponse{BindingNamesByProvider: bindings})
+	_ = json.NewEncoder(w).Encode(ListEnabledProvidersResponse{
+		BindingNamesByProvider:        bindingNames,
+		ClaimReviewRequiredByProvider: claimReviewRequired,
+		ClaimDecisionsByProvider:      claimDecisions,
+	})
+}
+
+// providerBindingNeedsClaimReview reports contract drift without treating an
+// intentional Accepted/Rejected choice as drift. kcp safely leaves newly added
+// export claims unapplied; the catalog uses this result to ask the tenant to
+// review the new group/resource/verbs set before the Enable endpoint patches
+// the existing APIBinding in place.
+func providerBindingNeedsClaimReview(binding kcp.ProviderAPIBinding, declared []providers.PermissionClaim) bool {
+	if binding.PermissionClaimsValidKnown && !binding.PermissionClaimsValid {
+		return true
+	}
+	canonical := func(group, resource string, verbs []string) string {
+		verbs = append([]string(nil), verbs...)
+		sort.Strings(verbs)
+		return group + "/" + resource + ":" + strings.Join(verbs, ",")
+	}
+	actual := make(map[string]struct{}, len(binding.PermissionClaims))
+	for _, claim := range binding.PermissionClaims {
+		actual[canonical(claim.Group, claim.Resource, claim.Verbs)] = struct{}{}
+	}
+	if len(actual) != len(binding.PermissionClaims) {
+		return true
+	}
+	expected := make(map[string]struct{}, len(declared))
+	for _, claim := range declared {
+		expected[canonical(claim.Group, claim.Resource, claim.Verbs)] = struct{}{}
+	}
+	if len(expected) != len(declared) {
+		return true
+	}
+	return !reflect.DeepEqual(actual, expected)
 }
