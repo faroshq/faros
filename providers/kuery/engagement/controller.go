@@ -118,6 +118,13 @@ type engagedEdge struct {
 
 // New builds the multicluster manager (APIExport VW) and registers the
 // Edge reconciler. Call Start to run it.
+//
+// Deliberately NOT leader-elected (unlike code/vibe-studio/infrastructure):
+// engagement is per-replica serving state — each replica engages edges into
+// its own kuery sync engine, and the HTTP layer reads TenantEdges /
+// EngagedCount from this process. Gating it on a lease would leave
+// non-leaders serving queries with zero engaged edges. Scaling past one
+// replica needs a shared engagement design first (chart default is 1).
 func New(cfg Config) (*Controller, error) {
 	if cfg.ProviderConfig == nil || cfg.Sync == nil || cfg.Store == nil {
 		return nil, fmt.Errorf("engagement: ProviderConfig, Sync, and Store are required")

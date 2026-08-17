@@ -209,6 +209,14 @@ func (h *controllerHealth) heartbeatStatus() string {
 // managerAuthority is installed in the tenant client factory once. The
 // controller retry loop swaps the currently running manager into it and clears
 // it after an exit, so requests cannot use a manager that is no longer alive.
+//
+// This coupling is also why the manager is deliberately NOT leader-elected
+// (unlike code/vibe-studio/infrastructure): the HTTP action path resolves
+// tenant clusters through the running manager via this authority, so it must
+// run on every replica — a lease-gated manager would leave non-leaders unable
+// to serve actions. The reconcilers are idempotent status stampers, so
+// active-active is churn, not corruption; keep replicaCount at 1 until the
+// serving path gets its own cluster resolver.
 type managerAuthority struct {
 	mu  sync.RWMutex
 	mgr mcmanager.Manager

@@ -61,6 +61,14 @@ const eventsMaxAge = 6 * time.Hour
 // edge token / RBAC / lifecycle reconcilers. connManager wires the lifecycle
 // reconciler's tunnel-liveness cross-check to the provider's live ConnManager.
 // A nil config means "skip the manager" (healthz-only / dev).
+//
+// Deliberately NOT leader-elected (unlike code/vibe-studio/infrastructure):
+// this manager doubles as the tunnel plane's tenant-config resolver
+// (SetTenantConfigGetter below goes through mgr.GetCluster) and the lifecycle
+// reconcilers cross-check liveness against this replica's ConnManager, so
+// gating it would break serving on non-leaders. The provider is single-replica
+// by design anyway (revdial tunnels + in-memory event store; the chart pins
+// replicaCount: 1) — revisit both together if it ever scales out.
 func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *sdktunnel.Server, hubExternalURL string, hubCAData []byte, devMode bool) error {
 	if config == nil {
 		return errControllerDisabled
