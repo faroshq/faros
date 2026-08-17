@@ -1584,6 +1584,34 @@ local_resource(
 # answers queries/edge listings from the shared store. Engagement needs
 # ▶ kuery-register then ▶ kuery-init (mints the runtime kubeconfig the
 # secrets sync delivers).
+#
+# The kubernetesclusters permission claim needs the EDGES APIExport's
+# identityHash (kcp hard-rejects hash-less claims on non-built-in types) —
+# same discovery-file pattern as app-studio's hashes below.
+kuery_hash_file = '.kcp/kuery-edges-identity-hash.env'
+local_resource(
+    'kuery-edges-identity-hash',
+    cmd='''
+set -eu
+hash="$(kubectl --kubeconfig=%s --server=%s/clusters/root:faros:providers:edges \
+  --insecure-skip-tls-verify get apiexport edges.providers.faros.sh \
+  -o jsonpath='{.status.identityHash}' 2>/dev/null || true)"
+if [ -z "$hash" ]; then
+  echo "edges identityHash not discoverable yet - re-trigger after edges-init"
+  exit 0
+fi
+printf 'edges=%%s\\n' "$hash" > %s
+echo "wrote %s"
+'''.strip() % (KCP_ADMIN_KUBECONFIG, KCP_ADMIN_SERVER, kuery_hash_file, kuery_hash_file),
+    deps=['.kcp/edges-runtime.kubeconfig', 'tilt-frontproxy.kubeconfig'],
+    allow_parallel=True,
+    labels=['providers-kuery'],
+)
+kuery_edges_hash = ''
+for _line in str(read_file(kuery_hash_file, '')).splitlines():
+    if _line.startswith('edges='):
+        kuery_edges_hash = _line[len('edges='):].strip()
+
 provider_kubeconfig_sync('kuery', '.kcp/kuery-runtime.kubeconfig', ['providers-kuery'])
 provider_pod(
     'kuery', 8084,
@@ -1591,6 +1619,7 @@ provider_pod(
         'replicaCount=2',
         'store.driver=postgres',
         'store.dsn=%s' % providers_db_url('kuery'),
+        'apiExport.edgesIdentityHash=%s' % kuery_edges_hash,
     ],
     resource_deps=['kuery-secrets', 'providers-db'],
 )
