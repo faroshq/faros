@@ -91,6 +91,8 @@ jobs:
             image: ${{ github.repository_owner }}/faros-infrastructure-provider
           - name: code
             image: ${{ github.repository_owner }}/faros-code-provider
+          - name: deployments
+            image: ${{ github.repository_owner }}/faros-deployments-provider
           - name: kuery
             image: ${{ github.repository_owner }}/faros-kuery-provider
           - name: app-studio

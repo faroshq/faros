@@ -2,10 +2,12 @@
 
 This POC lets a project choose the desired-state boundary independently for
 development and production. Its recommended policy keeps development direct and
-fast while making the repository authoritative for production. It is a
-source-level proof of the provider contracts; it does not claim that an
-existing tenant has been migrated or that the complete flow has been exercised
-against a live Git host and kcp installation.
+fast while making the repository authoritative for production. Deployments is
+implemented as a standalone, first-class Faros provider: it owns an APIExport,
+CatalogEntry, provider workspace, minted runtime identity, multicluster
+controller, Helm chart, heartbeat/readiness contract, Tilt lifecycle, image and
+split-module publishing, and live provider-registration e2e coverage. The
+complete Git-host promotion flow remains a manual acceptance path.
 
 ## Ownership boundary
 
@@ -131,18 +133,21 @@ recorded separately from the Release's source revision.
 The provider exposes `deployments.faros.sh/v1alpha1`:
 
 - `Release` is immutable after creation. It records source repository and code
-  revision, an Infrastructure Template reference, and admitted component image
-  references.
+  revision, a blueprint reference, and admitted component image references.
 - `Deployment` is mutable Git-projected desired state. It selects a Release,
   configuration, mode (`development` or `production`), deletion policy, class,
   and rollout identity.
 
-The built-in `kro-direct` class translates a Deployment into the instance kind
-declared by its Infrastructure Template. Production maps admitted Release image
-artifacts to component image inputs. Development leaves image selection to the
-Infrastructure development overlay. In both modes the adapter reserves the
-platform-owned name, mode, and rollout revision, then projects backend phase,
-URL, outputs, and release references into `Deployment.status`.
+The built-in `kro-direct` class currently admits the canonical `application`
+blueprint contract and translates it into an Infrastructure `Application`.
+Infrastructure Templates use virtual storage and therefore cannot be selected
+through another provider's permission claim; the POC keeps this mapping
+provider-owned until Release can carry an immutable resolved blueprint
+snapshot. Production maps admitted Release image artifacts to component image
+inputs. Development leaves image selection to the Infrastructure development
+overlay. In both modes the adapter reserves the platform-owned name, mode, and
+rollout revision, then projects backend phase, URL, outputs, and release
+references into `Deployment.status`.
 
 Configuration fields removed from Git are removed from the backend instance;
 provider-computed and unrelated backend-managed fields are preserved. This is a
@@ -203,10 +208,9 @@ the serving APIExport identity hashes and must match provider init,
 bootstrap fail closed when the Code or Deployments identities required by this
 flow are absent.
 
-Existing tenant APIBindings do not automatically accept newly added claims.
-They must be re-enabled or migrated before the Git sync and proposal controllers
-are treated as available. Until then, existing projects remain on the legacy
-direct path.
+This POC deliberately does not preserve existing tenant APIBindings. Re-enable
+the affected providers or create a fresh tenant so the new cross-provider
+claims are accepted.
 
 App Studio does not yet collapse the three native lifecycle resources into one
 durable aggregate phase. Its promotion response reports `PendingApproval`, then
@@ -225,7 +229,22 @@ make codegen-code-provider codegen-deployments-provider codegen-app-studio-provi
 git diff --check
 ```
 
-Live acceptance additionally requires a real repository and provider claims:
+First-class provider acceptance against the Tilt multi-shard stack is:
+
+```sh
+make tilt-cluster
+# After infrastructure-init, deployments-register, and deployments-init are ready:
+make e2e-tilt-cluster
+```
+
+That gate proves the provider process is ready, its authoritative CatalogEntry
+is Ready, its APIExport publishes `releases` and `deployments`, and its exact
+Infrastructure permission claims carry the live Infrastructure identity hash.
+It also creates an isolated tenant, binds both providers with accepted claims,
+materializes an Infrastructure `Application` from a `Release`/`Deployment`, and
+verifies default `Retain` finalization detaches rather than deletes the backend.
+
+Full product acceptance additionally requires a real repository:
 
 1. Create a default project and verify development has a writable
    provider-resource binding, production is GitOps, one RepositorySync exists,

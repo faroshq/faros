@@ -30,6 +30,7 @@ You may obtain a copy of the License at
 //   - kcp admin            tilt-frontproxy.kubeconfig          (FAROS_E2E_TILT_KUBECONFIG)
 //   - hub REST + MCP        https://localhost:9443             (FAROS_E2E_HUB_URL)
 //   - infrastructure /mcp   http://localhost:8082              (FAROS_E2E_INFRA_URL)
+//   - deployments provider  http://localhost:8093              (FAROS_E2E_DEPLOYMENTS_URL)
 //   - hub static token      dev-token                          (FAROS_E2E_STATIC_TOKEN)
 package tiltcluster
 
@@ -52,11 +53,12 @@ import (
 
 // Suite-shared state, populated by TestMain.
 var (
-	repoRoot     string
-	frontproxyKC string // path to tilt-frontproxy.kubeconfig (kcp admin)
-	hubURL       string // https://localhost:9443
-	infraURL     string // http://localhost:8082
-	staticToken  string // hub static-auth token (dev-token)
+	repoRoot       string
+	frontproxyKC   string // path to tilt-frontproxy.kubeconfig (kcp admin)
+	hubURL         string // https://localhost:9443
+	infraURL       string // http://localhost:8082
+	deploymentsURL string // http://localhost:8093
+	staticToken    string // hub static-auth token (dev-token)
 
 	kcpBaseHost string // front-proxy host with any /clusters/<x> suffix stripped
 	kcpTLS      rest.TLSClientConfig
@@ -71,7 +73,7 @@ const (
 	// the MCP aggregate federates its tools as "<providerName>__<tool>".
 	providerName       = "infrastructure"
 	providerWorkspace  = "root:faros:providers:infrastructure"
-	providersWorkspace = "root:faros:providers"
+	providersWorkspace = "root:faros:system:providers"
 	infraGroup         = "infrastructure.faros.sh"
 	infraAPIExportName = "infrastructure.providers.faros.sh"
 )
@@ -83,15 +85,16 @@ func TestMain(m *testing.M) {
 	frontproxyKC = envOr("FAROS_E2E_TILT_KUBECONFIG", filepath.Join(repoRoot, "tilt-frontproxy.kubeconfig"))
 	hubURL = strings.TrimRight(envOr("FAROS_E2E_HUB_URL", "https://localhost:9443"), "/")
 	infraURL = strings.TrimRight(envOr("FAROS_E2E_INFRA_URL", "http://localhost:8082"), "/")
+	deploymentsURL = strings.TrimRight(envOr("FAROS_E2E_DEPLOYMENTS_URL", "http://localhost:8093"), "/")
 	staticToken = envOr("FAROS_E2E_STATIC_TOKEN", "dev-token")
 
 	stackReady = detectStack()
 	if !stackReady {
 		fmt.Fprintf(os.Stderr,
 			"\n[tiltcluster] stack not detected — tests will be SKIPPED.\n"+
-				"  kubeconfig: %s\n  hub:        %s\n  provider:   %s\n"+
+				"  kubeconfig: %s\n  hub:        %s\n  infrastructure: %s\n  deployments:    %s\n"+
 				"Bring it up first in another terminal:  make tilt-cluster\n\n",
-			frontproxyKC, hubURL, infraURL)
+			frontproxyKC, hubURL, infraURL, deploymentsURL)
 	}
 
 	os.Exit(m.Run())
@@ -119,6 +122,9 @@ func detectStack() bool {
 		return false
 	}
 	if !httpOK(infraURL+"/healthz", 10*time.Second) {
+		return false
+	}
+	if !httpOK(deploymentsURL+"/readyz", 10*time.Second) {
 		return false
 	}
 	return true

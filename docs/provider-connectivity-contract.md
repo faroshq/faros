@@ -197,6 +197,7 @@ client against `/graphql/{clusterName}` with the same `Bearer` pattern.
 |----------|--------------|---------|
 | `code` | GraphQL gateway for all CRUD; one backend probe (`/services/providers/code/oauth/github/config`) | ✅ Conforms |
 | `infrastructure` | GraphQL gateway only; backend serves no template/instance REST | ✅ Conforms |
+| `deployments` | Headless controller; no UI or caller-facing backend | ✅ Not applicable |
 | `mcp` / `kubernetesedges` / `serveredges` | `useGraphQLQuery` / `graphqlMutate` against the gateway | ✅ Conforms |
 | `kuery` | **REST** to `/services/providers/kuery/api/{edges,query}` — token reaches backend | ❌ Diverges |
 | `app-studio` | **REST** to `/services/providers/app-studio/api/projects/*` — token reaches backend | ❌ Diverges |
@@ -219,6 +220,7 @@ servers receive the token by design.
 |----------|-----------|---------|
 | `code` | (2a) `apiexport.New(...)` multicluster mgr off the endpointslice + (2b) caller-token tenant client for MCP | ✅ Conforms |
 | `infrastructure` | init/serve split: admin kubeconfig only in one-shot `init`, then a **minted SA** + endpointslice for serve; (2b) caller-token factory for MCP; KRO writes go to a separate runtime cluster | ✅ Conforms |
+| `deployments` | init/serve split: minted provider SA + APIExportEndpointSlice multicluster manager; delegated Infrastructure claims only | ✅ Conforms |
 | `kuery` | (2a) minted provider SA + APIExportEndpointSlice for edge discovery; `[get,list,watch] edges`, `tenantScoped` | ✅ Conforms |
 | `app-studio` | (2b) clears the provider credential, builds the tenant client from the forwarded caller token; `tenantScoped` secret claims | ✅ Conforms |
 | `mcp` | **hub admin config** (`deps.KCPConfig`) to read MCPServer + list edges; per-MCPServer SA bound to **`cluster-admin`** | ❌ Violates by design |
@@ -252,6 +254,7 @@ keeps only the CA, and authenticates with the **caller's** bearer token against
 | Interaction | Mechanism | Verdict |
 |----------|-----------|---------|
 | `app-studio` → `infrastructure` (Template development data plane) | Selected Template instance (control plane) + infrastructure provider data-plane subresources at `/dataplane/clusters/{workspace}/{resource}/{name}/…`, including component-scoped verbs, called as the tenant user | ✅ Conforms |
+| `deployments` → `infrastructure` | Reconciles only bound Template/Application resources through delegated APIExport permission claims; no backend URL or runtime-cluster credential | ✅ Conforms |
 | `app-studio` → runtime cluster (historical) | Formerly held `APP_STUDIO_RUNTIME_KUBECONFIG`, a direct second credential into infrastructure's runtime cluster | ❌ Removed anti-pattern; retained only as historical context in [`app-studio-runtime-decoupling.md`](./app-studio-runtime-decoupling.md) |
 | `kuery` → `Edge`s | reads bound `Edge` CRs / engages clusters through the hub's edges-proxy as the caller, never the edge provider's backend | ✅ Conforms |
 

@@ -62,7 +62,7 @@ go.work               Workspace: root + standalone provider modules
 ```
 
 `go.work` members: `.`, `providers/quickstart`, `providers/infrastructure`,
-`providers/code`, `providers/kuery`, `providers/app-studio`, and the external
+`providers/code`, `providers/deployments`, `providers/kuery`, `providers/app-studio`, and the external
 `kubernetes-graphql-gateway`. Standalone providers each have their own `go.mod`;
 built-in providers do not (they compile into the hub binary).
 
@@ -305,6 +305,7 @@ for the canonical pattern, and `docs/provider-scoping.md`.
 |----------|--------|-----------|--------------|
 | `quickstart` | own `go.mod` | standalone | **Reference provider** — minimal HTTP server + embedded Vite portal + sample `Greeting` API. Start here. |
 | `code` | own `go.mod` | standalone | Source-code/repository management; controllers + tenant isolation + MCP |
+| `deployments` | own `go.mod` | standalone | Headless Release/Deployment lifecycle provider; reconciles Git-projected desired state into Infrastructure runtimes |
 | `infrastructure` | own `go.mod` | standalone | kro-based infrastructure templates; self-bootstrap example; tenant isolation |
 | `kuery` | own `go.mod` | standalone | Query API + engagement; MCP server |
 | `app-studio` | own `go.mod` | standalone | Application templates / project store (recently reorganized from `providers/projects`) |

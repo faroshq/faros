@@ -5,3 +5,10 @@
 app.kubernetes.io/name: faros-deployments-provider
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+{{- define "deployments.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "deployments.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}

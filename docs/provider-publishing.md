@@ -30,6 +30,7 @@ fast-forward.
 | --------------------------- | ---------------------------------- | ----------------------- | -------------------------------------------------------- |
 | `providers/quickstart`      | `faroshq/provider-quickstart`      | `QUICKSTART_DEPLOY_KEY` | [`split-quickstart.yaml`](../.github/workflows/split-quickstart.yaml) |
 | `providers/code`            | `faroshq/provider-code`            | `CODE_DEPLOY_KEY`       | [`split-code.yaml`](../.github/workflows/split-code.yaml) |
+| `providers/deployments`     | `faroshq/provider-deployments`     | `DEPLOYMENTS_DEPLOY_KEY` | [`split-deployments.yaml`](../.github/workflows/split-deployments.yaml) |
 | `providers/infrastructure`  | `faroshq/provider-infrastructure`  | `INFRA_DEPLOY_KEY`      | [`split-infrastructure.yaml`](../.github/workflows/split-infrastructure.yaml) |
 | `providers/app-studio`      | `faroshq/provider-app-studio`      | `APP_STUDIO_DEPLOY_KEY` | [`split-app-studio.yaml`](../.github/workflows/split-app-studio.yaml) |
 | `providers/kuery`           | `faroshq/provider-kuery`           | `KUERY_DEPLOY_KEY`      | [`split-kuery.yaml`](../.github/workflows/split-kuery.yaml) |
@@ -221,6 +222,7 @@ path rather than a monorepo-nested path:
 | -------------------------- | --------------------------------------------- |
 | `providers/quickstart`     | `github.com/faroshq/provider-quickstart`      |
 | `providers/code`           | `github.com/faroshq/provider-code`            |
+| `providers/deployments`    | `github.com/faroshq/provider-deployments`     |
 | `providers/infrastructure` | `github.com/faroshq/provider-infrastructure`  |
 | `providers/app-studio`     | `github.com/faroshq/provider-app-studio`      |
 | `providers/kuery`          | `github.com/faroshq/provider-kuery`           |

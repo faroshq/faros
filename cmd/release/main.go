@@ -69,7 +69,7 @@ type component struct {
 // provider-sdk is first: the providers depend on it, so when releasing `all`
 // the SDK tag is cut (and published to the mirror) before the providers that
 // will eventually `require` that published version.
-var componentOrder = []string{"provider-sdk", "hub", "quickstart", "kuery", "app-studio", "infrastructure", "code", "edges", "databricks", "agents"}
+var componentOrder = []string{"provider-sdk", "hub", "quickstart", "kuery", "infrastructure", "deployments", "code", "app-studio", "edges", "databricks", "agents"}
 
 var components = map[string]component{
 	"provider-sdk":   {"provider-sdk/v", "split → faroshq/provider-sdk; publishes the go-gettable SDK module (providers require this version once the replace is dropped)"},
@@ -78,6 +78,7 @@ var components = map[string]component{
 	"kuery":          {"providers/kuery/v", "provider-release.yaml builds the image + chart at this version; source mirror → faroshq/provider-kuery"},
 	"app-studio":     {"providers/app-studio/v", "provider-release.yaml builds the image + chart at this version; source mirror → faroshq/provider-app-studio"},
 	"infrastructure": {"providers/infrastructure/v", "provider-release.yaml builds the image + chart at this version; source mirror → faroshq/provider-infrastructure"},
+	"deployments":    {"providers/deployments/v", "provider-release.yaml builds the image + chart at this version; source mirror → faroshq/provider-deployments"},
 	"code":           {"providers/code/v", "provider-release.yaml builds the image + chart at this version; source mirror → faroshq/provider-code"},
 	"edges":          {"providers/edges/v", "provider-release.yaml builds the image (ghcr.io/faroshq/faros-edges-provider) + chart at this version; source mirror → faroshq/provider-edges"},
 	"databricks":     {"providers/databricks/v", "provider-release.yaml builds the image (ghcr.io/faroshq/faros-databricks-provider) + chart at this version; source mirror → faroshq/provider-databricks"},
@@ -461,6 +462,7 @@ Components:
   kuery           providers/kuery/v<X.Y.Z>
   app-studio      providers/app-studio/v<X.Y.Z>
   infrastructure  providers/infrastructure/v<X.Y.Z>
+  deployments     providers/deployments/v<X.Y.Z>
   code            providers/code/v<X.Y.Z>
   edges           providers/edges/v<X.Y.Z>
   databricks      providers/databricks/v<X.Y.Z>

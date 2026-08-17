@@ -1,6 +1,6 @@
 .PHONY: sync-portalkit verify-portalkit
 .PHONY: build-access-proxy docker-build-access-proxy
-.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks build-deployments-provider codegen-deployments-provider run-provider-deployments install-provider-deployments init-provider-deployments uninstall-provider-deployments test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed dev-kro-register-self e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
+.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks build-deployments-provider test-deployments-provider codegen-deployments-provider run-provider-deployments install-provider-deployments init-provider-deployments uninstall-provider-deployments test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed dev-kro-register-self e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
 
 BINDIR ?= bin
 GOFLAGS ?=
@@ -212,6 +212,9 @@ build-databricks-provider: build-databricks-provider-portal ## Build the Databri
 
 build-deployments-provider: ## Build the deployments provider binary
 	cd providers/deployments && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/deployments-provider .
+
+test-deployments-provider: ## Run the deployments provider unit and contract tests
+	cd providers/deployments && go test -count=1 ./...
 
 test-databricks-provider-chart: ## Lint and render both supported Databricks bootstrap modes
 	@set -eu; \
@@ -945,6 +948,7 @@ e2e-edges-connectivity: build-hub build-edges-provider build-faros certs ## Run 
 E2E_TILT_TIMEOUT ?= 10m
 E2E_TILT_HUB_URL ?= https://localhost:9443
 E2E_TILT_INFRA_URL ?= http://localhost:8082
+E2E_TILT_DEPLOYMENTS_URL ?= http://localhost:8093
 E2E_TILT_KCP_KUBECONFIG ?= $(CURDIR)/tilt-frontproxy.kubeconfig
 E2E_TILT_RUNTIME_KUBECONFIG ?= $(CURDIR)/.faros-cluster.kubeconfig
 E2E_TILT_OPERATOR_NAMESPACE ?= faros-infrastructure-operator
@@ -966,6 +970,10 @@ e2e-tilt-cluster: ## Run Tilt-cluster provider e2e (requires `make tilt-cluster`
 	}
 	@curl -s --max-time 5 -o /dev/null "$(E2E_TILT_INFRA_URL)/healthz" || { \
 		echo "infrastructure provider not reachable at $(E2E_TILT_INFRA_URL); is 'make tilt-cluster' fully up?"; \
+		exit 1; \
+	}
+	@curl -s --max-time 5 -o /dev/null "$(E2E_TILT_DEPLOYMENTS_URL)/readyz" || { \
+		echo "deployments provider not ready at $(E2E_TILT_DEPLOYMENTS_URL); trigger deployments-register and deployments-init in Tilt"; \
 		exit 1; \
 	}
 	go test ./test/e2e/suites/tiltcluster/... -v -timeout $(E2E_TILT_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
@@ -2103,7 +2111,7 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/databricks/deploy/chart/files/schemas \
 		$(BINDIR)/databricks-provider init
 
-# --- Deployments provider (release/deployment reconciliation POC) ---
+# --- Deployments provider (release/deployment reconciliation) ---
 # Local flow:
 #   Terminal 1: make run-hub-embedded-static
 #   Terminal 2: make install-provider-deployments
@@ -2138,11 +2146,16 @@ init-provider-deployments: build-deployments-provider ## Bootstrap deployments A
 		exit 1; \
 	}
 	@echo "Reading provider-token from $(DEPLOYMENTS_WORKSPACE_PATH) and writing $(DEPLOYMENTS_RUNTIME_KUBECONFIG)"
-	@TOKEN=$$(kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
-		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/$(DEPLOYMENTS_WORKSPACE_PATH) \
-		--insecure-skip-tls-verify \
-		get secret -n default provider-token -o jsonpath='{.data.token}' | base64 -d); \
-	test -n "$$TOKEN" || { echo "provider-token Secret empty — wait for the Provider controller to provision the workspace"; exit 1; }; \
+	@TOKEN=""; \
+	for attempt in $$(seq 1 60); do \
+		TOKEN=$$(kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
+			--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/$(DEPLOYMENTS_WORKSPACE_PATH) \
+			--insecure-skip-tls-verify \
+			get secret -n default provider-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d); \
+		test -n "$$TOKEN" && break; \
+		test "$$attempt" -eq 60 || sleep 2; \
+	done; \
+	test -n "$$TOKEN" || { echo "provider-token Secret was not provisioned within 120 seconds"; exit 1; }; \
 	mkdir -p $(KCP_DATA_DIR); \
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(DEPLOYMENTS_KCP_SERVER)/clusters/$(DEPLOYMENTS_WORKSPACE_PATH)" "$$TOKEN" \

@@ -10,7 +10,10 @@ You may obtain a copy of the License at
 
 package main
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestDatabricksComponentReleaseContract(t *testing.T) {
 	component, ok := components["databricks"]
@@ -30,6 +33,30 @@ func TestDatabricksComponentReleaseContract(t *testing.T) {
 		if i == len(componentOrder)-1 {
 			t.Fatal("databricks component is not in componentOrder")
 		}
+	}
+}
+
+func TestDeploymentsComponentReleaseContract(t *testing.T) {
+	component, ok := components["deployments"]
+	if !ok {
+		t.Fatal("deployments component is not registered")
+	}
+	if component.prefix != "providers/deployments/v" {
+		t.Fatalf("deployments tag prefix = %q, want providers/deployments/v", component.prefix)
+	}
+	if component.triggers == "" {
+		t.Fatal("deployments release contract has no downstream trigger description")
+	}
+	if !slices.Contains(componentOrder, "deployments") {
+		t.Fatal("deployments component is not in componentOrder")
+	}
+	infra := slices.Index(componentOrder, "infrastructure")
+	deployments := slices.Index(componentOrder, "deployments")
+	code := slices.Index(componentOrder, "code")
+	appStudio := slices.Index(componentOrder, "app-studio")
+	if infra < 0 || deployments < 0 || code < 0 || appStudio < 0 ||
+		!(infra < deployments && deployments < code && code < appStudio) {
+		t.Fatalf("provider dependency release order is invalid: %v", componentOrder)
 	}
 }
 

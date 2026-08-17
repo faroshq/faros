@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -150,8 +151,7 @@ func TestReconcileCreatesThenUpdatesPreservingComputedFieldsAndProjectsStatus(t 
 	initialConfig, _ := json.Marshal(map[string]any{"obsolete": "remove", "nested": map[string]any{"obsolete": "remove", "desired": "old"}})
 	d.Spec.Configuration = &runtime.RawExtension{Raw: initialConfig}
 	release := testRelease()
-	template := testTemplate()
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, release, template).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, release).Build()
 	key := types.NamespacedName{Name: d.Name}
 	if _, err := ReconcileClient(ctx, c, key); err != nil {
 		t.Fatal(err)
@@ -244,11 +244,13 @@ func TestReconcileMissingReleaseRecordsPendingConditionAndRequeues(t *testing.T)
 	}
 }
 
-func TestReconcileMissingBlueprintRecordsPendingConditionAndRequeues(t *testing.T) {
+func TestReconcileUnsupportedBlueprintRecordsInvalidCondition(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme(t)
 	d := testDeployment()
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, testRelease()).Build()
+	release := testRelease()
+	release.Spec.BlueprintRef.Name = "unknown"
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, release).Build()
 	key := types.NamespacedName{Name: d.Name}
 	if _, err := ReconcileClient(ctx, c, key); err != nil {
 		t.Fatal(err)
@@ -257,16 +259,16 @@ func TestReconcileMissingBlueprintRecordsPendingConditionAndRequeues(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RequeueAfter != pollInterval {
-		t.Fatalf("missing blueprint requeue = %s, want %s", result.RequeueAfter, pollInterval)
+	if result != (ctrl.Result{}) {
+		t.Fatalf("unsupported blueprint result = %#v, want no retry", result)
 	}
 	var current deploymentsv1alpha1.Deployment
 	if err := c.Get(ctx, key, &current); err != nil {
 		t.Fatal(err)
 	}
 	cond := apiMeta.FindStatusCondition(current.Status.Conditions, ConditionApplied)
-	if current.Status.Phase != "Pending" || cond == nil || cond.Reason != "BlueprintNotFound" || cond.Status != metav1.ConditionFalse {
-		t.Fatalf("missing blueprint was not surfaced: %#v", current.Status)
+	if current.Status.Phase != "Invalid" || cond == nil || cond.Reason != "UnsupportedBlueprint" || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("unsupported blueprint was not surfaced: %#v", current.Status)
 	}
 }
 

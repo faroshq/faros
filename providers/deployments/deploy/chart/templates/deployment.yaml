@@ -14,13 +14,16 @@ spec:
       labels:
         {{- include "deployments.labels" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "deployments.serviceAccountName" . }}
+      automountServiceAccountToken: false
       initContainers:
         - name: init
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["init"]
           env:
             - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
-            - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ .Values.infrastructureIdentityHash | quote }} }
+            - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ required "infrastructureIdentityHash is required" .Values.infrastructureIdentityHash | quote }} }
             - { name: FAROS_SCHEMAS_DIR, value: /etc/faros/schemas }
             {{- if .Values.catalogEntry.enabled }}
             - { name: FAROS_CATALOGENTRY_FILE, value: /etc/faros/catalogentry/catalogentry.yaml }
@@ -33,6 +36,7 @@ spec:
       containers:
         - name: provider
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
           ports:
             - { name: http, containerPort: 8093 }

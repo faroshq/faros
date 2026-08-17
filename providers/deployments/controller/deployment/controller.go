@@ -91,13 +91,9 @@ func ReconcileClient(ctx context.Context, c client.Client, key types.NamespacedN
 		}
 		return ctrl.Result{}, err
 	}
-	template := &unstructured.Unstructured{}
-	template.SetGroupVersionKind(templateGVK)
-	if err := c.Get(ctx, client.ObjectKey{Name: release.Spec.BlueprintRef.Name}, template); err != nil {
-		if apierrors.IsNotFound(err) {
-			return dependencyPending(ctx, c, &d, "BlueprintNotFound", fmt.Sprintf("waiting for Template %q", release.Spec.BlueprintRef.Name))
-		}
-		return ctrl.Result{}, err
+	template, err := builtinTemplateContract(release.Spec.BlueprintRef.Name)
+	if err != nil {
+		return invalid(ctx, c, &d, "UnsupportedBlueprint", err.Error())
 	}
 	want, ref, err := DesiredInstance(&d, &release, template)
 	if err != nil {
@@ -126,6 +122,34 @@ func ReconcileClient(ctx context.Context, c client.Client, key types.NamespacedN
 		return ctrl.Result{RequeueAfter: 4 * pollInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
+}
+
+// builtinTemplateContract is the admitted deployment contract for the initial
+// POC class. Infrastructure Templates use virtual storage and therefore cannot
+// be selected by another APIExport through a permission claim. Keep the
+// production mapping deterministic here until Release carries an immutable
+// snapshot of the resolved Template contract.
+func builtinTemplateContract(name string) (*unstructured.Unstructured, error) {
+	if strings.TrimSpace(name) != "application" {
+		return nil, fmt.Errorf("blueprint %q is not supported by class %q", name, deploymentsv1alpha1.DeploymentClassKRODirect)
+	}
+	template := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": templateGVK.GroupVersion().String(),
+		"kind":       templateGVK.Kind,
+		"metadata":   map[string]any{"name": "application"},
+		"spec": map[string]any{
+			"instanceCRD": map[string]any{
+				"group": "infrastructure.faros.sh", "version": "v1alpha1",
+				"resource": "applications", "kind": "Application",
+			},
+			"development": map[string]any{"components": map[string]any{
+				"web": map[string]any{"imageInput": "webImage"},
+				"api": map[string]any{"imageInput": "apiImage"},
+			}},
+		},
+	}}
+	template.SetGroupVersionKind(templateGVK)
+	return template, nil
 }
 
 func sameBackendTarget(a, b *deploymentsv1alpha1.BackendReference) bool {

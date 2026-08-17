@@ -12,6 +12,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
@@ -24,6 +25,7 @@ import (
 
 	deploymentcontroller "github.com/faroshq/provider-deployments/controller/deployment"
 	deploymentscheme "github.com/faroshq/provider-deployments/scheme"
+	sdkinstall "github.com/faroshq/provider-sdk/install"
 )
 
 var errControllerDisabled = errors.New("no kubeconfig available; controller manager disabled")
@@ -45,12 +47,27 @@ func loadControllerConfig() (*rest.Config, error) {
 	return cfg, nil
 }
 
-func startControllerManager(ctx context.Context, config *rest.Config, ready *atomic.Bool) error {
+func startControllerManager(
+	ctx context.Context,
+	config *rest.Config,
+	ready *atomic.Bool,
+	stop context.CancelFunc,
+	exited chan<- error,
+) error {
 	if config == nil {
 		return errControllerDisabled
 	}
 	ctrl.SetLogger(klog.NewKlogr())
 	scheme := deploymentscheme.New()
+	client, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create provider workspace client: %w", err)
+	}
+	if err := sdkinstall.EnsureAPIExportEndpointSlice(
+		ctx, client, apiExportName, apiExportName, deploymentWorkspacePath(),
+	); err != nil {
+		return fmt.Errorf("ensure APIExportEndpointSlice: %w", err)
+	}
 	provider, err := apiexport.New(config, apiExportName, apiexport.Options{Scheme: scheme})
 	if err != nil {
 		return fmt.Errorf("create APIExport multicluster provider: %w", err)
@@ -64,11 +81,14 @@ func startControllerManager(ctx context.Context, config *rest.Config, ready *ato
 	}
 	managerCtx, cancelManager := context.WithCancel(ctx)
 	go func() {
-		if err := mgr.Start(managerCtx); err != nil {
+		err := mgr.Start(managerCtx)
+		if err != nil {
 			ctrl.Log.Error(err, "controller manager exited")
 		}
 		cancelManager()
 		ready.Store(false)
+		exited <- err
+		stop()
 	}()
 	go func() {
 		// The manager is not ready merely because Start was spawned. Its local

@@ -75,11 +75,12 @@ go build -o bin/faros-hub ./cmd/faros-hub
 #   providers-app-studio   — the AI workspace provider (port :8085)
 #   providers-kro          — infrastructure broker (port :8082) +
 #                            management kind cluster that kro runs in
+#   providers-deployments  — release/deployment reconciler (port :8093)
 #   providers-code         — git repository manager (port :8083)
 #   providers-kuery        — fleet query engine (port :8084)
 #   providers-agents       — long-running personal AI agents (port :8087)
 #
-# Each provider has three resources:
+# Each provider has four lifecycle resources:
 #   <name>            build + serve; auto-restarts on src change
 #   <name>-register   manual ▶ to kubectl apply the Provider + CatalogEntry.
 #                     Applying the Provider CR is what provisions the
@@ -94,6 +95,7 @@ go build -o bin/faros-hub ./cmd/faros-hub
 #                     host-binary simplicity; in production the provider's init
 #                     self-registers the CatalogEntry into its own workspace via
 #                     FAROS_CATALOGENTRY_FILE.
+#   <name>-init       manual ▶ to bootstrap schemas, APIExport, and claims.
 #   <name>-unregister manual ▶ to kubectl delete them (deleting the Provider
 #                     triggers full teardown of the sub-workspace)
 #
@@ -160,6 +162,57 @@ local_resource(
     labels=['providers-quickstart'],
 )
 
+# --- providers-deployments (headless release/deployment reconciler, :8093) ---
+local_resource(
+    'deployments',
+    cmd='make build-deployments-provider',
+    serve_cmd='make run-provider-deployments',
+    deps=[
+        'providers/deployments/main.go',
+        'providers/deployments/heartbeat.go',
+        'providers/deployments/controller_manager.go',
+        'providers/deployments/controller',
+        'providers/deployments/apis',
+        'providers/deployments/scheme',
+        'providers/deployments/go.mod',
+        'providers/deployments/go.sum',
+        '.kcp/deployments-runtime.kubeconfig',
+    ],
+    resource_deps=['hub', 'deployments-init'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=8093, path='/readyz'),
+    ),
+    labels=['providers-deployments'],
+)
+
+local_resource(
+    'deployments-register',
+    cmd='make install-provider-deployments',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub'],
+    labels=['providers-deployments'],
+)
+
+local_resource(
+    'deployments-init',
+    cmd='make init-provider-deployments',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub', 'infrastructure-init', 'deployments-register'],
+    labels=['providers-deployments'],
+)
+
+local_resource(
+    'deployments-unregister',
+    cmd='make uninstall-provider-deployments',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub'],
+    labels=['providers-deployments'],
+)
+
 # --- providers-code (git repository management) ---
 # Long-lived provider: serves the portal + MCP on :8083 and, once a kubeconfig
 # is present, runs the multicluster controller manager. run-provider-code reads
@@ -218,7 +271,7 @@ local_resource(
     cmd='make init-provider-code',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'code-register'],
+    resource_deps=['hub', 'deployments-init', 'code-register'],
     labels=['providers-code'],
 )
 
@@ -367,7 +420,7 @@ local_resource(
     cmd='make init-provider-app-studio',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'app-studio-register'],
+    resource_deps=['hub', 'infrastructure-init', 'deployments-init', 'code-init', 'app-studio-register'],
     labels=['providers-app-studio'],
 )
 

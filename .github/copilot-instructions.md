@@ -77,11 +77,12 @@ as the reference layout.
 
 - **`README.md`** at `providers/<name>/README.md` — what it does, how to build,
   run, install/uninstall, and its tenant-isolation story.
-- **`.github/`** — a `providers/<name>/.github/workflows/` with at least build +
-  test CI for the standalone module (see `providers/code/.github/workflows/`).
+- **CI** — add the standalone module's build/test command to a root workflow;
+  source-only mirrors inherit validation from this monorepo and do not carry
+  provider-local workflow files.
 - **Helm chart** at `providers/<name>/deploy/chart/` with a `Chart.yaml` (every
   existing standalone provider has one: `code`, `kuery`, `infrastructure`,
-  `app-studio`, `quickstart`).
+  `deployments`, `app-studio`, `quickstart`).
 - **e2e tests** — a suite under `test/e2e/suites/` whenever the provider has
   tenant-isolation or cross-tenant behavior, plus a `make e2e-<name>` target.
   If the PR adds isolation logic but no e2e suite, ask for one (or an explicit

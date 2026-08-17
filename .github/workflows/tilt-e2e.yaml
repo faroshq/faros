@@ -289,6 +289,23 @@ jobs:
           # (The CatalogEntry reconcile gate below is the real readiness check.)
           wait_resource infrastructure 300
 
+      # Deployments is headless but otherwise follows the same first-class
+      # provider lifecycle. It initializes after Infrastructure because its
+      # APIExport claims Infrastructure resources by identity hash.
+      - name: Register + initialize the deployments provider
+        working-directory: faros
+        run: |
+          set -euo pipefail
+          source "${GITHUB_WORKSPACE}/tilt-helpers.sh"
+
+          tilt trigger deployments-register
+          wait_resource deployments-register 300
+
+          tilt trigger deployments-init
+          wait_resource deployments-init 300
+
+          wait_resource deployments 300
+
       # The suite reads kcp state directly and fails fast (no Eventually/retry),
       # so block until kcp has actually reconciled the provider's CatalogEntry to
       # Ready before running it. This absorbs the controller/CachedResource
@@ -297,29 +314,32 @@ jobs:
         working-directory: faros
         run: |
           set -euo pipefail
-          deadline=$(( $(date +%s) + 600 ))
-          while :; do
-            status=$(kubectl --kubeconfig=tilt-frontproxy.kubeconfig \
-              --server=https://kcp.localhost:8443/clusters/root:faros:providers \
-              --insecure-skip-tls-verify \
-              get catalogentries.providers.faros.sh infrastructure \
-              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-            if [ "$status" = "True" ]; then
-              echo "CatalogEntry infrastructure is Ready."
-              break
-            fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "timed out waiting for CatalogEntry Ready (last status: '${status:-<none>}')"
-              kubectl --kubeconfig=tilt-frontproxy.kubeconfig \
+          for provider in infrastructure deployments; do
+            deadline=$(( $(date +%s) + 600 ))
+            while :; do
+              status=$(kubectl --kubeconfig=tilt-frontproxy.kubeconfig \
                 --server=https://kcp.localhost:8443/clusters/root:faros:providers \
                 --insecure-skip-tls-verify \
-                get catalogentries.providers.faros.sh infrastructure -o yaml || true
-              exit 1
-            fi
-            sleep 10
+                get catalogentries.providers.faros.sh "$provider" \
+                -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+              if [ "$status" = "True" ]; then
+                echo "CatalogEntry ${provider} is Ready."
+                break
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "timed out waiting for ${provider} CatalogEntry Ready (last status: '${status:-<none>}')"
+                kubectl --kubeconfig=tilt-frontproxy.kubeconfig \
+                  --server=https://kcp.localhost:8443/clusters/root:faros:providers \
+                  --insecure-skip-tls-verify \
+                  get catalogentries.providers.faros.sh "$provider" -o yaml || true
+                exit 1
+              fi
+              sleep 10
+            done
           done
 
-      # `make e2e-tilt-cluster` prechecks hub + provider /healthz, then runs the
+      # `make e2e-tilt-cluster` prechecks hub + Infrastructure health and the
+      # Deployments controller-gated /readyz, then runs the
       # suite against the live stack. Retry a couple of times to absorb any
       # last-moment reconcile lag (the tests are read-only and idempotent).
       - name: Run tilt-cluster e2e

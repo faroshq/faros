@@ -57,6 +57,9 @@ func runHeartbeatLoop(ctx context.Context, ready *atomic.Bool, client *http.Clie
 			return
 		}
 		_ = resp.Body.Close()
+		if resp.StatusCode >= http.StatusMultipleChoices {
+			log.Printf("heartbeat %s: %s", req.URL, resp.Status)
+		}
 	}
 	send()
 	ticker := time.NewTicker(30 * time.Second)

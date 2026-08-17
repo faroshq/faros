@@ -32,3 +32,31 @@ func TestReadinessHandlerTracksControllerState(t *testing.T) {
 		t.Fatalf("stopped controller remained ready: %d", recorder.Code)
 	}
 }
+
+func TestProviderCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default serve", want: "serve"},
+		{name: "explicit serve", args: []string{"serve"}, want: "serve"},
+		{name: "init", args: []string{"init"}, want: "init"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := providerCommand(tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("command = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if _, err := providerCommand([]string{"unknown"}); err == nil {
+		t.Fatal("unknown subcommand must fail")
+	}
+	if _, err := providerCommand([]string{"serve", "unexpected"}); err == nil {
+		t.Fatal("trailing arguments must fail")
+	}
+}

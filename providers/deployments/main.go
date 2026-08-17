@@ -19,7 +19,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "init" {
+	command, err := providerCommand(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, "usage: deployments-provider [init|serve]")
+		os.Exit(2)
+	}
+	if command == "init" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 		if err := runInitCmd(ctx); err != nil {
@@ -28,19 +34,38 @@ func main() {
 		}
 		return
 	}
-	runServe()
+	if err := runServe(); err != nil {
+		fmt.Fprintln(os.Stderr, "serve:", err)
+		os.Exit(1)
+	}
 }
 
-func runServe() {
+func providerCommand(args []string) (string, error) {
+	if len(args) == 0 {
+		return "serve", nil
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("expected exactly one subcommand, got %d arguments", len(args))
+	}
+	switch args[0] {
+	case "init", "serve":
+		return args[0], nil
+	default:
+		return "", fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func runServe() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	var ready atomic.Bool
 	cfg, err := loadControllerConfig()
-	if err == nil {
-		err = startControllerManager(ctx, cfg, &ready)
-	}
 	if err != nil {
-		log.Printf("controller manager unavailable: %v", err)
+		return fmt.Errorf("controller config: %w", err)
+	}
+	managerExited := make(chan error, 1)
+	if err := startControllerManager(ctx, cfg, &ready, stop, managerExited); err != nil {
+		return fmt.Errorf("controller manager: %w", err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -53,9 +78,11 @@ func runServe() {
 		port = "8093"
 	}
 	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	serverExited := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("server: %v", err)
+			serverExited <- err
 			stop()
 		}
 	}()
@@ -63,7 +90,22 @@ func runServe() {
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdown)
+	if err := srv.Shutdown(shutdown); err != nil {
+		return fmt.Errorf("shutdown HTTP server: %w", err)
+	}
+	select {
+	case err := <-managerExited:
+		if err != nil {
+			return fmt.Errorf("controller manager exited: %w", err)
+		}
+	default:
+	}
+	select {
+	case err := <-serverExited:
+		return fmt.Errorf("HTTP server exited: %w", err)
+	default:
+	}
+	return nil
 }
 
 func readinessHandler(ready *atomic.Bool) http.HandlerFunc {

@@ -8,6 +8,9 @@ service:
 providerKubeconfig:
   secretName: faros-provider-kubeconfig
 infrastructureIdentityHash: ""
+serviceAccount:
+  create: true
+  name: ""
 hub:
   url: https://faros-hub.faros.svc.cluster.local:9443
   tokenSecretRef:
