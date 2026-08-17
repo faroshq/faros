@@ -251,7 +251,7 @@ func (p *Proxy) redirectToAuthorize(w http.ResponseWriter, r *http.Request, path
 		http.Error(w, "app access state unavailable", http.StatusInternalServerError)
 		return
 	}
-	p.setReturnCookie(w, cookieValue, requestUsesPartitionedCookies(r))
+	p.setReturnCookie(w, handle, cookieValue, requestUsesPartitionedCookies(r))
 	callbackURL := p.config.publicScheme + "://" + p.config.host + CallbackPath
 	query := url.Values{}
 	query.Set("cluster", p.config.Instance.Cluster)
@@ -271,14 +271,14 @@ func (p *Proxy) redirectToAuthorize(w http.ResponseWriter, r *http.Request, path
 func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 	partitioned := requestUsesPartitionedCookies(r)
 	state := r.URL.Query().Get("state")
-	returnPath, ok := p.consumeReturnState(w, r, state, partitioned)
+	returnPath, returnCookie, ok := p.consumeReturnState(w, r, state, partitioned)
 	if !ok {
 		http.Error(w, "invalid app access state", http.StatusBadRequest)
 		return
 	}
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	if code == "" {
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "missing app access code", http.StatusBadRequest)
 		return
 	}
@@ -291,7 +291,7 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Name:     p.config.Instance.Name,
 	})
 	if err != nil {
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "app access exchange unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -299,7 +299,7 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, p.config.hubURL+hubExchangePath, bytes.NewReader(body))
 	if err != nil {
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "app access exchange unavailable", http.StatusBadGateway)
 		return
 	}
@@ -311,7 +311,7 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// here, and the 502 reaches the browser as a generic bad-gateway page
 		// with no hint of the cause. Name the URL and the error.
 		p.logf("app access exchange failed: %s is unreachable from this gate (host=%s): %v", p.config.hubURL+hubExchangePath, p.config.host, err)
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		p.clearSessionCookie(w, partitioned)
 		http.Error(w, "app access exchange unavailable", http.StatusBadGateway)
 		return
@@ -320,13 +320,13 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if response.StatusCode == http.StatusGone {
 		// Expired or replayed code: restart the flow. With a live hub shared
 		// session this is a silent redirect loop of exactly one extra hop.
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		p.redirectToAuthorize(w, r, returnPath)
 		return
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		p.logf("app access exchange refused: hub answered %d (host=%s)", response.StatusCode, p.config.host)
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		p.clearSessionCookie(w, partitioned)
 		http.Error(w, "app access exchange denied", http.StatusBadGateway)
 		return
@@ -334,23 +334,23 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var exchange exchangeResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&exchange); err != nil {
 		p.logf("app access exchange returned an unreadable body (host=%s): %v", p.config.host, err)
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "invalid app access exchange", http.StatusBadGateway)
 		return
 	}
 	if !exchange.Allowed || strings.TrimSpace(exchange.UserID) == "" {
 		p.logf("app access exchange returned no grant: allowed=%t userID-empty=%t (host=%s)", exchange.Allowed, strings.TrimSpace(exchange.UserID) == "", p.config.host)
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "invalid app access exchange", http.StatusBadGateway)
 		return
 	}
 	sessionValue, err := p.putSession(exchange.UserID, exchange.SessionTTLSeconds)
 	if err != nil {
-		p.clearReturnCookie(w, partitioned)
+		p.clearReturnCookie(w, returnCookie, partitioned)
 		http.Error(w, "app session unavailable", http.StatusInternalServerError)
 		return
 	}
-	p.clearReturnCookie(w, partitioned)
+	p.clearReturnCookie(w, returnCookie, partitioned)
 	http.SetCookie(w, &http.Cookie{
 		Name:        SessionCookieName,
 		Value:       sessionValue,
@@ -380,39 +380,45 @@ func (p *Proxy) handleCallback(w http.ResponseWriter, r *http.Request) {
 // still be able to complete its own sign-in. Single use is enforced by the
 // usedStates cache below, which is a best-effort optimisation rather than the
 // authority — see markStateUsed.
-func (p *Proxy) consumeReturnState(w http.ResponseWriter, r *http.Request, state string, partitioned bool) (string, bool) {
-	cookie, err := r.Cookie(ReturnCookieName)
+func (p *Proxy) consumeReturnState(w http.ResponseWriter, r *http.Request, state string, partitioned bool) (string, string, bool) {
+	cookieName := returnCookieName(state)
+	cookie, err := r.Cookie(cookieName)
+	if err != nil {
+		// Accept the original unsuffixed cookie during a rolling upgrade. New
+		// redirects only issue nonce-specific cookies.
+		cookieName = ReturnCookieName
+		cookie, err = r.Cookie(cookieName)
+	}
 	if err != nil {
 		p.logf("app access callback rejected: request carried no %s cookie (host=%s) — a copied callback URL, or the cookie was blocked", ReturnCookieName, p.config.host)
-		p.clearReturnCookie(w, partitioned)
-		return "", false
+		return "", "", false
 	}
 	payload, ok := decodeReturnState(cookie.Value)
 	if !ok {
 		p.logf("app access callback rejected: %s cookie is malformed (host=%s)", ReturnCookieName, p.config.host)
-		p.clearReturnCookie(w, partitioned)
-		return "", false
+		p.clearReturnCookie(w, cookieName, partitioned)
+		return "", "", false
 	}
 	if state == "" || subtle.ConstantTimeCompare([]byte(payload.Nonce), []byte(state)) != 1 {
 		p.logf("app access callback rejected: state parameter does not match the %s cookie (host=%s)", ReturnCookieName, p.config.host)
-		return "", false
+		return "", "", false
 	}
 	if !p.now().Before(time.Unix(payload.ExpiresAt, 0)) {
 		p.logf("app access callback rejected: sign-in state expired (host=%s) — the round trip through the hub took longer than %s", p.config.host, stateTTL)
-		p.clearReturnCookie(w, partitioned)
-		return "", false
+		p.clearReturnCookie(w, cookieName, partitioned)
+		return "", "", false
 	}
 	if !p.markStateUsed(payload.Nonce, time.Unix(payload.ExpiresAt, 0)) {
 		p.logf("app access callback rejected: sign-in state already used (host=%s) — replayed callback", p.config.host)
-		p.clearReturnCookie(w, partitioned)
-		return "", false
+		p.clearReturnCookie(w, cookieName, partitioned)
+		return "", "", false
 	}
 	// Re-sanitise rather than trust: the path round-tripped through a cookie.
 	path := cleanReturnPath(payload.Path)
 	if path == "" {
 		path = "/"
 	}
-	return path, true
+	return path, cookieName, true
 }
 
 // newReturnState mints the nonce echoed to the hub and the cookie value that
@@ -593,11 +599,16 @@ func appCookieSameSite(partitioned bool) http.SameSite {
 	return http.SameSiteLaxMode
 }
 
-func (p *Proxy) setReturnCookie(w http.ResponseWriter, handle string, partitioned bool) {
+func returnCookieName(state string) string {
+	digest := sha256.Sum256([]byte(state))
+	return ReturnCookieName + "-" + hex.EncodeToString(digest[:16])
+}
+
+func (p *Proxy) setReturnCookie(w http.ResponseWriter, state, handle string, partitioned bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name:        ReturnCookieName,
+		Name:        returnCookieName(state),
 		Value:       handle,
-		Path:        "/",
+		Path:        CallbackPath,
 		Secure:      true,
 		HttpOnly:    true,
 		SameSite:    appCookieSameSite(partitioned),
@@ -606,11 +617,16 @@ func (p *Proxy) setReturnCookie(w http.ResponseWriter, handle string, partitione
 	})
 }
 
-func (p *Proxy) clearReturnCookie(w http.ResponseWriter, partitioned bool) {
+func (p *Proxy) clearReturnCookie(w http.ResponseWriter, name string, partitioned bool) {
+	path := CallbackPath
+	if strings.EqualFold(name, ReturnCookieName) {
+		// Legacy unsuffixed cookies were issued for the whole app origin.
+		path = "/"
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:        ReturnCookieName,
+		Name:        name,
 		Value:       "",
-		Path:        "/",
+		Path:        path,
 		Secure:      true,
 		HttpOnly:    true,
 		SameSite:    appCookieSameSite(partitioned),
@@ -758,5 +774,7 @@ func stripCookieDomain(value string) string {
 }
 
 func isInternalCookie(name string) bool {
-	return strings.EqualFold(name, SessionCookieName) || strings.EqualFold(name, ReturnCookieName)
+	return strings.EqualFold(name, SessionCookieName) ||
+		strings.EqualFold(name, ReturnCookieName) ||
+		strings.HasPrefix(strings.ToLower(name), strings.ToLower(ReturnCookieName)+"-")
 }
