@@ -1120,7 +1120,11 @@ spec:
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "faros"]
+            # First boot runs initdb + a temporary "rejecting connections"
+            # server before the real one starts; don't paint that window red.
+            initialDelaySeconds: 10
             periodSeconds: 5
+            failureThreshold: 12
       volumes:
         - name: init
           configMap:
