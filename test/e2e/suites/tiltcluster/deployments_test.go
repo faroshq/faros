@@ -33,13 +33,13 @@ const (
 )
 
 var (
-	deploymentsAPIBindingGVR  = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings"}
-	deploymentsWorkspaceGVR   = schema.GroupVersionResource{Group: "tenancy.kcp.io", Version: "v1alpha1", Resource: "workspaces"}
-	deploymentsReleaseGVR     = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "releases"}
-	deploymentsDeploymentGVR  = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "deployments"}
-	deploymentsTemplateGVR    = schema.GroupVersionResource{Group: infraGroup, Version: "v1alpha1", Resource: "templates"}
-	deploymentsApplicationGVR = schema.GroupVersionResource{
-		Group: infraGroup, Version: "v1alpha1", Resource: "applications",
+	deploymentsAPIBindingGVR = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings"}
+	deploymentsWorkspaceGVR  = schema.GroupVersionResource{Group: "tenancy.kcp.io", Version: "v1alpha1", Resource: "workspaces"}
+	deploymentsReleaseGVR    = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "releases"}
+	deploymentsDeploymentGVR = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "deployments"}
+	deploymentsTemplateGVR   = schema.GroupVersionResource{Group: infraGroup, Version: "v1alpha1", Resource: "templates"}
+	deploymentsInstanceGVR   = schema.GroupVersionResource{
+		Group: infraGroup, Version: "v1alpha1", Resource: "instances",
 	}
 )
 
@@ -86,7 +86,7 @@ func TestDeploymentsProviderRegistered(t *testing.T) {
 	}
 
 	wantVerbs := map[string][]string{
-		"applications": {"get", "list", "watch", "create", "update", "patch", "delete"},
+		"instances": {"get", "list", "watch", "create", "update", "patch", "delete"},
 	}
 	claims := nestedSlice(export.Object, "spec", "permissionClaims")
 	if len(claims) != len(wantVerbs) {
@@ -113,8 +113,8 @@ func TestDeploymentsProviderRegistered(t *testing.T) {
 // TestDeploymentsProviderReconcilesTenantDeployment proves the controller's
 // effective tenant authority, not only its registration metadata. A fresh
 // workspace binds Infrastructure and Deployments with accepted claims, then a
-// Release/Deployment must materialize an Infrastructure Application. Deleting
-// the default-Retain Deployment must detach, not delete, that Application.
+// Release/Deployment must materialize an Infrastructure Instance. Deleting
+// the default-Retain Deployment must detach, not delete, that Instance.
 func TestDeploymentsProviderReconcilesTenantDeployment(t *testing.T) {
 	requireStack(t)
 	ctx := context.Background()
@@ -187,15 +187,17 @@ func TestDeploymentsProviderReconcilesTenantDeployment(t *testing.T) {
 	createTenantObject(t, tenant, deploymentsDeploymentGVR, deployment)
 
 	if !waitTilt(t, deploymentsTestWait, func() (bool, string) {
-		application, err := tenant.Resource(deploymentsApplicationGVR).Get(ctx, deploymentName, metav1.GetOptions{})
+		instance, err := tenant.Resource(deploymentsInstanceGVR).Get(ctx, deploymentName, metav1.GetOptions{})
 		if err != nil {
 			return false, err.Error()
 		}
-		spec, _, _ := unstructured.NestedMap(application.Object, "spec")
-		if spec["webImage"] != "ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3" ||
-			spec["apiImage"] != "ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3" ||
-			spec["farosRedeployRevision"] != "e2e-rollout-1" {
-			return false, fmt.Sprintf("application spec not projected: %#v", spec)
+		template, _, _ := nestedString(instance.Object, "spec", "template")
+		values, _, _ := unstructured.NestedMap(instance.Object, "spec", "values")
+		if template != "application" ||
+			values["webImage"] != "ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3" ||
+			values["apiImage"] != "ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3" ||
+			values["farosRedeployRevision"] != "e2e-rollout-1" {
+			return false, fmt.Sprintf("instance template=%q values not projected: %#v", template, values)
 		}
 		current, err := tenant.Resource(deploymentsDeploymentGVR).Get(ctx, deploymentName, metav1.GetOptions{})
 		if err != nil {
@@ -206,22 +208,22 @@ func TestDeploymentsProviderReconcilesTenantDeployment(t *testing.T) {
 		return backendName == deploymentName && rollout == "e2e-rollout-1",
 			fmt.Sprintf("backend=%q rollout=%q", backendName, rollout)
 	}) {
-		t.Fatalf("Deployment %q did not materialize its Infrastructure Application", deploymentName)
+		t.Fatalf("Deployment %q did not materialize its Infrastructure Instance", deploymentName)
 	}
 
 	if err := tenant.Resource(deploymentsDeploymentGVR).Delete(ctx, deploymentName, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete retained Deployment %q: %v", deploymentName, err)
 	}
 	waitTiltResourceGone(t, tenant.Resource(deploymentsDeploymentGVR), deploymentName, deploymentsTestWait)
-	application, err := tenant.Resource(deploymentsApplicationGVR).Get(ctx, deploymentName, metav1.GetOptions{})
+	instance, err := tenant.Resource(deploymentsInstanceGVR).Get(ctx, deploymentName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("Retain policy removed Application %q: %v", deploymentName, err)
+		t.Fatalf("Retain policy removed Instance %q: %v", deploymentName, err)
 	}
-	if application.GetLabels()["deployments.faros.sh/deployment"] != "" {
-		t.Fatalf("retained Application still carries Deployment ownership label: %v", application.GetLabels())
+	if instance.GetLabels()["deployments.faros.sh/deployment"] != "" {
+		t.Fatalf("retained Instance still carries Deployment ownership label: %v", instance.GetLabels())
 	}
-	if application.GetAnnotations()["deployments.faros.sh/last-applied-spec"] != "" {
-		t.Fatalf("retained Application still carries managed-spec ownership: %v", application.GetAnnotations())
+	if instance.GetAnnotations()["deployments.faros.sh/last-applied-spec"] != "" {
+		t.Fatalf("retained Instance still carries managed-spec ownership: %v", instance.GetAnnotations())
 	}
 }
 
@@ -259,10 +261,10 @@ func infrastructureBinding() *unstructured.Unstructured {
 
 func deploymentsBinding(identityHash string) *unstructured.Unstructured {
 	verbs := map[string][]string{
-		"applications": {"get", "list", "watch", "create", "update", "patch", "delete"},
+		"instances": {"get", "list", "watch", "create", "update", "patch", "delete"},
 	}
 	claims := make([]any, 0, len(verbs))
-	for _, resource := range []string{"applications"} {
+	for _, resource := range []string{"instances"} {
 		claimVerbs := make([]any, len(verbs[resource]))
 		for i, verb := range verbs[resource] {
 			claimVerbs[i] = verb

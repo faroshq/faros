@@ -42,7 +42,7 @@ func TestGitManagedScaffoldIncludesTrackedEnvironmentInventoryWithoutStarterSour
 	if err := enableProjectGitOps(p); err != nil {
 		t.Fatal(err)
 	}
-	info := projectTemplateInfo{Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications"}
+	info := projectTemplateInfo{Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances"}
 	seeded, err := s.seedProjectScaffold(context.Background(), id, p, info)
 	if err != nil {
 		t.Fatalf("seedProjectScaffold: %v", err)
@@ -92,7 +92,7 @@ func TestGitManagedScaffoldTracksStarterSourceAndEnvironmentInventoryTogether(t 
 		t.Fatal(err)
 	}
 	info := projectTemplateInfo{
-		Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+		Name: "application", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
 		ScaffoldRepo: srv.URL + "/team/starter", Components: map[string]projectTemplateComponent{"web": {WorkspacePath: "web"}},
 	}
 	seeded, err := s.seedProjectScaffold(context.Background(), id, p, info)

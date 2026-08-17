@@ -45,8 +45,8 @@ func applicationTemplateObject() *unstructured.Unstructured {
 			"instanceCRD": map[string]any{
 				"group":    "infrastructure.faros.sh",
 				"version":  "v1alpha1",
-				"resource": "applications",
-				"kind":     "Application",
+				"resource": "instances",
+				"kind":     "Instance",
 			},
 			"development": map[string]any{
 				"build": map[string]any{"workflowPath": ".github/workflows/build.yaml"},
@@ -76,7 +76,7 @@ func TestProjectTemplateInfoFromUnstructured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("projectTemplateInfoFromUnstructured: %v", err)
 	}
-	if info.APIVersion != "infrastructure.faros.sh/v1alpha1" || info.Kind != "Application" || info.Resource != "applications" {
+	if info.APIVersion != "infrastructure.faros.sh/v1alpha1" || info.Kind != "Instance" || info.Resource != "instances" {
 		t.Errorf("instance coordinates = %s/%s/%s", info.APIVersion, info.Kind, info.Resource)
 	}
 	// The runtime half of the contract must survive extraction: without the
@@ -110,11 +110,12 @@ func TestProjectTemplateInfoFromUnstructured(t *testing.T) {
 		t.Errorf("BuildWorkflowPath without development = %q, want empty", info.BuildWorkflowPath)
 	}
 
-	// Incomplete instanceCRD is rejected.
+	// The flattened instance coordinates are constants — a Template without
+	// an instanceCRD (runtime-cluster detail) still yields usable info.
 	obj = applicationTemplateObject()
-	unstructured.RemoveNestedField(obj.Object, "spec", "instanceCRD", "kind")
-	if _, err := projectTemplateInfoFromUnstructured(obj); err == nil {
-		t.Error("expected error for incomplete instanceCRD")
+	unstructured.RemoveNestedField(obj.Object, "spec", "instanceCRD")
+	if _, err := projectTemplateInfoFromUnstructured(obj); err != nil {
+		t.Errorf("info without instanceCRD: %v", err)
 	}
 }
 
@@ -163,7 +164,7 @@ func TestProjectTemplateDevBinding(t *testing.T) {
 	if binding.Name != projectDevelopmentBindingName || binding.Provider != projectDevelopmentProviderAppStudio {
 		t.Errorf("binding identity = %s/%s", binding.Name, binding.Provider)
 	}
-	if binding.ResourceRef.Kind != "Application" || binding.ResourceRef.Resource != "applications" || binding.ResourceRef.Name != "shop-dev" {
+	if binding.ResourceRef.Kind != "Instance" || binding.ResourceRef.Resource != "instances" || binding.ResourceRef.Name != "shop-dev" {
 		t.Errorf("resourceRef = %+v", binding.ResourceRef)
 	}
 	var values map[string]any
@@ -484,7 +485,7 @@ func TestDevelopmentTemplateViews(t *testing.T) {
 	// error — a broken catalog entry must not hide the rest of the catalog.
 	broken := applicationTemplateObject()
 	broken.SetName("broken")
-	unstructured.RemoveNestedField(broken.Object, "spec", "instanceCRD", "kind")
+	unstructured.RemoveNestedField(broken.Object, "spec", "development", "components", "frontend", "workspacePath")
 
 	// Second valid entry, named to sort before "application" if ordering were
 	// insertion order — proves the sort.
@@ -655,14 +656,14 @@ func TestRouteProjectSyncFiles(t *testing.T) {
 
 func TestProjectDevelopmentTargetRefs(t *testing.T) {
 	target := projectDevelopmentSyncTargetInfo{
-		Resource:     "applications",
-		Kind:         "Application",
+		Resource:     "instances",
+		Kind:         "Instance",
 		APIVersion:   "infrastructure.faros.sh/v1alpha1",
 		ResourceName: "shop-dev",
 		Components:   devComponentPaths(map[string]string{"frontend": "web", "backend": "api"}),
 	}
 	ref := target.dataPlaneRefFor("backend")
-	if ref.Resource != "applications" || ref.Name != "shop-dev" || ref.Component != "backend" {
+	if ref.Resource != "instances" || ref.Name != "shop-dev" || ref.Component != "backend" {
 		t.Errorf("dataPlaneRefFor = %+v", ref)
 	}
 	if got := target.sortedComponents(); !reflect.DeepEqual(got, []string{"backend", "frontend"}) {
@@ -672,7 +673,7 @@ func TestProjectDevelopmentTargetRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("instanceResource: %v", err)
 	}
-	if res.Kind != "Application" || res.GVR.Resource != "applications" {
+	if res.Kind != "Instance" || res.GVR.Resource != "instances" {
 		t.Errorf("instanceResource = %+v", res)
 	}
 }

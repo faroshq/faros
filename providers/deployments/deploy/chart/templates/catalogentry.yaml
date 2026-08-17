@@ -24,7 +24,7 @@ data:
         name: "deployments.faros.sh"
         permissionClaims:
           - group: infrastructure.faros.sh
-            resource: applications
+            resource: instances
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
 {{- end }}

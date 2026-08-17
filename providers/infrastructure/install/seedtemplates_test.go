@@ -79,6 +79,18 @@ func TestSeedTemplatesDecodeAndValidate(t *testing.T) {
 	}
 }
 
+func TestSeedTemplatesExcludeOptInTerraformContrib(t *testing.T) {
+	entries, err := fs.ReadDir(seedTemplatesFS, "templates")
+	if err != nil {
+		t.Fatalf("read embedded templates/: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "terraform-stack.yaml" || entry.Name() == "terraform-stack-template.yaml" {
+			t.Fatalf("opt-in Terraform contrib fixture must not be embedded as seed %q", entry.Name())
+		}
+	}
+}
+
 // TestApplicationSeedsRouteEverythingThroughTheAccessGate encodes the
 // exposure invariants of the template-native access design:
 //
@@ -90,9 +102,12 @@ func TestSeedTemplatesDecodeAndValidate(t *testing.T) {
 //     Service — no tenant workload is ever the direct route backend, in any
 //     mode, so flipping spec.access can never be routed around.
 func TestApplicationSeedsRouteEverythingThroughTheAccessGate(t *testing.T) {
+	// The gate's SAR targets the flattened tenant-facing resource — every
+	// template's instances are authored as instances.infrastructure.faros.sh,
+	// so access grants live on instances/<name> subresource access.
 	instanceResource := map[string]string{
-		"simple-webapp.yaml": "simplewebapps",
-		"application.yaml":   "applications",
+		"simple-webapp.yaml": "instances",
+		"application.yaml":   "instances",
 	}
 	for _, file := range []string{"simple-webapp.yaml", "application.yaml"} {
 		t.Run(file, func(t *testing.T) {

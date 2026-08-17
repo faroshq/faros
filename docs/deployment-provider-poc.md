@@ -139,7 +139,8 @@ The provider exposes `deployments.faros.sh/v1alpha1`:
   and rollout identity.
 
 The built-in `kro-direct` class currently admits the canonical `application`
-blueprint contract and translates it into an Infrastructure `Application`.
+blueprint contract and translates it into the stable Infrastructure `Instance`
+API with `spec.template: application` and template inputs under `spec.values`.
 Infrastructure Templates use virtual storage and therefore cannot be selected
 through another provider's permission claim; the POC keeps this mapping
 provider-owned until Release can carry an immutable resolved blueprint
@@ -241,7 +242,7 @@ That gate proves the provider process is ready, its authoritative CatalogEntry
 is Ready, its APIExport publishes `releases` and `deployments`, and its exact
 Infrastructure permission claims carry the live Infrastructure identity hash.
 It also creates an isolated tenant, binds both providers with accepted claims,
-materializes an Infrastructure `Application` from a `Release`/`Deployment`, and
+materializes an Infrastructure `Instance` from a `Release`/`Deployment`, and
 verifies default `Retain` finalization detaches rather than deletes the backend.
 
 Full product acceptance additionally requires a real repository:

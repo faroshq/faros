@@ -37,7 +37,7 @@ import (
 )
 
 var (
-	publishingTestTargetGVR = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "applications"}
+	publishingTestTargetGVR = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances"}
 	clusterRoleGVR          = clusterRoleResource.GVR
 	clusterRoleBindingGVR   = clusterRoleBindingResource.GVR
 )
@@ -47,7 +47,7 @@ func publishingTestDynamic(objects ...runtime.Object) *fake.FakeDynamicClient {
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
 			asclient.ProjectGVR:           "ProjectList",
-			publishingTestTargetGVR:       "ApplicationList",
+			publishingTestTargetGVR:       "InstanceList",
 			projectDeploymentGVRForTest(): "DeploymentList",
 			clusterRoleGVR:                "ClusterRoleList",
 			clusterRoleBindingGVR:         "ClusterRoleBindingList",
@@ -92,7 +92,7 @@ func publishingTestProjectTyped(name, uid, access string) *aiv1alpha1.Project {
 					Provider: "app-studio",
 					Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
 					ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
-						Name: name + "-prod", APIVersion: publishingTestTargetGVR.GroupVersion().String(), Kind: "Application", Resource: "applications",
+						Name: name + "-prod", APIVersion: publishingTestTargetGVR.GroupVersion().String(), Kind: "Instance", Resource: "instances",
 					},
 					Values: rawJSONForPublishing(values),
 				}},
@@ -147,8 +147,8 @@ func publishingTestDeployment(name, backendUID string) *unstructured.Unstructure
 			"url":   "https://" + name + "-abc.apps.test",
 			"backendRef": map[string]any{
 				"apiVersion": publishingTestTargetGVR.GroupVersion().String(),
-				"kind":       "Application",
-				"resource":   "applications",
+				"kind":       "Instance",
+				"resource":   "instances",
 				"name":       name,
 				"uid":        backendUID,
 			},
@@ -158,9 +158,9 @@ func publishingTestDeployment(name, backendUID string) *unstructured.Unstructure
 
 func publishingTestTarget(name, uid, specAccess, url string) *unstructured.Unstructured {
 	object := map[string]any{
-		"apiVersion": publishingTestTargetGVR.GroupVersion().String(), "kind": "Application",
+		"apiVersion": publishingTestTargetGVR.GroupVersion().String(), "kind": "Instance",
 		"metadata": map[string]any{"name": name, "uid": uid},
-		"spec":     map[string]any{"access": specAccess},
+		"spec":     map[string]any{"template": "application", "values": map[string]any{"access": specAccess}},
 		"status":   map[string]any{},
 	}
 	if url != "" {
@@ -296,7 +296,7 @@ func TestDeploymentPublishingResolvesBackendAndMutatesConfigurationOnly(t *testi
 	}
 	if body.Publication == nil || !body.Publication.Ready || body.Publication.UID != "runtime-uid-1" ||
 		body.Publication.Target.APIVersion != publishingTestTargetGVR.GroupVersion().String() ||
-		body.Publication.Target.Resource != "applications" {
+		body.Publication.Target.Resource != "instances" {
 		t.Fatalf("deployment publication = %+v, want resolved Infrastructure backend", body.Publication)
 	}
 	stored, err := dyn.Resource(asclient.ProjectGVR).Get(context.Background(), "demo", metav1.GetOptions{})
@@ -341,7 +341,7 @@ func TestDeploymentGrantTargetsResolvedBackendAccessSubresource(t *testing.T) {
 	resources, _ := rule["resources"].([]any)
 	names, _ := rule["resourceNames"].([]any)
 	if len(groups) != 1 || groups[0] != publishingTestTargetGVR.Group ||
-		len(resources) != 1 || resources[0] != "applications/access" ||
+		len(resources) != 1 || resources[0] != "instances/access" ||
 		len(names) != 1 || names[0] != "demo-prod" {
 		t.Fatalf("resolved backend access rule = %#v", rule)
 	}
@@ -432,8 +432,8 @@ func TestGrantLifecycleWritesRBACOnly(t *testing.T) {
 	rule, _ := rules[0].(map[string]any)
 	resources, _ := rule["resources"].([]any)
 	names, _ := rule["resourceNames"].([]any)
-	if len(resources) != 1 || resources[0] != "applications/access" || len(names) != 1 || names[0] != "demo-prod" {
-		t.Fatalf("ClusterRole rule = %#v, want applications/access on demo-prod", rule)
+	if len(resources) != 1 || resources[0] != "instances/access" || len(names) != 1 || names[0] != "demo-prod" {
+		t.Fatalf("ClusterRole rule = %#v, want instances/access on demo-prod", rule)
 	}
 	// kcp's workspace content authorizer requires `access` on "/" before any
 	// RBAC rule applies — without this, invited outsiders are denied even

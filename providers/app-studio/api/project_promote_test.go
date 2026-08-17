@@ -112,8 +112,8 @@ func TestGitManagedPromotionCreatesChangeRequestWithoutDirectDeploymentWrites(t 
 func applicationTemplateForPromote() projectTemplateInfo {
 	info := applicationTemplateInfo()
 	info.APIVersion = "infrastructure.faros.sh/v1alpha1"
-	info.Kind = "Application"
-	info.Resource = "applications"
+	info.Kind = "Instance"
+	info.Resource = "instances"
 	return info
 }
 
@@ -153,7 +153,7 @@ func TestProjectTemplateProdBindingFillsImagesAndForcesMode(t *testing.T) {
 	if binding.Name != projectProductionBindingName || binding.Provider != projectDevelopmentProviderAppStudio {
 		t.Fatalf("binding meta = %+v", binding)
 	}
-	if binding.ResourceRef == nil || binding.ResourceRef.Name != "shop-prod" || binding.ResourceRef.Resource != "applications" {
+	if binding.ResourceRef == nil || binding.ResourceRef.Name != "shop-prod" || binding.ResourceRef.Resource != "instances" {
 		t.Fatalf("resourceRef = %+v", binding.ResourceRef)
 	}
 
@@ -583,7 +583,7 @@ func TestProjectPromoteResponseIncludesRolloutRevision(t *testing.T) {
 
 func TestProjectObservedRedeployRevisionReadsProviderInstanceSpec(t *testing.T) {
 	instance := &unstructured.Unstructured{Object: map[string]any{
-		"spec": map[string]any{projectRedeployRevisionField: " rollout-observed-42 "},
+		"spec": map[string]any{"values": map[string]any{projectRedeployRevisionField: " rollout-observed-42 "}},
 	}}
 	if got := projectObservedRedeployRevision(instance); got != "rollout-observed-42" {
 		t.Fatalf("observed rollout revision = %q, want rollout-observed-42", got)

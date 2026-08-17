@@ -301,9 +301,9 @@ func TestIntegrationActionNormalizationAndRevocation(t *testing.T) {
 type integrationHTTPFixture struct {
 	mu sync.Mutex
 
-	projectYAML     string
-	tableYAML       string
-	applicationYAML string
+	projectYAML  string
+	tableYAML    string
+	instanceYAML string
 
 	graphql    *httptest.Server
 	hub        *httptest.Server
@@ -380,10 +380,10 @@ func (f *integrationHTTPFixture) serveGraphQL(w http.ResponseWriter, r *http.Req
 				"v1alpha1": map[string]any{"TableYaml": f.tableYAML},
 			},
 		})
-	case strings.Contains(request.Query, "ApplicationYaml"):
+	case strings.Contains(request.Query, "InstanceYaml"):
 		writeIntegrationGraphQLData(w, map[string]any{
 			"infrastructure_faros_sh": map[string]any{
-				"v1alpha1": map[string]any{"ApplicationYaml": f.applicationYAML},
+				"v1alpha1": map[string]any{"InstanceYaml": f.instanceYAML},
 			},
 		})
 	case strings.Contains(request.Query, "applyStatusYaml"):
@@ -407,8 +407,8 @@ func (f *integrationHTTPFixture) serveGraphQL(w http.ResponseWriter, r *http.Req
 		switch object["kind"] {
 		case "Project":
 			f.projectYAML = applied
-		case "Application":
-			f.applicationYAML = applied
+		case "Instance":
+			f.instanceYAML = applied
 		}
 		writeIntegrationGraphQLData(w, map[string]any{"applyYaml": applied})
 	default:
@@ -485,25 +485,25 @@ func (f *integrationHTTPFixture) project(t *testing.T) *aiv1alpha1.Project {
 	return project
 }
 
-func (f *integrationHTTPFixture) setApplication(t *testing.T, application *unstructured.Unstructured) {
+func (f *integrationHTTPFixture) setInstance(t *testing.T, instance *unstructured.Unstructured) {
 	t.Helper()
-	raw, err := yaml.Marshal(application.Object)
+	raw, err := yaml.Marshal(instance.Object)
 	if err != nil {
-		t.Fatalf("marshal Application: %v", err)
+		t.Fatalf("marshal Instance: %v", err)
 	}
 	f.mu.Lock()
-	f.applicationYAML = string(raw)
+	f.instanceYAML = string(raw)
 	f.mu.Unlock()
 }
 
-func (f *integrationHTTPFixture) application(t *testing.T) *unstructured.Unstructured {
+func (f *integrationHTTPFixture) instance(t *testing.T) *unstructured.Unstructured {
 	t.Helper()
 	f.mu.Lock()
-	raw := []byte(f.applicationYAML)
+	raw := []byte(f.instanceYAML)
 	f.mu.Unlock()
 	var object map[string]any
 	if err := yaml.Unmarshal(raw, &object); err != nil {
-		t.Fatalf("decode Application YAML: %v", err)
+		t.Fatalf("decode Instance YAML: %v", err)
 	}
 	return &unstructured.Unstructured{Object: object}
 }
@@ -563,7 +563,7 @@ func projectWithDevelopmentRuntimeBinding() *aiv1alpha1.Project {
 					Name: projectDevelopmentBindingName, Provider: projectDevelopmentProviderAppStudio,
 					Kind: aiv1alpha1.ProjectBindingKindProviderResource,
 					ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
-						Name: "demo-dev", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+						Name: "demo-dev", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
 					},
 					Values: runtime.RawExtension{Raw: []byte(`{
 						"name":"demo-dev",
@@ -579,23 +579,26 @@ func projectWithDevelopmentRuntimeBinding() *aiv1alpha1.Project {
 	return project
 }
 
-func developmentApplicationObject() *unstructured.Unstructured {
+func developmentInstanceObject() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "infrastructure.faros.sh/v1alpha1",
-		"kind":       "Application",
+		"kind":       "Instance",
 		"metadata":   map[string]any{"name": "demo-dev"},
 		"spec": map[string]any{
-			"name":                    "demo-dev",
-			"farosMode":               "development",
-			"farosActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
-			"farosActionsBaseURL":     "https://stale.example/services/providers/app-studio",
-			"farosActionsTenantPath":  "stale-tenant",
-			"farosActionsProject":     "stale-project",
-			"farosActionsProjectUID":  "stale-project-uid",
-			"farosActionsEnvironment": "stale-environment",
-			"farosActionsInstance":    "stale-instance",
-			"farosActionsOrg":         "stale-org",
-			"farosActionsWorkspace":   "stale-workspace",
+			"template": "application",
+			"values": map[string]any{
+				"name":                    "demo-dev",
+				"farosMode":               "development",
+				"farosActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
+				"farosActionsBaseURL":     "https://stale.example/services/providers/app-studio",
+				"farosActionsTenantPath":  "stale-tenant",
+				"farosActionsProject":     "stale-project",
+				"farosActionsProjectUID":  "stale-project-uid",
+				"farosActionsEnvironment": "stale-environment",
+				"farosActionsInstance":    "stale-instance",
+				"farosActionsOrg":         "stale-org",
+				"farosActionsWorkspace":   "stale-workspace",
+			},
 		},
 	}}
 }
@@ -731,7 +734,7 @@ func TestProjectIntegrationCRUDInvokeAndForwardingContract(t *testing.T) {
 
 func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *testing.T) {
 	fixture := newIntegrationHTTPFixture(t, projectWithDevelopmentRuntimeBinding())
-	fixture.setApplication(t, developmentApplicationObject())
+	fixture.setInstance(t, developmentInstanceObject())
 	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
 	server.actionsExternalURL = "https://actions.example"
 	server.providerActionCatalogResolver = integrationTestCatalogResolver
@@ -744,15 +747,19 @@ func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *te
 	if addResponse.Code != http.StatusCreated {
 		t.Fatalf("add integration status = %d: %s", addResponse.Code, addResponse.Body.String())
 	}
-	addedApplication := fixture.application(t)
-	addedSpec, ok := addedApplication.Object["spec"].(map[string]any)
+	addedInstance := fixture.instance(t)
+	addedSpec, ok := addedInstance.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("Application spec = %#v, want object", addedApplication.Object["spec"])
+		t.Fatalf("Instance spec = %#v, want object", addedInstance.Object["spec"])
 	}
-	if got := addedSpec["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+	addedValues, ok := addedSpec["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("Instance spec.values = %#v, want object", addedSpec["values"])
+	}
+	if got := addedValues["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
 		t.Fatalf("after grant farosActionsExchangeURL = %v, want unchanged provider resource", got)
 	}
-	if got := addedSpec["farosActionsBaseURL"]; got != "https://stale.example/services/providers/app-studio" {
+	if got := addedValues["farosActionsBaseURL"]; got != "https://stale.example/services/providers/app-studio" {
 		t.Fatalf("after grant farosActionsBaseURL = %v, want unchanged provider resource", got)
 	}
 
@@ -766,16 +773,20 @@ func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *te
 	if revokeResponse.Code != http.StatusOK {
 		t.Fatalf("revoke integration status = %d: %s", revokeResponse.Code, revokeResponse.Body.String())
 	}
-	revokedApplication := fixture.application(t)
-	revokedSpec, ok := revokedApplication.Object["spec"].(map[string]any)
+	revokedInstance := fixture.instance(t)
+	revokedSpec, ok := revokedInstance.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("reconciled Application spec after revoke = %#v, want object", revokedApplication.Object["spec"])
+		t.Fatalf("reconciled Instance spec after revoke = %#v, want object", revokedInstance.Object["spec"])
+	}
+	revokedValues, ok := revokedSpec["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled Instance spec.values after revoke = %#v, want object", revokedSpec["values"])
 	}
 	for field, want := range map[string]string{
 		"farosActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
 		"farosActionsBaseURL":     "https://stale.example/services/providers/app-studio",
 	} {
-		if got := revokedSpec[field]; got != want {
+		if got := revokedValues[field]; got != want {
 			t.Fatalf("after grant revocation %s = %v, want unchanged provider resource", field, got)
 		}
 	}
@@ -786,16 +797,20 @@ func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *te
 	if removeResponse.Code != http.StatusNoContent {
 		t.Fatalf("remove integration status = %d: %s", removeResponse.Code, removeResponse.Body.String())
 	}
-	removedApplication := fixture.application(t)
-	removedSpec, ok := removedApplication.Object["spec"].(map[string]any)
+	removedInstance := fixture.instance(t)
+	removedSpec, ok := removedInstance.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("reconciled Application spec after removal = %#v, want object", removedApplication.Object["spec"])
+		t.Fatalf("reconciled Instance spec after removal = %#v, want object", removedInstance.Object["spec"])
+	}
+	removedValues, ok := removedSpec["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled Instance spec.values after removal = %#v, want object", removedSpec["values"])
 	}
 	for field, want := range map[string]string{
 		"farosActionsExchangeURL": "https://stale.example/api/provider-actions/workload/exchange",
 		"farosActionsBaseURL":     "https://stale.example/services/providers/app-studio",
 	} {
-		if got := removedSpec[field]; got != want {
+		if got := removedValues[field]; got != want {
 			t.Fatalf("after grant removal %s = %v, want unchanged provider resource", field, got)
 		}
 	}
@@ -804,7 +819,7 @@ func TestProjectIntegrationMutationsDoNotReconcileDevelopmentActionContext(t *te
 func TestProjectIntegrationAddRejectsMissingActionsURLWithoutMutation(t *testing.T) {
 	initial := projectWithDevelopmentRuntimeBinding()
 	fixture := newIntegrationHTTPFixture(t, initial)
-	fixture.setApplication(t, developmentApplicationObject())
+	fixture.setInstance(t, developmentInstanceObject())
 	before := fixture.project(t)
 	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
 	server.providerActionCatalogResolver = integrationTestCatalogResolver
@@ -823,12 +838,16 @@ func TestProjectIntegrationAddRejectsMissingActionsURLWithoutMutation(t *testing
 	if got := fixture.project(t); !reflect.DeepEqual(got.Spec, before.Spec) {
 		t.Fatalf("Project changed after rejected grant: got %#v, want %#v", got.Spec, before.Spec)
 	}
-	application := fixture.application(t)
-	spec, ok := application.Object["spec"].(map[string]any)
+	instance := fixture.instance(t)
+	spec, ok := instance.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("runtime Application spec = %#v, want object", application.Object["spec"])
+		t.Fatalf("runtime Instance spec = %#v, want object", instance.Object["spec"])
 	}
-	if got := spec["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+	values, ok := spec["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime Instance spec.values = %#v, want object", spec["values"])
+	}
+	if got := values["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
 		t.Fatalf("runtime changed after rejected grant: farosActionsExchangeURL = %v", got)
 	}
 }
@@ -864,7 +883,7 @@ func testProjectIntegrationPatchPreflight(t *testing.T, actionsURL string) {
 			}},
 		})
 	fixture := newIntegrationHTTPFixture(t, initial)
-	fixture.setApplication(t, developmentApplicationObject())
+	fixture.setInstance(t, developmentInstanceObject())
 	before := fixture.project(t)
 	server := NewWithWorkspace(tenant.NewGraphQLClient(fixture.graphql.URL, false), nil, nil, fixture.hub.URL, false)
 	server.actionsExternalURL = actionsURL
@@ -884,12 +903,16 @@ func testProjectIntegrationPatchPreflight(t *testing.T, actionsURL string) {
 	if got := fixture.project(t); !reflect.DeepEqual(got.Spec, before.Spec) {
 		t.Fatalf("Project changed after rejected reactivation: got %#v, want %#v", got.Spec, before.Spec)
 	}
-	application := fixture.application(t)
-	spec, ok := application.Object["spec"].(map[string]any)
+	instance := fixture.instance(t)
+	spec, ok := instance.Object["spec"].(map[string]any)
 	if !ok {
-		t.Fatalf("runtime Application spec = %#v, want object", application.Object["spec"])
+		t.Fatalf("runtime Instance spec = %#v, want object", instance.Object["spec"])
 	}
-	if got := spec["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
+	values, ok := spec["values"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime Instance spec.values = %#v, want object", spec["values"])
+	}
+	if got := values["farosActionsExchangeURL"]; got != "https://stale.example/api/provider-actions/workload/exchange" {
 		t.Fatalf("runtime changed after rejected reactivation: farosActionsExchangeURL = %v", got)
 	}
 }
@@ -986,16 +1009,16 @@ func TestProviderReferenceSurvivesTemplateSwitchPromotionAndProjectCleanup(t *te
 			Name: projectDevelopmentBindingName, Provider: projectDevelopmentProviderAppStudio,
 			Kind: aiv1alpha1.ProjectBindingKindProviderResource,
 			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
-				Name: "demo-dev", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+				Name: "demo-dev", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
 			},
 		})
 	scheme := runtime.NewScheme()
 	if err := aiv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add App Studio scheme: %v", err)
 	}
-	applicationGVR := schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "applications"}
-	oldApplication := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "infrastructure.faros.sh/v1alpha1", "kind": "Application",
+	instanceGVR := schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances"}
+	oldInstance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1", "kind": "Instance",
 		"metadata": map[string]any{"name": "demo-dev"},
 	}}
 	table := &unstructured.Unstructured{Object: map[string]any{
@@ -1003,8 +1026,8 @@ func TestProviderReferenceSurvivesTemplateSwitchPromotionAndProjectCleanup(t *te
 		"metadata": map[string]any{"name": "orders"},
 	}}
 	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-		asclient.ProjectGVR: "ProjectList", testDatabricksTableGVR: "TableList", applicationGVR: "ApplicationList",
-	}, project, table, oldApplication)
+		asclient.ProjectGVR: "ProjectList", testDatabricksTableGVR: "TableList", instanceGVR: "InstanceList",
+	}, project, table, oldInstance)
 	for _, verb := range []string{"create", "update", "delete", "patch"} {
 		verb := verb
 		dyn.PrependReactor(verb, "tables", func(k8stesting.Action) (bool, runtime.Object, error) {
@@ -1032,7 +1055,7 @@ func TestProviderReferenceSurvivesTemplateSwitchPromotionAndProjectCleanup(t *te
 		Name: projectProductionBindingName, Provider: projectDevelopmentProviderAppStudio,
 		Kind: aiv1alpha1.ProjectBindingKindProviderResource,
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
-			Name: "demo-prod", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Application", Resource: "applications",
+			Name: "demo-prod", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
 		},
 	})
 	if _, err := (&Server{actionsExternalURL: "https://hub.example"}).reconcileProjectLiveBindings(context.Background(), c, project, id); err != nil {

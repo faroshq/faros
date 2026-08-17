@@ -19,7 +19,7 @@ const (
 	defaultWorkspacePath = "root:faros:providers:deployments"
 )
 
-var instanceResources = []string{"applications"}
+var instanceResources = []string{"instances"}
 
 func deploymentClaims(identityHash string) ([]sdkinstall.PermissionClaim, error) {
 	hash := strings.TrimSpace(identityHash)

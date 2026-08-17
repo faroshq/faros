@@ -25,8 +25,23 @@ by Infrastructure remain untouched.
 `deletionPolicy: Retain` is the default and detaches the backend when the
 Deployment is removed. `deletionPolicy: Delete` gives the Deployment ownership
 of the backend and waits for its deletion before completing finalization. The
-provider currently manages only `applications`; additional adapters must add
-their own claims when they are implemented.
+provider currently manages only the stable Infrastructure `instances` resource;
+additional adapters must add their own claims when they are implemented.
+
+The Infrastructure handoff is always the flattened Instance contract:
+
+```yaml
+apiVersion: infrastructure.faros.sh/v1alpha1
+kind: Instance
+spec:
+  template: application
+  values: # template-shaped values, including release image overrides
+    webImage: ghcr.io/example/web@sha256:...
+```
+
+`application` is a template name carried as data. It does not create a
+template-specific kind or claim; the only Infrastructure permission claim is
+for the stable `instances` resource.
 
 Bootstrap requires `FAROS_PROVIDER_KUBECONFIG` and
 `DEPLOYMENTS_INFRA_IDENTITY_HASH`, the identity hash of the Infrastructure
@@ -97,7 +112,7 @@ make e2e-tilt-cluster
 That suite verifies CatalogEntry readiness, exported `Release`/`Deployment`
 resources, the exact Infrastructure claims and identity hash, both health
 endpoints, and a fresh tenant's accepted-claim path from Release/Deployment to
-an Infrastructure Application with `Retain` finalization. Controller unit tests
+an Infrastructure Instance with `Retain` finalization. Controller unit tests
 cover status projection, managed configuration removal, and both finalization
 policies in more detail.
 

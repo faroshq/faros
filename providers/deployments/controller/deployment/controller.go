@@ -43,7 +43,12 @@ const (
 	deletePollInterval = 2 * time.Second
 )
 
-var templateGVK = schema.GroupVersionKind{Group: "infrastructure.faros.sh", Version: "v1alpha1", Kind: "Template"}
+var (
+	templateGVK = schema.GroupVersionKind{Group: "infrastructure.faros.sh", Version: "v1alpha1", Kind: "Template"}
+	instanceGVK = schema.GroupVersionKind{Group: "infrastructure.faros.sh", Version: "v1alpha1", Kind: "Instance"}
+)
+
+const instanceResource = "instances"
 
 type Reconciler struct{ Manager mcmanager.Manager }
 
@@ -138,10 +143,6 @@ func builtinTemplateContract(name string) (*unstructured.Unstructured, error) {
 		"kind":       templateGVK.Kind,
 		"metadata":   map[string]any{"name": "application"},
 		"spec": map[string]any{
-			"instanceCRD": map[string]any{
-				"group": "infrastructure.faros.sh", "version": "v1alpha1",
-				"resource": "applications", "kind": "Application",
-			},
 			"development": map[string]any{"components": map[string]any{
 				"web": map[string]any{"imageInput": "webImage"},
 				"api": map[string]any{"imageInput": "apiImage"},
@@ -163,12 +164,9 @@ func DesiredInstance(d *deploymentsv1alpha1.Deployment, release *deploymentsv1al
 	if d == nil || release == nil || template == nil {
 		return nil, nil, fmt.Errorf("deployment, release, and template are required")
 	}
-	group, _, _ := unstructured.NestedString(template.Object, "spec", "instanceCRD", "group")
-	version, _, _ := unstructured.NestedString(template.Object, "spec", "instanceCRD", "version")
-	resource, _, _ := unstructured.NestedString(template.Object, "spec", "instanceCRD", "resource")
-	kind, _, _ := unstructured.NestedString(template.Object, "spec", "instanceCRD", "kind")
-	if group != "infrastructure.faros.sh" || version == "" || resource == "" || kind == "" {
-		return nil, nil, fmt.Errorf("Template %q has an invalid spec.instanceCRD", template.GetName())
+	templateName := strings.TrimSpace(template.GetName())
+	if templateName == "" {
+		return nil, nil, fmt.Errorf("Template name is required")
 	}
 	configuration := map[string]any{}
 	if d.Spec.Configuration != nil && len(d.Spec.Configuration.Raw) > 0 {
@@ -217,11 +215,13 @@ func DesiredInstance(d *deploymentsv1alpha1.Deployment, release *deploymentsv1al
 	configuration["farosMode"] = string(mode)
 	configuration["farosRedeployRevision"] = d.Spec.RolloutID
 
-	gvk := schema.GroupVersionKind{Group: group, Version: version, Kind: kind}
 	obj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": gvk.GroupVersion().String(), "kind": kind,
+		"apiVersion": instanceGVK.GroupVersion().String(), "kind": instanceGVK.Kind,
 		"metadata": map[string]any{"name": d.Name, "labels": map[string]any{"deployments.faros.sh/deployment": d.Name}},
-		"spec":     configuration,
+		"spec": map[string]any{
+			"template": templateName,
+			"values":   configuration,
+		},
 	}}
 	deletionPolicy := effectiveDeletionPolicy(d.Spec.DeletionPolicy)
 	if deletionPolicy != deploymentsv1alpha1.DeploymentDeletionPolicyRetain && deletionPolicy != deploymentsv1alpha1.DeploymentDeletionPolicyDelete {
@@ -230,7 +230,7 @@ func DesiredInstance(d *deploymentsv1alpha1.Deployment, release *deploymentsv1al
 	if deletionPolicy == deploymentsv1alpha1.DeploymentDeletionPolicyDelete {
 		obj.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: d.Name, UID: d.UID, Controller: boolPtr(true), BlockOwnerDeletion: boolPtr(true)}})
 	}
-	return obj, &deploymentsv1alpha1.BackendReference{APIVersion: gvk.GroupVersion().String(), Kind: kind, Resource: resource, Name: d.Name}, nil
+	return obj, &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name}, nil
 }
 
 func effectiveMode(mode deploymentsv1alpha1.DeploymentMode) deploymentsv1alpha1.DeploymentMode {

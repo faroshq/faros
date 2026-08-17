@@ -471,6 +471,13 @@ func TestCreateProjectLivePathListsCatalogCallsPreflightOnceAndCreatesInstance(t
 	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
 		t.Fatalf("development binding = %+v, want direct provider resource %s-dev", binding, created.Name)
 	}
+	want, gvr, err := bindings.Desired(created, created.Spec.Environments[0].Bindings[0])
+	if err != nil {
+		t.Fatalf("binding is not self-contained: %v", err)
+	}
+	if gvr.Resource != "instances" || want.GetName() != created.Name+"-dev" {
+		t.Fatalf("desired instance = %s/%s, want instances/%s-dev", gvr.Resource, want.GetName(), created.Name)
+	}
 }
 
 func TestCreateProjectLivePathSurfacesCatalogListErrorBeforePreflight(t *testing.T) {
@@ -696,8 +703,8 @@ func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDy
 			codeConnectionsGVR:  "ConnectionList",
 			codeRepositoriesGVR: "RepositoryList",
 			{
-				Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "applications",
-			}: "ApplicationList",
+				Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances",
+			}: "InstanceList",
 		},
 		objects...,
 	)

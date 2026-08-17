@@ -15,7 +15,7 @@ func TestDeploymentClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims) != 1 || claims[0].Resource != "applications" {
+	if len(claims) != 1 || claims[0].Resource != "instances" {
 		t.Fatalf("unexpected claims: %#v", claims)
 	}
 	for _, claim := range claims {

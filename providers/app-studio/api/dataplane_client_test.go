@@ -19,23 +19,23 @@ import (
 func TestDataPlaneURL(t *testing.T) {
 	s := &Server{hubBase: "https://hub.example/"}
 
-	got := s.dataPlaneURL("root:faros:orgs:acme", dataPlaneRef{Resource: "applications", Name: "shop-dev"}, dataPlaneVerbLog, "")
-	want := "https://hub.example/services/providers/infrastructure/dataplane/clusters/root:faros:orgs:acme/applications/shop-dev/log"
+	got := s.dataPlaneURL("root:faros:orgs:acme", dataPlaneRef{Resource: "instances", Name: "shop-dev"}, dataPlaneVerbLog, "")
+	want := "https://hub.example/services/providers/infrastructure/dataplane/clusters/root:faros:orgs:acme/instances/shop-dev/log"
 	if got != want {
 		t.Fatalf("dataPlaneURL = %q, want %q", got, want)
 	}
 
 	// The open proxy verb appends the caller tail after the verb.
-	gotProxy := s.dataPlaneURL("c1", dataPlaneRef{Resource: "applications", Name: "r1"}, dataPlaneVerbProxy, "/assets/app.js")
-	wantProxy := "https://hub.example/services/providers/infrastructure/dataplane/clusters/c1/applications/r1/proxy/assets/app.js"
+	gotProxy := s.dataPlaneURL("c1", dataPlaneRef{Resource: "instances", Name: "r1"}, dataPlaneVerbProxy, "/assets/app.js")
+	wantProxy := "https://hub.example/services/providers/infrastructure/dataplane/clusters/c1/instances/r1/proxy/assets/app.js"
 	if gotProxy != wantProxy {
 		t.Fatalf("proxy URL = %q, want %q", gotProxy, wantProxy)
 	}
 
 	// Component verbs address a template instance's component
 	// (docs/app-studio-template-sandboxes.md §3).
-	gotComp := s.dataPlaneURL("c1", dataPlaneRef{Resource: "applications", Name: "shop-dev", Component: "backend"}, dataPlaneVerbSync, "")
-	wantComp := "https://hub.example/services/providers/infrastructure/dataplane/clusters/c1/applications/shop-dev/components/backend/sync"
+	gotComp := s.dataPlaneURL("c1", dataPlaneRef{Resource: "instances", Name: "shop-dev", Component: "backend"}, dataPlaneVerbSync, "")
+	wantComp := "https://hub.example/services/providers/infrastructure/dataplane/clusters/c1/instances/shop-dev/components/backend/sync"
 	if gotComp != wantComp {
 		t.Fatalf("component URL = %q, want %q", gotComp, wantComp)
 	}
@@ -43,7 +43,7 @@ func TestDataPlaneURL(t *testing.T) {
 
 func TestNewDataPlaneRequestRequiresHubAndCluster(t *testing.T) {
 	id := identity{clusterID: "c1", token: "tok"}
-	ref := dataPlaneRef{Resource: "applications", Name: "r1"}
+	ref := dataPlaneRef{Resource: "instances", Name: "r1"}
 	// No hub base configured.
 	if _, err := (&Server{}).newDataPlaneRequest(context.Background(), http.MethodGet, id, ref, dataPlaneVerbLog, "", nil); err == nil {
 		t.Fatal("expected error when hubBase is unset")

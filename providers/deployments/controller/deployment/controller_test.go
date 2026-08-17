@@ -23,8 +23,6 @@ import (
 	deploymentsv1alpha1 "github.com/faroshq/provider-deployments/apis/v1alpha1"
 )
 
-var appGVK = schema.GroupVersionKind{Group: "infrastructure.faros.sh", Version: "v1alpha1", Kind: "Application"}
-
 func TestDesiredInstanceReservedFieldsAndArtifactMapping(t *testing.T) {
 	config, _ := json.Marshal(map[string]any{"name": "attacker", "farosMode": "development", "farosRedeployRevision": "old", "webImage": "mutable", "replicas": float64(2)})
 	d := &deploymentsv1alpha1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Spec: deploymentsv1alpha1.DeploymentSpec{RolloutID: "roll-2", Configuration: &runtime.RawExtension{Raw: config}}}
@@ -34,16 +32,20 @@ func TestDesiredInstanceReservedFieldsAndArtifactMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec, _, _ := unstructured.NestedMap(want.Object, "spec")
-	if spec["name"] != "demo" || spec["farosMode"] != "production" || spec["farosRedeployRevision"] != "roll-2" {
-		t.Fatalf("reserved fields did not win: %#v", spec)
+	if spec["template"] != "application" {
+		t.Fatalf("template was not selected: %#v", spec)
 	}
-	if spec["webImage"] != "ghcr.io/acme/web@sha256:1" || spec["apiImage"] != "ghcr.io/acme/api@sha256:2" {
-		t.Fatalf("artifacts not mapped: %#v", spec)
+	values, _, _ := unstructured.NestedMap(spec, "values")
+	if values["name"] != "demo" || values["farosMode"] != "production" || values["farosRedeployRevision"] != "roll-2" {
+		t.Fatalf("reserved values did not win: %#v", values)
 	}
-	if spec["replicas"] != float64(2) {
-		t.Fatalf("configuration lost: %#v", spec)
+	if values["webImage"] != "ghcr.io/acme/web@sha256:1" || values["apiImage"] != "ghcr.io/acme/api@sha256:2" {
+		t.Fatalf("artifacts not mapped: %#v", values)
 	}
-	if ref.Resource != "applications" || ref.APIVersion != "infrastructure.faros.sh/v1alpha1" {
+	if values["replicas"] != float64(2) {
+		t.Fatalf("configuration lost: %#v", values)
+	}
+	if want.GroupVersionKind() != instanceGVK || ref.Resource != "instances" || ref.Kind != "Instance" || ref.APIVersion != "infrastructure.faros.sh/v1alpha1" {
 		t.Fatalf("unexpected backend ref: %#v", ref)
 	}
 }
@@ -67,14 +69,15 @@ func TestDesiredInstanceDevelopmentSkipsArtifactMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec, _, _ := unstructured.NestedMap(want.Object, "spec")
-	if spec["farosMode"] != "development" || spec["farosRedeployRevision"] != "workspace-2" {
-		t.Fatalf("development reserved fields not applied: %#v", spec)
+	values, _, _ := unstructured.NestedMap(spec, "values")
+	if values["farosMode"] != "development" || values["farosRedeployRevision"] != "workspace-2" {
+		t.Fatalf("development reserved values not applied: %#v", values)
 	}
-	if _, found := spec["webImage"]; found {
-		t.Fatalf("development deployment mapped release image: %#v", spec)
+	if _, found := values["webImage"]; found {
+		t.Fatalf("development deployment mapped release image: %#v", values)
 	}
-	if _, found := spec["apiImage"]; found {
-		t.Fatalf("development deployment mapped release image: %#v", spec)
+	if _, found := values["apiImage"]; found {
+		t.Fatalf("development deployment mapped release image: %#v", values)
 	}
 	if len(want.GetOwnerReferences()) != 0 {
 		t.Fatalf("Retain deployment unexpectedly owns backend: %#v", want.GetOwnerReferences())
@@ -162,14 +165,16 @@ func TestReconcileCreatesThenUpdatesPreservingComputedFieldsAndProjectsStatus(t 
 	if _, err := ReconcileClient(ctx, c, key); err != nil {
 		t.Fatal(err)
 	}
-	instance := getUnstructured(t, ctx, c, appGVK, "demo")
+	instance := getUnstructured(t, ctx, c, instanceGVK, "demo")
 	spec, _, _ := unstructured.NestedMap(instance.Object, "spec")
-	if spec["webImage"] != "ghcr.io/acme/web@sha256:1" {
-		t.Fatalf("create did not map image: %#v", spec)
+	values, _, _ := unstructured.NestedMap(spec, "values")
+	if values["webImage"] != "ghcr.io/acme/web@sha256:1" {
+		t.Fatalf("create did not map image: %#v", values)
 	}
 
-	spec["computed"] = "provider-owned"
-	spec["nested"] = map[string]any{"computed": "keep"}
+	values["computed"] = "provider-owned"
+	values["nested"] = map[string]any{"computed": "keep"}
+	spec["values"] = values
 	instance.Object["spec"] = spec
 	instance.Object["status"] = map[string]any{"phase": "Ready", "url": "https://demo.example", "outputs": map[string]any{"service": "demo"}}
 	if err := c.Update(ctx, instance); err != nil {
@@ -189,17 +194,18 @@ func TestReconcileCreatesThenUpdatesPreservingComputedFieldsAndProjectsStatus(t 
 	if _, err := ReconcileClient(ctx, c, key); err != nil {
 		t.Fatal(err)
 	}
-	instance = getUnstructured(t, ctx, c, appGVK, "demo")
+	instance = getUnstructured(t, ctx, c, instanceGVK, "demo")
 	spec, _, _ = unstructured.NestedMap(instance.Object, "spec")
-	if spec["computed"] != "provider-owned" {
-		t.Fatalf("provider field erased: %#v", spec)
+	values, _, _ = unstructured.NestedMap(spec, "values")
+	if values["computed"] != "provider-owned" {
+		t.Fatalf("provider field erased: %#v", values)
 	}
-	nested := spec["nested"].(map[string]any)
+	nested := values["nested"].(map[string]any)
 	if nested["computed"] != "keep" || nested["desired"] != "set" {
 		t.Fatalf("nested merge failed: %#v", nested)
 	}
-	if _, found := spec["obsolete"]; found {
-		t.Fatalf("removed configuration field survived: %#v", spec)
+	if _, found := values["obsolete"]; found {
+		t.Fatalf("removed configuration field survived: %#v", values)
 	}
 	if _, found := nested["obsolete"]; found {
 		t.Fatalf("removed nested configuration field survived: %#v", nested)
@@ -280,16 +286,16 @@ func TestFinalizeRetainsFinalizerUntilBackendDeletionObserved(t *testing.T) {
 	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
 	d.Finalizers = []string{Finalizer}
 	d.DeletionTimestamp = &now
-	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: appGVK.GroupVersion().String(), Kind: appGVK.Kind, Resource: "applications", Name: "demo"}
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo"}
 	instance := &unstructured.Unstructured{}
-	instance.SetGroupVersionKind(appGVK)
+	instance.SetGroupVersionKind(instanceGVK)
 	instance.SetName("demo")
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, instance).Build()
 	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
 		t.Fatal(err)
 	}
 	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(appGVK)
+	got.SetGroupVersionKind(instanceGVK)
 	if err := c.Get(ctx, client.ObjectKey{Name: "demo"}, got); err == nil {
 		t.Fatal("backend instance still exists")
 	}
@@ -316,24 +322,24 @@ func TestFinalizeRetainDetachesBackendAndRemovesFinalizer(t *testing.T) {
 	d := testDeployment()
 	d.Finalizers = []string{Finalizer}
 	d.DeletionTimestamp = &now
-	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: appGVK.GroupVersion().String(), Kind: appGVK.Kind, Resource: "applications", Name: "demo"}
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo"}
 	instance := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": appGVK.GroupVersion().String(),
-		"kind":       appGVK.Kind,
+		"apiVersion": instanceGVK.GroupVersion().String(),
+		"kind":       instanceGVK.Kind,
 		"metadata": map[string]any{
 			"name":            "demo",
 			"labels":          map[string]any{"deployments.faros.sh/deployment": "demo", "provider": "keep"},
 			"annotations":     map[string]any{lastAppliedSpecKey: `{"name":"demo"}`, "provider": "keep"},
 			"ownerReferences": []any{map[string]any{"apiVersion": deploymentsv1alpha1.GroupVersion.String(), "kind": "Deployment", "name": "demo", "uid": "deployment-uid", "controller": true, "blockOwnerDeletion": true}},
 		},
-		"spec": map[string]any{"name": "demo"},
+		"spec": map[string]any{"template": "application", "values": map[string]any{"name": "demo"}},
 	}}
-	instance.SetGroupVersionKind(appGVK)
+	instance.SetGroupVersionKind(instanceGVK)
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, instance).Build()
 	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
 		t.Fatal(err)
 	}
-	retained := getUnstructured(t, ctx, c, appGVK, "demo")
+	retained := getUnstructured(t, ctx, c, instanceGVK, "demo")
 	if len(retained.GetOwnerReferences()) != 0 {
 		t.Fatalf("deployment owner reference remains: %#v", retained.GetOwnerReferences())
 	}
@@ -367,8 +373,8 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	}
 	s.AddKnownTypeWithName(templateGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(templateGVK.GroupVersion().WithKind("TemplateList"), &unstructured.UnstructuredList{})
-	s.AddKnownTypeWithName(appGVK, &unstructured.Unstructured{})
-	s.AddKnownTypeWithName(appGVK.GroupVersion().WithKind("ApplicationList"), &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(instanceGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(instanceGVK.GroupVersion().WithKind("InstanceList"), &unstructured.UnstructuredList{})
 	return s
 }
 
@@ -381,7 +387,7 @@ func testRelease() *deploymentsv1alpha1.Release {
 }
 
 func testTemplate() *unstructured.Unstructured {
-	u := &unstructured.Unstructured{Object: map[string]any{"apiVersion": templateGVK.GroupVersion().String(), "kind": "Template", "metadata": map[string]any{"name": "application"}, "spec": map[string]any{"instanceCRD": map[string]any{"group": appGVK.Group, "version": appGVK.Version, "resource": "applications", "kind": appGVK.Kind}, "development": map[string]any{"components": map[string]any{"web": map[string]any{"imageInput": "webImage"}, "api": map[string]any{"imageInput": "apiImage"}}}}}}
+	u := &unstructured.Unstructured{Object: map[string]any{"apiVersion": templateGVK.GroupVersion().String(), "kind": "Template", "metadata": map[string]any{"name": "application"}, "spec": map[string]any{"development": map[string]any{"components": map[string]any{"web": map[string]any{"imageInput": "webImage"}, "api": map[string]any{"imageInput": "apiImage"}}}}}}
 	u.SetGroupVersionKind(templateGVK)
 	return u
 }

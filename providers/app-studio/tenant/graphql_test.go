@@ -18,9 +18,9 @@ import (
 )
 
 func TestMapGraphQLErrorMapsStandardModifiedObjectToConflict(t *testing.T) {
-	err := mapGraphQLError([]gqlError{{Message: "Operation cannot be fulfilled on applications.infrastructure.faros.sh \\\"demo\\\": the object has been modified; please apply your changes to the latest version and try again"}}, &Resource{
-		GVR:  schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "applications"},
-		Kind: "Application",
+	err := mapGraphQLError([]gqlError{{Message: "Operation cannot be fulfilled on instances.infrastructure.faros.sh \\\"demo\\\": the object has been modified; please apply your changes to the latest version and try again"}}, &Resource{
+		GVR:  schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances"},
+		Kind: "Instance",
 	}, "demo")
 	if !apierrors.IsConflict(err) {
 		t.Fatalf("mapGraphQLError = %v, want Conflict", err)
