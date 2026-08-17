@@ -80,12 +80,14 @@ spec:
     healthPath: "/readyz"
   apiExport:
     name: "infrastructure.providers.faros.sh"
-    # The init command always publishes the platform Templates virtual resource
-    # before self-registering this CatalogEntry. Per-template instance APIs are
-    # dynamic additions and deliberately are not part of the bootstrap minimum.
+    # Init publishes the read-only Templates catalog and the permanent Instance
+    # API before self-registering this CatalogEntry. New Templates do not change
+    # the tenant-facing API surface.
     requiredResources:
       - group: infrastructure.faros.sh
         name: templates
+      - group: infrastructure.faros.sh
+        name: instances
     # secrets get/list/watch with tenantScoped: true is what lets the
     # provider read the per-tenant `cloud-credentials` Secret when
     # brokering a template (phase 3). tenantScoped: true triggers
@@ -95,6 +97,5 @@ spec:
         verbs: [get, list, watch]
         tenantScoped: true
     # Schemas are provider-owned rather than embedded here. Init publishes the
-    # Templates APIResourceSchema with virtual storage, and the Template
-    # controller adds per-template entries as operators apply Templates. Both
-    # paths reuse the same APIResourceSchema mint + APIExport upsert logic.
+    # Templates APIResourceSchema with virtual storage and the stable Instances
+    # APIResourceSchema with CRD storage.

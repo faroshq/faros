@@ -18,16 +18,14 @@ limitations under the License.
 // +groupName=infrastructure.faros.sh
 
 // Package v1alpha1 contains the platform-facing API for the
-// infrastructure provider — a small, backend-neutral catalog system
-// that publishes Templates to tenant workspaces and lets tenants
-// provision per-template Kubernetes resources without knowing which
-// backend (kro today; terraform / cloud later) actually materializes
-// them.
+// infrastructure provider — a backend-neutral catalog system that publishes
+// Templates read-only and exposes one stable Instance kind to tenant
+// workspaces. Instance.spec.template selects the product without exposing
+// which backend (kro today; terraform/cloud later) materializes it.
 //
-// Only Template is in this group today. The per-template CRDs
-// (e.g. Redis, Postgres) are registered dynamically by the Template
-// controller in providers/infrastructure/controller/template; they
-// share the group but carry their own kinds.
+// The provider's authored API surface is Template and Instance. Per-template
+// runtime kinds exist only on the backend cluster and are not APIExport
+// resources.
 //
 // See docs/infrastructure-architecture.md for the full design.
 package v1alpha1

@@ -12,7 +12,7 @@
 > the mirror is published.
 
 A faros provider that brokers application templates from a central
-[kro](https://github.com/faroshq/kro-multicluster) (Kube Resource
+[kro](https://github.com/kro-run/kro) (Kube Resource
 Orchestrator) cluster into faros tenant workspaces. A tenant picks a
 template in the faros portal — or asks an MCP-driven LLM — supplies
 inputs, and this provider creates the kro instance CR on their behalf
@@ -27,8 +27,8 @@ continuously:
 
 - bootstraps the provider kcp workspace (CRDs, APIExport, CachedResource,
   EndpointSlice, the `infrastructure` APIExportEndpointSlice, schemas, Templates);
-- **lifecycles the kro Helm release** via the helm CLI (our multicluster fork
-  chart + image, `kcp-apiexport` mode), and seeds kro's `kcp-kubeconfig`;
+- **lifecycles the kro Helm release** via the helm CLI (upstream kro,
+  single-cluster; chart CRDs applied explicitly so version bumps carry them);
 - owns the **provider serve Deployment** (image/replicas/port from the CR).
 
 It is the same `infrastructure-provider` binary (`controller` subcommand); the
@@ -82,9 +82,9 @@ Values:
   existing Secret via `operator.providerKubeconfigSecret.name` and omit the
   inline value.
 - `operator.runtimeKubeconfig` — **optional**; omit for the in-cluster runtime.
-- `operator.kro.*` — chart/version/image of the kro release (defaults to the
-  multicluster fork: `oci://ghcr.io/faroshq/kro-multicluster/charts/kro/kro` +
-  `ghcr.io/faroshq/kro-multicluster/kro`).
+- `operator.kro.*` — chart/version/image of the kro release (defaults to
+  upstream: `oci://registry.k8s.io/kro/charts/kro`, image from the chart's
+  own defaults).
 - `operator.provider.image.*` — the provider serve image (defaults to the chart
   image/appVersion).
 - `operator.application.*` — the `application` template's exposure layer:
@@ -133,21 +133,24 @@ helm CLI.
 | Surface | Where |
 |---|---|
 | HTTP server | `server/` — `/healthz` liveness, `/readyz` controller readiness, portal SPA, `/mcp` |
-| MCP transport | `mcpserver/` — `/mcp`, `/mcp/sse` (6 `kro_*` tools) |
-| Central kro client | `kro/` — `ResourceGraphDefinition` discovery + instance lifecycle |
-| Tenant kcp client | `tenant/` — per-tenant `cloud-credentials` Secret resolution |
+| MCP transport | `mcpserver/` — `/mcp`, `/mcp/sse` (catalog, instance lifecycle, and development tools) |
+| Template controller + kro backend | `controller/template/`, `backend/kro/` — validate Templates and author runtime RGDs |
+| Cross-tenant Instance controller | `controller/instance/` — validate stable Instances, bridge secrets, sync runtime CRs, mirror status |
+| Tenant kcp client | `tenant/` — caller-scoped Template/Instance access and per-tenant Secret resolution |
 | Portal micro-frontend | `portal/` — Vue 3 catalog + dynamic provision form + instance list |
 | Operator | `operator/` + `apis/v1alpha1` — `InfrastructureProvider` CRD + reconciler |
 | Helm chart | `deploy/chart/` — operator + provider Deployment + CatalogEntry |
 | Per-cloud credential convention | [docs/credentials.md](docs/credentials.md) |
 | Template-defined instance rendering | [docs/instance-views.md](docs/instance-views.md) |
 
-The CatalogEntry declares `templates.infrastructure.faros.sh` as its stable
-`apiExport.requiredResources` minimum. Provider init publishes that schema and
-APIExport; the Template controller adds instance APIs dynamically only after
-their CRD is established and the selected backend accepts the Template. The
-`secrets get/list/watch` permission claim is `tenantScoped: true` so the
-provider can read `cloud-credentials` after a tenant Enables it.
+The CatalogEntry declares the permanent tenant API surface —
+`templates.infrastructure.faros.sh` and `instances.infrastructure.faros.sh` —
+as its `apiExport.requiredResources` minimum. Provider init publishes both
+schemas once. Adding or changing a Template does not mutate the APIExport: the
+Template controller validates the catalog entry and asks its backend to prepare
+the runtime graph. The `secrets get/list/watch` permission claim is
+`tenantScoped: true` so the provider can read `cloud-credentials` after a tenant
+Enables it.
 
 ## Architecture
 
@@ -162,29 +165,31 @@ hub /services/providers/infrastructure/{api/*, mcp, mcp/sse}
    ▼
 this provider pod
    │
-   ├── tenant kcp client ── /var/run/secrets/faros/faros-provider-kubeconfig
-   │     resolves cloud-credentials Secret in tenant workspace
+   ├── provider-workspace controller
+   │     watches Templates and authors one RGD per Template
    │
-   └── central kro client ── /var/run/secrets/kro/kubeconfig
-         discovers RGDs, creates/lists/deletes instances in
-         per-tenant namespace faros-tenants-<hash>
+   ├── APIExport virtual-workspace Instance controller
+   │     watches stable Instances across bound tenant workspaces
+   │     validates spec.values, bridges tenant Secrets, mirrors status
+   │
+   └── upstream kro runtime cluster ── /var/run/secrets/kro/kubeconfig
+         receives per-template runtime CRs in <workspace-cluster>-default
+         and reconciles their child resources single-cluster
 ```
 
-kro runs in **`kcp-apiexport`** mode: the provider creates instance CRs in the
-tenant's kcp workspace through its APIExport
-`infrastructure.providers.faros.sh`; kro reads the `infrastructure`
-APIExportEndpointSlice in the provider workspace to find the virtual-workspace
-URL, watches instance CRs across every bound tenant workspace, and — with
-`controller.deployToLocalRuntime=true` — materializes each instance's child
-resources on the cluster kro runs in, while the instance object + status stay in
-the tenant workspace.
+kro runs in ordinary **single-cluster** mode. It never receives a kcp
+credential and does not watch the provider APIExport. The provider's Instance
+controller owns that boundary: it watches the one stable `Instance` kind through
+the APIExport virtual workspace, materializes the Template's per-template
+runtime CR beside its workloads, and mirrors runtime status back to the tenant
+Instance. See [the flattened Instance contract](../../docs/infrastructure-flattened-instances.md).
 
 **This provider is the sole owner of the runtime cluster.** The runtime
 kubeconfig (`/var/run/secrets/kro/kubeconfig`), the kro RGDs, and the
 workloads' internal Services are its private backend layer — no other
 provider holds a credential into them. Consumers (e.g. App Studio) operate
-infrastructure-owned workloads only through the instance CRs (control plane)
-and their VW subresources (data plane: `sandboxrunners/{name}/{log,proxy,…}`),
+infrastructure-owned workloads only through `Instance` CRs (control plane)
+and their VW subresources (data plane: `instances/{name}/{log,proxy,…}`),
 as the tenant user. See the platform
 [provider-isolation rule](../../docs/providers.md#provider-isolation-the-cross-provider-boundary)
 and [`app-studio-runtime-decoupling.md`](../../docs/app-studio-runtime-decoupling.md).
@@ -205,11 +210,12 @@ the central faros MCP aggregator:
 }
 ```
 
-The MCP server exposes six tools: `kro_list_templates`,
-`kro_describe_template`, `kro_provision`, `kro_list_instances`,
-`kro_get_instance`, `kro_delete_instance`. Identity (tenant + user) is
-taken from the same bearer token the faros portal uses — the model
-never needs to ask the user for a tenant path.
+The MCP server exposes catalog and instance lifecycle tools
+(`list_templates`, `describe_template`, `provision`, `list_instances`,
+`get_instance`, `update_instance`, `delete_instance`) plus `dev_sync`,
+`dev_logs`, and `dev_restart` for development-capable Templates. Identity
+(tenant + user) is taken from the same bearer token the faros portal uses — the
+model never needs to ask the user for a tenant path.
 
 External providers cannot plug into the in-tree aggregator at
 [providers/mcp/aggregate/](../mcp/aggregate/) (init()-only registration).
@@ -230,7 +236,6 @@ central one.
 | `FAROS_TENANT_CREDENTIALS_NAMESPACE` | `default` | Namespace in tenant workspace |
 | `FAROS_DEV_ALLOW_TENANT_QUERY` | (unset) | `true` lets `?tenant=` replace `X-Faros-Tenant` (dev only) |
 | `KRO_KUBECONFIG` | (unset → stub mode) | Central kro cluster kubeconfig |
-| `KRO_NAMESPACE_PREFIX` | `faros-tenants-` | Per-tenant namespace prefix |
 
 ---
 
@@ -304,76 +309,33 @@ docker build -t faros-infrastructure-provider:dev .
 ## Manual kro install (without the operator)
 
 The operator installs and lifecycles kro for you. To wire it by hand (e.g. for
-the init-container bootstrap deploy below), install kro in **`kcp-apiexport`**
-mode.
-
-### How it's wired — and the ordering
-
-kro and the provider are mutually dependent, so bring-up is a two-step dance:
-
-1. **kro chart installs first, with a _placeholder_ kubeconfig.** The chart
-   mounts the `kcp-kubeconfig` Secret (key `kubeconfig`) at
-   `/etc/kro/kcp/kubeconfig`; the mount is non-optional, so the Secret must exist
-   or the pod never schedules. You seed a stub value — kro starts but stays
-   not-Ready until the real credentials arrive.
-2. **The provider's `infrastructure init`** (the chart's init container) is what
-   makes kro functional. It:
-   - creates the APIExport + the `infrastructure` APIExportEndpointSlice in the
-     provider workspace ([`install.PlatformAPIExportEndpointSlice`](install/endpointslice.go)) — what kro watches;
-   - **overwrites** the `kcp-kubeconfig` Secret in `kro-system` with a real
-     kubeconfig pointing at the provider workspace, carrying the runtime SA
-     bearer token scoped by the provider's ClusterRole
-     ([`install.SeedKroCluster`](install/kroseed.go) — needs `KRO_KUBECONFIG`
-     set so init can reach the kro cluster);
-   - bounces the kro Deployment so it reloads the new kubeconfig.
-
-> [!IMPORTANT]
-> So it is **neither** "provider then kro" **nor** "kro then provider": the kro
-> chart goes in first with a placeholder Secret, and the provider's **init** then
-> seeds it (creates the endpoint slice, writes the real `kcp-kubeconfig`,
-> restarts kro). Until init runs, kro has no VW URL to watch and tenant instances
-> go unreconciled.
-
-### Install kro (kcp-apiexport mode)
-
-kro ships its CRDs in the chart. The
-[`faroshq/kro-multicluster`](https://github.com/faroshq/kro-multicluster) fork
-publishes its image and chart to GHCR. The chart defaults to the upstream image,
-so you **must** point `image.repository`/`tag` at the fork or the multicluster
-features are missing:
+the init-container bootstrap deploy below), install **upstream kro,
+single-cluster**: tenants author the flattened `Instance` kind in kcp and the
+provider's instance controller materializes the per-template kro CRs on the
+runtime cluster, so kro never talks to kcp — no kcp kubeconfig, no
+multicluster values, no ordering dance.
 
 ```sh
-KRO_VERSION=v0.0.1-mc.7   # latest faroshq/kro-multicluster release tag
+KRO_VERSION=0.9.3   # upstream release (must contain the SSA-finalizer deletion fix, ≥0.9.x)
 
-# Placeholder kcp credentials so the kro pod can schedule; the provider's
-# `infrastructure init` overwrites this Secret with the real kubeconfig and
-# restarts kro (see above).
-kubectl create namespace kro-system
-kubectl -n kro-system create secret generic kcp-kubeconfig \
-  --from-literal=kubeconfig=pending-init
+# helm only installs crds/-dir CRDs on FIRST install; apply them explicitly
+# so version bumps carry CRD schema changes too.
+helm show crds oci://registry.k8s.io/kro/charts/kro --version "$KRO_VERSION" | kubectl apply -f -
 
-helm install kro oci://ghcr.io/faroshq/kro-multicluster/charts/kro/kro \
+helm install kro oci://registry.k8s.io/kro/charts/kro \
   --version "$KRO_VERSION" \
-  -n kro-system \
-  --set image.repository=ghcr.io/faroshq/kro-multicluster/kro \
-  --set image.tag="$KRO_VERSION" \
-  --set multicluster.enabled=true \
-  --set multicluster.provider=kcp-apiexport \
-  --set multicluster.kcp.kubeconfigSecret=kcp-kubeconfig \
-  --set multicluster.kcp.apiExportEndpointSlice=infrastructure \
-  --set controller.deployToLocalRuntime=true
+  -n kro-system --create-namespace
 ```
 
-Then deploy the provider with bootstrap enabled (below); its init container seeds
-kro. Verify:
+Verify:
 
 ```sh
 kubectl -n kro-system rollout status deploy/kro
-kubectl -n kro-system logs deploy/kro | grep -i apiexport   # should log the discovered VW URL
 ```
 
-Apply the RGD templates you want to expose, labeled `faros.sh/expose=true`
-(see [docs/credentials.md](docs/credentials.md)).
+The provider's `infrastructure init` (or the operator's bootstrap) then seeds
+Templates in kcp; the Template controller authors one RGD per template on this
+cluster and the instance controller materializes tenant Instances into it.
 
 ## Deploy with Helm (init-container bootstrap, non-operator)
 

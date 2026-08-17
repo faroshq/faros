@@ -23,18 +23,13 @@ import (
 	"io/fs"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"testing"
 
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
-	clientgotesting "k8s.io/client-go/testing"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
@@ -47,42 +42,17 @@ func TestRequiredSeedTemplateResourcesRequiresEmbeddedBackends(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(required) == 0 {
-		t.Fatal("kro registration produced no required seed resources")
+		t.Fatal("kro registration produced no required seed Templates")
 	}
-	want := map[schema.GroupResource]struct{}{}
-	for _, resource := range []string{
-		"applications",
-		"browsers",
-		"postgresdatabases",
-		"rediscaches",
-		"scheduledjobs",
-		"searxngs",
-		"simplewebapps",
-		"workers",
-	} {
-		want[schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: resource}] = struct{}{}
-	}
-	seen := make(map[schema.GroupResource]struct{}, len(required))
+	seen := map[string]struct{}{}
 	for _, requirement := range required {
-		resource := requirement.GroupResource
 		if requirement.Name == "" {
-			t.Errorf("required resource %s has no Template name", resource)
+			t.Error("required seed Template has no name")
 		}
-		if resource.Group != infrav1alpha1.GroupName {
-			t.Errorf("required resource %s has group %q, want %q", resource, resource.Group, infrav1alpha1.GroupName)
+		if _, duplicate := seen[requirement.Name]; duplicate {
+			t.Errorf("required Template %q is duplicated", requirement.Name)
 		}
-		if _, duplicate := seen[resource]; duplicate {
-			t.Errorf("required resource %s is duplicated", resource)
-		}
-		seen[resource] = struct{}{}
-	}
-	if len(seen) != len(want) {
-		t.Fatalf("required resources = %v, want all %v", seen, want)
-	}
-	for resource := range want {
-		if _, ok := seen[resource]; !ok {
-			t.Errorf("required resources omit embedded resource %s", resource)
-		}
+		seen[requirement.Name] = struct{}{}
 	}
 
 	_, err = RequiredSeedTemplateResources([]string{"stub"})
@@ -91,76 +61,33 @@ func TestRequiredSeedTemplateResourcesRequiresEmbeddedBackends(t *testing.T) {
 	}
 }
 
-func TestSeedTemplatesReadyRequiresReferencedSchema(t *testing.T) {
-	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
-	dyn := newPublicationTestClient(t, false, true)
-	published, err := SeedTemplatesReady(context.Background(), dyn, required)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if published {
-		t.Fatal("resource with a missing referenced APIResourceSchema was reported ready")
-	}
-}
-
-func TestSeedTemplatesReadyWaitsForEffectiveGVR(t *testing.T) {
-	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
-	dyn := newPublicationTestClient(t, true, true)
-	var available atomic.Bool
-	dyn.PrependReactor("list", "applications", func(clientgotesting.Action) (bool, runtime.Object, error) {
-		if !available.Load() {
-			return true, nil, apierrors.NewNotFound(required[0].GroupResource, "")
-		}
-		return false, nil, nil
-	})
-
-	published, err := SeedTemplatesReady(context.Background(), dyn, required)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if published {
-		t.Fatal("resource was reported ready before its effective GVR could be listed")
-	}
-	available.Store(true)
-	published, err = SeedTemplatesReady(context.Background(), dyn, required)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !published {
-		t.Fatal("resource was not reported ready after schema and effective GVR became available")
-	}
-}
-
 func TestSeedTemplatesReadyRequiresCurrentBackendReadyStatus(t *testing.T) {
-	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
-	dyn := newPublicationTestClient(t, true, false)
-	published, err := SeedTemplatesReady(context.Background(), dyn, required)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if published {
-		t.Fatal("resource with published schema but failed backend was reported ready")
+	required := []SeedTemplateRequirement{{Name: "application"}}
+	for _, tt := range []struct {
+		name  string
+		ready bool
+	}{
+		{name: "pending", ready: false},
+		{name: "ready", ready: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dyn := seedTemplateReadinessClient(t, tt.ready)
+			got, err := SeedTemplatesReady(context.Background(), dyn, required)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.ready {
+				t.Fatalf("SeedTemplatesReady = %v, want %v", got, tt.ready)
+			}
+		})
 	}
 }
 
-func newPublicationTestClient(t *testing.T, includeSchema, templateReady bool) *dynamicfake.FakeDynamicClient {
+func seedTemplateReadinessClient(t *testing.T, ready bool) *dynamicfake.FakeDynamicClient {
 	t.Helper()
-	const schemaName = "v1alpha1.applications.infrastructure.faros.sh"
-	export := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "apis.kcp.io/v1alpha2",
-		"kind":       "APIExport",
-		"metadata":   map[string]any{"name": APIExportName},
-		"spec": map[string]any{
-			"resources": []any{
-				map[string]any{"group": infrav1alpha1.GroupName, "name": "applications", "schema": schemaName},
-			},
-		},
-	}}
 	conditionStatus := string(metav1.ConditionFalse)
-	backendReady := false
-	if templateReady {
+	if ready {
 		conditionStatus = string(metav1.ConditionTrue)
-		backendReady = true
 	}
 	template := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": infrav1alpha1.SchemeGroupVersion.String(),
@@ -169,44 +96,18 @@ func newPublicationTestClient(t *testing.T, includeSchema, templateReady bool) *
 			"name":       "application",
 			"generation": int64(1),
 		},
-		"spec": map[string]any{
-			"instanceCRD": map[string]any{
-				"group":    infrav1alpha1.GroupName,
-				"resource": "applications",
-			},
-		},
 		"status": map[string]any{
 			"observedGeneration": int64(1),
-			"backend":            map[string]any{"ready": backendReady},
+			"backend":            map[string]any{"ready": ready},
 			"conditions": []any{
 				map[string]any{"type": infrav1alpha1.ConditionBackendReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
 				map[string]any{"type": infrav1alpha1.ConditionReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
 			},
 		},
 	}}
-	objects := []runtime.Object{export, template}
-	if includeSchema {
-		objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": apisv1alpha1.SchemeGroupVersion.String(),
-			"kind":       "APIResourceSchema",
-			"metadata":   map[string]any{"name": schemaName},
-			"spec": map[string]any{
-				"group": infrav1alpha1.GroupName,
-				"names": map[string]any{"plural": "applications", "kind": "Application"},
-				"scope": "Cluster",
-				"versions": []any{
-					map[string]any{"name": "v1alpha1", "served": true, "storage": true},
-				},
-			},
-		}})
-	}
 	scheme := runtime.NewScheme()
-	scheme.AddKnownTypeWithName(apiExportGVR.GroupVersion().WithKind("APIExportList"), &unstructured.UnstructuredList{})
-	scheme.AddKnownTypeWithName(apiResourceSchemaGVR.GroupVersion().WithKind("APIResourceSchemaList"), &unstructured.UnstructuredList{})
 	scheme.AddKnownTypeWithName(templateGVR.GroupVersion().WithKind("TemplateList"), &unstructured.UnstructuredList{})
-	instanceGVR := schema.GroupVersionResource{Group: infrav1alpha1.GroupName, Version: "v1alpha1", Resource: "applications"}
-	scheme.AddKnownTypeWithName(instanceGVR.GroupVersion().WithKind("ApplicationList"), &unstructured.UnstructuredList{})
-	return dynamicfake.NewSimpleDynamicClient(scheme, objects...)
+	return dynamicfake.NewSimpleDynamicClient(scheme, template)
 }
 
 // TestSeedTemplatesDecodeAndValidate decodes every embedded seed template
@@ -257,6 +158,18 @@ func TestSeedTemplatesDecodeAndValidate(t *testing.T) {
 	}
 }
 
+func TestSeedTemplatesExcludeOptInTerraformContrib(t *testing.T) {
+	entries, err := fs.ReadDir(seedTemplatesFS, "templates")
+	if err != nil {
+		t.Fatalf("read embedded templates/: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == "terraform-stack.yaml" || entry.Name() == "terraform-stack-template.yaml" {
+			t.Fatalf("opt-in Terraform contrib fixture must not be embedded as seed %q", entry.Name())
+		}
+	}
+}
+
 // TestApplicationSeedsRouteEverythingThroughTheAccessGate encodes the
 // exposure invariants of the template-native access design:
 //
@@ -268,9 +181,12 @@ func TestSeedTemplatesDecodeAndValidate(t *testing.T) {
 //     Service — no tenant workload is ever the direct route backend, in any
 //     mode, so flipping spec.access can never be routed around.
 func TestApplicationSeedsRouteEverythingThroughTheAccessGate(t *testing.T) {
+	// The gate's SAR targets the flattened tenant-facing resource — every
+	// template's instances are authored as instances.infrastructure.faros.sh,
+	// so access grants live on instances/<name> subresource access.
 	instanceResource := map[string]string{
-		"simple-webapp.yaml": "simplewebapps",
-		"application.yaml":   "applications",
+		"simple-webapp.yaml": "instances",
+		"application.yaml":   "instances",
 	}
 	for _, file := range []string{"simple-webapp.yaml", "application.yaml"} {
 		t.Run(file, func(t *testing.T) {

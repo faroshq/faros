@@ -90,16 +90,19 @@ data:
         # /healthz is process liveness. /readyz is controller-aware readiness
         # used by deployments and declared to the hub.
         healthPath: "/readyz"
-      # Reference-only. The APIExport + its dynamically-generated schemas + the bind
-      # grant are created by this chart's init container (provider `init`); the hub
-      # no longer provisions.
+      # Reference-only. The APIExport, stable platform schemas, and bind grant are
+      # created by this chart's init container (provider `init`); the hub no
+      # longer provisions them.
       apiExport:
         name: "infrastructure.providers.faros.sh"
-        # Init publishes Templates before applying this CatalogEntry. Instance
-        # resources remain dynamic additions managed by the Template controller.
+        # Init publishes the read-only Templates catalog and permanent Instance
+        # API before applying this CatalogEntry. New Templates do not change the
+        # tenant-facing API surface.
         requiredResources:
           - group: infrastructure.faros.sh
             name: templates
+          - group: infrastructure.faros.sh
+            name: instances
         permissionClaims:
           - resource: secrets
             verbs: [get, list, watch]

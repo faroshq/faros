@@ -65,6 +65,28 @@ func TestRuntimeTLSForIdentityPreservesSupportedSourceSettings(t *testing.T) {
 	})
 }
 
+func TestRuntimeKubeconfigContainsOnlyMintedIdentity(t *testing.T) {
+	id := &RuntimeIdentity{
+		Server: "https://kcp.internal", CAData: []byte("ca-data"), Token: "runtime-token",
+		ServiceAccount: "infrastructure-runtime", Namespace: "default",
+	}
+	data, err := RuntimeKubeconfig(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.AuthInfos) != 1 || config.AuthInfos[id.ServiceAccount] == nil {
+		t.Fatalf("auth infos = %v, want only %q", config.AuthInfos, id.ServiceAccount)
+	}
+	auth := config.AuthInfos[id.ServiceAccount]
+	if auth.Token != id.Token || len(auth.ClientCertificateData) != 0 || len(auth.ClientKeyData) != 0 {
+		t.Fatalf("runtime auth unexpectedly retained bootstrap credentials: %#v", auth)
+	}
+}
+
 func TestBuildRuntimeKubeconfigCarriesMintedTLSSettings(t *testing.T) {
 	id := &RuntimeIdentity{
 		Server: "https://kcp.internal", CAData: []byte("ca-data"), ServerName: "certificate.internal",
@@ -83,25 +105,5 @@ func TestBuildRuntimeKubeconfigCarriesMintedTLSSettings(t *testing.T) {
 	cluster = buildRuntimeKubeconfig(id).Clusters["provider-workspace"]
 	if !cluster.InsecureSkipTLSVerify || cluster.TLSServerName != id.ServerName {
 		t.Fatalf("insecure/SNI settings were not preserved: %#v", cluster)
-	}
-}
-
-func TestEncodeKubeconfigCarriesMintedTLSSettings(t *testing.T) {
-	t.Setenv("FAROS_KRO_KCP_HOST", "")
-	id := &RuntimeIdentity{
-		Server: "https://kcp.internal", CAData: []byte("ca-data"), ServerName: "certificate.internal",
-		Token: "runtime-token", ServiceAccount: "runtime",
-	}
-	data, err := encodeKubeconfig(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	config, err := clientcmd.Load(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cluster := config.Clusters["provider-vw"]
-	if cluster.TLSServerName != id.ServerName || string(cluster.CertificateAuthorityData) != string(id.CAData) || cluster.InsecureSkipTLSVerify {
-		t.Fatalf("seeded kro cluster TLS settings were not preserved: %#v", cluster)
 	}
 }

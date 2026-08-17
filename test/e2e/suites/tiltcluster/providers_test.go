@@ -33,7 +33,6 @@ var (
 	templatesGVR      = schema.GroupVersionResource{Group: infraGroup, Version: "v1alpha1", Resource: "templates"}
 	cachedTemplates   = "publish-templates"
 	wantTemplateNames = []string{"application", "browser", "cron-job", "database", "redis-cache", "searxng", "simple-webapp", "worker"}
-	wantInstanceAPIs  = []string{"applications", "browsers", "scheduledjobs", "postgresdatabases", "rediscaches", "searxngs", "simplewebapps", "workers"}
 )
 
 // TestInfrastructureProviderRegistered asserts the out-of-process
@@ -59,17 +58,13 @@ func TestInfrastructureProviderRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get APIExport %q in %s: %v", infraAPIExportName, providerWorkspace, err)
 	}
-	if !apiExportHasResource(ex.Object, "templates", infraGroup) {
-		t.Fatalf("APIExport %q missing templates resource; spec.resources=%v",
-			infraAPIExportName, nestedSlice(ex.Object, "spec", "resources"))
-	}
-	for _, resource := range wantInstanceAPIs {
+	for _, resource := range []string{"templates", "instances"} {
 		if !apiExportHasResource(ex.Object, resource, infraGroup) {
-			t.Fatalf("APIExport %q missing required instance resource %q; spec.resources=%v",
+			t.Fatalf("APIExport %q missing %s resource; spec.resources=%v",
 				infraAPIExportName, resource, nestedSlice(ex.Object, "spec", "resources"))
 		}
 	}
-	t.Logf("infrastructure provider registered: CatalogEntry Ready + APIExport %s exports catalog and %d instance APIs", infraAPIExportName, len(wantInstanceAPIs))
+	t.Logf("infrastructure provider registered: CatalogEntry Ready + APIExport %s exports templates + instances", infraAPIExportName)
 }
 
 // TestTemplatesCatalogProjected asserts the broker catalog is materialized:

@@ -8,7 +8,7 @@ import { REASON_CLOUD_CREDENTIALS_MISSING, REASON_API_BINDING_MISSING, REASON_TE
 const props = defineProps<{ templateName: string }>()
 const emit = defineEmits<{
   (e: 'navigate', view: string, payload?: unknown): void
-  (e: 'provisioned', instanceName: string, templateName: string): void
+  (e: 'provisioned', instanceName: string): void
 }>()
 
 const template = ref<Template | null>(null)
@@ -70,7 +70,7 @@ async function submit() {
       name: instanceName.value,
       values: values.value,
     })
-    if (active) emit('provisioned', inst.name, currentTemplate.name)
+    if (active) emit('provisioned', inst.name)
   } catch (e: unknown) {
     if (!active || isContextChangedError(e)) return
     const err = e as ErrorResponse

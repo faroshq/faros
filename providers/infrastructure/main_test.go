@@ -25,7 +25,7 @@ func TestLateConfigRetryReplacesRequestSurfacesAndCancelsFailedAttempt(t *testin
 	initial := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
-	cancelledApplications := make(chan string, 2)
+	cancelledInstances := make(chan string, 2)
 	surfaces := newServeSurfaces(initial, func(config *rest.Config) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-Test-Config", config.Host)
@@ -34,7 +34,7 @@ func TestLateConfigRetryReplacesRequestSurfacesAndCancelsFailedAttempt(t *testin
 	}, func(ctx context.Context, config *rest.Config, _ *controllerHealth) <-chan error {
 		go func() {
 			<-ctx.Done()
-			cancelledApplications <- config.Host
+			cancelledInstances <- config.Host
 		}()
 		return nil
 	})
@@ -85,12 +85,12 @@ func TestLateConfigRetryReplacesRequestSurfacesAndCancelsFailedAttempt(t *testin
 	waitForSignal(t, firstStarted, "failed first attempt")
 	assertSurfaceConfig(t, surfaces, configs[0].Host)
 	select {
-	case got := <-cancelledApplications:
+	case got := <-cancelledInstances:
 		if got != configs[0].Host {
-			t.Fatalf("cancelled Application config = %q, want %q", got, configs[0].Host)
+			t.Fatalf("cancelled Instance config = %q, want %q", got, configs[0].Host)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("failed attempt's Application controller was not cancelled")
+		t.Fatal("failed attempt's Instance controller was not cancelled")
 	}
 
 	close(allowRetry)
@@ -100,28 +100,28 @@ func TestLateConfigRetryReplacesRequestSurfacesAndCancelsFailedAttempt(t *testin
 	cancel()
 	waitForSignal(t, done, "controller lifecycle shutdown")
 	select {
-	case got := <-cancelledApplications:
+	case got := <-cancelledInstances:
 		if got != configs[1].Host {
-			t.Fatalf("cancelled replacement Application config = %q, want %q", got, configs[1].Host)
+			t.Fatalf("cancelled replacement Instance config = %q, want %q", got, configs[1].Host)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("replacement Application controller was not cancelled on shutdown")
+		t.Fatal("replacement Instance controller was not cancelled on shutdown")
 	}
 }
 
-func TestAggregateReadinessIncludesConfiguredApplicationController(t *testing.T) {
+func TestAggregateReadinessIncludesConfiguredInstanceController(t *testing.T) {
 	platform := newControllerHealth(true)
-	application := newControllerHealth(true)
+	instance := newControllerHealth(true)
 	platform.markReady()
-	application.markFailed(errors.New("application startup failed"))
+	instance.markFailed(errors.New("instance startup failed"))
 
-	readiness := aggregateReadiness(platform, application)
-	if readiness.Ready || readiness.Controller != "application-failed" || readiness.Error != "application startup failed" {
+	readiness := aggregateReadiness(platform, instance)
+	if readiness.Ready || readiness.Controller != "instance-failed" || readiness.Error != "instance startup failed" {
 		t.Fatalf("aggregate readiness = %+v", readiness)
 	}
 
-	application.markReady()
-	readiness = aggregateReadiness(platform, application)
+	instance.markReady()
+	readiness = aggregateReadiness(platform, instance)
 	if !readiness.Ready || readiness.Controller != string(controllerStateReady) {
 		t.Fatalf("ready aggregate = %+v", readiness)
 	}
@@ -129,47 +129,47 @@ func TestAggregateReadinessIncludesConfiguredApplicationController(t *testing.T)
 	disabled := newControllerHealth(false)
 	readiness = aggregateReadiness(platform, disabled)
 	if !readiness.Ready {
-		t.Fatalf("disabled application became mandatory: %+v", readiness)
+		t.Fatalf("disabled instance became mandatory: %+v", readiness)
 	}
 }
 
-func TestApplicationControllerConfiguredRequiresDomainAndRuntime(t *testing.T) {
+func TestInstanceControllerConfiguredAcceptsExplicitAndInClusterRuntime(t *testing.T) {
 	t.Setenv("FAROS_APP_BASE_DOMAIN", "")
 	t.Setenv("KRO_KUBECONFIG", "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
-	if applicationControllerConfigured() {
-		t.Fatal("application controller configured without a base domain or runtime")
+	if instanceControllerConfigured() {
+		t.Fatal("instance controller configured without a runtime")
 	}
 
 	t.Setenv("FAROS_APP_BASE_DOMAIN", "apps.127.0.0.1.sslip.io")
-	if applicationControllerConfigured() {
-		t.Fatal("stub mode made application controller mandatory")
+	if instanceControllerConfigured() {
+		t.Fatal("stub mode made instance controller mandatory")
 	}
 
 	t.Setenv("KRO_KUBECONFIG", "/tmp/kro.kubeconfig")
-	if !applicationControllerConfigured() {
-		t.Fatal("explicit kro runtime did not configure application controller")
+	if !instanceControllerConfigured() {
+		t.Fatal("explicit kro runtime did not configure instance controller")
 	}
 
 	t.Setenv("KRO_KUBECONFIG", "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
-	if !applicationControllerConfigured() {
-		t.Fatal("in-cluster runtime did not configure application controller")
+	if !instanceControllerConfigured() {
+		t.Fatal("in-cluster runtime did not configure instance controller")
 	}
 }
 
-func TestConfiguredApplicationFailureFailsAttemptAndCancelsPlatformManager(t *testing.T) {
+func TestConfiguredInstanceFailureFailsAttemptAndCancelsPlatformManager(t *testing.T) {
 	platformHealth := newControllerHealth(true)
-	applicationHealth := newControllerHealth(true)
-	applicationFailure := errors.New("application watch exited")
+	instanceHealth := newControllerHealth(true)
+	instanceFailure := errors.New("instance watch exited")
 	managerCancelled := make(chan struct{})
 	surfaces := newServeSurfaces(
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		func(*rest.Config) http.Handler { return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}) },
 		func(context.Context, *rest.Config, *controllerHealth) <-chan error {
-			applicationHealth.markFailed(applicationFailure)
+			instanceHealth.markFailed(instanceFailure)
 			result := make(chan error, 1)
-			result <- applicationFailure
+			result <- instanceFailure
 			close(result)
 			return result
 		},
@@ -180,7 +180,7 @@ func TestConfiguredApplicationFailureFailsAttemptAndCancelsPlatformManager(t *te
 		platformHealth,
 		func() (*rest.Config, error) { return &rest.Config{Host: "https://provider.example"}, nil },
 		func(ctx context.Context, config *rest.Config, health *controllerHealth) error {
-			return runControllerAttempt(ctx, config, health, applicationHealth, surfaces, func(managerCtx context.Context, _ *rest.Config, _ *controllerHealth) error {
+			return runControllerAttempt(ctx, config, health, instanceHealth, surfaces, func(managerCtx context.Context, _ *rest.Config, _ *controllerHealth) error {
 				<-managerCtx.Done()
 				close(managerCancelled)
 				return managerCtx.Err()
@@ -190,18 +190,18 @@ func TestConfiguredApplicationFailureFailsAttemptAndCancelsPlatformManager(t *te
 		func(context.Context, time.Duration) bool { return false },
 	)
 
-	waitForSignal(t, managerCancelled, "platform manager cancellation after application failure")
-	readiness := aggregateReadiness(newReadyControllerHealth(), applicationHealth)
-	if readiness.Ready || readiness.Controller != "application-failed" {
-		t.Fatalf("application failure did not block aggregate readiness: %+v", readiness)
+	waitForSignal(t, managerCancelled, "platform manager cancellation after instance failure")
+	readiness := aggregateReadiness(newReadyControllerHealth(), instanceHealth)
+	if readiness.Ready || readiness.Controller != "instance-failed" {
+		t.Fatalf("instance failure did not block aggregate readiness: %+v", readiness)
 	}
 }
 
 func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) {
-	applicationHealth := newControllerHealth(true)
-	var applicationStarts atomic.Int32
-	var activeApplications atomic.Int32
-	var maxActiveApplications atomic.Int32
+	instanceHealth := newControllerHealth(true)
+	var instanceStarts atomic.Int32
+	var activeInstances atomic.Int32
+	var maxActiveInstances atomic.Int32
 	firstCancelled := make(chan struct{})
 	allowFirstExit := make(chan struct{})
 	secondStarted := make(chan struct{})
@@ -209,13 +209,13 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		func(*rest.Config) http.Handler { return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}) },
 		func(ctx context.Context, _ *rest.Config, health *controllerHealth) <-chan error {
-			attempt := applicationStarts.Add(1)
+			attempt := instanceStarts.Add(1)
 			result := make(chan error, 1)
 			go func() {
-				active := activeApplications.Add(1)
+				active := activeInstances.Add(1)
 				for {
-					max := maxActiveApplications.Load()
-					if active <= max || maxActiveApplications.CompareAndSwap(max, active) {
+					max := maxActiveInstances.Load()
+					if active <= max || maxActiveInstances.CompareAndSwap(max, active) {
 						break
 					}
 				}
@@ -231,7 +231,7 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 				// This terminal health mutation must finish before the next attempt
 				// is allowed to publish its Ready state.
 				health.markStopped(ctx.Err())
-				activeApplications.Add(-1)
+				activeInstances.Add(-1)
 				result <- ctx.Err()
 				close(result)
 			}()
@@ -245,14 +245,14 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 			context.Background(),
 			&rest.Config{Host: "https://first.example"},
 			newControllerHealth(true),
-			applicationHealth,
+			instanceHealth,
 			surfaces,
 			func(context.Context, *rest.Config, *controllerHealth) error {
 				return errors.New("platform startup failed")
 			},
 		)
 	}()
-	waitForSignal(t, firstCancelled, "first Application cancellation")
+	waitForSignal(t, firstCancelled, "first Instance cancellation")
 	select {
 	case err := <-firstDone:
 		t.Fatalf("attempt returned before delayed sibling exited: %v", err)
@@ -262,10 +262,10 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 	if err := <-firstDone; err == nil || !strings.Contains(err.Error(), "platform startup failed") {
 		t.Fatalf("first attempt error = %v", err)
 	}
-	if active := activeApplications.Load(); active != 0 {
-		t.Fatalf("active Applications after joined attempt = %d, want 0", active)
+	if active := activeInstances.Load(); active != 0 {
+		t.Fatalf("active Instances after joined attempt = %d, want 0", active)
 	}
-	if got := applicationHealth.snapshot().State; got != controllerStateStopped {
+	if got := instanceHealth.snapshot().State; got != controllerStateStopped {
 		t.Fatalf("first terminal health = %q, want stopped", got)
 	}
 
@@ -276,7 +276,7 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 			secondCtx,
 			&rest.Config{Host: "https://second.example"},
 			newControllerHealth(true),
-			applicationHealth,
+			instanceHealth,
 			surfaces,
 			func(ctx context.Context, _ *rest.Config, _ *controllerHealth) error {
 				<-ctx.Done()
@@ -284,12 +284,12 @@ func TestRunControllerAttemptJoinsDelayedSiblingBeforeReplacement(t *testing.T) 
 			},
 		)
 	}()
-	waitForSignal(t, secondStarted, "replacement Application start")
-	if got := applicationHealth.snapshot().State; got != controllerStateReady {
+	waitForSignal(t, secondStarted, "replacement Instance start")
+	if got := instanceHealth.snapshot().State; got != controllerStateReady {
 		t.Fatalf("replacement health = %q, want ready", got)
 	}
-	if max := maxActiveApplications.Load(); max != 1 {
-		t.Fatalf("maximum overlapping Applications = %d, want 1", max)
+	if max := maxActiveInstances.Load(); max != 1 {
+		t.Fatalf("maximum overlapping Instances = %d, want 1", max)
 	}
 	cancelSecond()
 	if err := <-secondDone; !errors.Is(err, context.Canceled) {

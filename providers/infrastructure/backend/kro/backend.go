@@ -12,14 +12,11 @@ You may obtain a copy of the License at
 // kro ResourceGraphDefinition on the runtime cluster.
 //
 // The Template is the source of truth (it lives in the provider's kcp
-// workspace; the Template controller publishes its CRD/APIResourceSchema so
-// tenants can create instances). This backend derives the matching RGD from
-// the same Template and writes it to the kro runtime cluster — the cluster
-// kro's controller-runtime manager watches RGDs on (a kind cluster in dev),
-// NOT kcp. Once the RGD exists, kro registers the dynamic watch and
-// reconciles instances; instance workloads land on the runtime cluster while
-// the instance object + status stay in the tenant's kcp workspace (see the
-// kro fork's --deploy-to-local-runtime split).
+// workspace; tenants author the stable Instance kind in kcp). This backend
+// derives the matching RGD from the same Template and writes it to the runtime
+// cluster, where upstream kro registers the dynamic watch. The provider's
+// Instance controller bridges the tenant object to the namespaced per-template
+// kro CR and mirrors its status back to kcp.
 //
 // This backend does NOT reconcile instances itself — the kro controller does
 // that. Run() therefore just blocks: the RGD authoring happens in
@@ -34,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -282,7 +280,11 @@ func (b *Backend) Run(ctx context.Context, _ *rest.Config) error {
 }
 
 // applyRGD creates or updates the RGD on the runtime cluster, preserving the
-// server-assigned resourceVersion on update so it's a compare-and-set.
+// server-assigned resourceVersion on update so it's a compare-and-set. An
+// update is only written when the desired spec or labels actually differ —
+// an unconditional update bumps the RGD's generation, which makes kro
+// re-reconcile every instance of the template (recreating includeWhen-gated
+// Jobs and the like) on every Template reconcile pass.
 func (b *Backend) applyRGD(ctx context.Context, rgd *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	existing, err := b.runtime.Resource(rgdGVR).Get(ctx, rgd.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -298,6 +300,20 @@ func (b *Backend) applyRGD(ctx context.Context, rgd *unstructured.Unstructured) 
 	if err != nil {
 		return nil, fmt.Errorf("get: %w", err)
 	}
+
+	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+	desiredSpec, _, _ := unstructured.NestedMap(rgd.Object, "spec")
+	labelsCurrent := true
+	for k, v := range rgd.GetLabels() {
+		if existing.GetLabels()[k] != v {
+			labelsCurrent = false
+			break
+		}
+	}
+	if labelsCurrent && equality.Semantic.DeepEqual(existingSpec, desiredSpec) {
+		return existing, nil
+	}
+
 	rgd.SetResourceVersion(existing.GetResourceVersion())
 	updated, err := b.runtime.Resource(rgdGVR).Update(ctx, rgd, metav1.UpdateOptions{})
 	if err != nil {
@@ -324,8 +340,8 @@ func currentRGDReady(rgd *unstructured.Unstructured) (bool, string, error) {
 		}
 		return false, graphDetail, nil
 	case metav1.ConditionTrue:
-		// Continue to the aggregate Ready condition below. GraphAccepted=True
-		// is an intermediate state while kro installs the dynamic controller.
+		// Continue: graph acceptance precedes installation of the dynamic
+		// controller represented by the aggregate Ready condition.
 	default:
 		return false, fmt.Sprintf("waiting for kro to accept RGD generation %d", rgd.GetGeneration()), nil
 	}

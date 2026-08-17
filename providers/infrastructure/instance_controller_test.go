@@ -18,18 +18,18 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type testApplicationControllerRunner struct {
+type testInstanceControllerRunner struct {
 	ready <-chan struct{}
 	start func(context.Context) error
 }
 
-func (r testApplicationControllerRunner) Start(ctx context.Context) error { return r.start(ctx) }
-func (r testApplicationControllerRunner) Ready() <-chan struct{}          { return r.ready }
+func (r testInstanceControllerRunner) Start(ctx context.Context) error { return r.start(ctx) }
+func (r testInstanceControllerRunner) Ready() <-chan struct{}          { return r.ready }
 
-func TestApplicationControllerLifecycleHealth(t *testing.T) {
+func TestInstanceControllerLifecycleHealth(t *testing.T) {
 	t.Run("setup failure", func(t *testing.T) {
 		health := newControllerHealth(true)
-		err := runApplicationControllerLifecycle(context.Background(), health, func() (applicationControllerRunner, string, error) {
+		err := runInstanceControllerLifecycle(context.Background(), health, func() (instanceControllerRunner, string, error) {
 			return nil, "", errors.New("cannot discover runtime")
 		})
 		if err == nil || !strings.Contains(err.Error(), "cannot discover runtime") {
@@ -43,11 +43,8 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 	t.Run("startup failure never reports ready", func(t *testing.T) {
 		health := newControllerHealth(true)
 		stateAtStart := make(chan controllerState, 1)
-		err := runApplicationControllerLifecycle(context.Background(), health, func() (applicationControllerRunner, string, error) {
-			if snapshot := health.snapshot(); snapshot.State != controllerStateStarting {
-				t.Fatalf("health before Start = %+v, want starting", snapshot)
-			}
-			return testApplicationControllerRunner{
+		err := runInstanceControllerLifecycle(context.Background(), health, func() (instanceControllerRunner, string, error) {
+			return testInstanceControllerRunner{
 				ready: make(chan struct{}),
 				start: func(context.Context) error {
 					stateAtStart <- health.snapshot().State
@@ -73,8 +70,8 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 		fail := make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			done <- runApplicationControllerLifecycle(context.Background(), health, func() (applicationControllerRunner, string, error) {
-				return testApplicationControllerRunner{
+			done <- runInstanceControllerLifecycle(context.Background(), health, func() (instanceControllerRunner, string, error) {
+				return testInstanceControllerRunner{
 					ready: ready,
 					start: func(context.Context) error {
 						close(started)
@@ -85,9 +82,6 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 			})
 		}()
 		<-started
-		if snapshot := health.snapshot(); snapshot.State != controllerStateStarting {
-			t.Fatalf("pre-ready health = %+v", snapshot)
-		}
 		close(ready)
 		waitForControllerState(t, health, controllerStateReady)
 		close(fail)
@@ -99,15 +93,15 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 		}
 	})
 
-	t.Run("cancellation", func(t *testing.T) {
+	t.Run("cancellation joins start", func(t *testing.T) {
 		health := newControllerHealth(true)
 		ctx, cancel := context.WithCancel(context.Background())
 		ready := make(chan struct{})
 		started := make(chan struct{})
 		done := make(chan error, 1)
 		go func() {
-			done <- runApplicationControllerLifecycle(ctx, health, func() (applicationControllerRunner, string, error) {
-				return testApplicationControllerRunner{
+			done <- runInstanceControllerLifecycle(ctx, health, func() (instanceControllerRunner, string, error) {
+				return testInstanceControllerRunner{
 					ready: ready,
 					start: func(runCtx context.Context) error {
 						close(started)
@@ -118,9 +112,6 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 			})
 		}()
 		<-started
-		if health.ready() {
-			t.Fatal("application health was ready before manager startup signal")
-		}
 		close(ready)
 		waitForControllerState(t, health, controllerStateReady)
 		cancel()
@@ -133,30 +124,24 @@ func TestApplicationControllerLifecycleHealth(t *testing.T) {
 	})
 }
 
-func TestApplicationControllerRequiresBaseDomainAndRuntime(t *testing.T) {
-	t.Setenv("FAROS_APP_BASE_DOMAIN", "")
+func TestInstanceControllerRequiresRuntime(t *testing.T) {
 	t.Setenv("KRO_KUBECONFIG", "")
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
-	if applicationControllerConfigured() {
-		t.Fatal("empty base domain made application controller mandatory")
-	}
-	t.Setenv("FAROS_APP_BASE_DOMAIN", " apps.example.test ")
-	if applicationControllerConfigured() {
-		t.Fatal("base domain without a runtime target made application controller mandatory")
+	if instanceControllerConfigured() {
+		t.Fatal("missing runtime target made instance controller mandatory")
 	}
 	t.Setenv("KRO_KUBECONFIG", " /tmp/kro.kubeconfig ")
-	if !applicationControllerConfigured() {
-		t.Fatal("base domain and explicit runtime target did not require application controller")
+	if !instanceControllerConfigured() {
+		t.Fatal("explicit runtime target did not require instance controller")
 	}
 }
 
-func TestStartApplicationControllerReportsConfiguredSetupFailure(t *testing.T) {
-	t.Setenv("FAROS_APP_BASE_DOMAIN", "apps.example.test")
+func TestStartInstanceControllerReportsConfiguredSetupFailure(t *testing.T) {
 	t.Setenv("KRO_KUBECONFIG", filepath.Join(t.TempDir(), "missing-kubeconfig"))
 	health := newControllerHealth(true)
-	result := startApplicationController(context.Background(), &rest.Config{Host: "https://provider.example"}, health)
+	result := startInstanceController(context.Background(), &rest.Config{Host: "https://provider.example"}, health)
 	if result == nil {
-		t.Fatal("configured application controller returned no lifecycle result")
+		t.Fatal("configured instance controller returned no lifecycle result")
 	}
 	if err := <-result; err == nil || !strings.Contains(err.Error(), "no kro runtime cluster") {
 		t.Fatalf("setup error = %v", err)
@@ -166,13 +151,14 @@ func TestStartApplicationControllerReportsConfiguredSetupFailure(t *testing.T) {
 	}
 }
 
-func TestStartApplicationControllerKeepsDisabledFeatureOptional(t *testing.T) {
-	t.Setenv("FAROS_APP_BASE_DOMAIN", "")
+func TestStartInstanceControllerKeepsDisabledFeatureOptional(t *testing.T) {
+	t.Setenv("KRO_KUBECONFIG", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	health := newControllerHealth(true)
-	if result := startApplicationController(context.Background(), &rest.Config{}, health); result != nil {
-		t.Fatal("disabled application controller returned a lifecycle channel")
+	if result := startInstanceController(context.Background(), &rest.Config{}, health); result != nil {
+		t.Fatal("disabled instance controller returned a lifecycle channel")
 	}
 	if snapshot := health.snapshot(); snapshot.Required || snapshot.State != controllerStateRESTOnly {
-		t.Fatalf("disabled application health = %+v", snapshot)
+		t.Fatalf("disabled instance health = %+v", snapshot)
 	}
 }

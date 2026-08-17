@@ -131,16 +131,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	setCond(&cr, v1alpha1.ConditionBootstrapped, metav1.ConditionTrue, "Bootstrapped", "provider workspace reconciled")
 
-	// 2. kro: ensure namespace, seed its kcp-kubeconfig, then helm release.
+	// 2. kro: ensure namespace, then helm release. kro runs single-cluster
+	// against the runtime cluster now (the instance controller bridges kcp →
+	// runtime), so no kcp-kubeconfig Secret is seeded — the runtime cluster
+	// never holds a kcp credential.
 	cs, err := runtimeClientset(runtimeCfg)
 	if err != nil {
 		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "RuntimeClientFailed", err)
 	}
 	if err := ensureNamespace(ctx, cs, cr.Spec.Kro.Namespace); err != nil {
 		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "KroNamespaceFailed", err)
-	}
-	if err := install.SeedKroClusterFromKubeconfig(ctx, runtimeCfg, providerKC, workspacePath); err != nil {
-		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "KroSeedFailed", err)
 	}
 	// helm needs a KUBECONFIG file only for an explicit runtime; for the
 	// in-cluster runtime (runtimeKC nil) we run helm with no override so it uses
@@ -154,13 +154,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		defer cleanup()
 		helmKubeconfig = tmp
 	}
+	// CRDs first: helm never upgrades crds/-dir CRDs, so a chart bump must
+	// carry them explicitly or kro's newer schema fields get pruned.
+	if err := EnsureKroChartCRDs(ctx, runtimeCfg, helmKubeconfig, cr.Spec.Kro); err != nil {
+		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "KroCRDsFailed", err)
+	}
 	if err := EnsureKroRelease(ctx, helmKubeconfig, cr.Spec.Kro); err != nil {
 		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "HelmFailed", err)
-	}
-	// Dev-only kind networking patches (no-op in prod; gated by env). Lets the
-	// operator fully own kro even in Tilt's kind cluster.
-	if err := ApplyKroDevPatches(ctx, cs, cr.Spec.Kro.Namespace, cr.Spec.Kro.ReleaseName); err != nil {
-		return r.fail(ctx, &cr, v1alpha1.ConditionKroReleased, "KroDevPatchFailed", err)
 	}
 	setCond(&cr, v1alpha1.ConditionKroReleased, metav1.ConditionTrue, "Released", "kro helm release reconciled")
 
@@ -170,7 +170,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		setCond(&cr, v1alpha1.ConditionProviderDeployed, metav1.ConditionTrue, "Skipped", "serve managed out-of-band (INFRASTRUCTURE_OPERATOR_SKIP_SERVE)")
 		setCond(&cr, v1alpha1.ConditionRegistered, metav1.ConditionTrue, "Skipped", "CatalogEntry managed out-of-band (skip-serve)")
 	} else {
-		if err := EnsureProviderServe(ctx, cs, &cr, providerKC, runtimeKC, hubToken); err != nil {
+		// Bootstrap uses the referenced provider kubeconfig's administrative
+		// authority, but the long-lived serve process must not. Mint the scoped
+		// runtime identity in the provider workspace and replicate only that
+		// credential into the runtime cluster.
+		runtimeIdentity, err := install.MintRuntimeIdentity(ctx, providerCfg)
+		if err != nil {
+			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "RuntimeIdentityFailed", err)
+		}
+		serveProviderKC, err := install.RuntimeKubeconfig(runtimeIdentity)
+		if err != nil {
+			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "RuntimeKubeconfigFailed", err)
+		}
+		if err := EnsureProviderServe(ctx, cs, &cr, serveProviderKC, runtimeKC, hubToken); err != nil {
 			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "ServeDeployFailed", err)
 		}
 		deployment, err := cs.AppsV1().Deployments(ServeNamespace).Get(ctx, cr.Name, metav1.GetOptions{})
@@ -296,21 +308,17 @@ func restConfigForWorkspace(kubeconfig []byte, workspacePath string) (*rest.Conf
 func applyDefaults(cr *v1alpha1.InfrastructureProvider) {
 	k := &cr.Spec.Kro
 	if k.Chart == "" {
-		k.Chart = "oci://ghcr.io/faroshq/kro-multicluster/charts/kro/kro"
-	}
-	// Default to the multicluster fork image — the chart otherwise pulls the
-	// upstream kro image, which lacks the kcp-apiexport build.
-	if k.Image.Repository == "" {
-		k.Image.Repository = "ghcr.io/faroshq/kro-multicluster/kro"
+		// Upstream kro: kro runs single-cluster against the runtime cluster
+		// (the instance controller bridges kcp → runtime), so the retired
+		// faroshq/kro-multicluster fork is no longer needed. The chart's own
+		// defaults supply the image (registry.k8s.io/kro/kro at appVersion).
+		k.Chart = "oci://registry.k8s.io/kro/charts/kro"
 	}
 	if k.Namespace == "" {
 		k.Namespace = "kro-system"
 	}
 	if k.ReleaseName == "" {
 		k.ReleaseName = "kro"
-	}
-	if k.APIExportEndpointSlice == "" {
-		k.APIExportEndpointSlice = "infrastructure"
 	}
 	if cr.Spec.Provider.Port == 0 {
 		cr.Spec.Provider.Port = 8081

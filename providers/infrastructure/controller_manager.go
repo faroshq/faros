@@ -9,10 +9,8 @@
 package main
 
 // Platform controller manager — the one that reconciles Template CRs
-// into per-template CRDs + backend setup. Lives alongside the legacy
-// REST surface; the two coexist for PRs A-D and the REST handlers get
-// deleted in PR E once the UI + MCP have migrated to the kcp-native
-// path.
+// into backend setup (kro RGDs). The cross-tenant Instance controller runs as
+// a sibling lifecycle in instance_controller.go.
 //
 // The manager is required whenever a controller config is supplied or
 // configured. Explicit REST-only mode remains available for deployments that
@@ -149,7 +147,9 @@ func startControllerManager(ctx context.Context, config *rest.Config, health *co
 	// narrow SA that doesn't have all the rights needed to re-apply
 	// CachedResources, so we MUST skip these calls. In the legacy
 	// single-binary mode we still run them so dev clusters that haven't
-	// migrated to init/serve keep working.
+	// migrated to init/serve keep working. That legacy path uses the config
+	// supplied directly to the process and therefore requires an admin/bootstrap
+	// credential; it must never be run with the minted runtime ServiceAccount.
 	if os.Getenv("INFRASTRUCTURE_KUBECONFIG") == "" {
 		if err := install.CRDs(ctx, config); err != nil {
 			return fmt.Errorf("install CRDs: %w", err)
@@ -232,19 +232,17 @@ func startControllerManager(ctx context.Context, config *rest.Config, health *co
 		log.Printf("controller manager: no kro runtime config (KRO_KUBECONFIG unset, not in a pod) — kro backend not registered (stub-only)")
 	}
 
-	dyn, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("dynamic client: %w", err)
-	}
-
 	if err := (&template.Reconciler{
 		Client:   mgr.GetClient(),
-		Dynamic:  dyn,
 		Backends: registry,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("template controller: %w", err)
 	}
 
+	dyn, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("seed Template readiness client: %w", err)
+	}
 	var seedTemplatesReady func(context.Context) (bool, error)
 	if os.Getenv("INFRASTRUCTURE_SKIP_SEED_TEMPLATES") == "" {
 		required, err := install.RequiredSeedTemplateResources(registry.Names())

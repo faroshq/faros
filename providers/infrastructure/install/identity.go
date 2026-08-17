@@ -17,21 +17,22 @@ package install
 // kubernetes.io/service-account-token Secret populated by kcp's token
 // controller. The returned RuntimeIdentity carries the SA's namespace + name + token,
 // plus the server URL the serve mode connects to (the in-cluster
-// kcp front-proxy URL for now; the APIExport virtual-workspace URL
-// once SeedKroCluster discovers it).
+// kcp front-proxy URL).
 //
-// The RBAC is intentionally narrow:
+// The RBAC is intentionally narrow and serves only the long-lived controller
+// process:
 //
-//   - read access to platform Templates + per-template CRs across
+//   - read access to platform Templates + Instances across
 //     bound tenant workspaces (via the APIExport virtual workspace)
 //   - manage rights on Templates' status (the Template controller
 //     patches status on every reconcile)
-//   - read on APIExport, APIResourceSchema, CachedResource so the
-//     Template controller's apiexport.go can list-then-update
+//   - read-only endpoint discovery plus the exact APIExport-content verbs used
+//     by the APIExport-backed Instance controller
 //
-// Cluster-admin operations (CRD apply, APIResourceSchema mint, etc.)
-// stay in init's own privilege scope. The serve mode never needs
-// them because init has already done that work.
+// Cluster-admin operations (CRD apply, APIExport/APIResourceSchema mutation,
+// etc.) stay in the bootstrap/admin credential's scope. Legacy single-binary
+// bootstrap runs only when INFRASTRUCTURE_KUBECONFIG is unset and therefore
+// uses that admin path; it must never rely on this runtime ServiceAccount.
 
 import (
 	"context"
@@ -66,18 +67,14 @@ const RuntimeRoleName = "infrastructure-runtime"
 // RuntimeTokenSecretName is the kubernetes.io/service-account-token Secret
 // that holds the runtime SA's long-lived bearer. kcp's token controller
 // populates it; the token does not expire (valid until the Secret or SA is
-// deleted), so neither the serve subcommand nor the kro cluster it's seeded
-// into needs a rotation loop.
+// deleted), so the serve subcommand does not need a rotation loop.
 const RuntimeTokenSecretName = "infrastructure-runtime-token"
 
 // RuntimeIdentity is what MintRuntimeIdentity returns to the caller.
 // Carries everything WriteKubeconfig needs to assemble a usable
 // kubeconfig: server URL, CA data, token, identity name.
 type RuntimeIdentity struct {
-	// Server is the apiserver URL the kubeconfig points at. For now
-	// the in-cluster kcp front-proxy URL is the right choice (PR C);
-	// the APIExport virtual workspace URL gets stitched in by the
-	// caller once it's discovered.
+	// Server is the provider-workspace apiserver URL the kubeconfig targets.
 	Server string
 
 	// CAData is the apiserver's CA cert in PEM form, used to verify
@@ -113,7 +110,8 @@ func MintRuntimeIdentity(ctx context.Context, adminConfig *rest.Config) (*Runtim
 		return nil, fmt.Errorf("kubernetes client: %w", err)
 	}
 
-	if err := ensureServiceAccount(ctx, cs); err != nil {
+	sa, err := ensureServiceAccount(ctx, cs)
+	if err != nil {
 		return nil, fmt.Errorf("ensure SA: %w", err)
 	}
 	if err := ensureClusterRole(ctx, cs); err != nil {
@@ -125,10 +123,9 @@ func MintRuntimeIdentity(ctx context.Context, adminConfig *rest.Config) (*Runtim
 
 	// Long-lived (legacy) token: create a kubernetes.io/service-account-token
 	// Secret bound to the SA and let kcp's token controller fill in a
-	// non-expiring bearer. This replaces the short-lived TokenRequest path
-	// so the token seeded into the kro cluster never expires out from under
-	// it (kro reads the kubeconfig once at startup and can't re-mint).
-	token, err := ensureLegacySAToken(ctx, cs, RuntimeServiceAccountNamespace, RuntimeServiceAccountName, RuntimeTokenSecretName)
+	// non-expiring bearer. This replaces the short-lived TokenRequest path so
+	// a long-lived serve process does not lose its credentials between retries.
+	token, err := ensureLegacySAToken(ctx, cs, sa, RuntimeTokenSecretName)
 	if err != nil {
 		return nil, fmt.Errorf("ensure runtime token: %w", err)
 	}
@@ -172,13 +169,18 @@ func runtimeTLSForIdentity(config *rest.Config) ([]byte, bool, string, error) {
 // token does not expire — it stays valid until the Secret or its ServiceAccount
 // is deleted — so callers need no rotation loop. Re-invoking reuses the existing
 // Secret and returns the same token, keeping the value stable across re-runs of init.
-func ensureLegacySAToken(ctx context.Context, cs kubernetes.Interface, namespace, saName, secretName string) (string, error) {
+func ensureLegacySAToken(ctx context.Context, cs kubernetes.Interface, sa *corev1.ServiceAccount, secretName string) (string, error) {
+	if sa == nil {
+		return "", fmt.Errorf("nil ServiceAccount")
+	}
+	namespace, saName := sa.Namespace, sa.Name
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: namespace,
 			Annotations: map[string]string{
 				corev1.ServiceAccountNameKey: saName,
+				corev1.ServiceAccountUIDKey:  string(sa.UID),
 			},
 		},
 		Type: corev1.SecretTypeServiceAccountToken,
@@ -191,7 +193,19 @@ func ensureLegacySAToken(ctx context.Context, cs kubernetes.Interface, namespace
 	if err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		got, err := cs.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 		if err != nil {
-			return false, nil
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("get service-account-token Secret: %w", err)
+		}
+		if got.Type != corev1.SecretTypeServiceAccountToken {
+			return false, fmt.Errorf("Secret %s/%s has type %q, want %q", namespace, secretName, got.Type, corev1.SecretTypeServiceAccountToken)
+		}
+		if got.Annotations[corev1.ServiceAccountNameKey] != saName {
+			return false, fmt.Errorf("Secret %s/%s names ServiceAccount %q, want %q", namespace, secretName, got.Annotations[corev1.ServiceAccountNameKey], saName)
+		}
+		if got.Annotations[corev1.ServiceAccountUIDKey] != string(sa.UID) {
+			return false, fmt.Errorf("Secret %s/%s has ServiceAccount UID %q, want %q", namespace, secretName, got.Annotations[corev1.ServiceAccountUIDKey], sa.UID)
 		}
 		if t := got.Data[corev1.ServiceAccountTokenKey]; len(t) > 0 {
 			token = string(t)
@@ -204,17 +218,17 @@ func ensureLegacySAToken(ctx context.Context, cs kubernetes.Interface, namespace
 	return token, nil
 }
 
-func ensureServiceAccount(ctx context.Context, cs kubernetes.Interface) error {
-	_, err := cs.CoreV1().
+func ensureServiceAccount(ctx context.Context, cs kubernetes.Interface) (*corev1.ServiceAccount, error) {
+	existing, err := cs.CoreV1().
 		ServiceAccounts(RuntimeServiceAccountNamespace).
 		Get(ctx, RuntimeServiceAccountName, metav1.GetOptions{})
 	if err == nil {
-		return nil
+		return existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return err
+		return nil, err
 	}
-	_, err = cs.CoreV1().
+	created, err := cs.CoreV1().
 		ServiceAccounts(RuntimeServiceAccountNamespace).
 		Create(ctx, &corev1.ServiceAccount{
 			ObjectMeta: metav1.ObjectMeta{
@@ -223,52 +237,49 @@ func ensureServiceAccount(ctx context.Context, cs kubernetes.Interface) error {
 			},
 		}, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+		return nil, err
 	}
-	return nil
+	if apierrors.IsAlreadyExists(err) {
+		return cs.CoreV1().ServiceAccounts(RuntimeServiceAccountNamespace).Get(ctx, RuntimeServiceAccountName, metav1.GetOptions{})
+	}
+	return created, nil
 }
 
 func ensureClusterRole(ctx context.Context, cs kubernetes.Interface) error {
 	want := &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: RuntimeRoleName},
 		Rules: []rbacv1.PolicyRule{
-			// Templates — read + status patch, plus delete: the
+			// Templates — read, finalizer update, and delete: the
 			// controller enforces retirement of removed platform
-			// templates by deleting them on sight
-			// (controller/template/retired.go). Finalizer add/remove
-			// (update) comes from the wildcard rule below.
+			// templates by deleting them on sight.
 			{
 				APIGroups: []string{"infrastructure.faros.sh"},
 				Resources: []string{"templates"},
-				Verbs:     []string{"get", "list", "watch", "delete"},
+				Verbs:     []string{"get", "list", "watch", "update", "delete"},
 			},
 			{
 				APIGroups: []string{"infrastructure.faros.sh"},
 				Resources: []string{"templates/status"},
 				Verbs:     []string{"get", "patch", "update"},
 			},
-			// Per-template kinds — wildcarded because the kinds are
-			// runtime-defined (Redis, Postgres, etc.). Read across
-			// the APIExport VW so the future kro backend can see
-			// every tenant's Instance CRs.
+			// The stable Instance API is reconciled through the APIExport virtual
+			// workspace. Spec/finalizer and status are separate authorization tuples.
 			{
 				APIGroups: []string{"infrastructure.faros.sh"},
-				Resources: []string{"*"},
+				Resources: []string{"instances"},
 				Verbs:     []string{"get", "list", "watch", "patch", "update"},
 			},
-			// kcp resources the Template controller has to touch.
-			// apiexportendpointslices is added for the kro-multicluster
-			// kcp-apiexport provider, which reads the slice to discover
-			// the APIExport's virtual-workspace URL.
-			//
-			// apibindings: the kcp-apiexport provider sets up an
-			// APIBinding informer through the VW to enumerate every
-			// kcp logical cluster that has bound the APIExport — that's
-			// how it discovers tenant workspaces dynamically.
+			{
+				APIGroups: []string{"infrastructure.faros.sh"},
+				Resources: []string{"instances/status"},
+				Verbs:     []string{"get", "patch", "update"},
+			},
+			// The imported multicluster provider's base cache watches only the named
+			// APIExportEndpointSlice to discover virtual-workspace shard URLs.
 			{
 				APIGroups: []string{"apis.kcp.io"},
-				Resources: []string{"apiexports", "apiresourceschemas", "apiexportendpointslices", "apibindings"},
-				Verbs:     []string{"get", "list", "watch", "update", "create"},
+				Resources: []string{"apiexportendpointslices"},
+				Verbs:     []string{"get", "list", "watch"},
 			},
 			// apiexports/content is the kcp VW authorizer's gate (see
 			// kcp/pkg/virtual/apiexport/authorizer/content.go). Every
@@ -281,30 +292,10 @@ func ensureClusterRole(ctx context.Context, cs kubernetes.Interface) error {
 				APIGroups:     []string{"apis.kcp.io"},
 				Resources:     []string{"apiexports/content"},
 				ResourceNames: []string{APIExportName},
-				Verbs:         []string{"*"},
-			},
-			{
-				APIGroups: []string{"cache.kcp.io"},
-				Resources: []string{"cachedresources"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			// CRDs: the controller authors the per-template CRD on
-			// reconcile and deletes it in the finalize chain when a
-			// Template is removed (deletePerTemplateCRD).
-			{
-				APIGroups: []string{"apiextensions.k8s.io"},
-				Resources: []string{"customresourcedefinitions"},
-				Verbs:     []string{"get", "list", "watch", "create", "update", "delete"},
-			},
-			// The provider-owned workload attestor performs an online
-			// TokenReview against the runtime cluster for projected
-			// faros-provider-actions-bootstrap tokens. It never parses JWTs
-			// locally, so this is the only authentication API permission it
-			// needs.
-			{
-				APIGroups: []string{"authentication.k8s.io"},
-				Resources: []string{"tokenreviews"},
-				Verbs:     []string{"create"},
+				// The content authorizer checks the requested resource verb. The
+				// controller watches APIBindings/Instances and updates Instance spec,
+				// finalizers, and status; it never creates or deletes tenant objects.
+				Verbs: []string{"get", "list", "watch", "patch", "update"},
 			},
 		},
 	}

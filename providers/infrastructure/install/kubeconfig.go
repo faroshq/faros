@@ -73,6 +73,21 @@ func buildRuntimeKubeconfig(id *RuntimeIdentity) *clientcmdapi.Config {
 	}
 }
 
+// RuntimeKubeconfig serializes the least-privilege provider runtime identity.
+// Deployment controllers use this form to hand the serve process a scoped
+// credential without copying their bootstrap/admin kubeconfig into another
+// cluster.
+func RuntimeKubeconfig(id *RuntimeIdentity) ([]byte, error) {
+	if id == nil {
+		return nil, fmt.Errorf("nil RuntimeIdentity")
+	}
+	data, err := clientcmd.Write(*buildRuntimeKubeconfig(id))
+	if err != nil {
+		return nil, fmt.Errorf("marshal kubeconfig: %w", err)
+	}
+	return data, nil
+}
+
 // WriteKubeconfig serializes the runtime kubeconfig built from id and writes
 // it to path. The file is created with 0600 because it carries a bearer
 // token; permissive permissions would let any local user hijack the SA's
@@ -100,12 +115,9 @@ func WriteKubeconfig(path string, id *RuntimeIdentity) error {
 // named Secret in the host cluster reachable via hostConfig. Idempotent:
 // updates the Secret's data if it already exists, creates it otherwise.
 func WriteKubeconfigToSecret(ctx context.Context, hostConfig *rest.Config, namespace, name string, id *RuntimeIdentity) error {
-	if id == nil {
-		return fmt.Errorf("nil RuntimeIdentity")
-	}
-	data, err := clientcmd.Write(*buildRuntimeKubeconfig(id))
+	data, err := RuntimeKubeconfig(id)
 	if err != nil {
-		return fmt.Errorf("marshal kubeconfig: %w", err)
+		return err
 	}
 	cs, err := kubernetes.NewForConfig(hostConfig)
 	if err != nil {

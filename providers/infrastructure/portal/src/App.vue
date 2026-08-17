@@ -16,8 +16,7 @@ import type { FarosContext } from './types'
 //   'templates'                 → templates
 //   'templates/<name>'          → provision form for that template
 //   'instances'                 → my instances
-//   'instances/<template>/<name>' → unambiguous instance detail
-//   'instances/<name>'          → legacy detail link (accepted when unique)
+//   'instances/<name>'          → instance detail
 //   'missing-credentials'       → onboarding error (provision side-effect)
 //
 // The shell's vue-router parses /providers/infrastructure/<rest>
@@ -33,7 +32,6 @@ const props = defineProps<{ ctx: FarosContext | null }>()
 interface Route {
   page: 'templates' | 'instances' | 'missing-credentials'
   id?: string
-  template?: string
 }
 
 function decodeSegment(value: string): string {
@@ -51,10 +49,7 @@ function parseSubPath(sub: string | null | undefined): Route {
   if (s === 'missing-credentials') return { page: 'missing-credentials' }
   const [head, ...rest] = s.split('/')
   if (head === 'templates' && rest.length) return { page: 'templates', id: decodeSegment(rest.join('/')) }
-  if (head === 'instances' && rest.length > 1) {
-    return { page: 'instances', template: decodeSegment(rest[0]), id: decodeSegment(rest.slice(1).join('/')) }
-  }
-  if (head === 'instances' && rest.length) return { page: 'instances', id: decodeSegment(rest[0]) }
+  if (head === 'instances' && rest.length) return { page: 'instances', id: decodeSegment(rest.join('/')) }
   // Unknown sub-path: fall back to templates rather than 404'ing —
   // the shell's URL might have stale segments from a prior provider.
   return { page: 'templates' }
@@ -119,11 +114,11 @@ function legacyNavigate(view: string) {
 function selectTemplate(name: string) {
   navigate('templates/' + encodeURIComponent(name))
 }
-function selectInstance(name: string, template: string) {
-  navigate('instances/' + encodeURIComponent(template) + '/' + encodeURIComponent(name))
+function selectInstance(name: string) {
+  navigate('instances/' + encodeURIComponent(name))
 }
-function provisioned(name: string, template: string) {
-  selectInstance(name, template)
+function provisioned(name: string) {
+  selectInstance(name)
 }
 </script>
 
@@ -183,9 +178,8 @@ function provisioned(name: string, template: string) {
     </template>
     <template v-else-if="route.page === 'instances' && route.id">
       <InstanceDetailPage
-        :key="`instance:${contextVersion}:${route.template ?? ''}:${route.id}`"
+        :key="`instance:${contextVersion}:${route.id}`"
         :instance-name="route.id"
-        :template-name="route.template"
         @navigate="legacyNavigate"
       />
     </template>

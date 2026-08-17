@@ -25,7 +25,6 @@ export interface Template {
   // never declared exposure is assumed not to publish anything.
   exposure?: TemplateExposure
   kind: string
-  resource: string
   inputsSchema: JSONSchema
   sampleValues?: Record<string, unknown>
   // view is optional presentation metadata authored on the template that

@@ -237,7 +237,7 @@ function dotFor(phase: string) {
             <button
               type="button"
               :class="tileClass.row"
-              @click="dispatchNavigate('instances/' + encodeURIComponent(i.template) + '/' + encodeURIComponent(i.name))"
+              @click="dispatchNavigate('instances/' + encodeURIComponent(i.name))"
             >
               <span :class="[tileClass.rowDot, dotFor(i.phase)]" aria-hidden="true" />
               <span :class="tileClass.rowPrimary">{{ i.name }}</span>

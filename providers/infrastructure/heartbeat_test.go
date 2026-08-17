@@ -40,17 +40,17 @@ func TestHeartbeatCanSendFollowsControllerReadiness(t *testing.T) {
 
 func TestHeartbeatRequiresEveryConfiguredController(t *testing.T) {
 	platform := newControllerHealth(true)
-	application := newControllerHealth(true)
+	instance := newControllerHealth(true)
 	platform.markReady()
-	application.markFailed(errors.New("application manager exited"))
-	if heartbeatCanSend(platform, application) {
-		t.Fatal("configured application failure must suppress heartbeat")
+	instance.markFailed(errors.New("instance manager exited"))
+	if heartbeatCanSend(platform, instance) {
+		t.Fatal("configured instance failure must suppress heartbeat")
 	}
-	application.markReady()
-	if !heartbeatCanSend(platform, application) {
+	instance.markReady()
+	if !heartbeatCanSend(platform, instance) {
 		t.Fatal("heartbeat should resume when both configured controllers are ready")
 	}
 	if !heartbeatCanSend(platform, newControllerHealth(false)) {
-		t.Fatal("disabled application controller must not become mandatory")
+		t.Fatal("disabled instance controller must not become mandatory")
 	}
 }

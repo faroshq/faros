@@ -25,24 +25,14 @@ import (
 // thing — a Redis cache, a Postgres database, a packaged application.
 // Operators apply Templates to the provider workspace
 // (root:faros:providers:infrastructure). The Template controller
-// reacts by:
+// validates its values contract and calls Backend.SetupTemplate on the backend
+// named in spec.backend. The kro backend authors a namespaced runtime RGD;
+// future terraform/cloud backends can stage modules or validate credentials.
 //
-//  1. Materializing the per-template CRD declared in spec.instanceCRD
-//     (e.g. redis.infrastructure.faros.sh) into the cluster's
-//     CRD set, with OpenAPI validation derived from spec.schema.
-//  2. Minting an APIResourceSchema and referencing it from
-//     APIExport.spec.resources so tenants who
-//     APIBind to the infrastructure provider can see and create
-//     instances.
-//  3. Calling Backend.SetupTemplate on the backend named in
-//     spec.backend. The backend does whatever backend-specific
-//     bookkeeping it needs (the kro backend authors an RGD; future
-//     terraform / cloud backends stage modules / validate credentials).
-//
-// Tenants discover Templates read-only via a CachedResource (PR B);
-// instances are CRs of the per-template CRD (PR C). The Template CR
-// itself is never tenant-facing as authorable input — it's the
-// platform's source of truth.
+// Tenants discover Templates read-only through a CachedResource and author the
+// one stable Instance kind with spec.template selecting the product and
+// spec.values carrying the template-shaped input. Template itself is never
+// tenant-authorable; it is the platform source of truth.
 //
 // +crd
 // +genclient
@@ -94,9 +84,8 @@ type TemplateSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	Category string `json:"category,omitempty"`
 
-	// Version pins the Template definition's revision. Required by
-	// the per-template CRD's served version selection and by
-	// instance-create-time consistency checks.
+	// Version pins the Template definition's revision and is mirrored into
+	// Instance status after reconciliation.
 	// +required
 	// +kubebuilder:validation:Pattern=`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`
 	// +kubebuilder:validation:MaxLength=64
@@ -136,20 +125,17 @@ type TemplateSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	Backend string `json:"backend"`
 
-	// InstanceCRD declares the per-template CRD the platform
-	// publishes for tenants to author instances against. Must be in
-	// group infrastructure.faros.sh; the resource (lowercase
-	// plural) and kind (CamelCase singular) are operator-chosen but
-	// must be unique across all Templates.
+	// InstanceCRD declares the backend runtime CR that represents this
+	// Template. For kro it becomes the namespaced RGD-generated kind on the
+	// runtime cluster; tenants never author it directly. The resource and kind
+	// must be unique across Templates.
 	// +required
 	InstanceCRD TemplateInstanceCRD `json:"instanceCRD"`
 
-	// Schema is the JSON Schema applied to the per-template CRD's
-	// spec field. Stored as raw JSON because importing
-	// apiextensions/v1.JSONSchemaProps directly trips controller-gen
-	// on the upstream type's recursive shape; the Template controller
-	// parses this back into JSONSchemaProps when it builds the CRD's
-	// spec.versions[].schema.openAPIV3Schema.properties.spec.
+	// Schema is the JSON Schema for Instance.spec.values and the backend runtime
+	// CR's spec. Stored as raw JSON because importing
+	// apiextensions/v1.JSONSchemaProps directly trips controller-gen on the
+	// upstream type's recursive shape.
 	//
 	// Expected content is the standard subset of OpenAPI v3 (type,
 	// properties, required, enum, default, description, minimum,
@@ -242,9 +228,8 @@ type TemplateSpec struct {
 	Development *TemplateDevelopment `json:"development,omitempty"`
 }
 
-// Platform-reserved instance spec field the Template controller injects into
-// every per-template CRD. Tenants set it to development only when the
-// Template declares a Development block (the injected enum enforces this).
+// Platform-reserved Instance values fields. The values contract admits
+// development mode only when the Template declares a Development block.
 const (
 	// FarosModeField is the reserved instance spec property name. Templates
 	// MUST NOT declare it in spec.schema themselves.
@@ -256,10 +241,10 @@ const (
 	FarosModeDevelopment = "development"
 
 	// Provider Actions fields are reserved instance spec properties used by the
-	// App Studio development runtime. The Template controller injects them into
-	// tenant-facing per-template CRDs/APIResourceSchemas, while App Studio owns
-	// their values and the dev overlay supplies empty defaults when no action
-	// grant is present. Templates MUST NOT declare these fields in spec.schema.
+	// App Studio development runtime. The flattened Instance values contract
+	// injects them while App Studio owns their values, and the dev overlay
+	// supplies empty defaults when no action grant is present. Templates MUST
+	// NOT declare these fields in spec.schema.
 	FarosActionsExchangeURLField = "farosActionsExchangeURL"
 	FarosActionsBaseURLField     = "farosActionsBaseURL"
 	FarosActionsTenantPathField  = "farosActionsTenantPath"
@@ -634,35 +619,29 @@ type TemplateAgent struct {
 	Outputs []string `json:"outputs,omitempty"`
 }
 
-// TemplateInstanceCRD identifies the per-template CRD the platform
-// projects. All four fields are required so the controller can both
-// register the CRD (group + version + resource + kind) and reference
-// its immutable APIResourceSchema from APIExport.spec.resources.
+// TemplateInstanceCRD identifies the backend runtime kind for a Template. For
+// kro these fields become the namespaced CRD generated from the RGD. The
+// tenant-facing API remains instances.infrastructure.faros.sh.
 type TemplateInstanceCRD struct {
-	// Group MUST be infrastructure.faros.sh. Pinned here so
-	// every per-template CRD lives under the same namespace and the
-	// portal can render them uniformly.
+	// Group MUST be infrastructure.faros.sh so all runtime kinds stay in the
+	// provider's API namespace.
 	// +required
 	// +kubebuilder:validation:Pattern=`^infrastructure\.faros\.sh$`
 	Group string `json:"group"`
 
-	// Version of the per-template CRD's served + storage schema.
-	// Templates can ship multiple Versions (a future Template can
-	// extend a previous one's set); the controller updates the CRD's
-	// spec.versions list rather than overwriting on conflict.
+	// Version is the RGD-generated runtime kind's API version.
 	// +required
 	// +kubebuilder:validation:Pattern=`^v[0-9]+((alpha|beta)[0-9]+)?$`
 	Version string `json:"version"`
 
-	// Resource is the lowercase plural the apiserver routes on
-	// (kubectl get <resource>). Must be unique across all Templates
-	// in the provider workspace.
+	// Resource is the lowercase plural the runtime apiserver routes on. It must
+	// be unique across all Templates.
 	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
 	// +kubebuilder:validation:MaxLength=64
 	Resource string `json:"resource"`
 
-	// Kind is the CamelCase singular tenants use in apiVersion + kind.
+	// Kind is the CamelCase singular used by the runtime RGD.
 	// +required
 	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
 	// +kubebuilder:validation:MaxLength=64
@@ -676,35 +655,18 @@ type TemplateStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Registered reflects the platform-side wiring the controller
-	// owns. CRDEstablished flips to true once the per-template CRD
-	// has the Established condition; SchemaInAPIExport flips once
-	// the APIResourceSchema is referenced from APIExport.spec.resources.
-	// +optional
-	Registered TemplateRegistrationStatus `json:"registered,omitempty"`
-
 	// Backend reflects what the backend reported from its
 	// SetupTemplate call. Empty until first reconcile.
 	// +optional
 	Backend TemplateBackendStatus `json:"backend,omitempty"`
 
 	// Conditions follows the standard Kubernetes conditions pattern.
-	// The aggregate Ready condition is True iff Registered and
-	// Backend both succeed.
+	// The aggregate Ready condition is True iff schema validation and
+	// the backend both succeed.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-
-// TemplateRegistrationStatus tracks the two platform-side wiring
-// steps separately so a failure mode (CRD admitted but APIExport
-// schema sync pending) is observable.
-type TemplateRegistrationStatus struct {
-	// +optional
-	CRDEstablished bool `json:"crdEstablished,omitempty"`
-	// +optional
-	SchemaInAPIExport bool `json:"schemaInAPIExport,omitempty"`
 }
 
 // TemplateBackendStatus is what the named backend reported. The
@@ -731,29 +693,23 @@ const (
 	// ConditionReady is the aggregate "this Template is fully
 	// reconciled, tenants can use it" condition.
 	ConditionReady = "Ready"
-	// ConditionCRDEstablished mirrors the per-template CRD's
-	// Established condition.
-	ConditionCRDEstablished = "CRDEstablished"
-	// ConditionSchemaInAPIExport flips True once the CRD's immutable
-	// APIResourceSchema appears in APIExport.spec.resources.
-	ConditionSchemaInAPIExport = "SchemaInAPIExport"
+	// ConditionSchemaValid reports whether spec.schema compiles into the
+	// effective values contract (parses, structural, no reserved-field
+	// claims) that the instance controller holds Instances to.
+	ConditionSchemaValid = "SchemaValid"
 	// ConditionBackendReady mirrors Backend.SetupTemplate's result.
 	ConditionBackendReady = "BackendReady"
 )
 
 // Standard reason strings paired with the condition types above.
 const (
-	ReasonReconciling       = "Reconciling"
-	ReasonReady             = "Ready"
-	ReasonInvalidSpec       = "InvalidSpec"
-	ReasonBackendNotFound   = "BackendNotFound"
-	ReasonBackendError      = "BackendError"
-	ReasonCRDError          = "CRDError"
-	ReasonAPIExportError    = "APIExportError"
-	ReasonAwaitingEstablish = "AwaitingEstablish"
+	ReasonReconciling     = "Reconciling"
+	ReasonReady           = "Ready"
+	ReasonInvalidSpec     = "InvalidSpec"
+	ReasonBackendNotFound = "BackendNotFound"
+	ReasonBackendError    = "BackendError"
 )
 
-// Standard finalizer the Template controller adds. Cleanup order on
-// delete: (1) backend.TeardownTemplate, (2) remove APIExport schema
-// entry, (3) delete the per-template CRD, (4) drop finalizer.
+// Standard finalizer the Template controller adds. Cleanup on delete:
+// (1) backend.TeardownTemplate, (2) drop finalizer.
 const FinalizerTemplateReconcile = "templates.infrastructure.faros.sh/reconcile"

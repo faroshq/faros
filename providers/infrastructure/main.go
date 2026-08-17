@@ -19,9 +19,8 @@
 //
 // Templates and instances are NOT served as REST here: the portal and
 // tenants drive them as CRDs directly against kcp
-// (templates.infrastructure.faros.sh + the per-template instance
-// kinds), projected to tenant workspaces via the CachedResource +
-// APIExport. The MCP surface keeps its own kro.Client.
+// (templates.infrastructure.faros.sh + instances.infrastructure.faros.sh),
+// projected to tenant workspaces through the APIExport.
 package main
 
 import (
@@ -104,7 +103,7 @@ func runInit() error {
 	// Implementation is in init_cmd.go so this file stays focused on
 	// process orchestration. See that file for the chain of install
 	// steps (CRDs → APIExport schemas → CachedResource → SA + RBAC →
-	// token → kubeconfig → kro Secret).
+	// token → runtime kubeconfig).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return runInitCmd(ctx)
@@ -149,7 +148,7 @@ func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloa
 	}
 
 	health := newControllerHealth(controllerModeFromEnv(kcpConfig != nil) == controllerModeRequired)
-	applicationHealth := newControllerHealth(applicationControllerConfigured())
+	instanceHealth := newControllerHealth(instanceControllerConfigured())
 	buildHandler := func(config *rest.Config) http.Handler {
 		// Data-plane subresource proxy (logs/sync/restart/preview proxy/status).
 		// nil in REST-only/dev (no kcp or runtime cluster); the handler then
@@ -171,7 +170,7 @@ func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloa
 			PortalFS:         distFS,
 			ServePortalAsset: servePortalAsset,
 			Readiness: func() server.Readiness {
-				return aggregateReadiness(health, applicationHealth)
+				return aggregateReadiness(health, instanceHealth)
 			},
 		})
 	}
@@ -179,7 +178,7 @@ func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloa
 	// Keep liveness and the portal available while a required kubeconfig is
 	// still being delivered. The controller lifecycle installs the recovered
 	// config into every request surface before it can mark readiness true.
-	surfaces := newServeSurfaces(buildHandler(nil), buildHandler, startApplicationController)
+	surfaces := newServeSurfaces(buildHandler(nil), buildHandler, startInstanceController)
 
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
@@ -200,12 +199,12 @@ func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloa
 	go func() {
 		loadConfig := controllerConfigLoader(kcpConfig, reloadConfig)
 		start := func(startCtx context.Context, config *rest.Config, healthState *controllerHealth) error {
-			return runControllerAttempt(startCtx, config, healthState, applicationHealth, surfaces, startControllerManager)
+			return runControllerAttempt(startCtx, config, healthState, instanceHealth, surfaces, startControllerManager)
 		}
 		runControllerManager(ctx, health, loadConfig, start, controllerRetryInterval)
 	}()
 
-	go runHeartbeat(ctx, health, applicationHealth)
+	go runHeartbeat(ctx, health, instanceHealth)
 
 	<-ctx.Done()
 	log.Printf("shutting down")
@@ -219,12 +218,12 @@ func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloa
 func runControllerAttempt(
 	ctx context.Context,
 	config *rest.Config,
-	platformHealth, applicationHealth *controllerHealth,
+	platformHealth, instanceHealth *controllerHealth,
 	surfaces *serveSurfaces,
 	startManager func(context.Context, *rest.Config, *controllerHealth) error,
 ) error {
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
-	applicationResult := surfaces.configure(attemptCtx, config, applicationHealth)
+	instanceResult := surfaces.configure(attemptCtx, config, instanceHealth)
 	managerResult := make(chan error, 1)
 	go func() {
 		managerResult <- startManager(attemptCtx, config, platformHealth)
@@ -235,9 +234,9 @@ func runControllerAttempt(
 	// to the retry loop. This prevents a slow old manager from reconciling or
 	// mutating shared health alongside its replacement.
 	managerCh := (<-chan error)(managerResult)
-	applicationCh := (<-chan error)(applicationResult)
+	instanceCh := (<-chan error)(instanceResult)
 	remaining := 1
-	if applicationCh != nil {
+	if instanceCh != nil {
 		remaining++
 	}
 	ctxDone := ctx.Done()
@@ -254,12 +253,12 @@ func runControllerAttempt(
 			}
 			managerCh = nil
 			remaining--
-		case result, ok := <-applicationCh:
-			source = "application"
+		case result, ok := <-instanceCh:
+			source = "instance"
 			if ok {
 				err = result
 			}
-			applicationCh = nil
+			instanceCh = nil
 			remaining--
 		case <-ctxDone:
 			source = "controller attempt"
@@ -299,28 +298,28 @@ func controllerConfigLoader(initial *rest.Config, reload func() (*rest.Config, e
 
 // serveSurfaces atomically replaces the degraded REST-only route set after a
 // late provider kubeconfig arrives. Every manager attempt replaces MCP and the
-// data-plane and starts the Application controller with the same attempt-scoped
+// data-plane and starts the Instance controller with the same attempt-scoped
 // config/context. A failed attempt is cancelled before its replacement starts.
 type serveSurfaces struct {
-	mu               sync.RWMutex
-	handler          http.Handler
-	build            func(*rest.Config) http.Handler
-	startApplication func(context.Context, *rest.Config, *controllerHealth) <-chan error
+	mu            sync.RWMutex
+	handler       http.Handler
+	build         func(*rest.Config) http.Handler
+	startInstance func(context.Context, *rest.Config, *controllerHealth) <-chan error
 }
 
 func newServeSurfaces(
 	initial http.Handler,
 	build func(*rest.Config) http.Handler,
-	startApplication func(context.Context, *rest.Config, *controllerHealth) <-chan error,
+	startInstance func(context.Context, *rest.Config, *controllerHealth) <-chan error,
 ) *serveSurfaces {
 	return &serveSurfaces{
-		handler:          initial,
-		build:            build,
-		startApplication: startApplication,
+		handler:       initial,
+		build:         build,
+		startInstance: startInstance,
 	}
 }
 
-func (s *serveSurfaces) configure(ctx context.Context, config *rest.Config, applicationHealth *controllerHealth) <-chan error {
+func (s *serveSurfaces) configure(ctx context.Context, config *rest.Config, instanceHealth *controllerHealth) <-chan error {
 	if s == nil || config == nil {
 		return nil
 	}
@@ -328,8 +327,8 @@ func (s *serveSurfaces) configure(ctx context.Context, config *rest.Config, appl
 	s.mu.Lock()
 	s.handler = handler
 	s.mu.Unlock()
-	if s.startApplication != nil {
-		return s.startApplication(ctx, config, applicationHealth)
+	if s.startInstance != nil {
+		return s.startInstance(ctx, config, instanceHealth)
 	}
 	return nil
 }
@@ -341,16 +340,16 @@ func (s *serveSurfaces) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r)
 }
 
-func aggregateReadiness(platform, application *controllerHealth) server.Readiness {
+func aggregateReadiness(platform, instance *controllerHealth) server.Readiness {
 	platformSnapshot := platform.snapshot()
 	if !platform.ready() {
 		return server.Readiness{Controller: string(platformSnapshot.State), Error: platformSnapshot.Error}
 	}
-	applicationSnapshot := application.snapshot()
-	if !application.ready() {
+	instanceSnapshot := instance.snapshot()
+	if !instance.ready() {
 		return server.Readiness{
-			Controller: "application-" + string(applicationSnapshot.State),
-			Error:      applicationSnapshot.Error,
+			Controller: "instance-" + string(instanceSnapshot.State),
+			Error:      instanceSnapshot.Error,
 		}
 	}
 	state := platformSnapshot.State

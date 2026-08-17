@@ -14,6 +14,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	vibev1alpha1 "github.com/faroshq/provider-vibe-studio/apis/vibe/v1alpha1"
@@ -78,21 +79,22 @@ func InstanceRefs(p *vibev1alpha1.Project) []InstanceRef {
 }
 
 // DesiredInstance builds the instance CR for a ref. Pure. Mirrors the
-// infrastructure provider's own provision shape: values verbatim under spec,
-// template attribution label, plus the Project back-reference.
+// infrastructure provider's own provision shape: the template name under
+// spec.template, values verbatim under spec.values, template attribution
+// label, plus the Project back-reference.
 func DesiredInstance(p *vibev1alpha1.Project, ref InstanceRef) *unstructured.Unstructured {
 	labels := map[string]any{projectLabel: p.Name}
 	// Attribution is per binding: a project's search backend is a searxng
-	// instance, not an instance of the app's template, and the
-	// infrastructure provider lists instances by this label.
-	if ref.Template != "" {
-		labels[templateLabel] = ref.Template
-	} else if ref.Binding == vibev1alpha1.BindingRuntime && p.Spec.Template != nil && p.Spec.Template.Name != "" {
+	// instance, not an instance of the app's template.
+	templateName := ref.Template
+	if templateName == "" && ref.Binding == vibev1alpha1.BindingRuntime && p.Spec.Template != nil {
 		// Bindings written before the field existed: only the runtime is
 		// known to come from the Project's template. Guessing for the others
-		// is what produced a searxng instance labelled "application", so an
-		// unlabelled instance is the better answer.
-		labels[templateLabel] = p.Spec.Template.Name
+		// is what produced a searxng instance labelled "application".
+		templateName = p.Spec.Template.Name
+	}
+	if templateName != "" {
+		labels[templateLabel] = templateName
 	}
 	inst := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": ref.GVR.GroupVersion().String(),
@@ -101,9 +103,44 @@ func DesiredInstance(p *vibev1alpha1.Project, ref InstanceRef) *unstructured.Uns
 			"name":   ref.Name,
 			"labels": labels,
 		},
-		"spec": ref.Values,
+		"spec": map[string]any{
+			"template": templateName,
+			"values":   ref.Values,
+		},
 	}}
 	return inst
+}
+
+// mergeInstanceValues overlays binding-owned desired values while preserving
+// fields computed by the infrastructure provider. Maps merge recursively;
+// explicit scalar, list, and nil values replace their observed counterparts.
+func mergeInstanceValues(observed, desired map[string]any) map[string]any {
+	merged := make(map[string]any, len(observed)+len(desired))
+	for key, value := range observed {
+		merged[key] = runtime.DeepCopyJSONValue(value)
+	}
+	mergeInstanceValueMap(merged, desired)
+	return merged
+}
+
+func mergeInstanceValueMap(dst, desired map[string]any) {
+	for key, desiredValue := range desired {
+		desiredMap, desiredIsMap := desiredValue.(map[string]any)
+		if !desiredIsMap {
+			dst[key] = runtime.DeepCopyJSONValue(desiredValue)
+			continue
+		}
+		observedMap, observedIsMap := dst[key].(map[string]any)
+		if !observedIsMap {
+			observedMap = map[string]any{}
+		}
+		mergedMap := make(map[string]any, len(observedMap)+len(desiredMap))
+		for nestedKey, nestedValue := range observedMap {
+			mergedMap[nestedKey] = runtime.DeepCopyJSONValue(nestedValue)
+		}
+		mergeInstanceValueMap(mergedMap, desiredMap)
+		dst[key] = mergedMap
+	}
 }
 
 // MirrorStatus computes the Project status from observed instances. Pure —
@@ -162,6 +199,9 @@ func MirrorStatus(p *vibev1alpha1.Project, observed map[string]*unstructured.Uns
 // unstructured status. Mirrors the infrastructure catalog reader: empty phase
 // defaults to Pending, or Ready when a Ready=True condition exists.
 func observeInstance(inst *unstructured.Unstructured) (phase, url string, outputs map[string]string) {
+	if !instanceStatusGenerationCurrent(inst) {
+		return "Pending", "", nil
+	}
 	status, _, _ := unstructured.NestedMap(inst.Object, "status")
 	if status == nil {
 		return "Pending", "", nil
@@ -197,6 +237,14 @@ func observeInstance(inst *unstructured.Unstructured) (phase, url string, output
 		outputs[k] = s
 	}
 	return phase, url, outputs
+}
+
+func instanceStatusGenerationCurrent(inst *unstructured.Unstructured) bool {
+	if inst == nil {
+		return false
+	}
+	observed, found, err := unstructured.NestedInt64(inst.Object, "status", "observedGeneration")
+	return err == nil && found && observed >= inst.GetGeneration()
 }
 
 func isReadyPhase(phase string) bool {

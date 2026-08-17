@@ -15,15 +15,12 @@ package main
 // Step list (each is idempotent):
 //
 //   1. Install platform CRDs into the provider workspace.
-//   2. Register the platform CRDs as APIExport.spec.resources entries.
-//   3. Apply the CachedResource that projects Templates to tenants.
-//   4. Create the ServiceAccount + Role + RoleBinding the runtime uses.
-//   5. Mint a TokenRequest bearer.
-//   6. Build a kubeconfig (in-cluster server URL + minted token) and
-//      write it to the path the serve subcommand reads.
-//   7. Apply the kro-cluster Secret in the kro Helm release's
-//      namespace so kro starts watching this APIExport's virtual
-//      workspace.
+//   2. Materialize the APIExport, bind grant, and endpoint slices.
+//   3. Register Templates (virtual storage) and Instances (CRD storage) as
+//      the provider's stable APIExport resources.
+//   4. Optionally self-register the CatalogEntry and seed built-in Templates.
+//   5. Create the ServiceAccount + RBAC and mint its bearer token.
+//   6. Write the lower-privilege kubeconfig the serve process reads.
 //
 // Exits on any step's error so a partial bootstrap is obvious.
 
@@ -77,9 +74,9 @@ func runInitCmd(ctx context.Context) error {
 	// the export by path — a missing export surfaces as the misleading
 	// "no permission to bind to export" forbidden, not a NotFound.
 	//
-	// Empty spec.resources: PlatformSchemaInAPIExport (below) upserts the
-	// Templates entry once the CachedResource identityHash is ready, and the
-	// Template controller adds per-template entries at runtime. The secrets claim
+	// Empty spec.resources: PlatformSchemaInAPIExport below publishes the stable
+	// Templates and Instances entries after the CachedResource identity is ready.
+	// Adding a Template never mutates the export. The secrets claim
 	// (built-in type → no identityHash) lets the provider read each tenant's
 	// cloud-credentials Secret; tenantScoped auto-accept is a CatalogEntry/Enable
 	// concept and is not part of the kcp APIExport spec.
@@ -115,7 +112,7 @@ func runInitCmd(ctx context.Context) error {
 	// export's logical cluster and publish endpoint URLs — otherwise kro never
 	// discovers the VW and tenant instances go unreconciled.
 	workspacePath := os.Getenv("INFRASTRUCTURE_WORKSPACE_PATH")
-	log.Printf("init: applying APIExportEndpointSlice (path=%q) for kro kcp-apiexport provider", workspacePath)
+	log.Printf("init: applying APIExportEndpointSlice (path=%q) for the provider's virtual-workspace controllers", workspacePath)
 	if err := install.PlatformAPIExportEndpointSlice(ctx, adminConfig, workspacePath); err != nil {
 		return fmt.Errorf("install APIExportEndpointSlice: %w", err)
 	}
@@ -199,18 +196,9 @@ func runInitCmd(ctx context.Context) error {
 		}
 	}
 
-	// kro seeding is best-effort during PR C bring-up: if no
-	// KRO_KUBECONFIG is set, we skip and log loudly. The serve
-	// subcommand still runs; tenants who apply Instance CRs see them
-	// as Pending until kro is wired.
-	if os.Getenv("KRO_KUBECONFIG") != "" {
-		log.Printf("init: seeding kro with VW kubeconfig Secret")
-		if err := install.SeedKroCluster(ctx, mint); err != nil {
-			return fmt.Errorf("seed kro: %w", err)
-		}
-	} else {
-		log.Printf("init: KRO_KUBECONFIG unset — skipping kro Secret seed; tenant Instance CRs will stay Pending until kro is configured")
-	}
+	// kro runs single-cluster against the runtime cluster (the instance
+	// controller bridges kcp → runtime), so no kcp kubeconfig is seeded onto
+	// the runtime cluster anymore.
 
 	log.Printf("init: complete. serve with INFRASTRUCTURE_KUBECONFIG=%s", kubeconfigPath)
 	return nil

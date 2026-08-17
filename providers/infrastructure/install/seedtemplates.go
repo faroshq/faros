@@ -35,8 +35,6 @@ import (
 	"sort"
 	"strings"
 
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
-	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -60,18 +58,18 @@ var templateGVR = schema.GroupVersionResource{
 	Resource: "templates",
 }
 
-// SeedTemplateRequirement identifies one embedded Template and the instance
-// API it must make usable before the provider can report ready.
+// SeedTemplateRequirement identifies one embedded Template that must be
+// current and backend-ready before the provider can report ready.
 type SeedTemplateRequirement struct {
-	Name          string
-	GroupResource schema.GroupResource
+	Name string
 }
 
-// RequiredSeedTemplateResources returns every instance group-resource declared
-// by the templates embedded in this binary. It is the bounded startup contract:
-// custom Templates are reconciled independently and do not gate provider
-// readiness. Every embedded Template must have a registered backend; otherwise
-// startup fails instead of reporting ready with an unusable built-in catalog.
+// RequiredSeedTemplateResources returns every Template embedded in this binary.
+// The name is retained for callers, but flattened Instances removed the old
+// per-template API resource contract. Custom Templates reconcile independently
+// and do not gate provider readiness. Every embedded Template must have a
+// registered backend; otherwise startup fails rather than advertise an unusable
+// built-in catalog.
 func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateRequirement, error) {
 	entries, err := fs.ReadDir(seedTemplatesFS, "templates")
 	if err != nil {
@@ -81,7 +79,7 @@ func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateR
 	for _, backend := range registeredBackends {
 		backends[backend] = struct{}{}
 	}
-	required := map[schema.GroupResource]string{}
+	required := map[string]struct{}{}
 	missingBackends := map[string]struct{}{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
@@ -101,17 +99,10 @@ func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateR
 		if _, registered := backends[tmpl.Spec.Backend]; !registered {
 			missingBackends[tmpl.Spec.Backend] = struct{}{}
 		}
-		groupResource := schema.GroupResource{
-			Group:    strings.TrimSpace(tmpl.Spec.InstanceCRD.Group),
-			Resource: strings.TrimSpace(tmpl.Spec.InstanceCRD.Resource),
+		if _, duplicate := required[tmpl.Name]; duplicate {
+			return nil, fmt.Errorf("duplicate embedded template %q", tmpl.Name)
 		}
-		if groupResource.Group == "" || groupResource.Resource == "" {
-			return nil, fmt.Errorf("embedded template %s has incomplete instanceCRD", e.Name())
-		}
-		if existing, duplicate := required[groupResource]; duplicate && existing != tmpl.Name {
-			return nil, fmt.Errorf("embedded templates %q and %q declare the same instance resource %s", existing, tmpl.Name, groupResource)
-		}
-		required[groupResource] = tmpl.Name
+		required[tmpl.Name] = struct{}{}
 	}
 	if len(missingBackends) > 0 {
 		missing := make([]string, 0, len(missingBackends))
@@ -123,90 +114,22 @@ func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateR
 	}
 
 	result := make([]SeedTemplateRequirement, 0, len(required))
-	for groupResource, name := range required {
-		result = append(result, SeedTemplateRequirement{Name: name, GroupResource: groupResource})
+	for name := range required {
+		result = append(result, SeedTemplateRequirement{Name: name})
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].GroupResource.String() < result[j].GroupResource.String() })
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
 }
 
 // SeedTemplatesReady reports whether every embedded seed Template
-// is current and backend-ready and its effective instance API is published.
-// Schema publication alone is insufficient: a failed Backend.SetupTemplate can
-// otherwise leave an API that accepts instances which no runtime reconciles.
+// is current and backend-ready. The one stable Instance API is installed during
+// provider bootstrap; Template readiness proves each built-in product has a
+// live backend graph before the provider advertises readiness.
 func SeedTemplatesReady(ctx context.Context, dyn dynamic.Interface, required []SeedTemplateRequirement) (bool, error) {
 	if len(required) == 0 {
 		return true, nil
 	}
-	export, err := dyn.Resource(apiExportGVR).Get(ctx, APIExportName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("get APIExport %q: %w", APIExportName, err)
-	}
-	return seedTemplateResourcesPublished(ctx, dyn, export, required)
-}
-
-func seedTemplateResourcesPublished(ctx context.Context, dyn dynamic.Interface, export *unstructured.Unstructured, required []SeedTemplateRequirement) (bool, error) {
-	raw, found, err := unstructured.NestedFieldNoCopy(export.Object, "spec", "resources")
-	if err != nil {
-		return false, fmt.Errorf("read APIExport resources: %w", err)
-	}
-	var resources []apisv1alpha2.ResourceSchema
-	if found && raw != nil {
-		data, err := json.Marshal(raw)
-		if err != nil {
-			return false, fmt.Errorf("marshal APIExport resources: %w", err)
-		}
-		if err := json.Unmarshal(data, &resources); err != nil {
-			return false, fmt.Errorf("decode APIExport resources: %w", err)
-		}
-	}
-	published := make(map[schema.GroupResource]apisv1alpha2.ResourceSchema, len(resources))
-	for _, resource := range resources {
-		published[schema.GroupResource{Group: resource.Group, Resource: resource.Name}] = resource
-	}
 	for _, requirement := range required {
-		groupResource := requirement.GroupResource
-		resource, ok := published[groupResource]
-		if !ok || strings.TrimSpace(resource.Schema) == "" {
-			return false, nil
-		}
-		schemaObj, err := dyn.Resource(apiResourceSchemaGVR).Get(ctx, resource.Schema, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("get APIResourceSchema %q for %s: %w", resource.Schema, groupResource, err)
-		}
-		data, err := json.Marshal(schemaObj.Object)
-		if err != nil {
-			return false, fmt.Errorf("marshal APIResourceSchema %q: %w", resource.Schema, err)
-		}
-		var apiSchema apisv1alpha1.APIResourceSchema
-		if err := json.Unmarshal(data, &apiSchema); err != nil {
-			return false, fmt.Errorf("decode APIResourceSchema %q: %w", resource.Schema, err)
-		}
-		if apiSchema.Spec.Group != groupResource.Group || apiSchema.Spec.Names.Plural != groupResource.Resource {
-			return false, nil
-		}
-		served := false
-		for _, version := range apiSchema.Spec.Versions {
-			if !version.Served {
-				continue
-			}
-			served = true
-			gvr := schema.GroupVersionResource{Group: groupResource.Group, Version: version.Name, Resource: groupResource.Resource}
-			if _, err := dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1}); apierrors.IsNotFound(err) {
-				return false, nil
-			} else if err != nil {
-				return false, fmt.Errorf("list effective resource %s: %w", gvr, err)
-			}
-		}
-		if !served {
-			return false, nil
-		}
 		ready, err := seedTemplateBackendReady(ctx, dyn, requirement)
 		if err != nil {
 			return false, err
@@ -233,10 +156,6 @@ func seedTemplateBackendReady(ctx context.Context, dyn dynamic.Interface, requir
 	var tmpl infrav1alpha1.Template
 	if err := json.Unmarshal(data, &tmpl); err != nil {
 		return false, fmt.Errorf("decode seed Template %q: %w", requirement.Name, err)
-	}
-	if tmpl.Spec.InstanceCRD.Group != requirement.GroupResource.Group ||
-		tmpl.Spec.InstanceCRD.Resource != requirement.GroupResource.Resource {
-		return false, nil
 	}
 	if tmpl.Status.ObservedGeneration != tmpl.Generation || !tmpl.Status.Backend.Ready {
 		return false, nil

@@ -12,6 +12,7 @@ package operator
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"os"
@@ -35,16 +36,18 @@ import (
 const ServeNamespace = "faros-infrastructure-provider"
 
 const (
-	providerKubeconfigMount = "/var/run/secrets/faros/provider/kubeconfig"
-	runtimeKubeconfigMount  = "/var/run/secrets/faros/runtime/kubeconfig"
+	providerKubeconfigMount          = "/var/run/secrets/faros/provider/kubeconfig"
+	runtimeKubeconfigMount           = "/var/run/secrets/faros/runtime/kubeconfig"
+	providerKubeconfigHashAnnotation = "infrastructure.faros.sh/provider-kubeconfig-sha256"
+	runtimeKubeconfigHashAnnotation  = "infrastructure.faros.sh/runtime-kubeconfig-sha256"
+	hubTokenHashAnnotation           = "infrastructure.faros.sh/hub-token-sha256"
 )
 
-// EnsureProviderServe replicates the provider + runtime kubeconfigs (and hub
-// token) into the runtime cluster and create-or-updates the provider serve
-// Deployment + Service there, with the image/replicas/port from the CR. The
-// serve container runs `infrastructure-provider serve`, reading the provider
-// kubeconfig (INFRASTRUCTURE_KUBECONFIG) for its controllers and the runtime
-// kubeconfig (KRO_KUBECONFIG) for the kro backend.
+// EnsureProviderServe replicates the scoped provider runtime kubeconfig, the
+// runtime-cluster kubeconfig, and hub token into the runtime cluster and
+// create-or-updates the provider serve Deployment + Service there. The caller
+// must never pass its bootstrap/admin provider kubeconfig: the serve container
+// uses INFRASTRUCTURE_KUBECONFIG only for its long-lived controllers.
 func EnsureProviderServe(
 	ctx context.Context,
 	cs kubernetes.Interface,
@@ -195,6 +198,15 @@ func EnsureProviderServe(
 
 	image := cr.Spec.Provider.Image.Repository + ":" + cr.Spec.Provider.Image.Tag
 	labels := map[string]string{"app.kubernetes.io/name": "faros-infrastructure-provider", "app.kubernetes.io/instance": name}
+	podAnnotations := map[string]string{
+		providerKubeconfigHashAnnotation: fmt.Sprintf("%x", sha256.Sum256(providerKubeconfig)),
+	}
+	if !inCluster {
+		podAnnotations[runtimeKubeconfigHashAnnotation] = fmt.Sprintf("%x", sha256.Sum256(runtimeKubeconfig))
+	}
+	if cr.Spec.Hub.TokenSecret != nil && len(hubToken) > 0 {
+		podAnnotations[hubTokenHashAnnotation] = fmt.Sprintf("%x", sha256.Sum256(hubToken))
+	}
 
 	want := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ServeNamespace, Labels: labels},
@@ -202,7 +214,10 @@ func EnsureProviderServe(
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      labels,
+					Annotations: podAnnotations,
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: serveSA,
 					Containers: []corev1.Container{{

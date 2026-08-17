@@ -12,7 +12,7 @@ import type { Instance, TemplateView, ViewColumn } from '../types'
 
 const emit = defineEmits<{
   (e: 'navigate', view: string): void
-  (e: 'select', name: string, template: string): void
+  (e: 'select', name: string): void
 }>()
 
 const items = ref<Instance[]>([])
@@ -135,7 +135,7 @@ async function deleteInstance(instance: Instance) {
 
   deletingInstanceKey.value = instanceKey(instance)
   try {
-    await api.deleteInstance(instance.name, instance.template)
+    await api.deleteInstance(instance.name)
     tombstones.add(instanceKey(instance), instance.uid)
     await load()
   } catch (caught) {
@@ -148,7 +148,7 @@ async function deleteInstance(instance: Instance) {
 function selectInstance(row: Record<string, unknown>) {
   const instance = rowInstance(row)
   if (deletingInstanceKey.value === instanceKey(instance) || tombstones.has(instanceKey(instance), instance.uid)) return
-  emit('select', instance.name, instance.template)
+  emit('select', instance.name)
 }
 
 function formatAge(timestamp?: string): string {

@@ -23,6 +23,9 @@ data:
       version: {{ .Chart.AppVersion | quote }}
       category: "Build"
       iconURL: "/ui/providers/vibe-studio/icon.svg"
+      dependencies:
+        - name: code
+        - name: infrastructure
       ui:
         url: "http://{{ include "vibe-studio.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         indexPath: "/"
@@ -41,24 +44,10 @@ data:
           - group: vibe.faros.sh
             name: studios
         permissionClaims:
-          - resource: applications
-            group: infrastructure.faros.sh
-            verbs: [get, list, watch, create, update, patch, delete]
-            tenantScoped: true
-            identitySource: {kind: Provider, provider: infrastructure}
-          - resource: simplewebapps
-            group: infrastructure.faros.sh
-            verbs: [get, list, watch, create, update, patch, delete]
-            tenantScoped: true
-            identitySource: {kind: Provider, provider: infrastructure}
-          - resource: workers
-            group: infrastructure.faros.sh
-            verbs: [get, list, watch, create, update, patch, delete]
-            tenantScoped: true
-            identitySource: {kind: Provider, provider: infrastructure}
-          # Web search: every project binds a private searxng instance so the
-          # assistant can look things up instead of asking the user to paste.
-          - resource: searxngs
+          # Every infrastructure template's instances are one flattened
+          # resource (product selected by spec.template), so one claim covers
+          # the runtime app, workers, and the per-project searxng backend.
+          - resource: instances
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true

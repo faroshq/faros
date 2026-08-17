@@ -16,10 +16,10 @@ package template
 // retirement keeps serving the old Template forever — visible in the portal,
 // selectable by agents, backed by code paths that no longer exist. The
 // reconciler deletes any Template on this list on sight; the normal finalize
-// chain (backend teardown → APIExport entry removal → per-template CRD
-// deletion) then dismantles what it authored, exactly as if an operator had
-// deleted it by hand. Because this runs in the watch loop, a re-applied
-// retired template is removed again — retirement is enforced, not one-shot.
+// chain tears down its backend runtime state and drops the finalizer, exactly
+// as if an operator had deleted it by hand. Because this runs in the watch
+// loop, a re-applied retired template is removed again — retirement is
+// enforced, not one-shot.
 //
 // The value is the reason, logged when the deletion happens. Names on this
 // list are reserved: an operator's hand-authored Template with a retired name
