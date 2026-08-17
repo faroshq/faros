@@ -3,6 +3,9 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Safe to scale: serving resolves tenant clusters through the APIExport
+# endpoint slice on every replica, and the controllers are leader-elected
+# (one active set per Lease in the provider workspace).
 replicaCount: 1
 
 service:

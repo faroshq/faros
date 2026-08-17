@@ -27,8 +27,6 @@ import (
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/cluster"
-	multicluster "sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 
 	databricksv1alpha1 "github.com/faroshq/provider-databricks/apis/databricks/v1alpha1"
 	"github.com/faroshq/provider-databricks/queryapi"
@@ -67,12 +65,15 @@ type ClientFactory struct {
 	cacheClock    uint64
 }
 
-// ClusterAuthority is the provider-owned multicluster manager. Its client is
-// authenticated with the provider ServiceAccount, so provider-owned Tables,
-// Warehouses, Connections, and credential Secrets are resolved with provider
-// authority rather than the forwarded caller token.
+// ClusterAuthority resolves a provider-credential client for one tenant
+// logical cluster, so provider-owned Tables, Warehouses, Connections, and
+// credential Secrets are read with provider authority rather than the
+// forwarded caller token. Production wiring is SliceAuthority (VW URLs from
+// the APIExportEndpointSlice) — deliberately independent of the controller
+// manager so serving works on every replica while controllers are
+// leader-elected.
 type ClusterAuthority interface {
-	GetCluster(context.Context, multicluster.ClusterName) (cluster.Cluster, error)
+	ClusterClient(ctx context.Context, clusterID string) (client.Client, error)
 }
 
 func NewClientFactory(base *rest.Config) *ClientFactory {
@@ -202,14 +203,14 @@ func (f *ClientFactory) AuthorityClient(ctx context.Context, clusterID string) (
 	if clusterID == "" || clusterID == "." || clusterID == ".." || url.PathEscape(clusterID) != clusterID {
 		return nil, errors.New("invalid tenant logical-cluster ID")
 	}
-	cl, err := authority.GetCluster(ctx, multicluster.ClusterName(clusterID))
+	cl, err := authority.ClusterClient(ctx, clusterID)
 	if err != nil {
 		return nil, fmt.Errorf("provider authority cluster %q: %w", clusterID, err)
 	}
-	if cl == nil || cl.GetClient() == nil {
+	if cl == nil {
 		return nil, fmt.Errorf("provider authority cluster %q has no client", clusterID)
 	}
-	return cl.GetClient(), nil
+	return cl, nil
 }
 
 func (f *ClientFactory) For(clusterID, token string) (dynamic.Interface, error) {
