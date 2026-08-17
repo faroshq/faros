@@ -31,6 +31,7 @@ VUE_PORTALS=(
   "providers/databricks/portal"
   "providers/edges/portal"
   "providers/infrastructure/portal"
+  "providers/secrets/portal"
 )
 VUE_FILES=(confirm.ts ConfirmDialog.vue ResourceTable.vue ResourceTableDeleteButton.vue ResourceTableDeleteButton.css ResourceTableEditButton.vue ResourceTableEditButton.css ConditionsPanel.vue StatusBadge.vue)
 
