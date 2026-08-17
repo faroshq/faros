@@ -14,6 +14,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	vibev1alpha1 "github.com/faroshq/provider-vibe-studio/apis/vibe/v1alpha1"
@@ -110,6 +111,38 @@ func DesiredInstance(p *vibev1alpha1.Project, ref InstanceRef) *unstructured.Uns
 	return inst
 }
 
+// mergeInstanceValues overlays binding-owned desired values while preserving
+// fields computed by the infrastructure provider. Maps merge recursively;
+// explicit scalar, list, and nil values replace their observed counterparts.
+func mergeInstanceValues(observed, desired map[string]any) map[string]any {
+	merged := make(map[string]any, len(observed)+len(desired))
+	for key, value := range observed {
+		merged[key] = runtime.DeepCopyJSONValue(value)
+	}
+	mergeInstanceValueMap(merged, desired)
+	return merged
+}
+
+func mergeInstanceValueMap(dst, desired map[string]any) {
+	for key, desiredValue := range desired {
+		desiredMap, desiredIsMap := desiredValue.(map[string]any)
+		if !desiredIsMap {
+			dst[key] = runtime.DeepCopyJSONValue(desiredValue)
+			continue
+		}
+		observedMap, observedIsMap := dst[key].(map[string]any)
+		if !observedIsMap {
+			observedMap = map[string]any{}
+		}
+		mergedMap := make(map[string]any, len(observedMap)+len(desiredMap))
+		for nestedKey, nestedValue := range observedMap {
+			mergedMap[nestedKey] = runtime.DeepCopyJSONValue(nestedValue)
+		}
+		mergeInstanceValueMap(mergedMap, desiredMap)
+		dst[key] = mergedMap
+	}
+}
+
 // MirrorStatus computes the Project status from observed instances. Pure —
 // now is injected. Phase: Ready when every demanded binding's instance reports
 // ready; Provisioning otherwise.
@@ -166,6 +199,9 @@ func MirrorStatus(p *vibev1alpha1.Project, observed map[string]*unstructured.Uns
 // unstructured status. Mirrors the infrastructure catalog reader: empty phase
 // defaults to Pending, or Ready when a Ready=True condition exists.
 func observeInstance(inst *unstructured.Unstructured) (phase, url string, outputs map[string]string) {
+	if !instanceStatusGenerationCurrent(inst) {
+		return "Pending", "", nil
+	}
 	status, _, _ := unstructured.NestedMap(inst.Object, "status")
 	if status == nil {
 		return "Pending", "", nil
@@ -201,6 +237,14 @@ func observeInstance(inst *unstructured.Unstructured) (phase, url string, output
 		outputs[k] = s
 	}
 	return phase, url, outputs
+}
+
+func instanceStatusGenerationCurrent(inst *unstructured.Unstructured) bool {
+	if inst == nil {
+		return false
+	}
+	observed, found, err := unstructured.NestedInt64(inst.Object, "status", "observedGeneration")
+	return err == nil && found && observed >= inst.GetGeneration()
 }
 
 func isReadyPhase(phase string) bool {

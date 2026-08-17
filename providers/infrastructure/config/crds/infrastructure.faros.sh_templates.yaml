@@ -42,23 +42,14 @@ spec:
           thing — a Redis cache, a Postgres database, a packaged application.
           Operators apply Templates to the provider workspace
           (root:faros:providers:infrastructure). The Template controller
-          reacts by:
+          validates its values contract and calls Backend.SetupTemplate on the backend
+          named in spec.backend. The kro backend authors a namespaced runtime RGD;
+          future terraform/cloud backends can stage modules or validate credentials.
 
-           1. Materializing the per-template CRD declared in spec.instanceCRD
-              (e.g. redis.infrastructure.faros.sh) into the cluster's
-              CRD set, with OpenAPI validation derived from spec.schema.
-           2. Adding that CRD to APIExport.spec.schemas so tenants who
-              APIBind to the infrastructure provider can see and create
-              instances.
-           3. Calling Backend.SetupTemplate on the backend named in
-              spec.backend. The backend does whatever backend-specific
-              bookkeeping it needs (the kro backend authors an RGD; future
-              terraform / cloud backends stage modules / validate credentials).
-
-          Tenants discover Templates read-only via a CachedResource (PR B);
-          instances are CRs of the per-template CRD (PR C). The Template CR
-          itself is never tenant-facing as authorable input — it's the
-          platform's source of truth.
+          Tenants discover Templates read-only through a CachedResource and author the
+          one stable Instance kind with spec.template selecting the product and
+          spec.values carrying the template-shaped input. Template itself is never
+          tenant-authorable; it is the platform source of truth.
         properties:
           apiVersion:
             description: |-
@@ -558,39 +549,32 @@ spec:
                 type: string
               instanceCRD:
                 description: |-
-                  InstanceCRD declares the per-template CRD the platform
-                  publishes for tenants to author instances against. Must be in
-                  group infrastructure.faros.sh; the resource (lowercase
-                  plural) and kind (CamelCase singular) are operator-chosen but
-                  must be unique across all Templates.
+                  InstanceCRD declares the backend runtime CR that represents this
+                  Template. For kro it becomes the namespaced RGD-generated kind on the
+                  runtime cluster; tenants never author it directly. The resource and kind
+                  must be unique across Templates.
                 properties:
                   group:
                     description: |-
-                      Group MUST be infrastructure.faros.sh. Pinned here so
-                      every per-template CRD lives under the same namespace and the
-                      portal can render them uniformly.
+                      Group MUST be infrastructure.faros.sh so all runtime kinds stay in the
+                      provider's API namespace.
                     pattern: ^infrastructure\.faros\.sh$
                     type: string
                   kind:
-                    description: Kind is the CamelCase singular tenants use in apiVersion
-                      + kind.
+                    description: Kind is the CamelCase singular used by the runtime
+                      RGD.
                     maxLength: 64
                     pattern: ^[A-Z][A-Za-z0-9]*$
                     type: string
                   resource:
                     description: |-
-                      Resource is the lowercase plural the apiserver routes on
-                      (kubectl get <resource>). Must be unique across all Templates
-                      in the provider workspace.
+                      Resource is the lowercase plural the runtime apiserver routes on. It must
+                      be unique across all Templates.
                     maxLength: 64
                     pattern: ^[a-z][a-z0-9]*$
                     type: string
                   version:
-                    description: |-
-                      Version of the per-template CRD's served + storage schema.
-                      Templates can ship multiple Versions (a future Template can
-                      extend a previous one's set); the controller updates the CRD's
-                      spec.versions list rather than overwriting on conflict.
+                    description: Version is the RGD-generated runtime kind's API version.
                     pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
                     type: string
                 required:
@@ -610,12 +594,10 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
               schema:
                 description: |-
-                  Schema is the JSON Schema applied to the per-template CRD's
-                  spec field. Stored as raw JSON because importing
-                  apiextensions/v1.JSONSchemaProps directly trips controller-gen
-                  on the upstream type's recursive shape; the Template controller
-                  parses this back into JSONSchemaProps when it builds the CRD's
-                  spec.versions[].schema.openAPIV3Schema.properties.spec.
+                  Schema is the JSON Schema for Instance.spec.values and the backend runtime
+                  CR's spec. Stored as raw JSON because importing
+                  apiextensions/v1.JSONSchemaProps directly trips controller-gen on the
+                  upstream type's recursive shape.
 
                   Expected content is the standard subset of OpenAPI v3 (type,
                   properties, required, enum, default, description, minimum,
@@ -625,9 +607,8 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
               version:
                 description: |-
-                  Version pins the Template definition's revision. Required by
-                  the per-template CRD's served version selection and by
-                  instance-create-time consistency checks.
+                  Version pins the Template definition's revision and is mirrored into
+                  Instance status after reconciliation.
                 maxLength: 64
                 pattern: ^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$
                 type: string

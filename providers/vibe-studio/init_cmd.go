@@ -61,6 +61,30 @@ func runInitCmd(ctx context.Context) error {
 	if infraHash == "" {
 		log.Printf("WARNING: VIBE_STUDIO_INFRA_IDENTITY_HASH is empty — the instance permission claims will have no identityHash and tenant Enable will not engage instance lifecycling")
 	}
+	// Repository creation (git seeding) — the reconciler creates Repository
+	// CRs; the seed commit itself goes through the code provider's MCP as
+	// the caller (commit bundles are code-provider-local).
+	codeHash := os.Getenv("VIBE_STUDIO_CODE_IDENTITY_HASH")
+	if codeHash == "" {
+		log.Printf("WARNING: VIBE_STUDIO_CODE_IDENTITY_HASH is empty — the repositories claim will have no identityHash and the reconciler cannot create repositories")
+	}
+	claims := vibeStudioPermissionClaims(infraHash, codeHash)
+
+	if err := sdkinstall.Bootstrap(ctx, sdkinstall.Options{
+		Config:           config,
+		ExportName:       apiExportName,
+		WorkspacePath:    workspacePath,
+		SchemasDir:       schemasDir,
+		Claims:           claims,
+		CatalogEntryFile: catalogEntryFile,
+	}); err != nil {
+		return fmt.Errorf("provider workspace bootstrap: %w", err)
+	}
+	log.Printf("vibe-studio-provider init: workspace bootstrapped (export=%s path=%s schemas=%s catalogEntry=%s claims=%d)", apiExportName, workspacePath, schemasDir, catalogEntryFile, len(claims))
+	return nil
+}
+
+func vibeStudioPermissionClaims(infraHash, codeHash string) []sdkinstall.PermissionClaim {
 	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceClaimResources)+1)
 	for _, r := range instanceClaimResources {
 		claims = append(claims, sdkinstall.PermissionClaim{
@@ -69,13 +93,6 @@ func runInitCmd(ctx context.Context) error {
 			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			IdentityHash: infraHash,
 		})
-	}
-	// Repository creation (git seeding) — the reconciler creates Repository
-	// CRs; the seed commit itself goes through the code provider's MCP as
-	// the caller (commit bundles are code-provider-local).
-	codeHash := os.Getenv("VIBE_STUDIO_CODE_IDENTITY_HASH")
-	if codeHash == "" {
-		log.Printf("WARNING: VIBE_STUDIO_CODE_IDENTITY_HASH is empty — the repositories claim will have no identityHash and the reconciler cannot create repositories")
 	}
 	claims = append(claims, sdkinstall.PermissionClaim{
 		Group:        "code.faros.sh",
@@ -101,19 +118,7 @@ func runInitCmd(ctx context.Context) error {
 			Verbs:    []string{"get", "list", "watch", "create", "update", "delete"},
 		},
 	)
-
-	if err := sdkinstall.Bootstrap(ctx, sdkinstall.Options{
-		Config:           config,
-		ExportName:       apiExportName,
-		WorkspacePath:    workspacePath,
-		SchemasDir:       schemasDir,
-		Claims:           claims,
-		CatalogEntryFile: catalogEntryFile,
-	}); err != nil {
-		return fmt.Errorf("provider workspace bootstrap: %w", err)
-	}
-	log.Printf("vibe-studio-provider init: workspace bootstrapped (export=%s path=%s schemas=%s catalogEntry=%s claims=%d)", apiExportName, workspacePath, schemasDir, catalogEntryFile, len(claims))
-	return nil
+	return claims
 }
 
 // loadInitConfig resolves the workspace-admin kubeconfig for init.

@@ -41,6 +41,7 @@ import (
 
 var (
 	templatesGVR  = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "templates"}
+	instancesGVR  = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances"}
 	crdGVR        = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
 	apiExportGVR  = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apiexports"}
 	apiBindingGVR = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings"}
@@ -73,9 +74,9 @@ func providerWSClient(t *testing.T) dynamic.Interface {
 	return kcpDynamic(t, workspacePath, adminToken)
 }
 
-// applyProviderManifests applies provider.yaml (kind Provider) + manifest.yaml
-// (kind CatalogEntry) into root:faros:system:providers, mirroring
-// `make install-provider-infrastructure`. Called from TestMain.
+// applyProviderManifests applies provider.yaml into
+// root:faros:system:providers and writes a port-adjusted CatalogEntry for init
+// to self-register in the provider workspace, mirroring the Makefile flow.
 func applyProviderManifests() error {
 	cfg := &rest.Config{
 		Host:            kcpServer + "/clusters/root:faros:system:providers",
@@ -86,10 +87,7 @@ func applyProviderManifests() error {
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
-	gvrByKind := map[string]schema.GroupVersionResource{
-		"Provider":     {Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"},
-		"CatalogEntry": {Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries"},
-	}
+	providerGVR := schema.GroupVersionResource{Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"}
 	for _, file := range []string{"provider.yaml", "manifest.yaml"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot, "providers", "infrastructure", file))
 		if err != nil {
@@ -106,8 +104,7 @@ func applyProviderManifests() error {
 			if obj.GetKind() == "" {
 				continue
 			}
-			gvr, ok := gvrByKind[obj.GetKind()]
-			if !ok {
+			if obj.GetKind() != "Provider" && obj.GetKind() != "CatalogEntry" {
 				return fmt.Errorf("%s: unexpected kind %q", file, obj.GetKind())
 			}
 			if obj.GetKind() == "CatalogEntry" {
@@ -120,6 +117,14 @@ func applyProviderManifests() error {
 				if err := unstructured.SetNestedField(obj.Object, overrideURL, "spec", "backend", "url"); err != nil {
 					return fmt.Errorf("%s: override spec.backend.url: %w", file, err)
 				}
+				rendered, err := yaml.Marshal(obj.Object)
+				if err != nil {
+					return fmt.Errorf("marshal %s: %w", file, err)
+				}
+				if err := os.WriteFile(filepath.Join(dataDir, "infrastructure-catalogentry.yaml"), rendered, 0o600); err != nil {
+					return fmt.Errorf("write CatalogEntry: %w", err)
+				}
+				continue
 			}
 			// The hub reports /readyz before the admin/catalog APIs in
 			// root:faros:system:providers are fully servable, so the first
@@ -128,7 +133,7 @@ func applyProviderManifests() error {
 			deadline := time.Now().Add(90 * time.Second)
 			for {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_, err = cl.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
+				_, err = cl.Resource(providerGVR).Create(ctx, obj, metav1.CreateOptions{})
 				cancel()
 				if err == nil || apierrors.IsAlreadyExists(err) {
 					break
@@ -387,9 +392,9 @@ func TestDProvidersDTO(t *testing.T) {
 }
 
 // TestETenantSeesTemplatesCatalog is the tenant vertical: bind the provider's
-// APIExport in the static user's workspace and list Templates through the
-// binding — the same read App Studio's template picker and the MCP
-// list_templates tool perform.
+// APIExport in the static user's workspace, list Templates through the
+// binding, then publish a new Template and prove the permanent flattened
+// Instance API and existing binding remain stable.
 func TestETenantSeesTemplatesCatalog(t *testing.T) {
 	tenantWS := loginStaticTokenAndGetCluster(t)
 	t.Logf("tenant workspace = %s", tenantWS)
@@ -417,16 +422,23 @@ func TestETenantSeesTemplatesCatalog(t *testing.T) {
 		_ = tenant.Resource(apiBindingGVR).Delete(ctx, "infrastructure", metav1.DeleteOptions{})
 	})
 
+	var bindingUID string
 	ok := waitForCondition(t, 60*time.Second, func() (bool, string) {
 		got, err := tenant.Resource(apiBindingGVR).Get(ctxWithTimeout(t, 5*time.Second), "infrastructure", metav1.GetOptions{})
 		if err != nil {
 			return false, err.Error()
 		}
 		phase, _, _ := unstructured.NestedString(got.Object, "status", "phase")
+		if phase == "Bound" {
+			bindingUID = string(got.GetUID())
+		}
 		return phase == "Bound", "phase=" + phase
 	})
 	if !ok {
 		t.Fatal("APIBinding never reached Bound")
+	}
+	if bindingUID == "" {
+		t.Fatal("bound APIBinding had no UID")
 	}
 
 	// The Templates catalog must be readable through the binding.
@@ -448,6 +460,78 @@ func TestETenantSeesTemplatesCatalog(t *testing.T) {
 	})
 	if !ok {
 		t.Fatal("tenant never saw the seeded templates through the APIBinding")
+	}
+
+	// The flattened provider exports one permanent Instance API. Templates are
+	// catalog data and must not grow APIExport.spec.resources after tenants bind.
+	if _, err := tenant.Resource(instancesGVR).List(ctxWithTimeout(t, 5*time.Second), metav1.ListOptions{}); err != nil {
+		t.Fatalf("list stable Instances through binding: %v", err)
+	}
+
+	const (
+		postBindName     = "e2e-post-bind-widget"
+		postBindResource = "e2epostbindwidgets"
+		postBindKind     = "E2EPostBindWidget"
+	)
+	provider := providerWSClient(t)
+	tmpl := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Template",
+		"metadata":   map[string]any{"name": postBindName},
+		"spec": map[string]any{
+			"displayName": "E2E post-bind widget",
+			"description": "proves post-bind Templates remain API-surface-neutral",
+			"version":     "0.0.1",
+			"backend":     "stub",
+			"instanceCRD": map[string]any{
+				"group":    "infrastructure.faros.sh",
+				"version":  "v1alpha1",
+				"resource": postBindResource,
+				"kind":     postBindKind,
+			},
+			"schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}}
+	if _, err := provider.Resource(templatesGVR).Create(ctxWithTimeout(t, 10*time.Second), tmpl, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create post-bind stub template: %v", err)
+	}
+	// The newly authored catalog entry must reconcile and appear through the
+	// existing binding; it does not publish its private runtime kind into the
+	// tenant workspace. Waiting for Ready avoids a vacuous negative assertion
+	// against APIExport before the Template controller has handled the object.
+	ok = waitForCondition(t, 60*time.Second, func() (bool, string) {
+		got, err := tenant.Resource(templatesGVR).Get(ctxWithTimeout(t, 5*time.Second), postBindName, metav1.GetOptions{})
+		if err != nil {
+			return false, err.Error()
+		}
+		generation := got.GetGeneration()
+		conditions, _, _ := unstructured.NestedSlice(got.Object, "status", "conditions")
+		for _, condition := range conditions {
+			entry, _ := condition.(map[string]any)
+			observedGeneration, _, _ := unstructured.NestedInt64(entry, "observedGeneration")
+			if entry["type"] == "Ready" && entry["status"] == "True" && observedGeneration >= generation {
+				return true, ""
+			}
+		}
+		return false, fmt.Sprintf("generation=%d conditions=%v", generation, conditions)
+	})
+	if !ok {
+		t.Fatal("tenant never saw a reconciled post-bind Template through the existing APIBinding")
+	}
+	if apiExportHasResource(t, provider, postBindResource) {
+		t.Fatalf("APIExport.spec.resources gained %q; Templates must not publish per-template APIs", postBindResource)
+	}
+	currentBinding, err := tenant.Resource(apiBindingGVR).Get(ctxWithTimeout(t, 5*time.Second), "infrastructure", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get upgraded APIBinding: %v", err)
+	}
+	if got := string(currentBinding.GetUID()); got != bindingUID {
+		t.Fatalf("post-bind Template replaced APIBinding: UID = %q, want original %q", got, bindingUID)
 	}
 }
 

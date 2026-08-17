@@ -30,6 +30,8 @@ hub:
   insecure: false
 
 # Central kro cluster kubeconfig.
+# Required when bootstrap.seedTemplates=true. The default unseeded chart render
+# leaves this empty so operators can supply their own externally managed catalog.
 # Two ways to provide it:
 #   1. Inline `centralKro.kubeconfig` (rendered into a Secret by the
 #      chart; convenient for dev, NOT recommended for prod).
@@ -118,35 +120,37 @@ development:
 # See providers/infrastructure/docs/template-conventions.md. Override per instance, or edit the
 # template default, to pin a digest.
 
-# Secret the provider mounts read-only at
-# /var/run/secrets/faros/faros-provider-kubeconfig to reach kcp. How it is
-# populated depends on bootstrap.enabled:
-#   - bootstrap.enabled=false (hub-provisioned): the hub catalog controller
-#     mints it (pkg/hub/providers/provision.go) when the CatalogEntry is
-#     reconciled; the serve volume mounts it as `optional` until it appears.
-#   - bootstrap.enabled=true (self-bootstrap): IGNORED — the serve container
-#     reuses the same kcp admin kubeconfig the init container used, so there
-#     is no separately-minted runtime Secret.
+# Bootstrap input Secret. How it is used depends on bootstrap.enabled:
+#   - bootstrap.enabled=true (default): only init mounts this hub-minted
+#     workspace-admin kubeconfig. Init installs provider APIs and writes a
+#     minted least-privilege runtime kubeconfig into a shared emptyDir for serve.
+#   - bootstrap.enabled=false: this Secret must target a provider workspace
+#     that was bootstrapped out-of-band; serve mounts it directly.
 providerKubeconfig:
   secretName: faros-provider-kubeconfig
 
 # Self-bootstrap via an init container. When enabled, an init container runs
 # `infrastructure init` BEFORE the serve container: it installs the CRDs,
-# CachedResource, and APIExport into the provider workspace. Both containers
-# share ONE kubeconfig (no separately-minted runtime token).
+# CachedResource, and APIExport into the provider workspace, then mints the
+# narrower kubeconfig used by the long-lived serve container.
 bootstrap:
-  enabled: false
+  # Keep this enabled for a fresh non-operator install. Disable it only when an
+  # external workflow has already installed every provider-owned API resource.
+  enabled: true
 
-  # Where the shared kubeconfig comes from:
-  #   hubMinted  - (default) the hub-delivered faros-provider-kubeconfig
-  #                (providerKubeconfig.secretName). A platform admin applies the
-  #                CatalogEntry; the hub creates the provider workspace, mints a
-  #                cluster-admin-in-workspace kubeconfig, and writes it as that
-  #                Secret (requires the hub to run with --kubeconfig so its
-  #                HostSecretWriter can write into this cluster). The init
-  #                container's mount is non-optional, so the pod simply waits in
-  #                ContainerCreating until the hub delivers it — no `kubectl ws
-  #                create`, no separate admin kubeconfig.
+  # Seed the in-binary kro-backed catalog and gate readiness on it. Enabling
+  # this requires bootstrap.enabled=true and centralKro configuration so init can wire kro's
+  # virtual-workspace client and serve can author/observe RGDs. The render-safe
+  # default is false because no valid runtime-cluster credential can be shipped
+  # in the chart; set true for the standard seeded deployment shown in README.
+  seedTemplates: false
+
+  # Where init's bootstrap credential comes from:
+  #   hubMinted  - (default) the faros-provider-kubeconfig minted by admin
+  #                Provider onboarding and supplied as
+  #                providerKubeconfig.secretName. The init mount is
+  #                non-optional, so the pod waits in ContainerCreating until the
+  #                deployment/operator workflow provides it.
   #   supplied   - you provide a kcp kubeconfig directly (no hub needed). Use
   #                this for a fully standalone install.
   kubeconfigSource: hubMinted

@@ -12,6 +12,7 @@ package operator
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"os"
@@ -35,16 +36,18 @@ import (
 const ServeNamespace = "faros-infrastructure-provider"
 
 const (
-	providerKubeconfigMount = "/var/run/secrets/faros/provider/kubeconfig"
-	runtimeKubeconfigMount  = "/var/run/secrets/faros/runtime/kubeconfig"
+	providerKubeconfigMount          = "/var/run/secrets/faros/provider/kubeconfig"
+	runtimeKubeconfigMount           = "/var/run/secrets/faros/runtime/kubeconfig"
+	providerKubeconfigHashAnnotation = "infrastructure.faros.sh/provider-kubeconfig-sha256"
+	runtimeKubeconfigHashAnnotation  = "infrastructure.faros.sh/runtime-kubeconfig-sha256"
+	hubTokenHashAnnotation           = "infrastructure.faros.sh/hub-token-sha256"
 )
 
-// EnsureProviderServe replicates the provider + runtime kubeconfigs (and hub
-// token) into the runtime cluster and create-or-updates the provider serve
-// Deployment + Service there, with the image/replicas/port from the CR. The
-// serve container runs `infrastructure-provider serve`, reading the provider
-// kubeconfig (INFRASTRUCTURE_KUBECONFIG) for its controllers and the runtime
-// kubeconfig (KRO_KUBECONFIG) for the kro backend.
+// EnsureProviderServe replicates the scoped provider runtime kubeconfig, the
+// runtime-cluster kubeconfig, and hub token into the runtime cluster and
+// create-or-updates the provider serve Deployment + Service there. The caller
+// must never pass its bootstrap/admin provider kubeconfig: the serve container
+// uses INFRASTRUCTURE_KUBECONFIG only for its long-lived controllers.
 func EnsureProviderServe(
 	ctx context.Context,
 	cs kubernetes.Interface,
@@ -78,6 +81,7 @@ func EnsureProviderServe(
 	env := []corev1.EnvVar{
 		{Name: "PORT", Value: fmt.Sprintf("%d", port)},
 		{Name: "FAROS_PROVIDER_NAME", Value: "infrastructure"},
+		{Name: "INFRASTRUCTURE_CONTROLLER_MODE", Value: "required"},
 		{Name: "INFRASTRUCTURE_KUBECONFIG", Value: providerKubeconfigMount},
 	}
 	if cr.Spec.Hub.URL != "" {
@@ -194,6 +198,15 @@ func EnsureProviderServe(
 
 	image := cr.Spec.Provider.Image.Repository + ":" + cr.Spec.Provider.Image.Tag
 	labels := map[string]string{"app.kubernetes.io/name": "faros-infrastructure-provider", "app.kubernetes.io/instance": name}
+	podAnnotations := map[string]string{
+		providerKubeconfigHashAnnotation: fmt.Sprintf("%x", sha256.Sum256(providerKubeconfig)),
+	}
+	if !inCluster {
+		podAnnotations[runtimeKubeconfigHashAnnotation] = fmt.Sprintf("%x", sha256.Sum256(runtimeKubeconfig))
+	}
+	if cr.Spec.Hub.TokenSecret != nil && len(hubToken) > 0 {
+		podAnnotations[hubTokenHashAnnotation] = fmt.Sprintf("%x", sha256.Sum256(hubToken))
+	}
 
 	want := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ServeNamespace, Labels: labels},
@@ -201,7 +214,10 @@ func EnsureProviderServe(
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      labels,
+					Annotations: podAnnotations,
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: serveSA,
 					Containers: []corev1.Container{{
@@ -211,9 +227,16 @@ func EnsureProviderServe(
 						Env:          env,
 						Ports:        []corev1.ContainerPort{{ContainerPort: port, Name: "http"}},
 						VolumeMounts: volMounts,
-						ReadinessProbe: &corev1.Probe{
+						LivenessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(port)},
+							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       20,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt32(port)},
 							},
 							PeriodSeconds: 5,
 						},
@@ -251,6 +274,63 @@ func EnsureProviderServe(
 	}
 
 	return ensureServeService(ctx, cs, name, labels, port)
+}
+
+// serveDeploymentAvailable reports whether the Deployment controller has
+// observed the current spec and the desired provider replicas are updated and
+// available. The Deployment's /readyz probe owns process/controller readiness;
+// the operator only consumes the resulting Deployment status.
+func serveDeploymentAvailable(deployment *appsv1.Deployment) (bool, string) {
+	if deployment.Status.ObservedGeneration < deployment.Generation {
+		return false, fmt.Sprintf("waiting for Deployment generation %d to be observed (currently %d)", deployment.Generation, deployment.Status.ObservedGeneration)
+	}
+
+	available := false
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentAvailable {
+			available = condition.Status == corev1.ConditionTrue
+			break
+		}
+	}
+	if !available {
+		return false, "waiting for Deployment Available condition"
+	}
+
+	desired := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desired = *deployment.Spec.Replicas
+	}
+	if deployment.Status.UpdatedReplicas != desired {
+		return false, fmt.Sprintf("waiting for updated provider replicas (%d/%d)", deployment.Status.UpdatedReplicas, desired)
+	}
+	if deployment.Status.Replicas != desired {
+		return false, fmt.Sprintf("waiting for old provider replicas to terminate (%d total, %d desired)", deployment.Status.Replicas, desired)
+	}
+	if deployment.Status.AvailableReplicas != desired {
+		return false, fmt.Sprintf("waiting for available provider replicas (%d/%d)", deployment.Status.AvailableReplicas, desired)
+	}
+	return true, ""
+}
+
+func serveDeploymentFailed(deployment *appsv1.Deployment) (string, bool) {
+	if deployment.Status.ObservedGeneration < deployment.Generation {
+		// Progressing may still describe the previous ReplicaSet while the
+		// Deployment controller is observing a new spec. Let availability report
+		// the rollout as pending instead of terminally failing on stale status.
+		return "", false
+	}
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentProgressing &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == "ProgressDeadlineExceeded" {
+			message := condition.Message
+			if message == "" {
+				message = "provider serve Deployment exceeded its progress deadline"
+			}
+			return message, true
+		}
+	}
+	return "", false
 }
 
 // ensureServeRBAC creates the serve pod's ServiceAccount (in ServeNamespace)

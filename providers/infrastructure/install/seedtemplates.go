@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"sort"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -57,14 +58,129 @@ var templateGVR = schema.GroupVersionResource{
 	Resource: "templates",
 }
 
+// SeedTemplateRequirement identifies one embedded Template that must be
+// current and backend-ready before the provider can report ready.
+type SeedTemplateRequirement struct {
+	Name string
+}
+
+// RequiredSeedTemplateResources returns every Template embedded in this binary.
+// The name is retained for callers, but flattened Instances removed the old
+// per-template API resource contract. Custom Templates reconcile independently
+// and do not gate provider readiness. Every embedded Template must have a
+// registered backend; otherwise startup fails rather than advertise an unusable
+// built-in catalog.
+func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateRequirement, error) {
+	entries, err := fs.ReadDir(seedTemplatesFS, "templates")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded templates/: %w", err)
+	}
+	backends := make(map[string]struct{}, len(registeredBackends))
+	for _, backend := range registeredBackends {
+		backends[backend] = struct{}{}
+	}
+	required := map[string]struct{}{}
+	missingBackends := map[string]struct{}{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		raw, err := fs.ReadFile(seedTemplatesFS, "templates/"+e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read embedded templates/%s: %w", e.Name(), err)
+		}
+		var tmpl infrav1alpha1.Template
+		if err := utilyaml.UnmarshalStrict(raw, &tmpl); err != nil {
+			return nil, fmt.Errorf("decode embedded template %s: %w", e.Name(), err)
+		}
+		if strings.TrimSpace(tmpl.Name) == "" {
+			return nil, fmt.Errorf("embedded template %s has no metadata.name", e.Name())
+		}
+		if _, registered := backends[tmpl.Spec.Backend]; !registered {
+			missingBackends[tmpl.Spec.Backend] = struct{}{}
+		}
+		if _, duplicate := required[tmpl.Name]; duplicate {
+			return nil, fmt.Errorf("duplicate embedded template %q", tmpl.Name)
+		}
+		required[tmpl.Name] = struct{}{}
+	}
+	if len(missingBackends) > 0 {
+		missing := make([]string, 0, len(missingBackends))
+		for backend := range missingBackends {
+			missing = append(missing, backend)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("embedded seed templates require unavailable backends: %s", strings.Join(missing, ", "))
+	}
+
+	result := make([]SeedTemplateRequirement, 0, len(required))
+	for name := range required {
+		result = append(result, SeedTemplateRequirement{Name: name})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
+// SeedTemplatesReady reports whether every embedded seed Template
+// is current and backend-ready. The one stable Instance API is installed during
+// provider bootstrap; Template readiness proves each built-in product has a
+// live backend graph before the provider advertises readiness.
+func SeedTemplatesReady(ctx context.Context, dyn dynamic.Interface, required []SeedTemplateRequirement) (bool, error) {
+	if len(required) == 0 {
+		return true, nil
+	}
+	for _, requirement := range required {
+		ready, err := seedTemplateBackendReady(ctx, dyn, requirement)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func seedTemplateBackendReady(ctx context.Context, dyn dynamic.Interface, requirement SeedTemplateRequirement) (bool, error) {
+	obj, err := dyn.Resource(templateGVR).Get(ctx, requirement.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get seed Template %q: %w", requirement.Name, err)
+	}
+	data, err := json.Marshal(obj.Object)
+	if err != nil {
+		return false, fmt.Errorf("marshal seed Template %q: %w", requirement.Name, err)
+	}
+	var tmpl infrav1alpha1.Template
+	if err := json.Unmarshal(data, &tmpl); err != nil {
+		return false, fmt.Errorf("decode seed Template %q: %w", requirement.Name, err)
+	}
+	if tmpl.Status.ObservedGeneration != tmpl.Generation || !tmpl.Status.Backend.Ready {
+		return false, nil
+	}
+	return currentTrueCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionBackendReady, tmpl.Generation) &&
+		currentTrueCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionReady, tmpl.Generation), nil
+}
+
+func currentTrueCondition(conditions []metav1.Condition, conditionType string, generation int64) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType {
+			return condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == generation
+		}
+	}
+	return false
+}
+
 // SeedTemplates upserts every Template YAML baked into install/templates/
 // into the workspace the supplied rest.Config points at. Idempotent —
 // existing Templates are patched in place, ResourceVersion preserved.
 //
-// Skipped when INFRASTRUCTURE_SKIP_SEED_TEMPLATES is set to any
-// non-empty value. Errors are non-fatal at the call-site: a failed
-// seed should not block the rest of the init chain (operators can
-// hand-apply later), but we still log loudly.
+// Callers skip this function when INFRASTRUCTURE_SKIP_SEED_TEMPLATES is set to
+// any non-empty value. When seeding is enabled, errors are fatal to bootstrap:
+// reporting the provider ready with an incomplete embedded catalog would leave
+// its required instance APIs unavailable.
 func SeedTemplates(ctx context.Context, config *rest.Config) error {
 	log := klog.FromContext(ctx).WithName("install.seedtemplates")
 

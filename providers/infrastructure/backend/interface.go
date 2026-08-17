@@ -9,9 +9,8 @@ You may obtain a copy of the License at
 */
 
 // Package backend defines the contract every infrastructure-provider
-// backend implements. The platform layer (Template controller,
-// CachedResource, APIExport schema syncing) never depends on a
-// specific backend — it dispatches through this interface.
+// backend implements. The platform Template controller never depends on a
+// specific provisioning engine — it dispatches through this interface.
 //
 // PR A ships the interface + a stub implementation used by the
 // platform's own tests. PR C ships the real kro backend. Future PRs
@@ -34,47 +33,38 @@ import (
 //
 // Lifecycle calls (SetupTemplate / TeardownTemplate) are invoked
 // by the Template controller whenever a Template CR is added,
-// updated, or deleted. Run is started once per process and reconciles
-// instance CRs of the kinds the backend's templates declared. The
-// backend is responsible for figuring out which instance kinds it
-// owns; the platform doesn't track that mapping because the same
-// backend might handle several templates with disjoint kinds.
+// updated, or deleted. Tenant-facing reconciliation of the stable Instance
+// kind is owned by controller/instance; a backend prepares and runs only its
+// engine-specific runtime machinery.
 type Backend interface {
 	// Name MUST match the string operators put in Template.spec.backend.
 	// Lower-case, kebab-case, registered at process startup via the
 	// package-level Register function below.
 	Name() string
 
-	// SetupTemplate is called after the platform has materialized the
-	// per-template CRD declared in tmpl.spec.instanceCRD AND added it
-	// to APIExport.spec.schemas. The backend does whatever
-	// backend-specific bookkeeping it needs (the kro backend writes an
-	// RGD; a hypothetical terraform backend stages a module). The
-	// returned status is mirrored onto Template.status.backend by the
-	// controller; an error here moves the Template's Ready condition
-	// to False with reason BackendError.
+	// SetupTemplate is called after the platform validates the Template's
+	// flattened Instance values contract. The backend does engine-specific
+	// preparation (the kro backend writes an RGD; a hypothetical terraform
+	// backend stages a module). The returned status is mirrored onto
+	// Template.status.backend; an error moves Ready=False/BackendError.
 	//
 	// SetupTemplate MUST be idempotent — the platform calls it on
 	// every reconcile pass for a given Template generation.
 	SetupTemplate(ctx context.Context, tmpl *infrastructurev1alpha1.Template) (TemplateStatus, error)
 
-	// TeardownTemplate is called during Template deletion, before the
-	// platform removes the per-template CRD or strips the APIExport
-	// schema entry. The backend should clean up any per-template
-	// state it owns. Instance CRs still exist at this point; the
-	// backend may want to refuse teardown if instances are still
-	// alive (return an error; the platform requeues).
+	// TeardownTemplate is called during Template deletion. The backend should
+	// clean up any per-template runtime state it owns. Instance CRs may still
+	// exist; a backend may refuse teardown until they are gone (the platform
+	// requeues the finalizer).
 	//
 	// TeardownTemplate MUST be idempotent — the platform may call it
 	// repeatedly until success.
 	TeardownTemplate(ctx context.Context, tmpl *infrastructurev1alpha1.Template) error
 
-	// Run starts the backend's reconcile loop and blocks until ctx is
-	// cancelled. The vwConfig points at the APIExport virtual
-	// workspace so the backend can watch instance CRs across every
-	// tenant workspace that has the APIBinding. Multiplexing across
-	// workspaces is the backend's responsibility (kro uses
-	// multicluster-runtime; terraform would do something different).
+	// Run starts any backend-owned long-running loop and blocks until ctx is
+	// cancelled. The current kro backend has no loop here: upstream kro runs on
+	// the runtime cluster and the provider's Instance controller owns the
+	// kcp-to-runtime bridge.
 	//
 	// Run returns when ctx is done. Errors during steady state are
 	// logged + retried by the backend itself; a returned error means

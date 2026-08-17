@@ -24,9 +24,8 @@ import (
 
 const (
 	// GroupName is the API group for infrastructure-provider types.
-	// New per-template CRDs registered by the Template controller share
-	// this group; their resource names are derived from
-	// Template.spec.instanceCRD.
+	// The stable tenant-facing resources are Templates and Instances; runtime
+	// backends may use Template.spec.instanceCRD for their private kinds.
 	GroupName = "infrastructure.faros.sh"
 	// Version pins the served + storage version. Bumping to v1 will
 	// require a conversion plan — keep all in-tree changes additive

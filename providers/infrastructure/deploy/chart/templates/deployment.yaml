@@ -27,6 +27,12 @@ spec:
     spec:
       serviceAccountName: {{ include "infrastructure.serviceAccountName" . }}
       {{- $centralName := (include "infrastructure.centralKroSecretName" .) }}
+      {{- if and .Values.bootstrap.seedTemplates (not .Values.bootstrap.enabled) }}
+        {{- fail "bootstrap.seedTemplates=true requires bootstrap.enabled=true because the init container owns catalog seeding" }}
+      {{- end }}
+      {{- if and .Values.bootstrap.seedTemplates (not $centralName) }}
+        {{- fail "bootstrap.seedTemplates=true requires centralKro.kubeconfig or centralKro.kubeconfigSecretRef.name so seeded kro templates can reconcile" }}
+      {{- end }}
       {{- if .Values.bootstrap.enabled }}
       {{- if not (include "infrastructure.bootstrapSecretName" .) }}
         {{- fail "bootstrap.enabled=true with kubeconfigSource=supplied requires bootstrap.kcpKubeconfig (inline) or bootstrap.kcpKubeconfigSecretRef.name" }}
@@ -37,22 +43,24 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["init"]
           env:
-            # init bootstraps the provider workspace using the SAME kubeconfig
-            # the serve container runs with (mounted at the faros path below).
-            # hubMinted: the hub-delivered faros-provider-kubeconfig, which is
-            # cluster-admin in the provider workspace — enough to install CRDs,
-            # the CachedResource, and the APIExport. supplied: your kcp config.
+            # The admin/supplied kubeconfig is bootstrap-only. Init mints a
+            # least-privilege runtime identity into the shared emptyDir below;
+            # the serve container never mounts this input credential.
             - name: INFRASTRUCTURE_ADMIN_KUBECONFIG
-              value: /var/run/secrets/faros/faros-provider-kubeconfig
+              value: /var/run/secrets/faros-admin/faros-provider-kubeconfig
             {{- if eq .Values.bootstrap.kubeconfigSource "supplied" }}
             # A supplied kubeconfig may be root-scoped, so retarget init at the
             # provider workspace. The hub-minted kubeconfig already targets it.
             - name: INFRASTRUCTURE_WORKSPACE_PATH
               value: {{ .Values.bootstrap.workspacePath | quote }}
             {{- end }}
-            # init writes a throwaway file copy; keep it off the read-only root.
+            # This file is the only kcp credential consumed by serve.
             - name: INFRASTRUCTURE_KUBECONFIG
-              value: /tmp/infrastructure.kubeconfig
+              value: /var/run/secrets/faros-runtime/faros-provider-kubeconfig
+            {{- if not .Values.bootstrap.seedTemplates }}
+            - name: INFRASTRUCTURE_SKIP_SEED_TEMPLATES
+              value: "1"
+            {{- end }}
             {{- if $centralName }}
             - name: KRO_KUBECONFIG
               value: /var/run/secrets/kro/kubeconfig
@@ -66,11 +74,11 @@ spec:
               value: /etc/faros/catalogentry/catalogentry.yaml
             {{- end }}
           volumeMounts:
-            - name: faros-provider-kubeconfig
-              mountPath: /var/run/secrets/faros
+            - name: faros-provider-admin-kubeconfig
+              mountPath: /var/run/secrets/faros-admin
               readOnly: true
-            - name: tmp
-              mountPath: /tmp
+            - name: faros-runtime-kubeconfig
+              mountPath: /var/run/secrets/faros-runtime
             {{- if $centralName }}
             - name: kro-kubeconfig
               mountPath: /var/run/secrets/kro
@@ -95,7 +103,9 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 20
           readinessProbe:
-            httpGet: { path: /healthz, port: http }
+            # Controller-aware readiness. The HTTP process stays live while the
+            # required Template controller recovers from kcp/bootstrap races.
+            httpGet: { path: /readyz, port: http }
             periodSeconds: 5
           env:
             - name: PORT
@@ -104,6 +114,11 @@ spec:
               value: {{ .Values.hub.url | quote }}
             - name: FAROS_PROVIDER_NAME
               value: "infrastructure"
+            # Production infrastructure always requires its Template
+            # controller. A misspelled/missing kubeconfig must keep /readyz
+            # false rather than silently degrading to the REST-only surface.
+            - name: INFRASTRUCTURE_CONTROLLER_MODE
+              value: "required"
             {{- if .Values.hub.insecure }}
             - name: FAROS_HUB_INSECURE
               value: "true"
@@ -115,8 +130,14 @@ spec:
                   name: {{ .Values.hub.tokenSecretRef.name }}
                   key: {{ .Values.hub.tokenSecretRef.key }}
             {{- end }}
-            - name: FAROS_PROVIDER_KUBECONFIG
+            # The serve process consumes the init-minted/provider-workspace
+            # kubeconfig through the infrastructure controller contract.
+            - name: INFRASTRUCTURE_KUBECONFIG
               value: /var/run/secrets/faros/faros-provider-kubeconfig
+            {{- if not .Values.bootstrap.seedTemplates }}
+            - name: INFRASTRUCTURE_SKIP_SEED_TEMPLATES
+              value: "1"
+            {{- end }}
             {{- if $centralName }}
             - name: KRO_KUBECONFIG
               value: /var/run/secrets/kro/kubeconfig
@@ -199,9 +220,15 @@ spec:
             {{- end }}
             {{- end }}
           volumeMounts:
+            {{- if .Values.bootstrap.enabled }}
+            - name: faros-runtime-kubeconfig
+              mountPath: /var/run/secrets/faros
+              readOnly: true
+            {{- else }}
             - name: faros-provider-kubeconfig
               mountPath: /var/run/secrets/faros
               readOnly: true
+            {{- end }}
             {{- if $centralName }}
             - name: kro-kubeconfig
               mountPath: /var/run/secrets/kro
@@ -211,7 +238,7 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         {{- if .Values.bootstrap.enabled }}
-        - name: tmp
+        - name: faros-runtime-kubeconfig
           emptyDir: {}
         {{- end }}
         {{- if and .Values.bootstrap.enabled .Values.catalogEntry.enabled }}
@@ -219,29 +246,28 @@ spec:
           configMap:
             name: {{ include "infrastructure.fullname" . }}-catalogentry
         {{- end }}
-        - name: faros-provider-kubeconfig
+        {{- if .Values.bootstrap.enabled }}
+        - name: faros-provider-admin-kubeconfig
           secret:
-            {{- if .Values.bootstrap.enabled }}
-            # init + serve share ONE kubeconfig (resolved by kubeconfigSource).
-            # NOT optional: the pod waits for the Secret to exist — in hubMinted
-            # mode that's the hub delivering faros-provider-kubeconfig after it
-            # reconciles the CatalogEntry, which is exactly the bootstrap
-            # ordering we want.
+            # Bootstrap input only. Serve mounts the init-minted runtime
+            # kubeconfig from faros-runtime-kubeconfig instead.
             secretName: {{ include "infrastructure.bootstrapSecretName" . }}
             items:
               - key: {{ include "infrastructure.bootstrapSecretKey" . }}
                 path: faros-provider-kubeconfig
-            {{- else }}
-            # Hub-provisioned, no init container: optional so the pod stays
-            # schedulable while the hub catalog controller mints the Secret.
-            # The provider logs a warning and serves catalog reads; broker
-            # writes 502 until the Secret appears.
+        {{- else }}
+        - name: faros-provider-kubeconfig
+          secret:
+            # Externally bootstrapped mode, no init container: wait for the
+            # provider kubeconfig before starting. The hub provisions the
+            # workspace and credential, but an out-of-band workflow must have
+            # installed the provider-owned APIs before this pod can be ready.
             secretName: {{ .Values.providerKubeconfig.secretName }}
-            optional: true
+            optional: false
             items:
               - key: kubeconfig
                 path: faros-provider-kubeconfig
-            {{- end }}
+        {{- end }}
         {{- if $centralName }}
         - name: kro-kubeconfig
           secret:

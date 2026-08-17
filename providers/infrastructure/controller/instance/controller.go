@@ -54,6 +54,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -178,8 +179,9 @@ func New(cfg Config) (*Controller, error) {
 		return nil, fmt.Errorf("creating apiexport multicluster provider: %w", err)
 	}
 	mgr, err := mcmanager.New(cfg.ProviderConfig, provider, manager.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:     scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: controllerOptionsForRetryableManager(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating multicluster manager: %w", err)
@@ -200,6 +202,19 @@ func New(cfg Config) (*Controller, error) {
 
 // Start runs the multicluster manager (blocking).
 func (c *Controller) Start(ctx context.Context) error { return c.mgr.Start(ctx) }
+
+// Ready closes after the multicluster manager reaches its startup/election
+// boundary. The provider readiness endpoint must not advertise a controller
+// that failed before its watches were running.
+func (c *Controller) Ready() <-chan struct{} { return c.mgr.Elected() }
+
+func controllerOptionsForRetryableManager() ctrlconfig.Controller {
+	// The provider lifecycle cancels and joins the previous manager before it
+	// constructs a replacement. controller-runtime nevertheless retains names
+	// process-wide, so allow the stable controller name on a later attempt.
+	skipNameValidation := true
+	return ctrlconfig.Controller{SkipNameValidation: &skipNameValidation}
+}
 
 type reconciler struct {
 	c *Controller
