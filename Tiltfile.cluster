@@ -863,6 +863,12 @@ k8s_yaml(helm(
     namespace=hub_namespace,
     set=[
         'image.hub.tag=dev',
+        # TWO hub replicas — external kcp is exactly the configuration the
+        # hub's HA work targets: singleton controllers gate on the
+        # faros-hub-controllers Lease, browser sessions and published-app auth
+        # codes live in kcp-backed Secrets, so sign-in survives either pod and
+        # the Service round-robins requests across both.
+        'replicaCount=2',
         'kcp.embedded.enabled=false',
         'kcp.external.enabled=true',
         'kcp.external.existingSecret=kcp-frontproxy-admin',
@@ -896,6 +902,12 @@ k8s_yaml(helm(
 
 k8s_resource(
     'faros-hub',
+    # NB with replicaCount=2: a Tilt port-forward attaches to ONE pod, so
+    # browser traffic through :9443 pins to a single replica (and drops while
+    # Tilt re-attaches if that pod dies). In-cluster traffic — providers and
+    # minted kubeconfigs via hub.internalURL — goes through the Service and
+    # round-robins across both replicas. To exercise failover from the
+    # browser, kill the pod Tilt is forwarding to and let it re-attach.
     port_forwards=['9443:9443'],
     resource_deps=['hub-compile', 'hub-kcp-secrets', 'hub-rbac', 'hub-tls', 'dex'],
     labels=['hub'],
