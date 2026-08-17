@@ -41,9 +41,9 @@ import (
 // "catalogentries.providers.faros.sh" — no redundant "Provider"
 // prefix on the kind itself.
 //
-// Phase 1A note: workspace/ServiceAccount/Secret provisioning and inline
-// APIResourceSchema apply are NOT yet implemented (see docs/providers.md).
-// This iteration only honors spec.ui.url and spec.backend.url to route HTTP.
+// Provider workspace objects are owned by provider init. The hub observes the
+// declared APIExport contract and runtime endpoints to gate tenant Enable and
+// request routing.
 type CatalogEntry struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -114,8 +114,8 @@ type CatalogEntrySpec struct {
 	// +optional
 	VirtualWorkspace *ProviderVirtualWorkspace `json:"virtualWorkspace,omitempty"`
 
-	// APIExport declares the provider's kcp APIExport. Not yet honored by
-	// the hub (Phase 1B will wire it up).
+	// APIExport declares the provider-owned kcp APIExport that the hub verifies
+	// before allowing tenant Enable.
 	// +optional
 	APIExport *ProviderAPIExport `json:"apiExport,omitempty"`
 
@@ -457,9 +457,9 @@ type ProviderVirtualWorkspace struct {
 	URL string `json:"url"`
 }
 
-// ProviderAPIExport declares the kcp APIExport the provider owns.
-// Distinct from kcp's apis.kcp.io APIExport CRD; this is the inline
-// declaration the catalog controller will use to materialise that CRD.
+// ProviderAPIExport declares the contract for the kcp APIExport the provider
+// owns. The hub observes this reference; provider init materializes the actual
+// apis.kcp.io APIExport and APIResourceSchemas.
 type ProviderAPIExport struct {
 	// Name is the APIExport name (also the API group binding consumers
 	// reference). The APIExport itself, along with its APIResourceSchemas and
@@ -469,11 +469,34 @@ type ProviderAPIExport struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
+	// RequiredResources is the stable minimum set of APIs that must be present
+	// in the provider-owned APIExport before tenants may bind it. Providers that
+	// add resources dynamically declare only their bootstrap APIs here; dynamic
+	// additions are allowed and are still validated by the hub before readiness.
+	//
+	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=group
+	// +listMapKey=name
+	RequiredResources []ProviderAPIExportResource `json:"requiredResources"`
+
 	// PermissionClaims mirrors the APIExport's permissionClaims for display
 	// in the Enable dialog. Each claim must be marked TenantScoped=true to
 	// be auto-acceptable.
 	// +optional
 	PermissionClaims []ProviderPermissionClaim `json:"permissionClaims,omitempty"`
+}
+
+// ProviderAPIExportResource identifies one stable API resource that must be
+// published by a provider's APIExport before the provider is ready to enable.
+type ProviderAPIExportResource struct {
+	// Group is the API group. Use the empty string for the core API group.
+	// +kubebuilder:default:=""
+	Group string `json:"group"`
+
+	// Name is the plural resource name exposed by the APIExport.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // ProviderPermissionClaim describes a permission the provider's APIExport
@@ -491,12 +514,36 @@ type ProviderPermissionClaim struct {
 	// +optional
 	Verbs []string `json:"verbs,omitempty"`
 
+	// IdentitySource identifies the trusted workspace whose current APIExport
+	// identity must match this claim's identityHash. It is required for Faros
+	// API groups, whose resources are not built in to Kubernetes. Platform
+	// sources resolve only from the hub-owned controllers workspace. Provider
+	// sources resolve only from the named provider child workspace.
+	// +optional
+	IdentitySource *ProviderPermissionClaimIdentitySource `json:"identitySource,omitempty"`
+
 	// TenantScoped declares the claim is bounded to the binding tenant's own
 	// workspace. Non-tenant-scoped claims are refused unless an admin sets
 	// the faros.sh/accept-untrusted-claims annotation on the
 	// CatalogEntry.
 	// +optional
 	TenantScoped bool `json:"tenantScoped,omitempty"`
+}
+
+// ProviderPermissionClaimIdentitySource identifies the server-derived logical
+// workspace from which the hub resolves a permission claim's current identity.
+// Catalog authors cannot supply an arbitrary kcp workspace path.
+// +kubebuilder:validation:XValidation:rule="self.kind == 'Provider' ? has(self.provider) : !has(self.provider)",message="provider is required only for Provider identity sources"
+type ProviderPermissionClaimIdentitySource struct {
+	// Kind selects a hub-owned platform export or an onboarded provider export.
+	// +kubebuilder:validation:Enum=Platform;Provider
+	Kind string `json:"kind"`
+
+	// Provider is the provider workspace name for a Provider source. The hub
+	// derives its full workspace path; arbitrary paths are never accepted.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	Provider string `json:"provider,omitempty"`
 }
 
 // CatalogEntryStatus defines the observed state of a CatalogEntry.
