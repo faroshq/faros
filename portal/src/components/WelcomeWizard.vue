@@ -19,7 +19,7 @@
 // one up says nothing about the next) and lives in localStorage — this is a
 // presentation preference, not state worth a round-trip to the hub.
 
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import {
   AlertCircle,
   ArrowLeft,
@@ -85,28 +85,11 @@ const concepts = [
 
 const catalog = computed(() => providers.enableable)
 const enabledCount = computed(() => catalog.value.filter((p) => providers.isEnabled(p.name)).length)
-const canManageProviders = computed(() => tenant.activeWorkspace?.role === 'admin')
 
 // Per-provider in-flight flag, so one Enable spinning doesn't disable the rest.
 const busy = ref<Record<string, boolean>>({})
 const actionError = ref<string | null>(null)
 const dialogProvider = ref<ProviderDTO | null>(null)
-const dialogBusy = computed(() => !!dialogProvider.value && !!busy.value[dialogProvider.value.name])
-let authorityGeneration = 0
-
-function activeWorkspaceKey(): string {
-  return `${tenant.orgUUID ?? ''}/${tenant.workspaceUUID ?? ''}`
-}
-
-watch(
-  () => [tenant.orgUUID, tenant.workspaceUUID] as const,
-  () => {
-    authorityGeneration += 1
-    dialogProvider.value = null
-    actionError.value = null
-    busy.value = {}
-  },
-)
 
 function categoryIcon(name: string | undefined): unknown {
   if (!name) return fallbackCategoryIcon
@@ -132,24 +115,18 @@ function openEnableDialog(p: ProviderDTO) {
 
 async function onDialogConfirm(accept: PermissionClaim[]) {
   const p = dialogProvider.value
-  if (!p || busy.value[p.name]) return
-  const generation = authorityGeneration
-  const workspace = activeWorkspaceKey()
+  if (!p) return
   busy.value = { ...busy.value, [p.name]: true }
   actionError.value = null
   try {
     await providers.enable(p, accept)
-    if (generation === authorityGeneration && workspace === activeWorkspaceKey()) dialogProvider.value = null
+    dialogProvider.value = null
   } catch (e) {
-    if (generation === authorityGeneration && workspace === activeWorkspaceKey()) {
-      actionError.value = e instanceof Error ? e.message : String(e)
-    }
+    actionError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    if (generation === authorityGeneration) {
-      const next = { ...busy.value }
-      delete next[p.name]
-      busy.value = next
-    }
+    const next = { ...busy.value }
+    delete next[p.name]
+    busy.value = next
   }
 }
 
@@ -360,7 +337,7 @@ const firstEnabled = computed(() => catalog.value.find((p) => providers.isEnable
                     <CheckCircle2 class="h-3.5 w-3.5" :stroke-width="2" />
                   </span>
                   <button
-                    v-else-if="canManageProviders"
+                    v-else
                     type="button"
                     class="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
                     :disabled="!!busy[p.name] || providers.hasMissingDependencies(p)"
@@ -371,7 +348,6 @@ const firstEnabled = computed(() => catalog.value.find((p) => providers.isEnable
                     <Plus v-else class="h-3 w-3" :stroke-width="2" />
                     Enable
                   </button>
-                  <span v-else class="text-[10px] text-text-muted/70">Workspace admin required</span>
                 </div>
               </div>
             </li>
@@ -457,7 +433,6 @@ const firstEnabled = computed(() => catalog.value.find((p) => providers.isEnable
 
     <ProviderEnableDialog
       :provider="dialogProvider"
-      :busy="dialogBusy"
       @cancel="dialogProvider = null"
       @confirm="onDialogConfirm"
     />

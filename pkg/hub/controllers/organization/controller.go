@@ -63,6 +63,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -168,9 +169,10 @@ func SetupWithManager(mgr manager.Manager, provisioner WorkspaceProvisioner) err
 // workspace's rest.Config (typically the root:faros:users workspace
 // returned by Bootstrapper.UsersConfig). The hub server calls this and
 // runs the manager in a goroutine alongside the multicluster managers.
-func NewManager(cfg *rest.Config, scheme *runtime.Scheme) (manager.Manager, error) {
+func NewManager(cfg *rest.Config, scheme *runtime.Scheme, controllerOptions ctrlconfig.Controller) (manager.Manager, error) {
 	return manager.New(cfg, manager.Options{
-		Scheme: scheme,
+		Scheme:     scheme,
+		Controller: controllerOptions,
 		Metrics: server.Options{
 			// Hub serves its own /metrics; disable controller-runtime's.
 			BindAddress: "0",

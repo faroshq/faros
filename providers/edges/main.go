@@ -16,7 +16,7 @@
 //
 // Routes (all behind the hub backend proxy at /services/providers/edges/*):
 //
-//   - /healthz                                          liveness/readiness gate
+//   - /healthz, /readyz                                 liveness/readiness gates
 //   - /agent/{cluster}/apis/edges.faros.sh/v1alpha1/{kubernetesclusters|linuxservers}/{name}/proxy  agent control-tunnel ingress
 //   - /agent/proxy?revdial.dialer=<id>                  agent revdial pickup ingress
 //   - /edgeproxy/clusters/{cluster}/.../{name}/{k8s|ssh|mcp}  consumer egress
@@ -95,12 +95,15 @@ func runServe() error {
 	}
 
 	mux := http.NewServeMux()
+	controllerHealth := &edgeControllerHealth{}
 
-	// Health gates Ready=true in the hub via spec.backend.healthPath.
+	// Liveness reports only that the HTTP process is serving. Readiness also
+	// requires the tenant controller manager to be configured and running.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.Handle("/readyz", edgeReadyHandler(controllerHealth))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -133,15 +136,19 @@ func runServe() error {
 	tsrv.Start(ctx.Done())
 
 	// Edge controllers (token / RBAC / lifecycle) on the provider's own
-	// APIExportEndpointSlice multicluster manager. Best-effort: a missing
-	// kubeconfig just disables the manager (healthz + tunnel still serve).
-	if cerr := startEdgeControllerManager(ctx, kcpConfig, tsrv,
-		hubExternalURL, hubCAData(log), os.Getenv("FAROS_DEV_MODE") == "true"); cerr != nil {
-		if errors.Is(cerr, errControllerDisabled) {
-			log.Info("edge controller manager disabled (no kcp kubeconfig)")
-		} else {
-			log.Error(cerr, "edge controller manager failed to start")
-		}
+	// APIExportEndpointSlice multicluster manager. Start is supervised so a
+	// setup failure or later manager exit terminates the process; Kubernetes or
+	// Tilt then restarts it with fresh credentials and controller state.
+	controllerErrCh := make(chan error, 1)
+	if kcpConfig == nil {
+		log.Info("edge controller manager disabled (no kcp kubeconfig)")
+	} else {
+		go func() {
+			controllerErrCh <- superviseEdgeController(ctx, controllerHealth, func(startCtx context.Context) error {
+				return startEdgeControllerManager(startCtx, kcpConfig, tsrv,
+					hubExternalURL, hubCAData(log), os.Getenv("FAROS_DEV_MODE") == "true", controllerHealth)
+			})
+		}()
 	}
 
 	// Agent ingress: control tunnel + revdial pickup. StripPrefix so the
@@ -217,6 +224,10 @@ func runServe() error {
 
 	select {
 	case <-ctx.Done():
+	case err := <-controllerErrCh:
+		if fatal := edgeControllerExitError(ctx, err); fatal != nil {
+			return fatal
+		}
 	case err := <-errCh:
 		return err
 	}
@@ -224,6 +235,25 @@ func runServe() error {
 	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdown)
+}
+
+func edgeControllerExitError(ctx context.Context, err error) error {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return nil
+	}
+	return fmt.Errorf("edge controller manager: %w", err)
+}
+
+func edgeReadyHandler(health *edgeControllerHealth) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !health.isReady() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not-ready","reason":"controller manager is not running"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 }
 
 // loadKCPConfig resolves the provider's kcp credential (its provisioned SA

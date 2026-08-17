@@ -1045,9 +1045,11 @@ local_resource(
 
 local_resource(
     'quickstart-init',
-    cmd=('QUICKSTART_KCP_KUBECONFIG={kc} QUICKSTART_KCP_SERVER={sv} ' +
+    cmd=('{rewrite} && QUICKSTART_KCP_KUBECONFIG={kc} QUICKSTART_KCP_SERVER={sv} ' +
+         'QUICKSTART_MANIFEST={mf} ' +
          'make init-provider-quickstart').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+             rewrite=QUICKSTART_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=QUICKSTART_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'quickstart-register'],
@@ -1086,11 +1088,12 @@ local_resource(
         'providers/edges/portal/src',
         'providers/edges/portal/package.json',
         'providers/edges/go.mod',
+        '.kcp/edges-runtime.kubeconfig',
     ],
-    resource_deps=['faros-hub'],
+    resource_deps=['faros-hub', 'edges-init'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8088, path='/healthz'),
+        http_get=http_get_action(port=8088, path='/readyz'),
     ),
     labels=['edges'],
 )
@@ -1110,9 +1113,11 @@ local_resource(
 
 local_resource(
     'edges-init',
-    cmd=('EDGES_KCP_KUBECONFIG={kc} EDGES_KCP_SERVER={sv} ' +
+    cmd=('{rewrite} && EDGES_KCP_KUBECONFIG={kc} EDGES_KCP_SERVER={sv} ' +
+         'EDGES_MANIFEST={mf} ' +
          'make init-provider-edges').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+             rewrite=EDGES_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=EDGES_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'edges-register'],
@@ -1169,11 +1174,12 @@ local_resource(
         'providers/agents/portal/package.json',
         'providers/agents/portal/vite.config.ts',
         'providers/agents/.env',
+        '.kcp/agents-provider.kubeconfig',
     ],
-    resource_deps=['faros-hub', 'agents-db'],
+    resource_deps=['faros-hub', 'agents-db', 'agents-init'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8087, path='/healthz'),
+        http_get=http_get_action(port=8087, path='/readyz'),
     ),
     labels=['providers-agents'],
 )
@@ -1193,9 +1199,11 @@ local_resource(
 
 local_resource(
     'agents-init',
-    cmd=('AGENTS_KCP_KUBECONFIG={kc} AGENTS_KCP_SERVER={sv} ' +
+    cmd=('{rewrite} && AGENTS_KCP_KUBECONFIG={kc} AGENTS_KCP_SERVER={sv} ' +
+         'AGENTS_MANIFEST={mf} ' +
          'make init-provider-agents').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+             rewrite=AGENTS_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=AGENTS_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'agents-register'],
@@ -1389,9 +1397,11 @@ local_resource(
 
 local_resource(
     'app-studio-init',
-    cmd=('APP_STUDIO_KCP_KUBECONFIG={kc} APP_STUDIO_KCP_SERVER={sv} ' +
+    cmd=('{rewrite} && APP_STUDIO_KCP_KUBECONFIG={kc} APP_STUDIO_KCP_SERVER={sv} ' +
+         'APP_STUDIO_MANIFEST={mf} ' +
          'make init-provider-app-studio').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+             rewrite=APP_STUDIO_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=APP_STUDIO_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'app-studio-register'],
@@ -1838,9 +1848,10 @@ local_resource(
 #   code (serve)  → restarts when the kubeconfig dep appears
 local_resource(
     'code-init',
-    cmd=('KROMC_KCP_KUBECONFIG={kc} KROMC_KCP_SERVER={sv} ' +
-         'make init-provider-code').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+    cmd=('{rewrite} && KROMC_KCP_KUBECONFIG={kc} KROMC_KCP_SERVER={sv} ' +
+         'CODE_MANIFEST={mf} make init-provider-code').format(
+             rewrite=CODE_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=CODE_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'code-register'],
@@ -1903,9 +1914,10 @@ local_resource(
 
 local_resource(
     'databricks-init',
-    cmd=('KROMC_KCP_KUBECONFIG={kc} KROMC_KCP_SERVER={sv} ' +
-         'make init-provider-databricks').format(
-             kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
+    cmd=('{rewrite} && KROMC_KCP_KUBECONFIG={kc} KROMC_KCP_SERVER={sv} ' +
+         'DATABRICKS_MANIFEST={mf} make init-provider-databricks').format(
+             rewrite=DATABRICKS_REWRITE_CMD, kc=KCP_ADMIN_KUBECONFIG,
+             sv=KCP_ADMIN_SERVER, mf=DATABRICKS_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     resource_deps=['faros-hub', 'databricks-register'],

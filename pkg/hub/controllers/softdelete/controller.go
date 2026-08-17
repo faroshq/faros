@@ -61,6 +61,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -160,9 +161,10 @@ func SetupWithManager(mgr manager.Manager, provisioner Provisioner) error {
 // organization bootstrap controller uses). Separated from the
 // bootstrap controller's manager so soft-delete restarts don't take
 // the bootstrap workqueue down.
-func NewManager(cfg *rest.Config, scheme *runtime.Scheme) (manager.Manager, error) {
+func NewManager(cfg *rest.Config, scheme *runtime.Scheme, controllerOptions ctrlconfig.Controller) (manager.Manager, error) {
 	return manager.New(cfg, manager.Options{
-		Scheme: scheme,
+		Scheme:     scheme,
+		Controller: controllerOptions,
 		Metrics: server.Options{
 			BindAddress: "0",
 		},

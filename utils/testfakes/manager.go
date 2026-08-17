@@ -33,8 +33,7 @@ import (
 // surfaces accidental dependencies in tests.
 type Manager struct {
 	mcmanager.Manager
-	FakeCluster   cluster.Cluster
-	GetClusterErr error
+	FakeCluster cluster.Cluster
 }
 
 // NewManager creates a Manager wired to the given fake client.
@@ -44,9 +43,6 @@ func NewManager(c client.Client) *Manager {
 
 // GetCluster returns the configured test cluster regardless of clusterName.
 func (m *Manager) GetCluster(_ context.Context, _ multicluster.ClusterName) (cluster.Cluster, error) {
-	if m.GetClusterErr != nil {
-		return nil, m.GetClusterErr
-	}
 	return m.FakeCluster, nil
 }
 

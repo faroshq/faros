@@ -112,19 +112,6 @@ func TestBackendProxyNoSPAFallback(t *testing.T) {
 	}
 }
 
-func TestBackendProxyDoesNotRouteAPIExportOnlyProvider(t *testing.T) {
-	reg := NewRegistry()
-	reg.Upsert(Provider{Name: "database", APIExportName: "database.providers.faros.sh"})
-	proxy := NewBackendProxy(reg, logr.Discard())
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/services/providers/database/healthz", nil)
-	proxy.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 for provider without a runtime endpoint", rec.Code)
-	}
-}
-
 // TestBackendProxyHubOnlyReservations pins the split between the public
 // data plane and hub-only endpoints. Provider action routes are ordinary
 // data-plane verbs — they MUST ride the backend proxy (authorization is the

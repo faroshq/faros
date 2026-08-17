@@ -473,12 +473,14 @@ type ProviderAPIExport struct {
 	// in the provider-owned APIExport before tenants may bind it. Providers that
 	// add resources dynamically declare only their bootstrap APIs here; dynamic
 	// additions are allowed and are still validated by the hub before readiness.
+	// Optional during the provider migration; the hub begins enforcing the
+	// complete set after all first-party providers declare their contracts.
 	//
-	// +kubebuilder:validation:MinItems=1
+	// +optional
 	// +listType=map
 	// +listMapKey=group
 	// +listMapKey=name
-	RequiredResources []ProviderAPIExportResource `json:"requiredResources"`
+	RequiredResources []ProviderAPIExportResource `json:"requiredResources,omitempty"`
 
 	// PermissionClaims mirrors the APIExport's permissionClaims for display
 	// in the Enable dialog. Each claim must be marked TenantScoped=true to
