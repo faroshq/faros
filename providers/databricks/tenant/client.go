@@ -169,10 +169,14 @@ func (f *ClientFactory) SetAuthority(authority ClusterAuthority) {
 	}
 }
 
-// Ready reports whether the factory has both caller-token client configuration
-// and a live provider authority. The optional Ready method is implemented by
-// the production manager wrapper; test and embedding implementations that do
-// not expose it are treated as available once configured.
+// Ready reports whether the factory has caller-token client configuration
+// and an installed provider authority. Deliberately NOT gated on the
+// authority having discovered virtual-workspace endpoints: those only exist
+// once a tenant binds the APIExport, and gating pod readiness on them makes
+// a chicken-and-egg — the hub 503s an unready provider, so no tenant could
+// ever Enable it to create the first binding. The authority resolves shards
+// lazily per request; a tenant action before any binding fails with a clear
+// per-call error instead.
 func (f *ClientFactory) Ready() bool {
 	if f == nil || !f.Configured() {
 		return false
@@ -180,13 +184,7 @@ func (f *ClientFactory) Ready() bool {
 	f.authorityMu.RLock()
 	authority := f.authority
 	f.authorityMu.RUnlock()
-	if authority == nil {
-		return false
-	}
-	if ready, ok := authority.(interface{ Ready() bool }); ok {
-		return ready.Ready()
-	}
-	return true
+	return authority != nil
 }
 
 func (f *ClientFactory) AuthorityClient(ctx context.Context, clusterID string) (client.Client, error) {
