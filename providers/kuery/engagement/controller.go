@@ -6,13 +6,13 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-// Package engagement watches Edge objects across all tenant workspaces that
+// Package engagement watches KubernetesCluster objects across all tenant workspaces that
 // enabled the kuery provider (through the APIExport virtual workspace — the
-// tenant-scoped permission claim on edges from the CatalogEntry) and feeds
+// tenant-scoped permission claim on the edges provider from the CatalogEntry) and feeds
 // connected kubernetes edges into kuery's sync controller.
 //
-// Per edge, the data path is the hub's edges-proxy: a rest.Config pointing
-// at /services/edges-proxy/clusters/{tenant}/.../edges/{name}/k8s with the
+// Per edge, the data path is the edges provider's proxy: a rest.Config pointing
+// at /services/providers/edges/edgeproxy/clusters/{tenant}/.../kubernetesclusters/{name}/k8s with the
 // provider SA's token. The Enable-time grant (verb "proxy" on edges, bound
 // to the SA's system:kcp:serviceaccount identity) authorizes it; see
 // docs/kuery-provider-architecture.md in the faros repo.
@@ -61,9 +61,9 @@ import (
 // key would be parsed as JSON path segments.
 const TenantLabel = "tenant"
 
-// edgeGVK is read with unstructured so the provider does not import the
-// faros monorepo module just for one type.
-var edgeGVK = schema.GroupVersionKind{Group: "faros.sh", Version: "v1alpha1", Kind: "Edge"}
+// edgeGVK is read with unstructured so the provider does not import the edges
+// provider module just for one type.
+var edgeGVK = schema.GroupVersionKind{Group: "edges.faros.sh", Version: "v1alpha1", Kind: "KubernetesCluster"}
 
 // clusterTTLSeconds is how long a disengaged cluster's rows survive before
 // kuery's GC reaps them (matches kuery's default).
@@ -78,8 +78,8 @@ type Config struct {
 	// it. Its bearer token (the provider SA token) also authorizes the
 	// per-edge edges-proxy data path.
 	ProviderConfig *rest.Config
-	// HubBaseURL is the faros hub root that serves the edges-proxy virtual
-	// workspace (/services/edges-proxy/...). When the hub and the kcp API
+	// HubBaseURL is the faros hub root that serves the edges provider proxy
+	// (/services/providers/edges/edgeproxy/...). When the hub and the kcp API
 	// share one front-proxy host (in-cluster production) this is empty and
 	// the base is derived from ProviderConfig.Host; in host-binary/Tilt dev
 	// the kcp API (kcp front proxy) and the edges-proxy (hub) are split
@@ -93,7 +93,7 @@ type Config struct {
 	Store kuerystore.Store
 }
 
-// Controller reconciles Edge objects into kuery Engage/Disengage calls.
+// Controller reconciles KubernetesCluster objects into kuery Engage/Disengage calls.
 type Controller struct {
 	cfg     Config
 	hubBase string // ProviderConfig host with the /clusters/... suffix stripped
@@ -104,26 +104,23 @@ type Controller struct {
 	engaged map[string]engagedEdge // "{tenantCluster}/{edgeName}" → engagement handle
 }
 
-// engagedEdge tracks one engaged edge. The map key stays cluster-based
-// ("{tenantCluster}/{edgeName}") so it's computable on delete (when the Edge —
-// and its status.workspacePath — is already gone), but the tenant identity
-// queries scope by is the workspace PATH the hub stamped onto the Edge status,
-// which is what X-Faros-Tenant carries. Keeping both decouples the data-path
-// key (cluster) from the tenant-scoping key (path).
+// engagedEdge tracks one engaged edge. Both the map key and tenant query scope
+// use the logical-cluster ID from the APIExport event. That ID remains available
+// on delete, when the KubernetesCluster object itself is already gone.
 type engagedEdge struct {
 	cancel   context.CancelFunc
-	tenant   string // workspace path, used as the kuery cluster label + TenantEdges scope
+	tenant   string // trusted logical-cluster ID, used as the kuery cluster label + TenantEdges scope
 	edgeName string
 }
 
 // New builds the multicluster manager (APIExport VW) and registers the
-// Edge reconciler. Call Start to run it.
+// KubernetesCluster reconciler. Call Start to run it.
 func New(cfg Config) (*Controller, error) {
 	if cfg.ProviderConfig == nil || cfg.Sync == nil || cfg.Store == nil {
 		return nil, fmt.Errorf("engagement: ProviderConfig, Sync, and Store are required")
 	}
 
-	// edges-proxy lives on the hub, which in dev is a different host than
+	// The edges provider proxy lives behind the hub, which in dev is a different host than
 	// the kcp API ProviderConfig points at — prefer the explicit hub URL,
 	// fall back to the ProviderConfig host for the unified production case.
 	hubBase := strings.TrimRight(cfg.HubBaseURL, "/")
@@ -137,7 +134,7 @@ func New(cfg Config) (*Controller, error) {
 		engaged: map[string]engagedEdge{},
 	}
 
-	// Edge objects are read unstructured, but the apiexport multicluster
+	// KubernetesCluster objects are read unstructured, but the apiexport multicluster
 	// provider builds a typed cache over APIExportEndpointSlice (v1alpha1)
 	// and APIExport (v1alpha2) to discover virtual-workspace URLs — those
 	// kinds must be registered or the cache fails with "no kind is
@@ -183,10 +180,8 @@ func (c *Controller) EngagedCount() int {
 	return len(c.engaged)
 }
 
-// TenantEdges lists the edge names currently engaged for one tenant —
-// the portal's edge selector. The tenant key is the workspace PATH (matching
-// the X-Faros-Tenant the hub injects), stored per-entry rather than parsed
-// from the cluster-based map key.
+// TenantEdges lists the edge names currently engaged for one tenant. The
+// tenant key is the logical-cluster ID the hub injects as X-Faros-Cluster.
 func (c *Controller) TenantEdges(tenant string) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,8 +195,8 @@ func (c *Controller) TenantEdges(tenant string) []string {
 	return edges
 }
 
-// Reconcile maps one Edge's state to an Engage/Disengage of the
-// corresponding kuery cluster "{tenantCluster}/{edgeName}".
+// Reconcile maps one KubernetesCluster's state to an Engage/Disengage of the
+// corresponding kuery store cluster "{logicalCluster}/{edgeName}".
 func (c *Controller) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	tenantCluster := string(req.ClusterName)
 	logger := klog.FromContext(ctx).WithValues("cluster", tenantCluster, "edge", req.Name)
@@ -222,50 +217,38 @@ func (c *Controller) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	edgeType, _, _ := unstructured.NestedString(edge.Object, "spec", "type")
 	connected, _, _ := unstructured.NestedBool(edge.Object, "status", "connected")
 
-	// Only kubernetes edges carry an API to sync; server (SSH) edges and
-	// disconnected edges are disengaged — kuery marks their rows stale and
-	// the GC reaps them after the TTL.
-	if edgeType != "kubernetes" || !connected {
+	// This controller watches only KubernetesCluster resources. Disconnected
+	// clusters are disengaged; kuery marks their rows stale and the GC reaps
+	// them after the TTL.
+	if !connected {
 		c.disengage(ctx, key)
 		return ctrl.Result{}, nil
 	}
 
-	// Tenant identity is the workspace PATH the hub stamps onto the Edge status
-	// (status.workspacePath). Both the kuery cluster row's NAME and its tenant
-	// LABEL are keyed by it so tenant-scoped queries match — the list query
-	// scopes by label, and the impact query re-pins the path prefix onto the
-	// cluster name (queryapi.ScopeToTenant). Until the hub has stamped it,
-	// requeue rather than engage under the logical-cluster name: that would
-	// create a store row the portal — which only ever sends the path — could
-	// never match (impact would report "object not found").
-	tenant, _, _ := unstructured.NestedString(edge.Object, "status", "workspacePath")
-	if tenant == "" {
-		logger.V(4).Info("workspacePath not yet stamped by hub; requeuing")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
-	if err := c.engage(ctx, key, tenantCluster, req.Name, tenant); err != nil {
+	// The logical cluster is the only tenant identity available on every
+	// APIExport virtual-workspace event. The hub independently resolves the
+	// authenticated caller's workspace to this same ID and injects it as
+	// X-Faros-Cluster on query requests, so no provider-authored status field is
+	// needed to join ingestion to the query authorization boundary.
+	if err := c.engage(ctx, key, tenantCluster, req.Name, tenantCluster); err != nil {
 		logger.Error(err, "engaging edge")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-// engage builds the edges-proxy cluster client and hands it to kuery,
-// then asserts the tenant label used for query scoping. tenant is the
-// workspace path.
+// engage builds the edges-provider proxy client and hands it to kuery, then
+// asserts the trusted logical-cluster tenant label used for query scoping.
 //
 // Two distinct identifiers are at play:
 //   - key ("{logicalCluster}/{edge}") is the internal engaged-map key. It's
 //     derived purely from the reconcile request so it stays computable on
-//     delete, when the Edge (and its status.workspacePath) is already gone.
-//   - storeName ("{workspacePath}/{edge}") is the name kuery records the
+//     delete, when the KubernetesCluster object is already gone.
+//   - storeName ("{logicalCluster}/{edge}") is the name kuery records the
 //     cluster under. queryapi.ScopeToTenant rebuilds exactly this form from
-//     the caller's tenant + edge for impact queries, so the store name MUST
-//     be path-based or those lookups miss.
+//     the hub-injected X-Faros-Cluster + edge for impact queries.
 func (c *Controller) engage(ctx context.Context, key, tenantCluster, edgeName, tenant string) error {
 	c.mu.Lock()
 	if _, ok := c.engaged[key]; ok {
@@ -348,8 +331,7 @@ func (c *Controller) disengage(ctx context.Context, key string) {
 		return
 	}
 	entry.cancel()
-	// kuery recorded the cluster under the path-based store name (see engage),
-	// not the cluster-based map key — disengage the same name.
+	// kuery records the cluster under the trusted tenant ID + edge name.
 	storeName := entry.tenant + "/" + entry.edgeName
 	if err := c.cfg.Sync.Disengage(ctx, storeName); err != nil {
 		klog.FromContext(ctx).Error(err, "disengaging edge", "edge", storeName)
@@ -357,12 +339,11 @@ func (c *Controller) disengage(ctx context.Context, key string) {
 	klog.FromContext(ctx).Info("edge disengaged", "edge", storeName)
 }
 
-// edgeProxyURL mirrors pkg/apiurl.EdgeProxyURL in the faros monorepo —
-// inlined so the provider module doesn't depend on the monorepo. Keep the
-// pattern in lockstep:
-// {hub}/services/edges-proxy/clusters/{cluster}/apis/faros.sh/v1alpha1/edges/{name}/k8s
+// edgeProxyURL mirrors the edges provider's public KubernetesCluster proxy
+// route. It is inlined so the kuery module does not depend on the edges module.
+// {hub}/services/providers/edges/edgeproxy/clusters/{cluster}/apis/edges.faros.sh/v1alpha1/kubernetesclusters/{name}/k8s
 func edgeProxyURL(hubBase, cluster, edgeName string) string {
-	return fmt.Sprintf("%s/services/edges-proxy/clusters/%s/apis/faros.sh/v1alpha1/edges/%s/k8s",
+	return fmt.Sprintf("%s/services/providers/edges/edgeproxy/clusters/%s/apis/edges.faros.sh/v1alpha1/kubernetesclusters/%s/k8s",
 		strings.TrimRight(hubBase, "/"), cluster, edgeName)
 }
 

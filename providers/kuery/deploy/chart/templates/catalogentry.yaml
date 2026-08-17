@@ -31,6 +31,8 @@ data:
       version: {{ .Chart.AppVersion | quote }}
       category: "Observability"
       iconURL: "/ui/providers/kuery/icon.svg"
+      dependencies:
+        - name: edges
       ui:
         url: "http://{{ include "kuery.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         indexPath: "/"
@@ -38,21 +40,24 @@ data:
         url: "http://{{ include "kuery.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         healthPath: "/healthz"
 
-      # Kuery's engagement controller opens BACKGROUND connections to the
-      # tenant's edge clusters through the hub's edges-proxy (informer sync).
-      # On Enable the hub grants the provider SA the "proxy" verb on edges in
+      # Kuery's engagement controller opens BACKGROUND connections to tenant
+      # Kubernetes clusters through the edges provider proxy (informer sync).
+      # On Enable the hub grants the provider SA the "proxy" verb on edge resources in
       # the tenant workspace; removed again on Disable.
       edgeProxyAccess: true
 
       apiExport:
         name: "kuery.providers.faros.sh"
-        # The engagement controller watches the tenant's Edge objects (via the
-        # APIExport virtual workspace) to know which edges to engage/disengage.
-        # First-party claim: the init container stamps its identityHash from
-        # apiExport.edgesIdentityHash (Helm value, copied from /bonkers).
+        requiredResources:
+          - group: kuery.providers.faros.sh
+            name: savedviews
+        # The engagement controller watches KubernetesCluster objects from the
+        # edges provider. Init stamps that provider APIExport's identityHash;
+        # the hub independently verifies the current source identity.
         permissionClaims:
-          - resource: edges
-            group: faros.sh
+          - resource: kubernetesclusters
+            group: edges.faros.sh
             verbs: [get, list, watch]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: edges}
 {{- end }}

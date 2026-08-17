@@ -27,6 +27,8 @@ spec:
   version: "0.1.0"
   category: "Observability"
   iconURL: "/ui/providers/kuery/icon.svg"
+  dependencies:
+    - name: edges
   ui:
     # Dev loopback port (KUERY_PORT / Tiltfile run-provider-kuery). Must be
     # 8084, not 8081 — quickstart owns 8081, and the hub reverse-proxies the
@@ -39,18 +41,24 @@ spec:
     healthPath: "/healthz"
 
   # Kuery's engagement controller opens BACKGROUND connections to the
-  # tenant's edge clusters through the hub's edges-proxy (informer sync).
+  # tenant's Kubernetes clusters through the edges provider proxy (informer sync).
   # This flag asks the hub to grant the provider SA the "proxy" verb on
-  # edges in the tenant workspace when the tenant clicks Enable; the
+  # edge resources in the tenant workspace when the tenant clicks Enable; the
   # Enable dialog surfaces the request. Removed again on Disable.
   edgeProxyAccess: true
 
   apiExport:
     name: "kuery.providers.faros.sh"
-    # The engagement controller watches the tenant's Edge objects (via the
-    # APIExport virtual workspace) to know which edges to engage/disengage.
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: kuery.providers.faros.sh
+        name: savedviews
+    # The engagement controller watches the tenant's KubernetesCluster objects
+    # from the edges provider to know which clusters to engage/disengage.
     permissionClaims:
-      - resource: edges
-        group: faros.sh
+      - resource: kubernetesclusters
+        group: edges.faros.sh
         verbs: [get, list, watch]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: edges}
