@@ -4,7 +4,14 @@ fullnameOverride: ""
 # App Studio assistant project mutations use a single active writer. The chart
 # rejects other values and uses a Recreate deployment strategy to prevent
 # cross-pod overlap during upgrades.
+# Phase A+B of docs/app-studio-replica-awareness.md are in place (durable run
+# claims, project affinity + peer forwarding); replicaCount stays pinned to 1
+# until Phase C lands claim-driven workspace re-hydration.
 replicaCount: 1
+
+# internalPort carries peer-forwarded project requests between replicas.
+# Deliberately not part of the Service.
+internalPort: 8091
 
 image:
   repository: ghcr.io/faroshq/faros/app-studio-provider
