@@ -155,9 +155,17 @@ init-provider-edges: build-edges-provider ## Bootstrap edges APIExport + write d
 	EDGES_WORKSPACE_PATH=$(EDGES_WORKSPACE_PATH) \
 		$(BINDIR)/edges-provider init
 
+# Replica identity for the tunnel-routing registry (multi-replica dev): every
+# instance needs a distinct POD_NAME/EDGES_INTERNAL_PORT; POD_IP is loopback
+# for host binaries. A second instance: make run-provider-edges
+# EDGES_PORT=18088 EDGES_INTERNAL_PORT=18090 POD_NAME=edges-local-2
+EDGES_INTERNAL_PORT ?= 8090
 run-provider-edges: build-edges-provider ## Run the edges provider (needs: hub + install + init)
-	@echo "Starting edges provider on :$(EDGES_PORT) (SINGLE-REPLICA)"
+	@echo "Starting edges provider on :$(EDGES_PORT) (replica $${POD_NAME:-edges-local-1}, relay :$(EDGES_INTERNAL_PORT))"
 	PORT=$(EDGES_PORT) \
+	POD_NAME=$${POD_NAME:-edges-local-1} \
+	POD_IP=$${POD_IP:-127.0.0.1} \
+	EDGES_INTERNAL_PORT=$(EDGES_INTERNAL_PORT) \
 	FAROS_HUB_URL=$(EDGES_HUB_URL) \
 	FAROS_HUB_EXTERNAL_URL=$(EDGES_HUB_EXTERNAL_URL) \
 	FAROS_HUB_TOKEN=$(EDGES_TOKEN) \
@@ -2146,7 +2154,7 @@ helm-deploy-provider-infrastructure: ## (experimental) Build+load image, helm in
 		--set image.repository=faros-infrastructure-provider \
 		--set image.tag=dev \
 		--set image.pullPolicy=Never \
-		--set replicaCount=1 \
+		--set replicaCount=2 \
 		--set bootstrap.enabled=true \
 		--set hub.url=$(HUB_INTERNAL_URL) \
 		--set hub.insecure=true \
