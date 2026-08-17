@@ -43,9 +43,9 @@ spec:
   backend:
     # The hub backend proxy forwards /services/providers/agents/* here,
     # injecting the verified X-Faros-Tenant/X-Faros-User headers and the
-    # caller's bearer token. The provider serves /api/* + /healthz.
+    # caller's bearer token. The provider serves /api/* + health/readiness.
     url: "http://localhost:8087"
-    healthPath: "/healthz"
+    healthPath: "/readyz"
 
   apiExport:
     name: "agents.faros.sh"

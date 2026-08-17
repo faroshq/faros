@@ -41,7 +41,7 @@ spec:
     # the hub backend proxy at /services/providers/edges/* to this Service.
     # Overridden by the chart to the in-cluster Service DNS name.
     url: "http://localhost:8088"
-    healthPath: "/healthz"
+    healthPath: "/readyz"
   apiExport:
     name: "edges.providers.faros.sh"
     # Static API surface the init command must publish before the hub offers

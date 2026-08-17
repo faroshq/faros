@@ -41,7 +41,7 @@ data:
             builtinRoute: services
       backend:
         url: "http://{{ include "edges.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
-        healthPath: "/healthz"
+        healthPath: "/readyz"
       apiExport:
         name: "edges.providers.faros.sh"
         requiredResources:

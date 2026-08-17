@@ -1112,11 +1112,12 @@ local_resource(
         'providers/edges/portal/src',
         'providers/edges/portal/package.json',
         'providers/edges/go.mod',
+        '.kcp/edges-runtime.kubeconfig',
     ],
-    resource_deps=['faros-hub'],
+    resource_deps=['faros-hub', 'edges-init'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8088, path='/healthz'),
+        http_get=http_get_action(port=8088, path='/readyz'),
     ),
     labels=['edges'],
 )
@@ -1197,11 +1198,12 @@ local_resource(
         'providers/agents/portal/package.json',
         'providers/agents/portal/vite.config.ts',
         'providers/agents/.env',
+        '.kcp/agents-provider.kubeconfig',
     ],
-    resource_deps=['faros-hub', 'agents-db'],
+    resource_deps=['faros-hub', 'agents-db', 'agents-init'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8087, path='/healthz'),
+        http_get=http_get_action(port=8087, path='/readyz'),
     ),
     labels=['providers-agents'],
 )

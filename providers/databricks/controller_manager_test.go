@@ -30,9 +30,14 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 
+	"github.com/faroshq/provider-databricks/controller/connection"
+	"github.com/faroshq/provider-databricks/controller/table"
+	"github.com/faroshq/provider-databricks/controller/warehouse"
 	databricksscheme "github.com/faroshq/provider-databricks/scheme"
 	"github.com/faroshq/provider-databricks/tenant"
 )
@@ -279,7 +284,7 @@ func TestControllerModeFromEnvRequiresExplicitRESTOnlyOptIn(t *testing.T) {
 	}
 }
 
-func TestControllerProviderReadinessTimesOutAndRecoversWithoutSleep(t *testing.T) {
+func TestControllerProviderReadinessRequiresSliceButAcceptsIdleProvider(t *testing.T) {
 	started := make(chan struct{})
 	close(started)
 	missing := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()).Resource(apiExportEndpointSliceGVR)
@@ -306,9 +311,6 @@ func TestControllerProviderReadinessTimesOutAndRecoversWithoutSleep(t *testing.T
 		"apiVersion": "apis.kcp.io/v1alpha1",
 		"kind":       "APIExportEndpointSlice",
 		"metadata":   map[string]any{"name": apiExportName},
-		"status": map[string]any{
-			"endpoints": []any{map[string]any{"url": "https://provider.example"}},
-		},
 	}}
 	readyClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), readyObject).Resource(apiExportEndpointSliceGVR)
 	recovered := &controllerProviderReadiness{
@@ -321,6 +323,85 @@ func TestControllerProviderReadinessTimesOutAndRecoversWithoutSleep(t *testing.T
 	}
 	if err := recovered.Wait(context.Background()); err != nil {
 		t.Fatalf("recovered endpoint readiness error = %v, want ready", err)
+	}
+}
+
+func TestControllerProviderMonitorAcceptsEndpointListBecomingEmpty(t *testing.T) {
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apis.kcp.io/v1alpha1",
+		"kind":       "APIExportEndpointSlice",
+		"metadata":   map[string]any{"name": apiExportName},
+		"status": map[string]any{
+			"endpoints": []any{map[string]any{"url": "https://provider.example"}},
+		},
+	}}
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object).Resource(apiExportEndpointSliceGVR)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	checkedEmpty := make(chan struct{})
+	var polls atomic.Int32
+	readiness := &controllerProviderReadiness{
+		endpoint:     client,
+		endpointName: apiExportName,
+		withTimeout: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithCancel(parent)
+		},
+		pollGate: func(pollCtx context.Context, _ time.Duration) bool {
+			if polls.Add(1) == 1 {
+				current, err := client.Get(context.Background(), apiExportName, metav1.GetOptions{})
+				if err != nil {
+					return false
+				}
+				if err := unstructured.SetNestedSlice(current.Object, []any{}, "status", "endpoints"); err != nil {
+					return false
+				}
+				if _, err := client.Update(context.Background(), current, metav1.UpdateOptions{}); err != nil {
+					return false
+				}
+				return true
+			}
+			close(checkedEmpty)
+			<-pollCtx.Done()
+			return false
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- readiness.Monitor(ctx) }()
+	waitForDatabricksControllerSignal(t, checkedEmpty)
+	select {
+	case err := <-done:
+		t.Fatalf("monitor rejected empty endpoint list: %v", err)
+	default:
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("monitor stop = %v, want context canceled", err)
+	}
+}
+
+func TestRetryableManagersCanReuseStableControllerNames(t *testing.T) {
+	for attempt := 1; attempt <= 2; attempt++ {
+		mgr, err := mcmanager.New(
+			&rest.Config{Host: "https://kcp.example"},
+			nil,
+			manager.Options{
+				Scheme:     databricksscheme.NewScheme(),
+				Metrics:    metricsserver.Options{BindAddress: "0"},
+				Controller: controllerOptionsForRetryableManager(),
+			},
+		)
+		if err != nil {
+			t.Fatalf("attempt %d manager: %v", attempt, err)
+		}
+		if err := (&connection.Reconciler{}).SetupWithManager(mgr); err != nil {
+			t.Fatalf("attempt %d connection controller: %v", attempt, err)
+		}
+		if err := (&warehouse.Reconciler{}).SetupWithManager(mgr); err != nil {
+			t.Fatalf("attempt %d warehouse controller: %v", attempt, err)
+		}
+		if err := (&table.Reconciler{}).SetupWithManager(mgr); err != nil {
+			t.Fatalf("attempt %d table controller: %v", attempt, err)
+		}
 	}
 }
 
