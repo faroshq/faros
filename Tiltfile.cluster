@@ -1959,6 +1959,13 @@ provider_pod(
     'code', 8083,
     chart_extra=['replicaCount=2', 'envFromSecret=code-env'],
     resource_deps=['code-secrets', 'code-env'],
+    # THE one legitimate host forward: the GitHub OAuth flow is
+    # browser → provider DIRECT (deliberately not through the hub's
+    # authenticated proxy), and the OAuth App's registered callback is
+    # http://localhost:8083/oauth/github/callback (GITHUB_OAUTH_REDIRECT_URL
+    # in providers/code/.env). The container listens on 8083, so the pod
+    # forward matches.
+    port_forwards=['8083:8083'],
 )
 
 local_resource(
