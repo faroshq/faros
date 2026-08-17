@@ -9,7 +9,7 @@ import { createLatestRefreshController } from '../refresh'
 import { resolve } from '../view'
 import type { Instance, TemplateView } from '../types'
 
-const props = defineProps<{ instanceName: string }>()
+const props = defineProps<{ instanceName: string; templateName?: string }>()
 const emit = defineEmits<{ (e: 'navigate', view: string): void }>()
 
 const inst = ref<Instance | null>(null)
@@ -31,7 +31,7 @@ const conditions = computed<ConditionInfo[]>(() => (inst.value?.conditions ?? []
 })))
 const conditionObservedGeneration = computed(() => {
   if (inst.value?.observedGeneration !== undefined) return inst.value.observedGeneration
-  return inst.value?.generation !== undefined ? 0 : undefined
+  return undefined
 })
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -42,7 +42,7 @@ function errorMessage(error: unknown, fallback: string): string {
 const refresh = createLatestRefreshController(async requestID => {
   loading.value = true
   try {
-    const result = await api.getInstanceDetail(props.instanceName)
+    const result = await api.getInstanceDetail(props.instanceName, props.templateName)
     if (!refresh.isCurrent(requestID)) return
     inst.value = result.instance
     view.value = result.template?.view ?? null
@@ -61,7 +61,7 @@ function load(): Promise<void> {
 }
 
 watch(
-  () => props.instanceName,
+  () => [props.templateName, props.instanceName] as const,
   () => {
     refresh.invalidate()
     inst.value = null
@@ -86,7 +86,7 @@ async function executeDelete() {
 
   deleting.value = true
   try {
-    await api.deleteInstance(props.instanceName)
+    await api.deleteInstance(props.instanceName, props.templateName)
     if (active) emit('navigate', 'instances')
   } catch (caught) {
     if (active && !isContextChangedError(caught)) deleteError.value = errorMessage(caught, 'delete failed')

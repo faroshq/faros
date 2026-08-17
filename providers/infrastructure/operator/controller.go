@@ -12,6 +12,7 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -38,6 +39,10 @@ const APIExportName = "infrastructure.providers.faros.sh"
 // requeueInterval re-runs each CR's reconcile periodically so the bootstrap +
 // kro release + serve Deployment self-heal even without a spec change.
 const requeueInterval = 2 * time.Minute
+
+// progressRequeueInterval observes rollout progress promptly without blocking
+// a reconcile worker on the Deployment readiness probe.
+const progressRequeueInterval = 5 * time.Second
 
 // Reconciler reconciles InfrastructureProvider CRs.
 type Reconciler struct {
@@ -167,6 +172,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else {
 		if err := EnsureProviderServe(ctx, cs, &cr, providerKC, runtimeKC, hubToken); err != nil {
 			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "ServeDeployFailed", err)
+		}
+		deployment, err := cs.AppsV1().Deployments(ServeNamespace).Get(ctx, cr.Name, metav1.GetOptions{})
+		if err != nil {
+			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "ServeStatusFailed", fmt.Errorf("get serve Deployment: %w", err))
+		}
+		if message, failed := serveDeploymentFailed(deployment); failed {
+			return r.fail(ctx, &cr, v1alpha1.ConditionProviderDeployed, "ProgressDeadlineExceeded", errors.New(message))
+		}
+		if available, message := serveDeploymentAvailable(deployment); !available {
+			setCond(&cr, v1alpha1.ConditionProviderDeployed, metav1.ConditionFalse, "Progressing", message)
+			cr.Status.Phase = "Bootstrapping"
+			cr.Status.ObservedGeneration = cr.Generation
+			if err := r.Client.Status().Update(ctx, &cr); err != nil {
+				log.Info("status update failed", "err", err.Error())
+			}
+			return ctrl.Result{RequeueAfter: progressRequeueInterval}, nil
 		}
 		setCond(&cr, v1alpha1.ConditionProviderDeployed, metav1.ConditionTrue, "Deployed", "provider serve Deployment reconciled")
 

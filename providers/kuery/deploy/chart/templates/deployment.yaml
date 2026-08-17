@@ -24,10 +24,10 @@ spec:
       serviceAccountName: {{ include "kuery.serviceAccountName" . }}
       initContainers:
         # Bootstrap the provider workspace (schemas, APIExport, slice, bind
-        # grant) with the onboarded workspace-admin kubeconfig. kuery's edges
-        # permission claim is first-party, so its identityHash MUST be supplied
-        # (copy it from the /bonkers "Root identities" view into
-        # apiExport.edgesIdentityHash) or tenant Enable engages zero edges.
+        # grant) with the onboarded workspace-admin kubeconfig. Kuery's
+        # edges.faros.sh/kubernetesclusters permission claim is first-party, so
+        # its identityHash MUST be supplied from the
+        # edges.providers.faros.sh APIExport.
         - name: init
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}

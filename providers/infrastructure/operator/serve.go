@@ -78,6 +78,7 @@ func EnsureProviderServe(
 	env := []corev1.EnvVar{
 		{Name: "PORT", Value: fmt.Sprintf("%d", port)},
 		{Name: "FAROS_PROVIDER_NAME", Value: "infrastructure"},
+		{Name: "INFRASTRUCTURE_CONTROLLER_MODE", Value: "required"},
 		{Name: "INFRASTRUCTURE_KUBECONFIG", Value: providerKubeconfigMount},
 	}
 	if cr.Spec.Hub.URL != "" {
@@ -211,9 +212,16 @@ func EnsureProviderServe(
 						Env:          env,
 						Ports:        []corev1.ContainerPort{{ContainerPort: port, Name: "http"}},
 						VolumeMounts: volMounts,
-						ReadinessProbe: &corev1.Probe{
+						LivenessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(port)},
+							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       20,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt32(port)},
 							},
 							PeriodSeconds: 5,
 						},
@@ -251,6 +259,63 @@ func EnsureProviderServe(
 	}
 
 	return ensureServeService(ctx, cs, name, labels, port)
+}
+
+// serveDeploymentAvailable reports whether the Deployment controller has
+// observed the current spec and the desired provider replicas are updated and
+// available. The Deployment's /readyz probe owns process/controller readiness;
+// the operator only consumes the resulting Deployment status.
+func serveDeploymentAvailable(deployment *appsv1.Deployment) (bool, string) {
+	if deployment.Status.ObservedGeneration < deployment.Generation {
+		return false, fmt.Sprintf("waiting for Deployment generation %d to be observed (currently %d)", deployment.Generation, deployment.Status.ObservedGeneration)
+	}
+
+	available := false
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentAvailable {
+			available = condition.Status == corev1.ConditionTrue
+			break
+		}
+	}
+	if !available {
+		return false, "waiting for Deployment Available condition"
+	}
+
+	desired := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desired = *deployment.Spec.Replicas
+	}
+	if deployment.Status.UpdatedReplicas != desired {
+		return false, fmt.Sprintf("waiting for updated provider replicas (%d/%d)", deployment.Status.UpdatedReplicas, desired)
+	}
+	if deployment.Status.Replicas != desired {
+		return false, fmt.Sprintf("waiting for old provider replicas to terminate (%d total, %d desired)", deployment.Status.Replicas, desired)
+	}
+	if deployment.Status.AvailableReplicas != desired {
+		return false, fmt.Sprintf("waiting for available provider replicas (%d/%d)", deployment.Status.AvailableReplicas, desired)
+	}
+	return true, ""
+}
+
+func serveDeploymentFailed(deployment *appsv1.Deployment) (string, bool) {
+	if deployment.Status.ObservedGeneration < deployment.Generation {
+		// Progressing may still describe the previous ReplicaSet while the
+		// Deployment controller is observing a new spec. Let availability report
+		// the rollout as pending instead of terminally failing on stale status.
+		return "", false
+	}
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentProgressing &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == "ProgressDeadlineExceeded" {
+			message := condition.Message
+			if message == "" {
+				message = "provider serve Deployment exceeded its progress deadline"
+			}
+			return message, true
+		}
+	}
+	return "", false
 }
 
 // ensureServeRBAC creates the serve pod's ServiceAccount (in ServeNamespace)

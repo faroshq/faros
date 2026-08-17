@@ -186,8 +186,8 @@ func encodeKubeconfig(id *RuntimeIdentity) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rewrite host for kro: %w", err)
 	}
-	cluster := &clientcmdapi.Cluster{Server: server}
-	if insecure {
+	cluster := &clientcmdapi.Cluster{Server: server, TLSServerName: id.ServerName}
+	if insecure || id.Insecure {
 		cluster.InsecureSkipTLSVerify = true
 	} else {
 		cluster.CertificateAuthorityData = id.CAData

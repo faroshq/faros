@@ -8,6 +8,7 @@ import RepositoriesView from './views/RepositoriesView.vue'
 import RepoDetailView from './views/RepoDetailView.vue'
 import PackagesView from './views/PackagesView.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
+import { resolveConfirm } from './portalkit/confirm'
 
 // Sub-path routing (the shell pushes the trailing /providers/code/<sub> segment):
 //   ''  | 'connections'        → Connections
@@ -47,6 +48,9 @@ const contextInitialized = computed(() => props.ctx !== null)
 watch(
   () => [props.ctx?.basePath, props.ctx?.token, props.ctx?.tenant, props.ctx?.user?.sub] as const,
   ([basePath, token, tenant]) => {
+    // The dialog is module-global, so remounting the routed page is not enough
+    // to revoke a confirmation opened under the previous authority.
+    resolveConfirm(false)
     setBasePath(basePath)
     setAPIContext({ token, tenant })
     contextGeneration.value += 1

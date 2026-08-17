@@ -8,7 +8,7 @@ import { REASON_CLOUD_CREDENTIALS_MISSING, REASON_API_BINDING_MISSING, REASON_TE
 const props = defineProps<{ templateName: string }>()
 const emit = defineEmits<{
   (e: 'navigate', view: string, payload?: unknown): void
-  (e: 'provisioned', instanceName: string): void
+  (e: 'provisioned', instanceName: string, templateName: string): void
 }>()
 
 const template = ref<Template | null>(null)
@@ -56,6 +56,7 @@ onUnmounted(() => {
 
 async function submit() {
   if (!template.value || !loaded.value || loading.value || submitting.value) return
+  const currentTemplate = template.value
   if (!instanceName.value) {
     mutationError.value = 'instance name required'
     return
@@ -64,12 +65,12 @@ async function submit() {
   submitting.value = true
   try {
     const inst = await api.createInstance({
-      templateName: template.value.name,
-      templateVersion: template.value.version,
+      templateName: currentTemplate.name,
+      templateVersion: currentTemplate.version,
       name: instanceName.value,
       values: values.value,
     })
-    if (active) emit('provisioned', inst.name)
+    if (active) emit('provisioned', inst.name, currentTemplate.name)
   } catch (e: unknown) {
     if (!active || isContextChangedError(e)) return
     const err = e as ErrorResponse
@@ -111,6 +112,10 @@ async function submit() {
           <p class="page-meta">{{ template.description }}</p>
         </div>
       </header>
+      <div v-if="!template.ready" class="read-error" role="alert" aria-live="assertive">
+        <span>{{ template.readinessMessage || 'This template is not ready for provisioning.' }}</span>
+        <button type="button" class="read-retry" @click="load">Check again</button>
+      </div>
       <form class="form" :aria-busy="submitting" @submit.prevent="submit">
         <div class="dynform-row">
           <label>
@@ -123,7 +128,7 @@ async function submit() {
         <div v-if="mutationError" class="read-error" role="alert" aria-live="assertive">{{ mutationError }}</div>
         <span v-if="submitting" class="sr-only" role="status" aria-live="polite">Provisioning instance…</span>
         <div class="actions">
-          <button type="submit" class="primary" :disabled="submitting">
+          <button type="submit" class="primary" :disabled="submitting || !template.ready">
             {{ submitting ? 'Provisioning…' : 'Provision' }}
           </button>
           <button type="button" class="link" :disabled="submitting" @click="emit('navigate', 'catalog')">Cancel</button>

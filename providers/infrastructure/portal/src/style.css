@@ -113,6 +113,26 @@ faros-provider-infrastructure .template-card:hover {
   border-color: var(--color-accent, #8b6bff);
 }
 
+faros-provider-infrastructure .template-card.is-unavailable {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+faros-provider-infrastructure .template-card.is-unavailable:hover {
+  border-color: var(--color-border-subtle);
+}
+
+faros-provider-infrastructure .template-readiness {
+  align-items: flex-start;
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  gap: 6px;
+  line-height: 1.4;
+  margin: 0;
+}
+
 faros-provider-infrastructure .template-card-head {
   display: flex;
   align-items: center;
@@ -238,6 +258,7 @@ faros-provider-infrastructure button.link {
 }
 
 faros-provider-infrastructure button.link.back {
+  align-self: flex-start;
   margin-bottom: 4px;
 }
 

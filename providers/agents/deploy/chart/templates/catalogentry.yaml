@@ -28,6 +28,17 @@ spec:
   # this chart's init container (provider `init`, via the faros-provider-sdk).
   apiExport:
     name: "agents.faros.sh"
+    requiredResources:
+      - group: agents.faros.sh
+        name: agents
+      - group: agents.faros.sh
+        name: connections
+      - group: agents.faros.sh
+        name: schedules
+      - group: agents.faros.sh
+        name: toolsets
+      - group: agents.faros.sh
+        name: triggers
     permissionClaims:
       - resource: secrets
         verbs: ["get", "list", "watch", "create", "update", "delete"]
@@ -48,6 +59,17 @@ spec:
       - resource: clusterrolebindings
         group: rbac.authorization.k8s.io
         verbs: ["get", "create"]
+        tenantScoped: true
+      # Service-to-service callers use delegated review APIs in the target
+      # tenant's APIExport virtual workspace. Existing bindings explicitly
+      # review and accept additions in the provider catalog.
+      - group: authentication.k8s.io
+        resource: tokenreviews
+        verbs: [create]
+        tenantScoped: true
+      - group: authorization.k8s.io
+        resource: subjectaccessreviews
+        verbs: [create]
         tenantScoped: true
 {{- end -}}
 

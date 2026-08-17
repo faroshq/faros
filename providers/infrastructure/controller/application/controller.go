@@ -50,6 +50,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -201,8 +202,9 @@ func New(cfg Config) (*Controller, error) {
 		return nil, fmt.Errorf("creating apiexport multicluster provider: %w", err)
 	}
 	mgr, err := mcmanager.New(cfg.ProviderConfig, provider, manager.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:     scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: controllerOptionsForRetryableManager(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating multicluster manager: %w", err)
@@ -223,6 +225,17 @@ func New(cfg Config) (*Controller, error) {
 	return c, nil
 }
 
+func controllerOptionsForRetryableManager() ctrlconfig.Controller {
+	// The provider lifecycle rebuilds this manager after any shared controller
+	// failure. controller-runtime retains controller names process-wide even
+	// after a manager stops, while the replacement intentionally reuses the same
+	// stable names. The outer lifecycle cancels and joins the previous manager
+	// before retrying, so bypassing the process-global check cannot create two
+	// active controllers with one name.
+	skipNameValidation := true
+	return ctrlconfig.Controller{SkipNameValidation: &skipNameValidation}
+}
+
 // instanceReconciler reconciles one instance kind; the shared Controller
 // carries the config and cross-kind helpers.
 type instanceReconciler struct {
@@ -232,6 +245,13 @@ type instanceReconciler struct {
 
 // Start runs the multicluster manager (blocking).
 func (c *Controller) Start(ctx context.Context) error { return c.mgr.Start(ctx) }
+
+// Ready closes once the multicluster manager has started and reached its
+// election boundary. Leader election is disabled for this manager today, so
+// this is the manager's native startup signal rather than construction-time
+// optimism. Keep the signal narrow so the process lifecycle does not need to
+// know about the concrete manager implementation.
+func (c *Controller) Ready() <-chan struct{} { return c.mgr.Elected() }
 
 // Reconcile stamps the computed fqdn (and, for oidc kinds,
 // credentialsSecretName) onto the instance and bridges the OIDC client secret

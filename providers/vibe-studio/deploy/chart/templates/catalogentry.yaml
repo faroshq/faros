@@ -31,29 +31,43 @@ data:
         healthPath: "/healthz"
       apiExport:
         name: "vibe.faros.sh"
+        requiredResources:
+          - group: vibe.faros.sh
+            name: models
+          - group: vibe.faros.sh
+            name: projects
+          - group: vibe.faros.sh
+            name: sessions
+          - group: vibe.faros.sh
+            name: studios
         permissionClaims:
           - resource: applications
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: infrastructure}
           - resource: simplewebapps
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: infrastructure}
           - resource: workers
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: infrastructure}
           # Web search: every project binds a private searxng instance so the
           # assistant can look things up instead of asking the user to paste.
           - resource: searxngs
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: infrastructure}
           - resource: repositories
             group: code.faros.sh
             verbs: [get, list, watch, create, update, patch]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: code}
           - resource: serviceaccounts
             verbs: [get, list, watch, create, delete]
             tenantScoped: true

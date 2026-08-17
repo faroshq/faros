@@ -13,7 +13,7 @@
 // `delete<Kind>` mutations — no field schema needs to be known ahead of time.
 
 import { load as yamlLoad } from 'js-yaml'
-import type { ErrorResponse, Instance, JSONSchema, Template, TemplateExposure, TemplateView } from './types'
+import type { ErrorResponse, Instance, JSONSchema, Template, TemplateCondition, TemplateExposure, TemplateView } from './types'
 import { columnsNeedInstanceData } from './view'
 
 const GROUP = 'infrastructure.faros.sh'
@@ -24,6 +24,7 @@ const GROUP_FIELD = 'infrastructure_faros_sh'
 let bearerToken: string | null = null
 let clusterName: string | null = null
 let contextGeneration = 0
+let pageAuthority: object = {}
 
 interface ApiContext {
   token: string | null
@@ -35,12 +36,49 @@ interface ApiContext {
 export interface PortalApiContext {
   token?: string | null
   tenant?: string | null
+  // Independently mounted callers can supply an opaque identity object and
+  // replace it whenever their tenant/token authority changes. Object identity
+  // is collision-free and lets the API cache without retaining credentials.
+  authority?: object
 }
 
-function authorityKey(cluster: string, token: string | null): string {
-  // Length-prefix the cluster so two distinct context pairs cannot alias. This
-  // key is internal only; it is never logged or persisted.
-  return `${cluster.length}:${cluster}:${token ?? ''}`
+// The page and dashboard tile share this module but receive context separately.
+// Cache by collision-free object identity, represented by an opaque non-secret
+// key, and bound the derived cache entries with a small LRU. The WeakMap never
+// retains an identity after its owner and in-flight requests release it.
+const MAX_CACHED_AUTHORITIES = 8
+const authorityKeys = new WeakMap<object, string>()
+const authorityUses = new Map<string, number>()
+let nextAuthorityID = 0
+let authorityUse = 0
+
+function authorityKey(identity: object): string {
+  let key = authorityKeys.get(identity)
+  if (!key) {
+    key = `authority-${++nextAuthorityID}`
+    authorityKeys.set(identity, key)
+  }
+  authorityUses.set(key, ++authorityUse)
+  if (authorityUses.size > MAX_CACHED_AUTHORITIES) {
+    let oldestKey: string | undefined
+    let oldestUse = Number.POSITIVE_INFINITY
+    for (const [candidate, usedAt] of authorityUses) {
+      if (usedAt < oldestUse) {
+        oldestKey = candidate
+        oldestUse = usedAt
+      }
+    }
+    if (oldestKey) {
+      authorityUses.delete(oldestKey)
+      cachedIndexes.delete(oldestKey)
+      capabilityByAuthority.delete(oldestKey)
+    }
+  }
+  return key
+}
+
+function authorityIsActive(id: string): boolean {
+  return authorityUses.has(id)
 }
 
 export function setContext(context: PortalApiContext) {
@@ -51,6 +89,7 @@ export function setContext(context: PortalApiContext) {
   bearerToken = nextToken
   clusterName = nextCluster
   contextGeneration += 1
+  pageAuthority = {}
   if (tenantChanged) {
     // eslint-disable-next-line no-console
     console.debug('[infrastructure] tenant clusterName →', nextCluster)
@@ -79,7 +118,10 @@ function captureContext(explicit?: PortalApiContext): ApiContext {
     token,
     cluster,
     generation: explicit ? null : contextGeneration,
-    authorityKey: authorityKey(cluster, token),
+    // Callers without a stable identity deliberately get a request-local cache
+    // identity. The page and dashboard provide stable objects that they rotate
+    // with authority, so their normal refreshes still reuse discovery data.
+    authorityKey: authorityKey(explicit?.authority ?? (explicit ? {} : pageAuthority)),
   }
 }
 
@@ -99,6 +141,12 @@ export function isContextChangedError(error: unknown): boolean {
 
 function protocolError(message: string): ErrorResponse {
   return { reason: 'ProtocolError', message }
+}
+
+function isGraphQLResourceNotFound(error: unknown, resource: string, name: string): boolean {
+  const value = error as { reason?: string; message?: string }
+  return value.reason === 'GraphQLError' &&
+    value.message === `${resource}.${GROUP} "${name}" not found`
 }
 
 // ── GraphQL transport ───────────────────────────────────────────────────────
@@ -165,7 +213,14 @@ async function applyCR(context: ApiContext, manifest: Record<string, unknown>): 
     if (!object || typeof object !== 'object' || Array.isArray(object)) {
       throw protocolError('applyYaml returned an invalid resource')
     }
-    return object as RawObject
+    const resource = object as RawObject
+    const expectedMetadata = manifest.metadata
+    if (!expectedMetadata || typeof expectedMetadata !== 'object' || Array.isArray(expectedMetadata) ||
+      resource.apiVersion !== manifest.apiVersion || resource.kind !== manifest.kind ||
+      resource.metadata?.name !== (expectedMetadata as { name?: unknown }).name) {
+      throw protocolError('applyYaml returned a different resource than requested')
+    }
+    return resource
   } catch (error) {
     if ((error as ErrorResponse).reason === 'ProtocolError') throw error
     throw protocolError('applyYaml returned malformed JSON')
@@ -195,10 +250,9 @@ interface RawObject {
   status?: {
     phase?: string
     message?: string
-    observedGeneration?: number
-    conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>
+    conditions?: Array<{ type: string; status: string; observedGeneration?: number; reason?: string; message?: string; lastTransitionTime?: string }> | null
     [k: string]: unknown
-  }
+  } | null
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────
@@ -230,7 +284,18 @@ function parseOptionalPresentationObject<T extends Record<string, unknown>>(valu
   }
 }
 
-function templateFromGQL(name: string, spec: Record<string, unknown>): Template {
+interface RawTemplateStatus {
+  observedGeneration?: unknown
+  backend?: unknown
+  conditions?: unknown
+}
+
+function templateFromGQL(
+  metadata: { name: string; generation?: unknown },
+  spec: Record<string, unknown>,
+  rawStatus?: RawTemplateStatus | null,
+): Template {
+  const name = metadata.name
   if (!name) throw protocolError('Template item was missing metadata.name')
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
     throw protocolError(`Template ${name} was missing an object spec`)
@@ -239,9 +304,12 @@ function templateFromGQL(name: string, spec: Record<string, unknown>): Template 
     (!spec.instanceCRD || typeof spec.instanceCRD !== 'object' || Array.isArray(spec.instanceCRD))) {
     throw protocolError(`Template ${name} instanceCRD was not an object`)
   }
-  const instanceCRD = (spec.instanceCRD ?? {}) as { kind?: string }
+  const instanceCRD = (spec.instanceCRD ?? {}) as { kind?: string; resource?: string }
   if (typeof instanceCRD.kind !== 'string' || !instanceCRD.kind) {
     throw protocolError(`Template ${name} was missing instanceCRD.kind`)
+  }
+  if (typeof instanceCRD.resource !== 'string' || !instanceCRD.resource) {
+    throw protocolError(`Template ${name} was missing instanceCRD.resource`)
   }
   // spec.schema is a preserve-unknown-fields field → the gateway returns it as a
   // JSON string (JSONString scalar); parse it back into the JSONSchema object.
@@ -253,16 +321,82 @@ function templateFromGQL(name: string, spec: Record<string, unknown>): Template 
   // view is a preserve-unknown-fields field → JSONString from the gateway;
   // same parse-the-string / accept-an-object treatment as schema/sampleValues.
   const view = parseOptionalPresentationObject<TemplateView & Record<string, unknown>>(spec.view, 'view')
+  if (metadata.generation !== undefined &&
+    (typeof metadata.generation !== 'number' || !Number.isSafeInteger(metadata.generation) || metadata.generation < 0)) {
+    throw protocolError(`Template ${name} metadata.generation had an invalid shape`)
+  }
+  if (rawStatus != null && (typeof rawStatus !== 'object' || Array.isArray(rawStatus))) {
+    throw protocolError(`Template ${name} status was not an object`)
+  }
+  const status = rawStatus ?? undefined
+  if (status?.observedGeneration != null &&
+    (typeof status.observedGeneration !== 'number' || !Number.isSafeInteger(status.observedGeneration) || status.observedGeneration < 0)) {
+    throw protocolError(`Template ${name} status.observedGeneration had an invalid shape`)
+  }
+  if (status?.conditions != null && !Array.isArray(status.conditions)) {
+    throw protocolError(`Template ${name} status.conditions was not an array`)
+  }
+  const conditions: TemplateCondition[] = (status?.conditions ?? []).map((condition, index) => {
+    if (!condition || typeof condition !== 'object' || Array.isArray(condition) ||
+      typeof condition.type !== 'string' || typeof condition.status !== 'string') {
+      throw protocolError(`Template ${name} condition ${index} had an invalid shape`)
+    }
+    const c = condition as Record<string, unknown>
+    if (c.observedGeneration != null &&
+      (typeof c.observedGeneration !== 'number' || !Number.isSafeInteger(c.observedGeneration) || c.observedGeneration < 0)) {
+      throw protocolError(`Template ${name} condition ${index} observedGeneration had an invalid shape`)
+    }
+    return {
+      type: c.type as string,
+      status: c.status as string,
+      observedGeneration: typeof c.observedGeneration === 'number' ? c.observedGeneration : undefined,
+      reason: typeof c.reason === 'string' ? c.reason : undefined,
+      message: typeof c.message === 'string' ? c.message : undefined,
+      time: typeof c.lastTransitionTime === 'string' ? c.lastTransitionTime : undefined,
+    }
+  })
+  const backend = status?.backend
+  if (backend != null && (typeof backend !== 'object' || Array.isArray(backend))) {
+    throw protocolError(`Template ${name} status.backend was not an object`)
+  }
+  const backendStatus = backend as { ready?: unknown; message?: unknown } | undefined
+  if (backendStatus?.ready != null && typeof backendStatus.ready !== 'boolean') {
+    throw protocolError(`Template ${name} status.backend.ready had an invalid shape`)
+  }
+  if (backendStatus?.message != null && typeof backendStatus.message !== 'string') {
+    throw protocolError(`Template ${name} status.backend.message had an invalid shape`)
+  }
+  const generation = metadata.generation as number | undefined
+  const observedGeneration = typeof status?.observedGeneration === 'number' ? status.observedGeneration : undefined
+  const readyCondition = conditions.find(condition => condition.type === 'Ready')
+  const readyObservedGeneration = readyCondition?.observedGeneration ?? observedGeneration
+  const current = generation === undefined ||
+    (readyObservedGeneration !== undefined && readyObservedGeneration >= generation)
+  const ready = current && readyCondition?.status === 'True' && backendStatus?.ready === true
+  const readinessMessage = ready
+    ? undefined
+    : !current && generation !== undefined
+      ? `Waiting for the template controller to observe generation ${generation}.`
+      : readyCondition?.message ||
+        (typeof backendStatus?.message === 'string' ? backendStatus.message : undefined) ||
+        readyCondition?.reason ||
+        'Template setup is still in progress.'
   return {
     name,
     displayName: (spec.displayName as string) || name,
     description: (spec.description as string) ?? '',
+    ready,
+    readinessMessage,
+    generation,
+    observedGeneration,
+    conditions,
     category: spec.category as string | undefined,
     cloud: spec.cloud as string | undefined,
     exposure: spec.exposure as TemplateExposure | undefined,
     version: spec.version as string | undefined,
     iconURL: spec.iconURL as string | undefined,
     kind: instanceCRD.kind ?? '',
+    resource: instanceCRD.resource,
     inputsSchema,
     sampleValues,
     view,
@@ -276,10 +410,10 @@ function instanceFromObj(c: RawObject, templateByKind: Map<string, string>): Ins
   if (!c || typeof c !== 'object' || Array.isArray(c) || !c.metadata || typeof c.metadata !== 'object' || !c.metadata.name) {
     throw protocolError('Instance item was missing metadata.name')
   }
-  if (c.status !== undefined && (!c.status || typeof c.status !== 'object' || Array.isArray(c.status))) {
+  if (c.status != null && (typeof c.status !== 'object' || Array.isArray(c.status))) {
     throw protocolError(`Instance ${c.metadata.name} status was not an object`)
   }
-  if (c.status?.conditions !== undefined && !Array.isArray(c.status.conditions)) {
+  if (c.status?.conditions != null && !Array.isArray(c.status.conditions)) {
     throw protocolError(`Instance ${c.metadata.name} conditions was not an array`)
   }
   const labels = c.metadata.labels ?? {}
@@ -292,6 +426,9 @@ function instanceFromObj(c: RawObject, templateByKind: Map<string, string>): Ins
     return {
       type: condition.type,
       status: condition.status,
+      observedGeneration: typeof condition.observedGeneration === 'number'
+        ? condition.observedGeneration
+        : undefined,
       reason: condition.reason,
       message: condition.message,
       time: condition.lastTransitionTime,
@@ -307,10 +444,13 @@ function instanceFromObj(c: RawObject, templateByKind: Map<string, string>): Ins
     if (Object.keys(rest).length > 0) status = rest
   }
   const generation = c.metadata?.generation
-  const observedGeneration = typeof c.status?.observedGeneration === 'number'
-    ? c.status.observedGeneration
-    : undefined
-  const reconciled = generation === undefined || (observedGeneration !== undefined && observedGeneration >= generation)
+  // Dynamic instance CRDs guarantee observedGeneration on condition entries,
+  // not at the top level of status. Ready is the authority for the aggregate
+  // phase; an unrelated current condition must not mask a stale Ready. If
+  // either side is absent, freshness is unknown rather than stale, so preserve
+  // the controller-reported phase.
+  const observedGeneration = conditions.find(condition => condition.type === 'Ready')?.observedGeneration
+  const reconciled = generation === undefined || observedGeneration === undefined || observedGeneration >= generation
   const reportedPhase = c.status?.phase || (conditions.find(x => x.type === 'Ready')?.status === 'True' ? 'Ready' : 'Pending')
   return {
     uid: c.metadata?.uid,
@@ -376,13 +516,19 @@ interface CapabilityState {
   sampleValuesSupported: boolean | null
   viewSupported: boolean | null
   exposureSupported: boolean | null
+  instanceConditionObservedGenerationUnsupported: Set<string>
 }
 const capabilityByAuthority = new Map<string, CapabilityState>()
 
 function capabilities(context: ApiContext): CapabilityState {
   let state = capabilityByAuthority.get(context.authorityKey)
   if (!state) {
-    state = { sampleValuesSupported: null, viewSupported: null, exposureSupported: null }
+    state = {
+      sampleValuesSupported: null,
+      viewSupported: null,
+      exposureSupported: null,
+      instanceConditionObservedGenerationUnsupported: new Set(),
+    }
     capabilityByAuthority.set(context.authorityKey, state)
   }
   return state
@@ -408,16 +554,20 @@ async function templateQuery<T>(context: ApiContext, make: (spec: string) => str
     try {
       return await graphqlQuery<T>(context, make(templateSpec(context)), variables)
     } catch (e) {
-      const msg = (e as { message?: string }).message ?? ''
-      if (state.sampleValuesSupported !== false && /Cannot query field ["']sampleValues["']/i.test(msg)) {
+      const error = e as { reason?: string; message?: string }
+      const msg = error.message ?? ''
+      // Capability downgrade is valid only for GraphQL schema validation.
+      // HTTP/protocol/authorization failures can contain the same words and
+      // must retain their original authority instead of being retried away.
+      if (error.reason === 'GraphQLError' && state.sampleValuesSupported !== false && /Cannot query field ["']sampleValues["']/i.test(msg)) {
         state.sampleValuesSupported = false
         continue
       }
-      if (state.viewSupported !== false && /Cannot query field ["']view["']/i.test(msg)) {
+      if (error.reason === 'GraphQLError' && state.viewSupported !== false && /Cannot query field ["']view["']/i.test(msg)) {
         state.viewSupported = false
         continue
       }
-      if (state.exposureSupported !== false && /Cannot query field ["']exposure["']/i.test(msg)) {
+      if (error.reason === 'GraphQLError' && state.exposureSupported !== false && /Cannot query field ["']exposure["']/i.test(msg)) {
         state.exposureSupported = false
         continue
       }
@@ -428,9 +578,9 @@ async function templateQuery<T>(context: ApiContext, make: (spec: string) => str
 
 async function refreshIndex(context: ApiContext): Promise<InfraIndex> {
   const [tmplData, versionFields] = await Promise.all([
-    templateQuery<Infra<{ Templates?: { items?: Array<{ metadata: { name: string }; spec: Record<string, unknown> }> } }>>(
+    templateQuery<Infra<{ Templates?: { items?: Array<{ metadata: { name: string; generation?: number }; spec: Record<string, unknown>; status?: RawTemplateStatus | null }> } }>>(
       context,
-      spec => `{ ${GROUP_FIELD} { ${VERSION} { Templates { items { metadata { name } spec { ${spec} } } } } } }`,
+      spec => `{ ${GROUP_FIELD} { ${VERSION} { Templates { items { metadata { name generation } spec { ${spec} } status { observedGeneration backend { ready message } conditions { type status observedGeneration reason message lastTransitionTime } } } } } } }`,
     ),
     introspectVersionFields(context),
   ])
@@ -446,7 +596,7 @@ async function refreshIndex(context: ApiContext): Promise<InfraIndex> {
       !item.spec || typeof item.spec !== 'object' || Array.isArray(item.spec)) {
       throw protocolError(`Template list item ${index} had an invalid shape`)
     }
-    return templateFromGQL(item.metadata.name, item.spec)
+    return templateFromGQL(item.metadata, item.spec, item.status)
   })
   const templateByKind = new Map<string, string>()
   for (const t of templates) if (t.kind) templateByKind.set(t.kind, t.name)
@@ -474,7 +624,10 @@ async function refreshIndex(context: ApiContext): Promise<InfraIndex> {
 
   assertContextCurrent(context)
   const index = { fetchedAt: Date.now(), templates, templateByKind, listFieldByKind }
-  cachedIndexes.set(context.authorityKey, index)
+  // An explicit tile request may finish after its authority was LRU-evicted by
+  // newer host contexts. Return its result to that caller without resurrecting
+  // an evicted cache entry.
+  if (authorityIsActive(context.authorityKey)) cachedIndexes.set(context.authorityKey, index)
   return index
 }
 
@@ -518,26 +671,88 @@ function parseYamlResource(text: string, operation: string): RawObject {
   }
 }
 
-async function getInstanceInContext(context: ApiContext, name: string, idx: InfraIndex): Promise<Instance> {
-  const kinds = [...idx.listFieldByKind.keys()]
+async function getInstanceInContext(
+  context: ApiContext,
+  name: string,
+  idx: InfraIndex,
+  templateName?: string,
+): Promise<Instance> {
+  const requestedTemplate = templateName
+    ? idx.templates.find(template => template.name === templateName)
+    : undefined
+  if (templateName && !requestedTemplate) {
+    throw <ErrorResponse>{ reason: 'TemplateNotFound', message: 'template ' + templateName + ' not found' }
+  }
+  if (requestedTemplate && !requestedTemplate.kind) {
+    throw <ErrorResponse>{
+      reason: 'ProviderNotReady',
+      message: `instance API for template ${templateName} is not established yet`,
+    }
+  }
+  if (requestedTemplate?.kind && !idx.listFieldByKind.has(requestedTemplate.kind)) {
+    throw <ErrorResponse>{ reason: 'ProviderNotReady', message: `instance API for template ${templateName} is not established yet` }
+  }
+  const kinds = requestedTemplate?.kind ? [requestedTemplate.kind] : [...idx.listFieldByKind.keys()]
   const probes = kinds.map(async kind => {
-    const data = await graphqlQuery<Infra<Record<string, string | null>>>(
-      context,
-      `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${kind}Yaml(name: $n) } } }`,
-      { n: name },
-    )
-    const version = versionPayload(data, `${kind} read`)
-    const field = kind + 'Yaml'
-    if (!(field in version)) throw protocolError(`${kind} read response was missing ${field}`)
-    const text = version[field]
-    if (text === null) return null
-    if (typeof text !== 'string' || !text) throw protocolError(`${kind} read returned invalid YAML data`)
-    return parseYamlResource(text, `${kind} read`)
+    const resource = idx.templates.find(template => template.kind === kind)?.resource
+    if (!resource) throw protocolError(`${kind} read could not resolve its resource`)
+    try {
+      const data = await graphqlQuery<Infra<Record<string, string>>>(
+        context,
+        `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${kind}Yaml(name: $n) } } }`,
+        { n: name },
+      )
+      const version = versionPayload(data, `${kind} read`)
+      const field = kind + 'Yaml'
+      if (!(field in version)) throw protocolError(`${kind} read response was missing ${field}`)
+      const text = version[field]
+      if (typeof text !== 'string' || !text) throw protocolError(`${kind} read returned invalid YAML data`)
+      return parseYamlResource(text, `${kind} read`)
+    } catch (error) {
+      // The gateway surfaces Kubernetes GET misses as GraphQL errors instead
+      // of a nullable <Kind>Yaml result. A miss is expected while probing the
+      // other dynamic kinds; only transport, schema, and protocol errors abort
+      // the aggregate lookup.
+      if (isGraphQLResourceNotFound(error, resource, name)) return null
+      throw error
+    }
   })
-  const found = (await Promise.all(probes)).find(Boolean)
+  const found = (await Promise.all(probes)).filter((item): item is RawObject => item !== null)
   assertContextCurrent(context)
-  if (!found) throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'instance ' + name + ' not found' }
-  return instanceFromObj(found, idx.templateByKind)
+  if (found.length === 0) {
+    const unprobeableTemplate = !requestedTemplate && idx.templates.some(template =>
+      !!template.kind && !idx.listFieldByKind.has(template.kind),
+    )
+    if (unprobeableTemplate) {
+      throw <ErrorResponse>{
+        reason: 'ProviderNotReady',
+        message: 'not all instance APIs are established in this workspace yet',
+      }
+    }
+    throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'instance ' + name + ' not found' }
+  }
+  if (found.length > 1) {
+    throw <ErrorResponse>{
+      reason: 'InstanceAmbiguous',
+      message: `instance name ${name} exists under more than one template; open it from the instance list`,
+    }
+  }
+  const raw = found[0]
+  if (typeof raw.kind !== 'string' || !raw.kind) {
+    throw protocolError(`${requestedTemplate?.kind ?? 'instance'} read returned a resource without kind`)
+  }
+  const instance = instanceFromObj(raw, idx.templateByKind)
+  const labeledTemplate = idx.templates.find(template => template.name === instance.template)
+  if (!labeledTemplate || labeledTemplate.kind !== raw.kind) {
+    throw protocolError(`instance ${name} template identity did not match its resource kind`)
+  }
+  if (requestedTemplate && instance.template !== requestedTemplate.name) {
+    // A kind can be shared by multiple templates. The targeted route is an
+    // identity tuple, so a CR labeled for a sibling template is absent here
+    // and must never be displayed or deleted through this route.
+    throw <ErrorResponse>{ reason: 'InstanceNotFound', message: `instance ${name} not found for template ${templateName}` }
+  }
+  return instance
 }
 
 export const api = {
@@ -552,9 +767,9 @@ export const api = {
 
   async getTemplate(name: string, explicitContext?: PortalApiContext): Promise<{ template: Template }> {
     const context = captureContext(explicitContext)
-    const data = await templateQuery<Infra<{ Template?: { metadata: { name: string }; spec: Record<string, unknown> } }>>(
+    const data = await templateQuery<Infra<{ Template?: { metadata: { name: string; generation?: number }; spec: Record<string, unknown>; status?: RawTemplateStatus | null } }>>(
       context,
-      spec => `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { Template(name: $n) { metadata { name } spec { ${spec} } } } } }`,
+      spec => `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { Template(name: $n) { metadata { name generation } spec { ${spec} } status { observedGeneration backend { ready message } conditions { type status observedGeneration reason message lastTransitionTime } } } } } }`,
       { n: name },
     )
     const version = versionPayload(data, 'Template read')
@@ -565,7 +780,7 @@ export const api = {
       !t.spec || typeof t.spec !== 'object' || Array.isArray(t.spec)) {
       throw protocolError('Template read returned an invalid resource shape')
     }
-    return { template: templateFromGQL(t.metadata.name, t.spec) }
+    return { template: templateFromGQL(t.metadata, t.spec, t.status) }
   },
 
   async createInstance(body: {
@@ -575,10 +790,19 @@ export const api = {
     values: Record<string, unknown>
   }): Promise<Instance> {
     const context = captureContext()
-    const idx = await getIndex(context)
+    // Re-read Template readiness at the write boundary. The catalog index is
+    // deliberately cached for reads, but an unavailable backend must never be
+    // provisioned from a stale Ready snapshot.
+    const idx = await getIndex(context, true)
     const tmpl = idx.templates.find(t => t.name === body.templateName)
     if (!tmpl || !tmpl.kind) {
       throw <ErrorResponse>{ reason: 'TemplateNotFound', message: 'template ' + body.templateName + ' not found' }
+    }
+    if (!tmpl.ready) {
+      throw <ErrorResponse>{
+        reason: 'TemplateNotReady',
+        message: tmpl.readinessMessage || `template ${body.templateName} is not ready`,
+      }
     }
     const manifest = buildInstanceManifest(tmpl.kind, body.name, body.templateName, body.values)
     const created = await applyCR(context, manifest)
@@ -598,14 +822,34 @@ export const api = {
     }
     // One LIST per established kind, in parallel. metadata + status only — the
     // list view never needs the (arbitrary) spec, so we don't select it.
-    const SEL = 'items { metadata { uid name namespace creationTimestamp generation labels } status { phase message observedGeneration conditions { type status reason message lastTransitionTime } } }'
     const lists = await Promise.all(
       kinds.map(async kind => {
         const field = idx.listFieldByKind.get(kind)!
-        const data = await graphqlQuery<Infra<Record<string, { items?: RawObject[] }>>>(
-          context,
-          `{ ${GROUP_FIELD} { ${VERSION} { ${field} { ${SEL} } } } }`,
-        )
+        const state = capabilities(context)
+        const query = (includeObservedGeneration: boolean) => {
+          const observedGeneration = includeObservedGeneration ? ' observedGeneration' : ''
+          return `{ ${GROUP_FIELD} { ${VERSION} { ${field} { items { metadata { uid name namespace creationTimestamp generation labels } status { phase message conditions { type status${observedGeneration} reason message lastTransitionTime } } } } } } } }`
+        }
+        let data: Infra<Record<string, { items?: RawObject[] }>>
+        const includeObservedGeneration = !state.instanceConditionObservedGenerationUnsupported.has(kind)
+        try {
+          data = await graphqlQuery<Infra<Record<string, { items?: RawObject[] }>>>(
+            context,
+            query(includeObservedGeneration),
+          )
+        } catch (error) {
+          const gqlError = error as { reason?: string; message?: string }
+          const message = gqlError.message ?? ''
+          if (!includeObservedGeneration || gqlError.reason !== 'GraphQLError' ||
+            !/Cannot query field ["']observedGeneration["'] on type ["'][^"']+["']/i.test(message)) {
+            throw error
+          }
+          // APIResourceSchemas are immutable and tenant APIBindings may still
+          // expose a prior per-kind schema. Retry only this kind without the
+          // optional freshness field; all other condition data remains useful.
+          state.instanceConditionObservedGenerationUnsupported.add(kind)
+          data = await graphqlQuery<Infra<Record<string, { items?: RawObject[] }>>>(context, query(false))
+        }
         const list = versionPayload(data, `${kind} list`)[field]
         if (!list || !Array.isArray(list.items)) {
           throw protocolError(`${kind} list response was missing its items array`)
@@ -624,11 +868,20 @@ export const api = {
       items.map(async i => {
         const tmpl = idx.templates.find(t => t.name === i.template)
         if (!tmpl?.kind || !columnsNeedInstanceData(tmpl.view)) return
-        const data = await graphqlQuery<Infra<Record<string, string | null>>>(
-          context,
-          `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${tmpl.kind}Yaml(name: $n) } } }`,
-          { n: i.name },
-        )
+        let data: Infra<Record<string, string | null>>
+        try {
+          data = await graphqlQuery<Infra<Record<string, string | null>>>(
+            context,
+            `query($n: String!) { ${GROUP_FIELD} { ${VERSION} { ${tmpl.kind}Yaml(name: $n) } } }`,
+            { n: i.name },
+          )
+        } catch (error) {
+          // The object can disappear between LIST and enrichment GET. The
+          // gateway surfaces that Kubernetes GET miss as a GraphQL error rather
+          // than a nullable Yaml field; only the exact miss is benign.
+          if (isGraphQLResourceNotFound(error, tmpl.resource, i.name)) return
+          throw error
+        }
         const version = versionPayload(data, `${tmpl.kind} enrichment`)
         const field = tmpl.kind + 'Yaml'
         if (!(field in version)) throw protocolError(`${tmpl.kind} enrichment response was missing ${field}`)
@@ -644,33 +897,49 @@ export const api = {
     return { items, templates: idx.templates }
   },
 
-  async getInstance(name: string): Promise<Instance> {
+  async getInstance(name: string, templateName?: string): Promise<Instance> {
     const context = captureContext()
     const idx = await getIndex(context)
-    return getInstanceInContext(context, name, idx)
+    return getInstanceInContext(context, name, idx, templateName)
   },
 
-  async getInstanceDetail(name: string): Promise<{ instance: Instance; template?: Template }> {
+  async getInstanceDetail(name: string, templateName?: string): Promise<{ instance: Instance; template?: Template }> {
     const context = captureContext()
     const idx = await getIndex(context)
-    const instance = await getInstanceInContext(context, name, idx)
+    const instance = await getInstanceInContext(context, name, idx, templateName)
     return { instance, template: idx.templates.find(template => template.name === instance.template) }
   },
 
-  async deleteInstance(name: string): Promise<void> {
+  async deleteInstance(name: string, templateName?: string): Promise<void> {
     const context = captureContext()
     const idx = await getIndex(context)
     // Resolve which kind the CR is, then delete<Kind>.
-    const inst = await getInstanceInContext(context, name, idx)
+    let inst: Instance
+    try {
+      inst = await getInstanceInContext(context, name, idx, templateName)
+    } catch (error) {
+      // The object may already be gone, including after a successful delete
+      // whose response was lost. Exact absence makes retry safe; all other
+      // discovery errors retain their original authority and propagate.
+      if ((error as ErrorResponse).reason === 'InstanceNotFound') return
+      throw error
+    }
     const kind = idx.templates.find(t => t.name === inst.template)?.kind
     if (!kind) {
       throw <ErrorResponse>{ reason: 'InstanceNotFound', message: 'cannot resolve kind for ' + name }
     }
-    const data = await graphqlQuery<Infra<Record<string, unknown>>>(
-      context,
-      `mutation($n: String!) { ${GROUP_FIELD} { ${VERSION} { delete${kind}(name: $n) } } }`,
-      { n: name },
-    )
+    let data: Infra<Record<string, unknown>>
+    try {
+      data = await graphqlQuery<Infra<Record<string, unknown>>>(
+        context,
+        `mutation($n: String!) { ${GROUP_FIELD} { ${VERSION} { delete${kind}(name: $n) } } }`,
+        { n: name },
+      )
+    } catch (error) {
+      const resource = idx.templates.find(t => t.kind === kind)?.resource
+      if (resource && isGraphQLResourceNotFound(error, resource, name)) return
+      throw error
+    }
     const version = versionPayload(data, `${kind} delete`)
     if (!(`delete${kind}` in version)) throw protocolError(`${kind} delete response was missing its result`)
     assertContextCurrent(context)

@@ -24,11 +24,9 @@ const (
 	heartbeatInterval = 30 * time.Second
 )
 
-// runHeartbeat POSTs to /api/providers/{name}/heartbeat every 30s. Skips
-// silently when FAROS_HUB_URL is empty so local invocations don't need a
-// hub. Mirrors providers/quickstart/main.go runHeartbeat — keep the two
-// implementations aligned until the heartbeat loop moves into a shared
-// provider SDK.
+// runHeartbeat POSTs to /api/providers/{name}/heartbeat every 30s while the
+// provider is ready. The hub treats every received heartbeat as healthy, so a
+// required controller that is starting or recovering must suppress heartbeats.
 //
 // Env:
 //
@@ -36,7 +34,7 @@ const (
 //	FAROS_HUB_TOKEN      - bearer token for the heartbeat request
 //	FAROS_PROVIDER_NAME  - this provider's CatalogEntry name (default: infrastructure)
 //	FAROS_HUB_INSECURE   - "true" → skip TLS verification (dev with self-signed certs)
-func runHeartbeat(ctx context.Context) {
+func runHeartbeat(ctx context.Context, healthStates ...*controllerHealth) {
 	hub := os.Getenv("FAROS_HUB_URL")
 	token := os.Getenv("FAROS_HUB_TOKEN")
 	name := os.Getenv("FAROS_PROVIDER_NAME")
@@ -48,8 +46,6 @@ func runHeartbeat(ctx context.Context) {
 		return
 	}
 	url := hub + "/api/providers/" + name + "/heartbeat"
-	body, _ := json.Marshal(map[string]string{"version": heartbeatVersion, "status": "healthy"})
-
 	client := &http.Client{Timeout: 5 * time.Second}
 	if os.Getenv("FAROS_HUB_INSECURE") == "true" {
 		client.Transport = &http.Transport{
@@ -58,6 +54,14 @@ func runHeartbeat(ctx context.Context) {
 	}
 
 	send := func() {
+		if !heartbeatCanSend(healthStates...) {
+			return
+		}
+		body, err := json.Marshal(map[string]string{"version": heartbeatVersion, "status": "healthy"})
+		if err != nil {
+			log.Printf("heartbeat encode: %v", err)
+			return
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			log.Printf("heartbeat build req: %v", err)
@@ -72,7 +76,7 @@ func runHeartbeat(ctx context.Context) {
 			log.Printf("heartbeat send: %v", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 300 {
 			log.Printf("heartbeat %s: %d %s", url, resp.StatusCode, resp.Status)
 		}
@@ -89,4 +93,13 @@ func runHeartbeat(ctx context.Context) {
 			send()
 		}
 	}
+}
+
+func heartbeatCanSend(healthStates ...*controllerHealth) bool {
+	for _, health := range healthStates {
+		if health != nil && !health.ready() {
+			return false
+		}
+	}
+	return true
 }

@@ -79,23 +79,18 @@ go build -o bin/faros-hub ./cmd/faros-hub
 #   providers-kuery        — fleet query engine (port :8084)
 #   providers-agents       — long-running personal AI agents (port :8087)
 #
-# Each provider has three resources:
+# Each provider has four resources:
 #   <name>            build + serve; auto-restarts on src change
-#   <name>-register   manual ▶ to kubectl apply the Provider + CatalogEntry.
+#   <name>-register   manual ▶ to apply the admin Provider onboarding record.
 #                     Applying the Provider CR is what provisions the
 #                     sub-workspace + ServiceAccount + kubeconfig Secret —
 #                     the hub's Provider controller does it declaratively
-#                     (no admin "onboard" step anymore). The Provider
-#                     (admin.faros.sh) is admin-only; the CatalogEntry
-#                     (providers.faros.sh) is also bound into provider
-#                     sub-workspaces so a provider can self-register it from
-#                     inside. Both objects live in root:faros:system:providers;
-#                     in dev we apply Provider + CatalogEntry there for
-#                     host-binary simplicity; in production the provider's init
-#                     self-registers the CatalogEntry into its own workspace via
+#                     (no imperative admin "onboard" step).
+#   <name>-init       manual ▶ to publish schemas/APIExport and self-register
+#                     CatalogEntry in the authoritative provider workspace via
 #                     FAROS_CATALOGENTRY_FILE.
-#   <name>-unregister manual ▶ to kubectl delete them (deleting the Provider
-#                     triggers full teardown of the sub-workspace)
+#   <name>-unregister manual ▶ to delete Provider; its finalizer tears down
+#                     the workspace and provider-owned CatalogEntry.
 #
 # The kro group adds two more for the backing infrastructure:
 #   kro-mgmt-up    builds the kind cluster + helm-installs kro +
@@ -139,9 +134,10 @@ local_resource(
     labels=['providers-quickstart'],
 )
 
-# Creates quickstart's APIExport (+ endpoint slice + bind grant) so tenants can
-# Enable it. Run AFTER quickstart-register (which applies the Provider CR → the
-# controller provisions the workspace + provider-token Secret this reads).
+# Creates quickstart's APIExport (+ endpoint slice + bind grant), then
+# self-registers CatalogEntry so tenants can Enable it. Run AFTER
+# quickstart-register (which applies the Provider CR → the controller
+# provisions the workspace + provider-token Secret this reads).
 local_resource(
     'quickstart-init',
     cmd='make init-provider-quickstart',
@@ -208,8 +204,8 @@ local_resource(
     labels=['providers-code'],
 )
 
-# Writes the dev kubeconfig (.kcp/code-runtime.kubeconfig) and ensures the
-# APIExportEndpointSlice the controller manager watches. Order:
+# Writes the dev kubeconfig (.kcp/code-runtime.kubeconfig), publishes the API,
+# and self-registers CatalogEntry. Order:
 #   code-register  → creates root:faros:providers:code
 #   code-init      → writes kubeconfig + endpoint slice
 #   code (serve)   → Tilt restarts it when the kubeconfig dep appears
@@ -360,8 +356,9 @@ local_resource(
     labels=['providers-app-studio'],
 )
 
-# Creates App Studio's APIExport (+ schemas + endpoint slice + bind grant) so
-# tenants can Enable it. Run AFTER app-studio-register.
+# Creates App Studio's APIExport (+ schemas + endpoint slice + bind grant) and
+# self-registers CatalogEntry so tenants can Enable it. Run AFTER
+# app-studio-register.
 local_resource(
     'app-studio-init',
     cmd='make init-provider-app-studio',
@@ -540,7 +537,7 @@ local_resource(
 # Mints the dev runtime kubeconfig from the provider SA token (created by
 # the Provider controller when kuery-register applies the Provider CR) and
 # ensures the APIExportEndpointSlice the engagement controller discovers VW
-# URLs from.
+# URLs from, and self-registers CatalogEntry.
 local_resource(
     'kuery-init',
     cmd='make init-provider-kuery',
@@ -585,7 +582,7 @@ local_resource(
 local_resource(
     'infrastructure',
     cmd='make build-infrastructure-provider',
-    serve_cmd='make run-provider-infrastructure',
+    serve_cmd='INFRASTRUCTURE_CONTROLLER_MODE=required make run-provider-infrastructure',
     deps=[
         'providers/infrastructure/main.go',
         'providers/infrastructure/heartbeat.go',
@@ -624,7 +621,7 @@ local_resource(
     resource_deps=['hub', 'kro-mgmt-up', 'app-studio-preview-console-key'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8082, path='/healthz'),
+        http_get=http_get_action(port=8082, path='/readyz'),
     ),
     labels=['providers-kro'],
 )
@@ -638,7 +635,7 @@ local_resource(
     labels=['providers-kro'],
 )
 
-# One-shot bootstrap: installs CRDs, registers APIExport schemas,
+# One-shot bootstrap: installs CRDs, registers APIExport schemas and CatalogEntry,
 # applies the Templates CachedResource, mints the runtime SA + token,
 # writes the kubeconfig run-provider-infrastructure reads. Order is:
 #   infrastructure-register  → creates the workspace
@@ -751,8 +748,8 @@ local_resource(
     labels=['edges'],
 )
 
-# Creates the edges APIExport (+ endpoint slice + bind grant) so tenants can
-# Enable it. Run AFTER edges-register (which applies the Provider CR → the
+# Creates the edges APIExport (+ endpoint slice + bind grant), then
+# self-registers CatalogEntry so tenants can Enable it. Run AFTER edges-register (which applies the Provider CR → the
 # controller provisions the workspace + provider-token Secret this reads).
 local_resource(
     'edges-init',

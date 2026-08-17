@@ -16,16 +16,18 @@ You may obtain a copy of the License at
 // backend-specific setup (kro: author an RGD; stub: no-op). Status
 // conditions tell operators which step is currently failing.
 //
-// Out of scope for PR A: pushing the per-template CRD into
-// APIExport.spec.schemas + minting an APIResourceSchema. Those land
-// in PR B alongside the CachedResource provisioner — they share the
-// kcp-specific surface and bench-time together.
+// Publication is deliberately ordered after backend acceptance: a new
+// per-template API must not become tenant-authorable until its backend can
+// reconcile instances. Once published, later backend degradation marks the
+// Template unready but does not remove the APIExport entry, because hiding an
+// existing API would also hide tenant objects that already use it.
 package template
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,6 +52,11 @@ var crdGVR = schema.GroupVersionResource{
 	Version:  "v1",
 	Resource: "customresourcedefinitions",
 }
+
+const (
+	backendPendingRequeueInterval = time.Second
+	backendReadyRequeueInterval   = 30 * time.Second
+)
 
 // Reconciler reconciles Template objects.
 type Reconciler struct {
@@ -83,10 +90,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Reconcile drives the Template through the four phases its status
-// tracks: registration (CRDEstablished), backend setup (BackendReady),
-// schema publication (SchemaInAPIExport — placeholder True for PR A
-// since the APIExport syncer isn't here yet), and the aggregate
-// Ready condition.
+// tracks: registration (CRDEstablished), backend setup (BackendReady), schema
+// publication (SchemaInAPIExport), and the aggregate Ready condition. Backend
+// setup gates initial publication; degradation never tears publication down.
 //
 // Returns Result{Requeue:true} for cases where the apiserver is
 // still catching up (CRD applied but not yet Established); errors
@@ -153,7 +159,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Step 1: per-template CRD. Build from the Template's instanceCRD
 	// + schema and apply with the dynamic client.
-	if err := r.ensurePerTemplateCRD(ctx, &tmpl); err != nil {
+	established, err := r.ensurePerTemplateCRD(ctx, &tmpl)
+	if err != nil {
 		setCondition(&tmpl, infrav1alpha1.ConditionCRDEstablished, metav1.ConditionFalse,
 			infrav1alpha1.ReasonCRDError, err.Error())
 		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
@@ -161,16 +168,60 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		_, _ = r.writeStatus(ctx, &tmpl, patchBase)
 		return ctrl.Result{}, err
 	}
+	if !established {
+		tmpl.Status.Registered.CRDEstablished = false
+		setCondition(&tmpl, infrav1alpha1.ConditionCRDEstablished, metav1.ConditionFalse,
+			infrav1alpha1.ReasonAwaitingEstablish, "waiting for the per-template CRD to report Established=True")
+		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonAwaitingEstablish, "waiting for the per-template CRD to report Established=True")
+		result, statusErr := r.writeStatus(ctx, &tmpl, patchBase)
+		if statusErr == nil {
+			result.RequeueAfter = time.Second
+		}
+		return result, statusErr
+	}
 	tmpl.Status.Registered.CRDEstablished = true
 	setCondition(&tmpl, infrav1alpha1.ConditionCRDEstablished, metav1.ConditionTrue,
 		infrav1alpha1.ReasonReady, "")
 
-	// Step 2: APIResourceSchema + APIExport.spec.resources sync.
-	// Mints a fresh content-addressed APIResourceSchema (re-used
-	// when the per-template CRD's schema hasn't changed) and patches
-	// APIExport.spec.resources to point at it. Existing APIBindings
-	// keep their frozen schema reference (kcp design); new bindings
-	// pick this up immediately.
+	// Step 2: backend admission gate. A backend must accept the Template before
+	// its API is first published to tenants. If a previously published Template
+	// later degrades, returning here intentionally leaves the existing
+	// APIExport entry in place so tenant objects remain discoverable; the Ready
+	// condition and portal write-boundary check prevent unsafe new creates.
+	bs, berr := b.SetupTemplate(ctx, &tmpl)
+	tmpl.Status.Backend = infrav1alpha1.TemplateBackendStatus{
+		Name:    b.Name(),
+		Ready:   bs.Ready,
+		Message: bs.Message,
+	}
+	if berr != nil {
+		setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonBackendError, berr.Error())
+		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonBackendError, berr.Error())
+		_, _ = r.writeStatus(ctx, &tmpl, patchBase)
+		return ctrl.Result{}, fmt.Errorf("backend %q SetupTemplate: %w", b.Name(), berr)
+	}
+	if !bs.Ready {
+		setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonBackendError, bs.Message)
+		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonBackendError, bs.Message)
+		result, err := r.writeStatus(ctx, &tmpl, patchBase)
+		if err == nil {
+			result.RequeueAfter = backendPendingRequeueInterval
+		}
+		return result, err
+	}
+	setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionTrue,
+		infrav1alpha1.ReasonReady, "")
+
+	// Step 3: APIResourceSchema + APIExport.spec.resources sync. Mints a fresh
+	// content-addressed APIResourceSchema (re-used when the per-template CRD's
+	// schema has not changed) and publishes it only after backend acceptance.
+	// The pinned kcp reconciler propagates additive resources into existing
+	// APIBindings as well as new bindings.
 	crd, _ := buildPerTemplateCRD(&tmpl) // already validated above
 	schemaName, err := r.ensureAPIResourceSchema(ctx, crd)
 	if err != nil {
@@ -193,37 +244,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	setCondition(&tmpl, infrav1alpha1.ConditionSchemaInAPIExport, metav1.ConditionTrue,
 		infrav1alpha1.ReasonReady, "")
 
-	// Step 3: backend handoff.
-	bs, berr := b.SetupTemplate(ctx, &tmpl)
-	tmpl.Status.Backend = infrav1alpha1.TemplateBackendStatus{
-		Name:    b.Name(),
-		Ready:   bs.Ready,
-		Message: bs.Message,
-	}
-	if berr != nil {
-		setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionFalse,
-			infrav1alpha1.ReasonBackendError, berr.Error())
-		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
-			infrav1alpha1.ReasonBackendError, berr.Error())
-		_, _ = r.writeStatus(ctx, &tmpl, patchBase)
-		return ctrl.Result{}, fmt.Errorf("backend %q SetupTemplate: %w", b.Name(), berr)
-	}
-	if !bs.Ready {
-		setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionFalse,
-			infrav1alpha1.ReasonBackendError, bs.Message)
-		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
-			infrav1alpha1.ReasonBackendError, bs.Message)
-		return r.writeStatus(ctx, &tmpl, patchBase)
-	}
-	setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionTrue,
-		infrav1alpha1.ReasonReady, "")
-
 	// All three sub-conditions True → Ready=True.
 	setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionTrue,
 		infrav1alpha1.ReasonReady, "")
 	tmpl.Status.ObservedGeneration = tmpl.Generation
 	logger.V(1).Info("template ready", "backend", b.Name())
-	return r.writeStatus(ctx, &tmpl, patchBase)
+	result, err := r.writeStatus(ctx, &tmpl, patchBase)
+	if err == nil {
+		// Backend state lives outside the provider workspace (for kro, on the
+		// runtime-cluster RGD), so no local watch can report a later acceptance
+		// loss. Periodically re-run SetupTemplate to degrade readiness promptly.
+		result.RequeueAfter = backendReadyRequeueInterval
+	}
+	return result, err
 }
 
 // finalize runs the cleanup chain in reverse: backend teardown,
@@ -272,34 +305,68 @@ func (r *Reconciler) finalize(ctx context.Context, tmpl, patchBase *infrav1alpha
 // openAPIV3Schema is composed from tmpl.spec.schema (the JSON schema
 // for spec) plus a fixed status sub-schema the platform always
 // provides.
-func (r *Reconciler) ensurePerTemplateCRD(ctx context.Context, tmpl *infrav1alpha1.Template) error {
+func (r *Reconciler) ensurePerTemplateCRD(ctx context.Context, tmpl *infrav1alpha1.Template) (bool, error) {
 	crd, err := buildPerTemplateCRD(tmpl)
 	if err != nil {
-		return fmt.Errorf("build CRD: %w", err)
+		return false, fmt.Errorf("build CRD: %w", err)
 	}
 
 	obj, err := crdToUnstructured(crd)
 	if err != nil {
-		return fmt.Errorf("convert to unstructured: %w", err)
+		return false, fmt.Errorf("convert to unstructured: %w", err)
 	}
 
 	existing, err := r.Dynamic.Resource(crdGVR).Get(ctx, crd.Name, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get existing: %w", err)
+		return false, fmt.Errorf("get existing: %w", err)
 	}
 	if apierrors.IsNotFound(err) {
-		_, err = r.Dynamic.Resource(crdGVR).Create(ctx, obj, metav1.CreateOptions{})
+		created, err := r.Dynamic.Resource(crdGVR).Create(ctx, obj, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create: %w", err)
+			return false, fmt.Errorf("create: %w", err)
 		}
-		return nil
+		if apierrors.IsAlreadyExists(err) {
+			created, err = r.Dynamic.Resource(crdGVR).Get(ctx, crd.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, fmt.Errorf("get concurrently created CRD: %w", err)
+			}
+		}
+		return crdEstablished(created)
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
-	_, err = r.Dynamic.Resource(crdGVR).Update(ctx, obj, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("update: %w", err)
+	if status, found, statusErr := unstructured.NestedFieldNoCopy(existing.Object, "status"); statusErr != nil {
+		return false, fmt.Errorf("read existing status: %w", statusErr)
+	} else if found && status != nil {
+		if err := unstructured.SetNestedField(obj.Object, status, "status"); err != nil {
+			return false, fmt.Errorf("preserve existing status: %w", err)
+		}
 	}
-	return nil
+	updated, err := r.Dynamic.Resource(crdGVR).Update(ctx, obj, metav1.UpdateOptions{})
+	if err != nil {
+		return false, fmt.Errorf("update: %w", err)
+	}
+	return crdEstablished(updated)
+}
+
+func crdEstablished(crd *unstructured.Unstructured) (bool, error) {
+	raw, found, err := unstructured.NestedFieldNoCopy(crd.Object, "status", "conditions")
+	if err != nil {
+		return false, fmt.Errorf("read CRD status conditions: %w", err)
+	}
+	if !found || raw == nil {
+		return false, nil
+	}
+	conditions, ok := raw.([]any)
+	if !ok {
+		return false, fmt.Errorf("read CRD status conditions: expected a list, got %T", raw)
+	}
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if ok && condition["type"] == string(apiextensionsv1.Established) && condition["status"] == string(apiextensionsv1.ConditionTrue) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // deletePerTemplateCRD removes the CRD declared by
@@ -558,13 +625,17 @@ func setCondition(tmpl *infrav1alpha1.Template, condType string, status metav1.C
 	now := metav1.Now()
 	for i := range conds {
 		if conds[i].Type == condType {
-			if conds[i].Status != status || conds[i].Reason != reason || conds[i].Message != message {
-				conds[i].Status = status
-				conds[i].Reason = reason
-				conds[i].Message = message
+			// LastTransitionTime records a status transition, not every reason,
+			// message, or generation refresh. Always advance ObservedGeneration so
+			// callers can distinguish a current failure from stale status even when
+			// the condition remains False across a spec update.
+			if conds[i].Status != status {
 				conds[i].LastTransitionTime = now
-				conds[i].ObservedGeneration = tmpl.Generation
 			}
+			conds[i].Status = status
+			conds[i].Reason = reason
+			conds[i].Message = message
+			conds[i].ObservedGeneration = tmpl.Generation
 			tmpl.Status.Conditions = conds
 			return
 		}

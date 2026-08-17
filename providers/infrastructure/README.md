@@ -132,7 +132,7 @@ helm CLI.
 
 | Surface | Where |
 |---|---|
-| HTTP server | `server/` — `/healthz`, portal SPA, `/mcp` |
+| HTTP server | `server/` — `/healthz` liveness, `/readyz` controller readiness, portal SPA, `/mcp` |
 | MCP transport | `mcpserver/` — `/mcp`, `/mcp/sse` (6 `kro_*` tools) |
 | Central kro client | `kro/` — `ResourceGraphDefinition` discovery + instance lifecycle |
 | Tenant kcp client | `tenant/` — per-tenant `cloud-credentials` Secret resolution |
@@ -142,10 +142,12 @@ helm CLI.
 | Per-cloud credential convention | [docs/credentials.md](docs/credentials.md) |
 | Template-defined instance rendering | [docs/instance-views.md](docs/instance-views.md) |
 
-The CatalogEntry ships with `apiExport.schemas: []` (pure broker, no
-CRDs leak into tenant workspaces). The single `permissionClaim` is
-`secrets get/list/watch` with `tenantScoped: true` so the provider
-can read `cloud-credentials` after a tenant Enables it.
+The CatalogEntry declares `templates.infrastructure.faros.sh` as its stable
+`apiExport.requiredResources` minimum. Provider init publishes that schema and
+APIExport; the Template controller adds instance APIs dynamically only after
+their CRD is established and the selected backend accepts the Template. The
+`secrets get/list/watch` permission claim is `tenantScoped: true` so the
+provider can read `cloud-credentials` after a tenant Enables it.
 
 ## Architecture
 
@@ -223,7 +225,7 @@ central one.
 | `FAROS_HUB_TOKEN` | (unset) | Bearer token for heartbeats |
 | `FAROS_PROVIDER_NAME` | `infrastructure` | CatalogEntry name |
 | `FAROS_HUB_INSECURE` | (unset) | `true` skips TLS verify on heartbeats |
-| `FAROS_PROVIDER_KUBECONFIG` | `/var/run/secrets/faros/faros-provider-kubeconfig` | Mounted kcp kubeconfig |
+| `INFRASTRUCTURE_KUBECONFIG` | `/var/run/secrets/faros/faros-provider-kubeconfig` | Mounted provider-workspace kcp kubeconfig used by the controller |
 | `FAROS_TENANT_CREDENTIALS_SECRET` | `cloud-credentials` | Secret name in tenant workspace |
 | `FAROS_TENANT_CREDENTIALS_NAMESPACE` | `default` | Namespace in tenant workspace |
 | `FAROS_DEV_ALLOW_TENANT_QUERY` | (unset) | `true` lets `?tenant=` replace `X-Faros-Tenant` (dev only) |
@@ -249,8 +251,9 @@ npm --prefix portal run build
 go run .
 # → listening on :8081 (kro=*kro.stubClient tenant=false mcp=true)
 
-# 3. Smoke test: liveness.
+# 3. Smoke test: process liveness and controller readiness.
 curl -s localhost:8081/healthz
+curl -s localhost:8081/readyz
 
 # 4. MCP tools/list (note: SSE response — pipe through `head`). Templates
 #    and instances are NOT served as REST — they are kro_* MCP tools and,
@@ -286,7 +289,8 @@ kubectl --kubeconfig kcp-admin.kubeconfig \
   ws use root:faros:providers
 kubectl apply -f manifest.yaml
 kubectl get catalogentry infrastructure -o yaml
-# status.conditions[Ready].status flips True once heartbeats land.
+# APIExportReady=True after init's export contract is verified.
+# Ready=True after APIExport, /readyz, and heartbeat gates all pass.
 ```
 
 Open the portal at `https://<hub>/ui/providers/infrastructure/`.
@@ -374,9 +378,12 @@ Apply the RGD templates you want to expose, labeled `faros.sh/expose=true`
 ## Deploy with Helm (init-container bootstrap, non-operator)
 
 A single provider Deployment that self-bootstraps via an init container — the
-pre-operator path. The provider needs a runtime kubeconfig to reach kcp, mounted
-as the `faros-provider-kubeconfig` Secret. Onboard the provider in the faros
-**admin portal**, download the issued kubeconfig, create the Secret, then deploy.
+pre-operator path. Bootstrap needs a workspace-admin kubeconfig to install the
+provider APIs. Onboard the provider in the faros **admin portal**, download the
+issued kubeconfig, create the Secret, then deploy. The init container uses that
+credential once and writes a newly minted, least-privilege runtime kubeconfig to
+a shared `emptyDir`; the long-lived serve container never mounts the admin
+credential.
 
 ### 1. Create the Secret from the download
 
@@ -389,6 +396,15 @@ kubectl -n infrastructure create secret generic faros-provider-kubeconfig \
   --from-file=kubeconfig=provider-infrastructure.kubeconfig
 ```
 
+The standard seeded catalog also needs a kubeconfig for the cluster running
+kro. Store it separately; this is the backend/runtime credential, not the kcp
+workspace-admin credential above:
+
+```sh
+kubectl -n infrastructure create secret generic central-kro-kubeconfig \
+  --from-file=kubeconfig=runtime-cluster.kubeconfig
+```
+
 ### 2. Deploy the chart
 
 ```sh
@@ -396,24 +412,40 @@ helm install infrastructure deploy/chart \
   -n infrastructure --create-namespace \
   --set hub.url=https://faros-hub.faros.svc.cluster.local:9443 \
   --set hub.tokenSecretRef.name=faros-infrastructure-hub-token \
-  --set bootstrap.enabled=true
+  --set bootstrap.seedTemplates=true \
+  --set centralKro.kubeconfigSecretRef.name=central-kro-kubeconfig
 ```
 
-With `bootstrap.enabled=true`, an init container runs `infrastructure init`
+`bootstrap.enabled=true` is the chart default. An init container runs
+`infrastructure init`
 — installing the CRDs / CachedResource / APIExport (and the `infrastructure`
-APIExportEndpointSlice kro watches) into the provider workspace. The serve
-container then reuses the same kubeconfig. The init/serve volume is **not**
-`optional`, so the pod waits in `ContainerCreating` until the
+APIExportEndpointSlice kro watches) into the provider workspace, seeding the
+catalog, and minting the narrower runtime identity. The serve container mounts
+only that generated identity from the shared `emptyDir`. The init input Secret
+is **not** optional, so the pod waits in `ContainerCreating` until the
 `faros-provider-kubeconfig` Secret exists.
+
+`bootstrap.seedTemplates=false` is the render-safe chart default. It installs
+the provider API surface but leaves the catalog and backend lifecycle to an
+external workflow. Any non-operator release that sets
+`bootstrap.seedTemplates=true` must also configure `centralKro.kubeconfig` or
+`centralKro.kubeconfigSecretRef.name`; Helm rejects a seeded render without that
+runtime credential instead of deploying permanently unready templates.
+
+Set `bootstrap.enabled=false` only when an external workflow has already
+installed those provider-owned APIs. The hub creates the provider workspace and
+kubeconfig, but does not install the infrastructure provider's API surface.
 
 ### Alternative: `supplied` — fully standalone, no hub
 
 ```sh
 helm install infrastructure deploy/chart -n infrastructure --create-namespace \
   --set bootstrap.enabled=true \
+  --set bootstrap.seedTemplates=true \
   --set bootstrap.kubeconfigSource=supplied \
   --set bootstrap.workspacePath=root:faros:providers:infrastructure \
-  --set-file bootstrap.kcpKubeconfig=./provider-workspace-admin.kubeconfig
+  --set-file bootstrap.kcpKubeconfig=./provider-workspace-admin.kubeconfig \
+  --set centralKro.kubeconfigSecretRef.name=central-kro-kubeconfig
 ```
 
 The kubeconfig must be admin of `bootstrap.workspacePath`, and that workspace

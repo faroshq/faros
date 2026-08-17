@@ -89,9 +89,10 @@ provider binary
   │
   ├─ Catalog: Template controller          ← admin-facing platform reconciler
   │      operator applies a Template CR    →
-  │      ensures the per-template CRD exists in APIExport.spec.schemas
   │      hands the Template to the matching backend for backend-specific setup
   │      (for kro: author the RGD; for terraform: stage the module; …)
+  │      only after backend acceptance, references a per-template
+  │      APIResourceSchema from APIExport.spec.resources
   │
   ├─ CachedResource provisioner            ← one-shot at startup
   │      ensures the publish-templates CachedResource exists
@@ -154,7 +155,7 @@ spec:
 
   # The CRD the platform projects into tenant workspaces.
   # name + group + version + kind together specify the per-template
-  # CRD that goes into APIExport.spec.schemas.
+  # APIResourceSchema referenced from APIExport.spec.resources.
   instanceCRD:
     group: infrastructure.faros.sh
     version: v1alpha1
@@ -213,7 +214,10 @@ status:
       reason: AllResourcesReady
 ```
 
-The CRD itself is what the Template controller adds to `APIExport.spec.schemas`. The instance CR is what tenants apply. Status is populated by whichever backend handles the parent Template — the tenant never knows.
+The Template controller converts the CRD into an immutable APIResourceSchema and
+references it from `APIExport.spec.resources`. The instance CR is what tenants
+apply. Status is populated by whichever backend handles the parent Template —
+the tenant never knows.
 
 ### 4.3 What tenants and the portal see
 
@@ -233,7 +237,7 @@ No `kro`, no `rgd`, no `tenant-hash`, no `faros-tenants-*` namespace. The portal
 
 ```
 inputs:  Template CRs in the provider workspace
-outputs: APIExport.spec.schemas entries
+outputs: APIResourceSchemas + APIExport.spec.resources entries
          Template.status fields
          Backend setup calls (via the Backend interface)
 
@@ -243,22 +247,27 @@ reconcile:
        no schema work.
     2. Ensure the CRD described by spec.instanceCRD exists in the
        provider workspace, with OpenAPI schema derived from spec.schema.
-    3. Ensure that CRD is listed in APIExport.spec.schemas.
-    4. Call backend.SetupTemplate(ctx, template). Record return value
-       in status.backend.
+    3. Call backend.SetupTemplate(ctx, template). Record return value in
+       status.backend. Do not publish a new instance API until the backend
+       accepts the Template and reports ready. If an already-published Template
+       later degrades, preserve its export entry so existing objects remain
+       discoverable while Ready=False makes the portal refuse new creates.
+    4. Mint an immutable APIResourceSchema and ensure it is referenced by
+       APIExport.spec.resources. The pinned kcp reconciler propagates additive
+       resources into APIBindings that are already Bound.
     5. Set status.registered.{crdEstablished,schemaInAPIExport}.
 
   on Template delete:
     1. Call backend.TeardownTemplate(ctx, template).
-    2. Remove the schema entry from APIExport.spec.schemas.
+    2. Remove the resource entry from APIExport.spec.resources.
     3. Delete the per-template CRD.
-       Existing tenant instance CRs of that kind enter a TemplateRemoved
-       phase via a finalizer chain (deletion blocks until they're cleaned).
+       APIBinding removal and storage migration remain separate kcp lifecycle
+       concerns; additive publication is the supported automatic path.
 
 guarantees:
   - Tenants never see a CRD whose Template isn't fully set up.
-  - Removing a Template removes the CRD; tenants can't create new
-    instances; existing ones are GC'd through the finalizer path.
+  - Adding a Template publishes its instance API to both new and existing
+    tenant bindings without recreating those bindings.
 ```
 
 ### 5.2 CachedResource provisioner (platform; new)
@@ -289,11 +298,9 @@ type Backend interface {
     // process startup in cmd/infrastructure-provider/main.go.
     Name() string
 
-    // SetupTemplate is called by the Template controller after the
-    // per-template CRD lands in APIExport.spec.schemas. The backend
-    // does whatever it needs (kro: author an RGD; terraform: stage a
-    // module) and returns a status the controller mirrors onto the
-    // Template.
+    // SetupTemplate is the admission gate before first API publication. The
+    // backend does whatever it needs (kro: author an RGD; terraform: stage a
+    // module) and returns a status the controller mirrors onto the Template.
     SetupTemplate(ctx context.Context, tmpl *v1alpha1.Template) (BackendTemplateStatus, error)
     TeardownTemplate(ctx context.Context, tmpl *v1alpha1.Template) error
 
@@ -360,11 +367,33 @@ Adding a backend = a new Go package, a new line in `cmd/infrastructure-provider/
 ### 5.6 What `providers/infrastructure/server/` becomes
 
 After PR E:
-- `/healthz`
+- `/healthz` — process liveness; remains 200 while the HTTP process can serve
+- `/readyz` — platform-controller, configured Application-controller, and
+  required built-in API publication readiness
 - `/mcp` — tools become kcp API calls (list Templates, apply per-template CRs)
 - `/ui/*` — static SPA assets
 
 `/api/templates`, `/api/instances` get deleted. The Go binary owns the Template controller, CachedResource provisioner, backend dispatcher, the kro backend implementation, and the SPA + MCP host. No REST broker.
+
+The provider does not advertise backend readiness or send heartbeats until its
+platform controller cache is running. When application publishing is configured
+(`FAROS_APP_BASE_DOMAIN` is non-empty), Application-controller startup and
+runtime health are part of the same readiness decision; an unconfigured
+Application controller is optional. When `bootstrap.seedTemplates=true`, initial
+readiness additionally requires every enabled embedded platform Template to
+publish its declared instance resource and report its backend ready. With
+`bootstrap.seedTemplates=false`, catalog seeding and that built-in readiness
+gate are deliberately disabled for externally managed catalogs; individual
+Template conditions remain authoritative. A failed user-added Template remains
+a per-Template error and does not take the whole provider offline. A
+successfully established instance API with zero objects is therefore a normal
+empty state; in seeded mode, a catalog containing a required embedded Template
+whose instance API is absent is a provider-readiness failure.
+
+For operator-managed installations, CatalogEntry registration is withheld until
+the provider Deployment completes its current rollout. Because that Deployment's
+readiness probe targets `/readyz`, `InfrastructureProvider.status.phase=Ready`
+cannot precede controller and built-in API readiness.
 
 ## 6. Flows
 
@@ -379,9 +408,6 @@ operator                provider workspace                    APIExport         
    │                          │                                   │                         │
    │                          │ Template controller fires         │                         │
    │                          │   ensures Redis CRD               │                         │
-   │                          │   appends to APIExport.schemas[]  │                         │
-   │                          ├───────────────────────────────────▶ schemas[] grows         │
-   │                          │                                   │                         │
    │                          │ calls backend.SetupTemplate       │                         │
    │                          ├─────────────────────────────────────────────────────────────▶
    │                          │                                   │                         │ authors RGD
@@ -389,6 +415,8 @@ operator                provider workspace                    APIExport         
    │                          │                                   │                         │ private state
    │                          │                                   │                         │
    │                          ◀─────────────────────────────────────────────────────────────│ ready=true
+   │                          │   updates APIExport.resources[]   │                         │
+   │                          ├───────────────────────────────────▶ resources[] grows       │
    │                          │ Template.status updated           │                         │
                                                                   │
                                                                   ▼
@@ -432,7 +460,7 @@ Note what tenants and the portal know about: `Template`, `Redis`. Nothing in thi
 
 | PR | Title | Acceptance criteria |
 |---|---|---|
-| **A** | Template CRD + per-template CRD lifecycle | `Template` CRD added to APIExport. Template controller registered. Applying a Template creates the per-template CRD and lists it in APIExport.spec.schemas. Deleting cleans up via finalizer. Backend interface defined; a no-op stub backend used for the test. |
+| **A** | Template CRD + per-template CRD lifecycle | `Template` CRD added to APIExport. Template controller registered. Applying a Template creates the per-template CRD, mints an APIResourceSchema, and references it from APIExport.spec.resources. Deleting runs provider-side cleanup via finalizer. Backend interface defined; a no-op stub backend used for the test. |
 | **B** | CachedResource publishing Templates | A tenant workspace with the APIBinding sees Templates as a read-only resource. `kubectl get templates -A` from a tenant returns the catalog. |
 | **C** | kro backend + APIExport VW wiring | Backend interface implemented for kro. The platform binary starts the kro multicluster-runtime pointed at the provider's APIExport VW. A tenant applies a Redis CR; kro reconciles it in the management cluster within 10s; status syncs back; delete propagates. Orphan sweeper for deleted tenant workspaces in scope. |
 | **D** | UI + MCP migration | Portal main app and dashboard tile read Templates + per-template CRs via GraphQL. MCP tools (`infrastructure__list_templates`, `__provision`, …) become kcp API calls. Old REST endpoints get a deprecation banner. |

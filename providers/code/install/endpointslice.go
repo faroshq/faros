@@ -8,18 +8,12 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 */
 
-// Package install holds the one-shot bootstrap steps the code provider runs
-// against its own kcp workspace. Today that is a single step: ensuring an
-// APIExportEndpointSlice exists for the provider's APIExport so the
-// multicluster apiexport provider can discover tenant workspaces.
-//
-// The hub provisioner creates the sub-workspace, the four APIResourceSchemas,
-// the APIExport, the ServiceAccount, and the minted kubeconfig — but it does
-// NOT create an APIExportEndpointSlice (that is the consumer's job, since the
-// slice's export path and name are consumer-chosen). Without the slice,
-// apiexport.New has no endpoints to watch and the controllers never engage any
-// tenant cluster. EnsureAPIExportEndpointSlice closes that gap; it is called
-// idempotently at serve startup (and by the init subcommand).
+// Package install holds provider-workspace bootstrap helpers for the code
+// provider. Admin onboarding creates the workspace, ServiceAccount, and
+// kubeconfig; code-provider init applies the schemas, APIExport, endpoint slice,
+// bind grant, and CatalogEntry. Without the slice, apiexport.New has no
+// endpoints to watch and the controllers never engage any tenant cluster.
+// EnsureAPIExportEndpointSlice is also called idempotently at serve startup.
 package install
 
 import (

@@ -195,6 +195,28 @@ func TestListHandlerProjectsDescription(t *testing.T) {
 	}
 }
 
+func TestListHandlerProjectsCatalogOwnerUntrustedClaimApproval(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{
+		Name: "vendor", APIExportName: "vendor.example.com", APIExportReady: true,
+		AllowUntrustedClaims: true,
+	})
+	w := httptest.NewRecorder()
+	NewListHandler(reg).ServeHTTP(w, httptest.NewRequest(http.MethodGet, PathListProviders, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(raw.Items) != 1 || raw.Items[0]["allowUntrustedClaims"] != true {
+		t.Fatalf("provider approval projection = %#v", raw.Items)
+	}
+}
+
 func mustProviderURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

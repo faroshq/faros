@@ -44,6 +44,17 @@ data:
         healthPath: "/healthz"
       apiExport:
         name: "edges.providers.faros.sh"
+        requiredResources:
+          - group: edges.faros.sh
+            name: kubernetesclusters
+          - group: edges.faros.sh
+            name: linuxservers
+          - group: edges.faros.sh
+            name: placements
+          - group: edges.faros.sh
+            name: services
+          - group: edges.faros.sh
+            name: workloads
         permissionClaims:
           - group: ""
             resource: namespaces

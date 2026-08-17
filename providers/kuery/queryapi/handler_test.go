@@ -80,13 +80,14 @@ func TestScopeToTenant_EdgeNameRewrite(t *testing.T) {
 func TestIdentityFromRequest_HeaderOnly(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/query?tenant=evil", nil)
 	r.Header.Set("X-Faros-Tenant", "tenant-a")
-	if id := IdentityFromRequest(r); id.Tenant != "tenant-a" {
-		t.Fatalf("tenant = %q, want header value", id.Tenant)
+	r.Header.Set("X-Faros-Cluster", "cl-a")
+	if id := IdentityFromRequest(r); id.Tenant != "tenant-a" || id.Cluster != "cl-a" {
+		t.Fatalf("identity = %#v, want trusted tenant path and cluster", id)
 	}
 
 	// Without the dev escape, the query parameter must NOT be honored.
 	r2 := httptest.NewRequest("POST", "/api/query?tenant=evil", nil)
-	if id := IdentityFromRequest(r2); id.Tenant != "" {
-		t.Fatalf("query-param tenant honored without dev escape: %q", id.Tenant)
+	if id := IdentityFromRequest(r2); id.Tenant != "" || id.Cluster != "" {
+		t.Fatalf("query-param tenant honored without dev escape: %#v", id)
 	}
 }

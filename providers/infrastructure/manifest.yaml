@@ -1,24 +1,17 @@
 # infrastructure provider — register with the faros hub.
 #
-# Apply to the kcp workspace where the faros.sh APIExport is bound
-# (typically root:faros:providers when running embedded kcp for
-# development):
+# Provider init applies this to its own onboarded workspace after publishing
+# the stable Templates API and wiring its virtual storage.
 #
 #   kubectl --kubeconfig kcp-admin.kubeconfig apply -f manifest.yaml
-#
-# Phase 1 ships the skeleton only — schemas: [] keeps tenant workspaces
-# free of provider CRDs while still creating the APIExport tenants
-# APIBind to. Adding a TemplateInstance CRD here later is a non-breaking
-# change.
 #
 # ════════════════════════════════════════════════════════════════════════
 # Provider object reference — kind: CatalogEntry (providers.faros.sh)
 #
 # A CatalogEntry registers one provider ("plugin") with the faros hub. The
-# hub's catalog controller reconciles it into the provider sub-workspace
-# root:faros:providers:<name>, a ServiceAccount + runtime kubeconfig, the
-# APIExport tenants APIBind to, and a routing entry backing
-# /ui/providers/<name>/* and /services/providers/<name>/*.
+# provider's init command owns its workspace APIExport and schemas; the hub
+# observes their readiness and maintains routing for /ui/providers/<name>/*
+# and /services/providers/<name>/*.
 #
 # spec:
 #   displayName              Title on the portal catalog card + side nav. [required]
@@ -27,8 +20,6 @@
 #   version                  Provider/chart version (informational).
 #   category                 Groups the entry under a portal nav heading.
 #   iconURL                  Portal-relative icon path (served via the UI proxy).
-#   serviceAccountNamespace  Host namespace the provider Deployment runs in;
-#                            the hub writes faros-provider-kubeconfig here.
 #   ui:                      Micro-frontend (omit for a UI-less provider).
 #     url                      Address the hub reverse-proxies for
 #                              /ui/providers/<name>/* (exclusive with builtinRoute).
@@ -46,11 +37,11 @@
 #                              by the hub).
 #   apiExport:               The provider's kcp APIExport.
 #     name                     Fully-qualified APIExport name tenants APIBind to.
+#     requiredResources[]      Stable minimum {group, name} pairs provider init
+#                              must publish before the hub permits Enable.
 #     permissionClaims[]       Access the provider needs in tenant workspaces:
 #                              {resource, group, verbs, tenantScoped}. tenantScoped:
 #                              true auto-accepts on Enable.
-#     schemas[]                Inline APIResourceSchemas to install ({groupResource,
-#                              body}); [] = pure broker, no CRDs leak to tenants.
 # ════════════════════════════════════════════════════════════════════════
 ---
 apiVersion: providers.faros.sh/v1alpha1
@@ -84,9 +75,17 @@ spec:
         builtinRoute: instances
   backend:
     url: "http://localhost:8082"
-    healthPath: "/healthz"
+    # /healthz is process liveness. /readyz is controller-aware readiness used
+    # by deployments and declared to the hub.
+    healthPath: "/readyz"
   apiExport:
     name: "infrastructure.providers.faros.sh"
+    # The init command always publishes the platform Templates virtual resource
+    # before self-registering this CatalogEntry. Per-template instance APIs are
+    # dynamic additions and deliberately are not part of the bootstrap minimum.
+    requiredResources:
+      - group: infrastructure.faros.sh
+        name: templates
     # secrets get/list/watch with tenantScoped: true is what lets the
     # provider read the per-tenant `cloud-credentials` Secret when
     # brokering a template (phase 3). tenantScoped: true triggers
@@ -95,10 +94,7 @@ spec:
       - resource: secrets
         verbs: [get, list, watch]
         tenantScoped: true
-    # No static schemas. The hub catalog controller materializes an
-    # APIExport with empty spec.resources; the provider binary's
-    # startup adds the Template CRD entry itself (so it doesn't have
-    # to ship its CRD body in this manifest), and the Template
-    # controller adds per-template entries as operators apply
-    # Templates. Both paths reuse the same APIResourceSchema mint +
-    # APIExport upsert logic.
+    # Schemas are provider-owned rather than embedded here. Init publishes the
+    # Templates APIResourceSchema with virtual storage, and the Template
+    # controller adds per-template entries as operators apply Templates. Both
+    # paths reuse the same APIResourceSchema mint + APIExport upsert logic.

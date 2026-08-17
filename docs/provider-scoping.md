@@ -43,7 +43,7 @@ Don't re-litigate; the doc body assumes these.
 | P-5 | **Permission claim acceptance = per-Workspace Enable** for all scopes (Global, Org, Personal). Same flow as today (`providers.md` #9 auto-accepts `tenantScoped` claims at Enable time). Org admin's CatalogEntry create does *not* pre-accept on behalf of members. | One consistent flow; the trust decision stays with the workspace that gains the binding. |
 | P-6 | **No `requireWorkspaceContext` migration flag.** Workspace headers (`X-Faros-Org`, `X-Faros-Workspace`) are **required** from day one. Follows from clean-slate migration (O-2). | No legacy users to keep working; the fallback flag was solving a problem we don't have. |
 | P-7 | **Disable = kcp handles the cascade; hub gates on confirm.** `DELETE .../providers/{uuid}/enable` returns 409 + a preview body (counts of CRs that will be affected, per kind) unless `?confirm=true` is passed. Hub doesn't try to delete CRs itself — kcp's APIBinding deletion semantics own that. | Fat-finger protection without re-implementing what kcp already does. |
-| P-8 | **Breaking CatalogEntry fields are immutable via CEL.** `spec.apiExport.schemas`, `spec.apiExport.permissionClaims`, `spec.apiExport.path`, `spec.apiExport.name`, and `spec.backend.url` carry a `+kubebuilder:validation:XValidation` rule of `self == oldSelf`. Display fields (`displayName`, `iconURL`, `category`, `version`) stay mutable. Changing a locked field requires deleting the CatalogEntry and creating a new one. | Kcp/CRD-layer enforcement; hub doesn't need to inspect updates. Producers expressing "this is the same provider" by reusing the slug get to control breaking-change UX explicitly. |
+| P-8 | **Breaking CatalogEntry fields are immutable via CEL.** In this proposed scoped-catalog design, `spec.apiExport.requiredResources`, `spec.apiExport.permissionClaims`, `spec.apiExport.name`, and `spec.backend.url` carry a `+kubebuilder:validation:XValidation` rule of `self == oldSelf`. Display fields (`displayName`, `iconURL`, `category`, `version`) stay mutable. Changing a locked field requires deleting the CatalogEntry and creating a new one. | Kcp/CRD-layer enforcement; the hub still observes the provider-owned export before Enable, while producers control breaking-change UX explicitly. |
 | P-9 | **Org soft-delete grace behavior (during the 30-day O-13 window):** the deleting Org's CatalogEntries are hidden from `/api/providers` everywhere; the per-Org `bind` ClusterRole (P-3) is removed so no *new* `APIBinding` can be created; existing `APIBindings` keep working until cascade-day. Undelete restores listings + RBAC. | Honors deletion intent without breaking running workloads mid-flight. |
 | P-10 | **ServiceAccounts can Enable iff `role=admin`** (mirroring human Memberships). Member-role SAs cannot. Permission claims are auto-accepted on the SA's behalf since SAs can't see a dialog — Org admin pre-authorizes the trust by giving the SA admin role. | Lets CI pipelines bootstrap a Workspace end-to-end; preserves the human-reviewed default for casual automation. |
 | P-11 | **Slug uniqueness is bi-directional.** Global adds are rejected if the slug is already in use by any Org-Private entry (response lists the conflicting Org UUIDs). Org-Private adds are rejected if the slug is in use Globally (today's rule). | Symmetric, no silent shadowing. The platform admin sees a clear list at add time. |
@@ -110,10 +110,8 @@ type CatalogEntrySpec struct {
     // Backend, UI, APIExport: existing structures from providers.md.
     // Per P-8, the following sub-fields are immutable:
     //   - spec.backend.url
-    //   - spec.apiExport.path
     //   - spec.apiExport.name
-    //   - spec.apiExport.schemas (the list itself; per-element edits
-    //     blocked by CEL on each element's identifying tuple)
+    //   - spec.apiExport.requiredResources (the stable minimum)
     //   - spec.apiExport.permissionClaims
     // Display sub-fields (spec.ui.iconURL, spec.version) stay mutable.
     Backend   *Backend          `json:"backend,omitempty"`
@@ -129,6 +127,11 @@ type CatalogEntryStatus struct {
     Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 ```
+
+This design changes where a CatalogEntry is visible; it does not change the
+current readiness boundary. Whichever scope owns the entry, the hub must resolve
+the referenced provider-owned APIExport and verify its identity, required
+resources, schema references, and exact claims before allowing Enable.
 
 No separate `ownerOrg` field — the workspace path encodes it.
 

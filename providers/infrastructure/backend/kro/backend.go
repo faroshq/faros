@@ -236,18 +236,29 @@ func (b *Backend) Name() string { return Name }
 // SetupTemplate derives the RGD from the Template and applies it to the
 // runtime cluster. Idempotent: re-applies on every reconcile pass. A build
 // error (malformed schema/backendConfig) is returned so the Template
-// controller surfaces BackendError; a successful apply reports Ready=true.
+// controller surfaces BackendError. Ready requires both GraphAccepted=True and
+// kro's aggregate Ready=True condition for the RGD's current generation;
+// graph validation alone does not prove kro installed the graph or its dynamic
+// watch.
 func (b *Backend) SetupTemplate(ctx context.Context, tmpl *infrav1alpha1.Template) (backend.TemplateStatus, error) {
 	rgd, err := buildRGD(tmpl, b.tokens)
 	if err != nil {
 		return backend.TemplateStatus{Ready: false, Message: err.Error()}, err
 	}
-	if err := b.applyRGD(ctx, rgd); err != nil {
+	applied, err := b.applyRGD(ctx, rgd)
+	if err != nil {
 		return backend.TemplateStatus{Ready: false, Message: "applying RGD: " + err.Error()}, err
 	}
-	klog.FromContext(ctx).WithName("backend.kro").Info("applied ResourceGraphDefinition to runtime cluster",
-		"template", tmpl.Name, "rgd", tmpl.Name)
-	return backend.TemplateStatus{Ready: true, Message: "RGD applied to runtime cluster"}, nil
+	ready, message, err := currentRGDReady(applied)
+	if err != nil {
+		return backend.TemplateStatus{Ready: false, Message: err.Error()}, err
+	}
+	if !ready {
+		return backend.TemplateStatus{Ready: false, Message: message}, nil
+	}
+	klog.FromContext(ctx).WithName("backend.kro").Info("ResourceGraphDefinition accepted by kro",
+		"template", tmpl.Name, "rgd", tmpl.Name, "generation", applied.GetGeneration())
+	return backend.TemplateStatus{Ready: true, Message: message}, nil
 }
 
 // TeardownTemplate removes the Template's RGD from the runtime cluster. kro
@@ -272,20 +283,114 @@ func (b *Backend) Run(ctx context.Context, _ *rest.Config) error {
 
 // applyRGD creates or updates the RGD on the runtime cluster, preserving the
 // server-assigned resourceVersion on update so it's a compare-and-set.
-func (b *Backend) applyRGD(ctx context.Context, rgd *unstructured.Unstructured) error {
+func (b *Backend) applyRGD(ctx context.Context, rgd *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	existing, err := b.runtime.Resource(rgdGVR).Get(ctx, rgd.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		if _, err := b.runtime.Resource(rgdGVR).Create(ctx, rgd, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create: %w", err)
+		created, createErr := b.runtime.Resource(rgdGVR).Create(ctx, rgd, metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(createErr) {
+			created, createErr = b.runtime.Resource(rgdGVR).Get(ctx, rgd.GetName(), metav1.GetOptions{})
 		}
-		return nil
+		if createErr != nil {
+			return nil, fmt.Errorf("create: %w", createErr)
+		}
+		return created, nil
 	}
 	if err != nil {
-		return fmt.Errorf("get: %w", err)
+		return nil, fmt.Errorf("get: %w", err)
 	}
 	rgd.SetResourceVersion(existing.GetResourceVersion())
-	if _, err := b.runtime.Resource(rgdGVR).Update(ctx, rgd, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update: %w", err)
+	updated, err := b.runtime.Resource(rgdGVR).Update(ctx, rgd, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("update: %w", err)
 	}
-	return nil
+	return updated, nil
+}
+
+func currentRGDReady(rgd *unstructured.Unstructured) (bool, string, error) {
+	if rgd == nil {
+		return false, "", fmt.Errorf("kro returned no ResourceGraphDefinition")
+	}
+	graphStatus, graphDetail, graphCurrent, err := currentRGDCondition(rgd, "GraphAccepted")
+	if err != nil {
+		return false, "", err
+	}
+	if !graphCurrent {
+		return false, fmt.Sprintf("waiting for kro to accept RGD generation %d", rgd.GetGeneration()), nil
+	}
+	switch graphStatus {
+	case metav1.ConditionFalse:
+		if graphDetail == "" {
+			graphDetail = "kro rejected the resource graph"
+		}
+		return false, graphDetail, nil
+	case metav1.ConditionTrue:
+		// Continue to the aggregate Ready condition below. GraphAccepted=True
+		// is an intermediate state while kro installs the dynamic controller.
+	default:
+		return false, fmt.Sprintf("waiting for kro to accept RGD generation %d", rgd.GetGeneration()), nil
+	}
+
+	readyStatus, readyDetail, readyCurrent, err := currentRGDCondition(rgd, "Ready")
+	if err != nil {
+		return false, "", err
+	}
+	if !readyCurrent || readyStatus == metav1.ConditionUnknown {
+		return false, fmt.Sprintf("waiting for kro RGD generation %d to become Ready", rgd.GetGeneration()), nil
+	}
+	if readyStatus == metav1.ConditionFalse {
+		if readyDetail == "" {
+			readyDetail = "kro resource graph is not ready"
+		}
+		return false, readyDetail, nil
+	}
+	if readyDetail == "" {
+		readyDetail = fmt.Sprintf("kro RGD generation %d is ready", rgd.GetGeneration())
+	}
+	return true, readyDetail, nil
+}
+
+func currentRGDCondition(rgd *unstructured.Unstructured, conditionType string) (metav1.ConditionStatus, string, bool, error) {
+	conditions, found, err := unstructured.NestedSlice(rgd.Object, "status", "conditions")
+	if err != nil {
+		return metav1.ConditionUnknown, "", false, fmt.Errorf("read RGD %q conditions: %w", rgd.GetName(), err)
+	}
+	if !found {
+		return metav1.ConditionUnknown, "", false, nil
+	}
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			return metav1.ConditionUnknown, "", false, fmt.Errorf("RGD %q condition was not an object", rgd.GetName())
+		}
+		gotType, _, _ := unstructured.NestedString(condition, "type")
+		if gotType != conditionType {
+			continue
+		}
+		observed, observedFound, err := unstructured.NestedInt64(condition, "observedGeneration")
+		if err != nil {
+			return metav1.ConditionUnknown, "", false, fmt.Errorf("read RGD %q %s observedGeneration: %w", rgd.GetName(), conditionType, err)
+		}
+		if !observedFound || observed != rgd.GetGeneration() {
+			return metav1.ConditionUnknown, "", false, nil
+		}
+		status, _, _ := unstructured.NestedString(condition, "status")
+		message, _, _ := unstructured.NestedString(condition, "message")
+		reason, _, _ := unstructured.NestedString(condition, "reason")
+		detail := strings.TrimSpace(reason)
+		if strings.TrimSpace(message) != "" {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += strings.TrimSpace(message)
+		}
+		switch metav1.ConditionStatus(status) {
+		case metav1.ConditionTrue:
+			return metav1.ConditionTrue, detail, true, nil
+		case metav1.ConditionFalse:
+			return metav1.ConditionFalse, detail, true, nil
+		default:
+			return metav1.ConditionUnknown, detail, true, nil
+		}
+	}
+	return metav1.ConditionUnknown, "", false, nil
 }

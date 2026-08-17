@@ -1,11 +1,12 @@
 # Kuery provider: fleet-wide object query for MCP, search, and impact analysis
 
-Status: **Design proposal.**
+Status: **Implemented architecture; phasing retained as design history.**
 Author: 2026-06-11
 Related: [kuery](https://github.com/faroshq/kuery) (the query engine this wraps),
 `providers/infrastructure/` (the standalone-provider pattern this is modeled on),
-`pkg/hub/providers/` (CatalogEntry provisioning), `pkg/virtual/builder/edges_proxy_builder.go`
-(edge data path), `docs/providers.md`, `docs/code-provider-architecture.md`.
+`pkg/hub/providers/` (CatalogEntry verification),
+`providers/edges/internal/tunnel/edges_proxy_builder.go` (edge data path),
+`docs/providers.md`, `docs/code-provider-architecture.md`.
 
 ## Summary
 
@@ -49,7 +50,8 @@ Kuery is already kcp-aware (APIExport identity disambiguation in `internal/sync/
 has an Engage/Disengage cluster lifecycle. It has **no UI and no authz** — both are this
 provider's job:
 
-- faros supplies the **clusters** (connected edges, reachable through the hub's edges-proxy)
+- faros supplies the **clusters** (connected `edges.faros.sh` KubernetesClusters,
+  reachable through the edges provider's proxy)
   and the **tenant boundary**;
 - the provider supplies **tenant-scoped query access** and the **visualization** (inventory,
   object graph, impact view).
@@ -61,19 +63,19 @@ Browser / MCP client
    │  bearer
    ▼
 hub /services/providers/kuery/{api/*, mcp, mcp/sse}
-   │  proxy injects X-Faros-Tenant + X-Faros-User
+   │  proxy injects X-Faros-Tenant + X-Faros-Cluster + X-Faros-User
    ▼
 kuery provider pod
    │
-   ├── engagement controller ── watches Edge CRs (permission claim, tenant-scoped)
-   │     on connect:    Engage("{tenantCluster}/{edgeName}", cluster.Cluster via edges-proxy)
+   ├── engagement controller ── watches KubernetesCluster CRs (permission claim, tenant-scoped)
+   │     on connect:    Engage("{logicalClusterID}/{edgeName}", cluster.Cluster via edges provider proxy)
    │     on disconnect: Disengage → kuery GC reaps stale objects
    │
    ├── embedded kuery ── informers stream edge objects through reverse tunnels
    │     into one local store (SQLite PVC; Postgres for production)
    │
    └── tenant-scoped query API ── rewrites spec.cluster on every Query to the
-         caller's tenant prefix before handing it to the kuery engine
+         caller's trusted logical-cluster prefix before handing it to the engine
 ```
 
 ### Repository layout
@@ -81,7 +83,7 @@ kuery provider pod
 ```
 providers/kuery/                      module github.com/faroshq/provider-kuery
 ├── main.go                           init | serve (same pattern as infrastructure provider)
-├── engagement/                       controller: watch Edge CRs → Engage/Disengage kuery clusters
+├── engagement/                       watch KubernetesCluster CRs → Engage/Disengage kuery clusters
 ├── server/                           tenant-scoped REST: /api/query, /api/impact, /api/edges
 ├── mcpserver/                        kuery_query, kuery_impact MCP tools
 ├── portal/                           Vue 3 + cytoscape.js graph UI
@@ -91,36 +93,49 @@ providers/kuery/                      module github.com/faroshq/provider-kuery
 └── Dockerfile
 ```
 
-### Data path: edges-proxy as the cluster endpoint
+### Data path: edges provider proxy as the cluster endpoint
 
-For every connected `Edge` in a tenant workspace, the engagement controller builds a
+For every connected `edges.faros.sh/v1alpha1` `KubernetesCluster` in a tenant
+workspace, the engagement controller builds a
 `rest.Config` with
 
 ```
-Host = apiurl.EdgeProxyURL(hubBase, cluster, edgeName, "k8s")
+Host = {hub}/services/providers/edges/edgeproxy/clusters/{cluster}/apis/
+       edges.faros.sh/v1alpha1/kubernetesclusters/{edgeName}/k8s
 ```
 
-— the exact pattern `pkg/virtual/builder/mcp_provider.go` already uses for the kubernetes
-MCP tools — wraps it in a controller-runtime `cluster.Cluster`, and `Engage`s it into
-kuery's sync controller under the name `{tenantCluster}/{edgeName}`. Kuery's discovery +
+— the edges provider's current consumer-egress route — wraps it in a
+controller-runtime `cluster.Cluster`, and `Engage`s it into
+kuery's sync controller under the name `{logicalClusterID}/{edgeName}`. Kuery's discovery +
 dynamic informers then stream the edge's objects through the existing reverse tunnel into
-the local store. On Edge disconnect/delete the controller `Disengage`s; kuery's GC handles
+the local store. On KubernetesCluster disconnect/delete the controller `Disengage`s; kuery's GC handles
 stale-cluster and stale-object cleanup (TTL-based).
 
 ### Tenant isolation
 
 Kuery has no authorization of its own, so its API is **never exposed directly**. The
-provider backend is the only entry point: it takes `X-Faros-Tenant` (injected by the hub's
-backend proxy) and forcibly rewrites every query's `spec.cluster` filter to the tenant's own
-cluster-name prefix (`{tenantCluster}/…`) before forwarding to the engine. One shared store,
-isolation enforced at the single choke point. `FAROS_DEV_ALLOW_TENANT_QUERY` mirrors the
-infrastructure provider's dev escape hatch.
+provider backend is the only entry point: it requires both `X-Faros-Tenant` and the
+hub-derived `X-Faros-Cluster`, then forcibly rewrites every query's `spec.cluster` filter to
+the tenant's logical-cluster prefix (`{logicalClusterID}/…`) before forwarding to the
+engine. The APIExport event that drives ingestion carries that same logical-cluster ID, so
+the join does not depend on any provider-authored status field. One shared store, isolation
+enforced at the single choke point. `FAROS_DEV_ALLOW_TENANT_QUERY` mirrors the infrastructure
+provider's dev escape hatch.
 
 Kuery's relationship to the **edge providers** also follows the platform
 [provider-isolation rule](./providers.md#provider-isolation-the-cross-provider-boundary):
-it consumes `Edge` CRs (a tenant-scoped permission claim) and reaches the clusters
-through the hub's **edges-proxy** as the caller — it never holds a credential into an
-edge provider's backend.
+it consumes `KubernetesCluster` CRs through an exact tenant-scoped
+`edges.faros.sh/kubernetesclusters` permission claim and reaches the clusters
+through the edges provider's authenticated proxy as the kuery provider ServiceAccount.
+The CatalogEntry points the claim identity at the `edges` provider workspace, so
+hub readiness rejects a stale or wrong non-empty identity hash.
+
+This replaces the removed `faros.sh/edges` claim. Existing tenant APIBindings
+are not silently widened or rewritten: the provider inventory marks them for
+access review, and the tenant must explicitly confirm the current
+`edges.faros.sh/kubernetesclusters` claim before background engagement resumes.
+That confirmation also reconciles any existing Kuery edge-proxy role to the
+least-privilege rules described below.
 
 ### MCP tools (the primary consumer)
 
@@ -146,11 +161,15 @@ small enough for interactive use.
 
 ### SavedView CRD
 
-`CatalogEntry.spec.apiExport` requires at least one schema. The provider exports a small
-**SavedView** CRD: a named, tenant-authored query + layout (root object, relation set, depth,
-filters) that the portal can list and re-open. This gives tenants GitOps-able saved graphs
-and gives the APIExport a real, useful schema — same "tenant-authored CRDs" stance as the
-code provider (no CachedResource, no virtual storage).
+`CatalogEntry.spec.apiExport.requiredResources` requires at least one stable
+resource declaration. Provider init publishes the **SavedView**
+APIResourceSchema and APIExport; the CatalogEntry declares
+`kuery.providers.faros.sh/savedviews` as the minimum the hub must observe before
+Enable. SavedView is a named, tenant-authored query + layout (root object,
+relation set, depth, filters) that the portal can list and re-open. This gives
+tenants GitOps-able saved graphs and the APIExport a useful API — the same
+"tenant-authored CRDs" stance as the code provider (no CachedResource, no
+virtual storage).
 
 ## Key decisions
 
@@ -169,10 +188,10 @@ submodule layout.
 
 ### 2. Edges-proxy authorization — the Enable-time grant
 
-The edges-proxy SAR-checks the caller for verb **`proxy`** on resource **`edges`** in the
-tenant workspace (`pkg/virtual/builder/edges_proxy_builder.go` → `auth.go` authorize()).
-Today only the kubernetesedges MCP path uses it, forwarding the *user's* bearer token
-per-request. Kuery needs a **long-lived credential for background watches** — a user token
+The edges provider proxy SAR-checks the caller for verb **`proxy`** on resource
+**`kubernetesclusters`** in API group **`edges.faros.sh`** in the tenant workspace.
+Interactive edges clients forward the *user's* bearer token per request. Kuery
+needs a **long-lived credential for background watches** — a user token
 is the wrong shape — and permission claims don't help: they grant access via the APIExport
 virtual workspace, not direct SAR passes in tenant workspaces.
 
@@ -205,8 +224,11 @@ cluster). Extend authorize() the same way:
   your edges" — same consent model as tenant-scoped claims.
 - The existing server-side Enable endpoint (`pkg/hub/restapi/providers_enable.go`, which
   already creates the APIBinding) additionally applies in the tenant workspace:
-  - ClusterRole `faros:provider:{name}:edges-proxy` — **two rules**: verb `proxy` on
-    `edges.faros.sh`, plus verb `access` on nonResourceURL `/`. The second is
+  - ClusterRole `faros:provider:{name}:edges-proxy` — verb `proxy` on
+    `edges.faros.sh/kubernetesclusters`, plus verb `access` on nonResourceURL
+    `/`. It deliberately carries no status, Secret, Namespace, delegated-review,
+    LinuxServer, or direct-read privileges; the accepted APIExport claim owns
+    Kuery's KubernetesCluster watch. The non-resource rule is
     required: kcp's workspaceContentAuthorizer checks `access` before any resource RBAC,
     and a foreign SA is not covered by the tenant workspace's `system:authenticated`
     grants (the SAR also drops its groups). kcp's own cross-workspace SA e2e pairs the
@@ -241,22 +263,23 @@ Full-object sync of every edge through the tunnels is the cost center.
   with GIN indexes on Postgres).
 - Kuery's safety limits (30s query timeout, 10k row cap, depth cap 20) stay as-is.
 
-## Phasing
+## Historical phasing
 
 - **Phase 0 — unblock.** Kuery upstream refactor (`internal/` → `pkg/`) — **done**
   ([kuery#3](https://github.com/faroshq/kuery/pull/3), merged 2026-06-11); hub-side
-  `proxy`-on-`edges` grant for provider ServiceAccounts on tenant Enable — **implemented**
+  `proxy` grant on edges-provider resources for provider ServiceAccounts on tenant Enable — **implemented**
   (design above, key decision 2): SA-aware `authorize()` in
   `pkg/virtual/builder/auth.go`, qualified identities in `pkg/util/identity`,
   `CatalogEntry.spec.edgeProxyAccess`, grant lifecycle in the server-side
   enable/disable endpoints (`pkg/hub/restapi/providers_enable.go`).
 - **Phase 1 — skeleton.** Clone the quickstart pattern: binary with `/healthz` + heartbeat,
-  CatalogEntry with the SavedView schema, Helm chart, Makefile targets
+  provider-owned SavedView schema plus CatalogEntry contract, Helm chart, Makefile targets
   (`build-kuery-provider`, `run-provider-kuery`, `install-provider-kuery`, …). Visible in
   the portal catalog.
 - **Phase 2 — data + MCP.** **Implemented** (providers/kuery: `core/`, `engagement/`,
-  `queryapi/`, `mcpserver/`). Engagement controller (watch Edges via permission claim
-  `edges.faros.sh` get/list/watch, tenantScoped) + embedded kuery sync +
+  `queryapi/`, `mcpserver/`). Engagement controller (watch KubernetesClusters via
+  permission claim `edges.faros.sh/kubernetesclusters` get/list/watch,
+  tenantScoped) + embedded kuery sync +
   tenant-scoped `/api/query` + MCP tools (`kuery_query`, `kuery_impact`) into the
   aggregator. This is the value milestone: agents can query the fleet.
   Implementation notes vs. this design: tenant scoping rides on kuery *cluster
@@ -278,8 +301,6 @@ Full-object sync of every edge through the tunnels is the cost center.
 
 ## Open questions
 
-- Whether the engagement controller watches Edges through the provider's APIExport virtual
-  workspace (one watch across all bound tenants) or per-tenant — VW is the natural fit.
 - Cross-shard behavior: tenant workspaces on a different shard than the provider workspace
   may hit the known CachedResource/discovery issues; SavedView is plain APIBinding-bound
   CRDs so it should be unaffected, but verify during Phase 2.

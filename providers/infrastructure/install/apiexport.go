@@ -48,7 +48,7 @@ import (
 )
 
 // APIExportName must match the provider's CatalogEntry.spec.apiExport.name.
-// Hardcoded constant — the hub catalog controller is the canonical writer.
+// Provider init is the canonical writer; the hub only observes readiness.
 const APIExportName = "infrastructure.providers.faros.sh"
 
 var (

@@ -20,7 +20,6 @@ import (
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 
 	sdkinstall "github.com/faroshq/provider-sdk/install"
 
@@ -46,8 +45,6 @@ type BootstrapOptions struct {
 // NOT seed kro — that is a separate step the caller owns so it can order the kro
 // namespace/release around it.
 func Bootstrap(ctx context.Context, providerCfg *rest.Config, opts BootstrapOptions) error {
-	log := klog.FromContext(ctx)
-
 	if err := install.CRDs(ctx, providerCfg); err != nil {
 		return fmt.Errorf("install CRDs: %w", err)
 	}
@@ -99,8 +96,7 @@ func Bootstrap(ctx context.Context, providerCfg *rest.Config, opts BootstrapOpti
 
 	if !opts.SkipSeedTemplates {
 		if err := install.SeedTemplates(ctx, providerCfg); err != nil {
-			// Non-fatal — the catalog can be managed out-of-band.
-			log.Info("WARNING failed to seed Templates", "err", err.Error())
+			return fmt.Errorf("seed Templates: %w", err)
 		}
 	}
 

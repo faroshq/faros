@@ -389,6 +389,13 @@ data:
 
       apiExport:
         name: "databricks.providers.faros.sh"
+        requiredResources:
+          - group: databricks.faros.sh
+            name: connections
+          - group: databricks.faros.sh
+            name: tables
+          - group: databricks.faros.sh
+            name: warehouses
         permissionClaims:
           - resource: secrets
             verbs: [get]

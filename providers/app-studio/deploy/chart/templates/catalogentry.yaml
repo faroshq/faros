@@ -29,6 +29,13 @@ spec:
   # this chart's init container (provider `init`, via the faros-provider-sdk).
   apiExport:
     name: "ai.faros.sh"
+    requiredResources:
+      - group: ai.faros.sh
+        name: projects
+      - group: ai.faros.sh
+        name: sessions
+      - group: ai.faros.sh
+        name: studios
     # Keep in sync with init_cmd.go (APIExport claims) and manifest.yaml —
     # the hub writes these into the tenant APIBinding at Enable time; a claim
     # missing here is silently denied at reconcile.
@@ -39,26 +46,32 @@ spec:
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: simplewebapps
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: workers
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: searxngs
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: browsers
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: repositories
         group: code.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: code}
       - resource: serviceaccounts
         verbs: ["get", "list", "watch", "create", "delete"]
         tenantScoped: true

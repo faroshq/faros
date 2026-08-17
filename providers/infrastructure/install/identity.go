@@ -36,6 +36,7 @@ package install
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -80,8 +81,14 @@ type RuntimeIdentity struct {
 	Server string
 
 	// CAData is the apiserver's CA cert in PEM form, used to verify
-	// the connection. Pulled from the admin rest.Config.
+	// the connection. Pulled from CAData, or materialized from CAFile, on
+	// the admin rest.Config so the generated kubeconfig is self-contained.
 	CAData []byte
+	// Insecure and ServerName preserve the source rest.Config's supported
+	// server-TLS behavior. Client certificate fields are intentionally omitted:
+	// the minted ServiceAccount token is the runtime client identity.
+	Insecure   bool
+	ServerName string
 
 	// Token is the SA's long-lived bearer, read from a
 	// kubernetes.io/service-account-token Secret. Non-expiring, so no
@@ -97,6 +104,10 @@ type RuntimeIdentity struct {
 // MintRuntimeIdentity provisions the runtime SA + RBAC and mints a
 // bearer for it. Idempotent on SA + role + binding creation.
 func MintRuntimeIdentity(ctx context.Context, adminConfig *rest.Config) (*RuntimeIdentity, error) {
+	caData, insecure, serverName, err := runtimeTLSForIdentity(adminConfig)
+	if err != nil {
+		return nil, err
+	}
 	cs, err := kubernetes.NewForConfig(adminConfig)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
@@ -124,11 +135,35 @@ func MintRuntimeIdentity(ctx context.Context, adminConfig *rest.Config) (*Runtim
 
 	return &RuntimeIdentity{
 		Server:         adminConfig.Host,
-		CAData:         adminConfig.CAData,
+		CAData:         caData,
+		Insecure:       insecure,
+		ServerName:     serverName,
 		Token:          token,
 		ServiceAccount: RuntimeServiceAccountName,
 		Namespace:      RuntimeServiceAccountNamespace,
 	}, nil
+}
+
+func runtimeTLSForIdentity(config *rest.Config) ([]byte, bool, string, error) {
+	if config == nil {
+		return nil, false, "", fmt.Errorf("runtime identity: nil admin config")
+	}
+	if config.Insecure {
+		// CA settings are ignored by an insecure source config. Omitting them from
+		// the generated kubeconfig avoids creating an invalid CA+insecure pair.
+		return nil, true, config.ServerName, nil
+	}
+	if len(config.CAData) > 0 {
+		return append([]byte(nil), config.CAData...), false, config.ServerName, nil
+	}
+	if config.CAFile == "" {
+		return nil, false, config.ServerName, nil
+	}
+	caData, err := os.ReadFile(config.CAFile)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("read admin kubeconfig CA file %q: %w", config.CAFile, err)
+	}
+	return caData, false, config.ServerName, nil
 }
 
 // ensureLegacySAToken creates (idempotently) a kubernetes.io/service-account-token

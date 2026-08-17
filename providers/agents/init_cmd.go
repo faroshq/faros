@@ -67,6 +67,11 @@ func runInitCmd(ctx context.Context) error {
 			{Resource: "serviceaccounts", Verbs: []string{"get", "create"}},
 			{Group: "rbac.authorization.k8s.io", Resource: "clusterroles", Verbs: []string{"get", "create"}},
 			{Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", Verbs: []string{"get", "create"}},
+			// Service-to-service callers authenticate and authorize against the
+			// target tenant workspace through the APIExport virtual workspace.
+			// These built-in review APIs do not carry an identityHash.
+			{Group: "authentication.k8s.io", Resource: "tokenreviews", Verbs: []string{"create"}},
+			{Group: "authorization.k8s.io", Resource: "subjectaccessreviews", Verbs: []string{"create"}},
 		},
 		CatalogEntryFile: catalogEntryFile,
 	}); err != nil {

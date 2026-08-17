@@ -168,9 +168,15 @@ Every provider ships a `manifest.yaml` that is a `CatalogEntry`
 (`providers.faros.sh/v1alpha1`, type at
 `apis/providers/v1alpha1/types_catalogentry.go`). It declares display metadata,
 the UI/backend/virtual-workspace URLs, a health path, the APIExport name +
-permission claims, and inline `APIResourceSchema` bodies. The hub's catalog
-controller reads it and provisions the kcp side (sub-workspace, ServiceAccount,
-APIExport, schemas) and registers routing/heartbeat state.
+`requiredResources` readiness contract, and permission claims. Admin onboarding
+(`Provider` in `admin.faros.sh`) creates the provider workspace, ServiceAccount,
+and kubeconfig. The provider's own `init` command uses that kubeconfig to apply
+its `APIResourceSchema`s, `APIExport`, endpoint slice, bind grant, and
+`CatalogEntry` in `root:faros:providers:<name>`. That provider workspace is the
+authoritative source for the provider's global route; a same-named CatalogEntry
+in another consumer workspace is ignored. The hub observes and validates the
+declared export contract, registers routing/heartbeat state, and refuses tenant
+Enable until it is ready.
 
 > **⚠️ `manifest.yaml` and `deploy/chart/templates/catalogentry.yaml` are TWO
 > copies of the CatalogEntry that MUST stay in sync — for the WHOLE spec, not just
@@ -187,16 +193,17 @@ APIExport, schemas) and registers routing/heartbeat state.
 >   updates the APIExport but the deployed CatalogEntry (what the hub Enable flow
 >   offers tenants) still advertises the old set — so all three must match for claims.
 >
-> **Existing tenants do NOT auto-migrate.** `init` only touches the provider-side
-> APIExport, never per-tenant `APIBinding`s (they live in tenant workspaces, written
-> by the hub Enable flow). A tenant's binding keeps its old accepted claims until it
-> re-Enables or a migration re-accepts them — and a provider that starts *requiring*
-> a newly-added claim (e.g. delegated `tokenreviews`/`subjectaccessreviews` for
-> data-plane auth) will break every already-enabled tenant on rollout. Ship a
-> migration (re-accept claims on all existing bindings) or a compatibility fallback
-> BEFORE deploying code that depends on the new claim. Symptom of the gap: provider
-> logs `User "system:serviceaccount:default:provider" cannot create <resource>` and
-> the binding's `status.exportPermissionClaims` lists the claim but `spec` /
+> **Existing tenants do NOT auto-accept claim changes.** `init` only touches the
+> provider-side APIExport, never per-tenant `APIBinding`s (they live in tenant
+> workspaces, written by the hub Enable flow). The catalog inventory detects claim
+> drift and shows **Review access**; tenant confirmation updates the existing
+> APIBinding in place, preserving prior decisions for unchanged claims. A provider
+> that immediately *requires* a newly added claim (for example delegated
+> `tokenreviews`/`subjectaccessreviews`) still breaks already-enabled tenants until
+> they review it, so ship a compatibility fallback or an explicit, authorized
+> migration before depending on the claim. Symptom of the gap: provider logs
+> `User "system:serviceaccount:default:provider" cannot create <resource>` and the
+> binding's `status.exportPermissionClaims` lists the claim but `spec` /
 > `status.appliedPermissionClaims` do not.
 
 > **⚠️ Adding an edges "service" type touches FOUR places (edges provider).**
@@ -224,14 +231,15 @@ APIExport, schemas) and registers routing/heartbeat state.
 
 | File | Role |
 |------|------|
-| `provision.go` | Creates kcp sub-workspace, ServiceAccount, APIExport, applies inline schemas; mints the provider kubeconfig |
+| `provider_controller.go` + `provision.go` | Reconcile admin `Provider` onboarding: create the provider sub-workspace and ServiceAccount, then mint/store its kubeconfig; the CatalogEntry path only performs read-only APIExport verification |
 | `proxy.go` | UI reverse-proxy (`/ui/providers/{name}/*`) + backend proxy (`/services/providers/{name}/*`); injects tenant/user headers; serves embedded UI for built-ins (`LocalUIAssets`) |
 | registry / controller / heartbeat | In-memory routing table, catalog reconcile, `POST /api/providers/{name}/heartbeat` liveness (TTL ~90s) |
 | `pkg/hub/provider_tenant_resolver.go` | Resolves caller identity → tenant workspace path; injects `X-Faros-User` / `X-Faros-Tenant`, strips spoofed inbound copies |
 
 Heartbeat: standalone providers POST every ~30s with `FAROS_HUB_URL`,
 `FAROS_HUB_TOKEN`, `FAROS_PROVIDER_NAME`. A provider is "Ready" only when its
-endpoints are valid and (once heartbeats have started) not stale.
+declared APIExport contract is valid, its declared runtime endpoints and backend
+health gate pass, and (once heartbeats have started) its heartbeat is not stale.
 
 ### 5.3 Provider portal micro-frontends
 
@@ -323,10 +331,13 @@ via their `CatalogEntry`. Per-provider deep docs:
 ### 5.6 Adding / modifying a provider — checklist
 
 1. Scaffold from `providers/quickstart/` (closest minimal example).
-2. Define APIs under `apis/v1alpha1/` (or inline schemas in the manifest);
-   regenerate deepcopy if you keep Go types.
+2. Define APIs under `apis/v1alpha1/`, generate the provider-owned
+   `APIResourceSchema` files, and have provider `init` apply them; regenerate
+   deepcopy if you keep Go types.
 3. Write `manifest.yaml` (CatalogEntry): displayName, ui/backend URLs, health
-   path, apiExport name + permission claims + schema bodies.
+   path, APIExport name + stable `requiredResources` minimum + exact permission
+   claims. Mirror the whole spec in the chart CatalogEntry and keep the claims in
+   sync with `init_cmd.go`.
 4. Build the portal (`providers/{name}/portal/`, embedded via `assets.go`).
 5. Implement heartbeat + tenant-scoped client if it talks to kcp.
 6. Add Makefile `build-{name}-provider[-portal]` + `run/install/uninstall`

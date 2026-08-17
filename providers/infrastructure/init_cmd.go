@@ -154,10 +154,7 @@ func runInitCmd(ctx context.Context) error {
 	if os.Getenv("INFRASTRUCTURE_SKIP_SEED_TEMPLATES") == "" {
 		log.Printf("init: seeding catalog Templates")
 		if err := install.SeedTemplates(ctx, adminConfig); err != nil {
-			// Non-fatal — operators can hand-apply, and the rest of
-			// the chain (SA mint, kro seed) is independent of seed
-			// content. Log loudly so the failure is visible.
-			log.Printf("init: WARNING failed to seed Templates: %v", err)
+			return fmt.Errorf("seed Templates: %w", err)
 		}
 	} else {
 		log.Printf("init: INFRASTRUCTURE_SKIP_SEED_TEMPLATES set — leaving catalog empty")
@@ -178,11 +175,12 @@ func runInitCmd(ctx context.Context) error {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
 
-	// When INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET is set (the Helm init
-	// container path), also write the minted runtime kubeconfig into a Secret
-	// in the host cluster so the long-lived serve container can mount it. The
-	// host cluster is the pod's own cluster (in-cluster config), which is
-	// distinct from the admin kcp config used for the bootstrap above.
+	// When INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET is set by an external
+	// deployment workflow, also write the minted runtime kubeconfig into a
+	// Secret in the host cluster. The chart's in-pod handoff uses the local file
+	// above through a shared emptyDir and does not grant init permission to write
+	// Secrets. The host cluster here is distinct from the admin kcp config used
+	// for bootstrap.
 	if secretName := os.Getenv("INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET"); secretName != "" {
 		ns := os.Getenv("INFRASTRUCTURE_RUNTIME_KUBECONFIG_NAMESPACE")
 		if ns == "" {

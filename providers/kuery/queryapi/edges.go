@@ -36,13 +36,13 @@ func (h *EdgesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := IdentityFromRequest(r)
-	if id.Tenant == "" {
-		http.Error(w, "missing tenant identity (X-Faros-Tenant)", http.StatusUnauthorized)
+	if id.Tenant == "" || id.Cluster == "" {
+		http.Error(w, "missing tenant identity (X-Faros-Tenant/X-Faros-Cluster)", http.StatusUnauthorized)
 		return
 	}
 	resp := edgesResponse{Edges: []string{}}
 	if h.Lister != nil {
-		if edges := h.Lister.TenantEdges(id.Tenant); edges != nil {
+		if edges := h.Lister.TenantEdges(id.Cluster); edges != nil {
 			resp.Edges = edges
 		}
 	}

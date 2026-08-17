@@ -1,4 +1,4 @@
-.PHONY: sync-portalkit verify-portalkit
+.PHONY: sync-portalkit verify-portalkit verify-infrastructure-provider-portal verify-code-provider-portal
 .PHONY: build-access-proxy docker-build-access-proxy
 .PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed dev-kro-register-self e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
 
@@ -99,8 +99,11 @@ build-kuery-provider-portal: ## Build the kuery provider's micro-frontend (Vite 
 build-kuery-provider: build-kuery-provider-portal ## Build the kuery provider binary (portal embedded)
 	cd providers/kuery && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/kuery-provider .
 
-build-infrastructure-provider-portal: ## Build the infrastructure provider's micro-frontend (Vite + Vue → portal/dist)
-	cd providers/infrastructure/portal && npm install --no-audit --no-fund && npm run build
+verify-infrastructure-provider-portal: ## Test and type-check the infrastructure provider portal
+	cd providers/infrastructure/portal && npm install --no-audit --no-fund && npm test && npm run typecheck
+
+build-infrastructure-provider-portal: verify-infrastructure-provider-portal ## Build the infrastructure provider's micro-frontend (Vite + Vue → portal/dist)
+	cd providers/infrastructure/portal && npm run build
 
 build-infrastructure-provider: build-infrastructure-provider-portal ## Build the infrastructure provider binary (portal embedded)
 	cd providers/infrastructure && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/infrastructure-provider .
@@ -132,12 +135,12 @@ codegen-edges-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for the e
 	install-provider-edges init-provider-edges run-provider-edges uninstall-provider-edges docker-build-edges-provider
 
 ## --- edges provider dev lifecycle (install → init → run) --------------------
-install-provider-edges: ## Apply edges Provider + CatalogEntry into root:faros:providers
+install-provider-edges: ## Apply edges Provider onboarding record
 	@test -f $(EDGES_KCP_KUBECONFIG) || { echo "kubeconfig not found at $(EDGES_KCP_KUBECONFIG); start the hub first (make run-hub-embedded-static)"; exit 1; }
 	kubectl --kubeconfig=$(EDGES_KCP_KUBECONFIG) \
 		--server=$(EDGES_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(EDGES_PROVIDER_MANIFEST) -f $(EDGES_MANIFEST)
+		apply -f $(EDGES_PROVIDER_MANIFEST)
 
 init-provider-edges: build-edges-provider ## Bootstrap edges APIExport + write dev runtime kubeconfig
 	@test -f $(EDGES_KCP_KUBECONFIG) || { echo "kubeconfig not found at $(EDGES_KCP_KUBECONFIG); start the hub first"; exit 1; }
@@ -153,6 +156,7 @@ init-provider-edges: build-edges-provider ## Bootstrap edges APIExport + write d
 	FAROS_PROVIDER_KUBECONFIG=$(EDGES_RUNTIME_KUBECONFIG) \
 	FAROS_SCHEMAS_DIR=$(EDGES_SCHEMAS_DIR) \
 	EDGES_WORKSPACE_PATH=$(EDGES_WORKSPACE_PATH) \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(EDGES_MANIFEST)) \
 		$(BINDIR)/edges-provider init
 
 run-provider-edges: build-edges-provider ## Run the edges provider (needs: hub + install + init)
@@ -168,11 +172,11 @@ run-provider-edges: build-edges-provider ## Run the edges provider (needs: hub +
 	FAROS_DEV_MODE=true \
 		$(BINDIR)/edges-provider serve
 
-uninstall-provider-edges: ## Delete edges CatalogEntry + Provider
+uninstall-provider-edges: ## Delete edges Provider (workspace + CatalogEntry)
 	-kubectl --kubeconfig=$(EDGES_KCP_KUBECONFIG) \
 		--server=$(EDGES_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(EDGES_MANIFEST) -f $(EDGES_PROVIDER_MANIFEST)
+		delete -f $(EDGES_PROVIDER_MANIFEST)
 
 docker-build-edges-provider: ## Build the edges provider image (context = providers/edges)
 	docker build \
@@ -198,8 +202,11 @@ build-vibe-studio-provider-portal: ## Build the vibe-studio provider's micro-fro
 build-vibe-studio-provider: build-vibe-studio-provider-portal ## Build the vibe-studio provider binary (portal embedded)
 	cd providers/vibe-studio && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/vibe-studio-provider .
 
-build-code-provider-portal: ## Build the code provider's micro-frontend (Vite + Vue → portal/dist)
-	cd providers/code/portal && npm install --no-audit --no-fund && npm run build
+verify-code-provider-portal: ## Test and type-check the code provider portal
+	cd providers/code/portal && npm install --no-audit --no-fund && npm test && npm run typecheck
+
+build-code-provider-portal: verify-code-provider-portal ## Build the code provider's micro-frontend (Vite + Vue → portal/dist)
+	cd providers/code/portal && npm run build
 
 build-code-provider: build-code-provider-portal ## Build the code provider binary (portal embedded)
 	cd providers/code && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/code-provider .
@@ -755,8 +762,9 @@ tilt-cluster: ## Run Tiltfile.cluster against a local kcp tree (override with TI
 # flow locally:
 #
 #   Terminal 1: make run-hub-embedded-static
-#   Terminal 2: make install-provider-quickstart   # admin: register the entry
-#   Terminal 3: make run-provider-quickstart       # tenant: run the binary
+#   Terminal 2: make install-provider-quickstart   # admin: onboard + register
+#   Terminal 3: make init-provider-quickstart      # publish Greeting API
+#   Terminal 4: make run-provider-quickstart       # run the provider
 #
 # The hub proxies /ui/providers/quickstart and /services/providers/quickstart
 # to the binary in Terminal 3; the quickstart heartbeats every 30s so the
@@ -767,7 +775,7 @@ QUICKSTART_HUB_URL ?= https://localhost:9443
 QUICKSTART_TOKEN ?= $(STATIC_AUTH_TOKEN)
 # kcp admin kubeconfig produced by embedded-kcp mode (see HUB_FLAGS_KCP_EMBEDDED).
 QUICKSTART_KCP_KUBECONFIG ?= $(KCP_DATA_DIR)/admin.kubeconfig
-# kcp apiserver URL for `kubectl apply` of the CatalogEntry. Embedded-kcp
+# kcp apiserver URL for Provider onboarding and provider-workspace init. Embedded-kcp
 # binds to :6443; Tiltfile.cluster (operator-deployed kcp) uses the envoy
 # gateway at kcp.localhost:8443 and overrides this from the Tilt resource.
 QUICKSTART_KCP_SERVER ?= https://localhost:6443
@@ -777,6 +785,7 @@ QUICKSTART_MANIFEST ?= providers/quickstart/manifest.yaml
 QUICKSTART_PROVIDER_MANIFEST ?= providers/quickstart/provider.yaml
 QUICKSTART_WORKSPACE_PATH ?= root:faros:providers:quickstart
 QUICKSTART_RUNTIME_KUBECONFIG ?= $(KCP_DATA_DIR)/quickstart-runtime.kubeconfig
+QUICKSTART_SCHEMAS_DIR ?= $(CURDIR)/providers/quickstart/deploy/chart/files/schemas
 
 # --- edges provider (single provider, both kinds) --------------------------
 # Runs SINGLE-REPLICA (revdial global dialer map). Reads a provider kubeconfig at
@@ -796,7 +805,7 @@ EDGES_SCHEMAS_DIR ?= $(CURDIR)/providers/edges/deploy/chart/files/schemas
 
 ## Run the quickstart provider binary locally. Heartbeats to the hub on
 ## $(QUICKSTART_HUB_URL); TLS verification skipped (dev cert is self-signed).
-run-provider-quickstart: build-quickstart-provider ## Run the quickstart provider (requires: make run-hub-embedded-static + make install-provider-quickstart)
+run-provider-quickstart: build-quickstart-provider ## Run quickstart (requires: hub + install-provider-quickstart + init-provider-quickstart)
 	@echo "Starting quickstart provider on :$(QUICKSTART_PORT)"
 	@echo "  hub:   $(QUICKSTART_HUB_URL)"
 	@echo "  token: $(QUICKSTART_TOKEN)"
@@ -807,9 +816,9 @@ run-provider-quickstart: build-quickstart-provider ## Run the quickstart provide
 	FAROS_PROVIDER_NAME=quickstart \
 		$(BINDIR)/quickstart-provider
 
-## Apply the quickstart CatalogEntry into root:faros:providers. Idempotent.
-## Requires the hub to be running so the admin kubeconfig exists.
-install-provider-quickstart: ## Apply quickstart Provider + CatalogEntry into root:faros:providers
+## Apply quickstart's admin Provider onboarding record. Idempotent. Provider
+## init self-registers CatalogEntry in the provisioned provider workspace.
+install-provider-quickstart: ## Apply quickstart Provider onboarding record
 	@test -f $(QUICKSTART_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(QUICKSTART_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -818,7 +827,7 @@ install-provider-quickstart: ## Apply quickstart Provider + CatalogEntry into ro
 	kubectl --kubeconfig=$(QUICKSTART_KCP_KUBECONFIG) \
 		--server=$(QUICKSTART_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(QUICKSTART_PROVIDER_MANIFEST) -f $(QUICKSTART_MANIFEST)
+		apply -f $(QUICKSTART_PROVIDER_MANIFEST)
 
 ## Run provider e2e suite (embedded kcp + quickstart-provider subprocess).
 ## Lightweight — no kind/Helm, just two host binaries the suite drives over
@@ -941,7 +950,7 @@ e2e-tilt-cluster: ## Run Tilt-cluster provider e2e (requires `make tilt-cluster`
 	}
 	go test ./test/e2e/suites/tiltcluster/... -v -timeout $(E2E_TILT_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
-## Create quickstart's APIExport (+ endpoint slice + bind grant) inside its
+## Create quickstart's APIExport (+ Greeting schema + endpoint slice + bind grant) inside its
 ## provider workspace, so tenants can Enable it. The Provider controller already
 ## minted the provider-token Secret on register; we read it, write a dev runtime
 ## kubeconfig targeting the sub-workspace, and run the provider's `init`
@@ -963,20 +972,21 @@ init-provider-quickstart: build-quickstart-provider ## Bootstrap quickstart APIE
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(QUICKSTART_KCP_SERVER)/clusters/$(QUICKSTART_WORKSPACE_PATH)" "$$TOKEN" \
 		> $(QUICKSTART_RUNTIME_KUBECONFIG)
-	@echo "Running quickstart-provider init (creates APIExport + endpoint slice + bind grant)"
+	@echo "Running quickstart-provider init (creates Greeting schema + APIExport + endpoint slice + bind grant)"
 	FAROS_PROVIDER_KUBECONFIG=$(QUICKSTART_RUNTIME_KUBECONFIG) \
 	QUICKSTART_WORKSPACE_PATH=$(QUICKSTART_WORKSPACE_PATH) \
-	FAROS_SCHEMAS_DIR=/nonexistent \
+	FAROS_SCHEMAS_DIR=$(QUICKSTART_SCHEMAS_DIR) \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(QUICKSTART_MANIFEST)) \
 		$(BINDIR)/quickstart-provider init
 
 ## Delete the quickstart CatalogEntry + Provider. Deleting the Provider triggers
 ## full teardown of root:faros:providers:quickstart (workspace, SA, APIExport)
 ## via the controller's finalizer.
-uninstall-provider-quickstart: ## Delete quickstart CatalogEntry + Provider (full teardown)
+uninstall-provider-quickstart: ## Delete quickstart Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(QUICKSTART_KCP_KUBECONFIG) \
 		--server=$(QUICKSTART_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(QUICKSTART_MANIFEST) -f $(QUICKSTART_PROVIDER_MANIFEST)
+		delete -f $(QUICKSTART_PROVIDER_MANIFEST)
 
 # --- Provider kuery (local dev) ---
 # Mirror of the quickstart pattern above. Distinct port (8084) so the demo
@@ -992,9 +1002,9 @@ KUERY_MANIFEST ?= providers/kuery/manifest.yaml
 KUERY_PROVIDER_MANIFEST ?= providers/kuery/provider.yaml
 KUERY_WORKSPACE_PATH ?= root:faros:providers:kuery
 KUERY_SCHEMAS_DIR ?= providers/kuery/deploy/chart/files/schemas
-# Optional: identityHash of the edges export for kuery's first-party edges
-# permission claim (copy from /bonkers Root identities). Empty → APIExport is
-# still created (Enable binds), but edge engagement won't activate until set.
+# Optional: identityHash of the edges provider export for kuery's
+# edges.faros.sh/kubernetesclusters permission claim. Empty is resolved from
+# root:faros:providers:edges by init-provider-kuery.
 KUERY_EDGES_IDENTITY_HASH ?=
 # Dev runtime kubeconfig for the engagement controller, written by
 # init-provider-kuery from the provider SA token the hub mints.
@@ -1087,7 +1097,7 @@ run-provider-kuery: build-kuery-provider kuery-db-up ## Run the kuery provider (
 	KUERY_STORE_DSN="$$STORE_DSN" \
 		$(BINDIR)/kuery-provider
 
-install-provider-kuery: ## Apply kuery Provider + CatalogEntry into root:faros:providers
+install-provider-kuery: ## Apply kuery Provider onboarding record
 	@test -f $(KUERY_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KUERY_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1096,7 +1106,7 @@ install-provider-kuery: ## Apply kuery Provider + CatalogEntry into root:faros:p
 	kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
 		--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(KUERY_PROVIDER_MANIFEST) -f $(KUERY_MANIFEST)
+		apply -f $(KUERY_PROVIDER_MANIFEST)
 
 ## Dev bootstrap for the engagement controller. The Provider controller writes
 ## the minted kubeconfig into a Secret in root:faros:providers, but host-binary
@@ -1123,41 +1133,42 @@ init-provider-kuery: build-kuery-provider ## Bootstrap kuery APIExport (schemas+
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(KUERY_KCP_SERVER)/clusters/$(KUERY_WORKSPACE_PATH)" "$$TOKEN" \
 		> $(KUERY_RUNTIME_KUBECONFIG)
-	@# kcp requires kuery's first-party edges permissionClaim to carry the
-	@# identityHash of the export that serves edges. Tenants consume edges
-	@# through the core.faros.sh binding, so resolve core.faros.sh's
-	@# identityHash from system:controllers (override via KUERY_EDGES_IDENTITY_HASH).
+	@# kcp requires kuery's KubernetesCluster permissionClaim to carry the
+	@# identityHash of the edges provider export (override via
+	@# KUERY_EDGES_IDENTITY_HASH).
 	@# The slice + bind grant are created inside install.Bootstrap using the
 	@# provider SA (cluster-admin → has `bind`), not the admin kubeconfig.
 	@echo "Running kuery-provider init (schemas + APIExport + endpoint slice + bind grant)"
 	@HASH="$(KUERY_EDGES_IDENTITY_HASH)"; \
 	if [ -z "$$HASH" ]; then \
 		HASH=$$(kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
-			--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:controllers \
+			--server=$(KUERY_KCP_SERVER)/clusters/root:faros:providers:edges \
 			--insecure-skip-tls-verify \
-			get apiexport core.faros.sh -o jsonpath='{.status.identityHash}'); \
-		echo "resolved edges identityHash from core.faros.sh: $$HASH"; \
+			get apiexport edges.providers.faros.sh -o jsonpath='{.status.identityHash}'); \
+		echo "resolved edges identityHash from edges.providers.faros.sh: $$HASH"; \
 	fi; \
-	test -n "$$HASH" || { echo "could not resolve core.faros.sh identityHash — is the hub bootstrapped?"; exit 1; }; \
+	test -n "$$HASH" || { echo "could not resolve edges.providers.faros.sh identityHash — is the edges provider initialized?"; exit 1; }; \
 	FAROS_PROVIDER_KUBECONFIG=$(KUERY_RUNTIME_KUBECONFIG) \
 	KUERY_WORKSPACE_PATH=$(KUERY_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(KUERY_SCHEMAS_DIR) \
 	KUERY_EDGES_IDENTITY_HASH=$$HASH \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(KUERY_MANIFEST)) \
 		$(BINDIR)/kuery-provider init
 
-uninstall-provider-kuery: ## Delete kuery CatalogEntry + Provider (full teardown)
+uninstall-provider-kuery: ## Delete kuery Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
 		--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(KUERY_MANIFEST) -f $(KUERY_PROVIDER_MANIFEST)
+		delete -f $(KUERY_PROVIDER_MANIFEST)
 
 # --- Provider infrastructure (local dev) ---
 # Mirror of the quickstart pattern above. Distinct port (8082) so both
 # providers can run side-by-side under Tilt. Iteration loop:
 #
 #   Terminal 1: make run-hub-embedded-static
-#   Terminal 2: make install-provider-infrastructure    # admin: register entry
-#   Terminal 3: make run-provider-infrastructure        # tenant: run binary
+#   Terminal 2: make install-provider-infrastructure    # admin: onboard workspace
+#   Terminal 3: make init-provider-infrastructure       # publish APIs + CatalogEntry
+#   Terminal 4: make run-provider-infrastructure        # run binary
 #
 KROMC_PORT ?= 8082
 KROMC_HUB_URL ?= https://localhost:9443
@@ -1432,8 +1443,9 @@ run-provider-app-studio: build-app-studio-provider app-studio-db-up app-studio-p
 			$(BINDIR)/app-studio-provider; \
 	fi
 
-## Apply the App Studio CatalogEntry into root:faros:providers. Idempotent.
-install-provider-app-studio: ## Apply App Studio Provider + CatalogEntry into root:faros:providers
+## Apply App Studio's admin Provider onboarding record. Idempotent. Provider
+## init self-registers CatalogEntry in the provisioned provider workspace.
+install-provider-app-studio: ## Apply App Studio Provider onboarding record
 	@test -f $(APP_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(APP_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1442,14 +1454,13 @@ install-provider-app-studio: ## Apply App Studio Provider + CatalogEntry into ro
 	kubectl --kubeconfig=$(APP_STUDIO_KCP_KUBECONFIG) \
 		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(APP_STUDIO_PROVIDER_MANIFEST) -f $(APP_STUDIO_MANIFEST)
+		apply -f $(APP_STUDIO_PROVIDER_MANIFEST)
 
 ## Create App Studio's APIExport (+ schemas + endpoint slice + bind grant) in
 ## its provider workspace so tenants can Enable it. Reads the provider-token the
 ## Provider controller minted on register, writes a dev provider kubeconfig, and
-## runs the provider's `init` (sdkinstall.Bootstrap) with the shipped schemas.
-## FAROS_CATALOGENTRY_FILE is intentionally unset — the dev install target
-## already applied the CatalogEntry to system:providers. Idempotent.
+## runs the provider's `init` (sdkinstall.Bootstrap) with the shipped schemas
+## and CatalogEntry. Idempotent.
 init-provider-app-studio: build-app-studio-provider ## Bootstrap App Studio APIExport + write dev provider kubeconfig
 	@test -f $(APP_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(APP_STUDIO_KCP_KUBECONFIG)"; \
@@ -1485,10 +1496,12 @@ init-provider-app-studio: build-app-studio-provider ## Bootstrap App Studio APIE
 	FAROS_SCHEMAS_DIR=$(APP_STUDIO_SCHEMAS_DIR) \
 	APP_STUDIO_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
 	APP_STUDIO_CODE_IDENTITY_HASH="$$CODE_HASH" \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(APP_STUDIO_MANIFEST)) \
 		$(BINDIR)/app-studio-provider init
 
-## Delete the App Studio CatalogEntry. Useful while iterating on the chart.
-uninstall-provider-app-studio: ## Delete App Studio CatalogEntry
+## Delete the App Studio Provider. Its finalizer removes the provider workspace,
+## including the provider-owned CatalogEntry.
+uninstall-provider-app-studio: ## Delete App Studio Provider (full workspace teardown)
 	@test -f $(APP_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(APP_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1497,7 +1510,7 @@ uninstall-provider-app-studio: ## Delete App Studio CatalogEntry
 	-kubectl --kubeconfig=$(APP_STUDIO_KCP_KUBECONFIG) \
 		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(APP_STUDIO_MANIFEST) -f $(APP_STUDIO_PROVIDER_MANIFEST)
+		delete -f $(APP_STUDIO_PROVIDER_MANIFEST)
 
 ## --- agents provider dev targets (mirror app-studio) ---
 
@@ -1545,7 +1558,7 @@ run-provider-agents: build-agents-provider agents-db-up ## Run the agents provid
 	AGENTS_IN_MEMORY_STORE="$$AGENTS_IN_MEMORY_STORE" \
 		$(BINDIR)/agents-provider
 
-install-provider-agents: ## Apply agents Provider + CatalogEntry into root:faros:providers
+install-provider-agents: ## Apply agents Provider onboarding record
 	@test -f $(AGENTS_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(AGENTS_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1554,7 +1567,7 @@ install-provider-agents: ## Apply agents Provider + CatalogEntry into root:faros
 	kubectl --kubeconfig=$(AGENTS_KCP_KUBECONFIG) \
 		--server=$(AGENTS_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(AGENTS_PROVIDER_MANIFEST) -f $(AGENTS_MANIFEST)
+		apply -f $(AGENTS_PROVIDER_MANIFEST)
 
 init-provider-agents: build-agents-provider ## Bootstrap agents APIExport + write dev provider kubeconfig
 	@test -f $(AGENTS_KCP_KUBECONFIG) || { \
@@ -1576,9 +1589,10 @@ init-provider-agents: build-agents-provider ## Bootstrap agents APIExport + writ
 	FAROS_PROVIDER_KUBECONFIG=$(AGENTS_PROVIDER_KUBECONFIG) \
 	AGENTS_WORKSPACE_PATH=$(AGENTS_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(AGENTS_SCHEMAS_DIR) \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(AGENTS_MANIFEST)) \
 		$(BINDIR)/agents-provider init
 
-uninstall-provider-agents: ## Delete the agents CatalogEntry + Provider
+uninstall-provider-agents: ## Delete agents Provider (full workspace teardown)
 	@test -f $(AGENTS_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(AGENTS_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1587,7 +1601,7 @@ uninstall-provider-agents: ## Delete the agents CatalogEntry + Provider
 	-kubectl --kubeconfig=$(AGENTS_KCP_KUBECONFIG) \
 		--server=$(AGENTS_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(AGENTS_MANIFEST) -f $(AGENTS_PROVIDER_MANIFEST)
+		delete -f $(AGENTS_PROVIDER_MANIFEST)
 
 ## --- vibe-studio provider dev targets (mirror agents) ---
 # Wizard-first app builder (docs/vibe-studio-design.md). Phase 0: event store
@@ -1659,7 +1673,7 @@ run-provider-vibe-studio: build-vibe-studio-provider vibe-studio-db-up ## Run th
 	VIBE_STUDIO_DATABASE_URL="$$VIBE_STUDIO_DATABASE_URL" \
 		$(BINDIR)/vibe-studio-provider
 
-install-provider-vibe-studio: ## Apply vibe-studio Provider + CatalogEntry into root:faros:providers
+install-provider-vibe-studio: ## Apply vibe-studio Provider onboarding record
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(VIBE_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1668,7 +1682,7 @@ install-provider-vibe-studio: ## Apply vibe-studio Provider + CatalogEntry into 
 	kubectl --kubeconfig=$(VIBE_STUDIO_KCP_KUBECONFIG) \
 		--server=$(VIBE_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(VIBE_STUDIO_PROVIDER_MANIFEST) -f $(VIBE_STUDIO_MANIFEST)
+		apply -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
 
 init-provider-vibe-studio: build-vibe-studio-provider ## Bootstrap vibe-studio APIExport + write dev provider kubeconfig
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
@@ -1705,9 +1719,10 @@ init-provider-vibe-studio: build-vibe-studio-provider ## Bootstrap vibe-studio A
 	FAROS_SCHEMAS_DIR=$(VIBE_STUDIO_SCHEMAS_DIR) \
 	VIBE_STUDIO_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
 	VIBE_STUDIO_CODE_IDENTITY_HASH="$$CODE_HASH" \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(VIBE_STUDIO_MANIFEST)) \
 		$(BINDIR)/vibe-studio-provider init
 
-uninstall-provider-vibe-studio: ## Delete the vibe-studio CatalogEntry + Provider
+uninstall-provider-vibe-studio: ## Delete vibe-studio Provider (full workspace teardown)
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(VIBE_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1716,7 +1731,7 @@ uninstall-provider-vibe-studio: ## Delete the vibe-studio CatalogEntry + Provide
 	-kubectl --kubeconfig=$(VIBE_STUDIO_KCP_KUBECONFIG) \
 		--server=$(VIBE_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(VIBE_STUDIO_MANIFEST) -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
+		delete -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
 
 # --- Dev agent image (template-native development mode) ---
 # The static control binary an init container injects into any dev-mode
@@ -1737,9 +1752,9 @@ load-dev-agent-image: docker-build-dev-agent ## Load the dev agent image into th
 	@echo ">>> loading $(DEV_AGENT_IMAGE) into kind cluster $(KRO_KIND_NAME)"
 	kind load docker-image $(DEV_AGENT_IMAGE) --name $(KRO_KIND_NAME)
 
-## Apply the infrastructure CatalogEntry into root:faros:providers. Idempotent.
-## Requires the hub to be running so the admin kubeconfig exists.
-install-provider-infrastructure: ## Apply infrastructure Provider + CatalogEntry into root:faros:providers
+## Apply infrastructure's admin Provider onboarding record. Idempotent. Provider
+## init self-registers CatalogEntry in the provisioned provider workspace.
+install-provider-infrastructure: ## Apply infrastructure Provider onboarding record
 	@test -f $(KROMC_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1748,15 +1763,15 @@ install-provider-infrastructure: ## Apply infrastructure Provider + CatalogEntry
 	kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply --validate=false -f $(KROMC_PROVIDER_MANIFEST) -f $(KROMC_MANIFEST)
+		apply --validate=false -f $(KROMC_PROVIDER_MANIFEST)
 
 ## Delete the infrastructure CatalogEntry + Provider (Provider delete triggers
 ## full teardown of the sub-workspace via the controller's finalizer).
-uninstall-provider-infrastructure: ## Delete infrastructure CatalogEntry + Provider (full teardown)
+uninstall-provider-infrastructure: ## Delete infrastructure Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(KROMC_MANIFEST) -f $(KROMC_PROVIDER_MANIFEST)
+		delete -f $(KROMC_PROVIDER_MANIFEST)
 
 ## One-shot bootstrap for the infrastructure provider's workspace.
 ## Uses the hub's admin kubeconfig to install CRDs, register APIExport
@@ -1781,13 +1796,15 @@ init-provider-infrastructure: build-infrastructure-provider ## Bootstrap infrast
 	INFRASTRUCTURE_WORKSPACE_PATH=$(INFRASTRUCTURE_WORKSPACE_PATH) \
 	INFRASTRUCTURE_KUBECONFIG=$(INFRASTRUCTURE_RUNTIME_KUBECONFIG) \
 	KRO_KUBECONFIG=$${KRO_KUBECONFIG:-$$( [ -f "$(KRO_KIND_KUBECONFIG)" ] && echo "$(KRO_KIND_KUBECONFIG)" )} \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(KROMC_MANIFEST)) \
 		$(BINDIR)/infrastructure-provider init
 
 # ── code provider (git repository management) ──────────────────────────────
 # Local-dev flow mirrors the infrastructure provider:
 #   Terminal 1: make run-hub-embedded-static          # hub + embedded kcp
-#   Terminal 2: make install-provider-code            # admin: register entry
-#   Terminal 3: make run-provider-code                # tenant: run binary
+#   Terminal 2: make install-provider-code            # admin: onboard workspace
+#   Terminal 3: make init-provider-code               # publish APIs + CatalogEntry
+#   Terminal 4: make run-provider-code                # run binary
 CODE_PORT ?= 8083
 CODE_MANIFEST ?= providers/code/manifest.yaml
 CODE_PROVIDER_MANIFEST ?= providers/code/provider.yaml
@@ -1812,7 +1829,7 @@ run-provider-code: build-code-provider ## Run the code provider (requires: make 
 	GITHUB_OAUTH_PORTAL_ORIGIN=$${GITHUB_OAUTH_PORTAL_ORIGIN:-$(KROMC_HUB_URL)} \
 		$(BINDIR)/code-provider serve
 
-install-provider-code: ## Apply the code Provider + CatalogEntry into root:faros:providers
+install-provider-code: ## Apply code Provider onboarding record
 	@test -f $(KROMC_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1821,13 +1838,13 @@ install-provider-code: ## Apply the code Provider + CatalogEntry into root:faros
 	kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(CODE_PROVIDER_MANIFEST) -f $(CODE_MANIFEST)
+		apply -f $(CODE_PROVIDER_MANIFEST)
 
-uninstall-provider-code: ## Delete the code CatalogEntry + Provider (full teardown)
+uninstall-provider-code: ## Delete code Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(CODE_MANIFEST) -f $(CODE_PROVIDER_MANIFEST)
+		delete -f $(CODE_PROVIDER_MANIFEST)
 
 CODE_WORKSPACE_PATH ?= root:faros:providers:code
 ## Dev bootstrap for the code provider. The hub mints a real provider
@@ -1859,6 +1876,7 @@ init-provider-code: build-code-provider ## Write the dev kubeconfig + ensure the
 	FAROS_PROVIDER_KUBECONFIG=$(CODE_RUNTIME_KUBECONFIG) \
 	CODE_WORKSPACE_PATH=$(CODE_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/code/deploy/chart/files/schemas \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(CODE_MANIFEST)) \
 		$(BINDIR)/code-provider init
 
 # --- Provider Databricks (local dev) ---
@@ -1879,7 +1897,7 @@ run-provider-databricks: build-databricks-provider ## Run the Databricks provide
 	FAROS_PROVIDER_KUBECONFIG=$$( [ -f "$(DATABRICKS_RUNTIME_KUBECONFIG)" ] && echo "$(DATABRICKS_RUNTIME_KUBECONFIG)" ) \
 		$(BINDIR)/databricks-provider serve
 
-install-provider-databricks: ## Apply the Databricks Provider + CatalogEntry into root:faros:providers
+install-provider-databricks: ## Apply Databricks Provider onboarding record
 	@test -f $(KROMC_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1888,13 +1906,13 @@ install-provider-databricks: ## Apply the Databricks Provider + CatalogEntry int
 	kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(DATABRICKS_PROVIDER_MANIFEST) -f $(DATABRICKS_MANIFEST)
+		apply -f $(DATABRICKS_PROVIDER_MANIFEST)
 
-uninstall-provider-databricks: ## Delete the Databricks CatalogEntry + Provider
+uninstall-provider-databricks: ## Delete Databricks Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(DATABRICKS_MANIFEST) -f $(DATABRICKS_PROVIDER_MANIFEST)
+		delete -f $(DATABRICKS_PROVIDER_MANIFEST)
 
 init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIExport + write dev provider kubeconfig
 	@test -f $(KROMC_KCP_KUBECONFIG) || { \
@@ -1912,6 +1930,7 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 	FAROS_PROVIDER_KUBECONFIG=$(DATABRICKS_RUNTIME_KUBECONFIG) \
 	DATABRICKS_WORKSPACE_PATH=$(DATABRICKS_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/databricks/deploy/chart/files/schemas \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(DATABRICKS_MANIFEST)) \
 		$(BINDIR)/databricks-provider init
 
 # --- Experimental: run the infrastructure provider as a POD (init-container
@@ -1921,7 +1940,8 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 #     Reuses the faros-kro kind cluster as the host cluster. Requires the hub
 #     to run with --kubeconfig=$(KRO_KIND_KUBECONFIG) and
 #     --hub-internal-url=$(HUB_INTERNAL_URL) (the Tiltfile sets
-#     both). Apply the CatalogEntry first: make install-provider-infrastructure
+#     both). Onboard and initialize first: make install-provider-infrastructure
+#     followed by make init-provider-infrastructure.
 INFRASTRUCTURE_NAMESPACE ?= infrastructure
 INFRASTRUCTURE_IMAGE ?= faros-infrastructure-provider:dev
 INFRASTRUCTURE_CHART ?= providers/infrastructure/deploy/chart
@@ -1954,7 +1974,7 @@ helm-deploy-provider-infrastructure: ## (experimental) Build+load image, helm in
 		--set hub.insecure=true \
 		--set catalogEntry.enabled=false
 	@echo ">>> deployed. The pod stays in ContainerCreating until the hub delivers"
-	@echo "    the faros-provider-kubeconfig Secret (apply the CatalogEntry first:"
+	@echo "    the faros-provider-kubeconfig Secret (onboard the Provider first:"
 	@echo "    make install-provider-infrastructure). Watch:"
 	@echo "    KUBECONFIG=$(KRO_KIND_KUBECONFIG) kubectl -n $(INFRASTRUCTURE_NAMESPACE) get pods -w"
 
@@ -2218,13 +2238,15 @@ help-dev: ## Show development environment options
 	@echo "          or: make run-hub-static      - External kcp + static token"
 	@echo ""
 	@echo "PROVIDER QUICKSTART (after the hub is running):"
-	@echo "  Terminal A: make install-provider-quickstart   - Apply CatalogEntry"
-	@echo "  Terminal B: make run-provider-quickstart       - Run the provider"
+	@echo "  Terminal A: make install-provider-quickstart   - Onboard provider workspace"
+	@echo "  Terminal B: make init-provider-quickstart      - Publish APIExport + CatalogEntry"
+	@echo "  Terminal C: make run-provider-quickstart       - Run the provider"
 	@echo "  Then open https://localhost:9443/ui/providers (Enable the provider)"
 	@echo ""
 	@echo "APP STUDIO PROVIDER (after the hub is running):"
-	@echo "  Terminal A: make install-provider-app-studio   - Apply CatalogEntry"
-	@echo "  Terminal B: make run-provider-app-studio       - Run the provider"
+	@echo "  Terminal A: make install-provider-app-studio   - Onboard provider workspace"
+	@echo "  Terminal B: make init-provider-app-studio      - Publish APIs + CatalogEntry"
+	@echo "  Terminal C: make run-provider-app-studio       - Run the provider"
 	@echo "  Then open https://localhost:9443/ui/providers (Enable the provider)"
 	@echo ""
 	@echo "ENVIRONMENT VARIABLES:"
@@ -2289,7 +2311,7 @@ clean:
 path: ## Print export command to add bin/ to PATH
 	@echo 'export PATH=$(CURDIR)/$(BINDIR):$$PATH'
 
-verify: verify-boilerplate verify-codegen verify-portalkit verify-app-studio-preview-console-dev-key verify-app-studio-eval vet lint build test ## Run all checks
+verify: verify-boilerplate verify-codegen verify-portalkit verify-infrastructure-provider-portal verify-code-provider-portal verify-app-studio-preview-console-dev-key verify-app-studio-eval vet lint build test ## Run all checks
 
 # --- Helm chart packaging ---
 

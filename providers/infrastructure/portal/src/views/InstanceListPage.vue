@@ -12,14 +12,14 @@ import type { Instance, TemplateView, ViewColumn } from '../types'
 
 const emit = defineEmits<{
   (e: 'navigate', view: string): void
-  (e: 'select', name: string): void
+  (e: 'select', name: string, template: string): void
 }>()
 
 const items = ref<Instance[]>([])
 const error = ref<string | null>(null)
 const loading = ref(false)
 const loaded = ref(false)
-const deletingInstanceName = ref<string | null>(null)
+const deletingInstanceKey = ref<string | null>(null)
 const deleteError = ref<string | null>(null)
 const viewByTemplate = ref<Map<string, TemplateView>>(new Map())
 const tombstones = createResourceTombstones()
@@ -60,11 +60,16 @@ const columns = computed(() => [
   { key: 'actions', label: '' },
 ])
 
-const visibleItems = computed(() => items.value.filter(item => !tombstones.has(item.name, item.uid)))
+function instanceKey(instance: Pick<Instance, 'template' | 'name'>): string {
+  return `${instance.template}/${instance.name}`
+}
+
+const visibleItems = computed(() => items.value.filter(item => !tombstones.has(instanceKey(item), item.uid)))
 
 const rows = computed<Array<Record<string, unknown>>>(() => visibleItems.value.map(instance => {
   const row: Record<string, unknown> = {
     name: instance.name,
+    rowKey: instanceKey(instance),
     template: instance.template,
     status: instance.phase,
     age: formatAge(instance.createdAt),
@@ -102,7 +107,7 @@ const refresh = createLatestRefreshController(async requestID => {
     for (const template of result.templates) if (template.view) views.set(template.name, template.view)
     viewByTemplate.value = views
     items.value = result.items
-    tombstones.reconcile(result.items)
+    tombstones.reconcile(result.items.map(item => ({ name: instanceKey(item), uid: item.uid })))
     loaded.value = true
     error.value = null
   } catch (caught) {
@@ -118,7 +123,7 @@ function load(): Promise<void> {
 }
 
 async function deleteInstance(instance: Instance) {
-  if (deletingInstanceName.value !== null) return
+  if (deletingInstanceKey.value !== null) return
   deleteError.value = null
   const confirmed = await confirmDialog({
     title: `Delete instance "${instance.name}"?`,
@@ -126,24 +131,24 @@ async function deleteInstance(instance: Instance) {
     confirmLabel: 'Delete instance',
     danger: true,
   })
-  if (!confirmed || deletingInstanceName.value !== null) return
+  if (!confirmed || deletingInstanceKey.value !== null) return
 
-  deletingInstanceName.value = instance.name
+  deletingInstanceKey.value = instanceKey(instance)
   try {
-    await api.deleteInstance(instance.name)
-    tombstones.add(instance.name, instance.uid)
+    await api.deleteInstance(instance.name, instance.template)
+    tombstones.add(instanceKey(instance), instance.uid)
     await load()
   } catch (caught) {
     if (!isContextChangedError(caught)) deleteError.value = errorMessage(caught, 'delete failed')
   } finally {
-    deletingInstanceName.value = null
+    deletingInstanceKey.value = null
   }
 }
 
 function selectInstance(row: Record<string, unknown>) {
   const instance = rowInstance(row)
-  if (deletingInstanceName.value === instance.name || tombstones.has(instance.name, instance.uid)) return
-  emit('select', instance.name)
+  if (deletingInstanceKey.value === instanceKey(instance) || tombstones.has(instanceKey(instance), instance.uid)) return
+  emit('select', instance.name, instance.template)
 }
 
 function formatAge(timestamp?: string): string {
@@ -190,7 +195,7 @@ onUnmounted(() => {
     <ResourceTable
       :columns="columns"
       :rows="rows"
-      row-key="name"
+      row-key="rowKey"
       :loaded="loaded"
       :loading="loading"
       :error="error"
@@ -213,8 +218,8 @@ onUnmounted(() => {
           <ResourceTableDeleteButton
             :label="`Delete instance ${rowInstance(row).name}`"
             :busy-label="`Deleting instance ${rowInstance(row).name}…`"
-            :busy="deletingInstanceName === rowInstance(row).name"
-            :disabled="deletingInstanceName !== null"
+            :busy="deletingInstanceKey === instanceKey(rowInstance(row))"
+            :disabled="deletingInstanceKey !== null"
             @click="deleteInstance(rowInstance(row))"
           />
         </div>

@@ -30,7 +30,8 @@ import (
 //  1. Materializing the per-template CRD declared in spec.instanceCRD
 //     (e.g. redis.infrastructure.faros.sh) into the cluster's
 //     CRD set, with OpenAPI validation derived from spec.schema.
-//  2. Adding that CRD to APIExport.spec.schemas so tenants who
+//  2. Minting an APIResourceSchema and referencing it from
+//     APIExport.spec.resources so tenants who
 //     APIBind to the infrastructure provider can see and create
 //     instances.
 //  3. Calling Backend.SetupTemplate on the backend named in
@@ -636,7 +637,7 @@ type TemplateAgent struct {
 // TemplateInstanceCRD identifies the per-template CRD the platform
 // projects. All four fields are required so the controller can both
 // register the CRD (group + version + resource + kind) and reference
-// it from APIExport.spec.schemas (resource.group).
+// its immutable APIResourceSchema from APIExport.spec.resources.
 type TemplateInstanceCRD struct {
 	// Group MUST be infrastructure.faros.sh. Pinned here so
 	// every per-template CRD lives under the same namespace and the
@@ -678,7 +679,7 @@ type TemplateStatus struct {
 	// Registered reflects the platform-side wiring the controller
 	// owns. CRDEstablished flips to true once the per-template CRD
 	// has the Established condition; SchemaInAPIExport flips once
-	// the schema is listed in APIExport.spec.schemas.
+	// the APIResourceSchema is referenced from APIExport.spec.resources.
 	// +optional
 	Registered TemplateRegistrationStatus `json:"registered,omitempty"`
 
@@ -733,8 +734,8 @@ const (
 	// ConditionCRDEstablished mirrors the per-template CRD's
 	// Established condition.
 	ConditionCRDEstablished = "CRDEstablished"
-	// ConditionSchemaInAPIExport flips True once the CRD's schema
-	// appears in APIExport.spec.schemas.
+	// ConditionSchemaInAPIExport flips True once the CRD's immutable
+	// APIResourceSchema appears in APIExport.spec.resources.
 	ConditionSchemaInAPIExport = "SchemaInAPIExport"
 	// ConditionBackendReady mirrors Backend.SetupTemplate's result.
 	ConditionBackendReady = "BackendReady"

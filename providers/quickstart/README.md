@@ -49,20 +49,27 @@ In another, the faros hub (embedded kcp is the easiest path):
   --listen-addr=:9443
 ```
 
-Register the provider via its `ProviderCatalogEntry`:
+Onboard the provider, initialize its API surface, and register its
+`CatalogEntry` (the root Makefile wraps the development credentials and paths):
 
 ```sh
-kubectl --kubeconfig kcp-admin.kubeconfig \
-  --context faros-admin \
-  ws use root:faros:providers
-kubectl apply -f providers/quickstart/manifest.yaml
+make install-provider-quickstart
+make init-provider-quickstart
 ```
+
+The first target applies the admin `Provider` record. The second runs
+`quickstart-provider init`, which applies the Greeting APIResourceSchema,
+APIExport, endpoint slice, bind grant, and CatalogEntry in the onboarded
+provider workspace. (The Helm chart passes its rendered CatalogEntry to that
+same init command.) The hub only
+observes the contract; it does not materialize provider APIs from CatalogEntry.
 
 Check the hub picked it up:
 
 ```sh
-kubectl get providercatalogentry quickstart -o yaml
-# status.conditions[Ready].status: "True"
+kubectl get catalogentry quickstart -o yaml
+# status.conditions[APIExportReady].status: "True"
+# status.conditions[Ready].status: "True" after runtime health/heartbeat gates
 ```
 
 Curl the backend through the hub proxy:
@@ -104,44 +111,23 @@ docker build -t faros-quickstart-provider:dev providers/quickstart
 
 ## Deploying in-cluster
 
-Update `manifest.yaml`:
-
-- `spec.ui.url` and `spec.backend.url` → the in-cluster Service DNS, e.g.
-  `http://quickstart.providers.svc.cluster.local:8081`
-- `spec.serviceAccountNamespace` → the Namespace where the Deployment runs
-
-Then apply the manifest plus a Deployment + Service of your own. A Helm
-chart for this provider arrives in Phase 4 (see `docs/providers.md`).
+The included Helm chart installs the provider Deployment, Service, init
+container, and rendered CatalogEntry. First onboard the admin `Provider` and
+supply the resulting provider-workspace kubeconfig as the chart's
+`providerKubeconfig.secretName`; then install `deploy/chart/`. The init container
+applies the checked-in schemas and APIExport before self-registering the
+CatalogEntry, whose URLs already use the in-cluster Service DNS.
 
 ### Two ways a provider's kcp credentials get bootstrapped
 
-quickstart uses the **hub-provisioned** model: you apply the
-`CatalogEntry` and the hub catalog controller creates the provider
-workspace, mints the runtime `faros-provider-kubeconfig` Secret, and
-applies the APIExport. quickstart doesn't read kcp itself, so it just
-needs the routing — no kubeconfig.
+quickstart uses the standard split model: the hub's admin `Provider` controller
+creates the workspace and provider identity; `quickstart-provider init` owns the
+Greeting schema, APIExport, endpoint slice, bind grant, and CatalogEntry.
+quickstart does not read kcp while serving, so the kubeconfig is needed by init,
+not by the runtime HTTP process.
 
-A provider that *does* talk to kcp can also **self-bootstrap** with an
-init container that holds a kcp admin kubeconfig and mints its own
-runtime kubeconfig — no hub provisioning step. The infrastructure
-provider demonstrates this end-to-end; see
-[providers/infrastructure](../infrastructure/README.md#b-self-bootstrap-with-an-init-container-bootstrapenabledtrue)
-and the "Alternative: self-bootstrap via an init container" section of
-[docs/providers.md](../../docs/providers.md). When you graduate this
-quickstart to a real Helm chart, copy that pattern if your provider
-needs kcp access.
-
-## What's *not* in this iteration (Phase 1A)
-
-The platform pieces these depend on land in later phases:
-
-- Heartbeat (`POST /api/providers/{name}/heartbeat`) — Phase 1C.
-- Hub-minted `faros-provider-kubeconfig` Secret — Phase 1B.
-- A `ProviderBinding` and APIBinding flow — Phase 3.
-- A "Providers" page in the portal — Phase 2.
-- A first-party Helm chart — Phase 4.
-
-For now this binary just demonstrates that an arbitrary external HTTP
-service can be proxied through the hub at a stable, same-origin URL by
-declaring a `ProviderCatalogEntry`. That's the foundation everything else
-sits on.
+A provider that needs kcp at runtime may reuse that workspace credential or
+mint a narrower runtime identity during init. The infrastructure provider shows
+the latter pattern. In every case, `CatalogEntry.apiExport.requiredResources`
+declares the stable minimum and the hub verifies the complete observed export
+and exact permission claims before tenant Enable.

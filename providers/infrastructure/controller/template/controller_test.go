@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -46,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -61,6 +63,10 @@ import (
 // can't materialize the APIExport itself (the hub's catalog
 // controller does that in prod).
 func newTestReconciler(t *testing.T, initial ...client.Object) (*Reconciler, *dynamicfake.FakeDynamicClient, *stub.Backend) {
+	return newTestReconcilerWithCRDEstablishment(t, true, initial...)
+}
+
+func newTestReconcilerWithCRDEstablishment(t *testing.T, establishCRDs bool, initial ...client.Object) (*Reconciler, *dynamicfake.FakeDynamicClient, *stub.Backend) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -91,6 +97,28 @@ func newTestReconciler(t *testing.T, initial ...client.Object) (*Reconciler, *dy
 	})
 	exportObj.SetName(APIExportName)
 	dyn := dynamicfake.NewSimpleDynamicClient(dynScheme, exportObj)
+	if establishCRDs {
+		markEstablished := func(obj runtime.Object) {
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				t.Fatalf("CRD reactor object = %T, want unstructured", obj)
+			}
+			if err := unstructured.SetNestedSlice(u.Object, []any{map[string]any{
+				"type":   string(apiextensionsv1.Established),
+				"status": string(apiextensionsv1.ConditionTrue),
+			}}, "status", "conditions"); err != nil {
+				t.Fatalf("mark CRD established: %v", err)
+			}
+		}
+		dyn.PrependReactor("create", "customresourcedefinitions", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+			markEstablished(action.(clientgotesting.CreateAction).GetObject())
+			return false, nil, nil
+		})
+		dyn.PrependReactor("update", "customresourcedefinitions", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+			markEstablished(action.(clientgotesting.UpdateAction).GetObject())
+			return false, nil, nil
+		})
+	}
 
 	reg := backend.NewRegistry()
 	stb := stub.New()
@@ -104,6 +132,68 @@ func newTestReconciler(t *testing.T, initial ...client.Object) (*Reconciler, *dy
 		Backends: reg,
 	}
 	return r, dyn, stb
+}
+
+func TestReconcileWaitsForCRDEstablishedBeforePublishing(t *testing.T) {
+	tmpl := newTestTemplate(t, "await")
+	r, dyn, stb := newTestReconcilerWithCRDEstablishment(t, false, tmpl)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil { // finalizer
+		t.Fatal(err)
+	}
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("unestablished CRD did not request a requeue")
+	}
+	var waiting infrav1alpha1.Template
+	if err := r.Client.Get(context.Background(), req.NamespacedName, &waiting); err != nil {
+		t.Fatal(err)
+	}
+	if condition := findCondition(waiting.Status.Conditions, infrav1alpha1.ConditionCRDEstablished); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != infrav1alpha1.ReasonAwaitingEstablish {
+		t.Fatalf("CRDEstablished condition before establishment = %+v", condition)
+	}
+	if waiting.Status.Registered.SchemaInAPIExport || len(stb.SeenSetups) != 0 {
+		t.Fatalf("publication/backend ran before CRD establishment: status=%+v setups=%v", waiting.Status.Registered, stb.SeenSetups)
+	}
+	export, err := dyn.Resource(apiExportGVR).Get(context.Background(), APIExportName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := getAPIExportResources(export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("APIExport published before CRD establishment: %v", resources)
+	}
+
+	crd, err := dyn.Resource(crdGVR).Get(context.Background(), perTemplateCRDName(tmpl), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedSlice(crd.Object, []any{map[string]any{
+		"type":   string(apiextensionsv1.Established),
+		"status": string(apiextensionsv1.ConditionTrue),
+	}}, "status", "conditions"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dyn.Resource(crdGVR).Update(context.Background(), crd, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	var ready infrav1alpha1.Template
+	if err := r.Client.Get(context.Background(), req.NamespacedName, &ready); err != nil {
+		t.Fatal(err)
+	}
+	if condition := findCondition(ready.Status.Conditions, infrav1alpha1.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready condition after establishment = %+v", condition)
+	}
 }
 
 // newTestTemplate returns a minimal Template with spec.backend=stub
@@ -219,6 +309,85 @@ func TestReconcileHappyPath(t *testing.T) {
 	}
 	if resources[0].Schema == "" {
 		t.Fatalf("resource entry missing schema name")
+	}
+}
+
+func TestReconcileRechecksBackendReadinessAndDegradesAfterLoss(t *testing.T) {
+	tmpl := newTestTemplate(t, "backend-health")
+	r, dyn, stb := newTestReconciler(t, tmpl)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}}
+	getPublishedResources := func() []apisv1alpha2.ResourceSchema {
+		t.Helper()
+		export, err := dyn.Resource(apiExportGVR).Get(context.Background(), APIExportName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get APIExport: %v", err)
+		}
+		resources, err := getAPIExportResources(export)
+		if err != nil {
+			t.Fatalf("decode APIExport resources: %v", err)
+		}
+		return resources
+	}
+
+	// The first pass only installs the finalizer. Start the actual setup with a
+	// backend that has not accepted the template yet.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("add finalizer: %v", err)
+	}
+	stb.FailSetup = true
+	pending, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile pending backend: %v", err)
+	}
+	if pending.RequeueAfter != backendPendingRequeueInterval {
+		t.Fatalf("pending backend requeue = %s, want %s", pending.RequeueAfter, backendPendingRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionFalse)
+	if resources := getPublishedResources(); len(resources) != 0 {
+		t.Fatalf("APIExport published before backend readiness: %v", resources)
+	}
+
+	// Once accepted, the template becomes ready but retains a periodic requeue:
+	// kro's RGD status lives on a different cluster, so there is no local watch
+	// event that could otherwise report a later GraphAccepted loss.
+	stb.FailSetup = false
+	ready, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile ready backend: %v", err)
+	}
+	if ready.RequeueAfter != backendReadyRequeueInterval {
+		t.Fatalf("ready backend requeue = %s, want %s", ready.RequeueAfter, backendReadyRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionTrue)
+	if resources := getPublishedResources(); len(resources) != 1 || resources[0].Name != tmpl.Spec.InstanceCRD.Resource {
+		t.Fatalf("APIExport resources after backend readiness = %v", resources)
+	}
+
+	// Simulate that periodic reconcile after the external backend loses
+	// acceptance. Platform readiness must degrade instead of remaining stale.
+	stb.FailSetup = true
+	degraded, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile degraded backend: %v", err)
+	}
+	if degraded.RequeueAfter != backendPendingRequeueInterval {
+		t.Fatalf("degraded backend requeue = %s, want %s", degraded.RequeueAfter, backendPendingRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionFalse)
+	if resources := getPublishedResources(); len(resources) != 1 || resources[0].Name != tmpl.Spec.InstanceCRD.Resource {
+		t.Fatalf("backend degradation hid the existing APIExport resource: %v", resources)
+	}
+}
+
+func assertTemplateReadyCondition(t *testing.T, c client.Client, key types.NamespacedName, want metav1.ConditionStatus) {
+	t.Helper()
+	var got infrav1alpha1.Template
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	condition := findCondition(got.Status.Conditions, infrav1alpha1.ConditionReady)
+	if condition == nil || condition.Status != want {
+		t.Fatalf("Ready condition = %+v, want status %s", condition, want)
 	}
 }
 
@@ -396,6 +565,44 @@ func TestSchemaPrefixIsStable(t *testing.T) {
 	crd3, _ := buildPerTemplateCRD(tmpl)
 	if schemaPrefix(crd1) == schemaPrefix(crd3) {
 		t.Fatalf("schemaPrefix must change when CRD content changes")
+	}
+}
+
+func TestSetConditionRefreshesGenerationWithoutFalseTransition(t *testing.T) {
+	transition := metav1.Date(2026, 1, 2, 3, 4, 5, 0, metav1.Now().Location())
+	tmpl := newTestTemplate(t, "condition")
+	tmpl.Generation = 2
+	tmpl.Status.Conditions = []metav1.Condition{{
+		Type:               infrav1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "OldReason",
+		Message:            "old message",
+		ObservedGeneration: 1,
+		LastTransitionTime: transition,
+	}}
+
+	setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse, "NewReason", "new message")
+	condition := findCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionReady)
+	if condition == nil {
+		t.Fatal("Ready condition missing")
+	}
+	if condition.ObservedGeneration != tmpl.Generation {
+		t.Fatalf("ObservedGeneration = %d, want %d", condition.ObservedGeneration, tmpl.Generation)
+	}
+	if !condition.LastTransitionTime.Equal(&transition) {
+		t.Fatalf("LastTransitionTime changed without a status transition: got %s, want %s", condition.LastTransitionTime, transition)
+	}
+	if condition.Reason != "NewReason" || condition.Message != "new message" {
+		t.Fatalf("reason/message were not refreshed: %+v", condition)
+	}
+
+	setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionTrue, infrav1alpha1.ReasonReady, "")
+	condition = findCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionReady)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready condition did not transition: %+v", condition)
+	}
+	if condition.LastTransitionTime.Equal(&transition) {
+		t.Fatalf("LastTransitionTime did not change on a status transition: %+v", condition)
 	}
 }
 

@@ -32,8 +32,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"sort"
 	"strings"
 
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,14 +60,208 @@ var templateGVR = schema.GroupVersionResource{
 	Resource: "templates",
 }
 
+// SeedTemplateRequirement identifies one embedded Template and the instance
+// API it must make usable before the provider can report ready.
+type SeedTemplateRequirement struct {
+	Name          string
+	GroupResource schema.GroupResource
+}
+
+// RequiredSeedTemplateResources returns every instance group-resource declared
+// by the templates embedded in this binary. It is the bounded startup contract:
+// custom Templates are reconciled independently and do not gate provider
+// readiness. Every embedded Template must have a registered backend; otherwise
+// startup fails instead of reporting ready with an unusable built-in catalog.
+func RequiredSeedTemplateResources(registeredBackends []string) ([]SeedTemplateRequirement, error) {
+	entries, err := fs.ReadDir(seedTemplatesFS, "templates")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded templates/: %w", err)
+	}
+	backends := make(map[string]struct{}, len(registeredBackends))
+	for _, backend := range registeredBackends {
+		backends[backend] = struct{}{}
+	}
+	required := map[schema.GroupResource]string{}
+	missingBackends := map[string]struct{}{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		raw, err := fs.ReadFile(seedTemplatesFS, "templates/"+e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read embedded templates/%s: %w", e.Name(), err)
+		}
+		var tmpl infrav1alpha1.Template
+		if err := utilyaml.UnmarshalStrict(raw, &tmpl); err != nil {
+			return nil, fmt.Errorf("decode embedded template %s: %w", e.Name(), err)
+		}
+		if strings.TrimSpace(tmpl.Name) == "" {
+			return nil, fmt.Errorf("embedded template %s has no metadata.name", e.Name())
+		}
+		if _, registered := backends[tmpl.Spec.Backend]; !registered {
+			missingBackends[tmpl.Spec.Backend] = struct{}{}
+		}
+		groupResource := schema.GroupResource{
+			Group:    strings.TrimSpace(tmpl.Spec.InstanceCRD.Group),
+			Resource: strings.TrimSpace(tmpl.Spec.InstanceCRD.Resource),
+		}
+		if groupResource.Group == "" || groupResource.Resource == "" {
+			return nil, fmt.Errorf("embedded template %s has incomplete instanceCRD", e.Name())
+		}
+		if existing, duplicate := required[groupResource]; duplicate && existing != tmpl.Name {
+			return nil, fmt.Errorf("embedded templates %q and %q declare the same instance resource %s", existing, tmpl.Name, groupResource)
+		}
+		required[groupResource] = tmpl.Name
+	}
+	if len(missingBackends) > 0 {
+		missing := make([]string, 0, len(missingBackends))
+		for backend := range missingBackends {
+			missing = append(missing, backend)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("embedded seed templates require unavailable backends: %s", strings.Join(missing, ", "))
+	}
+
+	result := make([]SeedTemplateRequirement, 0, len(required))
+	for groupResource, name := range required {
+		result = append(result, SeedTemplateRequirement{Name: name, GroupResource: groupResource})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].GroupResource.String() < result[j].GroupResource.String() })
+	return result, nil
+}
+
+// SeedTemplatesReady reports whether every embedded seed Template
+// is current and backend-ready and its effective instance API is published.
+// Schema publication alone is insufficient: a failed Backend.SetupTemplate can
+// otherwise leave an API that accepts instances which no runtime reconciles.
+func SeedTemplatesReady(ctx context.Context, dyn dynamic.Interface, required []SeedTemplateRequirement) (bool, error) {
+	if len(required) == 0 {
+		return true, nil
+	}
+	export, err := dyn.Resource(apiExportGVR).Get(ctx, APIExportName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get APIExport %q: %w", APIExportName, err)
+	}
+	return seedTemplateResourcesPublished(ctx, dyn, export, required)
+}
+
+func seedTemplateResourcesPublished(ctx context.Context, dyn dynamic.Interface, export *unstructured.Unstructured, required []SeedTemplateRequirement) (bool, error) {
+	raw, found, err := unstructured.NestedFieldNoCopy(export.Object, "spec", "resources")
+	if err != nil {
+		return false, fmt.Errorf("read APIExport resources: %w", err)
+	}
+	var resources []apisv1alpha2.ResourceSchema
+	if found && raw != nil {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return false, fmt.Errorf("marshal APIExport resources: %w", err)
+		}
+		if err := json.Unmarshal(data, &resources); err != nil {
+			return false, fmt.Errorf("decode APIExport resources: %w", err)
+		}
+	}
+	published := make(map[schema.GroupResource]apisv1alpha2.ResourceSchema, len(resources))
+	for _, resource := range resources {
+		published[schema.GroupResource{Group: resource.Group, Resource: resource.Name}] = resource
+	}
+	for _, requirement := range required {
+		groupResource := requirement.GroupResource
+		resource, ok := published[groupResource]
+		if !ok || strings.TrimSpace(resource.Schema) == "" {
+			return false, nil
+		}
+		schemaObj, err := dyn.Resource(apiResourceSchemaGVR).Get(ctx, resource.Schema, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("get APIResourceSchema %q for %s: %w", resource.Schema, groupResource, err)
+		}
+		data, err := json.Marshal(schemaObj.Object)
+		if err != nil {
+			return false, fmt.Errorf("marshal APIResourceSchema %q: %w", resource.Schema, err)
+		}
+		var apiSchema apisv1alpha1.APIResourceSchema
+		if err := json.Unmarshal(data, &apiSchema); err != nil {
+			return false, fmt.Errorf("decode APIResourceSchema %q: %w", resource.Schema, err)
+		}
+		if apiSchema.Spec.Group != groupResource.Group || apiSchema.Spec.Names.Plural != groupResource.Resource {
+			return false, nil
+		}
+		served := false
+		for _, version := range apiSchema.Spec.Versions {
+			if !version.Served {
+				continue
+			}
+			served = true
+			gvr := schema.GroupVersionResource{Group: groupResource.Group, Version: version.Name, Resource: groupResource.Resource}
+			if _, err := dyn.Resource(gvr).List(ctx, metav1.ListOptions{Limit: 1}); apierrors.IsNotFound(err) {
+				return false, nil
+			} else if err != nil {
+				return false, fmt.Errorf("list effective resource %s: %w", gvr, err)
+			}
+		}
+		if !served {
+			return false, nil
+		}
+		ready, err := seedTemplateBackendReady(ctx, dyn, requirement)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func seedTemplateBackendReady(ctx context.Context, dyn dynamic.Interface, requirement SeedTemplateRequirement) (bool, error) {
+	obj, err := dyn.Resource(templateGVR).Get(ctx, requirement.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get seed Template %q: %w", requirement.Name, err)
+	}
+	data, err := json.Marshal(obj.Object)
+	if err != nil {
+		return false, fmt.Errorf("marshal seed Template %q: %w", requirement.Name, err)
+	}
+	var tmpl infrav1alpha1.Template
+	if err := json.Unmarshal(data, &tmpl); err != nil {
+		return false, fmt.Errorf("decode seed Template %q: %w", requirement.Name, err)
+	}
+	if tmpl.Spec.InstanceCRD.Group != requirement.GroupResource.Group ||
+		tmpl.Spec.InstanceCRD.Resource != requirement.GroupResource.Resource {
+		return false, nil
+	}
+	if tmpl.Status.ObservedGeneration != tmpl.Generation || !tmpl.Status.Backend.Ready {
+		return false, nil
+	}
+	return currentTrueCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionBackendReady, tmpl.Generation) &&
+		currentTrueCondition(tmpl.Status.Conditions, infrav1alpha1.ConditionReady, tmpl.Generation), nil
+}
+
+func currentTrueCondition(conditions []metav1.Condition, conditionType string, generation int64) bool {
+	for _, condition := range conditions {
+		if condition.Type == conditionType {
+			return condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == generation
+		}
+	}
+	return false
+}
+
 // SeedTemplates upserts every Template YAML baked into install/templates/
 // into the workspace the supplied rest.Config points at. Idempotent —
 // existing Templates are patched in place, ResourceVersion preserved.
 //
-// Skipped when INFRASTRUCTURE_SKIP_SEED_TEMPLATES is set to any
-// non-empty value. Errors are non-fatal at the call-site: a failed
-// seed should not block the rest of the init chain (operators can
-// hand-apply later), but we still log loudly.
+// Callers skip this function when INFRASTRUCTURE_SKIP_SEED_TEMPLATES is set to
+// any non-empty value. When seeding is enabled, errors are fatal to bootstrap:
+// reporting the provider ready with an incomplete embedded catalog would leave
+// its required instance APIs unavailable.
 func SeedTemplates(ctx context.Context, config *rest.Config) error {
 	log := klog.FromContext(ctx).WithName("install.seedtemplates")
 

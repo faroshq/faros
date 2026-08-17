@@ -1,6 +1,6 @@
 # Code provider: git repository management
 
-Status: **Design proposal, scaffold in progress.**
+Status: **Implemented architecture; staged-delivery sections retained as design history.**
 Author: 2026-06-09
 Related: `providers/infrastructure/` (the standalone-provider pattern this is modeled on), `pkg/hub/providers/` (CatalogEntry provisioning), `docs/providers.md`, `docs/infrastructure-architecture.md`.
 
@@ -104,25 +104,28 @@ seam the `infrastructure` provider mounts to clone/push.
 
 ## 6. Hub integration & manifest
 
-**No hub code change.** A standalone provider is discovered purely by applying its
-`manifest.yaml` `CatalogEntry`; the hub's `CatalogReconciler` + `provisioner` create the
-sub-workspace, apply the schemas, mint the SA + kubeconfig.
+**No provider-specific hub code change.** Admin onboarding creates the
+sub-workspace, provider ServiceAccount, and kubeconfig. `code-provider init`
+uses that credential to apply its schemas, APIExport, endpoint slice, bind
+grant, and CatalogEntry. The hub catalog reconciler observes that declaration
+and refuses Enable until the export contract is complete.
 
 Manifest specifics (the corrections vs infra):
 
 - `apiExport.permissionClaims`: `secrets` with verbs `[get, list, watch, create, update,
   patch, delete]`, `tenantScoped: true` (write verbs are needed for the DeployKey private-key
   Secret; infra only needed read).
-- `apiExport.schemas`: **NON-empty** — 4 inline `APIResourceSchema` bodies, applied by the hub
-  with `storage: {crd: {}}`. Each body's `metadata.name` MUST follow the immutable
-  content-versioned format `vYYMMDD-hash.<resource>.code.faros.sh` (required by the
-  provisioner's `splitSchemaName`).
+- `apiExport.requiredResources`: the stable minimum mirrors all checked-in Code
+  schemas that init publishes. Each schema's `metadata.name` follows the
+  immutable content-versioned format
+  `vYYMMDD-hash.<resource>.code.faros.sh`; the CatalogEntry carries only
+  `{group,name}` readiness declarations, never inline schema bodies.
 
-## 7. Staged delivery
+## 7. Historical staged delivery
 
 - **PR A — scaffold:** new Go module `providers/code/` (added to `go.work`); API types + CRDs;
   `GitBackend` interface + stub backend; multicluster controller-manager wiring with no-op
-  reconciler skeletons; manifest (4 inline schemas, widened secrets claim); Helm chart; portal
+  reconciler skeletons; manifest/export contract, widened secrets claim; Helm chart; portal
   shell. Builds and registers against the hub; the stub flips a Connection to `Validated=true`.
 - **PR B — GitHub backend (done):** `backend/github` using `go-github` + a PAT token source —
   `ValidateConnection` (login + `X-OAuth-Scopes`) and `EnsureRepository`/`DeleteRepository`. The

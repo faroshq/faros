@@ -45,14 +45,16 @@ type Backend interface {
 	// package-level Register function below.
 	Name() string
 
-	// SetupTemplate is called after the platform has materialized the
-	// per-template CRD declared in tmpl.spec.instanceCRD AND added it
-	// to APIExport.spec.schemas. The backend does whatever
-	// backend-specific bookkeeping it needs (the kro backend writes an
-	// RGD; a hypothetical terraform backend stages a module). The
-	// returned status is mirrored onto Template.status.backend by the
-	// controller; an error here moves the Template's Ready condition
-	// to False with reason BackendError.
+	// SetupTemplate is called after the platform has materialized and
+	// established the per-template CRD, but before that API is first published
+	// through APIExport.spec.resources. The backend does whatever
+	// backend-specific bookkeeping it needs (the kro backend writes an RGD; a
+	// hypothetical terraform backend stages a module). The returned status is
+	// mirrored onto Template.status.backend by the controller; an error here
+	// moves the Template's Ready condition to False with reason BackendError.
+	// Once an API has been published, later Ready=false results do not remove it:
+	// existing tenant objects must remain discoverable while writes are gated by
+	// Template readiness.
 	//
 	// SetupTemplate MUST be idempotent — the platform calls it on
 	// every reconcile pass for a given Template generation.

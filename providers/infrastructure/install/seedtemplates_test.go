@@ -17,19 +17,197 @@ limitations under the License.
 package install
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientgotesting "k8s.io/client-go/testing"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
 
 var viteShimPattern = regexp.MustCompile(`printf '%s' '([^']+)' \| base64 -d`)
+
+func TestRequiredSeedTemplateResourcesRequiresEmbeddedBackends(t *testing.T) {
+	required, err := RequiredSeedTemplateResources([]string{"kro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(required) == 0 {
+		t.Fatal("kro registration produced no required seed resources")
+	}
+	want := map[schema.GroupResource]struct{}{}
+	for _, resource := range []string{
+		"applications",
+		"browsers",
+		"postgresdatabases",
+		"rediscaches",
+		"scheduledjobs",
+		"searxngs",
+		"simplewebapps",
+		"workers",
+	} {
+		want[schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: resource}] = struct{}{}
+	}
+	seen := make(map[schema.GroupResource]struct{}, len(required))
+	for _, requirement := range required {
+		resource := requirement.GroupResource
+		if requirement.Name == "" {
+			t.Errorf("required resource %s has no Template name", resource)
+		}
+		if resource.Group != infrav1alpha1.GroupName {
+			t.Errorf("required resource %s has group %q, want %q", resource, resource.Group, infrav1alpha1.GroupName)
+		}
+		if _, duplicate := seen[resource]; duplicate {
+			t.Errorf("required resource %s is duplicated", resource)
+		}
+		seen[resource] = struct{}{}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("required resources = %v, want all %v", seen, want)
+	}
+	for resource := range want {
+		if _, ok := seen[resource]; !ok {
+			t.Errorf("required resources omit embedded resource %s", resource)
+		}
+	}
+
+	_, err = RequiredSeedTemplateResources([]string{"stub"})
+	if err == nil || !strings.Contains(err.Error(), "unavailable backends: kro") {
+		t.Fatalf("stub-only registration error = %v, want unavailable kro backend", err)
+	}
+}
+
+func TestSeedTemplatesReadyRequiresReferencedSchema(t *testing.T) {
+	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
+	dyn := newPublicationTestClient(t, false, true)
+	published, err := SeedTemplatesReady(context.Background(), dyn, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published {
+		t.Fatal("resource with a missing referenced APIResourceSchema was reported ready")
+	}
+}
+
+func TestSeedTemplatesReadyWaitsForEffectiveGVR(t *testing.T) {
+	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
+	dyn := newPublicationTestClient(t, true, true)
+	var available atomic.Bool
+	dyn.PrependReactor("list", "applications", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		if !available.Load() {
+			return true, nil, apierrors.NewNotFound(required[0].GroupResource, "")
+		}
+		return false, nil, nil
+	})
+
+	published, err := SeedTemplatesReady(context.Background(), dyn, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published {
+		t.Fatal("resource was reported ready before its effective GVR could be listed")
+	}
+	available.Store(true)
+	published, err = SeedTemplatesReady(context.Background(), dyn, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !published {
+		t.Fatal("resource was not reported ready after schema and effective GVR became available")
+	}
+}
+
+func TestSeedTemplatesReadyRequiresCurrentBackendReadyStatus(t *testing.T) {
+	required := []SeedTemplateRequirement{{Name: "application", GroupResource: schema.GroupResource{Group: infrav1alpha1.GroupName, Resource: "applications"}}}
+	dyn := newPublicationTestClient(t, true, false)
+	published, err := SeedTemplatesReady(context.Background(), dyn, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published {
+		t.Fatal("resource with published schema but failed backend was reported ready")
+	}
+}
+
+func newPublicationTestClient(t *testing.T, includeSchema, templateReady bool) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	const schemaName = "v1alpha1.applications.infrastructure.faros.sh"
+	export := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apis.kcp.io/v1alpha2",
+		"kind":       "APIExport",
+		"metadata":   map[string]any{"name": APIExportName},
+		"spec": map[string]any{
+			"resources": []any{
+				map[string]any{"group": infrav1alpha1.GroupName, "name": "applications", "schema": schemaName},
+			},
+		},
+	}}
+	conditionStatus := string(metav1.ConditionFalse)
+	backendReady := false
+	if templateReady {
+		conditionStatus = string(metav1.ConditionTrue)
+		backendReady = true
+	}
+	template := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": infrav1alpha1.SchemeGroupVersion.String(),
+		"kind":       "Template",
+		"metadata": map[string]any{
+			"name":       "application",
+			"generation": int64(1),
+		},
+		"spec": map[string]any{
+			"instanceCRD": map[string]any{
+				"group":    infrav1alpha1.GroupName,
+				"resource": "applications",
+			},
+		},
+		"status": map[string]any{
+			"observedGeneration": int64(1),
+			"backend":            map[string]any{"ready": backendReady},
+			"conditions": []any{
+				map[string]any{"type": infrav1alpha1.ConditionBackendReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
+				map[string]any{"type": infrav1alpha1.ConditionReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
+			},
+		},
+	}}
+	objects := []runtime.Object{export, template}
+	if includeSchema {
+		objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": apisv1alpha1.SchemeGroupVersion.String(),
+			"kind":       "APIResourceSchema",
+			"metadata":   map[string]any{"name": schemaName},
+			"spec": map[string]any{
+				"group": infrav1alpha1.GroupName,
+				"names": map[string]any{"plural": "applications", "kind": "Application"},
+				"scope": "Cluster",
+				"versions": []any{
+					map[string]any{"name": "v1alpha1", "served": true, "storage": true},
+				},
+			},
+		}})
+	}
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(apiExportGVR.GroupVersion().WithKind("APIExportList"), &unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(apiResourceSchemaGVR.GroupVersion().WithKind("APIResourceSchemaList"), &unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(templateGVR.GroupVersion().WithKind("TemplateList"), &unstructured.UnstructuredList{})
+	instanceGVR := schema.GroupVersionResource{Group: infrav1alpha1.GroupName, Version: "v1alpha1", Resource: "applications"}
+	scheme.AddKnownTypeWithName(instanceGVR.GroupVersion().WithKind("ApplicationList"), &unstructured.UnstructuredList{})
+	return dynamicfake.NewSimpleDynamicClient(scheme, objects...)
+}
 
 // TestSeedTemplatesDecodeAndValidate decodes every embedded seed template
 // into the typed API (catching field typos YAML would silently keep as

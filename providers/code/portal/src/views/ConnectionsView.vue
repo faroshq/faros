@@ -44,6 +44,8 @@ const oauthStartURL = ref('')
 const oauthBusy = ref(false)
 let oauthState = ''
 let oauthOrigin = ''
+let oauthPopup: Window | null = null
+let oauthPopupTimer: number | undefined
 let mounted = false
 let timer: number | undefined
 let refresh!: LatestRefreshController
@@ -64,38 +66,58 @@ function randomState(): string {
   return Array.from(a, b => b.toString(16).padStart(2, '0')).join('')
 }
 
+function clearOAuthWait(message?: string) {
+  window.clearInterval(oauthPopupTimer)
+  oauthPopupTimer = undefined
+  oauthBusy.value = false
+  oauthPopup = null
+  oauthOrigin = ''
+  oauthState = ''
+  if (message) formError.value = message
+}
+
 function connectGitHub() {
   if (!oauthStartURL.value) return
   oauthBusy.value = true
   formError.value = null
   oauthState = randomState()
+  let url: URL
   try {
-    oauthOrigin = new URL(oauthStartURL.value).origin
+    // The provider normally returns a same-origin relative path. Resolve it
+    // before recording the trusted callback origin, and reject schemes that
+    // could execute in the opener's page context.
+    url = new URL(oauthStartURL.value, window.location.href)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('unsupported OAuth URL scheme')
   } catch {
-    oauthOrigin = ''
+    clearOAuthWait('invalid GitHub OAuth start URL — contact a platform admin')
+    return
   }
-  const url = oauthStartURL.value + '?state=' + encodeURIComponent(oauthState)
-  const popup = window.open(url, 'faros-github-oauth', 'width=720,height=820')
-  if (!popup) {
-    oauthBusy.value = false
-    formError.value = 'popup blocked — allow popups and retry'
+  oauthOrigin = url.origin
+  url.searchParams.set('state', oauthState)
+  oauthPopup = window.open(url.toString(), 'faros-github-oauth', 'width=720,height=820')
+  if (!oauthPopup) {
+    clearOAuthWait('popup blocked — allow popups and retry')
+    return
   }
+  oauthPopupTimer = window.setInterval(() => {
+    if (oauthPopup?.closed) clearOAuthWait('GitHub sign-in window was closed — retry when ready')
+  }, 500)
 }
 
 function onMessage(ev: MessageEvent) {
   if (!oauthBusy.value) return
-  if (oauthOrigin && ev.origin !== oauthOrigin) return
+  if (!oauthPopup || ev.source !== oauthPopup || ev.origin !== oauthOrigin) return
   const d = ev.data as { type?: string; state?: string; token?: string; login?: string; error?: string }
   if (!d || d.type !== 'faros-github-oauth') return
-  oauthBusy.value = false
   if (d.state !== oauthState) {
-    formError.value = 'oauth state mismatch — please retry'
+    clearOAuthWait('oauth state mismatch — please retry')
     return
   }
   if (d.error || !d.token) {
-    formError.value = d.error || 'no token returned from GitHub'
+    clearOAuthWait(d.error || 'no token returned from GitHub')
     return
   }
+  clearOAuthWait()
   token.value = d.token
   owner.value = d.login || ''
   name.value = d.login ? 'github-' + d.login : 'github'
@@ -191,6 +213,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   mounted = false
+  clearOAuthWait()
   window.clearInterval(timer)
   window.removeEventListener('message', onMessage)
   refresh.stop()

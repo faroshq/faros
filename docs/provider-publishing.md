@@ -88,9 +88,11 @@ For each package:
    the provider's checked-in `manifest.yaml` and mirror the complete
    `assistantSkills` entry in `deploy/chart/templates/catalogentry.yaml`.
 4. If the API contract changes, run the provider code-generation target and
-   commit generated schemas. Test that the manifest and Helm CatalogEntry
-   render equivalent package name, version, digest, document, and resources;
-   do not rely on one copy drifting silently.
+   commit generated schemas. Update the stable `apiExport.requiredResources`
+   minimum in both CatalogEntry copies and keep permission claims exactly in
+   sync with provider init. Test that the manifest and Helm CatalogEntry render
+   equivalent package name, version, digest, document, resources, APIExport
+   minimum, and claims; do not rely on one copy drifting silently.
 5. Link the shipped package's `SKILL.md` from the provider README so its
    authoring contract and operational evidence remain reviewable.
 

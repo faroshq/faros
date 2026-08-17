@@ -18,8 +18,11 @@ package operator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -59,6 +62,159 @@ func TestEnsureProviderServePropagatesPlatformPreviewConsoleJWKS(t *testing.T) {
 		}
 	}
 	t.Error("managed provider Deployment lacks FAROS_PREVIEW_CONSOLE_VERIFICATION_JWKS")
+}
+
+func TestEnsureProviderServeRequiresControllerAndSeparatesLivenessFromReadiness(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := &v1alpha1.InfrastructureProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure"},
+		Spec: v1alpha1.InfrastructureProviderSpec{
+			Provider: v1alpha1.ProviderServeSpec{
+				Image: v1alpha1.ImageSpec{Repository: "example.test/infrastructure", Tag: "test"},
+			},
+		},
+	}
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), nil, nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	deployment, err := client.AppsV1().Deployments(ServeNamespace).Get(context.Background(), provider.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if container.LivenessProbe == nil || container.LivenessProbe.HTTPGet == nil || container.LivenessProbe.HTTPGet.Path != "/healthz" {
+		t.Fatalf("liveness probe = %#v, want GET /healthz", container.LivenessProbe)
+	}
+	if container.ReadinessProbe == nil || container.ReadinessProbe.HTTPGet == nil || container.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Fatalf("readiness probe = %#v, want GET /readyz", container.ReadinessProbe)
+	}
+	for _, variable := range container.Env {
+		if variable.Name == "INFRASTRUCTURE_CONTROLLER_MODE" {
+			if variable.Value != "required" {
+				t.Fatalf("INFRASTRUCTURE_CONTROLLER_MODE = %q, want required", variable.Value)
+			}
+			return
+		}
+	}
+	t.Fatal("managed provider Deployment lacks INFRASTRUCTURE_CONTROLLER_MODE")
+}
+
+func TestServeDeploymentAvailable(t *testing.T) {
+	replicas := int32(2)
+	tests := []struct {
+		name        string
+		deployment  appsv1.Deployment
+		want        bool
+		wantMessage string
+	}{
+		{
+			name: "stale observed generation",
+			deployment: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status:     appsv1.DeploymentStatus{ObservedGeneration: 1},
+			},
+			wantMessage: "waiting for Deployment generation",
+		},
+		{
+			name: "not available",
+			deployment: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 2,
+					Conditions:         []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse}},
+				},
+			},
+			wantMessage: "waiting for Deployment Available condition",
+		},
+		{
+			name: "old replicas remain available during rollout",
+			deployment: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 2,
+					UpdatedReplicas:    1,
+					AvailableReplicas:  2,
+					Conditions:         []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+				},
+			},
+			wantMessage: "waiting for updated provider replicas",
+		},
+		{
+			name: "surge has old replicas satisfying availability",
+			deployment: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 2,
+					Replicas:           4,
+					UpdatedReplicas:    2,
+					AvailableReplicas:  2,
+					Conditions:         []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+				},
+			},
+			wantMessage: "waiting for old provider replicas to terminate",
+		},
+		{
+			name: "current replicas available",
+			deployment: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status: appsv1.DeploymentStatus{
+					ObservedGeneration: 2,
+					Replicas:           2,
+					UpdatedReplicas:    2,
+					AvailableReplicas:  2,
+					Conditions:         []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+				},
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, message := serveDeploymentAvailable(&test.deployment)
+			if got != test.want {
+				t.Fatalf("serveDeploymentAvailable() = %t, %q; want %t", got, message, test.want)
+			}
+			if !strings.Contains(message, test.wantMessage) {
+				t.Fatalf("message = %q, want substring %q", message, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestServeDeploymentFailedOnProgressDeadline(t *testing.T) {
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Generation: 2}, Status: appsv1.DeploymentStatus{ObservedGeneration: 2, Conditions: []appsv1.DeploymentCondition{
+		{
+			Type:    appsv1.DeploymentProgressing,
+			Status:  corev1.ConditionFalse,
+			Reason:  "ProgressDeadlineExceeded",
+			Message: "ReplicaSet did not become ready",
+		},
+	}}}
+	message, failed := serveDeploymentFailed(deployment)
+	if !failed || message != "ReplicaSet did not become ready" {
+		t.Fatalf("serveDeploymentFailed = (%q, %t)", message, failed)
+	}
+}
+
+func TestServeDeploymentFailedIgnoresStaleProgressDeadline(t *testing.T) {
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 2,
+			Conditions: []appsv1.DeploymentCondition{{
+				Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse,
+				Reason: "ProgressDeadlineExceeded", Message: "previous rollout failed",
+			}},
+		},
+	}
+	if message, failed := serveDeploymentFailed(deployment); failed || message != "" {
+		t.Fatalf("stale serveDeploymentFailed = (%q, %t), want no failure", message, failed)
+	}
 }
 
 func TestEnsureProviderServePropagatesPlatformPublishingConfig(t *testing.T) {

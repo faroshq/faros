@@ -10,6 +10,13 @@ package application
 
 import "testing"
 
+func TestControllerOptionsForRetryableManagerAllowsStableNames(t *testing.T) {
+	options := controllerOptionsForRetryableManager()
+	if options.SkipNameValidation == nil || !*options.SkipNameValidation {
+		t.Fatal("retryable manager must allow stable controller names across process-lifetime rebuilds")
+	}
+}
+
 // The gate matrix decides whether a workload ends up behind an IdP, behind
 // nothing, or not published at all. Every row here is a posture, not a branch.
 func TestGateFor(t *testing.T) {

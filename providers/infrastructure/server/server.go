@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-// Package server wires the provider's HTTP routes: /healthz, the MCP
+// Package server wires the provider's HTTP routes: /healthz, /readyz, the MCP
 // handler, and the embedded portal. Template + instance traffic is NOT
 // served here — the portal and tenants drive those as CRDs directly
 // against kcp (templates.infrastructure.faros.sh and the
@@ -27,6 +27,13 @@ import (
 // assets.go's servePortalAsset.
 type AssetServer func(w http.ResponseWriter, r *http.Request, distFS fs.FS, name string) bool
 
+// Readiness is the controller-backed provider readiness snapshot.
+type Readiness struct {
+	Ready      bool
+	Controller string
+	Error      string
+}
+
 // Deps bundles everything Server needs. The portal fields are exercised
 // in the smoke test only.
 type Deps struct {
@@ -36,12 +43,14 @@ type Deps struct {
 	PortalFileServer http.Handler
 	PortalFS         fs.FS
 	ServePortalAsset AssetServer
+	Readiness        func() Readiness
 }
 
 // Server is the wired-up HTTP server. Implements http.Handler so
 // main() can install it under a net/http.Server directly.
 type Server struct {
-	mux *http.ServeMux
+	mux       *http.ServeMux
+	readiness func() Readiness
 }
 
 // New composes the mux. Route order: /healthz first, then /mcp +
@@ -51,10 +60,12 @@ type Server struct {
 // wins for path patterns, so this order is illustrative — not load-bearing.
 func New(d Deps) *Server {
 	s := &Server{
-		mux: http.NewServeMux(),
+		mux:       http.NewServeMux(),
+		readiness: d.Readiness,
 	}
 
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/readyz", s.handleReadyz)
 
 	// Templates + instances are NOT served here: the portal and tenants
 	// read/write them as CRDs directly against kcp (projected via the
@@ -107,4 +118,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	readiness := Readiness{Ready: true, Controller: "rest-only"}
+	if s.readiness != nil {
+		readiness = s.readiness()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !readiness.Ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status":     "not_ready",
+			"controller": readiness.Controller,
+			"error":      readiness.Error,
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":     "ready",
+		"controller": readiness.Controller,
+	})
 }

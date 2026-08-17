@@ -65,6 +65,9 @@ const loading = ref(false)
 const loaded = ref(false)
 const error = ref<string | null>(null)
 let pollHandle: number | null = null
+// Stable only for the current tenant/token authority. api.ts keys discovery
+// caches by this object without retaining the bearer credential itself.
+let requestAuthority: object = {}
 
 const stats = computed(() => {
   const total = instances.value.length
@@ -106,7 +109,7 @@ const refresh = createLatestRefreshController(async requestID => {
     // app's module-global authority. The dashboard and page are independently
     // mounted custom elements and can receive host context updates in either
     // order.
-    const r = await api.listInstances({ token: ctx.token, tenant: ctx.tenant })
+    const r = await api.listInstances({ token: ctx.token, tenant: ctx.tenant, authority: requestAuthority })
     if (!refresh.isCurrent(requestID)) return
     instances.value = r.items
     error.value = null
@@ -156,6 +159,7 @@ onUnmounted(() => {
 watch(
   () => [props.context === null, props.context?.tenant, props.context?.token, props.context?.basePath] as const,
   () => {
+    requestAuthority = {}
     refresh.invalidate()
     instances.value = []
     error.value = null
@@ -233,7 +237,7 @@ function dotFor(phase: string) {
             <button
               type="button"
               :class="tileClass.row"
-              @click="dispatchNavigate('instances/' + encodeURIComponent(i.name))"
+              @click="dispatchNavigate('instances/' + encodeURIComponent(i.template) + '/' + encodeURIComponent(i.name))"
             >
               <span :class="[tileClass.rowDot, dotFor(i.phase)]" aria-hidden="true" />
               <span :class="tileClass.rowPrimary">{{ i.name }}</span>

@@ -52,6 +52,15 @@ spec:
 
   apiExport:
     name: "ai.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: ai.faros.sh
+        name: projects
+      - group: ai.faros.sh
+        name: sessions
+      - group: ai.faros.sh
+        name: studios
     # Keep in sync with init_cmd.go (APIExport claims) and
     # deploy/chart/templates/catalogentry.yaml — the hub writes these into the
     # tenant APIBinding at Enable time; a claim missing here is silently
@@ -63,31 +72,37 @@ spec:
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: simplewebapps
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: workers
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       # Web search: the Studio reconciler provisions one shared searxng
       # instance per workspace so the assistant can look things up.
       - resource: searxngs
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       # Preview browser: the Studio reconciler provisions one shared headless
       # browser (Playwright MCP) per workspace for development-preview inspection.
       - resource: browsers
         group: infrastructure.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       # Repository CRs the Project reconciler creates (git backing).
       - resource: repositories
         group: code.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch"]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: code}
       # Per-project ServiceAccount identity for reconciler commits, plus
       # per-workspace LLM credential Secrets.
       - resource: serviceaccounts

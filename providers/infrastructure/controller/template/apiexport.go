@@ -22,15 +22,15 @@ package template
 //      restarts and idempotent across reconciles.
 //
 //   2. Add an entry to APIExport.spec.resources pointing at that
-//      APIResourceSchema name. Tenants who already APIBind don't
-//      pick up the new schema (kcp design: existing bindings see
-//      the schema they bound to), but new bindings + the
-//      APIExport's virtual workspace will project the kind. Removing
-//      the entry on Template delete reverses this.
+//      APIResourceSchema name. The pinned kcp reconciler propagates
+//      additive resources into existing APIBindings as well as new
+//      bindings, and the APIExport's virtual workspace projects the
+//      kind. Resource removal has separate kcp lifecycle constraints;
+//      removing the export entry is only the provider-side step.
 //
 // The APIExport name is well-known: it matches the provider's
-// CatalogEntry.spec.apiExport.name. PR A hardcodes the constant.
-// PR B / future hardening can move it to config if needed.
+// CatalogEntry.spec.apiExport.name. Provider init creates the export; this
+// controller owns only the dynamic per-template resource entries.
 
 import (
 	"context"
@@ -51,9 +51,8 @@ import (
 
 // APIExportName is the well-known name of the provider's APIExport,
 // matching CatalogEntry.spec.apiExport.name in manifest.yaml. The
-// catalog controller in the hub creates this APIExport in the
-// provider's workspace; the Template controller appends per-template
-// resources to its spec.
+// provider's init command creates this APIExport in its workspace; the
+// Template controller appends per-template resources to its spec.
 const APIExportName = "infrastructure.providers.faros.sh"
 
 // apiExportGVR + apiResourceSchemaGVR are what the Reconciler's

@@ -99,6 +99,11 @@ function protocolError(message: string): ErrorResponse {
   return { reason: 'ProtocolError', message }
 }
 
+function isKubernetesGraphQLNotFound(error: unknown, resource: string, name: string): boolean {
+  const value = error as { reason?: string; message?: string }
+  return value.reason === 'GraphQLError' && value.message === `${resource} "${name}" not found`
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -559,16 +564,15 @@ async function deleteCR(kind: string, name: string, context?: APIRequestContext)
   }
 }
 
-// deleteSecret removes a credential Secret (core/v1, namespaced) by name. Best-
-// effort: a missing Secret is not an error for the caller.
-async function deleteSecret(name: string, context?: APIRequestContext): Promise<void> {
-  const data = await graphqlQuery<unknown>(
-    'mutation($n: String!, $ns: String!) { v1 { deleteSecret(name: $n, namespace: $ns) } }',
-    { n: name, ns: CRED_NAMESPACE },
-    context,
-  )
-  if (!isRecord(data) || !hasOwn(data, 'v1') || !isRecord(data.v1) || !hasOwn(data.v1, 'deleteSecret')) {
-    throw protocolError('deleteSecret response was missing v1.deleteSecret')
+// deleteCodeResource makes delete retries safe for the exact Kubernetes
+// resource miss emitted by the GraphQL gateway. Capture authority once so a
+// concurrent workspace/token switch cannot redirect any part of the request.
+async function deleteCodeResource(kind: CodeResourceKind, resource: string, name: string): Promise<void> {
+  const context = captureRequestContext()
+  try {
+    await deleteCR(kind, name, context)
+  } catch (error) {
+    if (!isKubernetesGraphQLNotFound(error, `${resource}.${GROUP}`, name)) throw error
   }
 }
 
@@ -705,28 +709,11 @@ export const api = {
   },
 
   async deleteConnection(name: string): Promise<void> {
-    const context = captureRequestContext()
-    // Resolve the credential Secret first so we can remove it explicitly. The
-    // ownerReference would let GC reclaim it, but deleting it here makes cleanup
-    // immediate and guarantees the name is free for the next connection.
-    let secretName = name + '-token'
-    try {
-      const conn = await gqlGet('Connection', name, F_CONNECTION, context)
-      const ref = conn.spec?.secretRef as Record<string, unknown> | undefined
-      if (ref?.name) secretName = String(ref.name)
-    } catch (error) {
-      // A genuinely missing connection can use the naming convention. Protocol
-      // and transport failures must remain visible rather than authorizing a
-      // delete from an untrustworthy read.
-      if ((error as ErrorResponse).reason !== 'NotFound') throw error
-    }
-    await deleteCR('Connection', name, context)
-    try {
-      await deleteSecret(secretName, context)
-    } catch (e) {
-      // best-effort: a since-deleted Secret (GC raced us) is fine
-      if (!/not\s*found/i.test((e as ErrorResponse).message ?? '')) throw e
-    }
+    // The credential Secret has an ownerReference to this Connection. Delete
+    // only the owner and let Kubernetes garbage collection remove the Secret;
+    // deleting the credential first would leave a live Connection unusable when
+    // this mutation fails. An exact Kubernetes miss makes retries idempotent.
+    await deleteCodeResource('Connection', 'connections', name)
   },
 
   // oauthConfig probes the provider backend (via the hub /services proxy) for
@@ -742,6 +729,7 @@ export const api = {
       if (!isRecord(body) || typeof body.enabled !== 'boolean') return { enabled: false }
       if ((body.startURL !== undefined && typeof body.startURL !== 'string') ||
         (body.scopes !== undefined && typeof body.scopes !== 'string')) return { enabled: false }
+      if (body.enabled && (typeof body.startURL !== 'string' || !body.startURL.trim())) return { enabled: false }
       return {
         enabled: body.enabled,
         startURL: body.startURL as string | undefined,
@@ -787,7 +775,7 @@ export const api = {
   },
 
   async deleteRepository(name: string): Promise<void> {
-    await deleteCR('Repository', name)
+    await deleteCodeResource('Repository', 'repositories', name)
   },
 
   // updateRepositoryConnection repoints an existing Repository at a different
@@ -836,7 +824,7 @@ export const api = {
   },
 
   async deleteDeployKey(name: string): Promise<void> {
-    await deleteCR('DeployKey', name)
+    await deleteCodeResource('DeployKey', 'deploykeys', name)
   },
 
   // ── Collaborators ────────────────────────────────────────────────────────
@@ -865,7 +853,7 @@ export const api = {
   },
 
   async deleteCollaborator(name: string): Promise<void> {
-    await deleteCR('Collaborator', name)
+    await deleteCodeResource('Collaborator', 'collaborators', name)
   },
 
   // ── Packages (read-only) ─────────────────────────────────────────────────
