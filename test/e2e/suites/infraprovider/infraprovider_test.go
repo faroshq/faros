@@ -41,6 +41,7 @@ import (
 
 var (
 	templatesGVR  = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "templates"}
+	instancesGVR  = schema.GroupVersionResource{Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances"}
 	crdGVR        = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
 	apiExportGVR  = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apiexports"}
 	apiBindingGVR = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings"}
@@ -392,8 +393,8 @@ func TestDProvidersDTO(t *testing.T) {
 
 // TestETenantSeesTemplatesCatalog is the tenant vertical: bind the provider's
 // APIExport in the static user's workspace, list Templates through the
-// binding, then publish a new instance API and prove the existing binding
-// converges without a destructive rebind.
+// binding, then publish a new Template and prove the permanent flattened
+// Instance API and existing binding remain stable.
 func TestETenantSeesTemplatesCatalog(t *testing.T) {
 	tenantWS := loginStaticTokenAndGetCluster(t)
 	t.Logf("tenant workspace = %s", tenantWS)
@@ -461,9 +462,12 @@ func TestETenantSeesTemplatesCatalog(t *testing.T) {
 		t.Fatal("tenant never saw the seeded templates through the APIBinding")
 	}
 
-	// Publish a resource after the tenant binding is already Bound. The pinned
-	// kcp reconciler is expected to notice APIExport.spec.resources growth and
-	// upsert the new resource into status.boundResources.
+	// The flattened provider exports one permanent Instance API. Templates are
+	// catalog data and must not grow APIExport.spec.resources after tenants bind.
+	if _, err := tenant.Resource(instancesGVR).List(ctxWithTimeout(t, 5*time.Second), metav1.ListOptions{}); err != nil {
+		t.Fatalf("list stable Instances through binding: %v", err)
+	}
+
 	const (
 		postBindName     = "e2e-post-bind-widget"
 		postBindResource = "e2epostbindwidgets"
@@ -476,7 +480,7 @@ func TestETenantSeesTemplatesCatalog(t *testing.T) {
 		"metadata":   map[string]any{"name": postBindName},
 		"spec": map[string]any{
 			"displayName": "E2E post-bind widget",
-			"description": "proves additive APIExport resources reach existing APIBindings",
+			"description": "proves post-bind Templates remain API-surface-neutral",
 			"version":     "0.0.1",
 			"backend":     "stub",
 			"instanceCRD": map[string]any{
@@ -496,50 +500,38 @@ func TestETenantSeesTemplatesCatalog(t *testing.T) {
 	if _, err := provider.Resource(templatesGVR).Create(ctxWithTimeout(t, 10*time.Second), tmpl, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create post-bind stub template: %v", err)
 	}
-	// The suite workspace is disposable. Deliberately leave this Template in
-	// place: additive binding is supported, while resource removal remains a
-	// separate kcp lifecycle concern and is not part of this regression.
-
-	ok = waitForCondition(t, 90*time.Second, func() (bool, string) {
-		got, err := tenant.Resource(apiBindingGVR).Get(ctxWithTimeout(t, 5*time.Second), "infrastructure", metav1.GetOptions{})
+	// The newly authored catalog entry must reconcile and appear through the
+	// existing binding; it does not publish its private runtime kind into the
+	// tenant workspace. Waiting for Ready avoids a vacuous negative assertion
+	// against APIExport before the Template controller has handled the object.
+	ok = waitForCondition(t, 60*time.Second, func() (bool, string) {
+		got, err := tenant.Resource(templatesGVR).Get(ctxWithTimeout(t, 5*time.Second), postBindName, metav1.GetOptions{})
 		if err != nil {
 			return false, err.Error()
 		}
-		bound, _, _ := unstructured.NestedSlice(got.Object, "status", "boundResources")
-		for _, entry := range bound {
-			resource, _ := entry.(map[string]any)
-			if resource["group"] == "infrastructure.faros.sh" && resource["resource"] == postBindResource {
+		generation := got.GetGeneration()
+		conditions, _, _ := unstructured.NestedSlice(got.Object, "status", "conditions")
+		for _, condition := range conditions {
+			entry, _ := condition.(map[string]any)
+			observedGeneration, _, _ := unstructured.NestedInt64(entry, "observedGeneration")
+			if entry["type"] == "Ready" && entry["status"] == "True" && observedGeneration >= generation {
 				return true, ""
 			}
 		}
-		return false, fmt.Sprintf("boundResources=%v", bound)
+		return false, fmt.Sprintf("generation=%d conditions=%v", generation, conditions)
 	})
 	if !ok {
-		t.Fatal("existing APIBinding never picked up the post-bind instance resource")
+		t.Fatal("tenant never saw a reconciled post-bind Template through the existing APIBinding")
+	}
+	if apiExportHasResource(t, provider, postBindResource) {
+		t.Fatalf("APIExport.spec.resources gained %q; Templates must not publish per-template APIs", postBindResource)
 	}
 	currentBinding, err := tenant.Resource(apiBindingGVR).Get(ctxWithTimeout(t, 5*time.Second), "infrastructure", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get upgraded APIBinding: %v", err)
 	}
 	if got := string(currentBinding.GetUID()); got != bindingUID {
-		t.Fatalf("schema upgrade replaced APIBinding: UID = %q, want original %q", got, bindingUID)
-	}
-
-	postBindGVR := schema.GroupVersionResource{
-		Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: postBindResource,
-	}
-	ok = waitForCondition(t, 60*time.Second, func() (bool, string) {
-		list, err := tenant.Resource(postBindGVR).List(ctxWithTimeout(t, 5*time.Second), metav1.ListOptions{})
-		if err != nil {
-			return false, err.Error()
-		}
-		if len(list.Items) != 0 {
-			return false, fmt.Sprintf("expected empty post-bind instance list, got %d objects", len(list.Items))
-		}
-		return true, ""
-	})
-	if !ok {
-		t.Fatal("post-bind instance API was not discoverable as an empty list")
+		t.Fatalf("post-bind Template replaced APIBinding: UID = %q, want original %q", got, bindingUID)
 	}
 }
 
