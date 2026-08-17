@@ -69,8 +69,7 @@ type providerDTO struct {
 	// The portal shows these in the Enable confirmation dialog so users see
 	// what the provider's controllers will be able to access in their
 	// workspace before they accept.
-	PermissionClaims     []permissionClaimDTO `json:"permissionClaims,omitempty"`
-	AllowUntrustedClaims bool                 `json:"allowUntrustedClaims,omitempty"`
+	PermissionClaims []permissionClaimDTO `json:"permissionClaims,omitempty"`
 	// EdgeProxyAccess mirrors CatalogEntry.spec.edgeProxyAccess. Shown in
 	// the Enable confirmation dialog: enabling such a provider grants its
 	// ServiceAccount proxied access to the workspace's edge clusters (verb
@@ -247,26 +246,25 @@ func NewListHandler(reg *Registry) http.Handler {
 			}
 			_, isBuiltin := BuiltinByName(p.Name)
 			items = append(items, providerDTO{
-				Name:                 p.Name,
-				DisplayName:          displayName,
-				Description:          p.Description,
-				Version:              p.Version,
-				Ready:                p.Ready(),
-				HasUI:                p.UIURL != nil || p.BuiltinRoute != "" || p.LocalUIAssets != nil,
-				HasBackend:           p.BackendURL != nil,
-				IconURL:              iconURL,
-				BuiltinRoute:         p.BuiltinRoute,
-				Children:             children,
-				Category:             p.Category,
-				Dependencies:         dependencies,
-				APIExportPath:        p.APIExportPath,
-				APIExportName:        p.APIExportName,
-				PermissionClaims:     claims,
-				AllowUntrustedClaims: p.AllowUntrustedClaims,
-				EdgeProxyAccess:      p.EdgeProxyAccess,
-				Builtin:              isBuiltin,
-				Actions:              actions,
-				AssistantSkills:      assistantSkills,
+				Name:             p.Name,
+				DisplayName:      displayName,
+				Description:      p.Description,
+				Version:          p.Version,
+				Ready:            p.Ready(),
+				HasUI:            p.UIURL != nil || p.BuiltinRoute != "" || p.LocalUIAssets != nil,
+				HasBackend:       p.BackendURL != nil,
+				IconURL:          iconURL,
+				BuiltinRoute:     p.BuiltinRoute,
+				Children:         children,
+				Category:         p.Category,
+				Dependencies:     dependencies,
+				APIExportPath:    p.APIExportPath,
+				APIExportName:    p.APIExportName,
+				PermissionClaims: claims,
+				EdgeProxyAccess:  p.EdgeProxyAccess,
+				Builtin:          isBuiltin,
+				Actions:          actions,
+				AssistantSkills:  assistantSkills,
 			})
 		}
 

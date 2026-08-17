@@ -1,18 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppLayout from '@/components/AppLayout.vue'
 import ProviderEnableDialog from '@/components/ProviderEnableDialog.vue'
 import { useProvidersStore, type ProviderDTO, type PermissionClaim } from '@/stores/providers'
-import { useTenantStore } from '@/stores/tenant'
 import { categoryIcons, fallbackCategoryIcon } from '@/lib/categoryIcons'
-import { confirmDialog, resolveConfirm } from '@/portalkit/confirm'
-import { Puzzle, ExternalLink, AlertCircle, Plus, X, Loader2, Search, ShieldAlert } from 'lucide-vue-next'
+import { Puzzle, ExternalLink, AlertCircle, Plus, X, Loader2, Search } from 'lucide-vue-next'
 
 const providers = useProvidersStore()
-const tenant = useTenantStore()
-// Provider mutations authorize membership on the selected workspace itself;
-// organization admins do not implicitly hold that workspace role.
-const canManageProviders = computed(() => tenant.activeWorkspace?.role === 'admin')
 
 // A card is a provider plus the resolved category metadata it belongs to.
 // We carry the category on each card (rather than in a section header) so
@@ -107,26 +101,6 @@ const actionError = ref<string | null>(null)
 // when closed. The user reviews permission claims here before the APIBinding
 // is actually POSTed.
 const dialogProvider = ref<ProviderDTO | null>(null)
-const dialogBusy = computed(() => !!dialogProvider.value && !!busy.value[dialogProvider.value.name])
-let authorityGeneration = 0
-
-function activeWorkspaceKey(): string {
-  return `${tenant.orgUUID ?? ''}/${tenant.workspaceUUID ?? ''}`
-}
-
-// Provider access decisions are workspace authority. Close any open review and
-// revoke old action state immediately when the shell switches that authority;
-// delayed requests must not paint errors or completion into the new workspace.
-watch(
-  () => [tenant.orgUUID, tenant.workspaceUUID] as const,
-  () => {
-    authorityGeneration += 1
-    resolveConfirm(false)
-    dialogProvider.value = null
-    actionError.value = null
-    busy.value = {}
-  },
-)
 
 // Always refetch on mount. The store's initial load happens at app boot
 // (App.vue), but new CatalogEntry installs are common while the portal is
@@ -149,52 +123,32 @@ function openEnableDialog(p: ProviderDTO) {
 
 async function onDialogConfirm(accept: PermissionClaim[]) {
   const p = dialogProvider.value
-  if (!p || busy.value[p.name]) return
-  const generation = authorityGeneration
-  const workspace = activeWorkspaceKey()
+  if (!p) return
   busy.value = { ...busy.value, [p.name]: true }
   actionError.value = null
   try {
     await providers.enable(p, accept)
-    if (generation === authorityGeneration && workspace === activeWorkspaceKey()) dialogProvider.value = null
+    dialogProvider.value = null
   } catch (e) {
-    if (generation === authorityGeneration && workspace === activeWorkspaceKey()) {
-      actionError.value = e instanceof Error ? e.message : String(e)
-    }
+    actionError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    if (generation === authorityGeneration) {
-      const next = { ...busy.value }
-      delete next[p.name]
-      busy.value = next
-    }
+    const next = { ...busy.value }
+    delete next[p.name]
+    busy.value = next
   }
 }
 
 async function onDisable(p: ProviderDTO) {
-  if (busy.value[p.name]) return
-  const workspace = activeWorkspaceKey()
-  const confirmed = await confirmDialog({
-    title: `Disable ${p.displayName}?`,
-    message: 'This removes the provider APIs and access grants from the active workspace. Existing provider resources may become unavailable until it is enabled again.',
-    confirmLabel: 'Disable provider',
-    danger: true,
-  })
-  if (!confirmed || workspace !== activeWorkspaceKey() || busy.value[p.name]) return
-  const generation = authorityGeneration
   busy.value = { ...busy.value, [p.name]: true }
   actionError.value = null
   try {
     await providers.disable(p)
   } catch (e) {
-    if (generation === authorityGeneration && workspace === activeWorkspaceKey()) {
-      actionError.value = e instanceof Error ? e.message : String(e)
-    }
+    actionError.value = e instanceof Error ? e.message : String(e)
   } finally {
-    if (generation === authorityGeneration) {
-      const next = { ...busy.value }
-      delete next[p.name]
-      busy.value = next
-    }
+    const next = { ...busy.value }
+    delete next[p.name]
+    busy.value = next
   }
 }
 
@@ -312,16 +266,14 @@ function dependencyNotice(p: ProviderDTO): string {
                       ? 'border border-border-default bg-surface-overlay text-text-muted'
                       : p.builtinRoute
                         ? 'border border-border-default bg-surface-overlay text-text-secondary'
-                        : providers.isEnabled(p.name) && providers.needsClaimReview(p.name)
-                          ? 'border border-warning/30 bg-warning-subtle text-warning'
-                          : providers.isEnabled(p.name)
+                        : providers.isEnabled(p.name)
                           ? 'border border-accent/30 bg-accent/10 text-accent'
                           : providers.hasMissingDependencies(p)
                             ? 'border border-warning/30 bg-warning-subtle text-warning'
                             : 'border border-success/30 bg-success-subtle text-success'
                   "
                 >
-                  {{ !p.ready ? 'Pending' : p.builtinRoute ? 'Built-in' : providers.isEnabled(p.name) && providers.needsClaimReview(p.name) ? 'Review access' : providers.isEnabled(p.name) ? 'Enabled' : providers.hasMissingDependencies(p) ? 'Blocked' : 'Available' }}
+                  {{ !p.ready ? 'Pending' : p.builtinRoute ? 'Built-in' : providers.isEnabled(p.name) ? 'Enabled' : providers.hasMissingDependencies(p) ? 'Blocked' : 'Available' }}
                 </span>
               </div>
               <p class="mt-0.5 truncate font-mono text-[10px] text-text-muted">{{ p.name }}<span v-if="p.version"> · {{ p.version }}</span></p>
@@ -371,7 +323,7 @@ function dependencyNotice(p: ProviderDTO): string {
             </router-link>
 
             <!-- Enable / Disable: only when provider declares an APIExport -->
-            <template v-if="p.apiExportName && p.ready && canManageProviders">
+            <template v-if="p.apiExportName && p.ready">
               <button
                 v-if="!providers.isEnabled(p.name)"
                 class="inline-flex items-center gap-1 rounded-lg border border-success/30 bg-success-subtle px-2.5 py-1 text-[11px] font-medium text-success transition-colors hover:bg-success/15 disabled:cursor-not-allowed disabled:opacity-60"
@@ -384,16 +336,7 @@ function dependencyNotice(p: ProviderDTO): string {
                 Enable
               </button>
               <button
-                v-if="providers.isEnabled(p.name) && providers.needsClaimReview(p.name)"
-                class="inline-flex items-center gap-1 rounded-md border border-warning/30 bg-warning-subtle px-2.5 py-1 text-[11px] font-medium text-warning transition-colors hover:border-warning/50 disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="!!busy[p.name]"
-                @click="openEnableDialog(p)"
-              >
-                <ShieldAlert class="h-3 w-3" :stroke-width="2" />
-                Review access
-              </button>
-              <button
-                v-if="providers.isEnabled(p.name)"
+                v-else
                 class="inline-flex items-center gap-1 rounded-lg border border-border-default bg-surface-overlay px-2.5 py-1 text-[11px] font-medium text-text-muted transition-colors hover:border-danger/30 hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
                 :disabled="!!busy[p.name]"
                 @click="onDisable(p)"
@@ -403,12 +346,6 @@ function dependencyNotice(p: ProviderDTO): string {
                 Disable
               </button>
             </template>
-
-            <span v-else-if="p.apiExportName && p.ready" class="text-[11px] text-text-muted/70">
-              {{ providers.isEnabled(p.name) && providers.needsClaimReview(p.name)
-                ? 'Workspace admin review required'
-                : 'Workspace admin required' }}
-            </span>
 
             <span v-if="!p.ready" class="text-[11px] text-text-muted/70">
               Provider is starting&hellip;
@@ -421,9 +358,6 @@ function dependencyNotice(p: ProviderDTO): string {
 
     <ProviderEnableDialog
       :provider="dialogProvider"
-      :busy="dialogBusy"
-      :review-existing="!!dialogProvider && providers.needsClaimReview(dialogProvider.name)"
-      :claim-decisions="dialogProvider ? providers.claimDecisionsByProvider[dialogProvider.name] : undefined"
       @cancel="dialogProvider = null"
       @confirm="onDialogConfirm"
     />
