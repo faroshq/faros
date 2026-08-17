@@ -25,7 +25,6 @@ import (
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -475,10 +474,10 @@ func controllerProviderConfig(config *rest.Config) (*rest.Config, *controllerPro
 	return providerConfig, readiness
 }
 
-// controllerProviderReadiness is the startup gate for tenant actions. The
-// endpoint slice is the multicluster provider's discovery input; requiring a
-// non-empty status.endpoints list means the provider has a usable virtual
-// workspace to discover, rather than merely an informer that was registered.
+// controllerProviderReadiness is the startup gate for tenant actions. An
+// existing, readable endpoint slice is sufficient: an empty endpoints list is
+// the valid idle state before any tenant binds the provider. The wrapped
+// provider transport separately proves its discovery LIST and WATCH started.
 type controllerProviderReadiness struct {
 	started        <-chan struct{}
 	providerDone   <-chan error
@@ -511,7 +510,7 @@ func (r *controllerProviderReadiness) Wait(ctx context.Context) error {
 		interval = 250 * time.Millisecond
 	}
 	for {
-		ready, err := r.endpointDiscovered(waitCtx)
+		ready, err := r.endpointSliceAvailable(waitCtx)
 		if err != nil {
 			return controllerProviderReadinessWaitError(ctx, waitCtx, timeout, err)
 		}
@@ -533,9 +532,9 @@ func (r *controllerProviderReadiness) Wait(ctx context.Context) error {
 	}
 }
 
-// Monitor keeps the manager gated after startup. A provider endpoint can
-// disappear or lose all usable URLs after the initial readiness check; that
-// must clear authority and force the lifecycle retry loop to rebuild it.
+// Monitor keeps the manager gated after startup. Deleting or making the
+// endpoint slice unreadable must clear authority and rebuild the manager, but
+// zero consumer endpoints remains a healthy idle state.
 func (r *controllerProviderReadiness) Monitor(ctx context.Context) error {
 	if r == nil {
 		return nil
@@ -549,7 +548,7 @@ func (r *controllerProviderReadiness) Monitor(ctx context.Context) error {
 			return err
 		}
 		checkCtx, cancel, timeout := r.startupContext(ctx)
-		ready, err := r.endpointDiscovered(checkCtx)
+		ready, err := r.endpointSliceAvailable(checkCtx)
 		if err == nil && checkCtx.Err() != nil {
 			err = checkCtx.Err()
 		}
@@ -561,7 +560,7 @@ func (r *controllerProviderReadiness) Monitor(ctx context.Context) error {
 			return err
 		}
 		if !ready {
-			return fmt.Errorf("%w: APIExportEndpointSlice %q has no usable endpoint", errControllerProviderEndpointLost, r.endpointName)
+			return fmt.Errorf("%w: APIExportEndpointSlice %q is unavailable", errControllerProviderEndpointLost, r.endpointName)
 		}
 		if !r.waitForPoll(ctx, interval) {
 			return ctx.Err()
@@ -634,34 +633,18 @@ func controllerProviderExitError(err error) error {
 	return fmt.Errorf("multicluster provider exited before readiness: %w", err)
 }
 
-func (r *controllerProviderReadiness) endpointDiscovered(ctx context.Context) (bool, error) {
+func (r *controllerProviderReadiness) endpointSliceAvailable(ctx context.Context) (bool, error) {
 	if r.endpoint == nil {
 		return true, nil
 	}
-	obj, err := r.endpoint.Get(ctx, r.endpointName, metav1.GetOptions{})
+	_, err := r.endpoint.Get(ctx, r.endpointName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("reading APIExportEndpointSlice %q: %w", r.endpointName, err)
 	}
-	endpoints, found, err := unstructured.NestedSlice(obj.Object, "status", "endpoints")
-	if err != nil {
-		return false, fmt.Errorf("reading APIExportEndpointSlice %q status.endpoints: %w", r.endpointName, err)
-	}
-	if !found {
-		return false, nil
-	}
-	for _, endpoint := range endpoints {
-		fields, ok := endpoint.(map[string]any)
-		if !ok {
-			continue
-		}
-		if url, ok := fields["url"].(string); ok && strings.TrimSpace(url) != "" {
-			return true, nil
-		}
-	}
-	return false, nil
+	return true, nil
 }
 
 func controllerBoundedSetup(ctx context.Context, timeout time.Duration, withTimeout func(context.Context, time.Duration) (context.Context, context.CancelFunc), setup func(context.Context) error) error {

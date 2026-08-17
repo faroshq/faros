@@ -293,17 +293,38 @@ func TestPhase(t *testing.T) {
 		status map[string]any
 		want   string
 	}{
-		{"explicit phase", map[string]any{"phase": "Ready"}, "Ready"},
-		{"ready condition", map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}, "Ready"},
-		{"unready condition", map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}, "Pending"},
-		{"active state", map[string]any{"state": "ACTIVE"}, "Ready"},
-		{"nothing", map[string]any{}, ""},
+		{"explicit phase", map[string]any{"observedGeneration": int64(3), "phase": "Ready"}, "Ready"},
+		{"ready condition", map[string]any{"observedGeneration": int64(3), "conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}, "Ready"},
+		{"unready condition", map[string]any{"observedGeneration": int64(3), "conditions": []any{map[string]any{"type": "Ready", "status": "False"}}}, "Pending"},
+		{"active state", map[string]any{"observedGeneration": int64(3), "state": "ACTIVE"}, "Ready"},
+		{"nothing", map[string]any{"observedGeneration": int64(3)}, ""},
+		{"stale generation", map[string]any{"observedGeneration": int64(2), "phase": "Ready"}, "Pending"},
+		{"missing observed generation", map[string]any{"phase": "Ready"}, "Pending"},
 	}
 	for _, tc := range cases {
-		obj := &unstructured.Unstructured{Object: map[string]any{"status": tc.status}}
+		obj := &unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"generation": int64(3)},
+			"status":   tc.status,
+		}}
 		if got := Phase(obj); got != tc.want {
 			t.Errorf("%s: Phase = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestStatusFromObjectDoesNotExposeStaleGeneration(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"generation": int64(4)},
+		"status": map[string]any{
+			"observedGeneration": int64(3),
+			"phase":              "Ready",
+			"url":                "https://stale.example",
+			"outputs":            map[string]any{"host": "stale.example"},
+		},
+	}}
+	st := StatusFromObject(testBinding(), obj)
+	if st.Phase != "Pending" || st.URL != "" || st.PreviewURL != "" || len(st.Outputs) != 0 {
+		t.Fatalf("stale status leaked rollout evidence: %+v", st)
 	}
 }
 

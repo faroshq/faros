@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/client-go/dynamic"
@@ -47,6 +48,28 @@ import (
 // continue without the manager when no kubeconfig is in scope.
 var errControllerDisabled = errors.New("no kubeconfig available; edge controller manager disabled")
 
+// edgeControllerHealth separates HTTP process liveness from the controller
+// manager required for tenant API behavior.
+type edgeControllerHealth struct {
+	ready atomic.Bool
+}
+
+func (h *edgeControllerHealth) markReady() {
+	if h != nil {
+		h.ready.Store(true)
+	}
+}
+
+func (h *edgeControllerHealth) markFailed() {
+	if h != nil {
+		h.ready.Store(false)
+	}
+}
+
+func (h *edgeControllerHealth) isReady() bool {
+	return h != nil && h.ready.Load()
+}
+
 // endpointSliceName is the APIExportEndpointSlice the multicluster provider
 // watches. By convention (provider-sdk) the slice name equals the APIExport
 // name — see sdkinstall.Bootstrap / EnsureAPIExportEndpointSlice.
@@ -57,11 +80,13 @@ const endpointSliceName = apiExportName
 // stay recent even for a quiet camera.
 const eventsMaxAge = 6 * time.Hour
 
-// startEdgeControllerManager builds the multicluster manager and starts the
-// edge token / RBAC / lifecycle reconcilers. connManager wires the lifecycle
-// reconciler's tunnel-liveness cross-check to the provider's live ConnManager.
+// startEdgeControllerManager builds the multicluster manager and synchronously
+// runs the edge token / RBAC / lifecycle reconcilers. connManager wires the
+// lifecycle reconciler's tunnel-liveness cross-check to the provider's live
+// ConnManager. Keeping Start synchronous lets runServe treat both setup errors
+// and later manager exits as fatal so the process supervisor can restart it.
 // A nil config means "skip the manager" (healthz-only / dev).
-func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *sdktunnel.Server, hubExternalURL string, hubCAData []byte, devMode bool) error {
+func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *sdktunnel.Server, hubExternalURL string, hubCAData []byte, devMode bool, health *edgeControllerHealth) error {
 	if config == nil {
 		return errControllerDisabled
 	}
@@ -72,14 +97,14 @@ func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *
 
 	// The hub provisioner does not create the APIExportEndpointSlice for the
 	// provider's APIExport, so ensure it here (idempotent) before building the
-	// multicluster provider. Best-effort: log + continue; the manager engages
-	// no clusters until the slice lands.
+	// multicluster provider. This is a readiness prerequisite: continuing after
+	// an authorization failure leaves only the HTTP process alive.
 	dynCl, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
 	if err := sdkinstall.EnsureAPIExportEndpointSlice(ctx, dynCl, endpointSliceName, apiExportName, defaultWorkspacePath); err != nil {
-		log.Printf("edge controller manager: WARNING could not ensure APIExportEndpointSlice: %v", err)
+		return fmt.Errorf("ensuring APIExportEndpointSlice: %w", err)
 	}
 
 	provider, err := apiexport.New(config, endpointSliceName, apiexport.Options{Scheme: s})
@@ -168,11 +193,45 @@ func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *
 		return fmt.Errorf("EdgeService controllers: %w", err)
 	}
 
-	go func() {
-		log.Printf("edges controller manager starting (endpointSlice=%s)", endpointSliceName)
-		if err := mgr.Start(ctx); err != nil {
-			log.Printf("edge controller manager exited: %v", err)
-		}
-	}()
-	return nil
+	if err := mgr.GetLocalManager().Add(edgeControllerReadyRunnable(health)); err != nil {
+		return fmt.Errorf("controller health runnable: %w", err)
+	}
+
+	defer health.markFailed()
+	log.Printf("edges controller manager starting (endpointSlice=%s)", endpointSliceName)
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("controller manager exited: %w", err)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errors.New("controller manager exited without an error")
+}
+
+// edgeControllerReadyRunnable marks readiness only after controller-runtime
+// begins launching manager runnables. It stays alive for the manager lifetime;
+// startEdgeControllerManager clears readiness on every Start return.
+func edgeControllerReadyRunnable(health *edgeControllerHealth) manager.Runnable {
+	return manager.RunnableFunc(func(ctx context.Context) error {
+		health.markReady()
+		<-ctx.Done()
+		return nil
+	})
+}
+
+// superviseEdgeController gives the HTTP process one failure contract for
+// controller setup and post-start exits: readiness closes and the error is
+// returned to runServe, which terminates so Kubernetes or Tilt can restart the
+// provider with fresh credentials and process-global controller state.
+func superviseEdgeController(ctx context.Context, health *edgeControllerHealth, start func(context.Context) error) error {
+	health.markFailed()
+	err := start(ctx)
+	health.markFailed()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == nil {
+		return errors.New("controller manager exited without an error")
+	}
+	return err
 }

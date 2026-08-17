@@ -39,6 +39,9 @@ data:
         healthPath: "/healthz"
       apiExport:
         name: "quickstart.providers.faros.sh"
+        requiredResources:
+          - group: quickstart.providers.faros.sh
+            name: greetings
         # Demo-only claim so the Enable dialog has something to render.
         permissionClaims:
           - resource: configmaps

@@ -37,7 +37,7 @@ service-account escalation.
 | Message store | `store/` — Postgres + in-memory + envelope-encryption implementations |
 | Development runtime | `api/development_*` + `api/dataplane_client.go` — template-selected development instances, component-aware sync, restart/log/status calls, and edge-checked preview authorization |
 | Portal | `portal/` — the Vue micro-frontend (`<faros-provider-app-studio>`), embedded via `assets.go` |
-| Registration | `manifest.yaml` — CatalogEntry + APIExport (`ai.faros.sh`) + Code and Infrastructure dependencies + Project/Session/Studio schemas + tenant-scoped Infrastructure, Code Repository, ServiceAccount, Secret, and RBAC claims |
+| Registration | `manifest.yaml` — CatalogEntry declaring APIExport `ai.faros.sh`, Project/Session/Studio `requiredResources`, Code and Infrastructure dependencies, and the exact tenant-scoped Infrastructure, Code Repository, ServiceAccount, Secret, and RBAC claims; provider init owns the schemas/export |
 | Deploy | `deploy/chart/` — Helm chart (Deployment, Service, CatalogEntry) |
 | CI (mirror) | `.github/workflows/{image,chart}.yaml` — publish the image + chart to GHCR (run only in the mirror) |
 

@@ -136,6 +136,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
 
 	// MCP transport — the hub's aggregate MCP endpoint probes every Ready
 	// provider's /mcp and federates these tools as "agents__<tool>", so agents
@@ -254,6 +255,17 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 		"version":   "0.1.0",
 		"uptimeSec": int(time.Since(s.started).Seconds()),
 	})
+}
+
+func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
+	if s.bg == nil || !s.bg.controlPlaneReady() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not-ready",
+			"reason": "provider discovery is not initialized",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
