@@ -281,6 +281,7 @@ func runServe() {
 			Actions:     apiServer.ActionsRuntimeConfig(),
 			Workspace:   workspaces,
 			Busy:        apiServer.AssistantBusy,
+			Owns:        apiServer.OwnsProject,
 			Store:       msgStore,
 			HubBase:     strings.TrimRight(os.Getenv("FAROS_HUB_URL"), "/"),
 			HubInsecure: os.Getenv("FAROS_HUB_INSECURE") == "true",

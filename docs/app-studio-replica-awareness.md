@@ -1,6 +1,9 @@
 # App Studio replica awareness — design
 
-Status: **proposed** · Date: 2026-08-17 · Author: design note
+Status: **phases A–C implemented** (run claims; project affinity + peer
+forwarding; git re-hydration on adoption, emptyDir workspaces, owner-gated
+commit convergence — phase D snapshotting remains optional hardening) ·
+Date: 2026-08-17 · Author: design note
 Related: [`provider-horizontal-scaling.md`](./provider-horizontal-scaling.md)
 (the cross-provider plan this details), the kuery per-edge claims
 (`providers/kuery/engagement/claims.go`) and the edges replica routing

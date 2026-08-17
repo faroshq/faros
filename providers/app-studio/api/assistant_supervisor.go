@@ -278,16 +278,19 @@ func (s *projectAssistantSupervisor) renewActivityClaims() {
 		for _, scope := range scopes {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			held, err := s.store.RenewReplicaClaim(ctx, store.ActivityClaimKey(scope), replicaID)
-			cancel()
 			if err != nil {
 				klog.Background().Error(err, "renewing assistant activity claim",
 					"org", scope.OrgUUID, "workspace", scope.WorkspaceUUID, "project", scope.ProjectName)
-				continue
-			}
-			if !held {
+			} else if !held {
 				klog.Background().Info("assistant activity claim lost to another replica",
 					"org", scope.OrgUUID, "workspace", scope.WorkspaceUUID, "project", scope.ProjectName)
 			}
+			// A long turn can outlive the request-path renewals of the project
+			// PIN (the run writes the workspace without further HTTP traffic);
+			// renew it alongside so the project cannot be adopted mid-turn.
+			// Owner-checked: a pin legitimately held elsewhere is untouched.
+			_, _ = s.store.RenewReplicaClaim(ctx, projectClaimKey(scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName), replicaID)
+			cancel()
 		}
 	}
 }

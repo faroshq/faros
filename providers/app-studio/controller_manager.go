@@ -203,6 +203,7 @@ type controllerDeps struct {
 	Actions     bindings.ActionsRuntimeConfig
 	Workspace   *workspace.FileStore
 	Busy        func(workspace.Scope) bool
+	Owns        func(workspace.Scope) bool
 	Store       store.Store
 	HubBase     string
 	HubInsecure bool
@@ -251,6 +252,7 @@ func startControllerManager(ctx context.Context, config *rest.Config, deps contr
 		Actions:     deps.Actions,
 		Workspace:   deps.Workspace,
 		Busy:        deps.Busy,
+		Owns:        deps.Owns,
 		HubBase:     deps.HubBase,
 		HubInsecure: deps.HubInsecure,
 	}).SetupWithManager(mgr); err != nil {

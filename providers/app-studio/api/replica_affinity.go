@@ -29,6 +29,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -36,9 +37,11 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
 	"github.com/faroshq/provider-app-studio/store"
+	"github.com/faroshq/provider-app-studio/workspace"
 )
 
 const (
@@ -155,7 +158,18 @@ func (s *Server) ReplicaAffinity(next http.Handler) http.Handler {
 			return
 		}
 
+		// The prior claim decides whether an acquisition is an ADOPTION (the
+		// project last lived on another replica — or nowhere — and this
+		// replica's workspace tree must be rebuilt from git) or a plain
+		// renewal.
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		prev, prevOK, err := s.store.GetReplicaClaim(ctx, key)
+		if err != nil {
+			cancel()
+			klog.Background().Error(err, "project affinity claim read failed", "project", project)
+			http.Error(w, "project ownership unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		claim, held, err := s.store.TryClaimReplica(ctx, store.ReplicaClaim{
 			Key:          key,
 			Kind:         store.ReplicaClaimKindProject,
@@ -173,6 +187,9 @@ func (s *Server) ReplicaAffinity(next http.Handler) http.Handler {
 			routing.mu.Lock()
 			routing.owned[key] = time.Now()
 			routing.mu.Unlock()
+			if !prevOK || prev.OwnerReplica != routing.id {
+				s.adoptProject(r, id, project, prev, prevOK, claim)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -252,6 +269,83 @@ func localSafeProjectRead(method, rest string) bool {
 		return false
 	}
 	return true
+}
+
+// adoptProject prepares this replica's workspace after it takes over a
+// project (Phase C of docs/app-studio-replica-awareness.md): seed the
+// source-revision fence from the claim's durable floor, then rebuild the tree
+// from git unless the previous owner was THIS pod (same forwarding address —
+// a process restart on a persistent volume, where the local tree is newer
+// than the last commit). Hydration failures are logged and the request served
+// anyway: a project without a repository has nothing to hydrate, and failing
+// closed would brick every project whenever the code provider is down.
+func (s *Server) adoptProject(r *http.Request, id identity, projectName string, prev store.ReplicaClaim, prevOK bool, claim store.ReplicaClaim) {
+	routing := s.routing()
+	if routing == nil || s.workspaces == nil {
+		return
+	}
+	ctx := r.Context()
+	logger := klog.Background().WithValues("project", projectName, "previousOwner", prev.OwnerReplica)
+	c, err := s.clientFor(id)
+	if err != nil {
+		logger.Error(err, "project adoption: building tenant client; serving with the local tree as-is")
+		return
+	}
+	p, err := c.Projects().Get(ctx, projectName, metav1.GetOptions{})
+	if err != nil {
+		logger.Error(err, "project adoption: reading Project; serving with the local tree as-is")
+		return
+	}
+	scope := projectWorkspaceScope(id, p)
+	if claim.Revision > 0 {
+		if err := s.workspaces.EnsureSourceRevisionFloor(ctx, scope, uint64(claim.Revision)); err != nil {
+			logger.Error(err, "project adoption: seeding source-revision floor")
+		}
+	}
+	if prevOK && prev.OwnerAddr != "" && prev.OwnerAddr == routing.addr {
+		// Same pod, new process: the local volume outlived the restart and may
+		// hold uncommitted work newer than the last commit — keep it.
+		return
+	}
+	hydrated, err := s.hydrateWorkspaceFromRepository(ctx, id, p, r, "")
+	if err != nil {
+		var validationErr *ValidationError
+		if errors.As(err, &validationErr) {
+			// No repository yet (fresh project) — nothing to rebuild.
+			logger.V(4).Info("project adoption: nothing to hydrate", "reason", err.Error())
+			return
+		}
+		logger.Error(err, "project adoption: hydrating workspace from git failed; the local tree may be stale until a manual hydrate")
+		return
+	}
+	logger.Info("project adopted: workspace rebuilt from git",
+		"commit", hydrated.CommitSHA, "files", len(hydrated.Written), "revisionFloor", claim.Revision)
+}
+
+// OwnsProject reports whether the project's workspace commit convergence may
+// run on this replica: yes when it holds the live project claim, or when no
+// live claim exists (a crashed owner's leftover dirty tree must still
+// converge — replicas without local files no-op naturally). An unreadable
+// store refuses: never commit on uncertainty.
+func (s *Server) OwnsProject(scope workspace.Scope) bool {
+	routing := s.routing()
+	if routing == nil {
+		return true
+	}
+	if s.store == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	claim, ok, err := s.store.GetReplicaClaim(ctx, projectClaimKey(scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName))
+	if err != nil {
+		klog.Background().Error(err, "reading project claim; refusing commit convergence", "project", scope.ProjectName)
+		return false
+	}
+	if !ok || !claim.Live(time.Now().UTC(), projectClaimTTL) {
+		return true
+	}
+	return claim.OwnerReplica == routing.id
 }
 
 // recordProjectClaimRevision raises the durable revision floor on the
