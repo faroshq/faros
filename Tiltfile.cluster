@@ -1496,18 +1496,18 @@ local_resource(
 )
 
 # --- providers-kro ---
-# Management kro: installed INTO the same kind cluster kcp lives in (no
-# separate faros-kro cluster like the embedded Tiltfile uses). That way
-# kro reaches kcp via in-cluster Service DNS — no cross-kind networking.
-# The infrastructure provider on the host still reaches kro via the kind
+# Management kro: upstream kro installed INTO the same kind cluster kcp
+# lives in (no separate faros-kro cluster like the embedded Tiltfile
+# uses). kro is single-cluster — it never talks to kcp; the
+# infrastructure provider's instance controller bridges kcp → this
+# cluster, and the provider on the host reaches it via the kind
 # cluster's host-published apiserver (KIND_HOST_KUBECONFIG).
-# kro-mgmt-up is now MANUAL: the infrastructure-operator helm-installs +
-# patches kro itself. Kept as a fallback / for poking kro without the operator.
+# kro-mgmt-up is now MANUAL: the infrastructure-operator helm-installs
+# kro itself. Kept as a fallback / for poking kro without the operator.
 local_resource(
     'kro-mgmt-up',
-    cmd=('KRO_TARGET_KUBECONFIG={kc} KRO_TARGET_KIND_NAME={name} ' +
-         'make dev-kro-up-into').format(
-             kc=KIND_HOST_KUBECONFIG, name=cluster_name),
+    cmd=('KRO_TARGET_KUBECONFIG={kc} ' +
+         'make dev-kro-up-into').format(kc=KIND_HOST_KUBECONFIG),
     deps=[
         'providers/infrastructure/examples/rgds',
     ],
@@ -1707,6 +1707,7 @@ local_resource(
         '.env',
         'providers/infrastructure/contrib/config-connector/enable.sh',
         'providers/infrastructure/contrib/config-connector/pubsub-template.yaml',
+        'providers/infrastructure/contrib/lib/enable-template.sh',
     ],
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
@@ -1723,6 +1724,56 @@ local_resource(
         '.env',
         'providers/infrastructure/contrib/config-connector/pubsub-template.yaml',
         'test/e2e/suites/tiltcluster/config_connector_gcp_test.go',
+    ],
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=['providers-kro'],
+)
+
+# --- optional infrastructure operator + Terraform/Infrakube demo ----------
+# These actions mirror the Config Connector lifecycle and remain default-off.
+# Normal Tilt startup does not clone or build Infrakube, enable the Terraform
+# Template, execute Terraform, or retain Terraform state.
+local_resource(
+    'terraform-install',
+    cmd=('FAROS_E2E_TILT_RUNTIME_KUBECONFIG={runtime} ' +
+         'TERRAFORM_KIND_CLUSTER_NAME={name} make terraform-install').format(
+             runtime=KIND_HOST_KUBECONFIG, name=cluster_name),
+    deps=[
+        'providers/infrastructure/contrib/terraform/install.sh',
+    ],
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=['providers-kro'],
+)
+
+local_resource(
+    'terraform-enable',
+    cmd=('FAROS_E2E_TILT_KUBECONFIG={admin} ' +
+         'FAROS_E2E_TILT_RUNTIME_KUBECONFIG={runtime} ' +
+         'FAROS_TERRAFORM_KCP_SERVER={server} ' +
+         'make terraform-enable').format(
+             admin=KCP_ADMIN_KUBECONFIG, runtime=KIND_HOST_KUBECONFIG,
+             server=KCP_ADMIN_SERVER),
+    deps=[
+        'providers/infrastructure/contrib/lib/enable-template.sh',
+        'providers/infrastructure/contrib/terraform/enable.sh',
+        'providers/infrastructure/contrib/terraform/terraform-stack-template.yaml',
+    ],
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    labels=['providers-kro'],
+)
+
+local_resource(
+    'terraform-smoke',
+    cmd=('FAROS_E2E_TILT_KUBECONFIG={admin} ' +
+         'FAROS_E2E_TILT_RUNTIME_KUBECONFIG={runtime} ' +
+         'make terraform-smoke').format(
+             admin=KCP_ADMIN_KUBECONFIG, runtime=KIND_HOST_KUBECONFIG),
+    deps=[
+        'providers/infrastructure/contrib/terraform/terraform-stack-template.yaml',
+        'test/e2e/suites/tiltcluster/terraform_test.go',
     ],
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
