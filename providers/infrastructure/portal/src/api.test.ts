@@ -132,6 +132,51 @@ describe('flattened Instance API', () => {
       phase: 'Ready',
     })
   })
+
+  it('renders an Instance that is already terminating as Deleting', async () => {
+    setContext({ tenant: 'flat-terminating', token: 'flat-terminating-token' })
+    const terminating = instance() as ReturnType<typeof instance> & { metadata: Record<string, unknown> }
+    terminating.metadata.deletionTimestamp = '2026-08-17T00:01:00Z'
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { query } = request(init)
+      if (query.includes('Templates')) return templateList(readyStatus())
+      if (query.includes('Instances')) {
+        expect(query).toContain('deletionTimestamp')
+        return instanceList([terminating])
+      }
+      throw new Error(`unexpected query: ${query}`)
+    }))
+
+    await expect(api.listInstances()).resolves.toMatchObject({
+      items: [{
+        name: 'demo',
+        uid: 'instance-uid',
+        deletionTimestamp: '2026-08-17T00:01:00Z',
+        phase: 'Deleting',
+        message: 'Deletion is in progress while provisioned resources are cleaned up.',
+      }],
+      identities: [{ name: 'demo', uid: 'instance-uid' }],
+    })
+  })
+
+  it('renders a terminating Instance detail as Deleting', async () => {
+    setContext({ tenant: 'flat-terminating-detail', token: 'flat-terminating-detail-token' })
+    vi.stubGlobal('fetch', vi.fn(async () => instanceYaml(instance({
+      metadata: {
+        uid: 'instance-uid',
+        name: 'demo',
+        generation: 2,
+        creationTimestamp: '2026-08-17T00:00:00Z',
+        deletionTimestamp: '2026-08-17T00:01:00Z',
+        labels: { 'faros.sh/template': 'widget' },
+      },
+    }))))
+
+    await expect(api.getInstance('demo')).resolves.toMatchObject({
+      deletionTimestamp: '2026-08-17T00:01:00Z',
+      phase: 'Deleting',
+    })
+  })
 })
 
 describe('Instance response safety', () => {
@@ -223,6 +268,7 @@ describe('Instance response safety', () => {
 
   it.each([
     ['metadata.generation', { metadata: { name: 'demo', generation: '3' } }, 'Instance demo metadata.generation had an invalid shape'],
+    ['metadata.deletionTimestamp', { metadata: { name: 'demo', deletionTimestamp: 4 } }, 'Instance demo metadata.deletionTimestamp had an invalid shape'],
     ['status.phase', { status: { observedGeneration: 2, phase: {}, conditions: [] } }, 'Instance demo status.phase had an invalid shape'],
     ['status.message', { status: { observedGeneration: 2, phase: 'Pending', message: [], conditions: [] } }, 'Instance demo status.message had an invalid shape'],
   ])('rejects a malformed %s', async (_field, override, message) => {
@@ -297,6 +343,61 @@ describe('list enrichment', () => {
     )
     expect(result.items).toHaveLength(1)
     expect(result.items[0]).toMatchObject({ name: 'demo', template: 'widget' })
+  })
+
+  it('does not let stale enrichment erase a deletion observed by the list', async () => {
+    setContext({ tenant: 'enrichment-stale-deletion', token: 'token-enrichment-stale-deletion' })
+    const terminating = instance() as ReturnType<typeof instance> & { metadata: Record<string, unknown> }
+    terminating.metadata.deletionTimestamp = '2026-08-17T00:01:00Z'
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { query } = request(init)
+      if (query.includes('Templates')) {
+        return templateList(readyStatus(), { columns: [{ header: 'Foo', path: 'spec.foo' }] })
+      }
+      if (query.includes('Instances')) return instanceList([terminating])
+      if (query.includes('InstanceYaml')) return instanceYaml(instance())
+      throw new Error(`unexpected query: ${query}`)
+    }))
+
+    await expect(api.listInstances()).resolves.toMatchObject({
+      items: [{
+        name: 'demo',
+        uid: 'instance-uid',
+        deletionTimestamp: '2026-08-17T00:01:00Z',
+        phase: 'Deleting',
+        message: 'Deletion is in progress while provisioned resources are cleaned up.',
+      }],
+    })
+  })
+
+  it('does not merge a same-name replacement into the listed UID', async () => {
+    setContext({ tenant: 'enrichment-replacement', token: 'token-enrichment-replacement' })
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const { query } = request(init)
+      if (query.includes('Templates')) {
+        return templateList(readyStatus(), { columns: [{ header: 'Foo', path: 'spec.foo' }] })
+      }
+      if (query.includes('Instances')) return instanceList([instance({ status: null })])
+      if (query.includes('InstanceYaml')) {
+        return instanceYaml(instance({
+          metadata: {
+            uid: 'replacement-uid',
+            name: 'demo',
+            generation: 1,
+            creationTimestamp: '2026-08-17T00:02:00Z',
+            labels: { 'faros.sh/template': 'widget' },
+          },
+          spec: { template: 'widget', values: { foo: 'replacement' } },
+        }))
+      }
+      throw new Error(`unexpected query: ${query}`)
+    }))
+
+    const result = await api.listInstances()
+
+    expect(result.items[0]).toMatchObject({ uid: 'instance-uid', phase: 'Pending' })
+    expect(result.items[0]?.values).toEqual({ foo: 'bar' })
+    expect(result.identities).toEqual([{ name: 'demo', uid: 'instance-uid' }])
   })
 
   it('does not hide a lookalike NotFound', async () => {

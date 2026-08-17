@@ -99,6 +99,7 @@ export interface Instance {
   name: string
   namespace: string
   template: string
+  deletionTimestamp?: string
   phase: string
   message?: string
   conditions?: InstanceCondition[]

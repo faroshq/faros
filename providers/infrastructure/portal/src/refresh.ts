@@ -74,10 +74,17 @@ export function createLatestRefreshController(
   }
 }
 
-/** Tenant-local acknowledged deletions remain hidden until a successful list
- * proves the resource is absent. The component that owns this set is remounted
- * on context changes, so tombstones cannot cross workspace boundaries. */
-export function createResourceTombstones() {
+/** Authority-local acknowledged deletions remain marked Deleting until a
+ * successful list proves the resource is absent. The app owner clears this
+ * registry when the tenant changes so markers cannot cross KRM authorities. */
+export interface ResourceTombstones {
+  add(name: string, uid?: string): void
+  has(name: string, uid?: string): boolean
+  reconcile(resources: readonly { name: string; uid?: string }[]): void
+  clear(): void
+}
+
+export function createResourceTombstones(): ResourceTombstones {
   const identities = reactive(new Map<string, string | null>())
   return {
     add(name: string, uid?: string) {
@@ -98,6 +105,9 @@ export function createResourceTombstones() {
           identities.delete(name)
         }
       }
+    },
+    clear() {
+      identities.clear()
     },
   }
 }

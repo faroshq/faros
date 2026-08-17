@@ -8,6 +8,7 @@ import MissingCredentialsPage from './views/MissingCredentialsPage.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
 import { resolveConfirm } from './portalkit/confirm'
 import { setContext } from './api'
+import { createResourceTombstones } from './refresh'
 import type { FarosContext } from './types'
 
 // Two top-level pages: 'templates' and 'instances'. Sub-routes:
@@ -59,6 +60,11 @@ const route = computed<Route>(() => parseSubPath(props.ctx?.subPath))
 const tenantPath = computed(() => props.ctx?.tenant ?? null)
 const contextInitialized = computed(() => props.ctx !== null)
 const contextVersion = ref(0)
+// Route-local pages remount during detail/list navigation, but acknowledged
+// deletions must remain marked Deleting until a successful list proves the old
+// UID is gone. Keep that state at the active authority boundary instead.
+const instanceTombstones = createResourceTombstones()
+let instanceTombstoneTenant: string | null | undefined
 
 // React to ctx changes — basePath drives URL prefixes on fetches,
 // token feeds Authorization, both reactively update when the shell
@@ -70,6 +76,10 @@ watch(
     // The generation also invalidates delayed reads and mutations in api.ts.
     setContext({ tenant, token })
     resolveConfirm(false)
+    // A refreshed bearer token is still the same KRM authority. Preserve
+    // deletion markers across token rotation, but never across tenants.
+    if (instanceTombstoneTenant !== tenant) instanceTombstones.clear()
+    instanceTombstoneTenant = tenant
     contextVersion.value += 1
   },
   { immediate: true },
@@ -174,12 +184,18 @@ function provisioned(name: string) {
       />
     </template>
     <template v-else-if="route.page === 'instances' && !route.id">
-      <InstanceListPage :key="`instances:${contextVersion}`" @navigate="legacyNavigate" @select="selectInstance" />
+      <InstanceListPage
+        :key="`instances:${contextVersion}`"
+        :tombstones="instanceTombstones"
+        @navigate="legacyNavigate"
+        @select="selectInstance"
+      />
     </template>
     <template v-else-if="route.page === 'instances' && route.id">
       <InstanceDetailPage
         :key="`instance:${contextVersion}:${route.id}`"
         :instance-name="route.id"
+        :tombstones="instanceTombstones"
         @navigate="legacyNavigate"
       />
     </template>

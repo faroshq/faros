@@ -212,6 +212,7 @@ interface RawObject {
     name?: string
     namespace?: string
     creationTimestamp?: string
+    deletionTimestamp?: string
     generation?: number
     labels?: Record<string, string>
   }
@@ -407,6 +408,10 @@ function instanceFromObj(object: RawObject): Instance {
       !Number.isSafeInteger(object.metadata.generation) || object.metadata.generation < 0)) {
     throw protocolError(`Instance ${name} metadata.generation had an invalid shape`)
   }
+  if (object.metadata.deletionTimestamp != null &&
+    (typeof object.metadata.deletionTimestamp !== 'string' || !object.metadata.deletionTimestamp)) {
+    throw protocolError(`Instance ${name} metadata.deletionTimestamp had an invalid shape`)
+  }
   if (object.spec != null && (typeof object.spec !== 'object' || Array.isArray(object.spec))) {
     throw protocolError(`Instance ${name} spec was not an object`)
   }
@@ -508,6 +513,7 @@ function instanceFromObj(object: RawObject): Instance {
     (observedGeneration !== undefined && observedGeneration >= generation)
   const ready = conditions.find(condition => condition.type === 'Ready')?.status === 'True'
   const reportedPhase = typeof rawStatus?.phase === 'string' ? rawStatus.phase : ready ? 'Ready' : 'Pending'
+  const deletionTimestamp = object.metadata.deletionTimestamp
 
   let status: Record<string, unknown> | undefined
   if (rawStatus) {
@@ -522,8 +528,11 @@ function instanceFromObj(object: RawObject): Instance {
     name,
     namespace: object.metadata.namespace ?? '',
     template,
-    phase: reconciled ? reportedPhase : 'Pending',
-    message: !reconciled && generation !== undefined
+    deletionTimestamp,
+    phase: deletionTimestamp ? 'Deleting' : reconciled ? reportedPhase : 'Pending',
+    message: deletionTimestamp
+      ? 'Deletion is in progress while provisioned resources are cleaned up.'
+      : !reconciled && generation !== undefined
       ? `Waiting for the controller to observe generation ${generation}.`
       : typeof rawStatus?.message === 'string' ? rawStatus.message : undefined,
     conditions,
@@ -534,6 +543,14 @@ function instanceFromObj(object: RawObject): Instance {
     generation,
     observedGeneration,
   }
+}
+
+function instanceIdentity(object: RawObject): { name: string; uid?: string } {
+  if (!object || typeof object !== 'object' || Array.isArray(object) || !object.metadata ||
+    typeof object.metadata !== 'object' || typeof object.metadata.name !== 'string' || !object.metadata.name) {
+    throw protocolError('Instance item was missing metadata.name')
+  }
+  return { name: object.metadata.name, uid: object.metadata.uid }
 }
 
 function capabilities(context: ApiContext): CapabilityState {
@@ -720,19 +737,28 @@ export const api = {
     return instanceFromObj(created)
   },
 
-  async listInstances(explicitContext?: PortalApiContext): Promise<{ items: Instance[]; templates: Template[] }> {
+  async listInstances(explicitContext?: PortalApiContext): Promise<{
+    items: Instance[]
+    templates: Template[]
+    identities: Array<{ name: string; uid?: string }>
+  }> {
     const context = captureContext(explicitContext)
     const [templates, data] = await Promise.all([
       getTemplates(context),
       graphqlQuery<Infra<{ Instances?: { items?: RawObject[] } }>>(
         context,
-        `{ ${GROUP_FIELD} { ${VERSION} { Instances { items { metadata { uid name namespace creationTimestamp generation labels } spec { template } status { observedGeneration phase message conditions { type status observedGeneration reason message lastTransitionTime } } } } } } }`,
+        `{ ${GROUP_FIELD} { ${VERSION} { Instances { items { metadata { uid name namespace creationTimestamp deletionTimestamp generation labels } spec { template } status { observedGeneration phase message conditions { type status observedGeneration reason message lastTransitionTime } } } } } } }`,
       ),
     ])
     const list = versionPayload(data, 'Instance list').Instances
     if (!list || !Array.isArray(list.items)) {
       throw protocolError('Instance list response was missing its items array')
     }
+    // A DELETE can remain finalizing while runtime resources are cleaned up.
+    // Keep the terminating object in the list as an inert Deleting row. Raw
+    // identities let the shared UID marker survive stale snapshots and be
+    // released only when a successful list proves the old UID is absent.
+    const identities = list.items.map(instanceIdentity)
     const items = list.items.map(instanceFromObj)
     await Promise.all(items.map(async instance => {
       const template = templates.find(candidate => candidate.name === instance.template)
@@ -740,11 +766,24 @@ export const api = {
       const full = await fetchInstanceYaml(context, instance.name)
       if (!full) return
       const parsed = instanceFromObj(full)
+      // The name may have been deleted and recreated between the list and
+      // detail reads. Never enrich the listed UID with a replacement's state.
+      if (instance.uid && parsed.uid && instance.uid !== parsed.uid) return
       instance.values = parsed.values
       instance.status = parsed.status
+      // Deletion is monotonic for one Kubernetes object incarnation. A
+      // cache-backed detail read can lag the list that first exposed
+      // deletionTimestamp, so never let that older response make the same UID
+      // active again.
+      const deletionTimestamp = instance.deletionTimestamp ?? parsed.deletionTimestamp
+      instance.deletionTimestamp = deletionTimestamp
+      instance.phase = deletionTimestamp ? 'Deleting' : parsed.phase
+      instance.message = deletionTimestamp
+        ? 'Deletion is in progress while provisioned resources are cleaned up.'
+        : parsed.message
     }))
     assertContextCurrent(context)
-    return { items, templates }
+    return { items, templates, identities }
   },
 
   async getInstance(name: string): Promise<Instance> {

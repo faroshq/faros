@@ -5,11 +5,11 @@ import ViewValue from '../components/ViewValue.vue'
 import { api, isContextChangedError } from '../api'
 import ConditionsPanel, { type ConditionInfo } from '../portalkit/ConditionsPanel.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController } from '../refresh'
+import { createLatestRefreshController, type ResourceTombstones } from '../refresh'
 import { resolve } from '../view'
-import type { Instance, TemplateView } from '../types'
+import { REASON_INSTANCE_NOT_FOUND, type Instance, type TemplateView } from '../types'
 
-const props = defineProps<{ instanceName: string }>()
+const props = defineProps<{ instanceName: string; tombstones: ResourceTombstones }>()
 const emit = defineEmits<{ (e: 'navigate', view: string): void }>()
 
 const inst = ref<Instance | null>(null)
@@ -21,6 +21,27 @@ const deleting = ref(false)
 const deleteError = ref<string | null>(null)
 let pollHandle: number | null = null
 let active = true
+let navigatingAway = false
+let acceptedDeletingIdentity: { name: string; uid?: string } | null = null
+
+const DELETING_MESSAGE = 'Deletion is in progress while provisioned resources are cleaned up.'
+
+function instanceIsDeleting(instance: Instance): boolean {
+  return Boolean(instance.deletionTimestamp) || props.tombstones.has(instance.name, instance.uid)
+}
+
+const deletionInProgress = computed(() => Boolean(inst.value && instanceIsDeleting(inst.value)))
+const displayedPhase = computed(() => deletionInProgress.value ? 'Deleting' : inst.value?.phase ?? '')
+const displayedMessage = computed(() => {
+  if (!inst.value) return undefined
+  return deletionInProgress.value ? DELETING_MESSAGE : inst.value.message
+})
+
+function acceptedDeletingInstance(instance: Instance): boolean {
+  if (!acceptedDeletingIdentity || acceptedDeletingIdentity.name !== instance.name) return false
+  return acceptedDeletingIdentity.uid === undefined || instance.uid === undefined ||
+    acceptedDeletingIdentity.uid === instance.uid
+}
 
 const conditions = computed<ConditionInfo[]>(() => (inst.value?.conditions ?? []).map(condition => ({
   type: condition.type,
@@ -44,12 +65,31 @@ const refresh = createLatestRefreshController(async requestID => {
   try {
     const result = await api.getInstanceDetail(props.instanceName)
     if (!refresh.isCurrent(requestID)) return
+    if (props.tombstones.has(result.instance.name, result.instance.uid) &&
+      !acceptedDeletingInstance(result.instance)) {
+      navigatingAway = true
+      emit('navigate', 'instances')
+      return
+    }
+    if (result.instance.deletionTimestamp) {
+      props.tombstones.add(result.instance.name, result.instance.uid)
+      acceptedDeletingIdentity = { name: result.instance.name, uid: result.instance.uid }
+    } else if (acceptedDeletingIdentity && !acceptedDeletingInstance(result.instance)) {
+      acceptedDeletingIdentity = null
+    }
     inst.value = result.instance
     view.value = result.template?.view ?? null
     loaded.value = true
     error.value = null
   } catch (caught) {
     if (!refresh.isCurrent(requestID) || isContextChangedError(caught)) return
+    const reason = (caught as { reason?: string }).reason
+    if (reason === REASON_INSTANCE_NOT_FOUND &&
+      (props.tombstones.has(props.instanceName) || (inst.value && instanceIsDeleting(inst.value)))) {
+      navigatingAway = true
+      emit('navigate', 'instances')
+      return
+    }
     error.value = errorMessage(caught, 'failed to get instance')
   } finally {
     if (refresh.isCurrent(requestID)) loading.value = false
@@ -64,6 +104,8 @@ watch(
   () => props.instanceName,
   () => {
     refresh.invalidate()
+    navigatingAway = false
+    acceptedDeletingIdentity = null
     inst.value = null
     view.value = null
     loaded.value = false
@@ -74,7 +116,7 @@ watch(
 )
 
 async function executeDelete() {
-  if (deleting.value || !inst.value) return
+  if (deleting.value || deletionInProgress.value || !inst.value) return
   deleteError.value = null
   const confirmed = await confirmDialog({
     title: `Delete instance "${props.instanceName}"?`,
@@ -84,10 +126,15 @@ async function executeDelete() {
   })
   if (!confirmed || !active) return
 
+  const deletingInstance = inst.value
   deleting.value = true
   try {
     await api.deleteInstance(props.instanceName)
-    if (active) emit('navigate', 'instances')
+    if (active) {
+      props.tombstones.add(deletingInstance.name, deletingInstance.uid)
+      navigatingAway = true
+      emit('navigate', 'instances')
+    }
   } catch (caught) {
     if (active && !isContextChangedError(caught)) deleteError.value = errorMessage(caught, 'delete failed')
   } finally {
@@ -96,7 +143,9 @@ async function executeDelete() {
 }
 
 onMounted(() => {
-  pollHandle = window.setInterval(() => { void load() }, 10000)
+  pollHandle = window.setInterval(() => {
+    if (!navigatingAway) void load()
+  }, 10000)
 })
 onUnmounted(() => {
   active = false
@@ -142,16 +191,16 @@ onUnmounted(() => {
         <div>
           <div class="instance-detail-title">
             <h2 class="page-title">{{ inst.name }}</h2>
-            <StatusBadge :status="inst.phase" />
+            <StatusBadge :status="displayedPhase" :tone="displayedPhase === 'Deleting' ? 'warning' : null" />
           </div>
           <p class="page-meta">{{ inst.template }}</p>
         </div>
-        <button type="button" class="danger" :disabled="deleting" @click="executeDelete">
-          {{ deleting ? 'Deleting…' : 'Delete' }}
+        <button type="button" class="danger" :disabled="deleting || deletionInProgress" @click="executeDelete">
+          {{ deleting || deletionInProgress ? 'Deleting…' : 'Delete' }}
         </button>
       </header>
 
-      <div v-if="inst.message" class="instance-message">{{ inst.message }}</div>
+      <div v-if="displayedMessage" class="instance-message">{{ displayedMessage }}</div>
 
       <template v-if="view?.detail?.length">
         <div v-for="(group, groupIndex) in view.detail" :key="group.title || groupIndex" class="detail-group">
@@ -159,7 +208,7 @@ onUnmounted(() => {
           <dl class="detail-fields">
             <div v-for="field in group.fields" :key="field.label" class="detail-field">
               <dt>{{ field.label }}</dt>
-              <dd><ViewValue :value="resolve(field, inst)" /></dd>
+              <dd><ViewValue :value="resolve(field, inst)" :interactive="!deletionInProgress" /></dd>
             </div>
           </dl>
         </div>

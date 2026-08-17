@@ -4,7 +4,7 @@
 //
 // Gives the user an at-a-glance read on what they've provisioned in the
 // CURRENT workspace:
-//   - total instances + per-phase breakdown (Ready / Pending / Failed)
+//   - total instances + per-phase breakdown (Ready / Pending / Deleting / Failed)
 //   - top-4 most-recent instances with template + phase chip and a
 //     click-through that bubbles faros-navigate up to the portal so it
 //     pushes /providers/infrastructure/instances/<name>.
@@ -19,7 +19,7 @@ import { computed, onMounted, onUnmounted, ref, watch, h } from 'vue'
 import { api, isContextChangedError } from './api'
 import { tileClass } from './portalkit/dashboardtile'
 import { ic } from './portalkit/icons'
-import { createLatestRefreshController } from './refresh'
+import { createLatestRefreshController, createResourceTombstones } from './refresh'
 import type { Instance } from './types'
 
 // Inline icon components — the provider's portal bundle is
@@ -65,16 +65,25 @@ const loading = ref(false)
 const loaded = ref(false)
 const error = ref<string | null>(null)
 let pollHandle: number | null = null
+const tombstones = createResourceTombstones()
+let tombstoneTenant: string | null | undefined
 // Stable only for the current tenant/token authority. api.ts keys discovery
 // caches by this object without retaining the bearer credential itself.
 let requestAuthority: object = {}
 
+function phaseFor(instance: Instance): string {
+  return instance.deletionTimestamp || tombstones.has(instance.name, instance.uid)
+    ? 'Deleting'
+    : instance.phase
+}
+
 const stats = computed(() => {
   const total = instances.value.length
-  const ready = instances.value.filter((i) => i.phase === 'Ready').length
-  const pending = instances.value.filter((i) => i.phase === 'Pending').length
-  const failed = instances.value.filter((i) => i.phase === 'Failed').length
-  return { total, ready, pending, failed }
+  const ready = instances.value.filter((i) => phaseFor(i) === 'Ready').length
+  const pending = instances.value.filter((i) => phaseFor(i) === 'Pending').length
+  const deleting = instances.value.filter((i) => phaseFor(i) === 'Deleting').length
+  const failed = instances.value.filter((i) => phaseFor(i) === 'Failed').length
+  return { total, ready, pending, deleting, failed }
 })
 
 // Most-recent first, capped at 4 so the tile stays a fixed height.
@@ -111,6 +120,10 @@ const refresh = createLatestRefreshController(async requestID => {
     // order.
     const r = await api.listInstances({ token: ctx.token, tenant: ctx.tenant, authority: requestAuthority })
     if (!refresh.isCurrent(requestID)) return
+    for (const instance of r.items) {
+      if (instance.deletionTimestamp) tombstones.add(instance.name, instance.uid)
+    }
+    tombstones.reconcile(r.identities)
     instances.value = r.items
     error.value = null
     loaded.value = true
@@ -147,6 +160,11 @@ function dispatchNavigate(path: string) {
   )
 }
 
+function openInstance(instance: Instance) {
+  if (phaseFor(instance) === 'Deleting') return
+  dispatchNavigate('instances/' + encodeURIComponent(instance.name))
+}
+
 onMounted(() => {
   // 30s poll matches the catalog/instance list cadence in the main app —
   // anything tighter wastes the hub roundtrips for a tile users glance at.
@@ -159,6 +177,8 @@ onUnmounted(() => {
 watch(
   () => [props.context === null, props.context?.tenant, props.context?.token, props.context?.basePath] as const,
   () => {
+    if (tombstoneTenant !== props.context?.tenant) tombstones.clear()
+    tombstoneTenant = props.context?.tenant
     requestAuthority = {}
     refresh.invalidate()
     instances.value = []
@@ -175,6 +195,7 @@ watch(
 const phaseDot: Record<string, string> = {
   Ready: 'bg-success',
   Pending: 'bg-text-muted',
+  Deleting: 'bg-warning',
   Failed: 'bg-danger',
 }
 function dotFor(phase: string) {
@@ -218,6 +239,11 @@ function dotFor(phase: string) {
           <span class="tabular-nums">{{ stats.pending }}</span>
           <span :class="tileClass.statLabel">pending</span>
         </span>
+        <span v-if="stats.deleting > 0" :class="[tileClass.stat, tileClass.statWarn]">
+          <span v-html="ic('clock', tileClass.statIcon)" />
+          <span class="tabular-nums">{{ stats.deleting }}</span>
+          <span :class="tileClass.statLabel">deleting</span>
+        </span>
         <span v-if="stats.failed > 0" :class="[tileClass.stat, tileClass.statBad]">
           <span v-html="ic('alert-triangle', tileClass.statIcon)" />
           <span class="tabular-nums">{{ stats.failed }}</span>
@@ -233,16 +259,20 @@ function dotFor(phase: string) {
       <div v-if="recent.length > 0">
         <div :class="tileClass.sectionLabel">Recent</div>
         <ul :class="tileClass.list">
-          <li v-for="i in recent" :key="i.name">
+          <li v-for="i in recent" :key="i.uid ?? i.name">
             <button
               type="button"
               :class="tileClass.row"
-              @click="dispatchNavigate('instances/' + encodeURIComponent(i.name))"
+              :disabled="phaseFor(i) === 'Deleting'"
+              :title="phaseFor(i) === 'Deleting' ? 'Deletion in progress' : undefined"
+              @click="openInstance(i)"
             >
-              <span :class="[tileClass.rowDot, dotFor(i.phase)]" aria-hidden="true" />
+              <span :class="[tileClass.rowDot, dotFor(phaseFor(i))]" aria-hidden="true" />
               <span :class="tileClass.rowPrimary">{{ i.name }}</span>
-              <span :class="tileClass.rowSecondary">{{ i.template }}</span>
-              <ChevronRight :class="tileClass.chevron" :stroke-width="2" />
+              <span :class="tileClass.rowSecondary">
+                {{ i.template }}<template v-if="phaseFor(i) === 'Deleting'"> · Deleting</template>
+              </span>
+              <ChevronRight v-if="phaseFor(i) !== 'Deleting'" :class="tileClass.chevron" :stroke-width="2" />
             </button>
           </li>
         </ul>

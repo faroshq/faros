@@ -6,7 +6,7 @@ import { api, isContextChangedError } from '../api'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, createResourceTombstones } from '../refresh'
+import { createLatestRefreshController, type ResourceTombstones } from '../refresh'
 import { resolve, type ResolvedValue } from '../view'
 import type { Instance, TemplateView, ViewColumn } from '../types'
 
@@ -14,6 +14,7 @@ const emit = defineEmits<{
   (e: 'navigate', view: string): void
   (e: 'select', name: string): void
 }>()
+const props = defineProps<{ tombstones: ResourceTombstones }>()
 
 const items = ref<Instance[]>([])
 const error = ref<string | null>(null)
@@ -22,7 +23,7 @@ const loaded = ref(false)
 const deletingInstanceKey = ref<string | null>(null)
 const deleteError = ref<string | null>(null)
 const viewByTemplate = ref<Map<string, TemplateView>>(new Map())
-const tombstones = createResourceTombstones()
+const tombstones = props.tombstones
 let pollHandle: number | null = null
 
 interface DynamicColumn {
@@ -60,18 +61,20 @@ const columns = computed(() => [
   { key: 'actions', label: '' },
 ])
 
-function instanceKey(instance: Pick<Instance, 'template' | 'name'>): string {
-  return `${instance.template}/${instance.name}`
+function instanceKey(instance: Pick<Instance, 'name'>): string {
+  return instance.name
 }
 
-const visibleItems = computed(() => items.value.filter(item => !tombstones.has(instanceKey(item), item.uid)))
+function instanceIsDeleting(instance: Instance): boolean {
+  return Boolean(instance.deletionTimestamp) || tombstones.has(instanceKey(instance), instance.uid)
+}
 
-const rows = computed<Array<Record<string, unknown>>>(() => visibleItems.value.map(instance => {
+const rows = computed<Array<Record<string, unknown>>>(() => items.value.map(instance => {
   const row: Record<string, unknown> = {
     name: instance.name,
-    rowKey: instanceKey(instance),
+    rowKey: `${instanceKey(instance)}/${instance.uid ?? ''}`,
     template: instance.template,
-    status: instance.phase,
+    status: instanceIsDeleting(instance) ? 'Deleting' : instance.phase,
     age: formatAge(instance.createdAt),
     actions: '',
     instance,
@@ -106,8 +109,13 @@ const refresh = createLatestRefreshController(async requestID => {
     const views = new Map<string, TemplateView>()
     for (const template of result.templates) if (template.view) views.set(template.name, template.view)
     viewByTemplate.value = views
+    // Once the API server has exposed deletionTimestamp, keep that UID in the
+    // Deleting state even if a later cache snapshot briefly omits the field.
+    for (const instance of result.items) {
+      if (instance.deletionTimestamp) tombstones.add(instanceKey(instance), instance.uid)
+    }
     items.value = result.items
-    tombstones.reconcile(result.items.map(item => ({ name: instanceKey(item), uid: item.uid })))
+    tombstones.reconcile(result.identities)
     loaded.value = true
     error.value = null
   } catch (caught) {
@@ -123,7 +131,7 @@ function load(): Promise<void> {
 }
 
 async function deleteInstance(instance: Instance) {
-  if (deletingInstanceKey.value !== null) return
+  if (deletingInstanceKey.value !== null || instanceIsDeleting(instance)) return
   deleteError.value = null
   const confirmed = await confirmDialog({
     title: `Delete instance "${instance.name}"?`,
@@ -147,7 +155,7 @@ async function deleteInstance(instance: Instance) {
 
 function selectInstance(row: Record<string, unknown>) {
   const instance = rowInstance(row)
-  if (deletingInstanceKey.value === instanceKey(instance) || tombstones.has(instanceKey(instance), instance.uid)) return
+  if (deletingInstanceKey.value === instanceKey(instance) || instanceIsDeleting(instance)) return
   emit('select', instance.name)
 }
 
@@ -207,26 +215,32 @@ onUnmounted(() => {
     >
       <template #name="{ value }"><span class="instance-name">{{ value }}</span></template>
       <template #template="{ value }"><code>{{ value }}</code></template>
-      <template v-for="column in dynamicColumns" :key="column.key" v-slot:[column.key]="{ value }">
-        <ViewValue v-if="resolvedValue(value)" :value="resolvedValue(value)!" />
+      <template v-for="column in dynamicColumns" :key="column.key" v-slot:[column.key]="{ value, row }">
+        <ViewValue
+          v-if="resolvedValue(value)"
+          :value="resolvedValue(value)!"
+          :interactive="!instanceIsDeleting(rowInstance(row))"
+        />
         <span v-else class="cell-empty">—</span>
       </template>
-      <template #status="{ row }"><StatusBadge :status="rowInstance(row).phase" /></template>
+      <template #status="{ row }">
+        <StatusBadge :status="String(row.status)" :tone="String(row.status) === 'Deleting' ? 'warning' : null" />
+      </template>
       <template #age="{ value }"><span class="cell-mono">{{ value }}</span></template>
       <template #actions="{ row }">
         <div class="row-actions">
           <ResourceTableDeleteButton
             :label="`Delete instance ${rowInstance(row).name}`"
             :busy-label="`Deleting instance ${rowInstance(row).name}…`"
-            :busy="deletingInstanceKey === instanceKey(rowInstance(row))"
-            :disabled="deletingInstanceKey !== null"
+            :busy="deletingInstanceKey === instanceKey(rowInstance(row)) || instanceIsDeleting(rowInstance(row))"
+            :disabled="deletingInstanceKey !== null || instanceIsDeleting(rowInstance(row))"
             @click="deleteInstance(rowInstance(row))"
           />
         </div>
       </template>
     </ResourceTable>
 
-    <div v-if="loaded && !error && visibleItems.length === 0" class="empty-followup">
+    <div v-if="loaded && !error && items.length === 0" class="empty-followup">
       <span>Each workspace has its own instances.</span>
       <button type="button" class="link" @click="emit('navigate', 'catalog')">Browse templates</button>
     </div>
