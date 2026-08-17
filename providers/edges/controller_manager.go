@@ -59,16 +59,18 @@ const eventsMaxAge = 6 * time.Hour
 
 // startEdgeControllerManager builds the multicluster manager and starts the
 // edge token / RBAC / lifecycle reconcilers. connManager wires the lifecycle
-// reconciler's tunnel-liveness cross-check to the provider's live ConnManager.
-// A nil config means "skip the manager" (healthz-only / dev).
+// reconciler's tunnel-liveness cross-check to the provider's ConnManager —
+// cluster-aware with replica routing enabled, so liveness reflects the whole
+// fleet, not this replica. A nil config means "skip the manager"
+// (healthz-only / dev).
 //
-// Deliberately NOT leader-elected (unlike code/vibe-studio/infrastructure):
-// this manager doubles as the tunnel plane's tenant-config resolver
-// (SetTenantConfigGetter below goes through mgr.GetCluster) and the lifecycle
-// reconcilers cross-check liveness against this replica's ConnManager, so
-// gating it would break serving on non-leaders. The provider is single-replica
-// by design anyway (revdial tunnels + in-memory event store; the chart pins
-// replicaCount: 1) — revisit both together if it ever scales out.
+// Still NOT leader-elected: this manager doubles as the tunnel plane's
+// tenant-config resolver (SetTenantConfigGetter below goes through
+// mgr.GetCluster), so it must run on every replica. With cluster-aware
+// liveness and relayed dials the reconcilers are CORRECT active-active (no
+// status flapping), just duplicated; leader-electing them requires first
+// giving the serving path a slice-backed tenant resolver (see the databricks
+// SliceAuthority pattern) — tracked in docs/provider-horizontal-scaling.md.
 func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *sdktunnel.Server, hubExternalURL string, hubCAData []byte, devMode bool) error {
 	if config == nil {
 		return errControllerDisabled
@@ -156,8 +158,11 @@ func startEdgeControllerManager(ctx context.Context, config *rest.Config, tsrv *
 	// Edge event subscribers (currently UniFi Protect): a per-tenant, per-service
 	// event store the validation reconciler feeds via WebSocket subscribers, and
 	// the MCP `events` tool reads. The in-memory store is bounded per service and
-	// sits behind an interface so it can be swapped for Redis once the provider
-	// scales past the revdial single-replica invariant. Both the writer (manager)
+	// sits behind an interface so it can be swapped for Redis (or another shared
+	// backend). Multi-replica caveat: subscribers are gated to the replica that
+	// terminates the edge's tunnel, so events buffer on THAT replica only — an
+	// `events` MCP call the Service hands to a different replica sees an empty
+	// buffer until the store moves to a shared backend. Both the writer (manager)
 	// and reader (tunnel Server) share the one store; subscriber goroutines live
 	// under ctx, so they stop on shutdown.
 	eventStore := events.NewMemoryStore(events.DefaultPerServiceCap, eventsMaxAge)
