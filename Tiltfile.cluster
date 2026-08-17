@@ -1014,7 +1014,11 @@ def rewrite_manifest_cmd(src, name, port):
                                     svc=provider_svc_url(name, port)), out
 
 QUICKSTART_REWRITE_CMD, QUICKSTART_MANIFEST_REWRITTEN = rewrite_manifest_cmd('providers/quickstart/manifest.yaml', 'quickstart', 8081)
-INFRA_REWRITE_CMD, INFRA_MANIFEST_REWRITTEN = rewrite_manifest_cmd('providers/infrastructure/manifest.yaml', 'infrastructure', 8082)
+# infrastructure's serve Service is stamped by its operator into the
+# faros-infrastructure-provider namespace (and the operator self-registers
+# the CatalogEntry with that URL anyway) — rewrite to match, not to
+# faros-providers.
+INFRA_REWRITE_CMD, INFRA_MANIFEST_REWRITTEN = ("sed 's|http://localhost:8082|http://infrastructure.faros-infrastructure-provider.svc.cluster.local:8082|g' providers/infrastructure/manifest.yaml > /tmp/faros-providers_infrastructure_manifest.yaml", '/tmp/faros-providers_infrastructure_manifest.yaml')
 APP_STUDIO_REWRITE_CMD, APP_STUDIO_MANIFEST_REWRITTEN = rewrite_manifest_cmd('providers/app-studio/manifest.yaml', 'app-studio', 8085)
 CODE_REWRITE_CMD, CODE_MANIFEST_REWRITTEN = rewrite_manifest_cmd('providers/code/manifest.yaml', 'code', 8083)
 KUERY_REWRITE_CMD, KUERY_MANIFEST_REWRITTEN = rewrite_manifest_cmd('providers/kuery/manifest.yaml', 'kuery', 8084)
@@ -1164,7 +1168,7 @@ kubectl --context {ctx} -n {ns} create secret generic faros-{name}-kubeconfig \
 # One helper per podified provider: Tilt-built image (auto kind-load +
 # rebuild-on-change), the provider's production chart, and a port-forward on
 # the historical host port so portals/curl keep working.
-def provider_pod(name, port, chart_extra=[], resource_deps=[], labels=None, image_only_deps=None, port_forwards=None):
+def provider_pod(name, port, chart_extra=[], resource_deps=[], labels=None, image_only_deps=None, port_forwards=None, container_port=None):
     labels = labels or ['providers-' + name]
     image_ref = 'faros-%s-provider' % name
     # Repo-root context: the Dockerfiles copy the in-tree provider-sdk (go.mod
@@ -1193,7 +1197,10 @@ def provider_pod(name, port, chart_extra=[], resource_deps=[], labels=None, imag
     ))
     k8s_resource(
         name,
-        port_forwards=port_forwards or ['%d:%d' % (port, port)],
+        # No host port-forwards: the portal and every API path go hub →
+        # in-cluster Service (CatalogEntry URLs). Debug directly with
+        # kubectl -n faros-providers port-forward svc/<name> <port>.
+        port_forwards=port_forwards or [],
         resource_deps=['faros-hub', 'kcp-dns'] + resource_deps,
         labels=labels,
     )
@@ -1523,6 +1530,7 @@ for _line in str(read_file(app_studio_hash_file, '')).splitlines():
 provider_kubeconfig_sync('app-studio', '.kcp/app-studio-provider.kubeconfig', ['providers-app-studio'])
 provider_pod(
     'app-studio', 8085,
+    container_port=8081,
     chart_extra=[
         'replicaCount=2',
         'store.databaseURL=%s' % providers_db_url('appstudio'),
@@ -1615,6 +1623,7 @@ for _line in str(read_file(kuery_hash_file, '')).splitlines():
 provider_kubeconfig_sync('kuery', '.kcp/kuery-runtime.kubeconfig', ['providers-kuery'])
 provider_pod(
     'kuery', 8084,
+    container_port=8081,
     chart_extra=[
         'replicaCount=2',
         'store.driver=postgres',
@@ -1926,12 +1935,30 @@ local_resource(
 # derives the runtime kubeconfig from that admin kubeconfig, so it reuses the
 # front-proxy credential in cluster mode without a separate token.
 # Two replicas: the controller lease keeps one active reconciler set while
-# both serve REST/MCP.
+# both serve REST/MCP. GitHub OAuth app credentials ride providers/code/.env
+# → the code-env Secret, exactly like agents.
+local_resource(
+    'code-env',
+    cmd='''
+set -eu
+if [ -f providers/code/.env ]; then
+  kubectl --context %s -n %s create secret generic code-env \
+    --from-env-file=providers/code/.env --dry-run=client -o yaml | \
+    kubectl --context %s -n %s apply -f -
+else
+  kubectl --context %s -n %s create secret generic code-env \
+    --dry-run=client -o yaml | kubectl --context %s -n %s apply -f -
+fi
+'''.strip() % (k8s_context(), providers_namespace, k8s_context(), providers_namespace,
+               k8s_context(), providers_namespace, k8s_context(), providers_namespace),
+    deps=['providers/code/.env'],
+    labels=['providers-code'],
+)
 provider_kubeconfig_sync('code', '.kcp/code-runtime.kubeconfig', ['providers-code'])
 provider_pod(
     'code', 8083,
-    chart_extra=['replicaCount=2'],
-    resource_deps=['code-secrets'],
+    chart_extra=['replicaCount=2', 'envFromSecret=code-env'],
+    resource_deps=['code-secrets', 'code-env'],
 )
 
 local_resource(
