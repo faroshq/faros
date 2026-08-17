@@ -1167,7 +1167,11 @@ kubectl --context {ctx} -n {ns} create secret generic faros-{name}-kubeconfig \
 def provider_pod(name, port, chart_extra=[], resource_deps=[], labels=None, image_only_deps=None, port_forwards=None):
     labels = labels or ['providers-' + name]
     image_ref = 'faros-%s-provider' % name
-    docker_build(image_ref, 'providers/' + name, only=image_only_deps)
+    # Repo-root context: the Dockerfiles copy the in-tree provider-sdk (go.mod
+    # replace) — same invocation as CI: docker build -f providers/<n>/Dockerfile .
+    docker_build(image_ref, '.',
+                 dockerfile='providers/%s/Dockerfile' % name,
+                 only=image_only_deps or ['providers/' + name, 'provider-sdk'])
     k8s_yaml(helm(
         'providers/%s/deploy/chart' % name,
         name=name,
@@ -1466,6 +1470,46 @@ kubectl --context %s -n %s create configmap app-studio-actions-ca \
     labels=['providers-app-studio'],
 )
 
+# The app-studio init container applies its APIExport with first-party
+# permission claims on the infrastructure/code APIExports — kcp REQUIRES
+# their identityHashes (empty hash = hard apply failure). The host init
+# target auto-discovered them; here a resource does the same lookups and
+# writes them to a file that read_file() below watches: the moment discovery
+# succeeds (after infrastructure/code exist), Tilt re-renders the chart with
+# the hashes and the pods restart with valid claims.
+app_studio_hash_file = '.kcp/app-studio-identity-hashes.env'
+local_resource(
+    'app-studio-identity-hashes',
+    cmd='''
+set -eu
+lookup() {
+  kubectl --kubeconfig=%s --server=%s/clusters/root:faros:providers:$1 \
+    --insecure-skip-tls-verify get apiexport $2 \
+    -o jsonpath='{.status.identityHash}' 2>/dev/null || true
+}
+infra="$(lookup infrastructure infrastructure.providers.faros.sh)"
+code="$(lookup code code.providers.faros.sh)"
+if [ -z "$infra" ] || [ -z "$code" ]; then
+  echo "identityHashes not discoverable yet (infra='$infra' code='$code')"
+  echo "re-trigger after the infrastructure operator has bootstrapped and code-init has run"
+  exit 0
+fi
+printf 'infra=%%s\\ncode=%%s\\n' "$infra" "$code" > %s
+echo "wrote %s"
+'''.strip() % (KCP_ADMIN_KUBECONFIG, KCP_ADMIN_SERVER, app_studio_hash_file, app_studio_hash_file),
+    deps=['.kcp/code-runtime.kubeconfig', 'tilt-frontproxy.kubeconfig'],
+    allow_parallel=True,
+    labels=['providers-app-studio'],
+)
+
+app_studio_infra_hash = cfg.get('app-studio-infra-identity-hash', '')
+app_studio_code_hash = cfg.get('app-studio-code-identity-hash', '')
+for _line in str(read_file(app_studio_hash_file, '')).splitlines():
+    if _line.startswith('infra=') and not app_studio_infra_hash:
+        app_studio_infra_hash = _line[len('infra='):].strip()
+    if _line.startswith('code=') and not app_studio_code_hash:
+        app_studio_code_hash = _line[len('code='):].strip()
+
 # Two replicas: durable run claims + project affinity live in the shared
 # providers-db Postgres, workspaces are emptyDir caches rebuilt from git on
 # adoption (docs/app-studio-replica-awareness.md).
@@ -1486,11 +1530,8 @@ provider_pod(
         'hub.actionsCABundleConfigMap.name=app-studio-actions-ca',
         'hub.actionsCABundleConfigMap.key=ca-bundle.pem',
         'previewConsole.enabled=false',
-        # identityHashes of the infrastructure/code APIExports — required for
-        # the Project reconciler's first-party claims. Set them once known:
-        #   tilt args -- --app-studio-infra-identity-hash=... --app-studio-code-identity-hash=...
-        'apiExport.infraIdentityHash=%s' % cfg.get('app-studio-infra-identity-hash', ''),
-        'apiExport.codeIdentityHash=%s' % cfg.get('app-studio-code-identity-hash', ''),
+        'apiExport.infraIdentityHash=%s' % app_studio_infra_hash,
+        'apiExport.codeIdentityHash=%s' % app_studio_code_hash,
     ],
     resource_deps=[
         'app-studio-secrets',
@@ -1630,7 +1671,20 @@ local_resource(
 # controllers + bootstrap-loop leases), and self-registers the CatalogEntry
 # with its serve Service URL.
 provider_kubeconfig_sync('infrastructure', 'tilt-frontproxy.kubeconfig', ['providers-kro'])
-docker_build('faros-infrastructure-provider', 'providers/infrastructure')
+# custom_build instead of docker_build: the OPERATOR deployment gets Tilt's
+# content-hashed tag as usual, but the SERVE deployment is stamped by the
+# operator from the CR's spec.provider.image — a split repo/tag field Tilt
+# cannot inject into. Build once, tag it :dev additionally, and kind-load
+# that tag so the CR-spawned pods resolve it locally.
+# NB a rebuild does not restart the operator-owned serve pods (same :dev
+# tag): kubectl -n faros-infrastructure-provider rollout restart deploy/infrastructure
+custom_build(
+    'faros-infrastructure-provider',
+    ('docker build -f providers/infrastructure/Dockerfile -t $EXPECTED_REF . && ' +
+     'docker tag $EXPECTED_REF faros-infrastructure-provider:dev && ' +
+     'kind load docker-image faros-infrastructure-provider:dev --name %s') % cluster_name,
+    deps=['providers/infrastructure', 'provider-sdk'],
+)
 k8s_yaml(helm(
     'providers/infrastructure/deploy/chart',
     name='infrastructure',
@@ -1648,6 +1702,8 @@ k8s_yaml(helm(
         'operator.providerWorkspace=root:faros:providers:infrastructure',
         'operator.providerKubeconfigSecret.name=faros-infrastructure-kubeconfig',
         'operator.providerKubeconfigSecret.key=kubeconfig',
+        'operator.provider.image.repository=faros-infrastructure-provider',
+        'operator.provider.image.tag=dev',
         'operator.provider.replicas=2',
         'operator.provider.port=8082',
         # Application-template exposure + platform access gate, mapped from

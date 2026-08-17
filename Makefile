@@ -2139,7 +2139,7 @@ helm-deploy-provider-infrastructure: ## (experimental) Build+load image, helm in
 	@command -v kind >/dev/null || { echo "kind not found; brew install kind"; exit 1; }
 	@test -f $(KRO_KIND_KUBECONFIG) || { echo "faros-kro cluster missing; run 'make dev-kro-up' first"; exit 1; }
 	@echo ">>> building $(INFRASTRUCTURE_IMAGE)"
-	docker build -t $(INFRASTRUCTURE_IMAGE) providers/infrastructure
+	docker build -t $(INFRASTRUCTURE_IMAGE) -f providers/infrastructure/Dockerfile .
 	@echo ">>> loading image into kind cluster $(KRO_KIND_NAME)"
 	kind load docker-image $(INFRASTRUCTURE_IMAGE) --name $(KRO_KIND_NAME)
 	@echo ">>> ensuring namespace + heartbeat token Secret in $(INFRASTRUCTURE_NAMESPACE)"
