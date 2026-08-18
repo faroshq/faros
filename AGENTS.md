@@ -313,7 +313,7 @@ lives hub-side in `pkg/hub/mcpaggregate/`; `projects` was folded into
 | `quickstart` | `quickstart.providers.faros.sh` | **Reference provider** — minimal HTTP server + embedded Vite portal + sample `Greeting` API. Start here. |
 | `edges` | `edges.providers.faros.sh` | The connectivity core: `KubernetesCluster`/`LinuxServer` edges, revdial tunnel termination, kubectl/SSH/MCP proxying, `Service` connectors (host/LAN apps → MCP tools), `Workload`/`Placement` scheduling + Helm marketplace. Single-replica (process-global dialer map). |
 | `infrastructure` | `infrastructure.providers.faros.sh` | Application Templates via kro: template catalog, instance provisioning, data plane (exec/logs/etc.), app hosting + access gate |
-| `deployments` | `deployments.faros.sh` | Headless Release/Deployment lifecycle provider; reconciles Git-projected desired state into Infrastructure instances |
+| `deployments` | `deployments.faros.sh` | Repository desired-state delivery: checks out reviewed Git content through Code and generically applies authorized provider CRs or native workspace resources |
 | `code` | `code.providers.faros.sh` | Git hosting management (repos, deploy keys, collaborators, packages) behind a `GitBackend` seam; GitHub is the only real backend today |
 | `databricks` | `databricks.providers.faros.sh` | Databricks SQL warehouse tables via governed `query_table` action + MCP tools; narrowest claims posture in the repo (the model citizen) |
 | `agents` | `agents.faros.sh` | Long-running personal AI agents: chat, schedules, triggers, approvals, budgets, memory, multi-channel (Slack/Telegram/Discord/SMTP). Needs hub + Postgres only |

@@ -46,6 +46,10 @@ watch(
 )
 
 const claims = computed(() => props.provider?.permissionClaims ?? [])
+const unavailableRequestedClaims = computed(() => {
+  const declared = new Set(claims.value.map(claimKey))
+  return [...new Set(props.preselectClaims ?? [])].filter((key) => !declared.has(key))
+})
 const currentClaim = (c: PermissionClaim): ProviderAccessClaim | undefined =>
   props.access?.claims?.find((candidate) => claimKey(candidate) === claimKey(c))
 const alreadyAccepted = (c: PermissionClaim): boolean => !!currentClaim(c)?.accepted
@@ -154,6 +158,28 @@ function onConfirm() {
             </label>
           </li>
         </ul>
+
+        <div
+          v-if="unavailableRequestedClaims.length"
+          class="mt-3 rounded-lg border border-warning/30 bg-warning-subtle px-3 py-2"
+          role="alert"
+        >
+          <div class="flex items-start gap-2">
+            <ShieldAlert class="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-warning" :stroke-width="2" />
+            <div>
+              <p class="text-[11px] font-medium text-warning">Requested access is not offered</p>
+              <p class="mt-1 text-[10px] leading-relaxed text-text-secondary">
+                Deployments detected target APIs that are not in its current permission claims.
+                A platform operator must add these optional claims to the Deployments CatalogEntry and APIExport before they can be authorized.
+              </p>
+              <ul class="mt-1 space-y-0.5">
+                <li v-for="claim in unavailableRequestedClaims" :key="claim" class="font-mono text-[10px] text-text-primary">
+                  {{ claim.startsWith('/') ? claim.slice(1) : claim }}
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
 
         <div
           v-if="provider.edgeProxyAccess"

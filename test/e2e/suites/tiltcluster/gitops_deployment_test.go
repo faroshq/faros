@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -160,6 +161,7 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 			"repositoryRef": "application", "ref": "main", "path": ".faros", "intervalSeconds": int64(10), "prune": true,
 		},
 	}})
+	var synced *unstructured.Unstructured
 	if !waitTilt(t, deploymentsTestWait, func() (bool, string) {
 		syncObj, err := tenant.Resource(deploymentsRepositorySyncGVR).Get(ctx, syncName, metav1.GetOptions{})
 		if err != nil {
@@ -168,11 +170,16 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 		phase, _, _ := nestedString(syncObj.Object, "status", "phase")
 		applied, _, _ := nestedString(syncObj.Object, "status", "appliedRevision")
 		observed, _, _ := unstructured.NestedInt64(syncObj.Object, "status", "observedGeneration")
-		return phase == "Synced" && applied == promotionGitRevision && observed == syncObj.GetGeneration() && conditionTrue(syncObj.Object, "Applied"),
+		current := phase == "Synced" && applied == promotionGitRevision && observed == syncObj.GetGeneration() && conditionTrue(syncObj.Object, "Applied")
+		if current {
+			synced = syncObj
+		}
+		return current,
 			fmt.Sprintf("phase=%q appliedRevision=%q observedGeneration=%d/%d conditions=%v", phase, applied, observed, syncObj.GetGeneration(), conditionsOf(syncObj.Object))
 	}) {
 		t.Fatalf("RepositorySync %q did not apply reviewed revision", syncName)
 	}
+	assertRepositorySyncContract(t, synced)
 
 	instance, err := tenant.Resource(deploymentsInstanceGVR).Get(ctx, promotionInstanceName, metav1.GetOptions{})
 	if err != nil {
@@ -187,6 +194,7 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 		database["version"] != "16" || oidc["mode"] != "none" {
 		t.Fatalf("synced Instance does not match reviewed desired state: template=%q values=%#v", template, values)
 	}
+	assertRepositorySyncProvenance(t, instance, syncName, ".faros/instance.yaml")
 
 	configMap, err := tenant.Resource(coreConfigMapGVR).Namespace("default").Get(ctx, promotionConfigMapName, metav1.GetOptions{})
 	if err != nil {
@@ -196,6 +204,7 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 	if data["source"] != "repositorysync" || data["revision"] != promotionGitRevision {
 		t.Fatalf("synced ConfigMap data = %v, want source and reviewed revision", data)
 	}
+	assertRepositorySyncProvenance(t, configMap, syncName, ".faros/configmap.yaml")
 
 	instance = waitInfrastructureInstanceReady(t, tenant, promotionInstanceName)
 	runtimeRef := deploymentRuntimeTarget(t, instance)
@@ -209,6 +218,153 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 	waitTiltResourceGone(t, tenant.Resource(deploymentsInstanceGVR), promotionInstanceName, deploymentsTestWait)
 	waitTiltResourceGone(t, tenant.Resource(coreConfigMapGVR).Namespace("default"), promotionConfigMapName, deploymentsTestWait)
 	waitTiltResourceGone(t, runtimeClient.Resource(runtimeRef.gvr).Namespace(runtimeRef.namespace), runtimeRef.name, deploymentsTestWait)
+}
+
+func assertRepositorySyncContract(t *testing.T, syncObj *unstructured.Unstructured) {
+	t.Helper()
+	if syncObj == nil {
+		t.Fatal("RepositorySync reached Synced without retaining the observed object")
+	}
+	for _, conditionType := range []string{"SourceReady", "AuthorizationReady", "Applied"} {
+		assertCurrentRepositorySyncCondition(t, syncObj, conditionType)
+	}
+
+	type expectedRequirement struct {
+		apiVersion string
+		kind       string
+		namespace  string
+		verbs      []string
+	}
+	wantRequirements := map[string]expectedRequirement{
+		"infrastructure.faros.sh/instances": {
+			apiVersion: "infrastructure.faros.sh/v1alpha1",
+			kind:       "Instance",
+			verbs:      []string{"get", "create", "update", "patch", "delete"},
+		},
+		"/configmaps": {
+			apiVersion: "v1",
+			kind:       "ConfigMap",
+			namespace:  "default",
+			verbs:      []string{"get", "create", "update", "patch", "delete"},
+		},
+	}
+	requirements := nestedSlice(syncObj.Object, "status", "targetRequirements")
+	if len(requirements) != len(wantRequirements) {
+		t.Fatalf("RepositorySync targetRequirements = %#v, want exactly %d target capabilities", requirements, len(wantRequirements))
+	}
+	for _, raw := range requirements {
+		requirement, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("RepositorySync target requirement has type %T, want object", raw)
+		}
+		claim, ok := requirement["claim"].(map[string]any)
+		if !ok {
+			t.Fatalf("RepositorySync target requirement %#v has no generic claim tuple", requirement)
+		}
+		group, _ := claim["group"].(string)
+		resource, _ := claim["resource"].(string)
+		key := group + "/" + resource
+		want, found := wantRequirements[key]
+		if !found {
+			t.Fatalf("RepositorySync reported unexpected target requirement %#v", requirement)
+		}
+		apiVersion, _ := requirement["apiVersion"].(string)
+		kind, _ := requirement["kind"].(string)
+		requirementResource, _ := requirement["resource"].(string)
+		namespace, _ := requirement["namespace"].(string)
+		state, _ := requirement["state"].(string)
+		verbs := stringSlice(claim["verbs"])
+		if apiVersion != want.apiVersion || kind != want.kind || requirementResource != resource || resource == "" || namespace != want.namespace || state != "Authorized" || !slices.Equal(verbs, want.verbs) {
+			t.Fatalf("RepositorySync target requirement %q = %#v, want apiVersion=%q kind=%q namespace=%q state=Authorized verbs=%v", key, requirement, want.apiVersion, want.kind, want.namespace, want.verbs)
+		}
+		delete(wantRequirements, key)
+	}
+	if len(wantRequirements) != 0 {
+		t.Fatalf("RepositorySync omitted target requirements: %#v", wantRequirements)
+	}
+
+	type expectedInventory struct {
+		apiVersion string
+		kind       string
+		namespace  string
+		name       string
+		sourcePath string
+	}
+	wantInventory := map[string]expectedInventory{
+		"infrastructure.faros.sh/instances": {
+			apiVersion: "infrastructure.faros.sh/v1alpha1",
+			kind:       "Instance",
+			name:       promotionInstanceName,
+			sourcePath: ".faros/instance.yaml",
+		},
+		"/configmaps": {
+			apiVersion: "v1",
+			kind:       "ConfigMap",
+			namespace:  "default",
+			name:       promotionConfigMapName,
+			sourcePath: ".faros/configmap.yaml",
+		},
+	}
+	inventory := nestedSlice(syncObj.Object, "status", "inventory")
+	if len(inventory) != len(wantInventory) {
+		t.Fatalf("RepositorySync inventory = %#v, want exactly %d applied objects", inventory, len(wantInventory))
+	}
+	for _, raw := range inventory {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("RepositorySync inventory item has type %T, want object", raw)
+		}
+		apiVersion, _ := item["apiVersion"].(string)
+		kind, _ := item["kind"].(string)
+		resource, _ := item["resource"].(string)
+		namespace, _ := item["namespace"].(string)
+		name, _ := item["name"].(string)
+		uid, _ := item["uid"].(string)
+		sourcePath, _ := item["sourcePath"].(string)
+		group := ""
+		if gv, err := schema.ParseGroupVersion(apiVersion); err == nil {
+			group = gv.Group
+		}
+		key := group + "/" + resource
+		want, found := wantInventory[key]
+		if !found {
+			t.Fatalf("RepositorySync recorded unexpected inventory item %#v", item)
+		}
+		if apiVersion != want.apiVersion || kind != want.kind || namespace != want.namespace || name != want.name || uid == "" || sourcePath != want.sourcePath {
+			t.Fatalf("RepositorySync inventory %q = %#v, want apiVersion=%q kind=%q namespace=%q name=%q non-empty UID sourcePath=%q", key, item, want.apiVersion, want.kind, want.namespace, want.name, want.sourcePath)
+		}
+		delete(wantInventory, key)
+	}
+	if len(wantInventory) != 0 {
+		t.Fatalf("RepositorySync omitted inventory objects: %#v", wantInventory)
+	}
+}
+
+func assertCurrentRepositorySyncCondition(t *testing.T, syncObj *unstructured.Unstructured, conditionType string) {
+	t.Helper()
+	for _, raw := range conditionsOf(syncObj.Object) {
+		condition, ok := raw.(map[string]any)
+		if !ok || condition["type"] != conditionType {
+			continue
+		}
+		status, _, _ := unstructured.NestedString(condition, "status")
+		observed, _, _ := unstructured.NestedInt64(condition, "observedGeneration")
+		if status != "True" || observed != syncObj.GetGeneration() {
+			t.Fatalf("RepositorySync condition %s = %#v, want True at generation %d", conditionType, condition, syncObj.GetGeneration())
+		}
+		return
+	}
+	t.Fatalf("RepositorySync has no %s condition: %#v", conditionType, conditionsOf(syncObj.Object))
+}
+
+func assertRepositorySyncProvenance(t *testing.T, target *unstructured.Unstructured, syncName, sourcePath string) {
+	t.Helper()
+	annotations := target.GetAnnotations()
+	if annotations["deployments.faros.sh/repository-sync"] != syncName ||
+		annotations["deployments.faros.sh/source-path"] != sourcePath ||
+		annotations["deployments.faros.sh/config-revision"] != promotionGitRevision {
+		t.Fatalf("%s %q RepositorySync provenance = %#v, want owner=%q sourcePath=%q revision=%q", target.GetKind(), target.GetName(), annotations, syncName, sourcePath, promotionGitRevision)
+	}
 }
 
 const (

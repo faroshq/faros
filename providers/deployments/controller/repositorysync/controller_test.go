@@ -8,6 +8,7 @@ package repositorysync
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,16 +216,16 @@ spec:
 	}
 }
 
-func TestMissingAdvertisedTargetReportsAwaitingAuthorization(t *testing.T) {
+func TestMissingArbitraryProviderTargetReportsAwaitingAuthorization(t *testing.T) {
 	mapper := apiMeta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}})
 	c := restMappedClient{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(), mapper: mapper}
 	sync := testRepositorySync()
-	docs, err := parseDocuments([]SourceFile{{Path: ".faros/instance.yaml", Content: `apiVersion: infrastructure.faros.sh/v1alpha1
-kind: Instance
+	docs, err := parseDocuments([]SourceFile{{Path: ".faros/widget.yaml", Content: `apiVersion: example.faros.sh/v1alpha1
+kind: Widget
 metadata:
-  name: pen-store
+  name: storefront
 spec:
-  template: application
+  size: medium
 `}}, ".faros")
 	if err != nil {
 		t.Fatal(err)
@@ -237,17 +238,18 @@ spec:
 	if len(requirements) != 1 || requirements[0].State != deploymentsv1alpha1.RepositorySyncTargetAwaitingAuthorization || requirements[0].Claim == nil {
 		t.Fatalf("requirements = %#v", requirements)
 	}
-	if requirements[0].Claim.Resource != "instances" || len(requirements[0].Claim.Verbs) != len(applyVerbs) {
+	if requirements[0].Claim.Group != "example.faros.sh" || requirements[0].Claim.Resource != "widgets" ||
+		!slices.Equal(requirements[0].Claim.Verbs, applyVerbs) {
 		t.Fatalf("claim = %#v", requirements[0].Claim)
 	}
 }
 
-func TestCoreConfigMapIsAnAdvertisedTargetCapability(t *testing.T) {
-	claim := advertisedClaim(configGVR)
+func TestCoreConfigMapUsesGenericAuthorizationHint(t *testing.T) {
+	claim := targetClaim(configGVR)
 	if claim == nil || claim.Group != "" || claim.Resource != "configmaps" {
 		t.Fatalf("ConfigMap claim = %#v", claim)
 	}
-	if len(claim.Verbs) != 7 || claim.Verbs[0] != "get" || claim.Verbs[6] != "delete" {
+	if !slices.Equal(claim.Verbs, applyVerbs) {
 		t.Fatalf("ConfigMap verbs = %#v", claim.Verbs)
 	}
 }

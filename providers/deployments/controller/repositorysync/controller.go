@@ -61,10 +61,7 @@ const (
 	defaultInterval             = 30 * time.Second
 )
 
-var (
-	applyVerbs     = []string{"get", "create", "update", "patch", "delete"}
-	configMapVerbs = []string{"get", "list", "watch", "create", "update", "patch", "delete"}
-)
+var applyVerbs = []string{"get", "create", "update", "patch", "delete"}
 
 var errPrunePending = errors.New("pruned target objects are still terminating")
 
@@ -446,7 +443,7 @@ func preflightDocuments(ctx context.Context, c client.Client, sync *deploymentsv
 		}
 		requirement.Resource = mapping.Resource.Resource
 		requirement.Namespace = namespace
-		requirement.Claim = advertisedClaim(mapping.Resource)
+		requirement.Claim = targetClaim(mapping.Resource)
 		// Different served versions of one API resource address the same stored
 		// object. Reject that ambiguity before dry-run so a single revision can
 		// never apply two documents to the same group/resource/namespace/name.
@@ -715,18 +712,14 @@ func deleteInventoryItem(ctx context.Context, c client.Client, syncName string, 
 func targetRequirement(gvk schema.GroupVersionKind, resource, namespace string) deploymentsv1alpha1.RepositorySyncTargetRequirement {
 	return deploymentsv1alpha1.RepositorySyncTargetRequirement{
 		APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind, Resource: resource, Namespace: namespace,
-		State: deploymentsv1alpha1.RepositorySyncTargetUnavailable, Claim: advertisedClaim(schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: resource}),
+		State: deploymentsv1alpha1.RepositorySyncTargetUnavailable, Claim: targetClaim(schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: resource}),
 	}
 }
 
-func advertisedClaim(gvr schema.GroupVersionResource) *deploymentsv1alpha1.RepositorySyncTargetClaim {
-	if gvr.Group == "infrastructure.faros.sh" && gvr.Resource == "instances" {
-		return &deploymentsv1alpha1.RepositorySyncTargetClaim{Group: gvr.Group, Resource: gvr.Resource, Verbs: append([]string(nil), applyVerbs...)}
+func targetClaim(gvr schema.GroupVersionResource) *deploymentsv1alpha1.RepositorySyncTargetClaim {
+	return &deploymentsv1alpha1.RepositorySyncTargetClaim{
+		Group: gvr.Group, Resource: gvr.Resource, Verbs: append([]string(nil), applyVerbs...),
 	}
-	if gvr.Group == "" && gvr.Resource == "configmaps" {
-		return &deploymentsv1alpha1.RepositorySyncTargetClaim{Resource: gvr.Resource, Verbs: append([]string(nil), configMapVerbs...)}
-	}
-	return nil
 }
 
 func upsertRequirement(requirements map[string]*deploymentsv1alpha1.RepositorySyncTargetRequirement, requirement deploymentsv1alpha1.RepositorySyncTargetRequirement) {

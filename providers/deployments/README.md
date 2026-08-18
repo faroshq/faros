@@ -36,8 +36,8 @@ RepositorySync status separates the stages:
 
 `phase: Synced` means desired state was applied. It does not mean the target
 workload is operational. `targetRequirements` reports the API, resource,
-namespace, authorization state, and an advertised optional claim when one can
-be granted through the provider access UI.
+namespace, authorization state, and the exact group/resource claim tuple needed
+for apply access.
 
 ## Authorization
 
@@ -52,8 +52,12 @@ Target access is optional and tenant-authorized. The initial catalog advertises:
 
 If a desired target is unavailable because its optional claim was not accepted,
 the sync reports `AwaitingAuthorization` without partially applying the
-revision. Other target APIs can be added as explicit optional claims without
-adding provider dependencies or target-specific controller code.
+revision. RepositorySync derives the required claim tuple from every target GVR;
+it does not contain a target-kind allowlist. When the claim is already offered,
+the access UI preselects it. Otherwise the UI explains that an operator must add
+the optional claim to the Deployments CatalogEntry and APIExport. Other target
+APIs therefore require explicit security configuration, but no provider
+dependency or target-specific controller code.
 
 `DEPLOYMENTS_CODE_IDENTITY_HASH` is required during bootstrap. The optional
 `DEPLOYMENTS_INFRA_IDENTITY_HASH` adds the Infrastructure Instance claim to the

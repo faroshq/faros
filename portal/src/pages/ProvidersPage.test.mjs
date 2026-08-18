@@ -36,3 +36,9 @@ test('provider access deep links preselect all requested claims and honor an int
   assert.match(page, /returnPath\.startsWith\('\/'\) && !returnPath\.startsWith\('\/\/'\)/)
   assert.match(dialog, /`\$\{c\.group \?\? ''\}\/\$\{c\.resource\}`/)
 })
+
+test('provider access deep links explain claims the provider does not offer', () => {
+  assert.match(dialog, /const unavailableRequestedClaims = computed/)
+  assert.match(dialog, /Requested access is not offered/)
+  assert.match(dialog, /add these optional claims to the Deployments CatalogEntry and APIExport/)
+})

@@ -2344,6 +2344,8 @@ dev-kro-up: ## Bring up the faros-kro kind cluster + install upstream kro
 		echo ">>> kind cluster $(KRO_KIND_NAME) already exists"; \
 		kind get kubeconfig --name $(KRO_KIND_NAME) > $(KRO_KIND_KUBECONFIG); \
 	fi
+	@echo ">>> installing Gateway API CRDs ($(GATEWAY_API_VERSION)) — templates declare HTTPRoute/ReferenceGrant"
+	KUBECONFIG=$(KRO_KIND_KUBECONFIG) kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
 	@# helm only installs crds/-dir CRDs on FIRST install; apply them
 	@# explicitly so chart upgrades (fork → upstream, version bumps) carry
 	@# CRD schema changes too. Pull+untar rather than `helm show crds`: some
@@ -2435,6 +2437,12 @@ dev-kro-up-into: ## Install upstream kro into an existing cluster ($KRO_TARGET_K
 	@command -v helm >/dev/null || { echo "helm not found; install: brew install helm"; exit 1; }
 	@test -n "$(KRO_TARGET_KUBECONFIG)" || { echo "KRO_TARGET_KUBECONFIG not set"; exit 1; }
 	@test -f "$(KRO_TARGET_KUBECONFIG)" || { echo "no kubeconfig at $(KRO_TARGET_KUBECONFIG)"; exit 1; }
+	@if ! KUBECONFIG=$(KRO_TARGET_KUBECONFIG) kubectl get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then \
+		echo ">>> installing Gateway API CRDs ($(GATEWAY_API_VERSION)) — templates declare HTTPRoute/ReferenceGrant"; \
+		KUBECONFIG=$(KRO_TARGET_KUBECONFIG) kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml; \
+	else \
+		echo ">>> Gateway API CRDs already present; preserving the cluster-owned version"; \
+	fi
 	@# kro runs single-cluster: the infrastructure provider's instance
 	@# controller bridges kcp → this cluster, so no kcp kubeconfig, no
 	@# multicluster values, no self-member Secret, no hostAliases.

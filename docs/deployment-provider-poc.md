@@ -89,6 +89,13 @@ The Deployments portal links to the provider access dialog with the exact claim
 tuples preselected. Authorization is additive: accepting a new claim preserves
 all existing grants and uses the APIExport's authoritative identity and verbs.
 
+Claim hints are derived from each document's discovered or inferred
+group/resource tuple; the controller contains no target-kind claim allowlist. If
+the Deployments CatalogEntry/APIExport does not yet offer a requested tuple, the
+access dialog identifies that operator-owned configuration gap instead of
+silently omitting the request. This keeps arbitrary target support generic while
+retaining kcp's explicit, auditable permission-claim boundary.
+
 This makes capability changes visible tenant decisions without coupling the
 sync engine to the target provider.
 

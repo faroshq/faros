@@ -40,20 +40,28 @@ isn't detected, so it's safe under `go test ./...`. (`make test` already exclude
 | operator/KRO runtime kubeconfig | `.faros-cluster.kubeconfig` | `FAROS_E2E_TILT_RUNTIME_KUBECONFIG` |
 | operator namespace | `faros-infrastructure-operator` | `FAROS_E2E_TILT_OPERATOR_NAMESPACE` |
 
+For a focused run against the plain embedded-kcp `tilt up` stack, override both
+kubeconfigs: use `.kcp/admin.kubeconfig` for
+`FAROS_E2E_TILT_KUBECONFIG` and `.faros-kro.kubeconfig` for
+`FAROS_E2E_TILT_RUNTIME_KUBECONFIG`. The defaults above belong to
+`Tiltfile.cluster` and can point at stale or unavailable endpoints in the plain
+Tilt topology.
+
 ## What it asserts
 
 - **Provider comes up** (`TestInfrastructureProviderRegistered`) — the
   infrastructure provider's `CatalogEntry` is `Ready` and its `APIExport`
   exports `templates`.
 - **Deployments provider comes up** (`TestDeploymentsProviderRegistered`) — the
-  headless provider is live and ready, its CatalogEntry is `Ready`, its APIExport
-  publishes `releases` and `deployments`, and its Infrastructure claims use the
-  live Infrastructure identity hash.
-- **Deployments reconciles a tenant**
-  (`TestDeploymentsProviderReconcilesTenantDeployment`) — a fresh tenant binds
-  Infrastructure and Deployments with accepted claims, then a Release and
-  Deployment materialize an Infrastructure Instance; default `Retain`
-  deletion detaches the Instance instead of deleting it.
+  provider and portal are live and ready, its APIExport publishes only
+  `repositorysyncs`, Code is its sole required dependency, and target-resource
+  claims are optional capabilities.
+- **Reviewed desired state reaches a tenant**
+  (`TestReviewedGitConfigurationReachesReadyInstance`) — a fresh tenant binds
+  Code, Deployments, and Infrastructure with explicit claims; Code merges an
+  approved change, then one `RepositorySync` applies both an Infrastructure
+  `Instance` and a native `ConfigMap`. Runtime readiness is observed separately
+  from RepositorySync's applied-state contract.
 - **Templates broker chain** (`TestTemplatesCatalogProjected`) — the seeded
   `Templates` exist in the provider workspace and the `CachedResource`
   (`publish-templates`) that projects them into tenant workspaces is `Ready`.
