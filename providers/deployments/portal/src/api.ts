@@ -1,5 +1,10 @@
 import { mapRepositorySync, mapRepositorySyncList } from './mapper.js'
-import type { ErrorResponse, RepositorySyncListResult, RepositorySyncSnapshot } from './types.js'
+import type {
+  CreateRepositorySyncInput,
+  ErrorResponse,
+  RepositorySyncListResult,
+  RepositorySyncSnapshot,
+} from './types.js'
 
 const GROUP_FIELD = 'deployments_faros_sh'
 const VERSION = 'v1alpha1'
@@ -35,7 +40,7 @@ function classifyMessage(message: string): ErrorResponse['reason'] {
 }
 
 async function graphqlQuery<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  if (!clusterName) throw errorResponse('TenantMissing', 'Select a workspace to view repository syncs.', false)
+  if (!clusterName) throw errorResponse('TenantMissing', 'Select a workspace to manage repository syncs.', false)
   const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' }
   if (bearerToken) headers.Authorization = 'Bearer ' + bearerToken
   let response: Response
@@ -47,7 +52,7 @@ async function graphqlQuery<T>(query: string, variables: Record<string, unknown>
       body: JSON.stringify({ query, variables }),
     })
   } catch {
-    throw errorResponse('NetworkError', 'The workspace gateway could not be reached. Retry the read.')
+    throw errorResponse('NetworkError', 'The workspace gateway could not be reached. Retry the request.')
   }
   const bodyText = await response.text()
   if (!response.ok) {
@@ -58,13 +63,13 @@ async function graphqlQuery<T>(query: string, variables: Record<string, unknown>
   try {
     body = (bodyText ? JSON.parse(bodyText) : {}) as typeof body
   } catch {
-    throw errorResponse('ProtocolError', 'Workspace gateway returned malformed JSON. Retry the read.')
+    throw errorResponse('ProtocolError', 'Workspace gateway returned malformed JSON. Retry the request.')
   }
   if (body.errors?.length) {
     const message = body.errors.map(error => error.message || 'GraphQL error').join('; ')
     throw errorResponse(classifyMessage(message), message)
   }
-  if (!body.data) throw errorResponse('ProtocolError', 'Workspace gateway returned no data. Retry the read.')
+  if (!body.data) throw errorResponse('ProtocolError', 'Workspace gateway returned no data. Retry the request.')
   return body.data
 }
 
@@ -80,6 +85,7 @@ interface GraphQLEnvelope {
     v1alpha1?: {
       RepositorySyncs?: { items?: unknown[] }
       RepositorySync?: unknown | null
+      createRepositorySync?: unknown | null
     }
   }
 }
@@ -108,6 +114,28 @@ export async function getRepositorySync(name: string): Promise<RepositorySyncSna
   )
   const raw = scope(data)?.RepositorySync
   if (!raw) throw errorResponse('NotFound', `RepositorySync "${name}" was not found.`, false)
+  try {
+    return mapRepositorySync(raw)
+  } catch (error) {
+    throw errorResponse('ProtocolError', error instanceof Error ? error.message : 'Workspace gateway returned malformed RepositorySync data.')
+  }
+}
+
+export async function createRepositorySync(input: CreateRepositorySyncInput): Promise<RepositorySyncSnapshot> {
+  const spec: Record<string, unknown> = { repositoryRef: input.repositoryRef }
+  if (input.ref) spec.ref = input.ref
+  if (input.path) spec.path = input.path
+  if (input.intervalSeconds !== undefined) spec.intervalSeconds = input.intervalSeconds
+  if (input.prune !== undefined) spec.prune = input.prune
+
+  const data = await graphqlQuery<GraphQLEnvelope>(
+    `mutation CreateRepositorySync($object: DeploymentsFarosShV1alpha1RepositorySync_Input!) {
+      ${GROUP_FIELD} { ${VERSION} { createRepositorySync(object: $object) { ${SYNC} } } }
+    }`,
+    { object: { metadata: { name: input.name }, spec } },
+  )
+  const raw = scope(data)?.createRepositorySync
+  if (!raw) throw errorResponse('ProtocolError', 'Workspace gateway returned no created RepositorySync. Retry the request.')
   try {
     return mapRepositorySync(raw)
   } catch (error) {

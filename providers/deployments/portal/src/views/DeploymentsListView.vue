@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { Plus, RefreshCw } from 'lucide-vue-next'
 import { listRepositorySyncs } from '../api'
 import { evidenceLabel, evidenceTone, syncEvidenceState } from '../mapper'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { beginRead, completeRead, failRead, initialReadState, readErrorMessage } from '../state'
 import type { FarosContext, RepositorySyncSnapshot } from '../types'
+import RepositorySyncCreateForm from './RepositorySyncCreateForm.vue'
 
 const props = defineProps<{ tenant?: FarosContext['tenant'] }>()
 const emit = defineEmits<{ open: [name: string] }>()
 
 const read = ref(initialReadState<RepositorySyncSnapshot[]>([]))
+const creating = ref(false)
 let requestSerial = 0
 let inFlight: Promise<void> | null = null
 const POLL_INTERVAL_MS = 10_000
@@ -54,6 +56,11 @@ async function refresh(): Promise<void> {
   return inFlight
 }
 
+function created(name: string): void {
+  creating.value = false
+  emit('open', name)
+}
+
 onMounted(() => {
   pollTimer = window.setInterval(() => { void refresh() }, POLL_INTERVAL_MS)
 })
@@ -78,11 +85,30 @@ watch(() => props.tenant, () => {
         <h1 class="page-title">Repository syncs</h1>
         <p class="page-meta">Git revisions projected into this workspace. Target providers own runtime readiness.</p>
       </div>
-      <button class="button ghost" type="button" :disabled="read.loading" :aria-busy="read.loading" @click="refresh">
-        <RefreshCw :size="14" :class="{ spinning: read.loading }" aria-hidden="true" />
-        {{ read.loading ? 'Refreshing…' : 'Refresh' }}
-      </button>
+      <div class="page-actions">
+        <button class="button ghost" type="button" :disabled="read.loading" :aria-busy="read.loading" @click="refresh">
+          <RefreshCw :size="14" :class="{ spinning: read.loading }" aria-hidden="true" />
+          {{ read.loading ? 'Refreshing…' : 'Refresh' }}
+        </button>
+        <button
+          class="button primary"
+          type="button"
+          aria-controls="create-repository-sync-panel"
+          :aria-expanded="creating"
+          @click="creating = !creating"
+        >
+          <Plus :size="14" :stroke-width="1.75" aria-hidden="true" />
+          {{ creating ? 'Close form' : 'New sync' }}
+        </button>
+      </div>
     </header>
+
+    <RepositorySyncCreateForm
+      v-if="creating"
+      id="create-repository-sync-panel"
+      @cancel="creating = false"
+      @created="created"
+    />
 
     <div class="read-contract" role="note">
       <span class="read-contract-dot" aria-hidden="true" />

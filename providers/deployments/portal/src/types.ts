@@ -62,6 +62,15 @@ export interface RepositorySyncSnapshot {
   conditions: SyncCondition[]
 }
 
+export interface CreateRepositorySyncInput {
+  name: string
+  repositoryRef: string
+  ref?: string
+  path?: string
+  intervalSeconds?: number
+  prune?: boolean
+}
+
 export type SyncEvidenceState =
   | 'pending'
   | 'awaiting-authorization'

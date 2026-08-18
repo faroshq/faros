@@ -10,10 +10,12 @@
   },
   "include": [
     "src/api.ts",
+    "src/createRepositorySyncForm.ts",
     "src/mapper.ts",
     "src/state.ts",
     "src/route.ts",
     "src/api.test.ts",
+    "src/createRepositorySyncForm.test.ts",
     "src/mapper.test.ts",
     "src/route.test.ts",
     "src/state.test.ts"

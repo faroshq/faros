@@ -219,7 +219,7 @@ build-databricks-provider-portal: ## Build the Databricks provider's micro-front
 build-databricks-provider: build-databricks-provider-portal ## Build the Databricks provider binary (portal embedded)
 	cd providers/databricks && go build $(GOFLAGS) -ldflags "-X main.buildVersion=$(VERSION)" -o $(CURDIR)/$(BINDIR)/databricks-provider .
 
-build-deployments-provider-portal: ## Build the Deployments provider's read-only micro-frontend (Vite + Vue → portal/dist)
+build-deployments-provider-portal: ## Build the Deployments provider's micro-frontend (Vite + Vue → portal/dist)
 	cd providers/deployments/portal && npm install --no-audit --no-fund && npm run build
 
 build-deployments-provider: build-deployments-provider-portal ## Build the deployments provider binary (portal embedded)

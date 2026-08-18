@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# 1. Build the read-only portal bundle before compiling the provider so the
+# 1. Build the portal bundle before compiling the provider so the
 #    image contains the exact assets served by the binary.
 FROM node:22-alpine AS portal
 WORKDIR /portal

@@ -23,6 +23,7 @@ faros-provider-deployments .app {
 
 faros-provider-deployments .page-head,
 faros-provider-deployments .panel-head,
+faros-provider-deployments .page-actions,
 faros-provider-deployments .detail-actions,
 faros-provider-deployments .copy-row,
 faros-provider-deployments .runtime-link-row {
@@ -34,6 +35,11 @@ faros-provider-deployments .runtime-link-row {
 faros-provider-deployments .page-head,
 faros-provider-deployments .panel-head {
   justify-content: space-between;
+}
+
+faros-provider-deployments .page-actions {
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 faros-provider-deployments .page-title,
@@ -394,6 +400,155 @@ faros-provider-deployments .rollout-value {
   font-size: 11px;
 }
 
+faros-provider-deployments .create-sync-panel {
+  max-width: 720px;
+}
+
+faros-provider-deployments .create-description {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+faros-provider-deployments .icon-button {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+
+faros-provider-deployments .sync-form,
+faros-provider-deployments .create-field {
+  display: flex;
+  flex-direction: column;
+}
+
+faros-provider-deployments .sync-form {
+  gap: 14px;
+}
+
+faros-provider-deployments .create-field {
+  min-width: 0;
+  gap: 5px;
+}
+
+faros-provider-deployments .field-row {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+faros-provider-deployments .field-input {
+  width: 100%;
+  min-height: 34px;
+  box-sizing: border-box;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  padding: 7px 9px;
+  background: var(--color-surface-overlay);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+
+faros-provider-deployments .field-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+faros-provider-deployments .field-input:focus-visible {
+  border-color: var(--color-accent);
+  outline: 3px solid var(--color-accent-subtle);
+  outline-offset: 1px;
+  box-shadow: 0 0 12px var(--color-accent-glow);
+}
+
+faros-provider-deployments .field-input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
+faros-provider-deployments .field-hint,
+faros-provider-deployments .field-error,
+faros-provider-deployments .checkbox-field small {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+faros-provider-deployments .field-hint,
+faros-provider-deployments .checkbox-field small {
+  color: var(--color-text-muted);
+}
+
+faros-provider-deployments .field-error {
+  color: var(--color-danger);
+}
+
+faros-provider-deployments .interval-field {
+  max-width: 300px;
+}
+
+faros-provider-deployments .input-unit,
+faros-provider-deployments .checkbox-field,
+faros-provider-deployments .form-actions {
+  display: flex;
+  align-items: center;
+}
+
+faros-provider-deployments .input-unit {
+  gap: 8px;
+}
+
+faros-provider-deployments .input-unit .field-input {
+  min-width: 0;
+}
+
+faros-provider-deployments .input-unit > span {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+faros-provider-deployments .checkbox-field {
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+faros-provider-deployments .checkbox-field input {
+  margin: 2px 0 0;
+  accent-color: var(--color-accent);
+}
+
+faros-provider-deployments .checkbox-field span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+faros-provider-deployments .checkbox-field strong {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+faros-provider-deployments .error-summary {
+  border: 1px solid color-mix(in srgb, var(--color-danger) 40%, transparent);
+  border-radius: 6px;
+  padding: 9px 11px;
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+faros-provider-deployments .form-actions {
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid var(--color-border-subtle);
+  margin-top: 2px;
+  padding-top: 14px;
+}
+
 /* Canonical PortalKit recipes are namespaced here for direct provider visits;
    when loaded in the host, the host's faros-ui.css provides the same classes. */
 faros-provider-deployments .resource-table {
@@ -610,9 +765,11 @@ faros-provider-deployments .shimmer {
 
 @media (max-width: 560px) {
   faros-provider-deployments .page-head,
+  faros-provider-deployments .page-actions,
   faros-provider-deployments .detail-head,
   faros-provider-deployments .stale-card { align-items: flex-start; flex-direction: column; }
   faros-provider-deployments .condition-summary { grid-template-columns: 1fr; }
+  faros-provider-deployments .field-row { grid-template-columns: 1fr; }
   faros-provider-deployments .facts > div,
   faros-provider-deployments .outputs-list > div,
   faros-provider-deployments .artifact-list li { grid-template-columns: 1fr; gap: 3px; }

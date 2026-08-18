@@ -2,13 +2,13 @@
   "name": "faros-provider-deployments-portal",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only Deployments provider micro-frontend.",
+  "description": "Deployments provider micro-frontend for repository synchronization.",
   "type": "module",
   "scripts": {
     "build": "vite build",
     "dev": "vite",
     "typecheck": "vue-tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-dist/api.test.js .test-dist/mapper.test.js .test-dist/route.test.js .test-dist/state.test.js"
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-dist/api.test.js .test-dist/createRepositorySyncForm.test.js .test-dist/mapper.test.js .test-dist/route.test.js .test-dist/state.test.js src/createRepositorySyncForm.component.test.mjs"
   },
   "dependencies": {
     "lucide-vue-next": "^0.475.0",
