@@ -422,10 +422,13 @@ func (s *Server) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("creating provider heartbeat recorder: %w", err)
 		}
-		heartbeatAuthenticator, err = providers.NewTokenReviewHeartbeatAuthenticator(kcpConfig)
+		heartbeatAuthenticator, err = providers.NewProviderHeartbeatAuthenticator(kcpConfig, providerRegistry)
 		if err != nil {
 			return fmt.Errorf("creating provider heartbeat authenticator: %w", err)
 		}
+	}
+	if s.opts.DevMode && len(s.opts.StaticAuthTokens) > 0 {
+		heartbeatAuthenticator = providers.WithHeartbeatStaticTokenFallback(heartbeatAuthenticator, s.opts.StaticAuthTokens)
 	}
 	heartbeatHandler := providers.RequireHeartbeatAuthentication(
 		heartbeatAuthenticator,
