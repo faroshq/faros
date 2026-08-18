@@ -51,15 +51,19 @@ func runInitCmd(ctx context.Context) error {
 		WorkspacePath: workspacePath,
 		SchemasDir:    schemasDir,
 		// Demo-only configmaps claim (built-in type → no identityHash).
-		Claims: []sdkinstall.PermissionClaim{
-			{Resource: "configmaps", Verbs: []string{"get", "list", "watch"}},
-		},
+		Claims:           quickstartPermissionClaims(),
 		CatalogEntryFile: catalogEntryFile,
 	}); err != nil {
 		return fmt.Errorf("provider workspace bootstrap: %w", err)
 	}
 	log.Printf("quickstart-provider init: workspace bootstrapped (export=%s path=%s schemas=%s catalogEntry=%s)", apiExportName, workspacePath, schemasDir, catalogEntryFile)
 	return nil
+}
+
+func quickstartPermissionClaims() []sdkinstall.PermissionClaim {
+	return []sdkinstall.PermissionClaim{
+		{Resource: "configmaps", Verbs: []string{"get", "list", "watch"}},
+	}
 }
 
 // loadInitConfig resolves the workspace-admin kubeconfig for init.
