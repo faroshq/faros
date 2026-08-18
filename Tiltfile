@@ -584,7 +584,7 @@ local_resource(
 local_resource(
     'infrastructure',
     cmd='make build-infrastructure-provider',
-    serve_cmd='make run-provider-infrastructure',
+    serve_cmd='INFRASTRUCTURE_CONTROLLER_MODE=required make run-provider-infrastructure',
     deps=[
         'providers/infrastructure/main.go',
         'providers/infrastructure/heartbeat.go',
@@ -623,7 +623,7 @@ local_resource(
     resource_deps=['hub', 'kro-mgmt-up', 'app-studio-preview-console-key'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8082, path='/healthz'),
+        http_get=http_get_action(port=8082, path='/readyz'),
     ),
     labels=['providers-kro'],
 )

@@ -334,8 +334,10 @@ test-provider-readiness:
 	cd providers/code && go test ./...
 	cd providers/databricks && go test ./...
 	cd providers/edges && go test ./...
+	cd providers/infrastructure && go test ./...
 	cd providers/kuery && go test ./...
 	cd providers/quickstart && go test ./...
+	cd providers/vibe-studio && go test ./...
 
 test-util:
 	go test ./pkg/util/...
@@ -1871,7 +1873,7 @@ run-provider-vibe-studio: build-vibe-studio-provider vibe-studio-db-up ## Run th
 	VIBE_STUDIO_DATABASE_URL="$$VIBE_STUDIO_DATABASE_URL" \
 		$(BINDIR)/vibe-studio-provider
 
-install-provider-vibe-studio: ## Apply vibe-studio Provider + CatalogEntry into root:faros:providers
+install-provider-vibe-studio: ## Apply vibe-studio Provider onboarding record
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(VIBE_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1880,7 +1882,7 @@ install-provider-vibe-studio: ## Apply vibe-studio Provider + CatalogEntry into 
 	kubectl --kubeconfig=$(VIBE_STUDIO_KCP_KUBECONFIG) \
 		--server=$(VIBE_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply -f $(VIBE_STUDIO_PROVIDER_MANIFEST) -f $(VIBE_STUDIO_MANIFEST)
+		apply -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
 
 init-provider-vibe-studio: build-vibe-studio-provider ## Bootstrap vibe-studio APIExport + write dev provider kubeconfig
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
@@ -1917,9 +1919,10 @@ init-provider-vibe-studio: build-vibe-studio-provider ## Bootstrap vibe-studio A
 	FAROS_SCHEMAS_DIR=$(VIBE_STUDIO_SCHEMAS_DIR) \
 	VIBE_STUDIO_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
 	VIBE_STUDIO_CODE_IDENTITY_HASH="$$CODE_HASH" \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(VIBE_STUDIO_MANIFEST)) \
 		$(BINDIR)/vibe-studio-provider init
 
-uninstall-provider-vibe-studio: ## Delete the vibe-studio CatalogEntry + Provider
+uninstall-provider-vibe-studio: ## Delete vibe-studio Provider (full workspace teardown)
 	@test -f $(VIBE_STUDIO_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(VIBE_STUDIO_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1928,7 +1931,7 @@ uninstall-provider-vibe-studio: ## Delete the vibe-studio CatalogEntry + Provide
 	-kubectl --kubeconfig=$(VIBE_STUDIO_KCP_KUBECONFIG) \
 		--server=$(VIBE_STUDIO_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(VIBE_STUDIO_MANIFEST) -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
+		delete -f $(VIBE_STUDIO_PROVIDER_MANIFEST)
 
 # --- Dev agent image (template-native development mode) ---
 # The static control binary an init container injects into any dev-mode
@@ -1949,9 +1952,9 @@ load-dev-agent-image: docker-build-dev-agent ## Load the dev agent image into th
 	@echo ">>> loading $(DEV_AGENT_IMAGE) into kind cluster $(KRO_KIND_NAME)"
 	kind load docker-image $(DEV_AGENT_IMAGE) --name $(KRO_KIND_NAME)
 
-## Apply the infrastructure CatalogEntry into root:faros:providers. Idempotent.
-## Requires the hub to be running so the admin kubeconfig exists.
-install-provider-infrastructure: ## Apply infrastructure Provider + CatalogEntry into root:faros:providers
+## Apply infrastructure's admin Provider onboarding record. Idempotent. Provider
+## init self-registers CatalogEntry in the provisioned provider workspace.
+install-provider-infrastructure: ## Apply infrastructure Provider onboarding record
 	@test -f $(KROMC_KCP_KUBECONFIG) || { \
 		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
 		echo "start the hub first with: make run-hub-embedded-static"; \
@@ -1960,15 +1963,15 @@ install-provider-infrastructure: ## Apply infrastructure Provider + CatalogEntry
 	kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		apply --validate=false -f $(KROMC_PROVIDER_MANIFEST) -f $(KROMC_MANIFEST)
+		apply --validate=false -f $(KROMC_PROVIDER_MANIFEST)
 
 ## Delete the infrastructure CatalogEntry + Provider (Provider delete triggers
 ## full teardown of the sub-workspace via the controller's finalizer).
-uninstall-provider-infrastructure: ## Delete infrastructure CatalogEntry + Provider (full teardown)
+uninstall-provider-infrastructure: ## Delete infrastructure Provider (full workspace teardown)
 	-kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
 		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
 		--insecure-skip-tls-verify \
-		delete -f $(KROMC_MANIFEST) -f $(KROMC_PROVIDER_MANIFEST)
+		delete -f $(KROMC_PROVIDER_MANIFEST)
 
 ## One-shot bootstrap for the infrastructure provider's workspace.
 ## Uses the hub's admin kubeconfig to install CRDs, register APIExport
@@ -1993,6 +1996,7 @@ init-provider-infrastructure: build-infrastructure-provider ## Bootstrap infrast
 	INFRASTRUCTURE_WORKSPACE_PATH=$(INFRASTRUCTURE_WORKSPACE_PATH) \
 	INFRASTRUCTURE_KUBECONFIG=$(INFRASTRUCTURE_RUNTIME_KUBECONFIG) \
 	KRO_KUBECONFIG=$${KRO_KUBECONFIG:-$$( [ -f "$(KRO_KIND_KUBECONFIG)" ] && echo "$(KRO_KIND_KUBECONFIG)" )} \
+	FAROS_CATALOGENTRY_FILE=$(abspath $(KROMC_MANIFEST)) \
 		$(BINDIR)/infrastructure-provider init
 
 # ── code provider (git repository management) ──────────────────────────────
