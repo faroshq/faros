@@ -464,6 +464,21 @@ successor to the deprecated `sandbox-runner`:
 - **When infrastructure is absent**: the `files` family doesn't register;
   agents still have memory notes. No core feature breaks.
 
+### Background instance identity RBAC
+
+Background runs use a per-agent ServiceAccount whose managed ClusterRole grants
+only `get`/`list` on `instances.infrastructure.faros.sh`. The agents provider
+has create-only authority over tenant RBAC and verifies that exact rule before
+using an existing identity; it deliberately cannot update arbitrary tenant
+ClusterRoles.
+
+Releases before the flattened Instance API created `faros-agent-*` roles with
+`resources: ["*"]` in the infrastructure group. Those roles now fail closed.
+An administrator must perform the one-time migration by replacing that wildcard
+with `resources: ["instances"]` while leaving the group and read-only verbs
+unchanged. Do not grant the agents provider `update` on ClusterRoles to automate
+this migration; that would widen its authority over unrelated tenant RBAC.
+
 ## Tool families (built-in, in-process Go)
 
 Registered per-agent from its grants; every family is optional and

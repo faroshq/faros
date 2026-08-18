@@ -99,7 +99,7 @@ hub's connection manager), not over plain HTTP.
 Providers that run as their own process (own binary, own `/mcp` HTTP handler)
 are folded into the same aggregate over HTTP.
 
-**Discovery.** Providers are registered via a `ProviderCatalogEntry` and kept
+**Discovery.** Providers are registered via a `CatalogEntry` and kept
 in an in-memory registry with a `BackendURL` and a heartbeat
 ([`pkg/hub/providers/registry.go`](https://github.com/faroshq/faros/blob/main/pkg/hub/providers/registry.go)). `Provider.Ready()` requires
 valid endpoints and a fresh heartbeat (TTL ~90s).
@@ -205,7 +205,8 @@ Use this when your integration runs as its own process/binary.
 
 1. Serve a streamable-HTTP MCP handler at **`/mcp`** on your backend
    (mirror `providers/infrastructure/mcpserver/`).
-2. Register a `ProviderCatalogEntry` and **heartbeat** so the hub marks you
+2. Initialize the provider-owned APIExport, register a `CatalogEntry`, and
+   **heartbeat** so the hub marks you
    `Ready` with a reachable `BackendURL`. The aggregate fetches `{BackendURL}/mcp`.
 3. **Honour the forwarded identity.** Read the caller from each request:
    `X-Faros-Tenant` for the tenant workspace and `Authorization: Bearer <token>`

@@ -1,18 +1,12 @@
 # Providers — extending faros with provider UIs, virtual workspaces, and APIs
 
-**Status:** Design draft (ready for phase-1 implementation)
-**Owner:** TBD
-**Last updated:** 2026-05-22
+**Status:** Implemented architecture and provider-authoring reference
+**Owner:** Faros maintainers
+**Last updated:** 2026-08-16
 
 ---
 
-## Restore-from-reboot summary
-
-> This section exists so a fresh Claude Code session (or a returning human)
-> can pick up the work without re-reading the conversation history.
-
-**Where we are:** design phase complete. No code written yet. The branch is
-`mcp.example` on a clean tree apart from this doc and a stray `bob` file.
+## Current-state summary
 
 **Goal in one sentence:** make faros pluggable so third parties can ship
 "providers" that bring an `APIExport`, optional UI, optional backend HTTP
@@ -28,14 +22,14 @@ the how):
 | 0 | API group = **`providers.faros.sh`** (separate from `faros.sh`) | Catalog entries and bindings are platform-owner-only. Excluding them from the `core.faros.sh` merged APIExport keeps them out of tenant workspaces. Tenants interact via portal/hub mediation, not raw CR access |
 | 1 | Terminology = **provider** (not "addon") | `root:faros:providers` already exists; first-party faros `APIExport`s already live there |
 | 2 | UI embedding = **iframe via hub proxy** | Same-origin → no CORS. Any frontend stack. Module Federation rejected (Vue lock-in + build coupling) |
-| 3 | Provider workspace = `root:faros:providers:{name}`, **auto-created by hub** on `CatalogEntry` admission | Chart needs no kcp credentials |
-| 4 | Distribution = **one Helm chart per provider**, targets *host cluster only* | All kcp work owned by hub catalog controller |
-| 5 | Registration = **hybrid**: chart creates `CatalogEntry` shell; provider pod heartbeats every 30s (`POST /api/providers/{name}/heartbeat`, TTL 90s) | Declarative install + runtime liveness |
+| 3 | Provider workspace = `root:faros:providers:{name}`, created by the hub's admin `Provider` reconciler before provider init | Onboarding and runtime registration have separate, observable ownership |
+| 4 | Distribution = **one Helm chart per provider**, installed in the host cluster; its init container uses the onboarded provider kubeconfig to initialize the provider workspace | The chart never requires a platform-admin kcp credential, while the provider owns its API surface |
+| 5 | Registration = **hybrid**: chart renders a `CatalogEntry` that provider init applies; provider runtime heartbeats every 30s (`POST /api/providers/{name}/heartbeat`, TTL 90s) | Declarative contract + runtime liveness |
 | 6 | VW = **APIExport-only by default**; `spec.virtualWorkspace.url` is an opt-in escape hatch under `/services/providers/{name}/vw/*` | Most providers won't need a VW; lowers bar |
-| 7 | Provider→kcp identity = SA `provider` in the provider's workspace; hub mints kubeconfig and writes it as Secret `faros-provider-kubeconfig` in the provider's host namespace; **24h token rotation** | Reuses existing exec-credential pattern from `pkg/server/proxy/proxy.go` |
-| 8 | Schema delivery = **inline** in `CatalogEntry.spec.apiExport.schemas[].body`; hub parses + applies | Solves chicken-and-egg of "chart can't apply to workspace that doesn't exist yet" |
+| 7 | Provider→kcp identity = SA `provider` in the provider's workspace; admin onboarding mints a kubeconfig for provider init and runtime | Keeps the provider inside its own workspace and separates credentials from CatalogEntry registration |
+| 8 | Schema delivery = provider-owned `APIResourceSchema` files applied by provider `init`; `CatalogEntry.spec.apiExport.requiredResources` declares the stable minimum the hub must observe before Enable | Prevents bindings to an empty or incomplete export without making the hub own provider schemas |
 | 9 | PermissionClaim acceptance = **auto-accept-all** at Enable time, but ONLY for claims marked `tenantScoped: true`. Non-tenant-scoped claims refused unless admin sets `faros.sh/accept-untrusted-claims=true` on the `CatalogEntry` | Simplest safe default; per-claim toggles deferred to v2 |
-| 10 | Tenant Enable = **direct kcp `APIBinding` in the tenant workspace**. No `ProviderBinding` CRD — kcp-native. Catalog controller grants tenants `bind` verb on each provider's APIExport once the provider is Ready. Permission-claim safety enforced by `MaximalPermissionPolicy` on the APIExport (kcp). | Simpler, kcp-native; fewer moving parts. Audit/inventory queries fan out across tenant workspaces (acceptable). |
+| 10 | Tenant Enable = **server-mediated creation of a direct kcp `APIBinding` in the tenant workspace**. No `ProviderBinding` CRD. Provider init installs the export bind grant; the hub verifies provider readiness and exact declared claims before creating the binding. | Keeps lifecycle kcp-native while making the mutation boundary deterministic and auditable |
 
 **Deferred (do NOT block phase 1):**
 
@@ -49,9 +43,9 @@ the how):
 - Heartbeat over kcp leases instead of HTTP — possible v2 simplification.
 - Per-permission-claim UI toggles — v2.
 
-**Next concrete step:** implement phase 1. See §"Phase 1 implementation
-plan" for the backend file-by-file checklist; phase 2 (portal wiring) is
-detailed under §"Portal changes" + §"Phase 2 implementation plan".
+The phase plans later in this document are retained as historical design context.
+The current contract is the generated `CatalogEntry` API plus the onboarding,
+provider-init, readiness, and Enable flows described above and below.
 
 **Portal integration anchors** (referenced throughout):
 
@@ -122,19 +116,20 @@ top-level workspace, no new vocabulary.
 │  /ui/providers/{p}/*         → reverse proxy → catalog.spec.ui.url    │
 │  /services/providers/{p}/*   → reverse proxy → catalog.spec.backend.url│
 │  /clusters/*, /services/agent-proxy, /services/mcp ... (unchanged)    │
-│  /api/providers/{p}/heartbeat (POST, provider-SA-authed)              │
+│  /api/providers/{p}/heartbeat (POST, known-provider runtime signal)   │
 │                                                                       │
-│  Catalog controller: watches CatalogEntry                     │
-│    - auto-creates root:faros:providers:{p} sub-workspace              │
-│    - creates `provider` ServiceAccount in that workspace              │
-│    - writes faros-provider-kubeconfig Secret to provider's namespace  │
-│    - applies inline bootstrap (APIResourceSchema, APIExport)          │
-│    - rebuilds proxy routing table; tracks heartbeats                  │
+│  Provider controller: watches admin Provider                          │
+│    - creates root:faros:providers:{p} + `provider` ServiceAccount     │
+│    - mints the provider kubeconfig                                    │
+│                                                                       │
+│  Catalog controller: watches provider-owned CatalogEntry              │
+│    - verifies APIExport identity, resources, schemas, and claims      │
+│    - rebuilds proxy routing table; tracks health + heartbeats         │
 │                                                                       │
 │  Tenants APIBind to provider APIExports DIRECTLY in their workspace   │
-│    - Portal calls kcp as the user to create the APIBinding            │
-│    - Catalog controller pre-grants tenants `bind` verb cluster-wide   │
-│    - Permission safety = MaximalPermissionPolicy on the APIExport     │
+│    - Portal calls the hub's server-side Enable endpoint               │
+│    - Provider init installs the export-local `bind` grant             │
+│    - Hub verifies readiness + exact claims before APIBinding mutation │
 └──────────────────────────────────────────────────────────────────────┘
         │ kcp                              │ HTTP (in-cluster Service)
         ▼                                  ▼
@@ -327,10 +322,6 @@ spec:
   version: "1.2.0"
   iconURL: "/ui/providers/cost-insights/icon.svg"  # served via UI proxy
 
-  # Host-cluster namespace where the provider Deployment runs. Hub writes
-  # the faros-provider-kubeconfig Secret here.
-  serviceAccountNamespace: "cost-insights"
-
   # OPTIONAL: micro-frontend. Omit if provider has no UI.
   ui:
     url: "http://cost-insights-ui.cost-insights.svc.cluster.local"
@@ -347,24 +338,27 @@ spec:
   virtualWorkspace:
     url: "http://cost-insights.cost-insights.svc.cluster.local:6443"
 
-  # REQUIRED: the APIExport the provider owns. Hub creates the workspace,
-  # applies the inline schema(s), then creates the APIExport.
+  # REQUIRED for a tenant-enableable API provider: reference to the APIExport
+  # that provider init owns. Runtime-only integrations may omit it; the hub
+  # refuses tenant Enable when no export is declared or until it is complete.
   apiExport:
     name: "cost.faros.sh"
-    # Inline APIResourceSchema docs the hub applies on first reconcile.
-    # Multiple schemas allowed; one APIExport references them all.
-    schemas:
-      - groupResource: "greetings.cost.faros.sh"
-        # The full v1alpha1 APIResourceSchema body as a string. Hub parses
-        # and applies. Kept inline so the chart needs no kcp access.
-        body: |
-          apiVersion: apis.kcp.io/v1alpha1
-          kind: APIResourceSchema
-          metadata:
-            name: v260522-abc.greetings.cost.faros.sh
-          spec: { ... }
-    # PermissionClaims declared on the APIExport itself (kcp-enforced).
-    # Mirrored here as informational for the Enable dialog.
+    # Minimum static API surface that must already be published before the
+    # provider can be Enabled. Each entry must exist in APIExport.spec.resources
+    # and reference an existing APIResourceSchema. Dynamic extra resources are
+    # allowed, but every exported resource must reference an existing schema
+    # whose group/plural match the export entry. Keep this list synchronized
+    # with the provider's init output.
+    requiredResources:
+      - group: cost.faros.sh
+        name: greetings
+    # Exact mirror of the APIExport's permissionClaims (kcp-enforced). The hub
+    # verifies group/resource and order-insensitive verb-set parity before
+    # offering Enable, then presents this declaration in the consent dialog.
+    # Any identity-bearing claim must declare identitySource. The hub resolves
+    # that source's current APIExport identity and requires an exact match with
+    # the provider-owned APIExport claim. Identity-less built-in Kubernetes API
+    # claims must omit identitySource.
     permissionClaims:
       - resource: configmaps
         verbs: [get, list, watch]
@@ -375,21 +369,18 @@ spec:
 status:
   # Filled by catalog controller
   workspace: "root:faros:providers:cost-insights"
-  apiExportRef:
-    workspace: "root:faros:providers:cost-insights"
-    name: "cost.faros.sh"
   endpoints:
     ui: "http://cost-insights-ui.cost-insights.svc.cluster.local"
     backend: "http://cost-insights.cost-insights.svc.cluster.local:8080"
 
-  # Filled by heartbeat. provider.Ready = true iff heartbeat within TTL
-  # AND (no backend declared OR backend healthz is 200).
+  # Filled by heartbeat. Provider.Ready() requires at least an APIExport or a
+  # runtime endpoint; every declared APIExport must pass APIExportReady, every
+  # declared backend must pass health, and heartbeat must remain fresh after
+  # the provider has sent its first one.
   lastHeartbeat: "2026-05-22T10:15:00Z"
   reportedVersion: "1.2.0"
-  ready: true
 
   conditions:
-    - type: WorkspaceReady
     - type: APIExportReady
     - type: BackendHealthy   # only present if .spec.backend set
     - type: Ready
@@ -422,53 +413,60 @@ spec:
 
 **Why this works safely:**
 
-- **Tenants need `bind` verb on the provider's `APIExport`.** kcp doesn't
-  grant it by default. The hub's catalog controller pre-grants
-  `bind` cluster-wide for each provider once its `CatalogEntry`
-  reaches Ready (via a `ClusterRole` aggregated to the tenant identity).
-  Without this grant, the tenant's `APIBinding` create fails with 403.
-- **Permission claims are gated by kcp's `MaximalPermissionPolicy`** on
-  each provider's `APIExport`. A tenant cannot accept a claim outside
-  their workspace because the export's `MaximalPermissionPolicy` refuses.
-  The provider chart declares the maximum claim set; users pick from it.
+- **Tenants need `bind` verb on the provider's `APIExport`.** Provider init
+  installs the export-local bind grant; without it, APIBinding creation fails
+  with 403.
+- **Permission claims cross two gates.** Catalog readiness requires the
+  CatalogEntry and APIExport to carry the exact same group/resource/verb set,
+  with identity hashes for every identity-bearing custom API claim. Enable
+  auto-accepts only the declared `tenantScoped` claims unless an administrator
+  explicitly permits an untrusted claim.
+- **Claim upgrades preserve tenant consent and bound resources.** When an
+  APIExport adds or replaces a claim, kcp leaves the new tuple unapplied on
+  existing APIBindings. The enabled-provider inventory compares each binding's
+  group/resource/verbs set with the current CatalogEntry (and honors kcp's
+  `PermissionClaimsValid` condition for identity mismatches), and the portal
+  shows **Review access** on drift. Confirming that dialog updates
+  `spec.permissionClaims` on the existing APIBinding in place; it never
+  deletes/recreates the binding, and it preserves prior accept/reject decisions
+  for unchanged claims. This is the required rollout path for new provider
+  permissions.
 - **Audit and inventory** ("who enabled X?") = list `APIBindings` across
   tenant workspaces filtered by `reference.export.path`. Acceptable at
   current scale; revisit if it ever isn't.
-- **Uninstall** (admin deletes `CatalogEntry`) leaves orphan
-  `APIBindings` in tenant workspaces — kcp flips them NotReady (broken
-  reference). The catalog controller's deletion hook walks tenant
-  workspaces and removes them.
+- **Uninstall** deletes the admin `Provider`; its finalizer removes the provider
+  workspace, including CatalogEntry, APIExport, and schemas. Existing tenant
+  APIBindings are not silently rewritten by the catalog controller; kcp marks
+  their now-broken export reference NotReady until the tenant disables the
+  provider or an explicit migration owns that cleanup.
 - **Disable** = tenant deletes their own `APIBinding`. No special API.
 
 ---
 
 ## Hub changes
 
-### 1. Catalog controller (`pkg/hub/controllers/providercatalog/`)
+### 1. Provider onboarding and catalog observation (`pkg/hub/providers/`)
 
-Watches `CatalogEntry` in `root:faros:providers`. On each
-reconcile:
+Two reconcilers intentionally split ownership:
 
-1. **Sub-workspace**: ensure `root:faros:providers:{name}` exists. Use
-   the existing kcp tenancy client. Created with type `universal`,
-   `bootstrap.kcp.io/create-only: "true"`.
-2. **Provider ServiceAccount**: ensure a `ServiceAccount` named
-   `provider` exists in that workspace, bound to `cluster-admin` on the
-   workspace (admin within its own sandbox, nothing outside).
-3. **Kubeconfig Secret**: mint a token for the SA, build an exec-credential
-   kubeconfig pointing at the hub URL with cluster
-   `root:faros:providers:{name}`, write it as Secret
-   `faros-provider-kubeconfig` in `spec.serviceAccountNamespace` of the
-   *host* cluster. Idempotent. Rotate token every 24h (set
-   `kubernetes.io/service-account-token` style annotation).
-4. **Schema + APIExport apply**: parse `spec.apiExport.schemas[].body`,
-   apply each as an `APIResourceSchema` in the workspace, then
-   apply/update the `APIExport` referencing them.
-5. **Registry upsert**: push (Name, UIURL, BackendURL, VWURL, Ready) into
-   the in-process `Registry` (below).
+1. **Admin `Provider` reconcile** ensures
+   `root:faros:providers:{name}`, the workspace-local `provider`
+   ServiceAccount, and the kubeconfig Secret used by the chart. It does not
+   create provider APIs.
+2. **Provider `init`** applies the provider-owned `APIResourceSchema`s,
+   `APIExport`, `APIExportEndpointSlice`, bind grant, and `CatalogEntry` using
+   that kubeconfig. The CatalogEntry must live in
+   `root:faros:providers:<name>`; the catalog reconciler rejects same-named
+   entries observed in any other consumer workspace.
+3. **Catalog reconcile** parses runtime endpoints and observes the declared
+   APIExport. Before setting `APIExportReady=True`, it requires a valid export
+   identity, every `requiredResources` entry, a present and matching schema for
+   every actual exported resource, and exact permission-claim parity, including
+   every identity-bearing claim's trusted identity hash. It then upserts the
+   routing registry and records backend/heartbeat health.
 
-The controller runs in the hub. It uses the hub's existing controller
-manager and the kcp admin client.
+This split is deliberate: provider API contents remain provider-owned, while
+tenant Enable stays server-gated on independently observed state.
 
 ### 2. In-memory routing registry (`pkg/hub/providers/`)
 
@@ -505,15 +503,23 @@ Content-Type: application/json
 { "version": "1.2.0", "buildTime": "...", "status": "healthy" }
 ```
 
-- Authenticates the bearer token against the SA in
-  `root:faros:providers:{name}`. Rejects any other identity.
+- Accepts heartbeats only for a provider name already in the registry. The
+  current handler does not perform provider-SA identity validation itself;
+  deployments must protect the endpoint at the surrounding ingress/auth layer.
 - Updates `CatalogEntry.status.lastHeartbeat` and
   `reportedVersion`.
-- TTL: 90 seconds. Catalog controller flips `Ready=false` if no heartbeat
-  within TTL.
+- TTL: 90 seconds. The catalog controller periodically reconciles every
+  provider that has heartbeated and persists `Ready=false` after expiry,
+  including UI-only providers without a backend health probe.
 - Cheap: providers heartbeat every 30s; tiny payload.
 
 ### 4. Generic provider proxy
+
+Provider availability and proxy routability are deliberately distinct. An
+APIExport-only provider is `Ready` and can be Enabled without declaring any HTTP
+endpoint. Proxy routes additionally require `RuntimeReady`: a valid endpoint
+for that route plus the same backend-health and heartbeat gates. An API-only
+provider therefore never becomes an accidental proxy target.
 
 Two route prefixes registered in [pkg/hub/server.go](../pkg/hub/server.go):
 
@@ -545,27 +551,24 @@ Note: if `spec.virtualWorkspace.url` is set, the backend proxy also
 recognizes a `/services/providers/{name}/vw/*` sub-path and routes it to
 the VW URL instead. This is the opt-in advanced path.
 
-### 5. Catalog controller's RBAC + enable plumbing
+### 5. Provider-init RBAC + server-side Enable plumbing
 
-When the catalog controller (`pkg/hub/controllers/providercatalog/`)
-reconciles a `CatalogEntry`, it additionally:
+Provider init creates the bind grant next to its APIExport. The hub's
+server-side Enable endpoint then:
 
-1. **Grants tenants `bind` verb on the provider's `APIExport`.**
-   The controller creates / updates a `ClusterRole` named
+1. **Uses the provider-owned `bind` grant.** Provider init creates / updates a
+   `ClusterRole` named
    `faros:providers:bind:{name}` in the provider's workspace with rules
    `[apiGroups: ["apis.kcp.io"], resources: ["apiexports"], verbs: ["bind"], resourceNames: ["{name}"]]`,
-   and a `ClusterRoleBinding` aggregating that role to the tenant-identity
-   group (`system:authenticated` is too broad — we use the same identity
-   subject used by the existing tenant `APIBinding` to `core.faros.sh`).
-2. **Sets `MaximalPermissionPolicy` on the provider's `APIExport`** to
-   the union of claims declared in
-   `CatalogEntry.spec.apiExport.permissionClaims` that are marked
-   `tenantScoped`. This is the kcp-enforced safety wall: tenants cannot
-   accept a claim that escapes their workspace.
-3. **Cleanup on delete.** When the `CatalogEntry` is deleted, the
-   controller walks tenant workspaces, lists `APIBindings` whose
-   `reference.export.path` matches this provider's workspace, and deletes
-   them. Best-effort; orphans flip NotReady on their own anyway.
+   plus its binding.
+2. **Re-checks provider readiness before mutation.** A missing, incomplete, or
+   drifted APIExport returns a conflict before any tenant APIBinding is created.
+3. **Builds accepted claims from the verified CatalogEntry declaration.** Only
+   claims marked `tenantScoped` are auto-accepted unless the administrator has
+   explicitly allowed an untrusted claim. The APIExport must carry the exact
+   same group/resource/verb set.
+4. **Creates the tenant APIBinding** and, when requested, the separate
+   edge-proxy access grant.
 
 There is no separate "binding reconciler" — the tenant's `APIBinding`
 itself is the reconciled state, and kcp handles its lifecycle.
@@ -846,9 +849,9 @@ override needed). Confirm → calls the mutation, sets
 
 ## Provider author experience
 
-A provider ships as one Helm chart. **Chart only targets the host
-cluster — never kcp directly.** All kcp interactions are owned by the
-hub's catalog controller.
+A provider ships as one Helm chart installed in the host cluster. Its init
+container reaches only the already-onboarded provider workspace through the
+provider kubeconfig; it does not receive a platform-admin kcp credential.
 
 ```
 provider-cost-insights/
@@ -857,83 +860,74 @@ provider-cost-insights/
 └── templates/
     ├── namespace.yaml
     ├── serviceaccount.yaml
-    ├── deployment.yaml          # provider pod (controllers + UI + backend)
+    ├── deployment.yaml          # init bootstrap + provider runtime
     ├── service.yaml             # ClusterIP services for UI and backend
-    └── catalogentry.yaml        # CatalogEntry (with inline schemas)
+    └── catalogentry.yaml        # ConfigMap consumed by provider init
+└── files/schemas/               # provider-owned APIResourceSchemas
 ```
 
 `helm install cost-insights ./chart` →
 
-1. Provider Deployment starts. Reads
-   `/var/run/secrets/faros/faros-provider-kubeconfig` (mounted from the
-   Secret the hub will write).
-2. `CatalogEntry` is applied to the host cluster API.
-3. Hub catalog controller picks it up:
-   a. Creates `root:faros:providers:cost-insights` workspace.
-   b. Creates `provider` SA in that workspace.
-   c. Mints token, writes `faros-provider-kubeconfig` Secret to
-      `cost-insights` namespace.
-   d. Applies `APIResourceSchema` + `APIExport` to the workspace.
-4. Provider pod's controller-runtime manager sees the kubeconfig file
-   appear (or retries until it does), starts reconciling its own CRs.
-5. Provider starts heartbeating; `status.ready=true`.
-6. Users see it in `/providers`, click Enable, get an `APIBinding`.
+1. A platform admin applies an admin `Provider`. The hub creates
+   `root:faros:providers:cost-insights`, its `provider` ServiceAccount, and the
+   provider kubeconfig Secret.
+2. The chart's init container waits for that Secret, then idempotently applies
+   the provider's schemas, APIExport, endpoint slice, bind grant, and rendered
+   CatalogEntry into the provider workspace.
+3. The serve container starts its controllers and HTTP surfaces, then
+   heartbeats only when its own required runtime is usable.
+4. The catalog controller observes the APIExport contract and runtime health.
+   `APIExportReady=True` requires the declared minimum, valid schema references,
+   exact claims, and a valid export identity; `Ready=True` additionally reflects
+   endpoint/backend and heartbeat gates.
+5. Users see it in `/providers`; Enable performs a final readiness check before
+   creating the tenant APIBinding.
 
-### Alternative: self-bootstrap via an init container
+### Kubeconfig sources for provider init
 
-The flow above is **hub-provisioned** — the hub catalog controller owns
-all kcp interactions and mints `faros-provider-kubeconfig`. A provider
-may instead **self-bootstrap** with an init container that holds a kcp
-workspace-admin kubeconfig, which lets it be installed into any cluster
-with no hub provisioning step. The infrastructure provider supports this
-via `bootstrap.enabled=true` (see
-[providers/infrastructure](../providers/infrastructure/README.md#b-self-bootstrap-with-an-init-container-bootstrapenabledtrue)).
+The normal flow is admin-onboarded: the hub owns workspace/identity creation and
+provider init owns the workspace contents. A fully standalone installation may
+instead supply an existing workspace-admin kubeconfig and take responsibility
+for creating the workspace and credential out of band. The infrastructure
+provider exposes this as `bootstrap.kubeconfigSource=supplied`.
 
-The key simplification: **one kubeconfig, shared by init and serve.** Two
-sources, set by `bootstrap.kubeconfigSource`:
+The key simplification is **one provider-workspace kubeconfig used by init and,
+when needed, serve**. Infrastructure exposes two sources through
+`bootstrap.kubeconfigSource`:
 
 **`hubMinted` (default)** — clean division of responsibility:
 
 ```
 Platform admin                         Provider owner
 ─────────────                          ─────────────
-applies CatalogEntry                   helm install … --set bootstrap.enabled=true
+applies admin Provider                 helm install … --set bootstrap.enabled=true
    │                                       │
-   ▼  hub catalog controller               ▼  pod scheduled, waits for the Secret
+   ▼  hub Provider controller              ▼  pod scheduled, waits for the Secret
 creates root:faros:providers:<name>    init container (`<provider> init`)
-mints kubeconfig (cluster-admin          uses faros-provider-kubeconfig to install
-  in the workspace)                       CRDs / CachedResource / APIExport
-HostSecretWriter writes it as            │
-  faros-provider-kubeconfig              ▼  serve container, SAME Secret, runs
+mints provider-workspace kubeconfig       uses the supplied Secret to install
+   │                                      schemas / APIExport / CatalogEntry
+   └── admin/operator supplies Secret     ▼  serve container starts
 ```
 
 The minted `provider` SA is **cluster-admin within the provider
 workspace** (`EnsureProviderSA`), so it's powerful enough to do init's
-installs *and* run serve. The init/serve volume is **not** `optional` —
-the pod blocks until the hub delivers the Secret, giving natural ordering.
-Requires the hub to run with `--kubeconfig` so its `HostSecretWriter`
-([pkg/hub/providers/secretwriter.go](../pkg/hub/providers/secretwriter.go))
-can write into the provider's cluster.
+installs and run serve. The chart's init volume is **not** `optional`, so the
+pod blocks until its operator or deployment workflow supplies the Secret.
 
 **`supplied`** — fully standalone, no hub: you provide a
 workspace-admin kubeconfig (`bootstrap.kcpKubeconfig` /
 `kcpKubeconfigSecretRef`) and own the prerequisites (workspace exists,
 kubeconfig targets it).
 
-Trade-offs vs. hub-provisioned (model A):
+Trade-offs:
 
-- **hubMinted needs no separate credential** — the platform already minted
-  one; the provider owner never handles a kcp admin kubeconfig.
-- **Simpler than the old mint-to-Secret approach**: no second token, no
-  mid-pod Secret write, no extra RBAC.
+- **hubMinted needs no separate kcp admin credential** — the platform already
+  minted a workspace-scoped identity.
 - **Privilege**: serve runs with cluster-admin-in-workspace rather than a
-  narrow scoped SA. For strict least-privilege, prefer model A with a
-  manual init.
+  narrower runtime identity unless the provider mints one during init.
 
-All models converge on the same runtime contract: the serve container
-mounts a kubeconfig at `/var/run/secrets/faros/faros-provider-kubeconfig`
-and talks to kcp with it. Only *which identity* and *who supplies the
-Secret* differ.
+All models converge on the same bootstrap contract: provider init receives a
+kubeconfig for its own workspace and owns the API objects it publishes there.
 
 ### Minimal provider backend contract
 
@@ -941,11 +935,20 @@ A provider's backend (if it declares one) MUST:
 
 - Heartbeat: `POST /api/providers/{name}/heartbeat` to the hub every 30s
   (helper in the SDK).
-- `GET /healthz` → 200 when ready (used by hub for `BackendHealthy`).
+- `GET /healthz` → 200 while the HTTP process is live.
+- A provider whose API depends on a controller SHOULD expose `GET /readyz` and
+  return 200 only while that controller is usable. Its Deployment readiness
+  probe and CatalogEntry `backend.healthPath` must both use `/readyz`; keep
+  `/healthz` for liveness.
 
 A provider's controller (the kcp-talking part) MUST:
 
 - Wait for `faros-provider-kubeconfig` Secret to appear before starting.
+- Run provider init before serving: publish every stable API in
+  `requiredResources`, reference a valid matching APIResourceSchema from every
+  actual APIExport resource, and stamp permission claims exactly as declared in
+  both CatalogEntry copies. First-party claims require the target APIExport's
+  identity hash.
 - Use the kubeconfig's `provider` SA identity. The SA only has rights in
   the provider's own workspace; cross-workspace access is via the
   `APIExport`'s VirtualWorkspace endpoint (kcp serves this natively
@@ -986,12 +989,17 @@ A provider's UI MUST:
   platform-owned frame sources, such as App Studio preview hosts.
 - **Internal-only services**: providers should be `ClusterIP`. Hub is the
   only public ingress. Network policies recommended.
-- **Heartbeat token**: provider SA token is short-lived (24h); rotation
-  handled by the catalog controller.
+- **Heartbeat endpoint**: protect it at ingress until route-specific
+  provider-SA validation is enforced in the handler.
 
 ---
 
-## Phased delivery
+## Historical phased delivery
+
+The remaining phase tables and implementation checklists record how the first
+provider system was planned and landed. They are retained for design history,
+not as current operational instructions; use the current-state and provider
+author sections above for the supported contract.
 
 | Phase | Scope | Verifiable outcome |
 |---|---|---|
@@ -1001,7 +1009,7 @@ A provider's UI MUST:
 | 4 | Provider SDK + example chart in `examples/provider-hello/` | Third party can copy the example and ship a working provider end-to-end |
 | 5 | Hardening: RBAC fuzz, cache-bust verification, e2e tests, optional `virtualWorkspace` opt-in, claim re-acceptance flow on chart upgrade | Ready to declare stable |
 
-## Deferred items
+## Historical deferred items
 
 1. **GraphQL discovery of provider CRs** — REQUIRED by end of phase 3, not
    optional. Once a tenant workspace has an `APIBinding` to a provider's
@@ -1021,16 +1029,17 @@ A provider's UI MUST:
 
 ---
 
-## Phase 1 implementation plan
+## Historical phase 1 implementation plan
 
 Phase 1 = the full backend skeleton, no portal changes yet. Verifiable by
 installing a stub provider chart and curling
 `/services/providers/example/healthz` through the hub.
 
-### What landed (current tree)
+### Historical phase 1 snapshot
 
-Use these as the authoritative source — the Phase 1A skeleton is in
-place. The list below is descriptive, not prescriptive.
+This table records the original phase-1 landing points. Paths may still exist,
+but the ownership descriptions in the current-state sections above are
+authoritative.
 
 | Path | Purpose |
 |---|---|
@@ -1042,7 +1051,7 @@ place. The list below is descriptive, not prescriptive.
 | [hack/gen-core-apiexport/main.go](../hack/gen-core-apiexport/main.go) | Excludes `apiexport-providers.faros.sh.yaml` from the merged tenant-facing core export |
 | [pkg/hub/providers/registry.go](../pkg/hub/providers/registry.go) | In-memory routing table |
 | [pkg/hub/providers/proxy.go](../pkg/hub/providers/proxy.go) | `NewUIProxy`, `NewBackendProxy` reverse proxies |
-| [pkg/hub/providers/controller.go](../pkg/hub/providers/controller.go) | Catalog reconciler (Phase 1A: URL parse → registry upsert + Ready condition). Phase 1B will add workspace/SA/Secret/schema apply; Phase 3 will add the RBAC `bind`-verb grant + `MaximalPermissionPolicy` apply. |
+| [pkg/hub/providers/controller.go](../pkg/hub/providers/controller.go) | Catalog observer: endpoint parsing, APIExport contract verification, routing registry, and readiness conditions |
 | [pkg/hub/providers/api.go](../pkg/hub/providers/api.go) | `GET /api/providers` admin-mediated list endpoint backing the portal |
 | [pkg/hub/portal_security.go](../pkg/hub/portal_security.go) | `WithPortalSecurityHeaders` middleware (CSP) — applied to both embedded SPA and `--portal-dev-url` proxy |
 | [pkg/apiurl/urls.go](../pkg/apiurl/urls.go) | `PathPrefixProvidersUI`, `PathPrefixProvidersProxy` constants |
@@ -1072,48 +1081,27 @@ place. The list below is descriptive, not prescriptive.
 - Workspace YAML pattern:
   [config/kcp/workspace-providers.yaml](../config/kcp/workspace-providers.yaml)
 
-### Phase 1 verification recipe
+### Provider contract verification recipe
 
 1. `make codegen && make build` — clean build.
 2. Start the hub against an embedded kcp:
    `./bin/faros-hub --embedded-kcp --static-auth-tokens=test:user-default`.
-3. Apply a stub `CatalogEntry`:
-   ```yaml
-   apiVersion: faros.sh/v1alpha1
-   kind: CatalogEntry
-   metadata: { name: hello }
-   spec:
-     displayName: Hello
-     vendor: faros
-     version: 0.0.1
-     serviceAccountNamespace: default
-     backend:
-       url: http://localhost:8081  # any local HTTP responder
-       healthPath: /healthz
-     apiExport:
-       name: hello.example.com
-       schemas:
-         - groupResource: greetings.hello.example.com
-           body: |
-             apiVersion: apis.kcp.io/v1alpha1
-             kind: APIResourceSchema
-             metadata: { name: v260522-stub.greetings.hello.example.com }
-             spec: { ... minimal valid schema ... }
-   ```
-4. Observe in hub logs:
-   - workspace `root:faros:providers:hello` created
-   - SA `provider` created
-   - Secret `faros-provider-kubeconfig` written to `default` namespace
-   - APIResourceSchema + APIExport applied
-   - registry shows `hello` once stub backend returns 200 on `/healthz`
+3. Run `make install-provider-quickstart`. This applies only the admin
+   `Provider` onboarding record; wait for its Ready condition so the provider
+   workspace and credential exist.
+4. Run `make init-provider-quickstart`. Init applies the declared
+   APIResourceSchema, APIExport, endpoint slice, bind grant, and CatalogEntry in
+   `root:faros:providers:quickstart`. Observe that `APIExportReady` and `Ready`
+   become True only after the export identity, required resource, referenced
+   schema, exact claims, and backend health check are all ready.
 5. `curl -H "Authorization: Bearer test" \
-   http://localhost:9443/services/providers/hello/healthz` → reaches the
-   stub backend (matches the body it serves).
+   http://localhost:9443/services/providers/quickstart/healthz` → reaches the
+   quickstart backend.
 6. POST a heartbeat with the SA token from the Secret →
    `status.lastHeartbeat` updates.
-7. Delete the `CatalogEntry` → registry entry removed, Secret
-   cleaned up. (Workspace deletion is a v2 concern — leave it for now,
-   note in code as TODO.)
+7. Run `make uninstall-provider-quickstart`. Deleting the admin `Provider`
+   removes the registry entry and its finalizer tears down the provider
+   workspace, ServiceAccount, CatalogEntry, API surface, and kubeconfig Secret.
 
 ### What phase 1 deliberately does NOT do
 
@@ -1127,7 +1115,7 @@ place. The list below is descriptive, not prescriptive.
 
 ---
 
-## Phase 2 implementation plan (portal)
+## Historical phase 2 implementation plan (portal)
 
 Phase 2 = the full portal wiring. Verifiable by serving a static "hello"
 provider UI and seeing it load inside the portal frame.
