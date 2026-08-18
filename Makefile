@@ -330,7 +330,8 @@ test: test-provider-readiness
 
 test-provider-readiness: build-agents-provider-portal build-app-studio-provider-portal \
 	build-code-provider-portal build-databricks-provider-portal \
-	build-edges-provider-portal build-kuery-provider-portal build-quickstart-provider-portal
+	build-edges-provider-portal build-infrastructure-provider-portal \
+	build-kuery-provider-portal build-quickstart-provider-portal build-vibe-studio-provider-portal
 	cd providers/agents && go test ./...
 	cd providers/app-studio && go test ./...
 	cd providers/code && go test ./...
