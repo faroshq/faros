@@ -85,9 +85,9 @@ providerKubeconfig:
 
 # APIExport bootstrap (applied by the init container).
 apiExport:
-  # REQUIRED for kuery: the identityHash of the root edges.faros.sh
-  # APIExport. Copy it from the /bonkers "Root identities" view. Without it,
-  # tenant Enable accepts the edges claim but the controller engages zero edges.
+  # REQUIRED for kuery: the identityHash of the edges provider's
+  # edges.providers.faros.sh APIExport in root:faros:providers:edges. Without it,
+  # kuery cannot claim KubernetesCluster objects.
   edgesIdentityHash: ""
 
 serviceAccount:

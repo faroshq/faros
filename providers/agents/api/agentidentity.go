@@ -38,10 +38,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 )
@@ -58,11 +60,13 @@ var (
 // so the permission claim covers both without widening anything.
 const identityNamespace = "default"
 
-// instanceGroup is the infrastructure provider's instance API group. The
-// agent's Role grants read across it; instance kinds are created at runtime
-// from Templates, so they cannot be enumerated ahead of time and the grant is
-// written against the group rather than a fixed resource list.
-const instanceGroup = "infrastructure.faros.sh"
+const (
+	// instanceGroup and instanceResource identify the infrastructure provider's
+	// permanent, flattened Instance API. Limiting both halves of the RBAC tuple
+	// is important: a group wildcard would also expose Templates and future APIs.
+	instanceGroup    = "infrastructure.faros.sh"
+	instanceResource = "instances"
+)
 
 // agentIdentityName is the ServiceAccount / ClusterRole / binding name for one
 // agent. Prefixed so it is obviously platform-managed in a workspace a human
@@ -121,7 +125,9 @@ func (c *identityCache) put(cluster, agent, token string) {
 // ensureAgentIdentity provisions (idempotently) the agent's ServiceAccount, its
 // read-instances ClusterRole and binding, and its token Secret, then waits for
 // kcp's token controller to fill the token in. Every object is created-if-absent
-// and never updated, which is what the create-only permission claim allows.
+// and the managed ClusterRole must match the exact least-privilege rule. Legacy
+// wildcard roles fail closed and require an administrator-owned migration; the
+// provider intentionally has no authority to update arbitrary ClusterRoles.
 func ensureAgentIdentity(ctx context.Context, dyn dynamic.Interface, agent string) (string, error) {
 	name := agentIdentityName(agent)
 
@@ -133,20 +139,24 @@ func ensureAgentIdentity(ctx context.Context, dyn dynamic.Interface, agent strin
 	if err := createIfAbsent(ctx, dyn.Resource(serviceAccountGVR).Namespace(identityNamespace), sa); err != nil {
 		return "", fmt.Errorf("agent ServiceAccount: %w", err)
 	}
+	createdSA, err := dyn.Resource(serviceAccountGVR).Namespace(identityNamespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("read agent ServiceAccount: %w", err)
+	}
 
-	// Read-only, and only over the instance group. Instances are cluster-scoped
-	// (the per-template CRDs are), so this has to be a ClusterRole.
+	// Read-only, and only over the permanent Instance resource. Instances are
+	// cluster-scoped, so this has to be a ClusterRole.
 	role := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "rbac.authorization.k8s.io/v1",
 		"kind":       "ClusterRole",
 		"metadata":   map[string]any{"name": name},
 		"rules": []any{map[string]any{
 			"apiGroups": []any{instanceGroup},
-			"resources": []any{"*"},
+			"resources": []any{instanceResource},
 			"verbs":     []any{"get", "list"},
 		}},
 	}}
-	if err := createIfAbsent(ctx, dyn.Resource(clusterRoleGVR), role); err != nil {
+	if err := ensureAgentRole(ctx, dyn.Resource(clusterRoleGVR), role); err != nil {
 		return "", fmt.Errorf("agent ClusterRole: %w", err)
 	}
 
@@ -165,20 +175,97 @@ func ensureAgentIdentity(ctx context.Context, dyn dynamic.Interface, agent strin
 			"namespace": identityNamespace,
 		}},
 	}}
-	if err := createIfAbsent(ctx, dyn.Resource(clusterRoleBindingGVR), binding); err != nil {
+	if err := ensureAgentRoleBinding(ctx, dyn.Resource(clusterRoleBindingGVR), binding); err != nil {
 		return "", fmt.Errorf("agent ClusterRoleBinding: %w", err)
 	}
 
-	return ensureAgentToken(ctx, dyn, agent)
+	return ensureAgentToken(ctx, dyn, agent, createdSA.GetUID())
+}
+
+// ensureAgentRoleBinding creates the managed binding or verifies that an
+// existing same-named object binds only the managed ServiceAccount to the
+// managed least-privilege role. As with the role, collisions fail closed and
+// are never updated with the provider's create-only authority.
+func ensureAgentRoleBinding(ctx context.Context, bindings dynamic.ResourceInterface, desired *unstructured.Unstructured) error {
+	got, err := bindings.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if _, createErr := bindings.Create(ctx, desired, metav1.CreateOptions{}); createErr == nil {
+			return nil
+		} else if !apierrors.IsAlreadyExists(createErr) {
+			return createErr
+		}
+		got, err = bindings.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	}
+	if err != nil {
+		return err
+	}
+
+	desiredRoleRef, _, err := unstructured.NestedMap(desired.Object, "roleRef")
+	if err != nil {
+		return err
+	}
+	gotRoleRef, _, err := unstructured.NestedMap(got.Object, "roleRef")
+	if err != nil {
+		return err
+	}
+	desiredSubjects, _, err := unstructured.NestedSlice(desired.Object, "subjects")
+	if err != nil {
+		return err
+	}
+	gotSubjects, _, err := unstructured.NestedSlice(got.Object, "subjects")
+	if err != nil {
+		return err
+	}
+	if equality.Semantic.DeepEqual(gotRoleRef, desiredRoleRef) && equality.Semantic.DeepEqual(gotSubjects, desiredSubjects) {
+		return nil
+	}
+	return fmt.Errorf("managed binding %q has legacy or unexpected roleRef/subjects; an administrator must bind only ServiceAccount %q/%q to ClusterRole %q", desired.GetName(), identityNamespace, desired.GetName(), desired.GetName())
+}
+
+// ensureAgentRole creates the managed role or verifies an existing role's exact
+// policy. It never updates RBAC: widening the provider's create-only authority
+// would let it mutate arbitrary tenant ClusterRoles. An administrator must
+// narrow roles left by releases that used the infrastructure-group wildcard.
+func ensureAgentRole(ctx context.Context, roles dynamic.ResourceInterface, desired *unstructured.Unstructured) error {
+	got, err := roles.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if _, createErr := roles.Create(ctx, desired, metav1.CreateOptions{}); createErr == nil {
+			return nil
+		} else if !apierrors.IsAlreadyExists(createErr) {
+			return createErr
+		}
+		got, err = roles.Get(ctx, desired.GetName(), metav1.GetOptions{})
+	}
+	if err != nil {
+		return err
+	}
+
+	desiredRules, _, err := unstructured.NestedSlice(desired.Object, "rules")
+	if err != nil {
+		return err
+	}
+	gotRules, _, err := unstructured.NestedSlice(got.Object, "rules")
+	if err != nil {
+		return err
+	}
+	_, hasAggregationRule := got.Object["aggregationRule"]
+	if equality.Semantic.DeepEqual(gotRules, desiredRules) && !hasAggregationRule {
+		return nil
+	}
+	return fmt.Errorf("managed role %q has legacy or unexpected policy; an administrator must narrow it to read-only resource %q in API group %q", desired.GetName(), instanceResource, instanceGroup)
 }
 
 // ensureAgentToken creates the legacy service-account-token Secret and waits
 // for the token controller to populate it. Mirrors pkg/hub/providers
 // ensureLegacySAToken; kcp has no TokenRequest subresource, so this is how a
 // usable token is obtained.
-func ensureAgentToken(ctx context.Context, dyn dynamic.Interface, agent string) (string, error) {
+func ensureAgentToken(ctx context.Context, dyn dynamic.Interface, agent string, serviceAccountUID types.UID) (string, error) {
 	secretName := agentTokenSecretName(agent)
 	secrets := dyn.Resource(secretsGVR).Namespace(identityNamespace)
+	annotations := map[string]any{corev1.ServiceAccountNameKey: agentIdentityName(agent)}
+	if serviceAccountUID != "" {
+		annotations[corev1.ServiceAccountUIDKey] = string(serviceAccountUID)
+	}
 
 	sec := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
@@ -186,7 +273,7 @@ func ensureAgentToken(ctx context.Context, dyn dynamic.Interface, agent string) 
 		"metadata": map[string]any{
 			"name":        secretName,
 			"namespace":   identityNamespace,
-			"annotations": map[string]any{corev1.ServiceAccountNameKey: agentIdentityName(agent)},
+			"annotations": annotations,
 		},
 		"type": string(corev1.SecretTypeServiceAccountToken),
 	}}
@@ -199,6 +286,9 @@ func ensureAgentToken(ctx context.Context, dyn dynamic.Interface, agent string) 
 		got, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
+		}
+		if err := validateAgentTokenSecret(got, agent, serviceAccountUID); err != nil {
+			return false, err
 		}
 		// Secret data is base64 in unstructured form; NestedString gives the
 		// encoded value, so decode through the typed object instead.
@@ -218,9 +308,29 @@ func ensureAgentToken(ctx context.Context, dyn dynamic.Interface, agent string) 
 	return token, nil
 }
 
-// createIfAbsent creates an object, treating AlreadyExists as success. Nothing
-// here is ever updated: the provider holds create-only rights on the RBAC
-// objects precisely so it cannot later widen a grant it once made.
+func validateAgentTokenSecret(secret *unstructured.Unstructured, agent string, serviceAccountUID types.UID) error {
+	wantName := agentTokenSecretName(agent)
+	if secret.GetName() != wantName || secret.GetNamespace() != identityNamespace {
+		return fmt.Errorf("managed token Secret identity is %s/%s, want %s/%s", secret.GetNamespace(), secret.GetName(), identityNamespace, wantName)
+	}
+	typeName, found, err := unstructured.NestedString(secret.Object, "type")
+	if err != nil || !found || typeName != string(corev1.SecretTypeServiceAccountToken) {
+		return fmt.Errorf("managed token Secret %s/%s has unexpected type %q", identityNamespace, wantName, typeName)
+	}
+	annotations := secret.GetAnnotations()
+	wantSA := agentIdentityName(agent)
+	if annotations[corev1.ServiceAccountNameKey] != wantSA {
+		return fmt.Errorf("managed token Secret %s/%s names ServiceAccount %q, want %q", identityNamespace, wantName, annotations[corev1.ServiceAccountNameKey], wantSA)
+	}
+	if serviceAccountUID != "" && annotations[corev1.ServiceAccountUIDKey] != string(serviceAccountUID) {
+		return fmt.Errorf("managed token Secret %s/%s names ServiceAccount UID %q, want %q", identityNamespace, wantName, annotations[corev1.ServiceAccountUIDKey], serviceAccountUID)
+	}
+	return nil
+}
+
+// createIfAbsent creates an object, treating AlreadyExists as success. The
+// ClusterRole policy is verified separately so legacy wildcard grants fail
+// closed without widening the provider's create-only RBAC authority.
 func createIfAbsent(ctx context.Context, ri dynamic.ResourceInterface, obj *unstructured.Unstructured) error {
 	_, err := ri.Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {

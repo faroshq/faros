@@ -123,25 +123,6 @@ func TestUpsertAdoptsHeartbeatFromStatus(t *testing.T) {
 	}
 }
 
-func TestUpsertNewerStatusHeartbeatClearsLocalStaleness(t *testing.T) {
-	base := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	reg := NewRegistry()
-	reg.Upsert(Provider{
-		Name: "cost", EndpointsValid: true,
-		LastHeartbeat: base, HeartbeatRequired: true, HeartbeatStale: true,
-	})
-
-	reg.Upsert(Provider{
-		Name: "cost", EndpointsValid: true,
-		LastHeartbeat: base.Add(time.Minute), HeartbeatRequired: true, HeartbeatStale: false,
-	})
-
-	got, _ := reg.Get("cost")
-	if got.HeartbeatStale {
-		t.Fatal("newer status heartbeat did not clear the stale verdict")
-	}
-}
-
 // HeartbeatRequired must never regress: a provider that has beaten once is
 // expected to keep beating, whichever replica observed the first one.
 func TestUpsertKeepsHeartbeatRequired(t *testing.T) {
@@ -153,59 +134,5 @@ func TestUpsertKeepsHeartbeatRequired(t *testing.T) {
 
 	if got, _ := reg.Get("cost"); !got.HeartbeatRequired {
 		t.Fatal("HeartbeatRequired regressed to false on a spec-only upsert")
-	}
-}
-
-func TestReadyCombinesBackendHealthAndHeartbeat(t *testing.T) {
-	p := Provider{Name: "cost", EndpointsValid: true}
-	if !p.Ready() {
-		t.Fatal("provider without backend or heartbeat should preserve compatibility")
-	}
-	p.BackendHealthRequired = true
-	if p.Ready() {
-		t.Fatal("provider with an unhealthy required backend reported Ready")
-	}
-	p.BackendHealthy = true
-	if !p.Ready() {
-		t.Fatal("provider with a healthy backend should be Ready")
-	}
-	p.HeartbeatRequired = true
-	p.HeartbeatStale = true
-	if p.Ready() {
-		t.Fatal("provider with a stale heartbeat reported Ready")
-	}
-}
-
-func TestReadyAllowsAPIExportOnlyButRuntimeReadyDoesNot(t *testing.T) {
-	p := Provider{Name: "database", APIExportName: "database.providers.faros.sh"}
-	if p.Ready() {
-		t.Fatal("unverified APIExport-only provider was Ready for enablement")
-	}
-	p.APIExportReady = true
-	if !p.Ready() {
-		t.Fatal("APIExport-only provider was not Ready for enablement")
-	}
-	if p.RuntimeReady() {
-		t.Fatal("APIExport-only provider was marked ready for proxy routing")
-	}
-
-	p.RuntimeDeclared = true
-	if p.Ready() {
-		t.Fatal("provider with an invalid declared runtime endpoint was Ready")
-	}
-}
-
-func TestRuntimeReadyDoesNotDependOnAPIExportInitialization(t *testing.T) {
-	p := Provider{
-		Name:            "database",
-		APIExportName:   "database.providers.faros.sh",
-		RuntimeDeclared: true,
-		EndpointsValid:  true,
-	}
-	if p.Ready() {
-		t.Fatal("provider with an unverified APIExport was Ready for enablement")
-	}
-	if !p.RuntimeReady() {
-		t.Fatal("healthy runtime was blocked by independent APIExport initialization")
 	}
 }

@@ -42,6 +42,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -385,10 +386,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// edge-specific virtual workspace; edge traffic now flows through the generic
 	// provider backend proxy below (/services/providers/edges-connectivity/*).
 
-	// Provider extension proxies (Phase 1A — see docs/providers.md).
+	// Provider extension proxies (see docs/providers.md).
 	// The proxies key off an in-memory registry that the catalog controller
 	// (wired below alongside other multicluster controllers) keeps in sync
-	// with ProviderCatalogEntry resources.
+	// with CatalogEntry resources.
 	providerRegistry := providers.NewRegistry()
 	// Provider action invocations ride the backend proxy like every other
 	// data-plane verb (/services/providers/{name}/actions/clusters/...): the
@@ -404,7 +405,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// backendProxy is held so we can install the TenantResolver below
 	// once kcpProxy + userClient are wired. Until then the proxy still
 	// works — it just forwards without injecting X-Faros-User /
-	// X-Faros-Tenant, which is the Phase 1A behaviour.
+	// X-Faros-Tenant until the resolver is installed.
 	backendProxy := providers.NewBackendProxy(providerRegistry, logger)
 	router.PathPrefix(apiurl.PathPrefixProvidersProxy + "/").Handler(backendProxy)
 	router.Handle(providers.PathListProviders, providers.NewListHandler(providerRegistry)).Methods("GET")
@@ -800,8 +801,9 @@ func (s *Server) Run(ctx context.Context) error {
 				return
 			}
 			coreMgr, err := mcmanager.New(providersConfig, coreExportProvider, manager.Options{
-				Scheme:  scheme,
-				Metrics: metricsserver.Options{BindAddress: "0"},
+				Scheme:     scheme,
+				Metrics:    metricsserver.Options{BindAddress: "0"},
+				Controller: controllerOptionsForRetryableLeaderTerm(),
 			})
 			if err != nil {
 				logger.Error(err, "Creating core multicluster manager failed")
@@ -826,8 +828,9 @@ func (s *Server) Run(ctx context.Context) error {
 				return
 			}
 			adminMgr, err := mcmanager.New(providersConfig, adminExportProvider, manager.Options{
-				Scheme:  scheme,
-				Metrics: metricsserver.Options{BindAddress: "0"},
+				Scheme:     scheme,
+				Metrics:    metricsserver.Options{BindAddress: "0"},
+				Controller: controllerOptionsForRetryableLeaderTerm(),
 			})
 			if err != nil {
 				logger.Error(err, "Creating admin multicluster manager failed")
@@ -845,7 +848,7 @@ func (s *Server) Run(ctx context.Context) error {
 			// where the User and (companion) Organization CRs live. This is a
 			// single-cluster controller-runtime manager, separate from the
 			// multicluster managers above which serve the kcp-tenant fleet.
-			orgMgr, err := organization.NewManager(bootstrapper.UsersConfig(), scheme)
+			orgMgr, err := organization.NewManager(bootstrapper.UsersConfig(), scheme, controllerOptionsForRetryableLeaderTerm())
 			if err != nil {
 				logger.Error(err, "Creating organization manager failed")
 				return
@@ -858,7 +861,7 @@ func (s *Server) Run(ctx context.Context) error {
 			// Soft-delete reconciler — roadmap step 8 (docs/organizations.md
 			// O-8 + O-13). Separate manager from the bootstrap one so a
 			// soft-delete crash doesn't take the bootstrap workqueue down.
-			softdeleteMgr, err := softdelete.NewManager(bootstrapper.UsersConfig(), scheme)
+			softdeleteMgr, err := softdelete.NewManager(bootstrapper.UsersConfig(), scheme, controllerOptionsForRetryableLeaderTerm())
 			if err != nil {
 				logger.Error(err, "Creating soft-delete manager failed")
 				return
@@ -876,7 +879,7 @@ func (s *Server) Run(ctx context.Context) error {
 			// else — crashes between the dual writes, rows written by older
 			// hubs, drift. Own manager for the same isolation reason as
 			// soft-delete.
-			umiMgr, err := membershipindex.NewManager(bootstrapper.UsersConfig(), scheme)
+			umiMgr, err := membershipindex.NewManager(bootstrapper.UsersConfig(), scheme, controllerOptionsForRetryableLeaderTerm())
 			if err != nil {
 				logger.Error(err, "Creating membership-index manager failed")
 				return
@@ -1032,6 +1035,17 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func controllerOptionsForRetryableLeaderTerm() ctrlconfig.Controller {
+	// A hub can lose and reacquire its controller lease without restarting the
+	// process. Each term reconstructs the singleton managers with stable names,
+	// while controller-runtime retains its name registry for the process lifetime.
+	// The term callback waits for every old manager to drain before returning and
+	// campaigning again, so bypassing that process-global check cannot create two
+	// active controllers with one name.
+	skipNameValidation := true
+	return ctrlconfig.Controller{SkipNameValidation: &skipNameValidation}
 }
 
 func (s *Server) buildRestConfig() (*rest.Config, error) {

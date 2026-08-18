@@ -79,8 +79,8 @@ make build-code-provider-portal
 
 # 2. Run against an embedded-kcp hub (see the repo root README for the hub).
 make run-hub-embedded-static          # in one terminal
-make install-provider-code            # apply the CatalogEntry
-make init-provider-code               # write dev kubeconfig + ensure the EndpointSlice
+make install-provider-code            # onboard the provider workspace
+make init-provider-code               # publish APIs + self-register CatalogEntry
 make run-provider-code                # start the provider on :8083
 
 # 3. Smoke test.
@@ -116,7 +116,8 @@ via the provider kubeconfig; alternatively apply the raw manifest yourself:
 ```sh
 kubectl --kubeconfig kcp-admin.kubeconfig ws use root:faros:providers
 kubectl apply -f manifest.yaml
-kubectl get catalogentry code -o yaml   # Ready flips True once heartbeats land
+kubectl get catalogentry code -o yaml   # APIExportReady verifies init output;
+                                        # Ready also requires health/heartbeat gates
 ```
 
 Open the portal at `https://<hub>/ui/providers/code/`.
@@ -134,11 +135,11 @@ docker build -t ghcr.io/faroshq/faros-code-provider:dev providers/code/
 
 The chart ships the provider Deployment, a ClusterIP Service, the ServiceAccount,
 and (optionally) the CatalogEntry ConfigMap the init container applies to kcp.
-The runtime kubeconfig the controllers need
-is **minted by the hub** when it reconciles the CatalogEntry and mounted from the
-`faros-provider-kubeconfig` Secret — the volume is `optional`, so the pod serves
-portal/MCP/packages reads immediately and the controller manager engages once
-the Secret appears.
+The provider-workspace kubeconfig is minted during admin `Provider` onboarding,
+not CatalogEntry reconciliation. The chart mounts it from the
+`faros-provider-kubeconfig` Secret; its init container uses it to publish the
+schemas, APIExport, endpoint slice, bind grant, and CatalogEntry before the serve
+container starts.
 
 ### Minimal (PAT-only connections)
 
@@ -311,8 +312,9 @@ the connection token's `read:packages` scope.
 
 ### `init` subcommand
 
-`code-provider init` is a one-shot bootstrap that ensures the
-APIExportEndpointSlice exists (the multicluster provider watches it), then exits.
-It uses `CODE_KUBECONFIG` and `CODE_WORKSPACE_PATH`. The Helm deployment does not
-run it — the hub provisions everything; `make init-provider-code` runs it for the
-local dev flow.
+`code-provider init` is the idempotent provider-workspace bootstrap. It applies
+the checked-in APIResourceSchemas, APIExport, APIExportEndpointSlice, bind grant,
+and optional rendered CatalogEntry, then exits. It uses
+`FAROS_PROVIDER_KUBECONFIG`, `CODE_WORKSPACE_PATH`, `FAROS_SCHEMAS_DIR`, and
+`FAROS_CATALOGENTRY_FILE`. The Helm chart runs it as an init container;
+`make init-provider-code` runs the same contract in local development.

@@ -546,10 +546,15 @@ func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpe
 }
 
 // Phase reads an instance's phase: status.phase, then the Ready condition,
-// then state=ACTIVE. Empty when nothing is published yet.
+// then state=ACTIVE. Status from an older generation (or status that does not
+// identify a reconciled generation) is Pending rather than reusable rollout
+// evidence. Empty when current status publishes no lifecycle signal.
 func Phase(obj *unstructured.Unstructured) string {
 	if obj == nil {
 		return ""
+	}
+	if !statusGenerationCurrent(obj) {
+		return "Pending"
 	}
 	if phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase"); strings.TrimSpace(phase) != "" {
 		return strings.TrimSpace(phase)
@@ -564,6 +569,14 @@ func Phase(obj *unstructured.Unstructured) string {
 		return "Ready"
 	}
 	return ""
+}
+
+func statusGenerationCurrent(obj *unstructured.Unstructured) bool {
+	if obj == nil {
+		return false
+	}
+	observed, found, err := unstructured.NestedInt64(obj.Object, "status", "observedGeneration")
+	return err == nil && found && observed >= obj.GetGeneration()
 }
 
 func conditionStatus(obj *unstructured.Unstructured, conditionType string) (string, bool) {
@@ -591,6 +604,10 @@ func StatusFromObject(binding aiv1alpha1.ProjectProviderBindingSpec, obj *unstru
 		Provider: binding.Provider,
 	}
 	if obj == nil {
+		status.Phase = "Pending"
+		return status
+	}
+	if !statusGenerationCurrent(obj) {
 		status.Phase = "Pending"
 		return status
 	}

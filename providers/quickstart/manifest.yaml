@@ -1,8 +1,7 @@
 # Quickstart provider — register with the faros hub.
 #
-# Apply this against the kcp workspace where the faros.sh APIExport is
-# bound (typically the user's tenant workspace, or root:faros:providers when
-# running embedded kcp for development).
+# The provider init command applies this to its own onboarded workspace after
+# creating the APIResourceSchemas, APIExport, endpoint slice, and bind grant.
 #
 #   kubectl --kubeconfig kcp-admin.kubeconfig apply -f manifest.yaml
 #
@@ -17,10 +16,9 @@
 # Provider object reference — kind: CatalogEntry (providers.faros.sh)
 #
 # A CatalogEntry registers one provider ("plugin") with the faros hub. The
-# hub's catalog controller reconciles it into the provider sub-workspace
-# root:faros:providers:<name>, a ServiceAccount + runtime kubeconfig, the
-# APIExport tenants APIBind to, and a routing entry backing
-# /ui/providers/<name>/* and /services/providers/<name>/*.
+# provider's init command owns its workspace APIExport and schemas; the hub
+# observes their readiness and maintains routing for /ui/providers/<name>/*
+# and /services/providers/<name>/*.
 #
 # spec:
 #   displayName              Title on the portal catalog card + side nav. [required]
@@ -29,8 +27,6 @@
 #   version                  Provider/chart version (informational).
 #   category                 Groups the entry under a portal nav heading.
 #   iconURL                  Portal-relative icon path (served via the UI proxy).
-#   serviceAccountNamespace  Host namespace the provider Deployment runs in;
-#                            the hub writes faros-provider-kubeconfig here.
 #   ui:                      Micro-frontend (omit for a UI-less provider).
 #     url                      Address the hub reverse-proxies for
 #                              /ui/providers/<name>/* (exclusive with builtinRoute).
@@ -45,11 +41,11 @@
 #   virtualWorkspace:        Advanced opt-in for custom non-CRD verbs (Phase 5).
 #   apiExport:               The provider's kcp APIExport.
 #     name                     Fully-qualified APIExport name tenants APIBind to.
+#     requiredResources[]      Stable minimum {group, name} pairs provider init
+#                              must publish before the hub permits Enable.
 #     permissionClaims[]       Access the provider needs in tenant workspaces:
 #                              {resource, group, verbs, tenantScoped}. tenantScoped:
 #                              true auto-accepts on Enable.
-#     schemas[]                Inline APIResourceSchemas to install ({groupResource,
-#                              body}); [] = pure broker, no CRDs leak to tenants.
 # ════════════════════════════════════════════════════════════════════════
 ---
 apiVersion: providers.faros.sh/v1alpha1
@@ -69,12 +65,15 @@ spec:
   backend:
     url: "http://localhost:8081"
     healthPath: "/healthz"
-  # Provider-owned APIExport. The hub catalog controller materializes the
-  # sub-workspace root:faros:providers:quickstart, applies the inline
-  # APIResourceSchema(s), and creates an APIExport that tenants can bind
-  # to. Phase 3 will wire the tenant-side Enable flow.
+  # Reference to the APIExport that provider init owns. The hub verifies the
+  # declared contract before offering tenant Enable.
   apiExport:
     name: "quickstart.providers.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: quickstart.providers.faros.sh
+        name: greetings
     # Sample permission claim so the portal's Enable dialog has something to
     # render. The quickstart provider does not actually read configmaps —
     # this is purely for demonstration. Marked tenantScoped so the dialog

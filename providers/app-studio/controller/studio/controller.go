@@ -289,9 +289,16 @@ func refGVK(ref *aiv1alpha1.ProjectProviderResourceReference) (schema.GroupVersi
 	return gv.WithKind(ref.Kind), nil
 }
 
-// instanceReady reads the instance's Ready condition or state field. Pure.
+// instanceReady reads the instance's Ready condition or state field, but only
+// after the infrastructure controller has observed the current spec generation.
+// Provider-stamped values update spec, so old Ready evidence must not leak
+// across that convergence window.
 func instanceReady(inst *unstructured.Unstructured) bool {
 	if inst == nil {
+		return false
+	}
+	observedGeneration, found, err := unstructured.NestedInt64(inst.Object, "status", "observedGeneration")
+	if err != nil || !found || observedGeneration < inst.GetGeneration() {
 		return false
 	}
 	if state, ok, _ := unstructured.NestedString(inst.Object, "status", "state"); ok && state == "ACTIVE" {

@@ -46,11 +46,10 @@ import (
 // Subcommands:
 //
 //	code-provider init
-//	    One-shot bootstrap (thin — see init_cmd.go). The hub provisioner
-//	    already creates the sub-workspace, schemas, APIExport, SA, and
-//	    kubeconfig from the CatalogEntry, so init only fills any gaps the
-//	    provider's own multicluster manager needs (e.g. an
-//	    APIExportEndpointSlice). Exits when done.
+//	    One-shot provider-workspace bootstrap (see init_cmd.go). Admin
+//	    onboarding creates the sub-workspace, SA, and kubeconfig; init applies
+//	    the schemas, APIExport, endpoint slice, bind grant, and optional
+//	    CatalogEntry. Exits when done.
 //
 //	code-provider serve  (default if no subcommand)
 //	    Runtime. Reads the minted kubeconfig from CODE_KUBECONFIG and starts

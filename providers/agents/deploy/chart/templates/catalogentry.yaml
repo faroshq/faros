@@ -21,13 +21,24 @@ spec:
   backend:
     # The hub backend proxy forwards /services/providers/agents/* here,
     # injecting the verified X-Faros-Tenant/X-Faros-User headers and the
-    # caller's bearer token. The provider serves /api/* + /healthz.
+    # caller's bearer token. The provider serves /api/* + health/readiness.
     url: {{ default (printf "http://%s.%s.svc.cluster.local:%v" (include "agents.fullname" .) .Release.Namespace .Values.service.port) .Values.catalogEntry.backendURL | quote }}
-    healthPath: "/healthz"
+    healthPath: "/readyz"
   # Reference-only: the APIExport, schemas, slice, and bind grant are created by
   # this chart's init container (provider `init`, via the faros-provider-sdk).
   apiExport:
     name: "agents.faros.sh"
+    requiredResources:
+      - group: agents.faros.sh
+        name: agents
+      - group: agents.faros.sh
+        name: connections
+      - group: agents.faros.sh
+        name: schedules
+      - group: agents.faros.sh
+        name: toolsets
+      - group: agents.faros.sh
+        name: triggers
     permissionClaims:
       - resource: secrets
         verbs: ["get", "list", "watch", "create", "update", "delete"]
@@ -35,9 +46,9 @@ spec:
       # Per-agent identity for background runs. A scheduled run has no user to
       # act as, so the provider mints the agent a ServiceAccount in the tenant
       # workspace and calls the platform data plane as that identity. See
-      # api/agentidentity.go. Create-only on the RBAC objects: the provider
-      # grants the agent read access to instances and can never widen it to
-      # anything else, because it cannot write arbitrary roles.
+      # api/agentidentity.go. New roles grant exactly read-only access on
+      # instances. Create-only prevents arbitrary tenant RBAC mutation; legacy
+      # wildcard roles fail closed until an administrator narrows them.
       - resource: serviceaccounts
         verbs: ["get", "create"]
         tenantScoped: true
@@ -48,6 +59,17 @@ spec:
       - resource: clusterrolebindings
         group: rbac.authorization.k8s.io
         verbs: ["get", "create"]
+        tenantScoped: true
+      # Service-to-service callers use delegated review APIs in the target
+      # tenant's APIExport virtual workspace. Existing bindings explicitly
+      # review and accept additions in the provider catalog.
+      - group: authentication.k8s.io
+        resource: tokenreviews
+        verbs: [create]
+        tenantScoped: true
+      - group: authorization.k8s.io
+        resource: subjectaccessreviews
+        verbs: [create]
         tenantScoped: true
 {{- end -}}
 

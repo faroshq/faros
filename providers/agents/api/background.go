@@ -89,6 +89,9 @@ type background struct {
 	// them.
 	mu     sync.RWMutex
 	shards []*vwShard
+	// initialized is set after the endpoint slice is read successfully. A
+	// slice with zero endpoints is healthy before any tenant binds Agents.
+	initialized bool
 	// clusterShard maps a tenant logical cluster to the URL of the shard that
 	// serves it, learned from wildcard lists and endpoint probes.
 	clusterShard map[string]string
@@ -160,7 +163,12 @@ func (s *Server) webhookToken(clusterID, name string) string {
 // ensureVW discovers (and re-discovers) the APIExport VW endpoints from the
 // endpoint slice in the provider workspace — one per kcp shard. Existing shard
 // clients are preserved across calls; only new URLs build a client.
-func (b *background) ensureVW(ctx context.Context) error {
+func (b *background) ensureVW(ctx context.Context) (err error) {
+	defer func() {
+		b.mu.Lock()
+		b.initialized = err == nil
+		b.mu.Unlock()
+	}()
 	dyn, err := dynamic.NewForConfig(b.base)
 	if err != nil {
 		return err
@@ -221,7 +229,7 @@ func (b *background) ensureVW(ctx context.Context) error {
 func sliceEndpointURLs(u *unstructured.Unstructured) ([]string, error) {
 	endpoints, _, _ := unstructured.NestedSlice(u.Object, "status", "endpoints")
 	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("endpoint slice %q has no endpoints yet", apiExportNameForSlice)
+		return nil, nil
 	}
 	urls := make([]string, 0, len(endpoints))
 	seen := map[string]bool{}
@@ -239,6 +247,17 @@ func sliceEndpointURLs(u *unstructured.Unstructured) ([]string, error) {
 		return nil, fmt.Errorf("endpoint slice %q has no endpoint with a url", apiExportNameForSlice)
 	}
 	return urls, nil
+}
+
+// controlPlaneReady reports that the provider credential can read its
+// discovery slice. Tenant endpoints may legitimately be empty until enabled.
+func (b *background) controlPlaneReady() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.initialized
 }
 
 // ready reports whether at least one VW endpoint has been discovered.

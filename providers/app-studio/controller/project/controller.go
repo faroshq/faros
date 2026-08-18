@@ -479,8 +479,12 @@ func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *aiv
 		// it anyway would make every reconcile see drift it can never resolve.
 		bindings.DropUnsupportedAccess(observedValues, desiredValues)
 		observedTemplate, _, _ := unstructured.NestedString(got.Object, "spec", "template")
+		desiredTemplate, _, _ := unstructured.NestedString(want.Object, "spec", "template")
+		if observedTemplate != "" && observedTemplate != desiredTemplate {
+			return nil, &bindings.InvalidBindingError{Err: fmt.Errorf("instance %q already exists with immutable spec.template %q, want %q", want.GetName(), observedTemplate, desiredTemplate)}
+		}
 		if observedTemplate == "" {
-			observedTemplate, _, _ = unstructured.NestedString(want.Object, "spec", "template")
+			observedTemplate = desiredTemplate
 		}
 		next.Object["spec"] = map[string]any{
 			"template": observedTemplate,

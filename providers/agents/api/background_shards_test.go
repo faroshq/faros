@@ -69,12 +69,16 @@ func TestSliceEndpointURLsNormalizes(t *testing.T) {
 	}
 }
 
-func TestSliceEndpointURLsErrors(t *testing.T) {
-	if _, err := sliceEndpointURLs(sliceWithEndpoints()); err == nil {
-		t.Error("want an error for a slice with no endpoints")
+func TestSliceEndpointURLsAcceptsIdleProvider(t *testing.T) {
+	got, err := sliceEndpointURLs(sliceWithEndpoints())
+	if err != nil {
+		t.Fatalf("idle endpoint slice: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("idle endpoint slice URLs = %v, want empty", got)
 	}
 	if _, err := sliceEndpointURLs(sliceWithEndpoints("", "  ")); err == nil {
-		t.Error("want an error when no endpoint carries a url")
+		t.Fatal("malformed non-empty endpoint slice should fail")
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -54,14 +55,22 @@ type HeartbeatRecorder func(ctx context.Context, name, version string, at time.T
 const heartbeatPersistThreshold = HeartbeatTTL / 6
 
 // NewHeartbeatHandler returns an http.Handler serving
-// POST /api/providers/{name}/heartbeat. It accepts beats only for providers
-// already present in the registry; authentication, when configured by the
-// deployment, is outside this handler.
+// POST /api/providers/{name}/heartbeat. Auth is enforced by the faros auth
+// middleware mounted upstream of this handler — any bearer token faros
+// accepts will be accepted as a valid heartbeat sender in Phase 1C. Phase
+// 1D will tighten this to "must be the provider's own SA token" once SA
+// minting is in place.
 //
 // record may be nil (no kcp configured), in which case liveness stays local to
 // this process and the hub must not be scaled beyond one replica.
 func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, log logr.Logger) http.Handler {
+	return newHeartbeatHandler(reg, record, log, time.Now)
+}
+
+func newHeartbeatHandler(reg *Registry, record HeartbeatRecorder, log logr.Logger, now func() time.Time) http.Handler {
 	logger := log.WithName("heartbeat")
+	var persistedMu sync.Mutex
+	lastPersisted := map[string]time.Time{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -79,21 +88,41 @@ func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, log logr.Logge
 				return
 			}
 		}
-		now := time.Now()
+		beatAt := now()
 		// Apply locally first so this replica routes to the provider without
 		// waiting for the watch to loop the status write back around.
-		previous, known := reg.Get(name)
-		if !reg.Heartbeat(name, body.Version, now) {
+		if !reg.Heartbeat(name, body.Version, beatAt) {
 			http.Error(w, "provider not found: "+name, http.StatusNotFound)
 			return
 		}
-		if record != nil && (!known || now.Sub(previous.LastHeartbeat) >= heartbeatPersistThreshold) {
-			if err := record(r.Context(), name, body.Version, now); err != nil {
-				// Fail the beat rather than silently leaving other replicas to
-				// time the provider out; the provider retries on its next tick.
-				logger.Error(err, "persisting heartbeat failed", "provider", name)
-				http.Error(w, "recording heartbeat failed", http.StatusInternalServerError)
-				return
+		if record != nil {
+			persistedMu.Lock()
+			previousPersisted, persisted := lastPersisted[name]
+			shouldPersist := !persisted || beatAt.Sub(previousPersisted) >= heartbeatPersistThreshold
+			if shouldPersist {
+				// Reserve the interval before the API write so concurrent beats do
+				// not all persist. A failed write restores the prior state below.
+				lastPersisted[name] = beatAt
+			}
+			persistedMu.Unlock()
+
+			if shouldPersist {
+				if err := record(r.Context(), name, body.Version, beatAt); err != nil {
+					persistedMu.Lock()
+					if lastPersisted[name].Equal(beatAt) {
+						if persisted {
+							lastPersisted[name] = previousPersisted
+						} else {
+							delete(lastPersisted, name)
+						}
+					}
+					persistedMu.Unlock()
+					// Fail the beat rather than silently leaving other replicas to
+					// time the provider out; the provider retries on its next tick.
+					logger.Error(err, "persisting heartbeat failed", "provider", name)
+					http.Error(w, "recording heartbeat failed", http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 		logger.V(2).Info("heartbeat received", "provider", name, "version", body.Version)

@@ -309,6 +309,42 @@ func TestEnsureInstanceDeepMergesComputedFieldsAndRetriesConflict(t *testing.T) 
 	}
 }
 
+func TestEnsureInstanceRejectsImmutableTemplateCollision(t *testing.T) {
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		Spec:       aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+	}
+	b := binding(projectDevelopmentBindingName)
+	b.ResourceRef.Name = "demo-dev"
+	existing := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": b.ResourceRef.APIVersion,
+		"kind":       b.ResourceRef.Kind,
+		"metadata": map[string]any{
+			"name":   b.ResourceRef.Name,
+			"labels": map[string]any{"owner": "someone-else"},
+		},
+		"spec": map[string]any{"template": "postgres", "values": map[string]any{"size": "large"}},
+	}}
+	existing.SetGroupVersionKind(existing.GroupVersionKind())
+	c := fake.NewClientBuilder().WithObjects(existing).Build()
+
+	_, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b)
+	if !bindings.IsInvalidBinding(err) || !strings.Contains(err.Error(), "immutable spec.template") {
+		t.Fatalf("error = %v, want invalid immutable-template collision", err)
+	}
+	stored := &unstructured.Unstructured{}
+	stored.SetGroupVersionKind(existing.GroupVersionKind())
+	if err := c.Get(context.Background(), client.ObjectKey{Name: b.ResourceRef.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if template, _, _ := unstructured.NestedString(stored.Object, "spec", "template"); template != "postgres" {
+		t.Fatalf("provider mutated colliding template to %q", template)
+	}
+	if stored.GetLabels()["owner"] != "someone-else" || stored.GetLabels()[bindings.ProjectLabel] != "" {
+		t.Fatalf("provider adopted colliding instance labels: %v", stored.GetLabels())
+	}
+}
+
 // Keep the conflict test independent of provider-specific API discovery.
 func schemaGroupResourceForTest() schema.GroupResource {
 	return schema.GroupResource{Group: "infrastructure.faros.sh", Resource: "applications"}

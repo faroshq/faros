@@ -19,11 +19,8 @@ package providers
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -41,17 +38,22 @@ import (
 	providersv1alpha1 "github.com/faroshq/faros/apis/providers/v1alpha1"
 )
 
-// CatalogReconciler keeps the in-process Registry and CatalogEntry status in
-// sync with provider-owned registration state. On create/update it parses the
-// declared runtime endpoints, probes backend health, and verifies the observed
-// APIExport identity, stable required resources, every referenced schema, and
-// exact permission claims before marking the provider ready. On delete it drops
-// the routing entry.
+// CatalogReconciler keeps the in-process Registry in sync with the cluster's
+// CatalogEntry resources AND provisions the kcp-side artefacts each provider
+// needs (sub-workspace + APIResourceSchemas + APIExport).
 //
-// It deliberately does not provision the provider workspace or API surface.
-// Admin Provider reconciliation owns workspace/ServiceAccount/kubeconfig
-// onboarding; provider init owns APIResourceSchemas, APIExport, endpoint slice,
-// bind grant, and CatalogEntry.
+// Scope as of Phase 1B:
+//   - On create/update: parse spec.ui.url and spec.backend.url, set the
+//     registry entry, and apply the inline APIResourceSchemas + APIExport in
+//     the per-provider sub-workspace.
+//   - On delete: drop the registry entry. (Cascade GC of the sub-workspace
+//     and its APIExport is deferred — Phase 5 hardening.)
+//
+// Deferred:
+//   - Heartbeat-driven readiness (Phase 1C).
+//   - Provider ServiceAccount + kubeconfig Secret mint (only required for
+//     providers that ship a controller — Phase 1D).
+//   - RBAC grant + MaximalPermissionPolicy enabling tenant Enable (Phase 3).
 type CatalogReconciler struct {
 	mgr   mcmanager.Manager
 	reg   *Registry
@@ -62,34 +64,6 @@ type CatalogReconciler struct {
 	// mints kubeconfigs (admin onboarding does).
 	hubExternalURL string
 	hubInternalURL string
-	healthClient   httpDoer
-	exportChecker  apiExportChecker
-	workspaceOwner catalogWorkspaceOwner
-}
-
-type httpDoer interface {
-	Do(*http.Request) (*http.Response, error)
-}
-
-type apiExportChecker interface {
-	CheckAPIExport(context.Context, string, string, []APIExportResource, []PermissionClaim) error
-}
-
-type catalogWorkspaceOwner interface {
-	ResolveCatalogEntryOwnerCluster(context.Context, string, bool) (string, error)
-}
-
-const backendHealthTimeout = 3 * time.Second
-
-const catalogBuiltinAnnotation = "providers.faros.sh/builtin"
-
-func defaultBackendHealthClient() *http.Client {
-	return &http.Client{
-		Timeout: backendHealthTimeout,
-		// A provider-controlled redirect must not turn the hub's health probe into
-		// a request to a different authority. A 3xx response is unhealthy.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
 }
 
 // CatalogReconcilerOptions threads optional extras into the reconciler
@@ -103,11 +77,10 @@ type CatalogReconcilerOptions struct {
 }
 
 // SetupCatalogWithManager wires the reconciler into a multicluster manager.
-// kcpConfig is the admin rest.Config used for read-only provider-workspace
-// checks: resolving each workspace cluster ID and verifying its declared
-// APIExport is usable before Enable. Pass nil to run the controller in
-// registry-only mode (no kcp reads). The hub no longer provisions providers —
-// that moved to admin onboarding + provider Helm init.
+// kcpConfig is the admin rest.Config used only to RESOLVE each provider's
+// workspace cluster ID (read-only) for the Enable flow. Pass nil to run the
+// controller in registry-only mode (no kcp reads). The hub no longer
+// provisions providers — that moved to admin onboarding + provider Helm init.
 func SetupCatalogWithManager(mgr mcmanager.Manager, reg *Registry, kcpConfig *rest.Config, opts CatalogReconcilerOptions) error {
 	r := &CatalogReconciler{
 		mgr:            mgr,
@@ -115,12 +88,9 @@ func SetupCatalogWithManager(mgr mcmanager.Manager, reg *Registry, kcpConfig *re
 		noKCP:          kcpConfig == nil,
 		hubExternalURL: opts.HubExternalURL,
 		hubInternalURL: opts.HubInternalURL,
-		healthClient:   defaultBackendHealthClient(),
 	}
 	if kcpConfig != nil {
 		r.prov = NewProvisioner(kcpConfig)
-		r.exportChecker = r.prov
-		r.workspaceOwner = r.prov
 	}
 	return mcbuilder.ControllerManagedBy(mgr).
 		Named("provider-catalog").
@@ -134,13 +104,6 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 
 	cl, err := r.mgr.GetCluster(ctx, req.ClusterName)
 	if err != nil {
-		// A logical-cluster removal can make the multicluster manager forget the
-		// cluster before the CatalogEntry delete event is reconciled. Fail closed
-		// in that case, but preserve spoof resistance: DeleteOwned only removes a
-		// route whose last observed CatalogEntry came from this exact cluster.
-		if r.reg.DeleteOwned(req.Name, string(req.ClusterName)) {
-			logger.Info("Removed provider from registry after catalog cluster became unavailable")
-		}
 		return ctrl.Result{}, fmt.Errorf("getting cluster %s: %w", req.ClusterName, err)
 	}
 	c := cl.GetClient()
@@ -148,35 +111,16 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	var entry providersv1alpha1.CatalogEntry
 	if err := c.Get(ctx, req.NamespacedName, &entry); err != nil {
 		if apierrors.IsNotFound(err) {
-			// The watch spans all APIExport consumers. Only the logical cluster
-			// that owns the current route may remove it.
-			if r.reg.DeleteOwned(req.Name, string(req.ClusterName)) {
+			// Deletion: drop from registry. We key by name only across all
+			// clusters for Phase 1A; this is fine because catalog entries
+			// are intended to live in root:faros:providers and the chart
+			// names them uniquely cluster-wide.
+			if r.reg.Delete(req.Name) {
 				logger.Info("Removed provider from registry")
 			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
-	}
-
-	// A consumer of providers.faros.sh can create a CatalogEntry with any
-	// metadata.name. Bind the global route identity to the authoritative
-	// workspace before parsing endpoints or mutating the registry.
-	if r.workspaceOwner != nil {
-		builtin := entry.GetAnnotations()[catalogBuiltinAnnotation] == "true"
-		if builtin {
-			if _, registered := BuiltinByName(entry.Name); !registered {
-				logger.Info("Rejected unknown builtin CatalogEntry")
-				return ctrl.Result{}, nil
-			}
-		}
-		ownerCluster, err := r.workspaceOwner.ResolveCatalogEntryOwnerCluster(ctx, entry.Name, builtin)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("resolving authoritative CatalogEntry workspace: %w", err)
-		}
-		if ownerCluster == "" || ownerCluster != string(req.ClusterName) {
-			logger.Info("Rejected CatalogEntry from non-authoritative workspace", "authoritativeCluster", ownerCluster)
-			return ctrl.Result{}, nil
-		}
 	}
 
 	// Snapshot the status as observed. Every hub replica runs this reconciler
@@ -192,7 +136,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	// registry record would allow an action whose contract no longer matches
 	// the CatalogEntry observed by the controller.
 	if err := providersv1alpha1.ValidateProviderActions(entry.Spec.Actions); err != nil {
-		r.reg.DeleteOwned(entry.Name, string(req.ClusterName))
+		r.reg.Delete(entry.Name)
 		now := metav1.NewTime(time.Now())
 		entry.Status.Endpoints = &providersv1alpha1.ProviderEndpoints{}
 		setCondition(&entry.Status.Conditions, metav1.Condition{
@@ -231,36 +175,23 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		CatalogEntryCluster: string(req.ClusterName),
 	}
 	prov.EdgeProxyAccess = entry.Spec.EdgeProxyAccess
-	prov.AllowUntrustedClaims = entry.Annotations[AcceptUntrustedClaimsAnnotation] == "true"
 	// Liveness travels through status so it reaches every hub replica, not just
 	// the one whose heartbeat endpoint the provider happened to hit.
 	if entry.Status.LastHeartbeat != nil {
 		prov.LastHeartbeat = entry.Status.LastHeartbeat.Time
 		prov.HeartbeatRequired = true
-		prov.HeartbeatStale = time.Since(prov.LastHeartbeat) > HeartbeatTTL
 		prov.ReportedVersion = entry.Status.ReportedVersion
 	}
 	if entry.Spec.APIExport != nil {
 		prov.APIExportName = entry.Spec.APIExport.Name
 		prov.APIExportPath = providersParentWorkspace + ":" + entry.Name
-		for _, resource := range entry.Spec.APIExport.RequiredResources {
-			prov.RequiredResources = append(prov.RequiredResources, APIExportResource{
-				Group: resource.Group,
-				Name:  resource.Name,
-			})
-		}
 		for _, c := range entry.Spec.APIExport.PermissionClaims {
-			claim := PermissionClaim{
+			prov.PermissionClaims = append(prov.PermissionClaims, PermissionClaim{
 				Group:        c.Group,
 				Resource:     c.Resource,
 				Verbs:        append([]string(nil), c.Verbs...),
 				TenantScoped: c.TenantScoped,
-			}
-			if c.IdentitySource != nil {
-				claim.IdentitySourceKind = c.IdentitySource.Kind
-				claim.IdentitySourceProvider = c.IdentitySource.Provider
-			}
-			prov.PermissionClaims = append(prov.PermissionClaims, claim)
+			})
 		}
 	}
 
@@ -278,7 +209,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	}
 	parsedActions, actionSchemaErr := ParseProviderActions(entry.Spec.Actions)
 	if actionSchemaErr != nil {
-		r.reg.DeleteOwned(entry.Name, string(req.ClusterName))
+		r.reg.Delete(entry.Name)
 		now := metav1.NewTime(time.Now())
 		entry.Status.Endpoints = &providersv1alpha1.ProviderEndpoints{}
 		setCondition(&entry.Status.Conditions, metav1.Condition{
@@ -343,8 +274,6 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	})
 
 	var parseErrs []string
-	var backendHealthErr error
-	var apiExportErr error
 	if entry.Spec.UI != nil && entry.Spec.UI.URL != "" {
 		u, err := ParseURL(entry.Spec.UI.URL)
 		if err != nil {
@@ -354,21 +283,11 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		}
 	}
 	if entry.Spec.Backend != nil {
-		prov.BackendHealthRequired = true
 		u, err := ParseURL(entry.Spec.Backend.URL)
 		if err != nil {
 			parseErrs = append(parseErrs, "backend.url: "+err.Error())
 		} else {
 			prov.BackendURL = u
-			healthClient := r.healthClient
-			if healthClient == nil {
-				healthClient = defaultBackendHealthClient()
-			}
-			if err := probeBackendHealth(ctx, healthClient, u, entry.Spec.Backend.HealthPath); err != nil {
-				backendHealthErr = err
-			} else {
-				prov.BackendHealthy = true
-			}
 		}
 	}
 	if entry.Spec.VirtualWorkspace != nil {
@@ -388,25 +307,12 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		prov.LocalUIAssets = spec.LocalUIAssets
 	}
 
-	// RuntimeDeclared preserves the distinction between an APIExport-only
-	// provider and a provider whose declared endpoint was invalid. EndpointsValid
-	// covers spec parse health and "the provider has
+	// EndpointsValid covers spec parse health and "the provider has
 	// somewhere to render": a URL endpoint OR a builtin Vue route OR a
 	// backend proxy target OR embedded UI assets. Heartbeat-driven
 	// readiness is layered on by the sweeper (see Provider.Ready()).
-	prov.RuntimeDeclared = (entry.Spec.UI != nil && (entry.Spec.UI.URL != "" || entry.Spec.UI.BuiltinRoute != "")) ||
-		entry.Spec.Backend != nil || entry.Spec.VirtualWorkspace != nil || prov.LocalUIAssets != nil
 	prov.EndpointsValid = len(parseErrs) == 0 &&
 		(prov.UIURL != nil || prov.BackendURL != nil || prov.VirtualWorkspaceURL != nil || prov.BuiltinRoute != "" || prov.LocalUIAssets != nil)
-	if entry.Spec.APIExport != nil {
-		if r.exportChecker == nil {
-			apiExportErr = fmt.Errorf("APIExport verification is unavailable")
-		} else if err := r.exportChecker.CheckAPIExport(ctx, prov.APIExportPath, prov.APIExportName, prov.RequiredResources, prov.PermissionClaims); err != nil {
-			apiExportErr = err
-		} else {
-			prov.APIExportReady = true
-		}
-	}
 
 	r.reg.Upsert(prov)
 	// Render URLs as strings: a nil *url.URL panics klog's stringer (shows as
@@ -416,10 +322,9 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	// The hub no longer provisions the per-provider workspace, schemas,
 	// APIExport, SA, or kubeconfig — that moved to admin onboarding
 	// (pkg/hub/admin) plus the provider's own Helm `init` (faros-provider-sdk).
-	// The other read-only provider-workspace operation above verifies the
-	// APIExport. Here we resolve the logical cluster ID so the Enable endpoint
-	// can build the edges-proxy RBAC subject. An empty result means the provider
-	// has not finished onboarding yet.
+	// We only RESOLVE the provider workspace's logical cluster ID (read-only)
+	// so the Enable endpoint can build the edges-proxy RBAC subject. Returns
+	// empty until the provider has been onboarded, which is the correct gate.
 	if r.prov != nil && entry.Spec.APIExport != nil {
 		if cluster, err := r.prov.ResolveWorkspaceCluster(ctx, entry.Name); err != nil {
 			logger.Info("WARNING could not resolve provider workspace cluster", "err", err.Error())
@@ -439,50 +344,6 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		entry.Status.Endpoints.Backend = prov.BackendURL.String()
 	}
 
-	if entry.Spec.Backend == nil {
-		removeCondition(&entry.Status.Conditions, "BackendHealthy")
-	} else {
-		backendCondition := metav1.Condition{
-			Type:               "BackendHealthy",
-			LastTransitionTime: now,
-			ObservedGeneration: entry.Generation,
-		}
-		if prov.BackendHealthy {
-			backendCondition.Status = metav1.ConditionTrue
-			backendCondition.Reason = "HealthCheckSucceeded"
-			backendCondition.Message = "Provider backend health check succeeded."
-		} else {
-			backendCondition.Status = metav1.ConditionFalse
-			if prov.BackendURL == nil {
-				backendCondition.Reason = "InvalidEndpoint"
-				backendCondition.Message = "Provider backend URL is invalid."
-			} else {
-				backendCondition.Reason = "HealthCheckFailed"
-				backendCondition.Message = "Provider backend health check failed: " + backendHealthErr.Error()
-			}
-		}
-		setCondition(&entry.Status.Conditions, backendCondition)
-	}
-	if entry.Spec.APIExport == nil {
-		removeCondition(&entry.Status.Conditions, "APIExportReady")
-	} else {
-		exportCondition := metav1.Condition{
-			Type:               "APIExportReady",
-			LastTransitionTime: now,
-			ObservedGeneration: entry.Generation,
-		}
-		if prov.APIExportReady {
-			exportCondition.Status = metav1.ConditionTrue
-			exportCondition.Reason = "APIExportAvailable"
-			exportCondition.Message = "The declared APIExport identity, resources, schemas, and permission claims are ready."
-		} else {
-			exportCondition.Status = metav1.ConditionFalse
-			exportCondition.Reason = "APIExportUnavailable"
-			exportCondition.Message = "The declared APIExport is not ready: " + apiExportErr.Error()
-		}
-		setCondition(&entry.Status.Conditions, exportCondition)
-	}
-
 	cond := metav1.Condition{
 		Type:               "Ready",
 		LastTransitionTime: now,
@@ -492,27 +353,11 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	case len(parseErrs) > 0:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "InvalidEndpoint"
-		cond.Message = fmt.Sprintf("Endpoint errors: %v", parseErrs)
-	case entry.Spec.APIExport != nil && !prov.APIExportReady:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = "APIExportUnavailable"
-		cond.Message = "Provider APIExport is not ready: " + apiExportErr.Error()
-	case prov.BackendHealthRequired && !prov.BackendHealthy:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = "BackendUnhealthy"
-		cond.Message = "Provider backend is not healthy: " + backendHealthErr.Error()
-	case prov.HeartbeatRequired && prov.HeartbeatStale:
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = "HeartbeatStale"
-		cond.Message = "Provider heartbeat is stale."
-	case prov.Ready():
+		cond.Message = fmt.Sprintf("Endpoint parse errors: %v", parseErrs)
+	case prov.EndpointsValid:
 		cond.Status = metav1.ConditionTrue
-		cond.Reason = "Ready"
-		if prov.EndpointsValid {
-			cond.Message = "Provider endpoints and health checks are ready."
-		} else {
-			cond.Message = "Provider APIExport is available."
-		}
+		cond.Reason = "EndpointsResolved"
+		cond.Message = "Provider endpoints registered with the hub routing table."
 	default:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "NoEndpoint"
@@ -525,75 +370,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	} else if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if entry.Spec.APIExport != nil || entry.Spec.Backend != nil || prov.HeartbeatRequired {
-		// Backend health is runtime state, not spec state. Reconcile it even when
-		// the provider does not heartbeat. Heartbeat freshness is also runtime
-		// state: periodically reconciling every provider that has ever heartbeated
-		// publishes TTL expiry into CatalogEntry.status instead of changing only
-		// this replica's in-memory routing verdict.
-		return ctrl.Result{RequeueAfter: SweepInterval}, nil
-	}
 	return ctrl.Result{}, nil
-}
-
-// probeBackendHealth constructs a same-authority endpoint from the parsed
-// backend URL and the CatalogEntry healthPath, then requires HTTP 200 within a
-// bounded interval. Absolute/network-path health URLs and traversal segments
-// are rejected so healthPath cannot override the admitted backend authority.
-func probeBackendHealth(ctx context.Context, client httpDoer, backend *url.URL, healthPath string) error {
-	if backend == nil {
-		return fmt.Errorf("backend URL is missing")
-	}
-	if backend.Scheme != "http" && backend.Scheme != "https" {
-		return fmt.Errorf("backend URL must use http or https")
-	}
-	if healthPath == "" {
-		healthPath = "/healthz"
-	}
-	rel, err := url.Parse(healthPath)
-	if err != nil {
-		return fmt.Errorf("invalid healthPath: %w", err)
-	}
-	if rel.IsAbs() || rel.Host != "" || rel.User != nil || rel.Opaque != "" || rel.Fragment != "" {
-		return fmt.Errorf("healthPath must be a local HTTP path")
-	}
-	decodedPath, err := url.PathUnescape(rel.EscapedPath())
-	if err != nil {
-		return fmt.Errorf("invalid healthPath escaping: %w", err)
-	}
-	for _, segment := range strings.Split(decodedPath, "/") {
-		if segment == "." || segment == ".." {
-			return fmt.Errorf("healthPath must not contain traversal segments")
-		}
-	}
-	if decodedPath == "" {
-		return fmt.Errorf("healthPath must not be empty")
-	}
-	if !strings.HasPrefix(decodedPath, "/") {
-		decodedPath = "/" + decodedPath
-	}
-	target := *backend
-	target.Path = singleJoiningSlash(backend.Path, decodedPath)
-	target.RawPath = ""
-	target.RawQuery = rel.RawQuery
-	target.Fragment = ""
-
-	probeCtx, cancel := context.WithTimeout(ctx, backendHealthTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target.String(), nil)
-	if err != nil {
-		return fmt.Errorf("build health request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("returned HTTP %d", resp.StatusCode)
-	}
-	return nil
 }
 
 // updateStatusIfChanged writes entry's status only when it differs from what
@@ -631,27 +408,12 @@ func urlString(u *url.URL) string {
 func setCondition(conds *[]metav1.Condition, c metav1.Condition) {
 	for i, existing := range *conds {
 		if existing.Type == c.Type {
-			// LastTransitionTime describes a status transition, not a reconcile,
-			// generation observation, or reason/message refresh. Preserve it while
-			// Status is stable, while still publishing ObservedGeneration.
-			if existing.Status == c.Status {
-				c.LastTransitionTime = existing.LastTransitionTime
-			}
-			if equality.Semantic.DeepEqual(existing, c) {
-				return
+			if existing.Status == c.Status && existing.Reason == c.Reason && existing.Message == c.Message {
+				return // no-op
 			}
 			(*conds)[i] = c
 			return
 		}
 	}
 	*conds = append(*conds, c)
-}
-
-func removeCondition(conds *[]metav1.Condition, conditionType string) {
-	for i, condition := range *conds {
-		if condition.Type == conditionType {
-			*conds = append((*conds)[:i], (*conds)[i+1:]...)
-			return
-		}
-	}
 }

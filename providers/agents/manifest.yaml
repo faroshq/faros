@@ -43,12 +43,25 @@ spec:
   backend:
     # The hub backend proxy forwards /services/providers/agents/* here,
     # injecting the verified X-Faros-Tenant/X-Faros-User headers and the
-    # caller's bearer token. The provider serves /api/* + /healthz.
+    # caller's bearer token. The provider serves /api/* + health/readiness.
     url: "http://localhost:8087"
-    healthPath: "/healthz"
+    healthPath: "/readyz"
 
   apiExport:
     name: "agents.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: agents.faros.sh
+        name: agents
+      - group: agents.faros.sh
+        name: connections
+      - group: agents.faros.sh
+        name: schedules
+      - group: agents.faros.sh
+        name: toolsets
+      - group: agents.faros.sh
+        name: triggers
     # The provider stores per-workspace model credentials and per-connection
     # secrets in Secrets in the tenant workspace; the claim lets it read/write
     # them as the calling user.
@@ -59,9 +72,9 @@ spec:
       # Per-agent identity for background runs. A scheduled run has no user to
       # act as, so the provider mints the agent a ServiceAccount in the tenant
       # workspace and calls the platform data plane as that identity. See
-      # api/agentidentity.go. Create-only on the RBAC objects: the provider
-      # grants the agent read access to instances and can never widen it to
-      # anything else, because it cannot write arbitrary roles.
+      # api/agentidentity.go. New roles grant exactly read-only access on
+      # instances. Create-only prevents arbitrary tenant RBAC mutation; legacy
+      # wildcard roles fail closed until an administrator narrows them.
       - resource: serviceaccounts
         verbs: ["get", "create"]
         tenantScoped: true
@@ -74,13 +87,10 @@ spec:
         verbs: ["get", "create"]
         tenantScoped: true
       # Service-to-service invocation (api/s2s.go). A caller that is not a human
-      # — another provider, a job — presents its own ServiceAccount token instead
-      # of a user's, so the provider authenticates and authorizes it itself:
-      # TokenReview to resolve the identity, SubjectAccessReview to check it may
-      # run this agent, both on the APIExport virtual workspace scoped to the
-      # target cluster (kcp#4279 / kcp#4280). tenantScoped: the VW confines each
-      # review to the tenant's OWN workspace and cannot reach beyond it, so this
-      # is bounded. Built-in review APIs: no identityHash, verb create only.
+      # presents its own ServiceAccount token, so the provider uses delegated
+      # review APIs in the target tenant's APIExport virtual workspace. Existing
+      # bindings must explicitly review and accept these additions in the portal;
+      # kcp leaves them unapplied until then.
       - group: authentication.k8s.io
         resource: tokenreviews
         verbs: [create]
