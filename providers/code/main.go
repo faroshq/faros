@@ -111,7 +111,7 @@ func runServe() {
 		log.Fatalf("commit bundle store: %v", err)
 	}
 	log.Printf("commit bundle store: %s", bundles.Dir())
-	signer, err := commitbundle.NewCapabilitySigner()
+	signer, err := commitbundle.NewCapabilitySignerFromEnv()
 	if err != nil {
 		log.Fatalf("bundle capability signer: %v", err)
 	}

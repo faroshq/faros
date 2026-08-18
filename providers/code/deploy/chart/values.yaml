@@ -80,6 +80,13 @@ tenant:
 # generated file contents live here until the controller commits them.
 bundleStore:
   path: /var/lib/faros-code/commit-bundles
+  # Optional Secret containing the HMAC key used to sign RepositoryCheckout
+  # bundle capabilities. Set this when running more than one replica so any
+  # pod can validate a capability issued by another pod. With an empty name,
+  # the provider keeps its process-random single-replica fallback.
+  signingKeySecretRef:
+    name: ""
+    key: signing-key
   # Use an existing PVC instead of rendering one.
   existingClaim: ""
   # Explicit non-durable fallback for throwaway/dev deployments.
@@ -113,6 +120,11 @@ resources:
     memory: 64Mi
 
 # Optional name overrides + pod-level scheduling controls.
+# Optional Secret whose keys are injected wholesale as environment variables
+# (GitHub OAuth app credentials and other dev secrets) — the containerized
+# equivalent of sourcing providers/code/.env.
+envFromSecret: ""
+
 nameOverride: ""
 fullnameOverride: ""
 podLabels: {}

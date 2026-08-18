@@ -71,6 +71,14 @@ spec:
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 5
+          {{- if .Values.envFromSecret }}
+          # Bulk env injection (GitHub OAuth app credentials and other dev
+          # secrets) — the containerized equivalent of the host binary
+          # sourcing providers/code/.env.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.envFromSecret }}
+          {{- end }}
           env:
             - name: PORT
               value: "8083"
@@ -95,6 +103,15 @@ spec:
               value: /var/run/secrets/faros/faros-provider-kubeconfig
             - name: CODE_COMMIT_BUNDLE_DIR
               value: {{ .Values.bundleStore.path | quote }}
+            {{- if .Values.bundleStore.signingKeySecretRef.name }}
+            # All replicas must use the same key because a checkout capability
+            # may be issued by one pod and redeemed by another.
+            - name: CODE_COMMIT_BUNDLE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.bundleStore.signingKeySecretRef.name }}
+                  key: {{ .Values.bundleStore.signingKeySecretRef.key }}
+            {{- end }}
             {{- if .Values.tenant.credentialsNamespace }}
             - name: FAROS_TENANT_CREDENTIALS_NAMESPACE
               value: {{ .Values.tenant.credentialsNamespace | quote }}

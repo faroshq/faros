@@ -96,10 +96,13 @@ type BundleFile struct {
 	Delete  bool   `json:"delete,omitempty"`
 }
 
-// Store persists and fetches immutable commit bundles.
+// Store persists and fetches immutable commit bundles. Consume atomically
+// claims a bundle before reading it, which keeps one-time transfers safe when
+// multiple provider replicas share the same filesystem.
 type Store interface {
 	Put(ctx context.Context, scope string, files []File) (BundleRef, error)
 	Get(ctx context.Context, scope, name, digest string) (*Bundle, error)
+	Consume(ctx context.Context, scope, name, digest string) (*Bundle, error)
 	Delete(ctx context.Context, scope, name, digest string) error
 }
 
@@ -213,20 +216,51 @@ func (s *FileStore) Get(ctx context.Context, scope, name, digest string) (*Bundl
 		}
 		return nil, fmt.Errorf("read bundle %q: %w", name, err)
 	}
-	var bundle Bundle
-	if err := json.Unmarshal(data, &bundle); err != nil {
-		return nil, fmt.Errorf("decode bundle %q: %w", name, err)
+	return decodeBundle(data, scope, name, digest)
+}
+
+// Consume atomically claims and reads a bundle. The initial rename is the
+// one-time boundary: only one process can move the source pathname to its
+// private claim pathname, even when handlers are running in different pods
+// against the same volume. The claim is removed after the read; a crash after
+// the rename leaves the bundle consumed rather than allowing a replay.
+func (s *FileStore) Consume(ctx context.Context, scope, name, digest string) (*Bundle, error) {
+	if s == nil {
+		return nil, errors.New("bundle store is nil")
 	}
-	if bundle.Name != name {
-		return nil, fmt.Errorf("bundle %q has stored name %q", name, bundle.Name)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if bundle.Scope != strings.TrimSpace(scope) {
-		return nil, fmt.Errorf("bundle %q scope mismatch", name)
+	key, err := scopeKey(scope)
+	if err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(digest) != "" && bundle.Digest != digest {
-		return nil, fmt.Errorf("bundle %q digest mismatch: got %s want %s", name, bundle.Digest, digest)
+	if err := validateBundleName(name); err != nil {
+		return nil, err
 	}
-	return &bundle, nil
+	dir := s.scopeDir(key)
+	claim, err := os.CreateTemp(dir, "."+name+"-*.consuming")
+	if err != nil {
+		return nil, fmt.Errorf("create bundle claim: %w", err)
+	}
+	claimPath := claim.Name()
+	if err := claim.Close(); err != nil {
+		_ = os.Remove(claimPath)
+		return nil, fmt.Errorf("close bundle claim: %w", err)
+	}
+	defer func() { _ = os.Remove(claimPath) }()
+
+	if err := os.Rename(s.path(key, name), claimPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", errBundleNotFound, name)
+		}
+		return nil, fmt.Errorf("claim bundle %q: %w", name, err)
+	}
+	data, err := os.ReadFile(claimPath)
+	if err != nil {
+		return nil, fmt.Errorf("read claimed bundle %q: %w", name, err)
+	}
+	return decodeBundle(data, scope, name, digest)
 }
 
 // Delete removes a bundle after its RepositoryCommit has reached terminal
@@ -261,6 +295,23 @@ func (s *FileStore) Delete(ctx context.Context, scope, name, digest string) erro
 		return fmt.Errorf("delete bundle %q: %w", name, err)
 	}
 	return nil
+}
+
+func decodeBundle(data []byte, scope, name, digest string) (*Bundle, error) {
+	var bundle Bundle
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return nil, fmt.Errorf("decode bundle %q: %w", name, err)
+	}
+	if bundle.Name != name {
+		return nil, fmt.Errorf("bundle %q has stored name %q", name, bundle.Name)
+	}
+	if bundle.Scope != strings.TrimSpace(scope) {
+		return nil, fmt.Errorf("bundle %q scope mismatch", name)
+	}
+	if strings.TrimSpace(digest) != "" && bundle.Digest != digest {
+		return nil, fmt.Errorf("bundle %q digest mismatch: got %s want %s", name, bundle.Digest, digest)
+	}
+	return &bundle, nil
 }
 
 func (s *FileStore) scopeDir(scopeKey string) string {

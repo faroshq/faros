@@ -7,6 +7,11 @@ service:
   port: 8093
 providerKubeconfig:
   secretName: faros-provider-kubeconfig
+# Run the provider bootstrap init container. Disable only when an external
+# workflow has already initialized the provider workspace and supplied the
+# resulting runtime kubeconfig (the Tilt cluster flow does this explicitly).
+bootstrap:
+  enabled: true
 infrastructureIdentityHash: ""
 codeIdentityHash: ""
 code:
@@ -22,4 +27,6 @@ hub:
   insecure: false
 catalogEntry:
   enabled: true
+nameOverride: ""
+fullnameOverride: ""
 resources: {}

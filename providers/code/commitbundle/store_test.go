@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -174,5 +175,65 @@ func TestFileStoreScopesBundles(t *testing.T) {
 	}
 	if _, err := store.Get(context.Background(), "../tenant-a", ref.Name, ref.Digest); err == nil {
 		t.Fatal("Get returned nil error for invalid scope")
+	}
+}
+
+func TestFileStoreConsumeIsAtomicAcrossStoreInstances(t *testing.T) {
+	root := t.TempDir()
+	writer, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := writer.Put(context.Background(), "root:tenant", []File{{Path: "app.yaml", Content: "kind: App\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		bundle *Bundle
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for _, store := range []*FileStore{first, second} {
+		wg.Add(1)
+		go func(store *FileStore) {
+			defer wg.Done()
+			<-start
+			bundle, err := store.Consume(context.Background(), ref.Scope, ref.Name, ref.Digest)
+			results <- result{bundle: bundle, err: err}
+		}(store)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	missing := 0
+	for got := range results {
+		if got.err == nil {
+			successes++
+			if got.bundle == nil || got.bundle.Digest != ref.Digest {
+				t.Fatalf("successful consume returned %#v, want digest %q", got.bundle, ref.Digest)
+			}
+			continue
+		}
+		if IsNotFound(got.err) {
+			missing++
+			continue
+		}
+		t.Fatalf("Consume returned unexpected error: %v", got.err)
+	}
+	if successes != 1 || missing != 1 {
+		t.Fatalf("concurrent consumes = %d successes, %d not-found; want one of each", successes, missing)
 	}
 }

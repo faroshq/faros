@@ -16,6 +16,7 @@ spec:
     spec:
       serviceAccountName: {{ include "deployments.serviceAccountName" . }}
       automountServiceAccountToken: false
+      {{- if .Values.bootstrap.enabled }}
       initContainers:
         - name: init
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
@@ -34,6 +35,7 @@ spec:
             {{- if .Values.catalogEntry.enabled }}
             - { name: catalogentry, mountPath: /etc/faros/catalogentry, readOnly: true }
             {{- end }}
+      {{- end }}
       containers:
         - name: provider
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"

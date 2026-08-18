@@ -151,6 +151,12 @@ The chart is at `deploy/chart`. Required deployment inputs are:
   `infrastructure.providers.faros.sh`.
 - `hub.url` and, when required, `hub.tokenSecretRef`.
 
+`bootstrap.enabled` defaults to `true` and runs the chart init container. Set
+it to `false` only when an external bootstrap has already initialized the
+Deployments workspace and supplied `providerKubeconfig.secretName`; this is
+the split used by `Tiltfile.cluster` after its explicit `deployments-init`
+resource.
+
 The pod uses a dedicated ServiceAccount with host-cluster token automounting
 disabled. Both init and serve authenticate to kcp only through the mounted
 provider kubeconfig.

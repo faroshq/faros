@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -23,7 +24,11 @@ const (
 	CapabilityScopeHeader  = "X-Faros-Bundle-Scope"
 	CapabilityNameHeader   = "X-Faros-Bundle-Name"
 	CapabilityDigestHeader = "X-Faros-Bundle-Digest"
-	capabilityTTL          = 2 * time.Minute
+	// EnvCapabilitySigningKey configures the HMAC key used by all Code
+	// replicas. Leave it unset for the single-replica development fallback.
+	EnvCapabilitySigningKey = "CODE_COMMIT_BUNDLE_SIGNING_KEY"
+	capabilityTTL           = 2 * time.Minute
+	minCapabilityKeyBytes   = 32
 )
 
 var (
@@ -39,8 +44,10 @@ type capabilityClaims struct {
 }
 
 // CapabilitySigner issues short-lived, opaque one-time bundle capabilities.
-// The key is process-local: capabilities are intentionally not portable
-// across provider instances or restarts.
+// Deployments may arrive at any Code replica, so production replicas must be
+// configured with the same key through EnvCapabilitySigningKey. When that
+// variable is absent, the process-random fallback remains useful for a
+// single-replica local process.
 type CapabilitySigner struct {
 	key []byte
 }
@@ -51,7 +58,31 @@ func NewCapabilitySigner() (*CapabilitySigner, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate bundle capability key: %w", err)
 	}
-	return &CapabilitySigner{key: key}, nil
+	return newCapabilitySigner(key)
+}
+
+// NewCapabilitySignerWithKey creates a signer from a shared HMAC key. The key
+// is copied so callers may safely reuse or clear their input buffer.
+func NewCapabilitySignerWithKey(key []byte) (*CapabilitySigner, error) {
+	return newCapabilitySigner(key)
+}
+
+// NewCapabilitySignerFromEnv creates a signer from the configured shared key,
+// falling back to NewCapabilitySigner when the variable is unset or blank.
+// Kubernetes Secret values are exposed as ordinary environment strings; the
+// value is treated as opaque rather than being base64-decoded a second time.
+func NewCapabilitySignerFromEnv() (*CapabilitySigner, error) {
+	if key := strings.TrimSpace(os.Getenv(EnvCapabilitySigningKey)); key != "" {
+		return NewCapabilitySignerWithKey([]byte(key))
+	}
+	return NewCapabilitySigner()
+}
+
+func newCapabilitySigner(key []byte) (*CapabilitySigner, error) {
+	if len(key) < minCapabilityKeyBytes {
+		return nil, fmt.Errorf("bundle capability key must be at least %d bytes", minCapabilityKeyBytes)
+	}
+	return &CapabilitySigner{key: append([]byte(nil), key...)}, nil
 }
 
 // Issue signs one scope/name/digest tuple. The returned expiry is persisted as

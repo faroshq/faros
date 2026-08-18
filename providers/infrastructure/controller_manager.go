@@ -32,8 +32,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/faroshq/provider-sdk/leaderelection"
 
 	"github.com/faroshq/provider-infrastructure/backend"
 	krobackend "github.com/faroshq/provider-infrastructure/backend/kro"
@@ -42,70 +45,148 @@ import (
 	"github.com/faroshq/provider-infrastructure/install"
 )
 
-// controllerReadiness reports lifecycle transitions back to the HTTP
-// readiness gate. The manager is not ready when it is merely constructed: the
-// provider cache must synchronize first, and an actual backend must be
-// registered before /readyz can pass.
+// Leases gating this binary's singleton write loops, all held in the provider
+// workspace ("default" namespace — kcp serves Leases in every logical
+// cluster). One lease per loop so each is independently singleton; which
+// replica holds which does not matter. REST/MCP/portal serving is untouched —
+// non-leaders keep serving.
+const (
+	controllerLeaseName = "infrastructure-controllers"
+	instanceLeaseName   = "infrastructure-instance"
+	bootstrapLeaseName  = "infrastructure-bootstrap"
+)
+
+// controllerReadiness is the process-wide readiness bridge used by main.go.
+// Controller-runtime managers are term-scoped: leader election builds a fresh
+// manager for every leadership term, and a manager's cache goroutine can finish
+// after its term has already ended. Every callback therefore carries a term
+// generation; callbacks from an old or stopped term are ignored.
 type controllerReadiness struct {
-	mu       sync.Mutex
-	terminal bool
+	mu sync.Mutex
+
+	nextTerm      uint64
+	activeTerm    uint64
+	activeStopped bool
 
 	onBackendReady func()
 	onReady        func()
 	onStopped      func(error)
 }
 
-func (r *controllerReadiness) backendReady() {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.terminal || r.onBackendReady == nil {
-		return
-	}
-	r.onBackendReady()
+type controllerReadinessTerm struct {
+	readiness *controllerReadiness
+	id        uint64
+	stopOnce  sync.Once
 }
 
-func (r *controllerReadiness) ready() {
+func (r *controllerReadiness) newTerm() *controllerReadinessTerm {
 	if r == nil {
-		return
+		return nil
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.terminal || r.onReady == nil {
-		return
+	// The election helper waits for the elected callback to return before
+	// starting another term. Keep this defensive transition anyway: if a future
+	// election implementation overlaps shutdown, an old manager still cannot
+	// re-arm readiness for the new term.
+	if r.activeTerm != 0 && !r.activeStopped {
+		r.activeStopped = true
+		if r.onStopped != nil {
+			r.onStopped(errors.New("controller leadership term changed"))
+		}
 	}
-	r.onReady()
+	r.nextTerm++
+	r.activeTerm = r.nextTerm
+	r.activeStopped = false
+	id := r.activeTerm
+	r.mu.Unlock()
+	return &controllerReadinessTerm{readiness: r, id: id}
 }
 
-func (r *controllerReadiness) stopped(err error) {
+func (r *controllerReadiness) stopWithoutTerm(err error) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.terminal {
+	if r.activeTerm != 0 && r.activeStopped {
+		r.mu.Unlock()
 		return
 	}
-	r.terminal = true
+	if r.activeTerm != 0 {
+		r.activeStopped = true
+	}
 	if r.onStopped != nil {
 		r.onStopped(err)
 	}
+	r.mu.Unlock()
 }
 
-// startControllerManager builds a controller-runtime manager pointed
-// at the provider's own kcp workspace, installs the platform CRDs,
-// registers the stub backend, and starts the Template controller.
-// The caller loads the kcp config (shared with the tenant client) and
-// passes it in; a nil config means "skip the manager, run REST-only".
+func stopControllerReadinessOnLeaderElectionError(readiness *controllerReadiness, err error) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	readiness.stopWithoutTerm(err)
+}
+
+func (t *controllerReadinessTerm) backendReady() {
+	t.withActive(func(r *controllerReadiness) {
+		if r.onBackendReady != nil {
+			r.onBackendReady()
+		}
+	})
+}
+
+func (t *controllerReadinessTerm) ready() {
+	t.withActive(func(r *controllerReadiness) {
+		if r.onReady != nil {
+			r.onReady()
+		}
+	})
+}
+
+func (t *controllerReadinessTerm) withActive(fn func(*controllerReadiness)) {
+	if t == nil || t.readiness == nil || fn == nil {
+		return
+	}
+	r := t.readiness
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.activeTerm != t.id || r.activeStopped {
+		return
+	}
+	fn(r)
+}
+
+func (t *controllerReadinessTerm) stopped(err error) {
+	if t == nil || t.readiness == nil {
+		return
+	}
+	t.stopOnce.Do(func() {
+		r := t.readiness
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.activeTerm != t.id || r.activeStopped {
+			return
+		}
+		r.activeStopped = true
+		if r.onStopped != nil {
+			r.onStopped(err)
+		}
+	})
+}
+
+// startControllerManager installs the platform CRDs (legacy single-binary
+// mode), then campaigns for the controller lease and — while leader — runs a
+// controller-runtime manager pointed at the provider's own kcp workspace with
+// the Template controller on it. The caller loads the kcp config (shared with
+// the tenant client) and passes it in; a nil config means "skip the manager,
+// run REST-only".
 func startControllerManager(ctx context.Context, config *rest.Config, readiness ...*controllerReadiness) error {
 	var lifecycle *controllerReadiness
 	if len(readiness) > 0 {
 		lifecycle = readiness[0]
 	}
 	if config == nil {
-		lifecycle.stopped(errControllerDisabled)
+		lifecycle.stopWithoutTerm(errControllerDisabled)
 		return errControllerDisabled
 	}
 
@@ -148,11 +229,46 @@ func startControllerManager(ctx context.Context, config *rest.Config, readiness 
 	// called" stack trace and swallows all controller-runtime logs.
 	ctrl.SetLogger(klog.NewKlogr())
 
+	// Leader-elected: only the replica holding the lease runs the Template
+	// controller, so scaling the serve deployment past one replica stops the
+	// two-active-managers conflict churn. The manager is rebuilt fresh each
+	// term — a stopped controller-runtime manager cannot be restarted.
+	go func() {
+		if err := leaderelection.Run(ctx, leaderelection.Options{
+			Config:    config,
+			Namespace: leaderelection.DefaultNamespace,
+			Name:      controllerLeaseName,
+		}, func(termCtx context.Context) {
+			term := lifecycle.newTerm()
+			if err := runTemplateControllerManager(termCtx, config, term); err != nil {
+				log.Printf("controller manager exited: %v", err)
+			}
+		}); err != nil {
+			log.Printf("controller leader election failed; Template controller is not running: %v", err)
+			stopControllerReadinessOnLeaderElectionError(lifecycle, err)
+		}
+	}()
+	return nil
+}
+
+// runTemplateControllerManager builds the Template controller manager and
+// blocks in Start until the leadership term ends. Called once per term.
+func runTemplateControllerManager(ctx context.Context, config *rest.Config, term *controllerReadinessTerm) (err error) {
+	defer func() {
+		if err != nil {
+			term.stopped(err)
+		}
+	}()
+
+	skipNameValidation := true
 	mgr, err := manager.New(config, manager.Options{
 		// Disable the metrics server in PR A; the bind on :8080 would
 		// collide with the provider's own HTTP server in dev. PR E
 		// adds it back on a configurable port.
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// Controller names register process-globally; the manager built for a
+		// later leadership term must skip that check.
+		Controller: ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	if err != nil {
 		return fmt.Errorf("manager.New: %w", err)
@@ -195,15 +311,10 @@ func startControllerManager(ctx context.Context, config *rest.Config, readiness 
 	} else {
 		log.Printf("controller manager: no kro runtime config (KRO_KUBECONFIG unset, not in a pod) — kro backend not registered (stub-only)")
 	}
-	// The stub is a valid backend for the intentionally supported local
-	// REST-only/demo flow; a kro backend is added above when a runtime cluster is
-	// configured. In either case, readiness must wait until registration has
-	// completed before the manager cache can advertise the provider as usable.
-	// A runtime cluster selects kro as the required backend. The stub is only
-	// the intentionally supported local/demo backend when no runtime cluster is
-	// configured. Verify the selected backend is actually in the registry before
-	// acknowledging backend readiness; registering an unconditional stub must
-	// never mask a configured-but-unavailable kro backend.
+
+	// The stub is valid for the local/demo flow; a configured runtime cluster
+	// selects KRO as the required backend. Never acknowledge backend readiness
+	// merely because the unconditional stub was registered.
 	requiredBackend := stub.Name
 	if kroCfg != nil {
 		requiredBackend = krobackend.Name
@@ -211,38 +322,35 @@ func startControllerManager(ctx context.Context, config *rest.Config, readiness 
 	if _, ok := registry.Get(requiredBackend); !ok {
 		return fmt.Errorf("required backend %q is not registered", requiredBackend)
 	}
+
 	if err := (&template.Reconciler{
 		Client:   mgr.GetClient(),
 		Backends: registry,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("template controller: %w", err)
 	}
-	// The selected backend is now registered and the controller that dispatches
-	// to it is wired. Cache sync below still gates provider/controller
-	// readiness, but backend readiness must not be acknowledged if setup failed.
-	lifecycle.backendReady()
+	term.backendReady()
 
 	go func() {
-		log.Printf("infrastructure controller manager starting (backends=%v)", registry.Names())
-		if err := mgr.Start(ctx); err != nil {
-			log.Printf("controller manager exited: %v", err)
-			lifecycle.stopped(fmt.Errorf("controller manager exited: %w", err))
-			return
-		}
-		lifecycle.stopped(errors.New("controller manager stopped"))
-	}()
-	go func() {
-		// WaitForCacheSync observes the actual provider cache, not merely the
-		// asynchronous Start call. This keeps /readyz false until the manager
-		// can serve the API resources its controllers reconcile.
+		// Wait for the actual provider cache, not merely manager construction.
+		// The term token makes a late cache result harmless after leadership loss.
 		if mgr.GetCache().WaitForCacheSync(ctx) && ctx.Err() == nil {
-			lifecycle.ready()
+			term.ready()
 			return
 		}
 		if ctx.Err() == nil {
-			lifecycle.stopped(errors.New("controller manager cache did not synchronize"))
+			term.stopped(errors.New("controller manager cache did not synchronize"))
 		}
 	}()
+
+	log.Printf("infrastructure controller manager starting (backends=%v)", registry.Names())
+	managerErr := mgr.Start(ctx)
+	if managerErr != nil {
+		err = fmt.Errorf("controller manager exited: %w", managerErr)
+		term.stopped(err)
+		return managerErr
+	}
+	term.stopped(errors.New("controller manager stopped"))
 	return nil
 }
 
