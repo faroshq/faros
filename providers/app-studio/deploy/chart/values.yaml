@@ -49,10 +49,10 @@ apiExport:
   # ChangeRequest authority; chart rendering fails while
   # this is empty rather than booting a partially functional GitOps flow.
   codeIdentityHash: ""
-  # REQUIRED: identityHash of the deployments provider's APIExport
-  # (deployments.faros.sh). New projects require RepositorySync, Release, and
-  # Deployment authority; chart rendering fails while empty so App Studio
-  # cannot bootstrap unauthorizable deployment claims.
+  # OPTIONAL: identityHash of the deployments provider's APIExport
+  # (deployments.faros.sh). When empty, App Studio omits the optional
+  # RepositorySync, Release, and Deployment claims and remains usable with
+  # Direct delivery. Supply it when reviewed-production GitOps is enabled.
   deploymentsIdentityHash: ""
 
 # Secret holding the workspace-admin kubeconfig minted by the platform admin

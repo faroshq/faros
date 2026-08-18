@@ -488,9 +488,12 @@ func TestCreateProjectLivePathSurfacesCatalogListErrorBeforePreflight(t *testing
 	dynamicClient := fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			asclient.ProjectGVR: "ProjectList",
-			templatesGVR:        "TemplateList",
+			asclient.ProjectGVR:     "ProjectList",
+			templatesGVR:            "TemplateList",
+			apiBindingsResource.GVR: "APIBindingList",
 		},
+		apiBindingObject("deployments", deploymentsAPIExportName, "Bound", deploymentsGitOpsClaims...),
+		apiBindingObject("app-studio", appStudioAPIExportName, "Bound", appStudioGitOpsClaims...),
 	)
 	forbidden := apierrors.NewForbidden(
 		schema.GroupResource{Group: templatesGVR.Group, Resource: templatesGVR.Resource},
@@ -699,6 +702,15 @@ func newProjectCreationTestClient(objects ...runtime.Object) *asclient.Client {
 }
 
 func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDynamicClient {
+	// Most project-creation tests exercise the Project lifecycle rather than
+	// provider enablement. Seed the authoritative GitOps capability so those
+	// tests model a tenant that has accepted the optional Deployments claims;
+	// readiness-specific tests use their own client fixture to cover missing
+	// and partially applied bindings.
+	objects = append(objects,
+		apiBindingObject("deployments", deploymentsAPIExportName, "Bound", deploymentsGitOpsClaims...),
+		apiBindingObject("app-studio", appStudioAPIExportName, "Bound", appStudioGitOpsClaims...),
+	)
 	client := fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
@@ -709,6 +721,7 @@ func newProjectCreationTestDynamicClient(objects ...runtime.Object) *fake.FakeDy
 			{
 				Group: "infrastructure.faros.sh", Version: "v1alpha1", Resource: "instances",
 			}: "InstanceList",
+			apiBindingsResource.GVR: "APIBindingList",
 		},
 		objects...,
 	)

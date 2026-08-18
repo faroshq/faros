@@ -42,6 +42,8 @@ import {
   canSubmitCreatePrompt,
   createSetupItems,
   gitConnectionReady,
+  gitOpsAvailable,
+  gitOpsReadinessMessage,
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantActionFeed } from './assistantActionFeed'
@@ -1161,6 +1163,12 @@ const conversationWorkingLabel = computed(() => {
 })
 const gitConnectionCreateReady = computed(() => gitConnectionReady(createReadiness.value))
 const createReadinessChecking = computed(() => createReadinessLoading.value || (!!props.ctx?.token && createReadiness.value === null && !createReadinessError.value))
+const gitOpsCreateReady = computed(() => gitOpsAvailable(createReadiness.value))
+const gitOpsCreateReadinessChecking = computed(() => createReadinessChecking.value)
+const gitOpsCreateReadinessMessage = computed(() => {
+  if (createReadinessError.value) return `Unable to verify Deployments availability: ${createReadinessError.value}`
+  return gitOpsReadinessMessage(createReadiness.value)
+})
 const createSetupItemsForPrompt = computed(() => createSetupItems({
   readiness: createReadiness.value,
   llmConfigured: llmConfigured.value,
@@ -6051,6 +6059,9 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 :initial-prompt="prompt"
                 :disabled="busy || !canStartProjectFromPrompt"
                 :disabled-reason="createPromptSubmitTitle"
+                :git-ops-available="gitOpsCreateReady"
+                :git-ops-reason="gitOpsCreateReadinessMessage"
+                :git-ops-checking="gitOpsCreateReadinessChecking"
                 @create="onWizardCreate"
                 @cancel="onWizardCancel"
               />

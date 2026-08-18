@@ -38,8 +38,9 @@ import (
 // EnableProviderRequest is the body of POST .../providers/{name}/enable.
 // Mirrors the dialog state — for each declared permission claim, whether
 // the user accepted it. Claims the user didn't tick are sent through to
-// kcp as state=Rejected, which prevents the binding from going Bound
-// and surfaces the mismatch to the user.
+// kcp as state=Rejected for required claims, which preserves the existing
+// binding semantics. Optional claims the user didn't tick are omitted from
+// the APIBinding entirely so they do not block a partial capability grant.
 type EnableProviderRequest struct {
 	AcceptedClaims []AcceptedClaim `json:"acceptedClaims"`
 }
@@ -51,6 +52,29 @@ type EnableProviderRequest struct {
 type AcceptedClaim struct {
 	Group    string `json:"group,omitempty"`
 	Resource string `json:"resource"`
+}
+
+// providerClaimsForAccepted converts the provider's declared claims into the
+// APIBinding claims accepted by kcp. Required claims retain the existing
+// Rejected state when the user did not accept them. Optional claims are
+// omitted unless explicitly accepted, allowing a provider to publish a
+// capability that tenants can add later without making the initial binding
+// invalid.
+func providerClaimsForAccepted(declared []providers.PermissionClaim, accepted map[string]bool) []kcp.ProviderClaim {
+	acceptedKey := func(group, resource string) string { return group + "/" + resource }
+	claims := make([]kcp.ProviderClaim, 0, len(declared))
+	for _, claim := range declared {
+		if claim.Optional && !accepted[acceptedKey(claim.Group, claim.Resource)] {
+			continue
+		}
+		claims = append(claims, kcp.ProviderClaim{
+			Group:    claim.Group,
+			Resource: claim.Resource,
+			Verbs:    claim.Verbs,
+			Accepted: accepted[acceptedKey(claim.Group, claim.Resource)],
+		})
+	}
+	return claims
 }
 
 // EnableProviderResponse is the success body. Mirrors what the portal
@@ -127,15 +151,7 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 		accepted[acceptedKey(c.Group, c.Resource)] = true
 	}
 
-	claims := make([]kcp.ProviderClaim, 0, len(prov.PermissionClaims))
-	for _, declared := range prov.PermissionClaims {
-		claims = append(claims, kcp.ProviderClaim{
-			Group:    declared.Group,
-			Resource: declared.Resource,
-			Verbs:    declared.Verbs,
-			Accepted: accepted[acceptedKey(declared.Group, declared.Resource)],
-		})
-	}
+	claims := providerClaimsForAccepted(prov.PermissionClaims, accepted)
 
 	// Precondition (checked BEFORE creating anything): a provider that requests
 	// edge-proxy access needs its WorkspaceCluster, which the catalog controller

@@ -105,9 +105,11 @@ test('planning failures remain honest and retain retry/edit affordances for a su
 })
 
 test('confirmed review emits the exact durable create payload and honors the disabled gate', () => {
-  assert.match(wizardSource, /function confirmCreate\(\) \{[\s\S]*if \(props\.disabled\) return[\s\S]*emit\('create', \{[\s\S]*prompt: prompt\.value\.trim\(\),[\s\S]*templateName: chosenTemplate\.value \|\| undefined,[\s\S]*displayName: displayName\.value\.trim\(\) \|\| undefined,[\s\S]*delivery: deliveryPreset\.value === 'reviewed-production'[\s\S]*development: \{ mode: 'Direct' \}[\s\S]*production: \{ mode: 'GitOps' \}[\s\S]*\}\)[\s\S]*\}/)
+  assert.match(wizardSource, /function confirmCreate\(\) \{[\s\S]*if \(createDisabled\.value\) return[\s\S]*emit\('create', \{[\s\S]*prompt: prompt\.value\.trim\(\),[\s\S]*templateName: chosenTemplate\.value \|\| undefined,[\s\S]*displayName: displayName\.value\.trim\(\) \|\| undefined,[\s\S]*delivery: deliveryPreset\.value === 'reviewed-production'[\s\S]*development: \{ mode: 'Direct' \}[\s\S]*production: \{ mode: 'GitOps' \}[\s\S]*\}\)[\s\S]*\}/)
   assert.match(wizardSource, /@click="confirmCreate"/)
-  assert.match(wizardSource, /:disabled="disabled"/)
+  assert.match(wizardSource, /:disabled="createDisabled"/)
+  assert.match(wizardSource, /:disabled="gitOpsOptionDisabled"/)
+  assert.match(wizardSource, /Enable Deployments \/ update App Studio access/)
 })
 
 test('App replaces the landing composer with the wizard and wires cancel to restore the exact prompt focus', () => {

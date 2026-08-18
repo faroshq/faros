@@ -116,6 +116,48 @@ func TestCatalogReconciler_PreservesChartOwnedUIRoutingForBuiltinName(t *testing
 	}
 }
 
+func TestCatalogReconcilerPropagatesOptionalPermissionClaims(t *testing.T) {
+	reg := NewRegistry()
+	scheme := newProviderTestScheme(t)
+	entry := &providersv1alpha1.CatalogEntry{
+		ObjectMeta: metav1.ObjectMeta{Name: "optional-claims"},
+		Spec: providersv1alpha1.CatalogEntrySpec{
+			DisplayName: "Optional claims",
+			APIExport: &providersv1alpha1.ProviderAPIExport{
+				Name: "optional-claims.faros.sh",
+				PermissionClaims: []providersv1alpha1.ProviderPermissionClaim{
+					{Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
+					{Group: "code.faros.sh", Resource: "repositories", TenantScoped: true},
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&providersv1alpha1.CatalogEntry{}).
+		WithObjects(entry).
+		Build()
+
+	r := &CatalogReconciler{mgr: testfakes.NewManager(c), reg: reg, noKCP: true}
+	if _, err := r.Reconcile(context.Background(), testfakes.NewRequest("cluster", "", entry.Name)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got, ok := reg.Get(entry.Name)
+	if !ok {
+		t.Fatal("expected provider in registry")
+	}
+	if len(got.PermissionClaims) != 2 {
+		t.Fatalf("permission claims = %#v, want two claims", got.PermissionClaims)
+	}
+	if !got.PermissionClaims[0].Optional {
+		t.Fatalf("optional claim was not propagated: %#v", got.PermissionClaims[0])
+	}
+	if got.PermissionClaims[1].Optional {
+		t.Fatalf("required claim became optional: %#v", got.PermissionClaims[1])
+	}
+}
+
 func TestCatalogReconcilerRejectsInvalidActionDeclarations(t *testing.T) {
 	reg := NewRegistry()
 	scheme := newProviderTestScheme(t)

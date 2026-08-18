@@ -74,6 +74,7 @@ export interface PermissionClaim {
   resource: string
   verbs?: string[]
   tenantScoped?: boolean
+  optional?: boolean
 }
 
 interface ProvidersResponse {
@@ -337,9 +338,9 @@ export const useProvidersStore = defineStore('providers', () => {
   //
   // `accept` is the list of permission claims the user explicitly
   // accepted in the confirmation dialog. The server merges this with
-  // the provider's declared claims — anything the user didn't accept
-  // is sent to kcp as state=Rejected (which prevents the binding from
-  // going Bound and surfaces the mismatch cleanly).
+  // the provider's declared claims. Unaccepted required claims are sent
+  // to kcp as Rejected; unaccepted optional claims are omitted so the
+  // provider can remain Bound without that capability.
   async function enable(p: ProviderDTO, accept: PermissionClaim[]): Promise<void> {
     if (!p.apiExportPath || !p.apiExportName) {
       throw new Error(`${p.name}: provider declares no APIExport to bind`)

@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,11 +68,72 @@ func TestProjectCreateReadinessSelectsValidatedGitConnection(t *testing.T) {
 	}
 }
 
+func TestProjectCreateReadinessReportsGitOpsBindingAndClaims(t *testing.T) {
+	client := newCodeRepositoryTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		apiBindingObject("deployments", deploymentsAPIExportName, "Bound", deploymentsGitOpsClaims...),
+		apiBindingObject("app-studio", appStudioAPIExportName, "Bound", appStudioGitOpsClaims...),
+	)
+
+	readiness, err := projectCreateReadiness(context.Background(), client)
+	if err != nil {
+		t.Fatalf("projectCreateReadiness returned error: %v", err)
+	}
+	if !readiness.GitOps.Available {
+		t.Fatalf("GitOps.Available = false, reason=%q message=%q", readiness.GitOps.Reason, readiness.GitOps.Message)
+	}
+	if !readiness.GitOps.Deployments.Ready || !readiness.GitOps.AppStudio.Ready {
+		t.Fatalf("provider readiness = %#v, want both providers ready", readiness.GitOps)
+	}
+	if len(readiness.GitOps.Deployments.MissingClaims) != 0 || len(readiness.GitOps.AppStudio.MissingClaims) != 0 {
+		t.Fatalf("ready bindings report missing claims: %#v", readiness.GitOps)
+	}
+}
+
+func TestProjectCreateReadinessReportsMissingAppliedGitOpsClaims(t *testing.T) {
+	client := newCodeRepositoryTestClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		apiBindingObject("deployments", deploymentsAPIExportName, "Bound", deploymentsGitOpsClaims[0]),
+		apiBindingObject("app-studio", appStudioAPIExportName, "Binding", appStudioGitOpsClaims...),
+	)
+
+	readiness, err := projectCreateReadiness(context.Background(), client)
+	if err != nil {
+		t.Fatalf("projectCreateReadiness returned error: %v", err)
+	}
+	if readiness.GitOps.Available {
+		t.Fatal("GitOps.Available = true, want false for unready bindings")
+	}
+	if readiness.GitOps.Deployments.Ready {
+		t.Fatal("Deployments.Ready = true, want false with missing instances claim")
+	}
+	if got := readiness.GitOps.Deployments.MissingClaims; len(got) != 1 || got[0] != "infrastructure.faros.sh/instances" {
+		t.Fatalf("Deployments.MissingClaims = %#v, want infrastructure instances", got)
+	}
+	if readiness.GitOps.AppStudio.Bound {
+		t.Fatal("AppStudio.Bound = true, want false for Binding phase")
+	}
+	if !strings.Contains(readiness.GitOps.Reason, "Deployments APIBinding is missing applied claims") ||
+		!strings.Contains(readiness.GitOps.Reason, "App Studio APIBinding is not Bound") {
+		t.Fatalf("GitOps.Reason = %q, want actionable binding and claim details", readiness.GitOps.Reason)
+	}
+}
+
+func TestEnsureProjectGitOpsReadinessRejectsMissingBinding(t *testing.T) {
+	client := newCodeRepositoryTestClient()
+	if err := ensureProjectGitOpsReadiness(context.Background(), client); err == nil ||
+		!strings.Contains(err.Error(), "Deployments APIBinding is not Bound") ||
+		!strings.Contains(err.Error(), "choose Direct delivery") {
+		t.Fatalf("ensureProjectGitOpsReadiness() = %v, want actionable GitOps conflict", err)
+	}
+}
+
 func newCodeRepositoryTestClient(objects ...runtime.Object) *asclient.Client {
 	return asclient.NewFromDynamic(fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{
-			codeConnectionsGVR: "ConnectionList",
+			codeConnectionsGVR:      "ConnectionList",
+			apiBindingsResource.GVR: "APIBindingList",
 		},
 		objects...,
 	))
@@ -91,4 +153,36 @@ func codeConnectionObjectWithValidated(name string, status metav1.ConditionStatu
 	u.SetKind("Connection")
 	u.SetName(name)
 	return u
+}
+
+func apiBindingObject(name, exportName, phase string, claims ...projectGitOpsRequiredClaim) *unstructured.Unstructured {
+	applied := make([]any, 0, len(claims))
+	for _, claim := range claims {
+		applied = append(applied, map[string]any{
+			"group":    claim.Group,
+			"resource": claim.Resource,
+		})
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"reference": map[string]any{
+				"export": map[string]any{"path": projectGitOpsExportPath(exportName), "name": exportName},
+			},
+		},
+		"status": map[string]any{
+			"phase":                   phase,
+			"appliedPermissionClaims": applied,
+		},
+	}}
+	u.SetAPIVersion(apiBindingsResource.GVR.GroupVersion().String())
+	u.SetKind(apiBindingsResource.Kind)
+	u.SetName(name)
+	return u
+}
+
+func projectGitOpsExportPath(exportName string) string {
+	if exportName == deploymentsAPIExportName {
+		return deploymentsAPIExportPath
+	}
+	return appStudioAPIExportPath
 }

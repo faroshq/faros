@@ -236,6 +236,11 @@ func writeProjectError(w http.ResponseWriter, err error) {
 		writeStatus(w, http.StatusServiceUnavailable, "ServiceUnavailable", projectAPIInitializingMessage)
 		return
 	}
+	var gitOpsErr *projectGitOpsUnavailableError
+	if errors.As(err, &gitOpsErr) {
+		writeStatus(w, http.StatusConflict, "Conflict", gitOpsErr.Error())
+		return
+	}
 	if errors.Is(err, errProjectCreatePreflightUnavailable) {
 		w.Header().Set("Retry-After", "2")
 		writeStatus(w, http.StatusBadGateway, "BadGateway", "Project planning is temporarily unavailable. Retry project creation shortly, or choose a development template explicitly.")
@@ -351,6 +356,14 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 	delivery, err := projectDeliveryForCreate(req.Delivery, adoptedPlan != nil)
 	if err != nil {
 		return nil, err
+	}
+	if projectDeliveryUsesGitOps(delivery) {
+		// This is a tenant capability check, not a provider liveness check. Do
+		// it before repository/project creation so a missing or stale binding
+		// cannot leave a half-created GitOps project behind.
+		if err := ensureProjectGitOpsReadiness(ctx, c); err != nil {
+			return nil, err
+		}
 	}
 	repoBase := slugifyProjectName(req.DisplayName)
 	if preflight != nil {

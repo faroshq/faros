@@ -130,6 +130,7 @@ type permissionClaimDTO struct {
 	Resource     string   `json:"resource"`
 	Verbs        []string `json:"verbs,omitempty"`
 	TenantScoped bool     `json:"tenantScoped,omitempty"`
+	Optional     bool     `json:"optional,omitempty"`
 }
 
 type dependencyDTO struct {
@@ -192,6 +193,7 @@ func NewListHandler(reg *Registry) http.Handler {
 					Resource:     c.Resource,
 					Verbs:        append([]string(nil), c.Verbs...),
 					TenantScoped: c.TenantScoped,
+					Optional:     c.Optional,
 				})
 			}
 			var children []navChildDTO

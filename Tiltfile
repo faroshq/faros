@@ -429,7 +429,7 @@ local_resource(
     cmd='make init-provider-app-studio',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'infrastructure-init', 'deployments-init', 'code-init', 'app-studio-register'],
+    resource_deps=['hub', 'infrastructure-init', 'code-init', 'app-studio-register'],
     labels=['providers-app-studio'],
 )
 

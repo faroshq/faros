@@ -156,6 +156,7 @@ type PermissionClaim struct {
 	Resource     string
 	Verbs        []string
 	TenantScoped bool
+	Optional     bool
 }
 
 // NavChild mirrors CatalogEntry.spec.ui.children — a single sub-nav

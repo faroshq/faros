@@ -15,7 +15,6 @@ spec:
   dependencies:
     - name: code
     - name: infrastructure
-    - name: deployments
   ui:
     url: {{ default (printf "http://%s.%s.svc.cluster.local:%v" (include "appstudio.fullname" .) .Release.Namespace .Values.service.port) .Values.catalogEntry.uiURL | quote }}
     indexPath: "/"
@@ -40,14 +39,17 @@ spec:
         group: deployments.faros.sh
         verbs: ["get", "list", "watch", "create"]
         tenantScoped: true
+        optional: true
       - resource: deployments
         group: deployments.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        optional: true
       - resource: repositorysyncs
         group: deployments.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+        optional: true
       # Infrastructure instances the Project reconciler lifecycles from a
       # project's live bindings, plus the Studio's shared searxng + browser —
       # every template's instances are ONE flattened resource (product

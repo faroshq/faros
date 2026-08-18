@@ -13,6 +13,12 @@ const props = defineProps<{
   // disabled blocks Create while the parent isn't ready (setup incomplete).
   disabled?: boolean
   disabledReason?: string
+  // GitOps is optional: Direct delivery remains available without Deployments,
+  // while the reviewed-production choice must stay disabled until the backend
+  // has confirmed the tenant capability.
+  gitOpsAvailable?: boolean
+  gitOpsReason?: string
+  gitOpsChecking?: boolean
   // initialPrompt is the idea already submitted in the landing composer. In
   // this mode the wizard never renders a second intake textarea.
   initialPrompt?: string
@@ -43,6 +49,14 @@ let planRequestSerial = 0
 
 const hasInitialPrompt = computed(() => Boolean(props.initialPrompt?.trim()))
 const canPlan = computed(() => prompt.value.trim().length > 0 && !planning.value)
+const gitOpsOptionDisabled = computed(() => props.gitOpsChecking === true || props.gitOpsAvailable !== true)
+const gitOpsOptionMessage = computed(() => {
+  if (props.gitOpsChecking) return 'Checking Deployments availability…'
+  return props.gitOpsReason?.trim() || 'Enable Deployments / update App Studio access to use reviewed production.'
+})
+const createDisabled = computed(() =>
+  props.disabled || (deliveryPreset.value === 'reviewed-production' && gitOpsOptionDisabled.value),
+)
 
 const activeTemplate = computed(() =>
   plan.value?.availableTemplates.find((template) => template.name === chosenTemplate.value) ?? null,
@@ -103,7 +117,9 @@ async function runPlan() {
 }
 
 function confirmCreate() {
-  if (props.disabled) return
+  // Never rewrite an explicitly selected GitOps request to Direct. The caller
+  // can choose Direct explicitly while the capability is unavailable.
+  if (createDisabled.value) return
   emit('create', {
     prompt: prompt.value.trim(),
     templateName: chosenTemplate.value || undefined,
@@ -356,13 +372,24 @@ watch(
         <div class="grid gap-3 sm:grid-cols-2">
           <label
             class="flex cursor-pointer items-start gap-3 rounded-md border p-3 transition"
-            :class="deliveryPreset === 'reviewed-production' ? 'border-accent bg-accent/10' : 'border-border-subtle bg-surface-raised hover:bg-surface-hover'"
+            :class="[
+              deliveryPreset === 'reviewed-production' ? 'border-accent bg-accent/10' : 'border-border-subtle bg-surface-raised hover:bg-surface-hover',
+              gitOpsOptionDisabled ? 'cursor-not-allowed opacity-60' : '',
+            ]"
           >
-            <input v-model="deliveryPreset" class="sr-only" type="radio" value="reviewed-production" />
+            <input
+              v-model="deliveryPreset"
+              class="sr-only"
+              type="radio"
+              value="reviewed-production"
+              :disabled="gitOpsOptionDisabled"
+              :aria-describedby="gitOpsOptionDisabled ? 'gitops-availability' : undefined"
+            />
             <GitPullRequest class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" />
             <span>
               <span class="block text-[13px] font-semibold text-text-primary">Reviewed production <span class="font-mono text-[10px] text-accent">Recommended</span></span>
               <span class="mt-1 block text-[12px] leading-5 text-text-muted">Develop directly in App Studio. Promote production changes through reviewed pull requests.</span>
+              <span v-if="gitOpsOptionDisabled" id="gitops-availability" class="mt-2 block text-[11px] leading-4 text-warning">{{ gitOpsOptionMessage }}</span>
             </span>
           </label>
           <label
@@ -394,7 +421,7 @@ watch(
         <button
           type="button"
           class="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3.5 text-[13px] font-medium text-surface shadow-[0_0_16px_var(--color-accent-glow)] transition hover:bg-accent-hover hover:shadow-[0_0_22px_var(--color-accent-glow)] disabled:cursor-not-allowed disabled:opacity-60"
-          :disabled="disabled"
+          :disabled="createDisabled"
           @click="confirmCreate"
         >
           Create &amp; open thread

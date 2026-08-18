@@ -1738,7 +1738,7 @@ init-provider-app-studio: build-app-studio-provider ## Bootstrap App Studio APIE
 		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:providers:deployments \
 		--insecure-skip-tls-verify \
 		get apiexport deployments.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
-	test -n "$$DEPLOYMENTS_HASH" || { echo "could not discover deployments APIExport identityHash; install/init deployments first or set APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"; exit 1; }; \
+	if [ -z "$$DEPLOYMENTS_HASH" ]; then echo "WARNING: could not discover the deployments APIExport identityHash — reviewed-production claims will be omitted"; fi; \
 	FAROS_PROVIDER_KUBECONFIG=$(APP_STUDIO_PROVIDER_KUBECONFIG) \
 	APP_STUDIO_WORKSPACE_PATH=$(APP_STUDIO_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(APP_STUDIO_SCHEMAS_DIR) \

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260806-77afd67d.catalogentries.providers.faros.sh
+  name: v260818-c883ac72.catalogentries.providers.faros.sh
 spec:
   group: providers.faros.sh
   names:
@@ -274,6 +274,13 @@ spec:
                       group:
                         description: Group is the API group (empty for core).
                         type: string
+                      optional:
+                        description: |-
+                          Optional marks a capability that may be omitted from a tenant's
+                          APIBinding. Optional claims are not accepted by default in the Enable
+                          dialog; callers must explicitly opt in before the claim is included.
+                          Required claims retain the existing Rejected semantics when not accepted.
+                        type: boolean
                       resource:
                         description: Resource is the resource name (plural).
                         minLength: 1

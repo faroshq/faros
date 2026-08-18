@@ -497,6 +497,13 @@ type ProviderPermissionClaim struct {
 	// CatalogEntry.
 	// +optional
 	TenantScoped bool `json:"tenantScoped,omitempty"`
+
+	// Optional marks a capability that may be omitted from a tenant's
+	// APIBinding. Optional claims are not accepted by default in the Enable
+	// dialog; callers must explicitly opt in before the claim is included.
+	// Required claims retain the existing Rejected semantics when not accepted.
+	// +optional
+	Optional bool `json:"optional,omitempty"`
 }
 
 // CatalogEntryStatus defines the observed state of a CatalogEntry.

@@ -191,6 +191,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 				Resource:     c.Resource,
 				Verbs:        append([]string(nil), c.Verbs...),
 				TenantScoped: c.TenantScoped,
+				Optional:     c.Optional,
 			})
 		}
 	}

@@ -1400,7 +1400,6 @@ local_resource(
     resource_deps=[
         'faros-hub',
         'infrastructure-init',
-        'deployments-init',
         'code-init',
         'app-studio-register',
     ],

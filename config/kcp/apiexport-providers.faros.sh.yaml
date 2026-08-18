@@ -6,7 +6,7 @@ spec:
   resources:
   - group: providers.faros.sh
     name: catalogentries
-    schema: v260806-77afd67d.catalogentries.providers.faros.sh
+    schema: v260818-c883ac72.catalogentries.providers.faros.sh
     storage:
       crd: {}
 status: {}

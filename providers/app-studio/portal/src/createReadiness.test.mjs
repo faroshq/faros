@@ -17,6 +17,8 @@ const {
   canSubmitCreatePrompt,
   createSetupItems,
   createPromptBlockedMessage,
+  gitOpsAvailable,
+  gitOpsReadinessMessage,
 } = await import(moduleURL)
 
 test('blocks project creation when no validated Git connection is ready', () => {
@@ -44,6 +46,39 @@ test('allows the a-ha prompt only after Git durability is ready', () => {
 
   assert.equal(canSubmitCreatePrompt('build a dashboard', readiness), true)
   assert.equal(createPromptBlockedMessage(readiness), '')
+})
+
+test('keeps Direct creation independent while exposing unavailable GitOps access', () => {
+  const readiness = {
+    gitConnection: {
+      ready: true,
+      connectionRef: 'github',
+    },
+    gitOps: {
+      available: false,
+      reason: 'Deployments is not enabled in this workspace',
+    },
+  }
+
+  assert.equal(gitOpsAvailable(readiness), false)
+  assert.match(gitOpsReadinessMessage(readiness), /Enable Deployments \/ update App Studio access/)
+  assert.match(gitOpsReadinessMessage(readiness), /Deployments is not enabled/)
+  assert.equal(canSubmitCreatePrompt('build a dashboard', readiness), true)
+})
+
+test('reports an available GitOps capability without a misleading explanation', () => {
+  const readiness = {
+    gitConnection: {
+      ready: true,
+      connectionRef: 'github',
+    },
+    gitOps: {
+      available: true,
+    },
+  }
+
+  assert.equal(gitOpsAvailable(readiness), true)
+  assert.equal(gitOpsReadinessMessage(readiness), '')
 })
 
 test('still requires the user to type a prompt before submitting', () => {
@@ -138,6 +173,9 @@ test('new-project route has one setup surface and a stable wizard entry label', 
   assert.equal(appSource.includes('error.value = gitConnectionCreateReady.value ? null : createReadinessError.value || createPromptBlockedMessage(createReadiness.value)'), false)
   assert.match(appSource, /if \(gitConnectionCreateReady\.value && llmConfigured\.value\) return true\s+error\.value = null\s+return false/)
   assert.match(appSource, />\s*Continue\s*</)
+  assert.match(appSource, /:git-ops-available="gitOpsCreateReady"/)
+  assert.match(appSource, /:git-ops-reason="gitOpsCreateReadinessMessage"/)
+  assert.match(appSource, /:git-ops-checking="gitOpsCreateReadinessChecking"/)
 })
 
 test('new-project stream explicitly authorizes development-template inference when no template is selected', () => {

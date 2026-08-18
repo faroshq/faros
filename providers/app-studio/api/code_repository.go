@@ -33,6 +33,7 @@ import (
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
+	"github.com/faroshq/provider-app-studio/tenant"
 )
 
 const (
@@ -66,6 +67,51 @@ var (
 	codeRepositoriesGVR      = codeSchemeGroupVersion.WithResource("repositories")
 	codeRepositoryCommitsGVR = codeSchemeGroupVersion.WithResource("repositorycommits")
 	codePackagesGVR          = codeSchemeGroupVersion.WithResource("packages")
+
+	apiBindingAPIGroup   = "apis.kcp.io"
+	apiBindingAPIVersion = "v1alpha2"
+)
+
+var apiBindingsResource = tenant.Resource{
+	GVR:        schema.GroupVersion{Group: apiBindingAPIGroup, Version: apiBindingAPIVersion}.WithResource("apibindings"),
+	Kind:       "APIBinding",
+	Plural:     "APIBindings",
+	Namespaced: false,
+}
+
+const (
+	appStudioAPIExportName   = "ai.faros.sh"
+	deploymentsAPIExportName = "deployments.faros.sh"
+	appStudioAPIExportPath   = "root:faros:providers:app-studio"
+	deploymentsAPIExportPath = "root:faros:providers:deployments"
+)
+
+type projectGitOpsRequiredClaim struct {
+	Group    string
+	Resource string
+}
+
+var (
+	// Deployments translates RepositorySyncs into immutable deployment intent.
+	// It needs both the Code source checkout and Infrastructure runtime claims
+	// before a GitOps project can safely be created.
+	deploymentsGitOpsClaims = []projectGitOpsRequiredClaim{
+		{Group: "code.faros.sh", Resource: "repositorycheckouts"},
+		{Group: "infrastructure.faros.sh", Resource: "instances"},
+	}
+	// App Studio creates the RepositorySync at project creation and later reads
+	// the resulting Release/Deployment state during promotion and convergence.
+	// Its existing Code and Infrastructure claims are included too: a GitOps
+	// project still has to create its Repository and reconcile development
+	// instances before Deployments can consume the source contract.
+	appStudioGitOpsClaims = []projectGitOpsRequiredClaim{
+		{Group: "code.faros.sh", Resource: "repositories"},
+		{Group: "code.faros.sh", Resource: "changerequests"},
+		{Group: "infrastructure.faros.sh", Resource: "instances"},
+		{Group: "deployments.faros.sh", Resource: "releases"},
+		{Group: "deployments.faros.sh", Resource: "deployments"},
+		{Group: "deployments.faros.sh", Resource: "repositorysyncs"},
+	}
 )
 
 type projectRepositoryPlan struct {
@@ -82,12 +128,31 @@ type projectRepositoryPlan struct {
 
 type ProjectCreateReadinessView struct {
 	GitConnection ProjectCreateGitConnectionReadiness `json:"gitConnection"`
+	GitOps        ProjectCreateGitOpsReadiness        `json:"gitOps"`
 }
 
 type ProjectCreateGitConnectionReadiness struct {
 	Ready         bool   `json:"ready"`
 	ConnectionRef string `json:"connectionRef,omitempty"`
 	Message       string `json:"message,omitempty"`
+}
+
+// ProjectCreateGitOpsReadiness is the authoritative tenant capability check
+// for reviewed production. It intentionally reports access in addition to
+// provider process health: a running Deployments provider is not sufficient if
+// the tenant APIBindings have not accepted and applied its claims.
+type ProjectCreateGitOpsReadiness struct {
+	Available   bool                                  `json:"available"`
+	Reason      string                                `json:"reason,omitempty"`
+	Message     string                                `json:"message,omitempty"`
+	Deployments ProjectCreateProviderBindingReadiness `json:"deployments"`
+	AppStudio   ProjectCreateProviderBindingReadiness `json:"appStudio"`
+}
+
+type ProjectCreateProviderBindingReadiness struct {
+	Bound         bool     `json:"bound"`
+	Ready         bool     `json:"ready"`
+	MissingClaims []string `json:"missingClaims,omitempty"`
 }
 
 type codeResourceGetter func(ctx context.Context, gvr schema.GroupVersionResource, name string) (*unstructured.Unstructured, error)
@@ -211,6 +276,13 @@ func repositoryAdopted(repo *unstructured.Unstructured) bool {
 }
 
 func projectCreateReadiness(ctx context.Context, c *asclient.Client) (ProjectCreateReadinessView, error) {
+	gitOps, gitOpsErr := projectGitOpsReadiness(ctx, c)
+	if gitOpsErr != nil {
+		gitOps = ProjectCreateGitOpsReadiness{
+			Reason:  "could not inspect tenant APIBindings",
+			Message: gitOpsErr.Error(),
+		}
+	}
 	connectionRef, err := selectCodeConnection(ctx, c, "")
 	if err != nil {
 		var validationErr *ValidationError
@@ -220,6 +292,7 @@ func projectCreateReadiness(ctx context.Context, c *asclient.Client) (ProjectCre
 					Ready:   false,
 					Message: err.Error(),
 				},
+				GitOps: gitOps,
 			}, nil
 		}
 		return ProjectCreateReadinessView{}, err
@@ -229,7 +302,139 @@ func projectCreateReadiness(ctx context.Context, c *asclient.Client) (ProjectCre
 			Ready:         true,
 			ConnectionRef: connectionRef,
 		},
+		GitOps: gitOps,
 	}, nil
+}
+
+// ensureProjectGitOpsReadiness is called before any Project resource is
+// created. Direct delivery deliberately bypasses it: users can create a
+// development-only/direct project while Deployments is disabled.
+func ensureProjectGitOpsReadiness(ctx context.Context, c *asclient.Client) error {
+	readiness, err := projectGitOpsReadiness(ctx, c)
+	if err != nil {
+		return newProjectGitOpsUnavailableError("could not inspect tenant APIBindings: " + err.Error())
+	}
+	if readiness.Available {
+		return nil
+	}
+	reason := strings.TrimSpace(readiness.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(readiness.Message)
+	}
+	if reason == "" {
+		reason = "required Deployments or App Studio APIBinding claims are not applied"
+	}
+	return newProjectGitOpsUnavailableError(reason + "; enable Deployments and update App Studio access, or choose Direct delivery")
+}
+
+type projectGitOpsUnavailableError struct{ message string }
+
+func (e *projectGitOpsUnavailableError) Error() string {
+	return "GitOps delivery is unavailable: " + e.message
+}
+
+func newProjectGitOpsUnavailableError(message string) error {
+	return &projectGitOpsUnavailableError{message: strings.TrimSpace(message)}
+}
+
+func projectGitOpsReadiness(ctx context.Context, c *asclient.Client) (ProjectCreateGitOpsReadiness, error) {
+	deployments, err := projectProviderBindingReadiness(ctx, c, deploymentsAPIExportPath, deploymentsAPIExportName, deploymentsGitOpsClaims)
+	if err != nil {
+		return ProjectCreateGitOpsReadiness{}, err
+	}
+	appStudio, err := projectProviderBindingReadiness(ctx, c, appStudioAPIExportPath, appStudioAPIExportName, appStudioGitOpsClaims)
+	if err != nil {
+		return ProjectCreateGitOpsReadiness{}, err
+	}
+
+	readiness := ProjectCreateGitOpsReadiness{
+		Deployments: deployments,
+		AppStudio:   appStudio,
+		Available:   deployments.Ready && appStudio.Ready,
+	}
+	if readiness.Available {
+		return readiness, nil
+	}
+
+	reasons := make([]string, 0, 4)
+	if !deployments.Bound {
+		reasons = append(reasons, "Deployments APIBinding is not Bound")
+	} else if len(deployments.MissingClaims) > 0 {
+		reasons = append(reasons, "Deployments APIBinding is missing applied claims: "+strings.Join(deployments.MissingClaims, ", "))
+	}
+	if !appStudio.Bound {
+		reasons = append(reasons, "App Studio APIBinding is not Bound")
+	} else if len(appStudio.MissingClaims) > 0 {
+		reasons = append(reasons, "App Studio APIBinding is missing applied claims: "+strings.Join(appStudio.MissingClaims, ", "))
+	}
+	readiness.Reason = strings.Join(reasons, "; ")
+	readiness.Message = "Reviewed production requires Bound Deployments and App Studio APIBindings with all required claims applied"
+	return readiness, nil
+}
+
+func projectProviderBindingReadiness(ctx context.Context, c *asclient.Client, exportPath, exportName string, required []projectGitOpsRequiredClaim) (ProjectCreateProviderBindingReadiness, error) {
+	list, err := c.Resource(apiBindingsResource, "").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ProjectCreateProviderBindingReadiness{}, fmt.Errorf("list APIBindings: %w", err)
+	}
+
+	var binding *unstructured.Unstructured
+	for i := range list.Items {
+		candidate := &list.Items[i]
+		path, _, _ := unstructured.NestedString(candidate.Object, "spec", "reference", "export", "path")
+		name, _, _ := unstructured.NestedString(candidate.Object, "spec", "reference", "export", "name")
+		if strings.TrimSpace(path) != exportPath || strings.TrimSpace(name) != exportName {
+			continue
+		}
+		// There should be one binding for each provider export. Prefer the
+		// first exact export-name match and retain the ambiguity as a not-ready
+		// state rather than accidentally trusting a binding from another path.
+		if binding != nil {
+			return ProjectCreateProviderBindingReadiness{}, fmt.Errorf("multiple APIBindings reference APIExport %q", exportName)
+		}
+		binding = candidate
+	}
+
+	readiness := ProjectCreateProviderBindingReadiness{}
+	if binding == nil {
+		readiness.MissingClaims = projectGitOpsClaimNames(required)
+		return readiness, nil
+	}
+
+	phase, _, _ := unstructured.NestedString(binding.Object, "status", "phase")
+	readiness.Bound = strings.EqualFold(strings.TrimSpace(phase), "Bound")
+	applied := make(map[string]struct{})
+	claims, _, _ := unstructured.NestedSlice(binding.Object, "status", "appliedPermissionClaims")
+	for _, raw := range claims {
+		claim, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		group, _ := claim["group"].(string)
+		resource, _ := claim["resource"].(string)
+		if group != "" && resource != "" {
+			applied[projectGitOpsClaimName(projectGitOpsRequiredClaim{Group: group, Resource: resource})] = struct{}{}
+		}
+	}
+	for _, claim := range required {
+		if _, ok := applied[projectGitOpsClaimName(claim)]; !ok {
+			readiness.MissingClaims = append(readiness.MissingClaims, projectGitOpsClaimName(claim))
+		}
+	}
+	readiness.Ready = readiness.Bound && len(readiness.MissingClaims) == 0
+	return readiness, nil
+}
+
+func projectGitOpsClaimName(claim projectGitOpsRequiredClaim) string {
+	return claim.Group + "/" + claim.Resource
+}
+
+func projectGitOpsClaimNames(claims []projectGitOpsRequiredClaim) []string {
+	names := make([]string, 0, len(claims))
+	for _, claim := range claims {
+		names = append(names, projectGitOpsClaimName(claim))
+	}
+	return names
 }
 
 func selectCodeConnection(ctx context.Context, c *asclient.Client, requested string) (string, error) {

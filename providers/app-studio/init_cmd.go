@@ -80,9 +80,9 @@ func runInitCmd(ctx context.Context) error {
 	// Production intent is expressed through immutable Releases and owned
 	// Deployments. The deployment provider translates those into the selected
 	// backend; App Studio no longer owns production Infrastructure instances.
-	deploymentClaims, err := deploymentPermissionClaims(os.Getenv("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"))
-	if err != nil {
-		return err
+	deploymentClaims := deploymentPermissionClaims(os.Getenv("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"))
+	if len(deploymentClaims) == 0 {
+		log.Printf("WARNING: APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH is empty — reviewed-production claims will be omitted; tenants can still use Direct delivery")
 	}
 	claims = append(claims, deploymentClaims...)
 	// Per-project ServiceAccount identity: repository commits run in the
@@ -136,10 +136,10 @@ func codePermissionClaims(identityHash string) []sdkinstall.PermissionClaim {
 	}
 }
 
-func deploymentPermissionClaims(identityHash string) ([]sdkinstall.PermissionClaim, error) {
+func deploymentPermissionClaims(identityHash string) []sdkinstall.PermissionClaim {
 	hash := strings.TrimSpace(identityHash)
 	if hash == "" {
-		return nil, fmt.Errorf("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH is required")
+		return nil
 	}
 	return []sdkinstall.PermissionClaim{
 		{
@@ -160,5 +160,5 @@ func deploymentPermissionClaims(identityHash string) ([]sdkinstall.PermissionCla
 			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			IdentityHash: hash,
 		},
-	}, nil
+	}
 }

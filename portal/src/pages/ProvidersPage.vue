@@ -4,7 +4,7 @@ import AppLayout from '@/components/AppLayout.vue'
 import ProviderEnableDialog from '@/components/ProviderEnableDialog.vue'
 import { useProvidersStore, type ProviderDTO, type PermissionClaim } from '@/stores/providers'
 import { categoryIcons, fallbackCategoryIcon } from '@/lib/categoryIcons'
-import { Puzzle, ExternalLink, AlertCircle, Plus, X, Loader2, Search } from 'lucide-vue-next'
+import { Puzzle, ExternalLink, AlertCircle, Plus, X, Loader2, Search, ShieldCheck } from 'lucide-vue-next'
 
 const providers = useProvidersStore()
 
@@ -97,10 +97,11 @@ function categoryIcon(name: string | null): unknown {
 const busy = ref<Record<string, boolean>>({})
 const actionError = ref<string | null>(null)
 
-// The Enable confirmation dialog is shown for one provider at a time. Null
-// when closed. The user reviews permission claims here before the APIBinding
-// is actually POSTed.
+// The Enable/Update access confirmation dialog is shown for one provider at a
+// time. Null when closed. The user reviews permission claims here before the
+// APIBinding is actually POSTed.
 const dialogProvider = ref<ProviderDTO | null>(null)
+const dialogMode = ref<'enable' | 'update'>('enable')
 
 // Always refetch on mount. The store's initial load happens at app boot
 // (App.vue), but new CatalogEntry installs are common while the portal is
@@ -118,7 +119,24 @@ function openEnableDialog(p: ProviderDTO) {
     actionError.value = `${p.displayName} requires ${providers.dependencyLabels(missing).join(', ')} to be enabled first.`
     return
   }
+  dialogMode.value = 'enable'
   dialogProvider.value = p
+}
+
+function openUpdateDialog(p: ProviderDTO) {
+  actionError.value = null
+  // The dialog deliberately starts from the declared consent contract:
+  // required tenant-scoped claims are checked and optional claims are
+  // unchecked. We do not infer which optional claims the existing binding
+  // currently contains because the catalog endpoint does not expose that
+  // per-claim state.
+  dialogMode.value = 'update'
+  dialogProvider.value = p
+}
+
+function closeDialog() {
+  dialogProvider.value = null
+  dialogMode.value = 'enable'
 }
 
 async function onDialogConfirm(accept: PermissionClaim[]) {
@@ -127,8 +145,10 @@ async function onDialogConfirm(accept: PermissionClaim[]) {
   busy.value = { ...busy.value, [p.name]: true }
   actionError.value = null
   try {
+    // The enable endpoint is idempotent and reconciles an existing binding,
+    // so Update access uses the same request path as initial Enable.
     await providers.enable(p, accept)
-    dialogProvider.value = null
+    closeDialog()
   } catch (e) {
     actionError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -335,16 +355,26 @@ function dependencyNotice(p: ProviderDTO): string {
                 <Plus v-else class="h-3 w-3" :stroke-width="2" />
                 Enable
               </button>
-              <button
-                v-else
-                class="inline-flex items-center gap-1 rounded-lg border border-border-default bg-surface-overlay px-2.5 py-1 text-[11px] font-medium text-text-muted transition-colors hover:border-danger/30 hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
-                :disabled="!!busy[p.name]"
-                @click="onDisable(p)"
-              >
-                <Loader2 v-if="busy[p.name]" class="h-3 w-3 animate-spin" :stroke-width="2" />
-                <X v-else class="h-3 w-3" :stroke-width="2" />
-                Disable
-              </button>
+              <template v-else>
+                <button
+                  class="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  :disabled="!!busy[p.name]"
+                  @click="openUpdateDialog(p)"
+                >
+                  <Loader2 v-if="busy[p.name]" class="h-3 w-3 animate-spin" :stroke-width="2" />
+                  <ShieldCheck v-else class="h-3 w-3" :stroke-width="2" />
+                  Update access
+                </button>
+                <button
+                  class="inline-flex items-center gap-1 rounded-lg border border-border-default bg-surface-overlay px-2.5 py-1 text-[11px] font-medium text-text-muted transition-colors hover:border-danger/30 hover:text-danger disabled:cursor-not-allowed disabled:opacity-60"
+                  :disabled="!!busy[p.name]"
+                  @click="onDisable(p)"
+                >
+                  <Loader2 v-if="busy[p.name]" class="h-3 w-3 animate-spin" :stroke-width="2" />
+                  <X v-else class="h-3 w-3" :stroke-width="2" />
+                  Disable
+                </button>
+              </template>
             </template>
 
             <span v-if="!p.ready" class="text-[11px] text-text-muted/70">
@@ -358,7 +388,8 @@ function dependencyNotice(p: ProviderDTO): string {
 
     <ProviderEnableDialog
       :provider="dialogProvider"
-      @cancel="dialogProvider = null"
+      :mode="dialogMode"
+      @cancel="closeDialog"
       @confirm="onDialogConfirm"
     />
   </AppLayout>

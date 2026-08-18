@@ -1522,9 +1522,9 @@ func waitForWorkspaceReady(ctx context.Context, client dynamic.Interface, name s
 }
 
 // ProviderClaim is the wire shape the REST handler hands
-// EnsureProviderAPIBinding — one entry per permission claim the
-// provider DECLARED in its CatalogEntry, plus a flag whether the
-// user accepted or rejected it in the Enable confirmation dialog.
+// EnsureProviderAPIBinding — one entry per permission claim selected by the
+// REST enable layer. Required claims are always present with an accepted or
+// rejected state; unaccepted optional claims are omitted before this boundary.
 // Mirrors providers.PermissionClaim but lives here so the bootstrap
 // package stays free of an import on pkg/hub/providers.
 type ProviderClaim struct {

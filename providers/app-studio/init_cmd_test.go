@@ -16,10 +16,7 @@ import (
 )
 
 func TestDeploymentPermissionClaimsUseDeploymentIdentity(t *testing.T) {
-	claims, err := deploymentPermissionClaims(" deployments-hash ")
-	if err != nil {
-		t.Fatal(err)
-	}
+	claims := deploymentPermissionClaims(" deployments-hash ")
 	if len(claims) != 3 {
 		t.Fatalf("deployment claims = %d, want Release, Deployment, and RepositorySync", len(claims))
 	}
@@ -52,14 +49,10 @@ func TestCodePermissionClaimsIncludeGitOpsSourceAndApproval(t *testing.T) {
 	}
 }
 
-func TestDeploymentPermissionClaimsRequireIdentityHash(t *testing.T) {
+func TestDeploymentPermissionClaimsAreOptionalWithoutIdentityHash(t *testing.T) {
 	for _, value := range []string{"", "   "} {
-		claims, err := deploymentPermissionClaims(value)
-		if err == nil || !strings.Contains(err.Error(), "APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH is required") {
-			t.Fatalf("deploymentPermissionClaims(%q) = %#v, %v; want required error", value, claims, err)
-		}
-		if claims != nil {
-			t.Fatalf("deploymentPermissionClaims(%q) returned hash-less claims: %#v", value, claims)
+		if claims := deploymentPermissionClaims(value); claims != nil {
+			t.Fatalf("deploymentPermissionClaims(%q) = %#v, want no optional claims", value, claims)
 		}
 	}
 }
@@ -81,10 +74,12 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 		{name: "chart", body: string(chart)},
 	} {
 		for _, required := range []string{
-			"- name: deployments",
 			"- resource: releases\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\"]",
+			"- resource: releases\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\"]\n        tenantScoped: true\n        optional: true",
 			"- resource: deployments\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
+			"- resource: deployments\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n        tenantScoped: true\n        optional: true",
 			"- resource: repositorysyncs\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
+			"- resource: repositorysyncs\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n        tenantScoped: true\n        optional: true",
 			"- resource: changerequests\n        group: code.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
 		} {
 			if !strings.Contains(source.body, required) {
@@ -93,6 +88,9 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 		}
 		if strings.Contains(source.body, "- resource: repositorysyncs\n        group: code.faros.sh") {
 			t.Errorf("%s still advertises RepositorySync under the Code APIExport", source.name)
+		}
+		if strings.Contains(source.body, "- name: deployments") {
+			t.Errorf("%s still declares Deployments as a hard CatalogEntry dependency", source.name)
 		}
 	}
 
@@ -106,9 +104,9 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 	}
 	if !strings.Contains(string(deployment), "APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH") ||
 		!strings.Contains(string(deployment), ".Values.apiExport.deploymentsIdentityHash") ||
-		!strings.Contains(string(deployment), "required \"apiExport.deploymentsIdentityHash is required") ||
+		strings.Contains(string(deployment), "required \"apiExport.deploymentsIdentityHash is required") ||
 		!strings.Contains(string(deployment), "required \"apiExport.codeIdentityHash is required") ||
 		!strings.Contains(string(values), "deploymentsIdentityHash:") {
-		t.Fatal("chart does not fail closed on the Code and Deployments APIExport identity hashes")
+		t.Fatal("chart does not keep Code identity required while making Deployments identity optional")
 	}
 }

@@ -5,6 +5,9 @@ import type { ProviderDTO, PermissionClaim } from '@/stores/providers'
 
 const props = defineProps<{
   provider: ProviderDTO | null
+  // Update mode reuses the same consent surface when an already-bound
+  // provider gains optional capabilities or the user changes their grants.
+  mode?: 'enable' | 'update'
 }>()
 
 const emit = defineEmits<{
@@ -12,9 +15,10 @@ const emit = defineEmits<{
   confirm: [accept: PermissionClaim[]]
 }>()
 
-// One boolean per claim, indexed by claim key. tenantScoped claims default
-// to accepted; non-tenantScoped default to rejected so the user has to
-// explicitly opt-in to anything that escapes their workspace.
+// One boolean per claim, indexed by claim key. Required tenantScoped claims
+// default to accepted; optional and non-tenantScoped claims default to
+// rejected so optional capabilities and anything escaping the workspace need
+// explicit consent.
 const accepted = ref<Record<string, boolean>>({})
 const busy = ref(false)
 
@@ -26,7 +30,7 @@ watch(
     if (!p) return
     const next: Record<string, boolean> = {}
     for (const c of p.permissionClaims ?? []) {
-      next[claimKey(c)] = !!c.tenantScoped
+      next[claimKey(c)] = !!c.tenantScoped && !c.optional
     }
     accepted.value = next
     busy.value = false
@@ -61,9 +65,14 @@ function onConfirm() {
     <div class="w-full max-w-lg rounded-xl border border-border-default bg-surface-raised shadow-2xl">
       <div class="flex items-center justify-between border-b border-border-subtle px-4 py-3">
         <div>
-          <h2 class="text-sm font-semibold text-text-primary">Enable {{ provider.displayName }}</h2>
+          <h2 class="text-sm font-semibold text-text-primary">
+            {{ mode === 'update' ? 'Update access for' : 'Enable' }} {{ provider.displayName }}
+          </h2>
           <p class="mt-0.5 text-[11px] text-text-muted">
             Review what this provider will be able to access in your workspace.
+          </p>
+          <p v-if="mode === 'update'" class="mt-1 text-[10px] text-warning">
+            This replaces the current grant set. Re-select any optional access you want to retain.
           </p>
         </div>
         <button class="text-text-muted hover:text-text-primary" @click="$emit('cancel')">
@@ -98,9 +107,15 @@ function onConfirm() {
                   <span class="font-mono text-[11px] text-text-primary">
                     {{ c.group ? `${c.group}/` : '' }}{{ c.resource }}
                   </span>
+                  <span v-if="c.optional" class="rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                    Optional
+                  </span>
                 </div>
                 <p class="mt-0.5 text-[10px] text-text-muted">
                   Verbs: <span class="font-mono">{{ (c.verbs ?? []).join(', ') || 'none' }}</span>
+                </p>
+                <p v-if="c.optional" class="mt-1 text-[10px] text-accent">
+                  Optional capability — leave unchecked to omit this access from the APIBinding.
                 </p>
                 <p v-if="!c.tenantScoped" class="mt-1 text-[10px] text-warning">
                   Not marked tenant-scoped — provider could reach beyond your workspace.
@@ -146,7 +161,7 @@ function onConfirm() {
           @click="onConfirm"
         >
           <Loader2 v-if="busy" class="h-3 w-3 animate-spin" :stroke-width="2" />
-          Confirm &amp; Enable
+          {{ mode === 'update' ? 'Confirm & Update' : 'Confirm & Enable' }}
         </button>
       </div>
     </div>

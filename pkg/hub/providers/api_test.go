@@ -195,6 +195,47 @@ func TestListHandlerProjectsDescription(t *testing.T) {
 	}
 }
 
+func TestListHandlerProjectsOptionalPermissionClaim(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{
+		Name:           "optional-claims",
+		DisplayName:    "Optional claims",
+		EndpointsValid: true,
+		UIURL:          mustProviderURL(t, "https://provider.example/ui"),
+		PermissionClaims: []PermissionClaim{
+			{Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
+			{Group: "code.faros.sh", Resource: "repositories", TenantScoped: true},
+		},
+	})
+
+	r := httptest.NewRequest(http.MethodGet, PathListProviders, nil)
+	w := httptest.NewRecorder()
+	NewListHandler(reg).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var raw struct {
+		Items []struct {
+			PermissionClaims []map[string]any `json:"permissionClaims"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(raw.Items) != 1 || len(raw.Items[0].PermissionClaims) != 2 {
+		t.Fatalf("permission claims = %#v, want two claims", raw.Items)
+	}
+	optional := raw.Items[0].PermissionClaims[0]
+	if optional["optional"] != true {
+		t.Fatalf("optional claim = %#v, want optional=true", optional)
+	}
+	required := raw.Items[0].PermissionClaims[1]
+	if _, ok := required["optional"]; ok {
+		t.Fatalf("required claim emitted optional=false: %#v", required)
+	}
+}
+
 func mustProviderURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

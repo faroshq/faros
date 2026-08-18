@@ -4,6 +4,15 @@ export interface ProjectCreateReadiness {
     connectionRef?: string
     message?: string
   }
+  // GitOps is an optional delivery capability. Direct delivery does not need
+  // Deployments, so its absence must not block project creation. Keep this
+  // separate from the Git connection readiness rather than treating the
+  // provider catalog's process health as tenant access.
+  gitOps?: {
+    available: boolean
+    reason?: string
+    message?: string
+  }
 }
 
 export interface CreateSetupItemsInput {
@@ -21,9 +30,20 @@ export interface CreateSetupItem {
 }
 
 const defaultGitConnectionMessage = 'You need to connect to a Git account before you can continue'
+const defaultGitOpsMessage = 'Enable Deployments / update App Studio access to use reviewed production.'
 
 export function gitConnectionReady(readiness: ProjectCreateReadiness | null): boolean {
   return readiness?.gitConnection.ready === true
+}
+
+export function gitOpsAvailable(readiness: ProjectCreateReadiness | null): boolean {
+  return readiness?.gitOps?.available === true
+}
+
+export function gitOpsReadinessMessage(readiness: ProjectCreateReadiness | null): string {
+  if (gitOpsAvailable(readiness)) return ''
+  const detail = readiness?.gitOps?.reason?.trim() || readiness?.gitOps?.message?.trim()
+  return detail ? `Enable Deployments / update App Studio access: ${detail}` : defaultGitOpsMessage
 }
 
 export function createPromptBlockedMessage(readiness: ProjectCreateReadiness | null): string {

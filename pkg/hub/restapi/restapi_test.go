@@ -49,16 +49,17 @@ type fakeOps struct {
 	mu sync.Mutex
 
 	// Storage
-	orgWorkspaces     map[string]bool              // orgUUID set
-	orgMemberships    map[string]map[string]string // orgUUID → user → role
-	childWorkspaces   map[string]map[string]bool   // orgUUID → wsUUID set
-	wsDisplayNames    map[wsKey]string             // (org,ws) → display
-	wsDeletionAnnos   map[wsKey]time.Time          // (org,ws) → timestamp
-	mcpServerCalls    map[wsKey]int                // (org,ws) → count
-	farosBindingCalls map[wsKey]int                // (org,ws) → count
-	workspaceAdmins   map[wsKey]map[string]bool    // (org,ws) → rbacIdentity set
-	providerBindings  map[wsKey]map[string]string  // (org,ws) → provider → binding name
-	providerBindCalls map[wsKey]int                // (org,ws) → count
+	orgWorkspaces     map[string]bool               // orgUUID set
+	orgMemberships    map[string]map[string]string  // orgUUID → user → role
+	childWorkspaces   map[string]map[string]bool    // orgUUID → wsUUID set
+	wsDisplayNames    map[wsKey]string              // (org,ws) → display
+	wsDeletionAnnos   map[wsKey]time.Time           // (org,ws) → timestamp
+	mcpServerCalls    map[wsKey]int                 // (org,ws) → count
+	farosBindingCalls map[wsKey]int                 // (org,ws) → count
+	workspaceAdmins   map[wsKey]map[string]bool     // (org,ws) → rbacIdentity set
+	providerBindings  map[wsKey]map[string]string   // (org,ws) → provider → binding name
+	providerBindCalls map[wsKey]int                 // (org,ws) → count
+	providerClaims    map[wsKey][]kcp.ProviderClaim // (org,ws) → latest provider claims
 }
 
 type wsKey struct{ Org, WS string }
@@ -75,6 +76,7 @@ func newFakeOps() *fakeOps {
 		workspaceAdmins:   map[wsKey]map[string]bool{},
 		providerBindings:  map[wsKey]map[string]string{},
 		providerBindCalls: map[wsKey]int{},
+		providerClaims:    map[wsKey][]kcp.ProviderClaim{},
 	}
 }
 
@@ -166,7 +168,7 @@ func (f *fakeOps) EnsureChildWorkspaceDefaultMCPServer(_ context.Context, orgUUI
 // provider-enable handler. The handler is exercised via its own
 // dedicated tests; for the existing org/workspace flows it just needs
 // to not error.
-func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, bindingName, _, _ string, _ []kcp.ProviderClaim) error {
+func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, bindingName, _, _ string, claims []kcp.ProviderClaim) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := wsKey{orgUUID, wsUUID}
@@ -175,6 +177,7 @@ func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, b
 	}
 	f.providerBindings[key][bindingName] = bindingName
 	f.providerBindCalls[key]++
+	f.providerClaims[key] = append([]kcp.ProviderClaim(nil), claims...)
 	return nil
 }
 
@@ -973,6 +976,52 @@ func TestEnableProvider_AllowsSatisfiedDependencies(t *testing.T) {
 	}
 	if got := ops.providerBindings[key]["app-studio"]; got != "app-studio" {
 		t.Fatalf("provider binding = %q, want app-studio", got)
+	}
+}
+
+func TestEnableProviderOmitsUnacceptedOptionalClaims(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	key := wsKey{"org-a", "ws-1"}
+	reg := hubproviders.NewRegistry()
+	reg.Upsert(hubproviders.Provider{
+		Name:          "app-studio",
+		APIExportPath: "root:providers:app-studio",
+		APIExportName: "app-studio",
+		PermissionClaims: []hubproviders.PermissionClaim{
+			{Group: "code.faros.sh", Resource: "repositories", TenantScoped: true},
+			{Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
+		},
+	})
+	mgr.WithProviderRegistry(reg)
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
+
+	body, _ := json.Marshal(EnableProviderRequest{})
+	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/app-studio/enable", "application/json", jsonBody(body))
+	if err != nil {
+		t.Fatalf("POST without optional claim: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status without optional claim = %d, want 200", resp.StatusCode)
+	}
+	claims := ops.providerClaims[key]
+	if len(claims) != 1 || claims[0].Group != "code.faros.sh" || claims[0].Accepted {
+		t.Fatalf("claims without optional acceptance = %#v, want required Rejected only", claims)
+	}
+
+	body, _ = json.Marshal(EnableProviderRequest{AcceptedClaims: []AcceptedClaim{{Group: "deployments.faros.sh", Resource: "repositorysyncs"}}})
+	resp, err = http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/app-studio/enable", "application/json", jsonBody(body))
+	if err != nil {
+		t.Fatalf("POST with optional claim: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status with optional claim = %d, want 200", resp.StatusCode)
+	}
+	claims = ops.providerClaims[key]
+	if len(claims) != 2 || !claims[1].Accepted {
+		t.Fatalf("claims with optional acceptance = %#v, want accepted optional claim", claims)
 	}
 }
 

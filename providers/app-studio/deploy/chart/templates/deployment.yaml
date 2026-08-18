@@ -57,8 +57,13 @@ spec:
             {{- end }}
             - name: APP_STUDIO_CODE_IDENTITY_HASH
               value: {{ required "apiExport.codeIdentityHash is required for App Studio repository and GitOps claims" .Values.apiExport.codeIdentityHash | quote }}
+            {{- if .Values.apiExport.deploymentsIdentityHash }}
+            # Optional: when unset, App Studio omits the Deployments claims and
+            # remains usable with Direct delivery. Tenants can add the claims
+            # later by accepting the optional CatalogEntry claims.
             - name: APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH
-              value: {{ required "apiExport.deploymentsIdentityHash is required for App Studio Release and Deployment claims" .Values.apiExport.deploymentsIdentityHash | quote }}
+              value: {{ .Values.apiExport.deploymentsIdentityHash | quote }}
+            {{- end }}
             {{- if $catalogEntryConfigMap }}
             # The CatalogEntry is a kcp resource, so the chart cannot apply it to
             # the hosting cluster. It is rendered into a ConfigMap (mounted below)
