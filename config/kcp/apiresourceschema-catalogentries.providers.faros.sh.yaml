@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260817-d53c64e0.catalogentries.providers.faros.sh
+  name: v260817-6f7e8622.catalogentries.providers.faros.sh
 spec:
   group: providers.faros.sh
   names:
@@ -311,9 +311,8 @@ spec:
                       tenantScoped:
                         description: |-
                           TenantScoped declares the claim is bounded to the binding tenant's own
-                          workspace. Non-tenant-scoped claims are refused unless an admin sets
-                          the faros.sh/accept-untrusted-claims annotation on the
-                          CatalogEntry.
+                          workspace. Faros refuses acceptance of non-tenant-scoped claims; they may
+                          be declared only so tenants can explicitly reject that access.
                         type: boolean
                       verbs:
                         description: Verbs are the requested verbs.
