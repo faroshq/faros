@@ -57,6 +57,8 @@ const builtInKinds: ReadonlySet<WorkbenchBuiltInTab> = new Set([
   'review',
   'providers',
   'integrations',
+  'publishing',
+  'deployments',
   'settings',
   'skills',
   'threads',

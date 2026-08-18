@@ -28,6 +28,8 @@ import type {
   ProjectProviderResourceReference,
   ProjectCheckpoints,
   ProjectPromotionReadiness,
+  ProjectRelease,
+  ProjectReleasesResponse,
   ProjectPreviewAccess,
   ProjectPublishing,
   ProjectPublishingGrant,
@@ -516,6 +518,15 @@ export const api = {
     )
   },
 
+  async listReleases(ctx: FarosContext | null, name: string): Promise<ProjectRelease[]> {
+    const body = await request<ProjectReleasesResponse>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/releases`,
+    )
+    return body.items ?? []
+  },
+
   async getCheckpoints(ctx: FarosContext | null, name: string): Promise<ProjectCheckpoints> {
     return request<ProjectCheckpoints>(
       ctx,
@@ -528,12 +539,18 @@ export const api = {
     ctx: FarosContext | null,
     name: string,
     values?: Record<string, unknown>,
+    commitSHA?: string,
+    releaseID?: string,
   ): Promise<ProjectPromoteResult> {
+    const body: { values?: Record<string, unknown>; commitSHA?: string; releaseID?: string } = {}
+    if (values) body.values = values
+    if (commitSHA?.trim()) body.commitSHA = commitSHA.trim()
+    if (releaseID?.trim()) body.releaseID = releaseID.trim()
     return request<ProjectPromoteResult>(
       ctx,
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/promote`,
-      values ? { values } : {},
+      body,
     )
   },
 

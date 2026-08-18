@@ -603,6 +603,26 @@ export interface ProjectBuildComponent {
   tag?: string
 }
 
+/** One immutable release returned by GET /api/projects/{name}/releases. */
+export interface ProjectRelease {
+  commitSHA: string
+  /** Server-derived identity for the exact component digest set. */
+  releaseID?: string
+  commitURL?: string
+  message?: string
+  createdAt?: string
+  completedAt?: string
+  deployable: boolean
+  live: boolean
+  /** Evidence that keeps an incomplete release disabled in the picker. */
+  missing?: string[]
+  components?: ProjectBuildComponent[]
+}
+
+export interface ProjectReleasesResponse {
+  items?: ProjectRelease[]
+}
+
 export interface ProjectBuildRunJob {
   name?: string
   status?: string
@@ -678,7 +698,8 @@ export interface ProjectPromoteResult {
   environment: string
   instance: string
   rolloutRevision?: string
-  commit?: string
+  commitSHA?: string
+  releaseID?: string
   components?: ProjectBuildComponent[]
 }
 

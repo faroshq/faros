@@ -11,7 +11,7 @@ defineProps<{
 
 <template>
   <section
-    class="grid gap-3 rounded-md border border-border-subtle bg-surface-overlay/50 p-3"
+    class="grid gap-3"
     aria-label="Release pipeline"
   >
     <ol class="grid gap-2 sm:grid-cols-4">
@@ -24,7 +24,7 @@ defineProps<{
         <span class="flex h-[18px] w-[18px] items-center justify-center" aria-hidden="true">
           <Check v-if="step.state === 'done'" class="h-3.5 w-3.5" :stroke-width="2" />
           <X v-else-if="step.state === 'error'" class="h-3.5 w-3.5" :stroke-width="2" />
-          <Loader2 v-else-if="step.state === 'current' && pipeline.transitional" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />
+          <Loader2 v-else-if="step.state === 'current' && pipeline.transitional" class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" :stroke-width="1.75" />
           <span v-else class="h-1.5 w-1.5 rounded-full bg-current" />
         </span>
         <span class="min-w-0">

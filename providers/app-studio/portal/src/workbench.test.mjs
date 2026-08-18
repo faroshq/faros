@@ -97,7 +97,31 @@ test('opens project settings as a closeable built-in tab', () => {
     id: 'settings',
     kind: 'settings',
     title: 'Project Settings',
-    subtitle: 'Manage project details, production, and model configuration',
+    subtitle: 'Manage project details and model configuration',
+    closeable: true,
+  })
+})
+
+test('opens publishing as a closeable built-in tab', () => {
+  const publishing = openWorkbenchBuiltInTab(createDefaultWorkbenchState(), 'publishing')
+  assert.equal(publishing.activeTabID, 'publishing')
+  assert.deepEqual(publishing.tabs.find((tab) => tab.id === 'publishing'), {
+    id: 'publishing',
+    kind: 'publishing',
+    title: 'Publishing',
+    subtitle: 'Deploy and share this app',
+    closeable: true,
+  })
+})
+
+test('opens deployments as a closeable built-in tab', () => {
+  const deployments = openWorkbenchBuiltInTab(createDefaultWorkbenchState(), 'deployments')
+  assert.equal(deployments.activeTabID, 'deployments')
+  assert.deepEqual(deployments.tabs.find((tab) => tab.id === 'deployments'), {
+    id: 'deployments',
+    kind: 'deployments',
+    title: 'Deployments',
+    subtitle: 'Review releases and roll back production',
     closeable: true,
   })
 })
