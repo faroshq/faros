@@ -540,7 +540,7 @@ func TestHHeartbeatEndpoint(t *testing.T) {
 	// Known name → 200.
 	req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/providers/quickstart/heartbeat",
 		strings.NewReader(`{"version":"0.1.0","status":"healthy"}`))
-	req.Header.Set("Authorization", "Bearer "+staticToken)
+	req.Header.Set("Authorization", "Bearer "+providerHeartbeatToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -551,17 +551,17 @@ func TestHHeartbeatEndpoint(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	// Unknown name → 404.
+	// The same valid provider token cannot impersonate an unknown provider.
 	req2, _ := http.NewRequest(http.MethodPost, hubURL+"/api/providers/nope/heartbeat", strings.NewReader("{}"))
-	req2.Header.Set("Authorization", "Bearer "+staticToken)
+	req2.Header.Set("Authorization", "Bearer "+providerHeartbeatToken)
 	req2.Header.Set("Content-Type", "application/json")
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatalf("heartbeat unknown POST: %v", err)
 	}
 	defer func() { _ = resp2.Body.Close() }()
-	if resp2.StatusCode != 404 {
-		t.Fatalf("expected 404 for unknown provider, got %d", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unbound provider identity, got %d", resp2.StatusCode)
 	}
 }
 
