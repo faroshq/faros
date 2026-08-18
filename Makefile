@@ -328,7 +328,9 @@ codegen-databricks-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for 
 test: test-provider-readiness
 	go test $(shell go list ./... | grep -v '/test/e2e')
 
-test-provider-readiness:
+test-provider-readiness: build-agents-provider-portal build-app-studio-provider-portal \
+	build-code-provider-portal build-databricks-provider-portal \
+	build-edges-provider-portal build-quickstart-provider-portal
 	cd providers/agents && go test ./...
 	cd providers/app-studio && go test ./...
 	cd providers/code && go test ./...
