@@ -51,13 +51,14 @@ import (
 
 // Suite-shared state populated by TestMain.
 var (
-	repoRoot     string
-	hubURL       string // http://127.0.0.1:<port>
-	kcpServer    string // https://127.0.0.1:<port> (admin kubeconfig)
-	adminToken   string // kcp admin token (from .kcp/admin.kubeconfig)
-	staticToken  = "test:user-default"
-	providerPort string
-	dataDir      string
+	repoRoot               string
+	hubURL                 string // http://127.0.0.1:<port>
+	kcpServer              string // https://127.0.0.1:<port> (admin kubeconfig)
+	adminToken             string // kcp admin token (from .kcp/admin.kubeconfig)
+	staticToken            = "test:user-default"
+	providerHeartbeatToken string
+	providerPort           string
+	dataDir                string
 )
 
 const (
@@ -161,6 +162,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "mint runtime kubeconfig:", err)
 		os.Exit(1)
 	}
+	providerHeartbeatToken, err = extractToken(runtimeKubeconfig)
+	if err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "extract provider heartbeat token:", err)
+		os.Exit(1)
+	}
 	initLog, err := os.Create(filepath.Join(dataDir, "init.log"))
 	if err != nil {
 		cleanup()
@@ -194,7 +201,7 @@ func TestMain(m *testing.M) {
 	provCmd.Env = append(os.Environ(),
 		"PORT="+providerPort,
 		"FAROS_HUB_URL="+hubURL,
-		"FAROS_HUB_TOKEN="+staticToken,
+		"FAROS_HUB_TOKEN="+providerHeartbeatToken,
 		"FAROS_PROVIDER_NAME=quickstart",
 	)
 	provCmd.Stdout = provLog
