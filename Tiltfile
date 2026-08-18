@@ -538,14 +538,14 @@ local_resource(
 
 # Mints the dev runtime kubeconfig from the provider SA token (created by
 # the Provider controller when kuery-register applies the Provider CR) and
-# ensures the APIExportEndpointSlice the engagement controller discovers VW
-# URLs from.
+# resolves the current Edges APIExport identity after edges-init, then ensures
+# the APIExportEndpointSlice the engagement controller discovers VW URLs from.
 local_resource(
     'kuery-init',
     cmd='make init-provider-kuery',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'kuery-register'],
+    resource_deps=['hub', 'edges-init', 'kuery-register'],
     labels=['providers-kuery'],
 )
 

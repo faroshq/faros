@@ -1433,9 +1433,9 @@ local_resource(
     labels=['providers-kuery'],
 )
 
-# Same shape as the embedded Tiltfile: serve immediately; engagement
-# needs ▶ kuery-register then ▶ kuery-init (mints the runtime kubeconfig
-# from the provider SA token + ensures the APIExportEndpointSlice).
+# Same shape as the embedded Tiltfile: serve immediately; engagement needs
+# ▶ edges-init and ▶ kuery-register before ▶ kuery-init (mints the runtime
+# kubeconfig, resolves the current Edges identity, and ensures the slice).
 local_resource(
     'kuery',
     cmd='make build-kuery-provider',
@@ -1489,7 +1489,7 @@ local_resource(
              sv=KCP_ADMIN_SERVER, mf=KUERY_MANIFEST_REWRITTEN),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['faros-hub', 'kuery-register'],
+    resource_deps=['faros-hub', 'edges-init', 'kuery-register'],
     labels=['providers-kuery'],
 )
 
