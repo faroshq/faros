@@ -254,6 +254,37 @@ func TestCoreConfigMapUsesGenericAuthorizationHint(t *testing.T) {
 	}
 }
 
+func TestCurrentSuccessfulStatusSurvivesBackgroundCheckout(t *testing.T) {
+	sync := testRepositorySync()
+	sync.Generation = 4
+	sync.Status.ObservedGeneration = 4
+	sync.Status.Phase = deploymentsv1alpha1.RepositorySyncPhaseSynced
+	sync.Status.AppliedRevision = "abc123"
+	if !hasCurrentSuccessfulStatus(sync) {
+		t.Fatal("current successful status was not recognized")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*deploymentsv1alpha1.RepositorySync)
+	}{
+		{name: "new generation", mutate: func(value *deploymentsv1alpha1.RepositorySync) { value.Generation++ }},
+		{name: "not synced", mutate: func(value *deploymentsv1alpha1.RepositorySync) {
+			value.Status.Phase = deploymentsv1alpha1.RepositorySyncPhaseReconciling
+		}},
+		{name: "no applied revision", mutate: func(value *deploymentsv1alpha1.RepositorySync) { value.Status.AppliedRevision = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := sync.DeepCopy()
+			tt.mutate(candidate)
+			if hasCurrentSuccessfulStatus(candidate) {
+				t.Fatal("stale or incomplete status was treated as current")
+			}
+		})
+	}
+}
+
 func TestCleanupInventoryUsesUIDAndPrunePolicy(t *testing.T) {
 	owned := unstructuredObject(instanceGVK, "pen-store", "", map[string]any{"spec": map[string]any{"template": "application"}})
 	owned.SetUID(types.UID("replacement-uid"))

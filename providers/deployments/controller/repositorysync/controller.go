@@ -104,6 +104,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		interval = time.Duration(sync.Spec.IntervalSeconds) * time.Second
 	}
 	result, reconcileErr := r.sync(ctx, c, &sync, string(req.ClusterName))
+	if errors.Is(reconcileErr, errCheckoutPending) && hasCurrentSuccessfulStatus(&sync) {
+		// A periodic source refresh is background work. Keep the last applied
+		// revision and its successful conditions truthful while Code prepares the
+		// next checkout; a changed generation still enters Reconciling below.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	next := sync.DeepCopy()
 	next.Status.ObservedGeneration = sync.Generation
 	next.Status.ObservedRevision = result.revision
@@ -165,6 +171,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+func hasCurrentSuccessfulStatus(sync *deploymentsv1alpha1.RepositorySync) bool {
+	return sync != nil &&
+		sync.Status.ObservedGeneration == sync.Generation &&
+		sync.Status.Phase == deploymentsv1alpha1.RepositorySyncPhaseSynced &&
+		strings.TrimSpace(sync.Status.AppliedRevision) != ""
 }
 
 func (r *Reconciler) finalize(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync) (ctrl.Result, error) {
