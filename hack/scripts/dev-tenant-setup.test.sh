@@ -38,6 +38,6 @@ grep -Fq -- "'.kcp/edges-runtime.kubeconfig'" "${TILTFILE}"
 grep -Fq -- "'.kcp/agents-provider.kubeconfig'" "${TILTFILE}"
 grep -Fq -- "http_get=http_get_action(port=8088, path='/readyz')" "${TILTFILE}"
 grep -Fq -- "http_get=http_get_action(port=8087, path='/readyz')" "${TILTFILE}"
-grep -Fq -- 'FAROS_PROVIDER_KUBECONFIG=$${FAROS_PROVIDER_KUBECONFIG:-$(AGENTS_PROVIDER_KUBECONFIG)}' "${ROOT_DIR}/Makefile"
+grep -Fq -- 'FAROS_PROVIDER_KUBECONFIG=$${FAROS_PROVIDER_KUBECONFIG:-$$( for f in "$(AGENTS_PROVIDER_KUBECONFIG)"' "${ROOT_DIR}/Makefile"
 
 echo "dev tenant setup static checks passed"

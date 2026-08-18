@@ -524,9 +524,8 @@ type ProviderPermissionClaim struct {
 	IdentitySource *ProviderPermissionClaimIdentitySource `json:"identitySource,omitempty"`
 
 	// TenantScoped declares the claim is bounded to the binding tenant's own
-	// workspace. Non-tenant-scoped claims are refused unless an admin sets
-	// the faros.sh/accept-untrusted-claims annotation on the
-	// CatalogEntry.
+	// workspace. Faros refuses acceptance of non-tenant-scoped claims; they may
+	// be declared only so tenants can explicitly reject that access.
 	// +optional
 	TenantScoped bool `json:"tenantScoped,omitempty"`
 }

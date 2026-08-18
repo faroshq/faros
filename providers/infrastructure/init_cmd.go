@@ -81,9 +81,7 @@ func runInitCmd(ctx context.Context) error {
 	// cloud-credentials Secret; tenantScoped auto-accept is a CatalogEntry/Enable
 	// concept and is not part of the kcp APIExport spec.
 	log.Printf("init: materializing APIExport shell %q", apiExportName)
-	if err := sdkinstall.ApplyAPIExport(ctx, dynCl, apiExportName, nil, []sdkinstall.PermissionClaim{
-		{Resource: "secrets", Verbs: []string{"get", "list", "watch"}},
-	}); err != nil {
+	if err := sdkinstall.ApplyAPIExport(ctx, dynCl, apiExportName, nil, infrastructurePermissionClaims()); err != nil {
 		return fmt.Errorf("materialize APIExport: %w", err)
 	}
 
@@ -202,6 +200,12 @@ func runInitCmd(ctx context.Context) error {
 
 	log.Printf("init: complete. serve with INFRASTRUCTURE_KUBECONFIG=%s", kubeconfigPath)
 	return nil
+}
+
+func infrastructurePermissionClaims() []sdkinstall.PermissionClaim {
+	return []sdkinstall.PermissionClaim{
+		{Resource: "secrets", Verbs: []string{"get", "list", "watch"}},
+	}
 }
 
 // loadAdminConfig resolves the admin kubeconfig used for the init

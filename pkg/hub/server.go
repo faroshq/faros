@@ -416,13 +416,22 @@ func (s *Server) Run(ctx context.Context) error {
 	// watch fans it back out. Without that, replicas that never saw the beat
 	// would time a healthy provider out and start refusing to proxy to it.
 	var heartbeatRecorder providers.HeartbeatRecorder
+	var heartbeatAuthenticator providers.HeartbeatAuthenticator
 	if kcpConfig != nil {
 		heartbeatRecorder, err = providers.NewCatalogHeartbeatRecorder(kcpConfig, providerRegistry)
 		if err != nil {
 			return fmt.Errorf("creating provider heartbeat recorder: %w", err)
 		}
+		heartbeatAuthenticator, err = providers.NewTokenReviewHeartbeatAuthenticator(kcpConfig)
+		if err != nil {
+			return fmt.Errorf("creating provider heartbeat authenticator: %w", err)
+		}
 	}
-	router.PathPrefix(providers.PathProviderHeartbeat + "/").Handler(providers.NewHeartbeatHandler(providerRegistry, heartbeatRecorder, logger)).Methods("POST")
+	heartbeatHandler := providers.RequireHeartbeatAuthentication(
+		heartbeatAuthenticator,
+		providers.NewHeartbeatHandler(providerRegistry, heartbeatRecorder, logger),
+	)
+	router.PathPrefix(providers.PathProviderHeartbeat + "/").Handler(heartbeatHandler).Methods("POST")
 	// Background sweeper marks providers stale when heartbeats stop. Every
 	// replica runs one: it only reads timestamps the registry already holds, so
 	// all replicas reach the same verdict without coordinating.
