@@ -32,13 +32,14 @@ var (
 	cachedResGVR      = schema.GroupVersionResource{Group: "cache.kcp.io", Version: "v1alpha1", Resource: "cachedresources"}
 	templatesGVR      = schema.GroupVersionResource{Group: infraGroup, Version: "v1alpha1", Resource: "templates"}
 	cachedTemplates   = "publish-templates"
-	wantTemplateNames = []string{"redis-cache", "simple-webapp"}
+	wantTemplateNames = []string{"application", "browser", "cron-job", "database", "redis-cache", "searxng", "simple-webapp", "worker"}
 )
 
 // TestInfrastructureProviderRegistered asserts the out-of-process
 // infrastructure provider bootstrapped its workspace against the operator
-// kcp: its CatalogEntry is Ready and its APIExport carries the templates
-// resource. This is the "provider comes up" gate.
+// kcp: its CatalogEntry is Ready and its APIExport carries the catalog plus
+// every built-in instance resource. This is the product-readiness gate, not
+// merely evidence that the HTTP process started.
 func TestInfrastructureProviderRegistered(t *testing.T) {
 	requireStack(t)
 	ctx := context.Background()
