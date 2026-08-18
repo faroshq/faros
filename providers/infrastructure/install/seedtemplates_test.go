@@ -17,6 +17,7 @@ limitations under the License.
 package install
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
@@ -24,12 +25,90 @@ import (
 	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
 
 var viteShimPattern = regexp.MustCompile(`printf '%s' '([^']+)' \| base64 -d`)
+
+func TestRequiredSeedTemplateResourcesRequiresEmbeddedBackends(t *testing.T) {
+	required, err := RequiredSeedTemplateResources([]string{"kro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(required) == 0 {
+		t.Fatal("kro registration produced no required seed Templates")
+	}
+	seen := map[string]struct{}{}
+	for _, requirement := range required {
+		if requirement.Name == "" {
+			t.Error("required seed Template has no name")
+		}
+		if _, duplicate := seen[requirement.Name]; duplicate {
+			t.Errorf("required Template %q is duplicated", requirement.Name)
+		}
+		seen[requirement.Name] = struct{}{}
+	}
+
+	_, err = RequiredSeedTemplateResources([]string{"stub"})
+	if err == nil || !strings.Contains(err.Error(), "unavailable backends: kro") {
+		t.Fatalf("stub-only registration error = %v, want unavailable kro backend", err)
+	}
+}
+
+func TestSeedTemplatesReadyRequiresCurrentBackendReadyStatus(t *testing.T) {
+	required := []SeedTemplateRequirement{{Name: "application"}}
+	for _, tt := range []struct {
+		name  string
+		ready bool
+	}{
+		{name: "pending", ready: false},
+		{name: "ready", ready: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dyn := seedTemplateReadinessClient(t, tt.ready)
+			got, err := SeedTemplatesReady(context.Background(), dyn, required)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.ready {
+				t.Fatalf("SeedTemplatesReady = %v, want %v", got, tt.ready)
+			}
+		})
+	}
+}
+
+func seedTemplateReadinessClient(t *testing.T, ready bool) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	conditionStatus := string(metav1.ConditionFalse)
+	if ready {
+		conditionStatus = string(metav1.ConditionTrue)
+	}
+	template := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": infrav1alpha1.SchemeGroupVersion.String(),
+		"kind":       "Template",
+		"metadata": map[string]any{
+			"name":       "application",
+			"generation": int64(1),
+		},
+		"status": map[string]any{
+			"observedGeneration": int64(1),
+			"backend":            map[string]any{"ready": ready},
+			"conditions": []any{
+				map[string]any{"type": infrav1alpha1.ConditionBackendReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
+				map[string]any{"type": infrav1alpha1.ConditionReady, "status": conditionStatus, "observedGeneration": int64(1), "lastTransitionTime": "2026-01-01T00:00:00Z", "reason": infrav1alpha1.ReasonReady},
+			},
+		},
+	}}
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(templateGVR.GroupVersion().WithKind("TemplateList"), &unstructured.UnstructuredList{})
+	return dynamicfake.NewSimpleDynamicClient(scheme, template)
+}
 
 // TestSeedTemplatesDecodeAndValidate decodes every embedded seed template
 // into the typed API (catching field typos YAML would silently keep as

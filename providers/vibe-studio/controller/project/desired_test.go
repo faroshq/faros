@@ -9,12 +9,16 @@
 package project
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	vibev1alpha1 "github.com/faroshq/provider-vibe-studio/apis/vibe/v1alpha1"
 )
@@ -90,6 +94,93 @@ func TestDesiredInstance(t *testing.T) {
 	}
 }
 
+func TestEnsureInstanceConvergesRepromotionInPlace(t *testing.T) {
+	ctx := context.Background()
+	p := devProject()
+	ref := InstanceRefs(p)[0]
+	ref.Values = map[string]any{
+		"farosMode": "production",
+		"webImage":  "ghcr.io/acme/web@sha256:old",
+		"expose": map[string]any{
+			"hostnamePrefix": "barber",
+			"fqdn":           "barber.apps.example",
+		},
+	}
+	old := DesiredInstance(p, ref)
+	old.SetLabels(map[string]string{
+		projectLabel:  p.Name,
+		templateLabel: "application",
+		"provider":    "preserved",
+	})
+	c := fake.NewClientBuilder().Build()
+	if err := c.Create(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-promotion keeps the same Instance name but replaces the image digest.
+	// Infrastructure-owned nested values must survive that desired-state update.
+	ref.Values = map[string]any{
+		"farosMode": "production",
+		"webImage":  "ghcr.io/acme/web@sha256:new",
+		"expose": map[string]any{
+			"hostnamePrefix": "barber-v2",
+		},
+	}
+	got, err := (&Reconciler{}).ensureInstance(ctx, c, p, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, _, _ := unstructured.NestedMap(got.Object, "spec", "values")
+	if values["webImage"] != "ghcr.io/acme/web@sha256:new" {
+		t.Fatalf("webImage = %v, want new digest", values["webImage"])
+	}
+	expose := values["expose"].(map[string]any)
+	if expose["hostnamePrefix"] != "barber-v2" || expose["fqdn"] != "barber.apps.example" {
+		t.Fatalf("merged expose = %#v", expose)
+	}
+	if got.GetLabels()["provider"] != "preserved" {
+		t.Fatalf("provider label was erased: %v", got.GetLabels())
+	}
+
+	persisted := &unstructured.Unstructured{}
+	persisted.SetGroupVersionKind(ref.GVK())
+	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, persisted); err != nil {
+		t.Fatal(err)
+	}
+	persistedImage, _, _ := unstructured.NestedString(persisted.Object, "spec", "values", "webImage")
+	if persistedImage != "ghcr.io/acme/web@sha256:new" {
+		t.Fatalf("persisted webImage = %q", persistedImage)
+	}
+}
+
+func TestEnsureInstanceRejectsImmutableTemplateCollision(t *testing.T) {
+	ctx := context.Background()
+	p := devProject()
+	ref := InstanceRefs(p)[0]
+	existing := DesiredInstance(p, ref)
+	if err := unstructured.SetNestedField(existing.Object, "postgres", "spec", "template"); err != nil {
+		t.Fatal(err)
+	}
+	existing.SetLabels(map[string]string{"owner": "someone-else"})
+	c := fake.NewClientBuilder().WithObjects(existing).Build()
+
+	_, err := (&Reconciler{}).ensureInstance(ctx, c, p, ref)
+	if !apierrors.IsInvalid(err) {
+		t.Fatalf("error = %v, want invalid immutable-template collision", err)
+	}
+	persisted := &unstructured.Unstructured{}
+	persisted.SetGroupVersionKind(ref.GVK())
+	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, persisted); err != nil {
+		t.Fatal(err)
+	}
+	if template, _, _ := unstructured.NestedString(persisted.Object, "spec", "template"); template != "postgres" {
+		t.Fatalf("provider mutated colliding template to %q", template)
+	}
+	if persisted.GetLabels()["owner"] != "someone-else" || persisted.GetLabels()[projectLabel] != "" {
+		t.Fatalf("provider adopted colliding instance labels: %v", persisted.GetLabels())
+	}
+}
+
 func TestMirrorStatus(t *testing.T) {
 	p := devProject()
 	now := metav1.NewTime(time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC))
@@ -105,10 +196,12 @@ func TestMirrorStatus(t *testing.T) {
 
 	// Ready instance with url + extra scalar status → Ready + outputs.
 	inst := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"generation": int64(2)},
 		"status": map[string]any{
-			"phase": "Ready",
-			"url":   "https://barber.apps.example",
-			"host":  "barber.apps.example",
+			"observedGeneration": int64(2),
+			"phase":              "Ready",
+			"url":                "https://barber.apps.example",
+			"host":               "barber.apps.example",
 		},
 	}}
 	st = MirrorStatus(p, map[string]*unstructured.Unstructured{"development/runtime": inst}, now)
@@ -122,13 +215,35 @@ func TestMirrorStatus(t *testing.T) {
 
 	// Ready via condition when phase is absent.
 	condInst := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"generation": int64(2)},
 		"status": map[string]any{
-			"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
+			"observedGeneration": int64(2),
+			"conditions":         []any{map[string]any{"type": "Ready", "status": "True"}},
 		},
 	}}
 	st = MirrorStatus(p, map[string]*unstructured.Unstructured{"development/runtime": condInst}, now)
 	if st.Phase != vibev1alpha1.ProjectPhaseReady {
 		t.Fatalf("condition-ready phase = %s", st.Phase)
+	}
+
+	// Ready evidence from an older generation must not complete a promotion or
+	// leak its old URL/outputs while the new values are still reconciling.
+	stale := inst.DeepCopy()
+	stale.SetGeneration(3)
+	st = MirrorStatus(p, map[string]*unstructured.Unstructured{"development/runtime": stale}, now)
+	if st.Phase != vibev1alpha1.ProjectPhaseProvisioning {
+		t.Fatalf("stale-generation phase = %s, want Provisioning", st.Phase)
+	}
+	staleBinding := st.Environments[0].Bindings[0]
+	if staleBinding.Phase != "Pending" || staleBinding.URL != "" || len(staleBinding.Outputs) != 0 {
+		t.Fatalf("stale generation leaked rollout evidence: %+v", staleBinding)
+	}
+
+	missingGeneration := inst.DeepCopy()
+	delete(missingGeneration.Object["status"].(map[string]any), "observedGeneration")
+	st = MirrorStatus(p, map[string]*unstructured.Unstructured{"development/runtime": missingGeneration}, now)
+	if st.Phase != vibev1alpha1.ProjectPhaseProvisioning {
+		t.Fatalf("missing-generation phase = %s, want Provisioning", st.Phase)
 	}
 
 	// A project with no refs is not Ready by vacuity.

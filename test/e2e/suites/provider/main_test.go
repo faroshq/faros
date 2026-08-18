@@ -17,10 +17,10 @@ limitations under the License.
 // Package provider implements an end-to-end suite for the faros provider
 // extension surface. It starts the faros-hub with embedded kcp and the
 // reference quickstart provider as host subprocesses, following the current
-// bootstrap flow: Provider + CatalogEntry applied into
-// root:faros:system:providers (the hub's Provider controller materializes
-// the sub-workspace + SA + provider-token), then `quickstart-provider init`
-// with the minted SA kubeconfig (APIExport + schemas + bind grant), then
+// bootstrap flow: Provider applied into root:faros:system:providers (the hub's
+// Provider controller materializes the sub-workspace + SA + provider-token),
+// then `quickstart-provider init` with the minted SA kubeconfig (APIExport +
+// schemas + bind grant + provider-workspace CatalogEntry), then
 // serve. The tests exercise the full lifecycle: catalog provisioning, the
 // /api/providers and /ui|services/providers proxies, tenant Enable via
 // direct APIBinding, and heartbeat freshness.
@@ -57,6 +57,7 @@ var (
 	adminToken   string // kcp admin token (from .kcp/admin.kubeconfig)
 	staticToken  = "test:user-default"
 	providerPort string
+	dataDir      string
 )
 
 const (
@@ -87,7 +88,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	dataDir, err := os.MkdirTemp("", "faros-e2e-provider-")
+	var err error
+	dataDir, err = os.MkdirTemp("", "faros-e2e-provider-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tempdir:", err)
 		os.Exit(1)
@@ -140,8 +142,8 @@ func TestMain(m *testing.M) {
 	}
 	adminToken = tok
 
-	// Provisioning: Provider + CatalogEntry into root:faros:system:providers
-	// (mirrors `make install-provider-quickstart`); the hub's Provider
+	// Provisioning: Provider into root:faros:system:providers (mirrors
+	// `make install-provider-quickstart`); the hub's Provider
 	// controller materializes root:faros:providers:quickstart, the provider
 	// SA, and the provider-token Secret.
 	if err := applyQuickstartManifests(); err != nil {
@@ -172,6 +174,7 @@ func TestMain(m *testing.M) {
 		// The greetings APIResourceSchema the chart ships — init reads the
 		// schemas dir to author the APIExport's resources.
 		"FAROS_SCHEMAS_DIR="+filepath.Join(repoRoot, "providers", "quickstart", "deploy", "chart", "files", "schemas"),
+		"FAROS_CATALOGENTRY_FILE="+filepath.Join(dataDir, "quickstart-catalogentry.yaml"),
 	)
 	initCmd.Stdout = initLog
 	initCmd.Stderr = initLog

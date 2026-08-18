@@ -141,6 +141,57 @@ func TestReconcileHappyPath(t *testing.T) {
 	}
 }
 
+func TestReconcileRechecksBackendReadinessAndDegradesAfterLoss(t *testing.T) {
+	tmpl := newTestTemplate(t, "backend-health")
+	r, stb := newTestReconciler(t, tmpl)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("add finalizer: %v", err)
+	}
+	stb.FailSetup = true
+	pending, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile pending backend: %v", err)
+	}
+	if pending.RequeueAfter != backendPendingRequeueInterval {
+		t.Fatalf("pending backend requeue = %s, want %s", pending.RequeueAfter, backendPendingRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionFalse)
+
+	stb.FailSetup = false
+	ready, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile ready backend: %v", err)
+	}
+	if ready.RequeueAfter != backendReadyRequeueInterval {
+		t.Fatalf("ready backend requeue = %s, want %s", ready.RequeueAfter, backendReadyRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionTrue)
+
+	stb.FailSetup = true
+	degraded, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile degraded backend: %v", err)
+	}
+	if degraded.RequeueAfter != backendPendingRequeueInterval {
+		t.Fatalf("degraded backend requeue = %s, want %s", degraded.RequeueAfter, backendPendingRequeueInterval)
+	}
+	assertTemplateReadyCondition(t, r.Client, req.NamespacedName, metav1.ConditionFalse)
+}
+
+func assertTemplateReadyCondition(t *testing.T, c client.Client, key types.NamespacedName, want metav1.ConditionStatus) {
+	t.Helper()
+	var got infrav1alpha1.Template
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	condition := findCondition(got.Status.Conditions, infrav1alpha1.ConditionReady)
+	if condition == nil || condition.Status != want {
+		t.Fatalf("Ready condition = %+v, want status %s", condition, want)
+	}
+}
+
 // TestReconcileInvalidSchema pins the values-contract gate: a Template whose
 // schema claims a platform-reserved property must park on
 // SchemaValid=False/InvalidSpec without ever reaching the backend — the
@@ -265,4 +316,27 @@ func findCondition(conds []metav1.Condition, condType string) *metav1.Condition 
 		}
 	}
 	return nil
+}
+
+func TestSetConditionAdvancesObservedGenerationWithoutResettingTransitionTime(t *testing.T) {
+	transition := metav1.Now()
+	tmpl := &infrav1alpha1.Template{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Status: infrav1alpha1.TemplateStatus{Conditions: []metav1.Condition{{
+			Type:               infrav1alpha1.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             infrav1alpha1.ReasonReady,
+			ObservedGeneration: 1,
+			LastTransitionTime: transition,
+		}}},
+	}
+
+	setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionTrue, infrav1alpha1.ReasonReady, "")
+	got := tmpl.Status.Conditions[0]
+	if got.ObservedGeneration != 2 {
+		t.Fatalf("observedGeneration = %d, want 2", got.ObservedGeneration)
+	}
+	if !got.LastTransitionTime.Equal(&transition) {
+		t.Fatalf("lastTransitionTime changed without a semantic transition: got %s want %s", got.LastTransitionTime, transition)
+	}
 }

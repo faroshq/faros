@@ -15,15 +15,12 @@ package main
 // Step list (each is idempotent):
 //
 //   1. Install platform CRDs into the provider workspace.
-//   2. Register the platform CRDs as APIExport.spec.resources entries.
-//   3. Apply the CachedResource that projects Templates to tenants.
-//   4. Create the ServiceAccount + Role + RoleBinding the runtime uses.
-//   5. Mint a TokenRequest bearer.
-//   6. Build a kubeconfig (in-cluster server URL + minted token) and
-//      write it to the path the serve subcommand reads.
-//   7. Apply the kro-cluster Secret in the kro Helm release's
-//      namespace so kro starts watching this APIExport's virtual
-//      workspace.
+//   2. Materialize the APIExport, bind grant, and endpoint slices.
+//   3. Register Templates (virtual storage) and Instances (CRD storage) as
+//      the provider's stable APIExport resources.
+//   4. Optionally self-register the CatalogEntry and seed built-in Templates.
+//   5. Create the ServiceAccount + RBAC and mint its bearer token.
+//   6. Write the lower-privilege kubeconfig the serve process reads.
 //
 // Exits on any step's error so a partial bootstrap is obvious.
 
@@ -77,9 +74,9 @@ func runInitCmd(ctx context.Context) error {
 	// the export by path — a missing export surfaces as the misleading
 	// "no permission to bind to export" forbidden, not a NotFound.
 	//
-	// Empty spec.resources: PlatformSchemaInAPIExport (below) upserts the
-	// Templates entry once the CachedResource identityHash is ready, and the
-	// Template controller adds per-template entries at runtime. The secrets claim
+	// Empty spec.resources: PlatformSchemaInAPIExport below publishes the stable
+	// Templates and Instances entries after the CachedResource identity is ready.
+	// Adding a Template never mutates the export. The secrets claim
 	// (built-in type → no identityHash) lets the provider read each tenant's
 	// cloud-credentials Secret; tenantScoped auto-accept is a CatalogEntry/Enable
 	// concept and is not part of the kcp APIExport spec.
@@ -154,10 +151,7 @@ func runInitCmd(ctx context.Context) error {
 	if os.Getenv("INFRASTRUCTURE_SKIP_SEED_TEMPLATES") == "" {
 		log.Printf("init: seeding catalog Templates")
 		if err := install.SeedTemplates(ctx, adminConfig); err != nil {
-			// Non-fatal — operators can hand-apply, and the rest of
-			// the chain (SA mint, kro seed) is independent of seed
-			// content. Log loudly so the failure is visible.
-			log.Printf("init: WARNING failed to seed Templates: %v", err)
+			return fmt.Errorf("seed Templates: %w", err)
 		}
 	} else {
 		log.Printf("init: INFRASTRUCTURE_SKIP_SEED_TEMPLATES set — leaving catalog empty")
@@ -178,11 +172,12 @@ func runInitCmd(ctx context.Context) error {
 		return fmt.Errorf("write kubeconfig: %w", err)
 	}
 
-	// When INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET is set (the Helm init
-	// container path), also write the minted runtime kubeconfig into a Secret
-	// in the host cluster so the long-lived serve container can mount it. The
-	// host cluster is the pod's own cluster (in-cluster config), which is
-	// distinct from the admin kcp config used for the bootstrap above.
+	// When INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET is set by an external
+	// deployment workflow, also write the minted runtime kubeconfig into a
+	// Secret in the host cluster. The chart's in-pod handoff uses the local file
+	// above through a shared emptyDir and does not grant init permission to write
+	// Secrets. The host cluster here is distinct from the admin kcp config used
+	// for bootstrap.
 	if secretName := os.Getenv("INFRASTRUCTURE_RUNTIME_KUBECONFIG_SECRET"); secretName != "" {
 		ns := os.Getenv("INFRASTRUCTURE_RUNTIME_KUBECONFIG_NAMESPACE")
 		if ns == "" {

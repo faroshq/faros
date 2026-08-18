@@ -20,7 +20,8 @@ What works today:
   (JSON or SSE). Multi-replica safe via the append CAS.
 - Stores: Postgres (`VIBE_STUDIO_DATABASE_URL`) and in-memory (dev).
 - Portal custom element (`faros-provider-vibe-studio`) rendering the whole
-  flow, chart + CatalogEntry + APIResourceSchema, Dockerfile.
+  flow, chart + provider-owned APIResourceSchemas/APIExport + CatalogEntry
+  readiness contract, Dockerfile.
 
 Deterministic lifecycle (first slice of Phase 1): approve resolves the
 Template's `instanceCRD` as the caller and records a fully-resolved runtime
@@ -58,5 +59,5 @@ go test ./...
 ```
 
 `manifest.yaml` registers the localhost variant with a dev hub; in-cluster
-installs use `deploy/chart` (the init container self-registers the
-CatalogEntry and applies the APIResourceSchemas).
+installs use `deploy/chart` (the init container applies the
+APIResourceSchemas, APIExport, endpoint slice, bind grant, and CatalogEntry).

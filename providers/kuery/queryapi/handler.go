@@ -36,7 +36,11 @@ type Handler struct {
 // pod access) queries are refused.
 type Identity struct {
 	Tenant string
-	User   string
+	// Cluster is the tenant workspace's trusted kcp logical-cluster ID. The hub
+	// strips inbound copies and derives it from the authenticated tenant path.
+	// Kuery uses this stable ID to join query scope to APIExport ingestion.
+	Cluster string
+	User    string
 }
 
 // IdentityFromRequest extracts the proxy-injected identity. With
@@ -44,11 +48,17 @@ type Identity struct {
 // the header — same escape hatch as the infrastructure provider.
 func IdentityFromRequest(r *http.Request) Identity {
 	id := Identity{
-		Tenant: r.Header.Get("X-Faros-Tenant"),
-		User:   r.Header.Get("X-Faros-User"),
+		Tenant:  r.Header.Get("X-Faros-Tenant"),
+		Cluster: r.Header.Get("X-Faros-Cluster"),
+		User:    r.Header.Get("X-Faros-User"),
 	}
-	if os.Getenv("FAROS_DEV_ALLOW_TENANT_QUERY") == "true" && id.Tenant == "" {
-		id.Tenant = r.URL.Query().Get("tenant")
+	if os.Getenv("FAROS_DEV_ALLOW_TENANT_QUERY") == "true" {
+		if id.Tenant == "" {
+			id.Tenant = r.URL.Query().Get("tenant")
+		}
+		if id.Cluster == "" {
+			id.Cluster = id.Tenant
+		}
 	}
 	return id
 }
@@ -61,8 +71,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := IdentityFromRequest(r)
-	if id.Tenant == "" {
-		http.Error(w, "missing tenant identity (X-Faros-Tenant)", http.StatusUnauthorized)
+	if id.Tenant == "" || id.Cluster == "" {
+		http.Error(w, "missing tenant identity (X-Faros-Tenant/X-Faros-Cluster)", http.StatusUnauthorized)
 		return
 	}
 
@@ -72,7 +82,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ScopeToTenant(&spec, id.Tenant)
+	ScopeToTenant(&spec, id.Cluster)
 
 	status, err := h.Engine.Execute(r.Context(), &spec)
 	if err != nil {
@@ -101,8 +111,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ScopeToTenant force-rewrites the spec's cluster filter so it can only
-// match clusters engaged for this tenant:
+// ScopeToTenant force-rewrites the spec's cluster filter so it can only match
+// clusters engaged for this tenant's trusted logical-cluster ID:
 //
 //   - The labels map is REPLACED with exactly {tenant: <caller's tenant>}.
 //     Replaced, not merged: cluster labels are an internal scoping
@@ -110,18 +120,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     SQLite kuery interpolates caller-controlled label KEYS into the SQL
 //     json_extract path — merging would hand callers that string.
 //   - A caller-supplied cluster name is interpreted as the EDGE name and
-//     rewritten to the engaged form "{tenant}/{edge}". Already-prefixed
-//     names are normalized to the caller's own tenant.
-func ScopeToTenant(spec *v1alpha1.QuerySpec, tenant string) {
+//     rewritten to the engaged form "{logicalCluster}/{edge}". Already-prefixed
+//     names are normalized to the caller's own cluster.
+func ScopeToTenant(spec *v1alpha1.QuerySpec, cluster string) {
 	if spec.Cluster == nil {
 		spec.Cluster = &v1alpha1.ClusterFilter{}
 	}
-	spec.Cluster.Labels = map[string]string{engagement.TenantLabel: tenant}
+	spec.Cluster.Labels = map[string]string{engagement.TenantLabel: cluster}
 	if name := spec.Cluster.Name; name != "" {
 		edge := name
 		if i := strings.LastIndex(name, "/"); i != -1 {
 			edge = name[i+1:]
 		}
-		spec.Cluster.Name = tenant + "/" + edge
+		spec.Cluster.Name = cluster + "/" + edge
 	}
 }

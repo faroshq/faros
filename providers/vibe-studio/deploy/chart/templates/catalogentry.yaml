@@ -23,6 +23,9 @@ data:
       version: {{ .Chart.AppVersion | quote }}
       category: "Build"
       iconURL: "/ui/providers/vibe-studio/icon.svg"
+      dependencies:
+        - name: code
+        - name: infrastructure
       ui:
         url: "http://{{ include "vibe-studio.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         indexPath: "/"
@@ -31,6 +34,15 @@ data:
         healthPath: "/healthz"
       apiExport:
         name: "vibe.faros.sh"
+        requiredResources:
+          - group: vibe.faros.sh
+            name: models
+          - group: vibe.faros.sh
+            name: projects
+          - group: vibe.faros.sh
+            name: sessions
+          - group: vibe.faros.sh
+            name: studios
         permissionClaims:
           # Every infrastructure template's instances are one flattened
           # resource (product selected by spec.template), so one claim covers
@@ -39,10 +51,12 @@ data:
             group: infrastructure.faros.sh
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: infrastructure}
           - resource: repositories
             group: code.faros.sh
             verbs: [get, list, watch, create, update, patch]
             tenantScoped: true
+            identitySource: {kind: Provider, provider: code}
           - resource: serviceaccounts
             verbs: [get, list, watch, create, delete]
             tenantScoped: true

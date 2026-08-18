@@ -12,13 +12,19 @@ import (
 	"testing"
 )
 
-// TestEdgeProxyURL keeps the inlined URL pattern in lockstep with the faros
-// monorepo's pkg/apiurl.EdgeProxyURL — the cases mirror its tests.
+// TestEdgeProxyURL keeps the inlined URL pattern in lockstep with the edges
+// provider's KubernetesCluster proxy route.
 func TestEdgeProxyURL(t *testing.T) {
 	got := edgeProxyURL("https://hub.example.com/", "2hx82dl9ncmepp5l", "edge-1")
-	want := "https://hub.example.com/services/edges-proxy/clusters/2hx82dl9ncmepp5l/apis/faros.sh/v1alpha1/edges/edge-1/k8s"
+	want := "https://hub.example.com/services/providers/edges/edgeproxy/clusters/2hx82dl9ncmepp5l/apis/edges.faros.sh/v1alpha1/kubernetesclusters/edge-1/k8s"
 	if got != want {
 		t.Fatalf("edgeProxyURL = %q, want %q", got, want)
+	}
+}
+
+func TestEngagementWatchesCurrentKubernetesClusterAPI(t *testing.T) {
+	if edgeGVK.Group != "edges.faros.sh" || edgeGVK.Version != "v1alpha1" || edgeGVK.Kind != "KubernetesCluster" {
+		t.Fatalf("edgeGVK = %s, want edges.faros.sh/v1alpha1 KubernetesCluster", edgeGVK.String())
 	}
 }
 
@@ -46,19 +52,17 @@ func TestTenantLabelIsBareIdentifier(t *testing.T) {
 }
 
 func TestTenantEdges(t *testing.T) {
-	// The map key is cluster-based, but TenantEdges scopes by the stored
-	// workspace-path tenant — so a key whose cluster segment differs from the
-	// tenant (cl-x/edge-2) must still surface under its tenant (tenant-a).
+	// TenantEdges scopes by the trusted logical-cluster ID stored at engage.
 	c := &Controller{engaged: map[string]engagedEdge{
-		"cl-x/edge-2":     {tenant: "tenant-a", edgeName: "edge-2", cancel: func() {}},
-		"tenant-a/edge-1": {tenant: "tenant-a", edgeName: "edge-1", cancel: func() {}},
-		"tenant-b/edge-9": {tenant: "tenant-b", edgeName: "edge-9", cancel: func() {}},
+		"cl-a/edge-2": {tenant: "cl-a", edgeName: "edge-2", cancel: func() {}},
+		"cl-a/edge-1": {tenant: "cl-a", edgeName: "edge-1", cancel: func() {}},
+		"cl-b/edge-9": {tenant: "cl-b", edgeName: "edge-9", cancel: func() {}},
 	}}
-	got := c.TenantEdges("tenant-a")
+	got := c.TenantEdges("cl-a")
 	if len(got) != 2 || got[0] != "edge-1" || got[1] != "edge-2" {
 		t.Fatalf("TenantEdges = %v, want sorted [edge-1 edge-2]", got)
 	}
-	if got := c.TenantEdges("tenant-c"); len(got) != 0 {
+	if got := c.TenantEdges("cl-c"); len(got) != 0 {
 		t.Fatalf("foreign tenant sees %v", got)
 	}
 }

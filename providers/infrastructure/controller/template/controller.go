@@ -26,6 +26,7 @@ package template
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,11 @@ import (
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 	"github.com/faroshq/provider-infrastructure/backend"
 	"github.com/faroshq/provider-infrastructure/instancespec"
+)
+
+const (
+	backendPendingRequeueInterval = time.Second
+	backendReadyRequeueInterval   = 30 * time.Second
 )
 
 // Reconciler reconciles Template objects.
@@ -162,7 +168,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			infrav1alpha1.ReasonBackendError, bs.Message)
 		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
 			infrav1alpha1.ReasonBackendError, bs.Message)
-		return r.writeStatus(ctx, &tmpl, patchBase)
+		result, err := r.writeStatus(ctx, &tmpl, patchBase)
+		if err == nil {
+			result.RequeueAfter = backendPendingRequeueInterval
+		}
+		return result, err
 	}
 	setCondition(&tmpl, infrav1alpha1.ConditionBackendReady, metav1.ConditionTrue,
 		infrav1alpha1.ReasonReady, "")
@@ -172,7 +182,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		infrav1alpha1.ReasonReady, "")
 	tmpl.Status.ObservedGeneration = tmpl.Generation
 	logger.V(1).Info("template ready", "backend", b.Name())
-	return r.writeStatus(ctx, &tmpl, patchBase)
+	result, err := r.writeStatus(ctx, &tmpl, patchBase)
+	if err == nil {
+		// Backend readiness lives on the runtime-cluster RGD. There is no
+		// provider-workspace watch event when that external condition changes,
+		// so periodically re-run SetupTemplate to detect degradation.
+		result.RequeueAfter = backendReadyRequeueInterval
+	}
+	return result, err
 }
 
 // finalize runs the cleanup chain: backend teardown, finalizer drop. Each
@@ -217,12 +234,15 @@ func setCondition(tmpl *infrav1alpha1.Template, condType string, status metav1.C
 	now := metav1.Now()
 	for i := range conds {
 		if conds[i].Type == condType {
-			if conds[i].Status != status || conds[i].Reason != reason || conds[i].Message != message {
+			transitioned := conds[i].Status != status || conds[i].Reason != reason || conds[i].Message != message
+			if transitioned || conds[i].ObservedGeneration != tmpl.Generation {
 				conds[i].Status = status
 				conds[i].Reason = reason
 				conds[i].Message = message
-				conds[i].LastTransitionTime = now
 				conds[i].ObservedGeneration = tmpl.Generation
+				if transitioned {
+					conds[i].LastTransitionTime = now
+				}
 			}
 			tmpl.Status.Conditions = conds
 			return

@@ -16,11 +16,11 @@ package install
 // (used by dev runs and the legacy init→serve handoff on disk).
 //
 // WriteKubeconfigToSecret writes the same kubeconfig into a Secret in the
-// host cluster — the cluster the provider Deployment runs in. This is the
-// path the Helm init container uses: it bootstraps kcp with an admin
-// kubeconfig, then drops the low-privilege runtime kubeconfig into the
-// Secret the runtime container mounts. Because the runtime token is a
-// long-lived (legacy) SA token, the Secret never needs re-minting.
+// host cluster for deployment workflows that need a persisted handoff. The
+// Helm chart uses WriteKubeconfig with a pod-local shared emptyDir instead, so
+// its init container does not need permission to write host-cluster Secrets.
+// Because the runtime token is a long-lived (legacy) SA token, a persisted
+// Secret does not need periodic re-minting.
 
 import (
 	"context"
@@ -52,6 +52,8 @@ func buildRuntimeKubeconfig(id *RuntimeIdentity) *clientcmdapi.Config {
 		Clusters: map[string]*clientcmdapi.Cluster{
 			"provider-workspace": {
 				Server:                   id.Server,
+				TLSServerName:            id.ServerName,
+				InsecureSkipTLSVerify:    id.Insecure,
 				CertificateAuthorityData: id.CAData,
 			},
 		},
@@ -69,6 +71,21 @@ func buildRuntimeKubeconfig(id *RuntimeIdentity) *clientcmdapi.Config {
 		},
 		CurrentContext: "provider",
 	}
+}
+
+// RuntimeKubeconfig serializes the least-privilege provider runtime identity.
+// Deployment controllers use this form to hand the serve process a scoped
+// credential without copying their bootstrap/admin kubeconfig into another
+// cluster.
+func RuntimeKubeconfig(id *RuntimeIdentity) ([]byte, error) {
+	if id == nil {
+		return nil, fmt.Errorf("nil RuntimeIdentity")
+	}
+	data, err := clientcmd.Write(*buildRuntimeKubeconfig(id))
+	if err != nil {
+		return nil, fmt.Errorf("marshal kubeconfig: %w", err)
+	}
+	return data, nil
 }
 
 // WriteKubeconfig serializes the runtime kubeconfig built from id and writes
@@ -96,17 +113,11 @@ func WriteKubeconfig(path string, id *RuntimeIdentity) error {
 
 // WriteKubeconfigToSecret writes the runtime kubeconfig built from id into the
 // named Secret in the host cluster reachable via hostConfig. Idempotent:
-// updates the Secret's data if it already exists, creates it otherwise. The
-// runtime container mounts this Secret read-only (optional volume), so a brief
-// window before the data lands is tolerated by the provider (it serves catalog
-// reads and 502s broker writes until the kubeconfig appears).
+// updates the Secret's data if it already exists, creates it otherwise.
 func WriteKubeconfigToSecret(ctx context.Context, hostConfig *rest.Config, namespace, name string, id *RuntimeIdentity) error {
-	if id == nil {
-		return fmt.Errorf("nil RuntimeIdentity")
-	}
-	data, err := clientcmd.Write(*buildRuntimeKubeconfig(id))
+	data, err := RuntimeKubeconfig(id)
 	if err != nil {
-		return fmt.Errorf("marshal kubeconfig: %w", err)
+		return err
 	}
 	cs, err := kubernetes.NewForConfig(hostConfig)
 	if err != nil {

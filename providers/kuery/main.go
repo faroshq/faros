@@ -12,7 +12,7 @@
 // faros repo for the design and phasing.
 //
 // Phase 1 skeleton: registration surface only (healthz, heartbeat, portal
-// placeholder, /api/status). Phase 2 embeds the kuery engine + the Edge
+// placeholder, /api/status). Phase 2 embeds the kuery engine + the edge
 // engagement controller and adds the tenant-scoped /api/query.
 //
 // It serves three groups of routes on the same port:
@@ -149,9 +149,9 @@ func runServe() {
 	}
 	go kc.StartGC(ctx)
 
-	// Engagement controller: watches Edge objects across bound tenant
-	// workspaces (APIExport VW) and feeds connected kubernetes edges into
-	// the sync controller via the hub's edges-proxy. Requires the minted
+	// Engagement controller: watches edges.faros.sh KubernetesCluster objects
+	// across bound tenant workspaces (APIExport VW) and feeds connected
+	// kubernetes edges into the sync controller via the edges provider proxy. Requires the minted
 	// provider kubeconfig; without one the provider serves an empty index
 	// (useful for UI dev), with a loud warning.
 	var engagementCtl *engagement.Controller

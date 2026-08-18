@@ -40,6 +40,25 @@ spec:
     healthPath: "/healthz"
   apiExport:
     name: "code.providers.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: code.faros.sh
+        name: collaborators
+      - group: code.faros.sh
+        name: connections
+      - group: code.faros.sh
+        name: deploykeys
+      - group: code.faros.sh
+        name: packages
+      - group: code.faros.sh
+        name: repositories
+      - group: code.faros.sh
+        name: repositorybuildstatuses
+      - group: code.faros.sh
+        name: repositorycheckouts
+      - group: code.faros.sh
+        name: repositorycommits
     # The controllers read each Connection's PAT Secret AND write the generated
     # DeployKey private-key Secret in the tenant workspace, so the secrets claim
     # needs write verbs (infra only needed read). tenantScoped: true auto-accepts

@@ -24,11 +24,13 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -52,6 +54,9 @@ const (
 	// watched (their kinds are per-template and dynamic); polling keeps the
 	// controller simple and deterministic.
 	requeueInterval = 15 * time.Second
+	// Conflicts are expected when the infrastructure provider stamps computed
+	// values while a Project promotion converges new desired image references.
+	instanceConvergenceMaxAttempts = 3
 )
 
 // Reconciler lifecycles infrastructure instances for Project bindings.
@@ -164,22 +169,66 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	return ctrl.Result{RequeueAfter: 4 * requeueInterval}, nil
 }
 
-// ensureInstance gets or creates the bound instance CR.
+// ensureInstance gets or creates the bound instance CR and converges binding-
+// owned values and labels without erasing fields computed by infrastructure.
 func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *vibev1alpha1.Project, ref InstanceRef) (*unstructured.Unstructured, error) {
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(ref.GVK())
-	err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, got)
-	if err == nil {
-		return got, nil
+	want := DesiredInstance(p, ref)
+	for attempt := 0; attempt < instanceConvergenceMaxAttempts; attempt++ {
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(ref.GVK())
+		err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, got)
+		if apierrors.IsNotFound(err) {
+			created := want.DeepCopy()
+			if createErr := c.Create(ctx, created); createErr == nil {
+				return created, nil
+			} else if apierrors.IsAlreadyExists(createErr) && attempt+1 < instanceConvergenceMaxAttempts {
+				continue
+			} else {
+				return nil, createErr
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		next := got.DeepCopy()
+		observedValues, _, _ := unstructured.NestedMap(got.Object, "spec", "values")
+		desiredValues, _, _ := unstructured.NestedMap(want.Object, "spec", "values")
+		observedTemplate, _, _ := unstructured.NestedString(got.Object, "spec", "template")
+		desiredTemplate, _, _ := unstructured.NestedString(want.Object, "spec", "template")
+		if observedTemplate != "" && observedTemplate != desiredTemplate {
+			return nil, apierrors.NewInvalid(
+				ref.GVK().GroupKind(),
+				ref.Name,
+				field.ErrorList{field.Invalid(field.NewPath("spec", "template"), observedTemplate, fmt.Sprintf("immutable template does not match requested %q", desiredTemplate))},
+			)
+		}
+		if observedTemplate == "" {
+			observedTemplate = desiredTemplate
+		}
+		next.Object["spec"] = map[string]any{
+			"template": observedTemplate,
+			"values":   mergeInstanceValues(observedValues, desiredValues),
+		}
+		labels := next.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		for key, value := range want.GetLabels() {
+			labels[key] = value
+		}
+		next.SetLabels(labels)
+		if equality.Semantic.DeepEqual(got.Object["spec"], next.Object["spec"]) &&
+			equality.Semantic.DeepEqual(got.GetLabels(), next.GetLabels()) {
+			return got, nil
+		}
+		if updateErr := c.Update(ctx, next); updateErr == nil {
+			return next, nil
+		} else if !apierrors.IsConflict(updateErr) || attempt+1 >= instanceConvergenceMaxAttempts {
+			return nil, updateErr
+		}
 	}
-	if !apierrors.IsNotFound(err) {
-		return nil, err
-	}
-	inst := DesiredInstance(p, ref)
-	if err := c.Create(ctx, inst); err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, err
-	}
-	return inst, nil
+	return nil, fmt.Errorf("instance convergence retry budget exhausted")
 }
 
 // repositoryGVK is the code provider's Repository resource.

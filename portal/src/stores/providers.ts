@@ -42,6 +42,7 @@ export interface ProviderDTO {
   apiExportPath?: string
   apiExportName?: string
   permissionClaims?: PermissionClaim[]
+  allowUntrustedClaims?: boolean
   // Builtin = true for first-party providers shipped with the hub
   // binary, regardless of how they surface UI (legacy builtinRoute or
   // new custom-element via embedded assets). Side-nav skips the
@@ -92,6 +93,13 @@ export const useProvidersStore = defineStore('providers', () => {
   // user's tenant workspace. Empty when the provider is not enabled for
   // this user. Used by the Disable button and the catalog status badge.
   const bindingNamesByProvider = ref<Record<string, string>>({})
+  // True when a bound provider's current APIBinding claim tuple differs from
+  // the provider's declared contract. kcp leaves additive claims unapplied;
+  // this drives an explicit review dialog before enable() patches the existing
+  // binding in place.
+  const claimReviewRequiredByProvider = ref<Record<string, boolean>>({})
+  const claimDecisionsByProvider = ref<Record<string, Record<string, boolean>>>({})
+  let bindingRefreshSerial = 0
 
   // bindingsWorkspace records which workspace the map above was fetched for,
   // and is the only safe way to read an *empty* map as "nothing is enabled
@@ -211,6 +219,10 @@ export const useProvidersStore = defineStore('providers', () => {
     return !!bindingNamesByProvider.value[name]
   }
 
+  function needsClaimReview(name: string): boolean {
+    return !!claimReviewRequiredByProvider.value[name]
+  }
+
   // enableable is the set of providers the user can actually turn on in the
   // current workspace: ready, and declaring an APIExport to bind. Everything
   // else in the catalog is either still starting up or shows up unconditionally
@@ -312,12 +324,27 @@ export const useProvidersStore = defineStore('providers', () => {
   // Membership upstream.
   async function refreshBindings() {
     const t = readTenantSelection()
-    if (!t.orgUUID || !t.workspaceUUID) return
+    const serial = ++bindingRefreshSerial
+    if (!t.orgUUID || !t.workspaceUUID) {
+      clearBindingState()
+      return
+    }
+    if (bindingsWorkspace.value !== t.workspaceUUID) clearBindingState()
     const url = `/api/orgs/${encodeURIComponent(t.orgUUID)}/workspaces/${encodeURIComponent(t.workspaceUUID)}/providers/enabled`
-    const res = await authFetch(url, { tenant: true })
+    const res = await authFetch(url, { tenant: true, headers: tenantRequestHeaders(t) })
+    if (serial !== bindingRefreshSerial || !tenantSelectionIsCurrent(t)) return
     if (!res.ok) throw new Error(`list enabled providers: ${res.status}`)
-    const body = (await res.json()) as { bindingNamesByProvider?: Record<string, string> }
+    const body = (await res.json()) as {
+      bindingNamesByProvider?: Record<string, string>
+      claimReviewRequiredByProvider?: Record<string, boolean>
+      claimDecisionsByProvider?: Record<string, Record<string, boolean>>
+    }
+    // JSON parsing is asynchronous too: a workspace switch may invalidate this
+    // response after headers arrived but before its body finished decoding.
+    if (serial !== bindingRefreshSerial || !tenantSelectionIsCurrent(t)) return
     bindingNamesByProvider.value = body.bindingNamesByProvider ?? {}
+    claimReviewRequiredByProvider.value = body.claimReviewRequiredByProvider ?? {}
+    claimDecisionsByProvider.value = body.claimDecisionsByProvider ?? {}
     bindingsWorkspace.value = t.workspaceUUID
   }
 
@@ -338,8 +365,7 @@ export const useProvidersStore = defineStore('providers', () => {
   // `accept` is the list of permission claims the user explicitly
   // accepted in the confirmation dialog. The server merges this with
   // the provider's declared claims — anything the user didn't accept
-  // is sent to kcp as state=Rejected (which prevents the binding from
-  // going Bound and surfaces the mismatch cleanly).
+  // is sent to kcp as state=Rejected and remains unapplied.
   async function enable(p: ProviderDTO, accept: PermissionClaim[]): Promise<void> {
     if (!p.apiExportPath || !p.apiExportName) {
       throw new Error(`${p.name}: provider declares no APIExport to bind`)
@@ -352,6 +378,7 @@ export const useProvidersStore = defineStore('providers', () => {
     if (!t.orgUUID || !t.workspaceUUID) {
       throw new Error('select an organization and workspace before enabling a provider')
     }
+    const operationWorkspace = tenantSelectionKey(t)
 
     const body = {
       acceptedClaims: accept.map((c) => ({ group: c.group ?? '', resource: c.resource })),
@@ -369,18 +396,40 @@ export const useProvidersStore = defineStore('providers', () => {
       const res = await authFetch(url, {
         method: 'POST',
         tenant: true,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...tenantRequestHeaders(t), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (tenantSelectionKey(readTenantSelection()) !== operationWorkspace) {
+        throw new Error('workspace changed while enabling the provider; refresh the active workspace to see its current state')
+      }
       if (res.ok) break
       const detail = await res.text().catch(() => '')
-      if (res.status === 409 && attempt < backoffMs.length) {
+      if (res.status === 409 && /retry shortly/i.test(detail) && attempt < backoffMs.length) {
         await new Promise((r) => setTimeout(r, backoffMs[attempt]))
+        if (tenantSelectionKey(readTenantSelection()) !== operationWorkspace) {
+          throw new Error('workspace changed while enabling the provider; refresh the active workspace to see its current state')
+        }
         continue
       }
       throw new Error(`enable ${p.name} failed: ${res.status} ${res.statusText} ${detail}`)
     }
+    // This mutation is now the newest binding authority. Prevent an older list
+    // response, started before the POST completed, from reverting it.
+    bindingRefreshSerial += 1
     bindingNamesByProvider.value = { ...bindingNamesByProvider.value, [p.name]: p.name }
+    const reviews = { ...claimReviewRequiredByProvider.value }
+    delete reviews[p.name]
+    claimReviewRequiredByProvider.value = reviews
+    claimDecisionsByProvider.value = {
+      ...claimDecisionsByProvider.value,
+      [p.name]: Object.fromEntries(
+        (p.permissionClaims ?? []).map((claim) => [
+          `${claim.group ?? ''}/${claim.resource}`,
+          accept.some((accepted) => (accepted.group ?? '') === (claim.group ?? '') && accepted.resource === claim.resource),
+        ]),
+      ),
+    }
+    bindingsWorkspace.value = t.workspaceUUID
   }
 
   // readTenantSelection mirrors the storage shape written by
@@ -398,6 +447,30 @@ export const useProvidersStore = defineStore('providers', () => {
     }
   }
 
+  type TenantSelection = ReturnType<typeof readTenantSelection>
+
+  function tenantSelectionKey(t: TenantSelection): string {
+    return `${t.orgUUID ?? ''}/${t.workspaceUUID ?? ''}`
+  }
+
+  function tenantSelectionIsCurrent(t: TenantSelection): boolean {
+    return tenantSelectionKey(readTenantSelection()) === tenantSelectionKey(t)
+  }
+
+  function tenantRequestHeaders(t: TenantSelection): Record<string, string> {
+    const headers: Record<string, string> = {}
+    if (t.orgUUID) headers['X-Faros-Org'] = t.orgUUID
+    if (t.workspaceUUID) headers['X-Faros-Workspace'] = t.workspaceUUID
+    return headers
+  }
+
+  function clearBindingState(): void {
+    bindingNamesByProvider.value = {}
+    claimReviewRequiredByProvider.value = {}
+    claimDecisionsByProvider.value = {}
+    bindingsWorkspace.value = null
+  }
+
   async function disable(p: ProviderDTO): Promise<void> {
     const bindingName = bindingNamesByProvider.value[p.name]
     if (!bindingName) return
@@ -409,16 +482,28 @@ export const useProvidersStore = defineStore('providers', () => {
     if (!t.orgUUID || !t.workspaceUUID) {
       throw new Error('select an organization and workspace before disabling a provider')
     }
+    const operationWorkspace = tenantSelectionKey(t)
     const url = `/api/orgs/${encodeURIComponent(t.orgUUID)}/workspaces/${encodeURIComponent(t.workspaceUUID)}/providers/${encodeURIComponent(p.name)}/disable`
-    const res = await authFetch(url, { method: 'POST', tenant: true })
+    const res = await authFetch(url, { method: 'POST', tenant: true, headers: tenantRequestHeaders(t) })
+    if (tenantSelectionKey(readTenantSelection()) !== operationWorkspace) {
+      throw new Error('workspace changed while disabling the provider; refresh the active workspace to see its current state')
+    }
     // Idempotent server-side; 404 means the route target is already gone.
     if (!res.ok && res.status !== 404) {
       const detail = await res.text().catch(() => '')
       throw new Error(`disable ${p.name} failed: ${res.status} ${res.statusText} ${detail}`)
     }
+    bindingRefreshSerial += 1
     const next = { ...bindingNamesByProvider.value }
     delete next[p.name]
     bindingNamesByProvider.value = next
+    const reviews = { ...claimReviewRequiredByProvider.value }
+    delete reviews[p.name]
+    claimReviewRequiredByProvider.value = reviews
+    const decisions = { ...claimDecisionsByProvider.value }
+    delete decisions[p.name]
+    claimDecisionsByProvider.value = decisions
+    bindingsWorkspace.value = t.workspaceUUID
   }
 
   function byName(name: string): ProviderDTO | undefined {
@@ -432,12 +517,15 @@ export const useProvidersStore = defineStore('providers', () => {
     loading,
     error,
     bindingNamesByProvider,
+    claimReviewRequiredByProvider,
+    claimDecisionsByProvider,
     bindingsWorkspace,
     enabledNavItems,
     categorizedNavItems,
     enableable,
     hasAnyEnabled,
     isEnabled,
+    needsClaimReview,
     missingDependencies,
     hasMissingDependencies,
     dependencyLabel,

@@ -14,14 +14,13 @@
 // Routes on a single port ($PORT, default 8081):
 //
 //   - /, /main.js, /icon.svg, /assets/*  — embedded Vite bundle
-//   - /healthz                           — liveness; gates BackendHealthy
+//   - /healthz, /readyz                  — process liveness and controller readiness
 //   - /mcp, /mcp/sse                     — MCP transport
 //
 // Templates and instances are NOT served as REST here: the portal and
 // tenants drive them as CRDs directly against kcp
-// (templates.infrastructure.faros.sh + the per-template instance
-// kinds), projected to tenant workspaces via the CachedResource +
-// APIExport. The MCP surface keeps its own kro.Client.
+// (templates.infrastructure.faros.sh + instances.infrastructure.faros.sh),
+// projected to tenant workspaces through the APIExport.
 package main
 
 import (
@@ -32,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -103,7 +103,7 @@ func runInit() error {
 	// Implementation is in init_cmd.go so this file stays focused on
 	// process orchestration. See that file for the chain of install
 	// steps (CRDs → APIExport schemas → CachedResource → SA + RBAC →
-	// token → kubeconfig → kro Secret).
+	// token → runtime kubeconfig).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return runInitCmd(ctx)
@@ -112,61 +112,77 @@ func runInit() error {
 // runServe is the existing main loop, moved into its own function so
 // runInit can short-circuit without touching it.
 func runServe() {
-	// Load the provider's kcp connection once and share it: the controller
-	// manager uses it directly, and the MCP tenant client borrows only its
-	// host + TLS (every tenant request authenticates with the CALLER's own
-	// bearer token — no provider-wide identity). nil config => REST-only dev.
+	// Try the provider's kcp connection immediately. Required mode retries a
+	// missing config and shares the recovered value across the controller and
+	// request surfaces. The MCP tenant client borrows only host + TLS; every
+	// request authenticates with the caller's bearer token.
 	kcpConfig, kcpErr := loadControllerConfig()
 	if kcpErr != nil {
-		log.Printf("kcp config unavailable (%v); tenant MCP tools + controller manager disabled", kcpErr)
+		log.Printf("kcp config unavailable (%v); kubeconfig-dependent surfaces will retry when controller mode is required", kcpErr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	serveWithConfig(ctx, kcpConfig)
+	serveWithConfigAndLoader(ctx, kcpConfig, loadControllerConfig)
 }
 
 // serveWithConfig runs the HTTP/MCP server + controller manager + heartbeat
 // against the supplied kcp config, blocking until ctx is cancelled. The caller
 // owns ctx (runServe wires signals; the operator shares its own ctx with the
-// bootstrap loop). A nil kcpConfig keeps the REST-only/stub flow.
+// bootstrap loop). A nil config stays REST-only in explicit REST-only mode; in
+// required mode the server stays live and atomically installs all config-backed
+// surfaces when the controller lifecycle loads the kubeconfig.
 func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
+	serveWithConfigAndLoader(ctx, kcpConfig, nil)
+}
+
+func serveWithConfigAndLoader(ctx context.Context, kcpConfig *rest.Config, reloadConfig func() (*rest.Config, error)) {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
 	}
-
-	// Data-plane subresource proxy (logs/sync/restart/preview proxy/status).
-	// nil in REST-only/dev (no kcp or runtime cluster); the handler then reports
-	// 503 so the route exists but is clearly unavailable. Shared with the MCP
-	// server so the dev_* tools can drive the same verbs in-process.
-	var dataPlaneHandler http.Handler
-	if h := buildDataPlaneHandler(kcpConfig); h != nil {
-		dataPlaneHandler = h
-	}
-
-	mcpHandler := mcpserver.NewHandler(mcpserver.Deps{
-		Tenant:    tenant.NewClientFactory(kcpConfig),
-		DataPlane: dataPlaneHandler,
-	})
 
 	fileServer, distFS, err := portalHandler()
 	if err != nil {
 		log.Fatalf("portal embed: %v", err)
 	}
 
-	srv := server.New(server.Deps{
-		MCP:              mcpHandler,
-		DataPlane:        dataPlaneHandler,
-		WorkloadIdentity: buildWorkloadIdentityReviewHandler(),
-		PortalFileServer: fileServer,
-		PortalFS:         distFS,
-		ServePortalAsset: servePortalAsset,
-	})
+	health := newControllerHealth(controllerModeFromEnv(kcpConfig != nil) == controllerModeRequired)
+	instanceHealth := newControllerHealth(instanceControllerConfigured())
+	buildHandler := func(config *rest.Config) http.Handler {
+		// Data-plane subresource proxy (logs/sync/restart/preview proxy/status).
+		// nil in REST-only/dev (no kcp or runtime cluster); the handler then
+		// reports 503 so the route exists but is clearly unavailable. Shared with
+		// MCP so the dev_* tools drive the same verbs in-process.
+		var dataPlaneHandler http.Handler
+		if h := buildDataPlaneHandler(config); h != nil {
+			dataPlaneHandler = h
+		}
+		mcpHandler := mcpserver.NewHandler(mcpserver.Deps{
+			Tenant:    tenant.NewClientFactory(config),
+			DataPlane: dataPlaneHandler,
+		})
+		return server.New(server.Deps{
+			MCP:              mcpHandler,
+			DataPlane:        dataPlaneHandler,
+			WorkloadIdentity: buildWorkloadIdentityReviewHandler(),
+			PortalFileServer: fileServer,
+			PortalFS:         distFS,
+			ServePortalAsset: servePortalAsset,
+			Readiness: func() server.Readiness {
+				return aggregateReadiness(health, instanceHealth)
+			},
+		})
+	}
+
+	// Keep liveness and the portal available while a required kubeconfig is
+	// still being delivered. The controller lifecycle installs the recovered
+	// config into every request surface before it can mark readiness true.
+	surfaces := newServeSurfaces(buildHandler(nil), buildHandler, startInstanceController)
 
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           srv,
+		Handler:           surfaces,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -177,22 +193,18 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 		}
 	}()
 
-	// Platform controller manager (PR A). Opt-in: when no kubeconfig
-	// is in scope the provider stays in REST-only mode, preserving the
-	// existing dev/stub flow while the new code lands.
-	if err := startControllerManager(ctx, kcpConfig); err != nil {
-		if errors.Is(err, errControllerDisabled) {
-			log.Printf("controller manager: disabled (no kubeconfig); set INFRASTRUCTURE_CONTROLLER_KUBECONFIG to enable")
-		} else {
-			log.Printf("controller manager: NOT started: %v", err)
+	// Provider bootstrap and serve ordering is not guaranteed. Own the manager
+	// lifecycle here so setup failures and post-start exits both make readiness
+	// false and retry with a fresh manager.
+	go func() {
+		loadConfig := controllerConfigLoader(kcpConfig, reloadConfig)
+		start := func(startCtx context.Context, config *rest.Config, healthState *controllerHealth) error {
+			return runControllerAttempt(startCtx, config, healthState, instanceHealth, surfaces, startControllerManager)
 		}
-	}
+		runControllerManager(ctx, health, loadConfig, start, controllerRetryInterval)
+	}()
 
-	// Cross-tenant Application instance controller (fqdn stamp + OIDC
-	// client-secret bridge). Opt-in via FAROS_APP_BASE_DOMAIN + KRO_KUBECONFIG.
-	startInstanceController(ctx, kcpConfig)
-
-	go runHeartbeat(ctx)
+	go runHeartbeat(ctx, health, instanceHealth)
 
 	<-ctx.Done()
 	log.Printf("shutting down")
@@ -201,4 +213,148 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 	if err := httpSrv.Shutdown(shutdown); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+func runControllerAttempt(
+	ctx context.Context,
+	config *rest.Config,
+	platformHealth, instanceHealth *controllerHealth,
+	surfaces *serveSurfaces,
+	startManager func(context.Context, *rest.Config, *controllerHealth) error,
+) error {
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	instanceResult := surfaces.configure(attemptCtx, config, instanceHealth)
+	managerResult := make(chan error, 1)
+	go func() {
+		managerResult <- startManager(attemptCtx, config, platformHealth)
+	}()
+
+	// The first terminal signal ends the attempt, but not this function: cancel
+	// the shared child context and join every started controller before returning
+	// to the retry loop. This prevents a slow old manager from reconciling or
+	// mutating shared health alongside its replacement.
+	managerCh := (<-chan error)(managerResult)
+	instanceCh := (<-chan error)(instanceResult)
+	remaining := 1
+	if instanceCh != nil {
+		remaining++
+	}
+	ctxDone := ctx.Done()
+	var firstErr error
+	firstTerminal := true
+	for remaining > 0 {
+		var source string
+		var err error
+		select {
+		case result, ok := <-managerCh:
+			source = "platform"
+			if ok {
+				err = result
+			}
+			managerCh = nil
+			remaining--
+		case result, ok := <-instanceCh:
+			source = "instance"
+			if ok {
+				err = result
+			}
+			instanceCh = nil
+			remaining--
+		case <-ctxDone:
+			source = "controller attempt"
+			err = ctx.Err()
+			ctxDone = nil
+		}
+		if firstTerminal {
+			if err == nil {
+				err = fmt.Errorf("%s exited without an error", source)
+			}
+			firstErr = err
+			firstTerminal = false
+			ctxDone = nil
+			cancelAttempt()
+		}
+	}
+	cancelAttempt()
+	return firstErr
+}
+
+func controllerConfigLoader(initial *rest.Config, reload func() (*rest.Config, error)) func() (*rest.Config, error) {
+	if reload != nil {
+		// CLI serve owns a file-backed config source. Re-read it on every manager
+		// attempt so a corrected Secret/token/host replaces a successfully parsed
+		// but unusable startup config.
+		return reload
+	}
+	// Operator mode passes an explicit in-memory config and owns its rotation by
+	// restarting/reconciling the serve process.
+	return func() (*rest.Config, error) {
+		if initial == nil {
+			return nil, errControllerDisabled
+		}
+		return rest.CopyConfig(initial), nil
+	}
+}
+
+// serveSurfaces atomically replaces the degraded REST-only route set after a
+// late provider kubeconfig arrives. Every manager attempt replaces MCP and the
+// data-plane and starts the Instance controller with the same attempt-scoped
+// config/context. A failed attempt is cancelled before its replacement starts.
+type serveSurfaces struct {
+	mu            sync.RWMutex
+	handler       http.Handler
+	build         func(*rest.Config) http.Handler
+	startInstance func(context.Context, *rest.Config, *controllerHealth) <-chan error
+}
+
+func newServeSurfaces(
+	initial http.Handler,
+	build func(*rest.Config) http.Handler,
+	startInstance func(context.Context, *rest.Config, *controllerHealth) <-chan error,
+) *serveSurfaces {
+	return &serveSurfaces{
+		handler:       initial,
+		build:         build,
+		startInstance: startInstance,
+	}
+}
+
+func (s *serveSurfaces) configure(ctx context.Context, config *rest.Config, instanceHealth *controllerHealth) <-chan error {
+	if s == nil || config == nil {
+		return nil
+	}
+	handler := s.build(config)
+	s.mu.Lock()
+	s.handler = handler
+	s.mu.Unlock()
+	if s.startInstance != nil {
+		return s.startInstance(ctx, config, instanceHealth)
+	}
+	return nil
+}
+
+func (s *serveSurfaces) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	handler := s.handler
+	s.mu.RUnlock()
+	handler.ServeHTTP(w, r)
+}
+
+func aggregateReadiness(platform, instance *controllerHealth) server.Readiness {
+	platformSnapshot := platform.snapshot()
+	if !platform.ready() {
+		return server.Readiness{Controller: string(platformSnapshot.State), Error: platformSnapshot.Error}
+	}
+	instanceSnapshot := instance.snapshot()
+	if !instance.ready() {
+		return server.Readiness{
+			Controller: "instance-" + string(instanceSnapshot.State),
+			Error:      instanceSnapshot.Error,
+		}
+	}
+	state := platformSnapshot.State
+	if state == "" {
+		state = controllerStateRESTOnly
+	}
+	return server.Readiness{Ready: true, Controller: string(state)}
 }

@@ -157,7 +157,7 @@ func registerTools(srv *mcp.Server, deps Deps, r *http.Request) {
 			// recursive v1alpha1.ObjectResult and panic. 'any' keeps the structured
 			// output without the schema.
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, any, error) {
-			if ident.Tenant == "" {
+			if ident.Tenant == "" || ident.Cluster == "" {
 				return nil, nil, fmt.Errorf("missing tenant identity")
 			}
 			var spec v1alpha1.QuerySpec
@@ -166,7 +166,7 @@ func registerTools(srv *mcp.Server, deps Deps, r *http.Request) {
 					return nil, nil, fmt.Errorf("invalid QuerySpec: %w", err)
 				}
 			}
-			queryapi.ScopeToTenant(&spec, ident.Tenant)
+			queryapi.ScopeToTenant(&spec, ident.Cluster)
 			status, err := deps.Engine.Execute(ctx, &spec)
 			if err != nil {
 				return nil, nil, fmt.Errorf("query failed: %w", err)
@@ -186,7 +186,7 @@ func registerTools(srv *mcp.Server, deps Deps, r *http.Request) {
 				"Coupling is DECLARED — ownerRefs, spec field references, label selectors, namespace membership — NOT runtime traffic or network policy, so a clean result is not proof nothing else depends on it at runtime. Each related object is returned with its kind/namespace/name/edge and the relation that linked it. Prefer this over per-edge kubectl for change-safety and root-cause questions that span edges.",
 			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in impactInput) (*mcp.CallToolResult, impactOutput, error) {
-			if ident.Tenant == "" {
+			if ident.Tenant == "" || ident.Cluster == "" {
 				return nil, impactOutput{}, fmt.Errorf("missing tenant identity")
 			}
 			if in.Kind == "" || in.Name == "" {
@@ -231,7 +231,7 @@ func registerTools(srv *mcp.Server, deps Deps, r *http.Request) {
 			if in.Edge == "" {
 				spec.Cluster = nil
 			}
-			queryapi.ScopeToTenant(&spec, ident.Tenant)
+			queryapi.ScopeToTenant(&spec, ident.Cluster)
 			status, err := deps.Engine.Execute(ctx, &spec)
 			if err != nil {
 				return nil, impactOutput{}, fmt.Errorf("impact query failed: %w", err)

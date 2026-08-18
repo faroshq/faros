@@ -41,9 +41,22 @@ spec:
     # the hub backend proxy at /services/providers/edges/* to this Service.
     # Overridden by the chart to the in-cluster Service DNS name.
     url: "http://localhost:8088"
-    healthPath: "/healthz"
+    healthPath: "/readyz"
   apiExport:
     name: "edges.providers.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: edges.faros.sh
+        name: kubernetesclusters
+      - group: edges.faros.sh
+        name: linuxservers
+      - group: edges.faros.sh
+        name: placements
+      - group: edges.faros.sh
+        name: services
+      - group: edges.faros.sh
+        name: workloads
     # Both KubernetesCluster + LinuxServer come with this export (the provider
     # owns them). These claims are the additional tenant-workspace resources the
     # token/RBAC/lifecycle reconcilers create per registered edge: a namespace +

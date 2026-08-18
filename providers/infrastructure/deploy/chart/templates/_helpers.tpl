@@ -46,9 +46,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 centralKroSecretName resolves to either the user-supplied existing
 Secret (centralKro.kubeconfigSecretRef.name) or the chart-rendered
 "<release>-kro-kubeconfig" Secret when centralKro.kubeconfig is set
-inline. Returns empty string when neither is configured — the
-provider runs in stub mode (no central kro), so phase-2 UI still
-demos.
+inline. Returns empty string when neither is configured. A seeded non-operator
+install rejects that state; bootstrap.seedTemplates=false keeps the explicit
+externally-managed/stub escape hatch.
 */}}
 {{- define "infrastructure.centralKroSecretName" -}}
 {{- if .Values.centralKro.kubeconfigSecretRef.name -}}
@@ -82,9 +82,10 @@ Empty when bootstrap is disabled / no kubeconfig configured.
 {{- end -}}
 
 {{/*
-bootstrapSecretName / bootstrapSecretKey resolve the SINGLE kubeconfig Secret
-that BOTH the init (bootstrap) and serve (runtime) containers mount when
-bootstrap.enabled=true. Two sources:
+bootstrapSecretName / bootstrapSecretKey resolve the admin/supplied kubeconfig
+Secret mounted by the init container when bootstrap.enabled=true. Serve never
+mounts this credential; init writes a minted least-privilege kubeconfig to a
+shared emptyDir. Two bootstrap input sources:
   - kubeconfigSource=hubMinted (default): the hub-delivered runtime kubeconfig
     Secret (providerKubeconfig.secretName, key "kubeconfig"). The platform
     admin's CatalogEntry triggers the hub to mint it (cluster-admin in the

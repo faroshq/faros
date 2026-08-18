@@ -19,16 +19,16 @@ limitations under the License.
 // the infrastructure provider (init + serve) as host subprocesses — the same
 // shape `suites/provider` uses for quickstart — then exercises what the
 // kind/kro template e2e (make e2e-infrastructure) cannot: provisioning
-// (Provider + CatalogEntry → workspace), `init` bootstrap (CRDs, APIExport,
+// (Provider → workspace), `init` bootstrap (CRDs, APIExport, CatalogEntry,
 // template seeding), the Template controller's full reconcile chain
 // (per-template CRD + APIResourceSchema + APIExport sync, via the stub
 // backend), retirement of removed platform templates, and the tenant catalog
 // path (APIBinding → list templates from a tenant workspace).
 //
-// Runs without kind/Helm/Dex/kro: with KRO_KUBECONFIG unset the provider
-// registers only the stub backend, so `backend: kro` seed templates park at
-// BackendNotFound (asserted as catalog presence, not readiness) while
-// `backend: stub` test templates drive the controller end-to-end.
+// Runs without kind/Helm/Dex/kro. Init still seeds the production catalog for
+// assertions, while the serve subprocess explicitly opts out of seed readiness
+// because it registers only the stub backend; `backend: stub` test templates
+// drive the controller end-to-end.
 package infraprovider
 
 import (
@@ -54,6 +54,7 @@ var (
 	kcpServer   string // https://127.0.0.1:<port> (admin kubeconfig)
 	adminToken  string // kcp admin token (from <dataDir>/kcp/admin.kubeconfig)
 	staticToken = "test:user-default"
+	dataDir     string
 )
 
 // Ports deliberately distinct from suites/provider (19443/16443/18081) so the
@@ -63,6 +64,7 @@ const (
 	hubPort       = "19453"
 	kcpPort       = "16453"
 	providerPort  = "18086"
+	recoveryPort  = "18087"
 	workspacePath = "root:faros:providers:infrastructure"
 )
 
@@ -73,7 +75,7 @@ func TestMain(m *testing.M) {
 	hubURL = "http://127.0.0.1:" + hubPort
 	kcpServer = "https://127.0.0.1:" + kcpPort
 
-	for _, p := range []string{hubPort, kcpPort, providerPort, "2380"} {
+	for _, p := range []string{hubPort, kcpPort, providerPort, recoveryPort, "2380"} {
 		if portInUse(p) {
 			fmt.Fprintf(os.Stderr, "port :%s already in use; run `pkill faros-hub; pkill infrastructure-provider` and retry\n", p)
 			os.Exit(2)
@@ -85,7 +87,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	dataDir, err := os.MkdirTemp("", "faros-e2e-infraprovider-")
+	var err error
+	dataDir, err = os.MkdirTemp("", "faros-e2e-infraprovider-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tempdir:", err)
 		os.Exit(1)
@@ -114,10 +117,11 @@ func TestMain(m *testing.M) {
 	}
 	fmt.Fprintf(os.Stderr, "hub started (pid=%d, log=%s)\n", hubCmd.Process.Pid, hubLog.Name())
 
-	var provCmd *exec.Cmd
+	var provCmd, recoveryCmd *exec.Cmd
 	cleanup := func() {
 		killGroup(hubCmd)
 		killGroup(provCmd)
+		killGroup(recoveryCmd)
 		if !keepData {
 			_ = os.RemoveAll(dataDir)
 		} else {
@@ -140,7 +144,48 @@ func TestMain(m *testing.M) {
 	}
 	adminToken = tok
 
-	// Provisioning: apply the Provider + CatalogEntry (mirrors
+	// Start a real required-mode provider before its kubeconfig, logical
+	// workspace, or APIs exist. This reproduces the production ordering race
+	// that previously made manager startup fail once and remain dead while
+	// /healthz stayed green. The main suite process below still uses the
+	// init-minted ServiceAccount kubeconfig and exercises its RBAC.
+	recoveryKubeconfig := filepath.Join(dataDir, "recovery-admin.kubeconfig")
+	recoveryLog, err := os.Create(filepath.Join(dataDir, "provider-recovery.log"))
+	if err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "create provider-recovery.log:", err)
+		os.Exit(1)
+	}
+	recoveryCmd = exec.Command(filepath.Join(repoRoot, "bin", "infrastructure-provider"))
+	recoveryCmd.Env = append(os.Environ(),
+		"PORT="+recoveryPort,
+		"INFRASTRUCTURE_CONTROLLER_MODE=required",
+		"INFRASTRUCTURE_KUBECONFIG="+recoveryKubeconfig,
+		"INFRASTRUCTURE_WORKSPACE_PATH="+workspacePath,
+		// This suite has no kro runtime. Init still seeds the catalog below;
+		// only the recovery process opts out of the production seed gate.
+		"INFRASTRUCTURE_SKIP_SEED_TEMPLATES=1",
+	)
+	recoveryCmd.Stdout = recoveryLog
+	recoveryCmd.Stderr = recoveryLog
+	recoveryCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := recoveryCmd.Start(); err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "start recovery provider:", err)
+		os.Exit(1)
+	}
+	if err := waitReady("http://127.0.0.1:"+recoveryPort+"/healthz", 30*time.Second); err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "recovery provider never became live:", err)
+		os.Exit(1)
+	}
+	if code, err := getStatus("http://127.0.0.1:" + recoveryPort + "/readyz"); err != nil || code != http.StatusServiceUnavailable {
+		cleanup()
+		fmt.Fprintf(os.Stderr, "recovery provider ready before bootstrap: status=%d err=%v\n", code, err)
+		os.Exit(1)
+	}
+
+	// Provisioning: apply the Provider onboarding record (mirrors
 	// `make install-provider-infrastructure`). The hub's Provider controller
 	// then materializes root:faros:providers:infrastructure.
 	if err := applyProviderManifests(); err != nil {
@@ -170,6 +215,7 @@ func TestMain(m *testing.M) {
 		"INFRASTRUCTURE_ADMIN_KUBECONFIG="+adminKubeconfig,
 		"INFRASTRUCTURE_WORKSPACE_PATH="+workspacePath,
 		"INFRASTRUCTURE_KUBECONFIG="+mintedKubeconfig,
+		"FAROS_CATALOGENTRY_FILE="+filepath.Join(dataDir, "infrastructure-catalogentry.yaml"),
 	)
 	initCmd.Stdout = initLog
 	initCmd.Stderr = initLog
@@ -178,6 +224,24 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "provider init failed: %v (log: %s)\n", err, initLog.Name())
 		os.Exit(1)
 	}
+	adminConfigBytes, err := os.ReadFile(adminKubeconfig)
+	if err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "read recovery kubeconfig source:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(recoveryKubeconfig, adminConfigBytes, 0o600); err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "publish recovery kubeconfig:", err)
+		os.Exit(1)
+	}
+	if err := waitHTTPStatus("http://127.0.0.1:"+recoveryPort+"/readyz", http.StatusOK, 90*time.Second); err != nil {
+		cleanup()
+		fmt.Fprintf(os.Stderr, "provider controller did not recover after bootstrap: %v (log: %s)\n", err, recoveryLog.Name())
+		os.Exit(1)
+	}
+	killGroup(recoveryCmd)
+	recoveryCmd = nil
 
 	// Serve: REST + MCP + the Template controller (stub backend only — no
 	// KRO_KUBECONFIG). Runs with the SA kubeconfig init minted — NOT the
@@ -197,6 +261,7 @@ func TestMain(m *testing.M) {
 		"FAROS_HUB_INSECURE=true",
 		"FAROS_PROVIDER_NAME=infrastructure",
 		"INFRASTRUCTURE_KUBECONFIG="+mintedKubeconfig,
+		"INFRASTRUCTURE_SKIP_SEED_TEMPLATES=1",
 	)
 	provCmd.Stdout = provLog
 	provCmd.Stderr = provLog
@@ -258,6 +323,31 @@ func waitReady(url string, timeout time.Duration) error {
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("timeout after %s waiting for %s", timeout, url)
+}
+
+func getStatus(url string) (int, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil
+}
+
+func waitHTTPStatus(url string, want int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastStatus int
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lastStatus, lastErr = getStatus(url)
+		if lastErr == nil && lastStatus == want {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout after %s waiting for %s status %d (last status=%d err=%v)", timeout, url, want, lastStatus, lastErr)
 }
 
 // extractToken pulls the first `token:` value out of the kcp admin

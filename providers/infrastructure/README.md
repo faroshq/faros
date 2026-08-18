@@ -132,20 +132,25 @@ helm CLI.
 
 | Surface | Where |
 |---|---|
-| HTTP server | `server/` — `/healthz`, portal SPA, `/mcp` |
-| MCP transport | `mcpserver/` — `/mcp`, `/mcp/sse` (6 `kro_*` tools) |
-| Central kro client | `kro/` — `ResourceGraphDefinition` discovery + instance lifecycle |
-| Tenant kcp client | `tenant/` — per-tenant `cloud-credentials` Secret resolution |
+| HTTP server | `server/` — `/healthz` liveness, `/readyz` controller readiness, portal SPA, `/mcp` |
+| MCP transport | `mcpserver/` — `/mcp`, `/mcp/sse` (catalog, instance lifecycle, and development tools) |
+| Template controller + kro backend | `controller/template/`, `backend/kro/` — validate Templates and author runtime RGDs |
+| Cross-tenant Instance controller | `controller/instance/` — validate stable Instances, bridge secrets, sync runtime CRs, mirror status |
+| Tenant kcp client | `tenant/` — caller-scoped Template/Instance access and per-tenant Secret resolution |
 | Portal micro-frontend | `portal/` — Vue 3 catalog + dynamic provision form + instance list |
 | Operator | `operator/` + `apis/v1alpha1` — `InfrastructureProvider` CRD + reconciler |
 | Helm chart | `deploy/chart/` — operator + provider Deployment + CatalogEntry |
 | Per-cloud credential convention | [docs/credentials.md](docs/credentials.md) |
 | Template-defined instance rendering | [docs/instance-views.md](docs/instance-views.md) |
 
-The CatalogEntry ships with `apiExport.schemas: []` (pure broker, no
-CRDs leak into tenant workspaces). The single `permissionClaim` is
-`secrets get/list/watch` with `tenantScoped: true` so the provider
-can read `cloud-credentials` after a tenant Enables it.
+The CatalogEntry declares the permanent tenant API surface —
+`templates.infrastructure.faros.sh` and `instances.infrastructure.faros.sh` —
+as its `apiExport.requiredResources` minimum. Provider init publishes both
+schemas once. Adding or changing a Template does not mutate the APIExport: the
+Template controller validates the catalog entry and asks its backend to prepare
+the runtime graph. The `secrets get/list/watch` permission claim is
+`tenantScoped: true` so the provider can read `cloud-credentials` after a tenant
+Enables it.
 
 ## Architecture
 
@@ -160,29 +165,31 @@ hub /services/providers/infrastructure/{api/*, mcp, mcp/sse}
    ▼
 this provider pod
    │
-   ├── tenant kcp client ── /var/run/secrets/faros/faros-provider-kubeconfig
-   │     resolves cloud-credentials Secret in tenant workspace
+   ├── provider-workspace controller
+   │     watches Templates and authors one RGD per Template
    │
-   └── central kro client ── /var/run/secrets/kro/kubeconfig
-         discovers RGDs, creates/lists/deletes instances in
-         per-tenant namespace faros-tenants-<hash>
+   ├── APIExport virtual-workspace Instance controller
+   │     watches stable Instances across bound tenant workspaces
+   │     validates spec.values, bridges tenant Secrets, mirrors status
+   │
+   └── upstream kro runtime cluster ── /var/run/secrets/kro/kubeconfig
+         receives per-template runtime CRs in <workspace-cluster>-default
+         and reconciles their child resources single-cluster
 ```
 
-kro runs in **`kcp-apiexport`** mode: the provider creates instance CRs in the
-tenant's kcp workspace through its APIExport
-`infrastructure.providers.faros.sh`; kro reads the `infrastructure`
-APIExportEndpointSlice in the provider workspace to find the virtual-workspace
-URL, watches instance CRs across every bound tenant workspace, and — with
-`controller.deployToLocalRuntime=true` — materializes each instance's child
-resources on the cluster kro runs in, while the instance object + status stay in
-the tenant workspace.
+kro runs in ordinary **single-cluster** mode. It never receives a kcp
+credential and does not watch the provider APIExport. The provider's Instance
+controller owns that boundary: it watches the one stable `Instance` kind through
+the APIExport virtual workspace, materializes the Template's per-template
+runtime CR beside its workloads, and mirrors runtime status back to the tenant
+Instance. See [the flattened Instance contract](../../docs/infrastructure-flattened-instances.md).
 
 **This provider is the sole owner of the runtime cluster.** The runtime
 kubeconfig (`/var/run/secrets/kro/kubeconfig`), the kro RGDs, and the
 workloads' internal Services are its private backend layer — no other
 provider holds a credential into them. Consumers (e.g. App Studio) operate
-infrastructure-owned workloads only through the instance CRs (control plane)
-and their VW subresources (data plane: `sandboxrunners/{name}/{log,proxy,…}`),
+infrastructure-owned workloads only through `Instance` CRs (control plane)
+and their VW subresources (data plane: `instances/{name}/{log,proxy,…}`),
 as the tenant user. See the platform
 [provider-isolation rule](../../docs/providers.md#provider-isolation-the-cross-provider-boundary)
 and [`app-studio-runtime-decoupling.md`](../../docs/app-studio-runtime-decoupling.md).
@@ -203,11 +210,12 @@ the central faros MCP aggregator:
 }
 ```
 
-The MCP server exposes six tools: `kro_list_templates`,
-`kro_describe_template`, `kro_provision`, `kro_list_instances`,
-`kro_get_instance`, `kro_delete_instance`. Identity (tenant + user) is
-taken from the same bearer token the faros portal uses — the model
-never needs to ask the user for a tenant path.
+The MCP server exposes catalog and instance lifecycle tools
+(`list_templates`, `describe_template`, `provision`, `list_instances`,
+`get_instance`, `update_instance`, `delete_instance`) plus `dev_sync`,
+`dev_logs`, and `dev_restart` for development-capable Templates. Identity
+(tenant + user) is taken from the same bearer token the faros portal uses — the
+model never needs to ask the user for a tenant path.
 
 External providers cannot plug into the in-tree aggregator at
 [providers/mcp/aggregate/](../mcp/aggregate/) (init()-only registration).
@@ -223,12 +231,11 @@ central one.
 | `FAROS_HUB_TOKEN` | (unset) | Bearer token for heartbeats |
 | `FAROS_PROVIDER_NAME` | `infrastructure` | CatalogEntry name |
 | `FAROS_HUB_INSECURE` | (unset) | `true` skips TLS verify on heartbeats |
-| `FAROS_PROVIDER_KUBECONFIG` | `/var/run/secrets/faros/faros-provider-kubeconfig` | Mounted kcp kubeconfig |
+| `INFRASTRUCTURE_KUBECONFIG` | `/var/run/secrets/faros/faros-provider-kubeconfig` | Mounted provider-workspace kcp kubeconfig used by the controller |
 | `FAROS_TENANT_CREDENTIALS_SECRET` | `cloud-credentials` | Secret name in tenant workspace |
 | `FAROS_TENANT_CREDENTIALS_NAMESPACE` | `default` | Namespace in tenant workspace |
 | `FAROS_DEV_ALLOW_TENANT_QUERY` | (unset) | `true` lets `?tenant=` replace `X-Faros-Tenant` (dev only) |
 | `KRO_KUBECONFIG` | (unset → stub mode) | Central kro cluster kubeconfig |
-| `KRO_NAMESPACE_PREFIX` | `faros-tenants-` | Per-tenant namespace prefix |
 
 ---
 
@@ -249,8 +256,9 @@ npm --prefix portal run build
 go run .
 # → listening on :8081 (kro=*kro.stubClient tenant=false mcp=true)
 
-# 3. Smoke test: liveness.
+# 3. Smoke test: process liveness and controller readiness.
 curl -s localhost:8081/healthz
+curl -s localhost:8081/readyz
 
 # 4. MCP tools/list (note: SSE response — pipe through `head`). Templates
 #    and instances are NOT served as REST — they are kro_* MCP tools and,
@@ -286,7 +294,8 @@ kubectl --kubeconfig kcp-admin.kubeconfig \
   ws use root:faros:providers
 kubectl apply -f manifest.yaml
 kubectl get catalogentry infrastructure -o yaml
-# status.conditions[Ready].status flips True once heartbeats land.
+# APIExportReady=True after init's export contract is verified.
+# Ready=True after APIExport, /readyz, and heartbeat gates all pass.
 ```
 
 Open the portal at `https://<hub>/ui/providers/infrastructure/`.
@@ -331,9 +340,12 @@ cluster and the instance controller materializes tenant Instances into it.
 ## Deploy with Helm (init-container bootstrap, non-operator)
 
 A single provider Deployment that self-bootstraps via an init container — the
-pre-operator path. The provider needs a runtime kubeconfig to reach kcp, mounted
-as the `faros-provider-kubeconfig` Secret. Onboard the provider in the faros
-**admin portal**, download the issued kubeconfig, create the Secret, then deploy.
+pre-operator path. Bootstrap needs a workspace-admin kubeconfig to install the
+provider APIs. Onboard the provider in the faros **admin portal**, download the
+issued kubeconfig, create the Secret, then deploy. The init container uses that
+credential once and writes a newly minted, least-privilege runtime kubeconfig to
+a shared `emptyDir`; the long-lived serve container never mounts the admin
+credential.
 
 ### 1. Create the Secret from the download
 
@@ -346,6 +358,15 @@ kubectl -n infrastructure create secret generic faros-provider-kubeconfig \
   --from-file=kubeconfig=provider-infrastructure.kubeconfig
 ```
 
+The standard seeded catalog also needs a kubeconfig for the cluster running
+kro. Store it separately; this is the backend/runtime credential, not the kcp
+workspace-admin credential above:
+
+```sh
+kubectl -n infrastructure create secret generic central-kro-kubeconfig \
+  --from-file=kubeconfig=runtime-cluster.kubeconfig
+```
+
 ### 2. Deploy the chart
 
 ```sh
@@ -353,24 +374,40 @@ helm install infrastructure deploy/chart \
   -n infrastructure --create-namespace \
   --set hub.url=https://faros-hub.faros.svc.cluster.local:9443 \
   --set hub.tokenSecretRef.name=faros-infrastructure-hub-token \
-  --set bootstrap.enabled=true
+  --set bootstrap.seedTemplates=true \
+  --set centralKro.kubeconfigSecretRef.name=central-kro-kubeconfig
 ```
 
-With `bootstrap.enabled=true`, an init container runs `infrastructure init`
+`bootstrap.enabled=true` is the chart default. An init container runs
+`infrastructure init`
 — installing the CRDs / CachedResource / APIExport (and the `infrastructure`
-APIExportEndpointSlice kro watches) into the provider workspace. The serve
-container then reuses the same kubeconfig. The init/serve volume is **not**
-`optional`, so the pod waits in `ContainerCreating` until the
+APIExportEndpointSlice kro watches) into the provider workspace, seeding the
+catalog, and minting the narrower runtime identity. The serve container mounts
+only that generated identity from the shared `emptyDir`. The init input Secret
+is **not** optional, so the pod waits in `ContainerCreating` until the
 `faros-provider-kubeconfig` Secret exists.
+
+`bootstrap.seedTemplates=false` is the render-safe chart default. It installs
+the provider API surface but leaves the catalog and backend lifecycle to an
+external workflow. Any non-operator release that sets
+`bootstrap.seedTemplates=true` must also configure `centralKro.kubeconfig` or
+`centralKro.kubeconfigSecretRef.name`; Helm rejects a seeded render without that
+runtime credential instead of deploying permanently unready templates.
+
+Set `bootstrap.enabled=false` only when an external workflow has already
+installed those provider-owned APIs. The hub creates the provider workspace and
+kubeconfig, but does not install the infrastructure provider's API surface.
 
 ### Alternative: `supplied` — fully standalone, no hub
 
 ```sh
 helm install infrastructure deploy/chart -n infrastructure --create-namespace \
   --set bootstrap.enabled=true \
+  --set bootstrap.seedTemplates=true \
   --set bootstrap.kubeconfigSource=supplied \
   --set bootstrap.workspacePath=root:faros:providers:infrastructure \
-  --set-file bootstrap.kcpKubeconfig=./provider-workspace-admin.kubeconfig
+  --set-file bootstrap.kcpKubeconfig=./provider-workspace-admin.kubeconfig \
+  --set centralKro.kubeconfigSecretRef.name=central-kro-kubeconfig
 ```
 
 The kubeconfig must be admin of `bootstrap.workspacePath`, and that workspace

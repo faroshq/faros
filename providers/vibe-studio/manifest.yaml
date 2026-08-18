@@ -13,6 +13,9 @@ spec:
   version: "0.1.0"
   category: "Build"
   iconURL: "/ui/providers/vibe-studio/icon.svg"
+  dependencies:
+    - name: code
+    - name: infrastructure
   ui:
     url: "http://localhost:8089"
     indexPath: "/"
@@ -26,6 +29,17 @@ spec:
   # for the Enable dialog only.
   apiExport:
     name: "vibe.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: vibe.faros.sh
+        name: models
+      - group: vibe.faros.sh
+        name: projects
+      - group: vibe.faros.sh
+        name: sessions
+      - group: vibe.faros.sh
+        name: studios
     permissionClaims:
       # Every infrastructure template's instances are one flattened resource
       # (product selected by spec.template), so one claim covers the runtime
@@ -34,10 +48,12 @@ spec:
         group: infrastructure.faros.sh
         verbs: [get, list, watch, create, update, patch, delete]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: infrastructure}
       - resource: repositories
         group: code.faros.sh
         verbs: [get, list, watch, create, update, patch]
         tenantScoped: true
+        identitySource: {kind: Provider, provider: code}
       - resource: serviceaccounts
         verbs: [get, list, watch, create, delete]
         tenantScoped: true

@@ -386,6 +386,15 @@ spec:
 
   apiExport:
     name: "databricks.providers.faros.sh"
+    # Static API surface the init command must publish before the hub offers
+    # this provider for Enable. Runtime-added resources may extend this set.
+    requiredResources:
+      - group: databricks.faros.sh
+        name: connections
+      - group: databricks.faros.sh
+        name: tables
+      - group: databricks.faros.sh
+        name: warehouses
     permissionClaims:
       - resource: secrets
         verbs: [get]

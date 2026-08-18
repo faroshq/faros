@@ -21,6 +21,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
@@ -57,6 +58,7 @@ func (r *Reconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	r.Manager = mgr
 	return mcbuilder.ControllerManagedBy(mgr).
 		Named("databricks-warehouse").
+		WithOptions(controller.TypedOptions[mcreconcile.Request]{SkipNameValidation: mgr.GetControllerOptions().SkipNameValidation}).
 		For(&databricksv1alpha1.Warehouse{}, mcbuilder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&databricksv1alpha1.Connection{}, mchandler.EnqueueRequestsFromMapFunc(r.mapConnectionToWarehouses)).
 		Complete(r)

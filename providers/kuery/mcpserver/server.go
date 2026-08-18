@@ -15,8 +15,9 @@
 //
 // Mirrors the infrastructure provider's pattern: a stateless streamable
 // HTTP handler building a per-request server, so each caller's
-// X-Faros-Tenant is closed over in the tool handlers. All queries go
-// through queryapi.ScopeToTenant — the same choke point as the REST API.
+// proxy-derived X-Faros-Tenant and X-Faros-Cluster identity is closed over in
+// the tool handlers. All queries go through queryapi.ScopeToTenant — the same
+// choke point as the REST API.
 package mcpserver
 
 import (

@@ -30,11 +30,9 @@ hub:
   insecure: false
 
 # Secret the provider mounts read-only at
-# /var/run/secrets/faros/faros-provider-kubeconfig to reach kcp (CODE_KUBECONFIG).
-# The hub catalog controller mints it when it reconciles the CatalogEntry; the
-# volume is `optional`, so the pod stays schedulable and serves portal/MCP reads
-# until the Secret appears — the multicluster controller manager engages once it
-# does (pod restart on Secret mount).
+# /var/run/secrets/faros/faros-provider-kubeconfig to reach kcp. Admin Provider
+# onboarding mints the workspace credential; the deployment workflow supplies
+# it here before provider init publishes schemas/APIExport/CatalogEntry.
 providerKubeconfig:
   secretName: faros-provider-kubeconfig
 

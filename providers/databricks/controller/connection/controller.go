@@ -21,6 +21,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
@@ -55,6 +56,7 @@ func (r *Reconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	// validation interval and transient Databricks failures use the short retry.
 	return mcbuilder.ControllerManagedBy(mgr).
 		Named("databricks-connection").
+		WithOptions(controller.TypedOptions[mcreconcile.Request]{SkipNameValidation: mgr.GetControllerOptions().SkipNameValidation}).
 		For(&databricksv1alpha1.Connection{}, mcbuilder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }

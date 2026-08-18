@@ -46,6 +46,23 @@ data:
         healthPath: "/healthz"
       apiExport:
         name: "code.providers.faros.sh"
+        requiredResources:
+          - group: code.faros.sh
+            name: collaborators
+          - group: code.faros.sh
+            name: connections
+          - group: code.faros.sh
+            name: deploykeys
+          - group: code.faros.sh
+            name: packages
+          - group: code.faros.sh
+            name: repositories
+          - group: code.faros.sh
+            name: repositorybuildstatuses
+          - group: code.faros.sh
+            name: repositorycheckouts
+          - group: code.faros.sh
+            name: repositorycommits
         permissionClaims:
           - resource: secrets
             verbs: [get, list, watch, create, update, patch, delete]
