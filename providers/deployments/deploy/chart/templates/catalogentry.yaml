@@ -16,7 +16,12 @@ data:
       version: {{ .Chart.AppVersion | quote }}
       category: "Developer"
       dependencies:
+        - name: code
         - name: infrastructure
+      iconURL: "/ui/providers/deployments/icon.svg"
+      ui:
+        url: "http://{{ include "deployments.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+        indexPath: "/"
       backend:
         url: "http://{{ include "deployments.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
         healthPath: "/readyz"
@@ -25,6 +30,10 @@ data:
         permissionClaims:
           - group: infrastructure.faros.sh
             resource: instances
+            verbs: [get, list, watch, create, update, patch, delete]
+            tenantScoped: true
+          - group: code.faros.sh
+            resource: repositorycheckouts
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
 {{- end }}

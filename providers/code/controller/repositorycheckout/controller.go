@@ -18,7 +18,11 @@ package repositorycheckout
 import (
 	"context"
 	"fmt"
+	"path"
 	"reflect"
+	"sort"
+	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,11 +39,14 @@ import (
 	"github.com/faroshq/provider-code/controller/shared"
 )
 
+const repositoryCheckoutFinalizer = "code.faros.sh/repository-checkout-bundle-cleanup"
+
 // Reconciler reads RepositoryCheckout requests from the git host into bundles.
 type Reconciler struct {
 	Manager  mcmanager.Manager
 	Backends *backend.Registry
 	Bundles  commitbundle.Store
+	Signer   *commitbundle.CapabilitySigner
 }
 
 // Checkout bounds, passed explicitly so every backend behaves consistently
@@ -77,7 +84,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		}
 		return ctrl.Result{}, err
 	}
-	if !checkout.DeletionTimestamp.IsZero() || isTerminal(checkout.Status.Phase) {
+	if !checkout.DeletionTimestamp.IsZero() {
+		if !hasString(checkout.Finalizers, repositoryCheckoutFinalizer) {
+			return ctrl.Result{}, nil
+		}
+		if checkout.Status.BundleRef != nil && r.Bundles != nil {
+			if err := r.Bundles.Delete(ctx, string(req.ClusterName), checkout.Status.BundleRef.Name, checkout.Status.BundleRef.Digest); err != nil {
+				return ctrl.Result{}, fmt.Errorf("delete checkout bundle during finalization: %w", err)
+			}
+		}
+		checkout.Finalizers = removeString(checkout.Finalizers, repositoryCheckoutFinalizer)
+		if err := c.Update(ctx, &checkout); err != nil {
+			return ctrl.Result{}, fmt.Errorf("remove repositorycheckout finalizer: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+	if !hasString(checkout.Finalizers, repositoryCheckoutFinalizer) {
+		checkout.Finalizers = append(checkout.Finalizers, repositoryCheckoutFinalizer)
+		if err := c.Update(ctx, &checkout); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add repositorycheckout finalizer: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	if isTerminal(checkout.Status.Phase) && checkout.Status.ObservedGeneration == checkout.Generation {
 		return ctrl.Result{}, nil
 	}
 	fail := func(message string) error { return r.fail(ctx, c, &checkout, message) }
@@ -87,6 +116,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	if r.Backends == nil {
 		return ctrl.Result{}, fail("git backends are unavailable")
 	}
+	if isTerminal(checkout.Status.Phase) && checkout.Status.BundleRef != nil {
+		if err := r.Bundles.Delete(ctx, string(req.ClusterName), checkout.Status.BundleRef.Name, checkout.Status.BundleRef.Digest); err != nil {
+			return ctrl.Result{}, fail(fmt.Sprintf("reclaim superseded checkout bundle: %v", err))
+		}
+	}
 
 	now := metav1.Now()
 	if checkout.Status.StartedAt == nil {
@@ -94,6 +128,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	}
 	checkout.Status.Phase = codev1alpha1.RepositoryCheckoutPhaseRunning
 	checkout.Status.ObservedGeneration = checkout.Generation
+	checkout.Status.CompletedAt = nil
+	checkout.Status.Ref = ""
+	checkout.Status.CommitSHA = ""
+	checkout.Status.Source = nil
+	checkout.Status.BundleRef = nil
+	checkout.Status.Access = nil
+	checkout.Status.Skipped = nil
 	shared.SetCondition(&checkout.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionFalse, codev1alpha1.ReasonReconciling, "Checkout is running.", checkout.Generation)
 	if err := updateStatusIfChanged(ctx, c, &checkout); err != nil {
 		return ctrl.Result{}, err
@@ -129,6 +170,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	if err != nil {
 		return ctrl.Result{}, fail(err.Error())
 	}
+	if strings.TrimSpace(checkout.Spec.Path) != "" {
+		files, skipped, err := pathScopedFiles(res.Files, res.Skipped, checkout.Spec.Path)
+		if err != nil {
+			return ctrl.Result{}, fail(err.Error())
+		}
+		res.Files = files
+		res.Skipped = skipped
+	}
+
+	// A path-scoped checkout with no text files is a valid empty source tree.
+	// Bundle mode retains its historical requirement that at least one file be
+	// present in the store.
+	if len(res.Files) == 0 && strings.TrimSpace(checkout.Spec.Path) != "" {
+		completed := metav1.Now()
+		next := checkout.DeepCopy()
+		next.Status.Phase = codev1alpha1.RepositoryCheckoutPhaseSucceeded
+		next.Status.ObservedGeneration = checkout.Generation
+		next.Status.CompletedAt = &completed
+		next.Status.Ref = res.Ref
+		next.Status.CommitSHA = res.CommitSHA
+		next.Status.BundleRef = nil
+		next.Status.Source = nil
+		next.Status.Access = nil
+		next.Status.Skipped = res.Skipped
+		shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionTrue, codev1alpha1.ReasonReady, "Checkout succeeded.", checkout.Generation)
+		if err := updateStatusIfChanged(ctx, c, next); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update repositorycheckout %q status: %w", checkout.Name, err)
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// Bundle scope = this CR's cluster, same convention the commit flow reads
 	// bundles under; the checkout MCP tool reads it there and deletes it.
@@ -140,6 +211,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	bundle, err := r.Bundles.Put(ctx, bundleScope, files)
 	if err != nil {
 		return ctrl.Result{}, fail(fmt.Sprintf("store checkout bundle: %v", err))
+	}
+	token, expiresAt, err := r.Signer.Issue(bundle.Scope, bundle.Name, bundle.Digest, time.Now())
+	if err != nil {
+		_ = r.Bundles.Delete(ctx, bundleScope, bundle.Name, bundle.Digest)
+		return ctrl.Result{}, fail(fmt.Sprintf("issue checkout bundle capability: %v", err))
 	}
 
 	completed := metav1.Now()
@@ -157,6 +233,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		Digest:    bundle.Digest,
 		Size:      bundle.Size,
 		FileCount: len(bundle.Files),
+	}
+	next.Status.Access = &codev1alpha1.RepositoryCheckoutAccess{
+		Token:     token,
+		ExpiresAt: metav1.NewTime(expiresAt),
 	}
 	next.Status.Skipped = res.Skipped
 	shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionTrue, codev1alpha1.ReasonReady, "Checkout succeeded.", checkout.Generation)
@@ -202,4 +282,73 @@ func updateStatusIfChanged(ctx context.Context, c client.Client, checkout *codev
 
 func isTerminal(phase codev1alpha1.RepositoryCheckoutPhase) bool {
 	return phase == codev1alpha1.RepositoryCheckoutPhaseSucceeded || phase == codev1alpha1.RepositoryCheckoutPhaseFailed
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, remove string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value != remove {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+const (
+	pathCheckoutMaxFiles      = 100
+	pathCheckoutMaxFileBytes  = 64 << 10
+	pathCheckoutMaxTotalBytes = 512 << 10
+)
+
+func pathScopedFiles(files []backend.RepositoryCommitFile, skipped []string, rawRoot string) ([]backend.RepositoryCommitFile, []string, error) {
+	root := strings.TrimSpace(strings.ReplaceAll(rawRoot, "\\", "/"))
+	if root == "" {
+		return nil, nil, fmt.Errorf("checkout path is required for path-scoped mode")
+	}
+	cleaned := path.Clean(root)
+	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "/") || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return nil, nil, fmt.Errorf("checkout path %q must be a repository-relative subdirectory", rawRoot)
+	}
+	ordered := append([]backend.RepositoryCommitFile(nil), files...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	out := make([]backend.RepositoryCommitFile, 0, len(ordered))
+	outSkipped := make([]string, 0, len(skipped))
+	for _, item := range skipped {
+		if strings.Contains(item, "tree truncated") || withinCheckoutRoot(item, cleaned) {
+			outSkipped = append(outSkipped, item)
+		}
+	}
+	var total int64
+	for _, file := range ordered {
+		if !withinCheckoutRoot(file.Path, cleaned) {
+			continue
+		}
+		size := int64(len([]byte(file.Content)))
+		switch {
+		case len(out) >= pathCheckoutMaxFiles:
+			outSkipped = append(outSkipped, file.Path+" (path file-count cap)")
+		case size > pathCheckoutMaxFileBytes:
+			outSkipped = append(outSkipped, file.Path+" (path file-size cap)")
+		case total+size > pathCheckoutMaxTotalBytes:
+			outSkipped = append(outSkipped, file.Path+" (path total-size cap)")
+		default:
+			out = append(out, file)
+			total += size
+		}
+	}
+	return out, outSkipped, nil
+}
+
+func withinCheckoutRoot(value, root string) bool {
+	cleaned := path.Clean(strings.ReplaceAll(value, "\\", "/"))
+	return cleaned == root || strings.HasPrefix(cleaned, root+"/")
 }

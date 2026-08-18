@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -37,42 +39,43 @@ import (
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
-	codev1alpha1 "github.com/faroshq/provider-code/apis/v1alpha1"
-	"github.com/faroshq/provider-code/backend"
-	"github.com/faroshq/provider-code/controller/shared"
+	deploymentsv1alpha1 "github.com/faroshq/provider-deployments/apis/v1alpha1"
 )
 
 const (
-	ownerAnnotation          = "code.faros.sh/repository-sync"
-	pathAnnotation           = "code.faros.sh/source-path"
-	revisionAnnotation       = "code.faros.sh/config-revision"
-	deletionPolicyAnnotation = "code.faros.sh/applied-deletion-policy"
-	repositorySyncFinalizer  = "code.faros.sh/repository-sync-cleanup"
-	defaultPath              = ".faros"
-	defaultInterval          = 30 * time.Second
-	maxFiles                 = 500
-	maxFileBytes             = 256 << 10
-	maxTotalBytes            = 16 << 20
+	ownerAnnotation                = "deployments.faros.sh/repository-sync"
+	pathAnnotation                 = "deployments.faros.sh/source-path"
+	revisionAnnotation             = "deployments.faros.sh/config-revision"
+	deletionPolicyAnnotation       = "deployments.faros.sh/applied-deletion-policy"
+	repositorySyncFinalizer        = "deployments.faros.sh/repository-sync-cleanup"
+	legacyOwnerAnnotation          = "code.faros.sh/repository-sync"
+	legacyPathAnnotation           = "code.faros.sh/source-path"
+	legacyRevisionAnnotation       = "code.faros.sh/config-revision"
+	legacyDeletionPolicyAnnotation = "code.faros.sh/applied-deletion-policy"
+	conditionReady                 = "Ready"
+	defaultPath                    = ".faros"
+	defaultInterval                = 30 * time.Second
 )
 
 var deploymentsGV = schema.GroupVersion{Group: "deployments.faros.sh", Version: "v1alpha1"}
 
 type Reconciler struct {
-	Manager  mcmanager.Manager
-	Backends *backend.Registry
+	Manager mcmanager.Manager
+	Source  SourceReader
 }
 
 func (r *Reconciler) SetupWithManager(mgr mcmanager.Manager) error {
 	r.Manager = mgr
-	return mcbuilder.ControllerManagedBy(mgr).Named("code-repositorysyncs").For(&codev1alpha1.RepositorySync{}).Complete(r)
+	return mcbuilder.ControllerManagedBy(mgr).Named("deployments-repositorysyncs").For(&deploymentsv1alpha1.RepositorySync{}).Complete(r)
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-	c, err := shared.ClusterClient(ctx, r.Manager, req.ClusterName)
+	cluster, err := r.Manager.GetCluster(ctx, req.ClusterName)
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("get tenant cluster %s: %w", req.ClusterName, err)
 	}
-	var sync codev1alpha1.RepositorySync
+	c := cluster.GetClient()
+	var sync deploymentsv1alpha1.RepositorySync
 	if err := c.Get(ctx, req.NamespacedName, &sync); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -89,6 +92,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		}
 		if pending {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if cleaner, ok := r.Source.(SourceCleaner); ok {
+			if err := cleaner.Cleanup(ctx, c, sync.Name); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		sync.Finalizers = removeString(sync.Finalizers, repositorySyncFinalizer)
 		if err := c.Update(ctx, &sync); err != nil {
@@ -107,62 +115,50 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	if sync.Spec.IntervalSeconds > 0 {
 		interval = time.Duration(sync.Spec.IntervalSeconds) * time.Second
 	}
-	revision, inventory, reconcileErr := r.sync(ctx, c, &sync)
+	revision, inventory, reconcileErr := r.sync(ctx, c, &sync, string(req.ClusterName))
 	next := sync.DeepCopy()
 	next.Status.ObservedGeneration = sync.Generation
 	next.Status.ObservedRevision = revision
+	if errors.Is(reconcileErr, errCheckoutPending) {
+		next.Status.Phase = deploymentsv1alpha1.RepositorySyncPhaseReconciling
+		apiMeta.SetStatusCondition(&next.Status.Conditions, metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse, Reason: "CheckoutPending", Message: "Waiting for Code to produce the repository checkout.", ObservedGeneration: sync.Generation})
+		if err := updateStatus(ctx, c, next); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if reconcileErr != nil {
-		next.Status.Phase = codev1alpha1.RepositorySyncPhaseFailed
-		shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionFalse, codev1alpha1.ReasonError, reconcileErr.Error(), sync.Generation)
+		next.Status.Phase = deploymentsv1alpha1.RepositorySyncPhaseFailed
+		apiMeta.SetStatusCondition(&next.Status.Conditions, metav1.Condition{Type: conditionReady, Status: metav1.ConditionFalse, Reason: "Error", Message: reconcileErr.Error(), ObservedGeneration: sync.Generation})
 		if err := updateStatus(ctx, c, next); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: interval}, nil
 	}
-	next.Status.Phase = codev1alpha1.RepositorySyncPhaseReady
+	next.Status.Phase = deploymentsv1alpha1.RepositorySyncPhaseReady
 	next.Status.AppliedRevision = revision
 	next.Status.Inventory = inventory
-	shared.SetCondition(&next.Status.Conditions, codev1alpha1.ConditionReady, metav1.ConditionTrue, codev1alpha1.ReasonReady, "Repository configuration applied.", sync.Generation)
+	apiMeta.SetStatusCondition(&next.Status.Conditions, metav1.Condition{Type: conditionReady, Status: metav1.ConditionTrue, Reason: "Ready", Message: "Repository configuration applied.", ObservedGeneration: sync.Generation})
 	if err := updateStatus(ctx, c, next); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
-func (r *Reconciler) sync(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync) (string, []codev1alpha1.RepositorySyncInventoryItem, error) {
-	if r.Backends == nil {
-		return "", nil, fmt.Errorf("git backends are unavailable")
+func (r *Reconciler) sync(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync, scope string) (string, []deploymentsv1alpha1.RepositorySyncInventoryItem, error) {
+	if r.Source == nil {
+		return "", nil, fmt.Errorf("Code repository checkout reader is unavailable")
 	}
-	repo, err := shared.ResolveRepository(ctx, c, sync.Spec.RepositoryRef)
+	root, err := cleanRoot(sync.Spec.Path)
 	if err != nil {
 		return "", nil, err
 	}
-	conn, err := shared.ResolveConnection(ctx, c, repo.Spec.ConnectionRef)
-	if err != nil {
-		return "", nil, err
-	}
-	b, ok := r.Backends.Get(string(conn.Spec.Provider))
-	if !ok {
-		return "", nil, fmt.Errorf("git provider %q is not registered", conn.Spec.Provider)
-	}
-	reader, ok := b.(backend.RepositoryReader)
-	if !ok {
-		return "", nil, fmt.Errorf("git provider %q does not support reading files", conn.Spec.Provider)
-	}
-	cred, err := shared.ResolveCredential(ctx, c, conn)
-	if err != nil {
-		return "", nil, err
-	}
-	checkout, err := reader.CheckoutFiles(ctx, conn, cred, repo, backend.RepositoryCheckoutInput{Ref: sync.Spec.Ref, MaxFiles: maxFiles, MaxFileBytes: maxFileBytes, MaxTotalBytes: maxTotalBytes})
+	checkout, err := r.Source.Checkout(ctx, c, RepositorySource{SyncName: sync.Name, RepositoryRef: sync.Spec.RepositoryRef, Ref: sync.Spec.Ref, Path: root, Scope: scope})
 	if err != nil {
 		return "", nil, err
 	}
 	if strings.TrimSpace(checkout.CommitSHA) == "" {
 		return "", nil, fmt.Errorf("git backend resolved the repository without a commit SHA")
-	}
-	root, err := cleanRoot(sync.Spec.Path)
-	if err != nil {
-		return checkout.CommitSHA, nil, err
 	}
 	for _, skipped := range checkout.Skipped {
 		if strings.Contains(skipped, "tree truncated") || withinRoot(skipped, root) {
@@ -198,13 +194,13 @@ func (r *Reconciler) sync(ctx context.Context, c client.Client, sync *codev1alph
 	return checkout.CommitSHA, inventory, nil
 }
 
-func applyDocuments(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, revision string, docs []sourcedDocument) ([]codev1alpha1.RepositorySyncInventoryItem, error) {
+func applyDocuments(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync, revision string, docs []sourcedDocument) ([]deploymentsv1alpha1.RepositorySyncInventoryItem, error) {
 	if err := validateDocuments(ctx, c, sync, docs); err != nil {
 		return nil, err
 	}
 	ordered := append([]sourcedDocument(nil), docs...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].GetKind() == "Release" && ordered[j].GetKind() != "Release" })
-	inventory := make([]codev1alpha1.RepositorySyncInventoryItem, 0, len(docs))
+	inventory := make([]deploymentsv1alpha1.RepositorySyncInventoryItem, 0, len(docs))
 	for _, doc := range ordered {
 		item, err := applyDocument(ctx, c, sync, revision, doc)
 		if err != nil {
@@ -220,7 +216,7 @@ type sourcedDocument struct {
 	sourcePath string
 }
 
-func parseDocuments(files []backend.RepositoryCommitFile, root string) ([]sourcedDocument, error) {
+func parseDocuments(files []SourceFile, root string) ([]sourcedDocument, error) {
 	var out []sourcedDocument
 	seen := map[string]string{}
 	for _, file := range files {
@@ -286,7 +282,7 @@ func validateGitMetadata(u *unstructured.Unstructured) error {
 		return fmt.Errorf("metadata.finalizers is not allowed")
 	}
 	for key := range u.GetAnnotations() {
-		if strings.HasPrefix(key, "code.faros.sh/") {
+		if strings.HasPrefix(key, "code.faros.sh/") || strings.HasPrefix(key, "deployments.faros.sh/") {
 			return fmt.Errorf("reserved annotation %q is not allowed", key)
 		}
 	}
@@ -302,7 +298,7 @@ func validateGitMetadata(u *unstructured.Unstructured) error {
 // validateDocuments performs every deterministic and workspace lookup before
 // the first write, so a malformed later document cannot partially apply an
 // otherwise valid-looking revision.
-func validateDocuments(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, docs []sourcedDocument) error {
+func validateDocuments(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync, docs []sourcedDocument) error {
 	releases := map[string]bool{}
 	for _, doc := range docs {
 		if doc.GetKind() == "Release" {
@@ -324,7 +320,7 @@ func validateDocuments(ctx context.Context, c client.Client, sync *codev1alpha1.
 		if err != nil {
 			return fmt.Errorf("preflight %s %q: %w", doc.GetKind(), doc.GetName(), err)
 		}
-		if existing.GetAnnotations()[ownerAnnotation] != sync.Name {
+		if repositorySyncOwner(existing.GetAnnotations()) != sync.Name {
 			return fmt.Errorf("%s %q is not owned by RepositorySync %q", doc.GetKind(), doc.GetName(), sync.Name)
 		}
 		if doc.GetKind() == "Release" && !reflect.DeepEqual(existing.Object["spec"], doc.Object["spec"]) {
@@ -417,13 +413,17 @@ func validateDeployment(u *unstructured.Unstructured) (string, error) {
 	return releaseRef, nil
 }
 
-func applyDocument(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, revision string, doc sourcedDocument) (codev1alpha1.RepositorySyncInventoryItem, error) {
+func applyDocument(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync, revision string, doc sourcedDocument) (deploymentsv1alpha1.RepositorySyncInventoryItem, error) {
 	doc.SetGroupVersionKind(deploymentsGV.WithKind(doc.GetKind()))
 	annotations := doc.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
 	annotations[ownerAnnotation], annotations[pathAnnotation], annotations[revisionAnnotation] = sync.Name, doc.sourcePath, revision
+	delete(annotations, legacyOwnerAnnotation)
+	delete(annotations, legacyPathAnnotation)
+	delete(annotations, legacyRevisionAnnotation)
+	delete(annotations, legacyDeletionPolicyAnnotation)
 	if doc.GetKind() == "Deployment" {
 		policy, _, _ := unstructured.NestedString(doc.Object, "spec", "deletionPolicy")
 		annotations[deletionPolicyAnnotation] = policy
@@ -435,50 +435,52 @@ func applyDocument(ctx context.Context, c client.Client, sync *codev1alpha1.Repo
 	err := c.Get(ctx, key, current)
 	if apierrors.IsNotFound(err) {
 		if err := c.Create(ctx, doc.Unstructured); err != nil {
-			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("create %s %q: %w", doc.GetKind(), doc.GetName(), err)
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("create %s %q: %w", doc.GetKind(), doc.GetName(), err)
 		}
 		current = doc.Unstructured
 	} else if err != nil {
-		return codev1alpha1.RepositorySyncInventoryItem{}, err
+		return deploymentsv1alpha1.RepositorySyncInventoryItem{}, err
 	} else if doc.GetKind() == "Release" {
 		if !reflect.DeepEqual(current.Object["spec"], doc.Object["spec"]) {
-			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("immutable Release %q already exists with different spec", doc.GetName())
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("immutable Release %q already exists with different spec", doc.GetName())
 		}
-		if owner := current.GetAnnotations()[ownerAnnotation]; owner != sync.Name {
-			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Release %q is owned by RepositorySync %q", doc.GetName(), owner)
+		if owner := repositorySyncOwner(current.GetAnnotations()); owner != sync.Name {
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Release %q is owned by RepositorySync %q", doc.GetName(), owner)
 		}
 		merged := current.GetAnnotations()
 		if merged == nil {
 			merged = map[string]string{}
 		}
+		clearLegacySyncAnnotations(merged)
 		for k, v := range annotations {
 			merged[k] = v
 		}
 		current.SetAnnotations(merged)
 		if err := c.Update(ctx, current); err != nil {
-			return codev1alpha1.RepositorySyncInventoryItem{}, err
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, err
 		}
 	} else {
-		if owner := current.GetAnnotations()[ownerAnnotation]; owner != sync.Name {
-			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Deployment %q is owned by RepositorySync %q", doc.GetName(), owner)
+		if owner := repositorySyncOwner(current.GetAnnotations()); owner != sync.Name {
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("Deployment %q is owned by RepositorySync %q", doc.GetName(), owner)
 		}
 		current.Object["spec"] = doc.Object["spec"]
 		merged := current.GetAnnotations()
 		if merged == nil {
 			merged = map[string]string{}
 		}
+		clearLegacySyncAnnotations(merged)
 		for k, v := range annotations {
 			merged[k] = v
 		}
 		current.SetAnnotations(merged)
 		if err := c.Update(ctx, current); err != nil {
-			return codev1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("update Deployment %q: %w", doc.GetName(), err)
+			return deploymentsv1alpha1.RepositorySyncInventoryItem{}, fmt.Errorf("update Deployment %q: %w", doc.GetName(), err)
 		}
 	}
-	return codev1alpha1.RepositorySyncInventoryItem{APIVersion: deploymentsGV.String(), Kind: doc.GetKind(), Resource: strings.ToLower(doc.GetKind()) + "s", Name: doc.GetName(), UID: string(current.GetUID())}, nil
+	return deploymentsv1alpha1.RepositorySyncInventoryItem{APIVersion: deploymentsGV.String(), Kind: doc.GetKind(), Resource: strings.ToLower(doc.GetKind()) + "s", Name: doc.GetName(), UID: string(current.GetUID())}, nil
 }
 
-func prune(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync, desired []codev1alpha1.RepositorySyncInventoryItem) error {
+func prune(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync, desired []deploymentsv1alpha1.RepositorySyncInventoryItem) error {
 	wanted := map[string]bool{}
 	for _, item := range desired {
 		wanted[item.Kind+"/"+item.Name] = true
@@ -495,10 +497,10 @@ func prune(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySy
 			}
 			return err
 		}
-		if u.GetAnnotations()[ownerAnnotation] != sync.Name {
+		if repositorySyncOwner(u.GetAnnotations()) != sync.Name {
 			continue
 		}
-		if old.Kind == "Deployment" && u.GetAnnotations()[deletionPolicyAnnotation] == "Delete" {
+		if old.Kind == "Deployment" && repositorySyncAnnotation(u.GetAnnotations(), deletionPolicyAnnotation, legacyDeletionPolicyAnnotation) == "Delete" {
 			if err := c.Delete(ctx, u); err != nil && !apierrors.IsNotFound(err) {
 				return err
 			}
@@ -509,6 +511,10 @@ func prune(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySy
 		delete(annotations, pathAnnotation)
 		delete(annotations, revisionAnnotation)
 		delete(annotations, deletionPolicyAnnotation)
+		delete(annotations, legacyOwnerAnnotation)
+		delete(annotations, legacyPathAnnotation)
+		delete(annotations, legacyRevisionAnnotation)
+		delete(annotations, legacyDeletionPolicyAnnotation)
 		u.SetAnnotations(annotations)
 		if err := c.Update(ctx, u); err != nil {
 			return err
@@ -521,7 +527,7 @@ func prune(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySy
 // applied-deletion-policy annotation is controller-authored from the last
 // applied Git spec, so a later out-of-band spec edit cannot turn retention
 // into deletion during Project teardown.
-func cleanupInventory(ctx context.Context, c client.Client, sync *codev1alpha1.RepositorySync) (bool, error) {
+func cleanupInventory(ctx context.Context, c client.Client, sync *deploymentsv1alpha1.RepositorySync) (bool, error) {
 	pending := false
 	for _, item := range sync.Status.Inventory {
 		u := &unstructured.Unstructured{}
@@ -533,10 +539,10 @@ func cleanupInventory(ctx context.Context, c client.Client, sync *codev1alpha1.R
 			return false, err
 		}
 		annotations := u.GetAnnotations()
-		if annotations[ownerAnnotation] != sync.Name {
+		if repositorySyncOwner(annotations) != sync.Name {
 			continue
 		}
-		if item.Kind == "Deployment" && annotations[deletionPolicyAnnotation] == "Delete" {
+		if item.Kind == "Deployment" && repositorySyncAnnotation(annotations, deletionPolicyAnnotation, legacyDeletionPolicyAnnotation) == "Delete" {
 			if u.GetDeletionTimestamp() != nil {
 				pending = true
 				continue
@@ -551,6 +557,10 @@ func cleanupInventory(ctx context.Context, c client.Client, sync *codev1alpha1.R
 		delete(annotations, pathAnnotation)
 		delete(annotations, revisionAnnotation)
 		delete(annotations, deletionPolicyAnnotation)
+		delete(annotations, legacyOwnerAnnotation)
+		delete(annotations, legacyPathAnnotation)
+		delete(annotations, legacyRevisionAnnotation)
+		delete(annotations, legacyDeletionPolicyAnnotation)
 		u.SetAnnotations(annotations)
 		if err := c.Update(ctx, u); err != nil {
 			return false, err
@@ -577,6 +587,24 @@ func removeString(values []string, remove string) []string {
 	return out
 }
 
+func repositorySyncOwner(annotations map[string]string) string {
+	return repositorySyncAnnotation(annotations, ownerAnnotation, legacyOwnerAnnotation)
+}
+
+func repositorySyncAnnotation(annotations map[string]string, current, legacy string) string {
+	if value := annotations[current]; value != "" {
+		return value
+	}
+	return annotations[legacy]
+}
+
+func clearLegacySyncAnnotations(annotations map[string]string) {
+	delete(annotations, legacyOwnerAnnotation)
+	delete(annotations, legacyPathAnnotation)
+	delete(annotations, legacyRevisionAnnotation)
+	delete(annotations, legacyDeletionPolicyAnnotation)
+}
+
 func cleanRoot(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -592,8 +620,8 @@ func withinRoot(value, root string) bool {
 	cleaned := path.Clean(value)
 	return cleaned == root || strings.HasPrefix(cleaned, root+"/")
 }
-func updateStatus(ctx context.Context, c client.Client, next *codev1alpha1.RepositorySync) error {
-	var current codev1alpha1.RepositorySync
+func updateStatus(ctx context.Context, c client.Client, next *deploymentsv1alpha1.RepositorySync) error {
+	var current deploymentsv1alpha1.RepositorySync
 	if err := c.Get(ctx, client.ObjectKey{Name: next.Name}, &current); err != nil {
 		return err
 	}

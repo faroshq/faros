@@ -518,6 +518,7 @@ func repositoryCommitForBuildTest(name, labelRepository, specRepository, phase, 
 		"spec": map[string]any{"repositoryRef": specRepository},
 		"status": map[string]any{
 			"phase":     phase,
+			"branch":    projectGitOpsDefaultBranch,
 			"commitSHA": commitSHA,
 		},
 	}}
@@ -620,7 +621,7 @@ func TestResolveProjectComponentImagesKeepsPackagesBoundToProjectRepository(t *t
 			"labels": map[string]any{codeLabelRepository: "repo-a"},
 		},
 		"spec":   map[string]any{"repositoryRef": "repo-a"},
-		"status": map[string]any{"phase": "Succeeded", "commitSHA": "current"},
+		"status": map[string]any{"phase": "Succeeded", "branch": projectGitOpsDefaultBranch, "commitSHA": "current"},
 	}}
 	listYAML, err := yaml.Marshal(packages)
 	if err != nil {
@@ -638,6 +639,10 @@ func TestResolveProjectComponentImagesKeepsPackagesBoundToProjectRepository(t *t
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode GraphQL request: %v", err)
+		}
+		if strings.Contains(req.Query, "RepositoryYaml") {
+			_, _ = fmt.Fprint(w, `{"errors":[{"message":"repository not found"}]}`)
+			return
 		}
 		if req.Variables["labelSelector"] != selector {
 			t.Fatalf("labelSelector variable = %#v, want %q", req.Variables["labelSelector"], selector)
@@ -698,6 +703,79 @@ func TestCurrentProjectRepositoryCommitSHASelectsNewestSuccessfulScopedCommit(t 
 	}
 	if got != "commit-current" {
 		t.Fatalf("current commit SHA = %q, want newest successful nonempty scoped commit", got)
+	}
+}
+
+func TestCurrentProjectRepositoryCommitSHAForProjectExcludesNewerPromotionBranchCommit(t *testing.T) {
+	baseTime := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	source := repositoryCommitForBuildTest(
+		"source-main", "repo-a", "repo-a", "Succeeded", "commit-main", baseTime,
+	)
+	promotion := repositoryCommitForBuildTest(
+		"promotion", "repo-a", "repo-a", "Succeeded", "commit-promotion", baseTime.Add(time.Hour),
+	)
+	promotion.Object["status"].(map[string]any)["branch"] = "promote/config"
+
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"},
+		Delivery: &aiv1alpha1.ProjectDeliverySpec{
+			Development: aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: aiv1alpha1.ProjectDeliveryModeDirect},
+			Production:  aiv1alpha1.ProjectEnvironmentDeliverySpec{Mode: aiv1alpha1.ProjectDeliveryModeGitOps},
+			GitOps:      &aiv1alpha1.ProjectGitOpsDeliverySpec{Ref: projectGitOpsDefaultBranch},
+		},
+	}}
+	client := asclient.NewFromDynamic(fake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{codeRepositoryCommitsGVR: "RepositoryCommitList"},
+		source, promotion,
+	))
+
+	got, err := currentProjectRepositoryCommitSHAForProject(context.Background(), client, project)
+	if err != nil {
+		t.Fatalf("currentProjectRepositoryCommitSHAForProject() error = %v", err)
+	}
+	if got != "commit-main" {
+		t.Fatalf("currentProjectRepositoryCommitSHAForProject() = %q, want %q", got, "commit-main")
+	}
+}
+
+func TestCurrentProjectRepositoryCommitSHAForProjectUsesRepositoryDefaultBranchForDirectAdoptedProject(t *testing.T) {
+	baseTime := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	source := repositoryCommitForBuildTest(
+		"source-trunk", "repo-a", "repo-a", "Succeeded", "commit-trunk", baseTime,
+	)
+	source.Object["status"].(map[string]any)["branch"] = "trunk"
+	promotion := repositoryCommitForBuildTest(
+		"promotion", "repo-a", "repo-a", "Succeeded", "commit-promotion", baseTime.Add(time.Hour),
+	)
+	promotion.Object["status"].(map[string]any)["branch"] = "promote/config"
+	repository := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": codeSchemeGroupVersion.String(),
+		"kind":       "Repository",
+		"metadata": map[string]any{
+			"name": "repo-a",
+		},
+		"status": map[string]any{"defaultBranch": "trunk"},
+	}}
+	repository.SetAnnotations(map[string]string{projectRepositoryAdoptedAnnotation: "true"})
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "repo-a"},
+	}}
+	client := asclient.NewFromDynamic(fake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			codeRepositoriesGVR:      "RepositoryList",
+			codeRepositoryCommitsGVR: "RepositoryCommitList",
+		},
+		repository, source, promotion,
+	))
+
+	got, err := currentProjectRepositoryCommitSHAForProject(context.Background(), client, project)
+	if err != nil {
+		t.Fatalf("currentProjectRepositoryCommitSHAForProject() error = %v", err)
+	}
+	if got != "commit-trunk" {
+		t.Fatalf("currentProjectRepositoryCommitSHAForProject() = %q, want %q", got, "commit-trunk")
 	}
 }
 

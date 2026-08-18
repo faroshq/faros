@@ -111,6 +111,10 @@ func runServe() {
 		log.Fatalf("commit bundle store: %v", err)
 	}
 	log.Printf("commit bundle store: %s", bundles.Dir())
+	signer, err := commitbundle.NewCapabilitySigner()
+	if err != nil {
+		log.Fatalf("bundle capability signer: %v", err)
+	}
 
 	// Caller-token client factory for the MCP tools: they act on the caller's
 	// behalf, never as the provider.
@@ -143,6 +147,7 @@ func runServe() {
 		PortalFS:         distFS,
 		ServePortalAsset: servePortalAsset,
 		OAuth:            oauthHandler,
+		BundleAccess:     commitbundle.NewCapabilityHandler(bundles, signer),
 	})
 
 	httpSrv := &http.Server{
@@ -161,7 +166,7 @@ func runServe() {
 		}
 	}()
 
-	if err := startControllerManager(ctx, kcpConfig, backends, bundles); err != nil {
+	if err := startControllerManager(ctx, kcpConfig, backends, bundles, signer); err != nil {
 		if errors.Is(err, errControllerDisabled) {
 			log.Printf("controller manager: disabled (no kubeconfig); set CODE_KUBECONFIG to enable")
 		} else {

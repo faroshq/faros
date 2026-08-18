@@ -8,8 +8,10 @@ package deployment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -47,6 +49,65 @@ func TestDesiredInstanceReservedFieldsAndArtifactMapping(t *testing.T) {
 	}
 	if want.GroupVersionKind() != instanceGVK || ref.Resource != "instances" || ref.Kind != "Instance" || ref.APIVersion != "infrastructure.faros.sh/v1alpha1" {
 		t.Fatalf("unexpected backend ref: %#v", ref)
+	}
+}
+
+func TestBuiltinTemplateContractAdmitsSupportedBlueprints(t *testing.T) {
+	for name, wantComponents := range map[string]map[string]string{
+		"application":   {"web": "webImage", "api": "apiImage"},
+		"simple-webapp": {"app": "image"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			template, err := builtinTemplateContract(name)
+			if err != nil {
+				t.Fatalf("builtinTemplateContract(%q): %v", name, err)
+			}
+			if template.GetName() != name {
+				t.Fatalf("template name = %q, want %q", template.GetName(), name)
+			}
+			components, ok, err := unstructured.NestedMap(template.Object, "spec", "development", "components")
+			if err != nil || !ok {
+				t.Fatalf("components = %#v, err = %v", components, err)
+			}
+			if len(components) != len(wantComponents) {
+				t.Fatalf("components = %#v, want %#v", components, wantComponents)
+			}
+			for componentName, imageInput := range wantComponents {
+				component, ok := components[componentName].(map[string]any)
+				if !ok || component["imageInput"] != imageInput {
+					t.Fatalf("component %q = %#v, want imageInput %q", componentName, components[componentName], imageInput)
+				}
+			}
+		})
+	}
+}
+
+func TestBuiltinTemplateContractRejectsUnknownBlueprint(t *testing.T) {
+	if _, err := builtinTemplateContract("unknown"); err == nil {
+		t.Fatal("unknown blueprint was admitted")
+	}
+}
+
+func TestDesiredInstanceSimpleWebAppMapsAppArtifact(t *testing.T) {
+	d := &deploymentsv1alpha1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Spec: deploymentsv1alpha1.DeploymentSpec{RolloutID: "roll-1"}}
+	release := testRelease()
+	release.Spec.BlueprintRef.Name = "simple-webapp"
+	release.Spec.Artifacts = []deploymentsv1alpha1.ReleaseArtifact{{Name: "app", Image: "ghcr.io/acme/app@sha256:1"}}
+	template, err := builtinTemplateContract("simple-webapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _, err := DesiredInstance(d, release, template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _, _ := unstructured.NestedMap(want.Object, "spec")
+	if spec["template"] != "simple-webapp" {
+		t.Fatalf("template = %#v, want simple-webapp", spec["template"])
+	}
+	values, _, _ := unstructured.NestedMap(spec, "values")
+	if values["image"] != "ghcr.io/acme/app@sha256:1" {
+		t.Fatalf("simple-webapp artifact was not mapped to image: %#v", values)
 	}
 }
 
@@ -93,6 +154,124 @@ func TestDesiredInstanceDeletePolicyOwnsBackend(t *testing.T) {
 	owners := want.GetOwnerReferences()
 	if len(owners) != 1 || owners[0].Name != "demo" || owners[0].UID != "deployment-uid" {
 		t.Fatalf("Delete deployment did not own backend: %#v", owners)
+	}
+}
+
+func TestEnsureInstancePreservesForeignOwnerReferences(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	d := testDeployment()
+	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
+	want, _, err := DesiredInstance(d, testRelease(), testTemplate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := metav1.OwnerReference{APIVersion: "other.faros.sh/v1alpha1", Kind: "Other", Name: "other", UID: "foreign-uid", Controller: boolPtr(true)}
+	own := metav1.OwnerReference{APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: d.Name, UID: d.UID}
+	instance := testBackendInstance()
+	instance.SetOwnerReferences([]metav1.OwnerReference{foreign, own})
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(instance).Build()
+
+	if _, err := ensureInstance(ctx, c, want, d.UID); err != nil {
+		t.Fatal(err)
+	}
+	got := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	owners := got.GetOwnerReferences()
+	if len(owners) != 2 || owners[0].APIVersion != foreign.APIVersion || owners[0].Kind != foreign.Kind || owners[0].Name != foreign.Name || owners[0].UID != foreign.UID || owners[0].Controller == nil || !*owners[0].Controller || owners[1].APIVersion != own.APIVersion || owners[1].Kind != own.Kind || owners[1].Name != own.Name || owners[1].UID != own.UID || owners[1].Controller == nil || *owners[1].Controller {
+		t.Fatalf("foreign owner reference was not preserved: %#v", owners)
+	}
+}
+
+func TestEnsureInstanceRemovesOnlyOwnOwnerReferenceForRetain(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	d := testDeployment()
+	want, _, err := DesiredInstance(d, testRelease(), testTemplate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := metav1.OwnerReference{APIVersion: "other.faros.sh/v1alpha1", Kind: "Other", Name: "other", UID: "foreign-uid"}
+	own := metav1.OwnerReference{APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: d.Name, UID: d.UID}
+	instance := testBackendInstance()
+	instance.SetOwnerReferences([]metav1.OwnerReference{foreign, own})
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(instance).Build()
+
+	if _, err := ensureInstance(ctx, c, want, d.UID); err != nil {
+		t.Fatal(err)
+	}
+	got := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	owners := got.GetOwnerReferences()
+	if len(owners) != 1 || owners[0].APIVersion != foreign.APIVersion || owners[0].Kind != foreign.Kind || owners[0].Name != foreign.Name || owners[0].UID != foreign.UID {
+		t.Fatalf("own owner reference was not removed while preserving foreign ownership: %#v", owners)
+	}
+}
+
+func TestEnsureInstanceRetriesMetadataConflictWithFreshObject(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	d := testDeployment()
+	want, _, err := DesiredInstance(d, testRelease(), testTemplate())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := testBackendInstance()
+	instance.SetLabels(map[string]string{"provider": "keep"})
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(instance).Build()
+	c := &conflictOnceClient{Client: base, conflicts: 1, beforeConflict: addRaceLabel}
+
+	if _, err := ensureInstance(ctx, c, want, d.UID); err != nil {
+		t.Fatal(err)
+	}
+	got := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	if got.GetLabels()["race"] != "keep" {
+		t.Fatalf("retry did not re-read the object after conflict: %#v", got.GetLabels())
+	}
+	if got.GetLabels()["deployments.faros.sh/deployment"] != d.Name {
+		t.Fatalf("desired deployment label missing after retry: %#v", got.GetLabels())
+	}
+}
+
+func TestDetachBackendRetriesMetadataConflictWithFreshObject(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	d := testDeployment()
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name, UID: "backend-uid"}
+	instance := testBackendInstance()
+	instance.SetLabels(map[string]string{"deployments.faros.sh/deployment": d.Name, "provider": "keep"})
+	instance.SetAnnotations(map[string]string{lastAppliedSpecKey: `{"name":"demo"}`, "provider": "keep"})
+	instance.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: d.Name, UID: d.UID}})
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(d, instance).Build()
+	c := &conflictOnceClient{Client: base, conflicts: 1, beforeConflict: addRaceLabel}
+
+	if err := detachBackend(ctx, c, d); err != nil {
+		t.Fatal(err)
+	}
+	got := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	if got.GetLabels()["race"] != "keep" || got.GetLabels()["deployments.faros.sh/deployment"] != "" || got.GetAnnotations()[lastAppliedSpecKey] != "" || len(got.GetOwnerReferences()) != 0 {
+		t.Fatalf("detach retry did not merge against fresh metadata: labels=%#v annotations=%#v owners=%#v", got.GetLabels(), got.GetAnnotations(), got.GetOwnerReferences())
+	}
+}
+
+func TestRemoveFinalizerRetriesMetadataConflict(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	d := testDeployment()
+	d.Finalizers = []string{Finalizer}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(d).Build()
+	c := &conflictOnceClient{Client: base, conflicts: 1, conflictResource: schema.GroupResource{Group: deploymentsv1alpha1.GroupVersion.Group, Resource: "deployments"}, beforeConflict: addDeploymentRaceAnnotation}
+
+	if err := removeFinalizer(ctx, c, d); err != nil {
+		t.Fatal(err)
+	}
+	var current deploymentsv1alpha1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if controllerContainsFinalizer(&current, Finalizer) {
+		t.Fatalf("finalizer remains after conflict retry: %#v", current.Finalizers)
+	}
+	if current.Annotations["race"] != "keep" {
+		t.Fatalf("finalizer retry did not preserve concurrently written annotation: %#v", current.Annotations)
 	}
 }
 
@@ -286,10 +465,11 @@ func TestFinalizeRetainsFinalizerUntilBackendDeletionObserved(t *testing.T) {
 	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
 	d.Finalizers = []string{Finalizer}
 	d.DeletionTimestamp = &now
-	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo"}
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo", UID: "backend-uid"}
 	instance := &unstructured.Unstructured{}
 	instance.SetGroupVersionKind(instanceGVK)
 	instance.SetName("demo")
+	instance.SetUID("backend-uid")
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, instance).Build()
 	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
 		t.Fatal(err)
@@ -315,6 +495,99 @@ func TestFinalizeRetainsFinalizerUntilBackendDeletionObserved(t *testing.T) {
 	}
 }
 
+func TestFinalizeDeleteUsesOwnerUIDWhenStatusUIDWriteWasInterrupted(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	now := metav1.Now()
+	d := testDeployment()
+	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
+	d.Finalizers = []string{Finalizer}
+	d.DeletionTimestamp = &now
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name}
+	instance := testBackendInstance()
+	instance.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: d.Name, UID: d.UID,
+	}})
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, instance).Build()
+
+	result, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != deletePollInterval {
+		t.Fatalf("interrupted status delete requeue = %s, want %s", result.RequeueAfter, deletePollInterval)
+	}
+	backend := &unstructured.Unstructured{}
+	backend.SetGroupVersionKind(instanceGVK)
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, backend); !apierrors.IsNotFound(err) {
+		t.Fatalf("owner-identified backend remains after Delete finalization: %v", err)
+	}
+	var current deploymentsv1alpha1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerContainsFinalizer(&current, Finalizer) {
+		t.Fatal("Deployment finalizer was removed before backend NotFound observation")
+	}
+}
+
+func TestFinalizeDeleteEmptyStatusUIDDoesNotTouchUnownedBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner *metav1.OwnerReference
+	}{
+		{name: "no owner"},
+		{name: "different deployment UID", owner: &metav1.OwnerReference{
+			APIVersion: deploymentsv1alpha1.GroupVersion.String(), Kind: "Deployment", Name: "demo", UID: "different-deployment-uid",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testScheme(t)
+			now := metav1.Now()
+			d := testDeployment()
+			d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
+			d.Finalizers = []string{Finalizer}
+			d.DeletionTimestamp = &now
+			d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name}
+			backend := testBackendInstance()
+			if tc.owner != nil {
+				backend.SetOwnerReferences([]metav1.OwnerReference{*tc.owner})
+			}
+			c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, backend).Build()
+
+			if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
+				t.Fatal(err)
+			}
+			got := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+			if got.GetUID() != backend.GetUID() {
+				t.Fatalf("unowned backend changed: UID=%q, want %q", got.GetUID(), backend.GetUID())
+			}
+		})
+	}
+}
+
+func TestRemoveFinalizerDoesNotTouchReplacementDeployment(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	stale := testDeployment()
+	stale.Finalizers = []string{Finalizer}
+	replacement := stale.DeepCopy()
+	replacement.UID = "replacement-deployment-uid"
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(replacement).Build()
+
+	if err := removeFinalizer(ctx, c, stale); err != nil {
+		t.Fatal(err)
+	}
+	var current deploymentsv1alpha1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Name: replacement.Name}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerContainsFinalizer(&current, Finalizer) {
+		t.Fatal("stale reconcile removed replacement Deployment finalizer")
+	}
+}
+
 func TestFinalizeRetainDetachesBackendAndRemovesFinalizer(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme(t)
@@ -322,26 +595,31 @@ func TestFinalizeRetainDetachesBackendAndRemovesFinalizer(t *testing.T) {
 	d := testDeployment()
 	d.Finalizers = []string{Finalizer}
 	d.DeletionTimestamp = &now
-	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo"}
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: "instances", Name: "demo", UID: "backend-uid"}
 	instance := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": instanceGVK.GroupVersion().String(),
 		"kind":       instanceGVK.Kind,
 		"metadata": map[string]any{
-			"name":            "demo",
-			"labels":          map[string]any{"deployments.faros.sh/deployment": "demo", "provider": "keep"},
-			"annotations":     map[string]any{lastAppliedSpecKey: `{"name":"demo"}`, "provider": "keep"},
-			"ownerReferences": []any{map[string]any{"apiVersion": deploymentsv1alpha1.GroupVersion.String(), "kind": "Deployment", "name": "demo", "uid": "deployment-uid", "controller": true, "blockOwnerDeletion": true}},
+			"name":        "demo",
+			"labels":      map[string]any{"deployments.faros.sh/deployment": "demo", "provider": "keep"},
+			"annotations": map[string]any{lastAppliedSpecKey: `{"name":"demo"}`, "provider": "keep"},
+			"ownerReferences": []any{
+				map[string]any{"apiVersion": "other.faros.sh/v1alpha1", "kind": "Other", "name": "other", "uid": "foreign-uid"},
+				map[string]any{"apiVersion": deploymentsv1alpha1.GroupVersion.String(), "kind": "Deployment", "name": "demo", "uid": "deployment-uid", "controller": true, "blockOwnerDeletion": true},
+			},
 		},
 		"spec": map[string]any{"template": "application", "values": map[string]any{"name": "demo"}},
 	}}
 	instance.SetGroupVersionKind(instanceGVK)
+	instance.SetUID("backend-uid")
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, instance).Build()
 	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
 		t.Fatal(err)
 	}
 	retained := getUnstructured(t, ctx, c, instanceGVK, "demo")
-	if len(retained.GetOwnerReferences()) != 0 {
-		t.Fatalf("deployment owner reference remains: %#v", retained.GetOwnerReferences())
+	owners := retained.GetOwnerReferences()
+	if len(owners) != 1 || owners[0].UID != "foreign-uid" {
+		t.Fatalf("deployment owner reference was not removed while preserving foreign owner: %#v", owners)
 	}
 	if retained.GetLabels()["deployments.faros.sh/deployment"] != "" || retained.GetLabels()["provider"] != "keep" {
 		t.Fatalf("deployment label was not detached cleanly: %#v", retained.GetLabels())
@@ -356,6 +634,112 @@ func TestFinalizeRetainDetachesBackendAndRemovesFinalizer(t *testing.T) {
 	}
 }
 
+func TestFinalizeDeleteSkipsSameNameReplacementByUID(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	now := metav1.Now()
+	d := testDeployment()
+	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
+	d.Finalizers = []string{Finalizer}
+	d.DeletionTimestamp = &now
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name, UID: "original-uid"}
+	replacement := testBackendInstance()
+	replacement.SetUID("replacement-uid")
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, replacement).Build()
+
+	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, replacement); err != nil {
+		t.Fatal(err)
+	}
+	var current deploymentsv1alpha1.Deployment
+	err := c.Get(ctx, client.ObjectKey{Name: d.Name}, &current)
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	if err == nil && controllerContainsFinalizer(&current, Finalizer) {
+		t.Fatalf("finalizer remained after original backend UID disappeared: %#v", current.Finalizers)
+	}
+}
+
+func TestFinalizeDeleteUIDPreconditionProtectsReplacementAfterGet(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	now := metav1.Now()
+	d := testDeployment()
+	d.Spec.DeletionPolicy = deploymentsv1alpha1.DeploymentDeletionPolicyDelete
+	d.Finalizers = []string{Finalizer}
+	d.DeletionTimestamp = &now
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name, UID: "backend-uid"}
+	original := testBackendInstance()
+	base := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, original).Build()
+	c := &deleteRaceClient{Client: base}
+
+	result, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != deletePollInterval {
+		t.Fatalf("UID precondition conflict requeue = %s, want %s", result.RequeueAfter, deletePollInterval)
+	}
+	if !c.sawUIDPrecondition {
+		t.Fatal("delete did not include the observed backend UID precondition")
+	}
+	replacement := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	if replacement.GetUID() != "replacement-uid" {
+		t.Fatalf("same-name replacement was deleted: UID=%q", replacement.GetUID())
+	}
+	var afterConflict deploymentsv1alpha1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, &afterConflict); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerContainsFinalizer(&afterConflict, Finalizer) {
+		t.Fatal("Deployment finalizer was removed on UID precondition conflict")
+	}
+
+	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKey{Name: d.Name}, replacement); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFinalizeRetainSkipsSameNameReplacementByUID(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+	now := metav1.Now()
+	d := testDeployment()
+	d.Finalizers = []string{Finalizer}
+	d.DeletionTimestamp = &now
+	d.Status.BackendRef = &deploymentsv1alpha1.BackendReference{APIVersion: instanceGVK.GroupVersion().String(), Kind: instanceGVK.Kind, Resource: instanceResource, Name: d.Name, UID: "original-uid"}
+	replacement := testBackendInstance()
+	replacement.SetUID("replacement-uid")
+	replacement.SetLabels(map[string]string{"deployments.faros.sh/deployment": d.Name, "provider": "keep"})
+	replacement.SetAnnotations(map[string]string{lastAppliedSpecKey: `{"name":"demo"}`, "provider": "keep"})
+	foreign := metav1.OwnerReference{APIVersion: "other.faros.sh/v1alpha1", Kind: "Other", Name: "other", UID: "foreign-uid"}
+	replacement.SetOwnerReferences([]metav1.OwnerReference{foreign})
+	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&deploymentsv1alpha1.Deployment{}).WithObjects(d, replacement).Build()
+
+	if _, err := ReconcileClient(ctx, c, types.NamespacedName{Name: d.Name}); err != nil {
+		t.Fatal(err)
+	}
+	retained := getUnstructured(t, ctx, c, instanceGVK, d.Name)
+	owners := retained.GetOwnerReferences()
+	if retained.GetLabels()["deployments.faros.sh/deployment"] != d.Name || retained.GetAnnotations()[lastAppliedSpecKey] == "" || len(owners) != 1 || owners[0].APIVersion != foreign.APIVersion || owners[0].Kind != foreign.Kind || owners[0].Name != foreign.Name || owners[0].UID != foreign.UID {
+		t.Fatalf("same-name replacement was detached: labels=%#v annotations=%#v owners=%#v", retained.GetLabels(), retained.GetAnnotations(), retained.GetOwnerReferences())
+	}
+	var current deploymentsv1alpha1.Deployment
+	err := c.Get(ctx, client.ObjectKey{Name: d.Name}, &current)
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	if err == nil && controllerContainsFinalizer(&current, Finalizer) {
+		t.Fatalf("finalizer remained after original backend UID disappeared: %#v", current.Finalizers)
+	}
+}
+
 func controllerContainsFinalizer(d *deploymentsv1alpha1.Deployment, finalizer string) bool {
 	for _, current := range d.Finalizers {
 		if current == finalizer {
@@ -363,6 +747,89 @@ func controllerContainsFinalizer(d *deploymentsv1alpha1.Deployment, finalizer st
 		}
 	}
 	return false
+}
+
+type conflictOnceClient struct {
+	client.Client
+	conflicts        int
+	conflictResource schema.GroupResource
+	beforeConflict   func(context.Context, client.Client, client.Object) error
+}
+
+func (c *conflictOnceClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.conflicts > 0 {
+		c.conflicts--
+		if c.beforeConflict != nil {
+			if err := c.beforeConflict(ctx, c.Client, obj); err != nil {
+				return err
+			}
+		}
+		resource := c.conflictResource
+		if resource.Group == "" && resource.Resource == "" {
+			resource = schema.GroupResource{Group: instanceGVK.Group, Resource: instanceResource}
+		}
+		return apierrors.NewConflict(resource, obj.GetName(), errors.New("transient conflict"))
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+type deleteRaceClient struct {
+	client.Client
+	sawUIDPrecondition bool
+	raced              bool
+}
+
+func (c *deleteRaceClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	original := &unstructured.Unstructured{}
+	original.SetGroupVersionKind(instanceGVK)
+	if err := c.Client.Get(ctx, client.ObjectKey{Name: obj.GetName()}, original); err != nil {
+		return err
+	}
+	originalUID := original.GetUID()
+	if !c.raced {
+		if err := c.Client.Delete(ctx, original); err != nil {
+			return err
+		}
+		replacement := testBackendInstance()
+		replacement.SetUID("replacement-uid")
+		if err := c.Client.Create(ctx, replacement); err != nil {
+			return err
+		}
+		c.raced = true
+	}
+	deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+	if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil && *deleteOptions.Preconditions.UID == originalUID {
+		c.sawUIDPrecondition = true
+		return apierrors.NewConflict(schema.GroupResource{Group: instanceGVK.Group, Resource: instanceResource}, obj.GetName(), errors.New("backend UID changed before delete"))
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func addRaceLabel(ctx context.Context, c client.Client, obj client.Object) error {
+	latest := &unstructured.Unstructured{}
+	latest.SetGroupVersionKind(instanceGVK)
+	if err := c.Get(ctx, client.ObjectKey{Name: obj.GetName()}, latest); err != nil {
+		return err
+	}
+	labels := latest.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels["race"] = "keep"
+	latest.SetLabels(labels)
+	return c.Update(ctx, latest)
+}
+
+func addDeploymentRaceAnnotation(ctx context.Context, c client.Client, obj client.Object) error {
+	var latest deploymentsv1alpha1.Deployment
+	if err := c.Get(ctx, client.ObjectKey{Name: obj.GetName()}, &latest); err != nil {
+		return err
+	}
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations["race"] = "keep"
+	return c.Update(ctx, &latest)
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -389,6 +856,18 @@ func testRelease() *deploymentsv1alpha1.Release {
 func testTemplate() *unstructured.Unstructured {
 	u := &unstructured.Unstructured{Object: map[string]any{"apiVersion": templateGVK.GroupVersion().String(), "kind": "Template", "metadata": map[string]any{"name": "application"}, "spec": map[string]any{"development": map[string]any{"components": map[string]any{"web": map[string]any{"imageInput": "webImage"}, "api": map[string]any{"imageInput": "apiImage"}}}}}}
 	u.SetGroupVersionKind(templateGVK)
+	return u
+}
+
+func testBackendInstance() *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": instanceGVK.GroupVersion().String(),
+		"kind":       instanceGVK.Kind,
+		"metadata":   map[string]any{"name": "demo"},
+		"spec":       map[string]any{"template": "application", "values": map[string]any{"existing": "keep"}},
+	}}
+	u.SetGroupVersionKind(instanceGVK)
+	u.SetUID("backend-uid")
 	return u
 }
 

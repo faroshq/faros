@@ -6,8 +6,10 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -58,5 +60,34 @@ func TestProviderCommand(t *testing.T) {
 	}
 	if _, err := providerCommand([]string{"serve", "unexpected"}); err == nil {
 		t.Fatal("trailing arguments must fail")
+	}
+}
+
+func TestPortalAssetsAreEmbeddedAndServed(t *testing.T) {
+	_, distFS, err := portalHandler()
+	if err != nil {
+		t.Fatalf("portalHandler: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	if !servePortalAsset(recorder, httptest.NewRequest(http.MethodGet, "/main.js", nil), distFS, "main.js") {
+		t.Fatal("embedded main.js was not served")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("main.js status = %d, want 200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("main.js content type = %q, want javascript", recorder.Header().Get("Content-Type"))
+	}
+	body, err := io.ReadAll(recorder.Result().Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "faros-provider-deployments") {
+		t.Fatal("served bundle does not register the Deployments custom element")
+	}
+
+	miss := httptest.NewRecorder()
+	if servePortalAsset(miss, httptest.NewRequest(http.MethodGet, "/missing.js", nil), distFS, "missing.js") {
+		t.Fatal("missing asset was reported as served")
 	}
 }

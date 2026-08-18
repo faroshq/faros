@@ -29,6 +29,7 @@ VUE_PORTALS=(
   "providers/app-studio/portal"
   "providers/code/portal"
   "providers/databricks/portal"
+  "providers/deployments/portal"
   "providers/edges/portal"
   "providers/infrastructure/portal"
 )

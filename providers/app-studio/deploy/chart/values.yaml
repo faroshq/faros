@@ -45,13 +45,14 @@ apiExport:
   # instances in tenant workspaces.
   infraIdentityHash: ""
   # REQUIRED: identityHash of the code provider's APIExport
-  # (code.providers.faros.sh). New projects require Repository,
-  # RepositorySync, and ChangeRequest authority; chart rendering fails while
+  # (code.providers.faros.sh). New projects require Repository and
+  # ChangeRequest authority; chart rendering fails while
   # this is empty rather than booting a partially functional GitOps flow.
   codeIdentityHash: ""
   # REQUIRED: identityHash of the deployments provider's APIExport
-  # (deployments.faros.sh). Chart rendering fails while empty so App Studio
-  # cannot bootstrap unauthorizable Release and Deployment claims.
+  # (deployments.faros.sh). New projects require RepositorySync, Release, and
+  # Deployment authority; chart rendering fails while empty so App Studio
+  # cannot bootstrap unauthorizable deployment claims.
   deploymentsIdentityHash: ""
 
 # Secret holding the workspace-admin kubeconfig minted by the platform admin

@@ -258,14 +258,18 @@ func TestCreateProjectPreflightTemplateCreatesBindingAndInstance(t *testing.T) {
 	if binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil || binding.ResourceRef.Name != created.Name+"-dev" {
 		t.Fatalf("created binding = %+v, want %s-dev", binding, created.Name)
 	}
+	gitOpsBinding := created.Spec.Environments[1].Bindings[0]
+	if gitOpsBinding.Provider != projectGitOpsProvider || gitOpsBinding.ResourceRef == nil || gitOpsBinding.ResourceRef.APIVersion != projectRepositorySyncAPIVersion {
+		t.Fatalf("GitOps binding = %+v, want Deployments RepositorySync", gitOpsBinding)
+	}
 	// The Project reconciler owns both the direct development runtime and the
 	// production RepositorySync without overlapping writers.
 	want, gvr, err := bindings.Desired(created, created.Spec.Environments[1].Bindings[0])
 	if err != nil {
 		t.Fatalf("GitOps binding is not self-contained: %v", err)
 	}
-	if gvr.Resource != projectRepositorySyncResource || gvr.Group != codeAPIGroup {
-		t.Fatalf("binding GVR = %v, want repositorysyncs.code.faros.sh", gvr)
+	if gvr.Resource != projectRepositorySyncResource || gvr.Group != "deployments.faros.sh" {
+		t.Fatalf("binding GVR = %v, want repositorysyncs.deployments.faros.sh", gvr)
 	}
 	if want.GetName() != created.Name+"-gitops" {
 		t.Fatalf("desired sync name = %q, want %s-gitops", want.GetName(), created.Name)

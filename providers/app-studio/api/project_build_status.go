@@ -204,7 +204,7 @@ func (s *Server) resolveProjectComponentImages(ctx context.Context, c *asclient.
 	if repoRef == "" || c == nil {
 		return map[string]componentImageRef{}, nil
 	}
-	commitSHA, err := currentProjectRepositoryCommitSHA(ctx, c, repoRef)
+	commitSHA, err := currentProjectRepositoryCommitSHAForProject(ctx, c, p)
 	if err != nil {
 		return nil, err
 	}
@@ -245,15 +245,36 @@ func (s *Server) resolveProjectComponentImagesForCommit(ctx context.Context, c *
 	return out, nil
 }
 
+// currentProjectRepositoryCommitSHAForProject returns the newest successful
+// RepositoryCommit on the project's authoritative source branch. GitOps
+// projects use their configured delivery ref; direct/adopted projects use the
+// repository's default branch, falling back to main when that information is
+// unavailable. This keeps promotion/config branch commits from becoming the
+// build authority.
+func currentProjectRepositoryCommitSHAForProject(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	repositoryRef := projectLinkedRepositoryRef(p)
+	if repositoryRef == "" || c == nil {
+		return "", nil
+	}
+	return currentProjectRepositoryCommitSHAOnBranch(ctx, c, repositoryRef, projectRepositoryDefaultBranch(ctx, c, p))
+}
+
 // currentProjectRepositoryCommitSHA returns the newest successful
-// RepositoryCommit for the project's repository. RepositoryCommit is the
-// Code provider's durable commit record and its status.commitSHA is the
-// source revision the user reviewed. Both the label and spec.repositoryRef
-// are checked because a list transport may return objects outside its selector
-// (or stale objects may have inconsistent metadata).
+// RepositoryCommit for the repository's default source branch. Keep this
+// repository-only wrapper for callers that do not have a Project; project
+// callers should use currentProjectRepositoryCommitSHAForProject so GitOps
+// refs and repository default branches are honored.
 func currentProjectRepositoryCommitSHA(ctx context.Context, c *asclient.Client, repositoryRef string) (string, error) {
+	return currentProjectRepositoryCommitSHAOnBranch(ctx, c, repositoryRef, projectGitOpsDefaultBranch)
+}
+
+func currentProjectRepositoryCommitSHAOnBranch(ctx context.Context, c *asclient.Client, repositoryRef, branch string) (string, error) {
 	repositoryRef = strings.TrimSpace(repositoryRef)
-	if c == nil || repositoryRef == "" {
+	branch = strings.TrimSpace(branch)
+	if c == nil || repositoryRef == "" || branch == "" {
 		return "", nil
 	}
 	list, err := c.Resource(codeRepositoryCommitResource, "").List(ctx, metav1.ListOptions{LabelSelector: codeLabelRepository + "=" + repositoryRef})
@@ -268,6 +289,10 @@ func currentProjectRepositoryCommitSHA(ctx context.Context, c *asclient.Client, 
 		}
 		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
 		if strings.TrimSpace(phase) != "Succeeded" {
+			continue
+		}
+		commitBranch, _, _ := unstructured.NestedString(item.Object, "status", "branch")
+		if strings.TrimSpace(commitBranch) != branch {
 			continue
 		}
 		if selected == nil || newerRepositoryCommit(item, selected) {
@@ -595,7 +620,7 @@ func (s *Server) checkProjectBuild(ctx context.Context, c *asclient.Client, id i
 		}, nil
 	}
 
-	commitSHA, err := currentProjectRepositoryCommitSHA(ctx, c, projectLinkedRepositoryRef(p))
+	commitSHA, err := currentProjectRepositoryCommitSHAForProject(ctx, c, p)
 	if err != nil {
 		return projectBuildCheckResult{}, err
 	}

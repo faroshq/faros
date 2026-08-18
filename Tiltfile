@@ -161,7 +161,7 @@ local_resource(
     labels=['providers-quickstart'],
 )
 
-# --- providers-deployments (headless release/deployment reconciler, :8093) ---
+# --- providers-deployments (read-only release/deployment evidence, :8093) ---
 local_resource(
     'deployments',
     cmd='make build-deployments-provider',
@@ -169,15 +169,22 @@ local_resource(
     deps=[
         'providers/deployments/main.go',
         'providers/deployments/heartbeat.go',
+        'providers/deployments/assets.go',
         'providers/deployments/controller_manager.go',
         'providers/deployments/controller',
         'providers/deployments/apis',
         'providers/deployments/scheme',
         'providers/deployments/go.mod',
         'providers/deployments/go.sum',
+        'providers/deployments/portal/src',
+        'providers/deployments/portal/public',
+        'providers/deployments/portal/package.json',
+        'providers/deployments/portal/vite.config.ts',
+        'providers/deployments/portal/tsconfig.json',
+        'providers/deployments/portal/tsconfig.test.json',
         '.kcp/deployments-runtime.kubeconfig',
     ],
-    resource_deps=['hub', 'deployments-init'],
+    resource_deps=['hub', 'code', 'deployments-init'],
     readiness_probe=probe(
         period_secs=5,
         http_get=http_get_action(port=8093, path='/readyz'),
@@ -199,7 +206,9 @@ local_resource(
     cmd='make init-provider-deployments',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'infrastructure-init', 'deployments-register'],
+    # RepositorySync is projected by Deployments and consumes Code's exported
+    # repository contracts as well as Infrastructure's Instance contract.
+    resource_deps=['hub', 'infrastructure-init', 'code-init', 'deployments-register'],
     labels=['providers-deployments'],
 )
 
@@ -261,7 +270,8 @@ local_resource(
 )
 
 # Writes the dev kubeconfig (.kcp/code-runtime.kubeconfig) and ensures the
-# APIExportEndpointSlice the controller manager watches. Order:
+# APIExportEndpointSlice the controller manager watches. Code is independent
+# of Deployments; Deployments initializes after Code and Infrastructure. Order:
 #   code-register  → creates root:faros:providers:code
 #   code-init      → writes kubeconfig + endpoint slice
 #   code (serve)   → Tilt restarts it when the kubeconfig dep appears
@@ -270,7 +280,7 @@ local_resource(
     cmd='make init-provider-code',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'deployments-init', 'code-register'],
+    resource_deps=['hub', 'code-register'],
     labels=['providers-code'],
 )
 
@@ -676,7 +686,7 @@ local_resource(
     resource_deps=['hub', 'kro-mgmt-up', 'app-studio-preview-console-key'],
     readiness_probe=probe(
         period_secs=5,
-        http_get=http_get_action(port=8082, path='/healthz'),
+        http_get=http_get_action(port=8082, path='/readyz'),
     ),
     labels=['providers-kro'],
 )

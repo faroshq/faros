@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,11 +25,11 @@ const (
 	heartbeatInterval = 30 * time.Second
 )
 
-// runHeartbeat POSTs to /api/providers/{name}/heartbeat every 30s. Skips
-// silently when FAROS_HUB_URL is empty so local invocations don't need a
-// hub. Mirrors providers/quickstart/main.go runHeartbeat — keep the two
-// implementations aligned until the heartbeat loop moves into a shared
-// provider SDK.
+// runHeartbeat POSTs to /api/providers/{name}/heartbeat every 30s once the
+// provider's readiness gate passes. Skips silently when FAROS_HUB_URL is empty
+// so local invocations don't need a hub. Mirrors providers/quickstart/main.go
+// runHeartbeat — keep the two implementations aligned until the heartbeat
+// loop moves into a shared provider SDK.
 //
 // Env:
 //
@@ -36,7 +37,7 @@ const (
 //	FAROS_HUB_TOKEN      - bearer token for the heartbeat request
 //	FAROS_PROVIDER_NAME  - this provider's CatalogEntry name (default: infrastructure)
 //	FAROS_HUB_INSECURE   - "true" → skip TLS verification (dev with self-signed certs)
-func runHeartbeat(ctx context.Context) {
+func runHeartbeat(ctx context.Context, readinessChecks ...func() error) {
 	hub := os.Getenv("FAROS_HUB_URL")
 	token := os.Getenv("FAROS_HUB_TOKEN")
 	name := os.Getenv("FAROS_PROVIDER_NAME")
@@ -57,11 +58,10 @@ func runHeartbeat(ctx context.Context) {
 		}
 	}
 
-	send := func() {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	send := func(sendCtx context.Context) error {
+		req, err := http.NewRequestWithContext(sendCtx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("heartbeat build req: %v", err)
-			return
+			return fmt.Errorf("build request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if token != "" {
@@ -69,24 +69,68 @@ func runHeartbeat(ctx context.Context) {
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("heartbeat send: %v", err)
-			return
+			return fmt.Errorf("send: %w", err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			log.Printf("heartbeat %s: %d %s", url, resp.StatusCode, resp.Status)
+			return fmt.Errorf("%s: %d %s", url, resp.StatusCode, resp.Status)
+		}
+		return nil
+	}
+	var readiness func() error
+	if len(readinessChecks) > 0 {
+		readiness = readinessChecks[0]
+	}
+	runHeartbeatLoop(ctx, readiness, heartbeatInterval, send)
+}
+
+// runHeartbeatLoop is the readiness-gated scheduling seam for heartbeat
+// delivery. It is intentionally independent from environment lookup and HTTP
+// construction so tests can control the interval and observe sends without a
+// real hub. A heartbeat is never attempted while readiness reports an error,
+// including after a previously-ready controller stops.
+func runHeartbeatLoop(
+	ctx context.Context,
+	readiness func() error,
+	interval time.Duration,
+	send func(context.Context) error,
+) {
+	if readiness == nil {
+		log.Printf("heartbeat disabled (readiness check unavailable)")
+		return
+	}
+	if send == nil {
+		log.Printf("heartbeat disabled (sender unavailable)")
+		return
+	}
+
+	trySend := func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if err := readiness(); err != nil {
+			log.Printf("heartbeat gated: %v", err)
+			return
+		}
+		if err := send(ctx); err != nil {
+			log.Printf("heartbeat: %v", err)
 		}
 	}
-	send()
+	trySend()
+	if interval <= 0 {
+		return
+	}
 
-	t := time.NewTicker(heartbeatInterval)
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			send()
+			trySend()
 		}
 	}
 }

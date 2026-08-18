@@ -79,6 +79,59 @@ func TestDesiredIsSelfContained(t *testing.T) {
 	}
 }
 
+func TestDesiredRepositorySyncUsesNativeSpecShape(t *testing.T) {
+	p := testProject()
+	b := testBinding()
+	b.Name = "gitops"
+	b.Provider = "deployments"
+	b.ResourceRef = &aiv1alpha1.ProjectProviderResourceReference{
+		Name:       "demo-gitops",
+		APIVersion: "deployments.faros.sh/v1alpha1",
+		Kind:       "RepositorySync",
+		Resource:   "repositorysyncs",
+	}
+	b.Values = runtime.RawExtension{Raw: []byte(`{"repositoryRef":"demo-repo","ref":"main","path":".faros","prune":true,"intervalSeconds":30}`)}
+
+	want, gvr, err := Desired(p, b)
+	if err != nil {
+		t.Fatalf("Desired: %v", err)
+	}
+	if gvr.Group != "deployments.faros.sh" || gvr.Version != "v1alpha1" || gvr.Resource != "repositorysyncs" {
+		t.Fatalf("gvr = %v, want repositorysyncs.deployments.faros.sh/v1alpha1", gvr)
+	}
+
+	spec, ok, err := unstructured.NestedMap(want.Object, "spec")
+	if err != nil || !ok {
+		t.Fatalf("spec = %#v, err = %v", spec, err)
+	}
+	if got, want := spec["repositoryRef"], "demo-repo"; got != want {
+		t.Errorf("spec.repositoryRef = %#v, want %q", got, want)
+	}
+	for key, expected := range map[string]any{
+		"ref":             "main",
+		"path":            ".faros",
+		"prune":           true,
+		"intervalSeconds": float64(30),
+	} {
+		if got := spec[key]; got != expected {
+			t.Errorf("spec.%s = %#v, want %#v", key, got, expected)
+		}
+	}
+	if _, found := spec["template"]; found {
+		t.Errorf("native RepositorySync spec unexpectedly contains spec.template: %#v", spec)
+	}
+	if _, found := spec["values"]; found {
+		t.Errorf("native RepositorySync spec unexpectedly contains spec.values: %#v", spec)
+	}
+	if labels := want.GetLabels(); labels[ProjectLabel] != "demo" || labels[TemplateLabel] != "application" {
+		t.Fatalf("labels = %#v, want project and template ownership labels", labels)
+	}
+	owners := want.GetOwnerReferences()
+	if len(owners) != 1 || owners[0].Kind != "Project" || owners[0].Name != "demo" || owners[0].UID != types.UID("uid-1") {
+		t.Fatalf("ownerReferences = %+v, want Project/demo uid-1", owners)
+	}
+}
+
 func TestDesiredNameFallbacks(t *testing.T) {
 	p := testProject()
 
@@ -263,6 +316,25 @@ func TestMergeProviderSpecPreservesComputedFieldsAndClearsStaleActions(t *testin
 	updated := MergeProviderSpec(got, map[string]any{"expose": map[string]any{"hostnamePrefix": "final"}})
 	if updated["expose"].(map[string]any)["fqdn"] != "demo-tenant.apps.example" {
 		t.Fatalf("explicit update dropped computed fqdn: %#v", updated["expose"])
+	}
+	numeric := MergeProviderSpec(
+		map[string]any{"intervalSeconds": int64(30)},
+		map[string]any{"intervalSeconds": float64(30)},
+	)
+	if got, ok := numeric["intervalSeconds"].(int64); !ok || got != 30 {
+		t.Fatalf("equivalent numeric value changed representation: %#v", numeric["intervalSeconds"])
+	}
+	largeLeft := uint64(1<<53 + 1)
+	largeRight := largeLeft + 1
+	if equivalentJSONNumbers(largeLeft, largeRight) {
+		t.Fatalf("adjacent large uint64 values were treated as equivalent: %d and %d", largeLeft, largeRight)
+	}
+	large := MergeProviderSpec(
+		map[string]any{"value": int64(1<<53 + 1)},
+		map[string]any{"value": int64(1<<53 + 2)},
+	)
+	if got, ok := large["value"].(int64); !ok || got != int64(1<<53+2) {
+		t.Fatalf("distinct large integer desired value was not applied: %#v", large["value"])
 	}
 }
 

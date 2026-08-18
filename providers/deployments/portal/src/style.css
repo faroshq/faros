@@ -1,0 +1,596 @@
+/*
+ * Deployments is a light-DOM provider bundle. Keep every selector below the
+ * custom-element namespace and consume the host Violet Circuit tokens so the
+ * portal follows both dark and light themes.
+ */
+
+faros-provider-deployments {
+  display: block;
+  color: var(--color-text-primary);
+  font-family: inherit;
+}
+
+faros-provider-deployments .app,
+faros-provider-deployments .page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+faros-provider-deployments .app {
+  padding: 8px 0;
+}
+
+faros-provider-deployments .page-head,
+faros-provider-deployments .panel-head,
+faros-provider-deployments .detail-actions,
+faros-provider-deployments .copy-row,
+faros-provider-deployments .runtime-link-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+faros-provider-deployments .page-head,
+faros-provider-deployments .panel-head {
+  justify-content: space-between;
+}
+
+faros-provider-deployments .page-title,
+faros-provider-deployments .panel-title,
+faros-provider-deployments .subheading {
+  margin: 0;
+  font-weight: 600;
+}
+
+faros-provider-deployments .page-title {
+  font-size: 18px;
+}
+
+faros-provider-deployments .page-meta,
+faros-provider-deployments .muted,
+faros-provider-deployments .state-card span,
+faros-provider-deployments .condition-summary-item .muted {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+faros-provider-deployments .page-meta {
+  margin: 4px 0 0;
+}
+
+faros-provider-deployments .eyebrow,
+faros-provider-deployments .field-label {
+  margin: 0 0 4px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+faros-provider-deployments .field-label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+faros-provider-deployments .mono,
+faros-provider-deployments code {
+  font-family: var(--font-mono);
+}
+
+faros-provider-deployments code {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+faros-provider-deployments .breakable {
+  overflow-wrap: anywhere;
+}
+
+faros-provider-deployments .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 4px;
+  padding: 5px 10px;
+  background: var(--color-surface-overlay);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+faros-provider-deployments .button:hover:not(:disabled),
+faros-provider-deployments .button:focus-visible {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+faros-provider-deployments .button:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+
+faros-provider-deployments .deployment-name-trigger {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+faros-provider-deployments .deployment-name-trigger:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+faros-provider-deployments .button.small {
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+faros-provider-deployments .button.text-button {
+  border-color: transparent;
+  padding-inline: 0;
+  background: transparent;
+  color: var(--color-accent);
+}
+
+faros-provider-deployments .spinning {
+  animation: deployments-spin .9s linear infinite;
+}
+
+faros-provider-deployments .read-contract,
+faros-provider-deployments .evidence-banner,
+faros-provider-deployments .state-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  padding: 11px 13px;
+  background: var(--color-surface-raised);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+faros-provider-deployments .read-contract {
+  color: var(--color-text-secondary);
+}
+
+faros-provider-deployments .read-status {
+  margin: -4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+faros-provider-deployments .read-contract-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+faros-provider-deployments .state-card {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+faros-provider-deployments .state-card p {
+  margin: 0;
+}
+
+faros-provider-deployments .error-card {
+  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+  color: var(--color-danger);
+}
+
+faros-provider-deployments .warning-card {
+  border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+  background: var(--color-warning-subtle);
+}
+
+faros-provider-deployments .stale-card {
+  align-items: center;
+  flex-direction: row;
+  border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+  background: var(--color-warning-subtle);
+}
+
+faros-provider-deployments .stale-card strong {
+  color: var(--color-warning);
+}
+
+faros-provider-deployments .evidence-banner {
+  align-items: center;
+}
+
+faros-provider-deployments .evidence-banner.evidence-ready,
+faros-provider-deployments .evidence-banner.evidence-applied {
+  border-color: color-mix(in srgb, var(--color-success) 35%, transparent);
+  background: var(--color-success-subtle);
+}
+
+faros-provider-deployments .evidence-banner.evidence-invalid,
+faros-provider-deployments .evidence-banner.evidence-deleting {
+  border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
+  background: var(--color-danger-subtle);
+}
+
+faros-provider-deployments .detail-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+faros-provider-deployments .panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: var(--color-surface-raised);
+}
+
+faros-provider-deployments .panel-title {
+  font-size: 14px;
+}
+
+faros-provider-deployments .subheading {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+faros-provider-deployments .facts,
+faros-provider-deployments .outputs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+}
+
+faros-provider-deployments .facts > div,
+faros-provider-deployments .outputs-list > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(105px, 0.7fr) minmax(0, 1.3fr);
+}
+
+faros-provider-deployments .facts dt,
+faros-provider-deployments .outputs-list dt {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+faros-provider-deployments .facts dd,
+faros-provider-deployments .outputs-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
+faros-provider-deployments .artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+faros-provider-deployments .artifact-list li {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 90px minmax(0, 1fr);
+  border-bottom: 1px solid var(--color-border-subtle);
+  padding-bottom: 7px;
+  font-size: 11px;
+}
+
+faros-provider-deployments .artifact-list li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+faros-provider-deployments .condition-summary {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+faros-provider-deployments .condition-summary-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 4px;
+  padding: 10px;
+}
+
+faros-provider-deployments .condition-summary-label {
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+faros-provider-deployments .runtime-link-row {
+  align-items: center;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: 10px;
+}
+
+faros-provider-deployments .runtime-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 180px;
+  color: var(--color-accent);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+faros-provider-deployments .runtime-link:hover {
+  text-decoration: underline;
+}
+
+faros-provider-deployments .link-text {
+  color: var(--color-accent);
+}
+
+faros-provider-deployments .rollout-value {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+/* Canonical PortalKit recipes are namespaced here for direct provider visits;
+   when loaded in the host, the host's faros-ui.css provides the same classes. */
+faros-provider-deployments .resource-table {
+  min-width: 0;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+}
+
+faros-provider-deployments .resource-table-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+faros-provider-deployments .resource-table-heading {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+faros-provider-deployments .resource-table-cell {
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  vertical-align: middle;
+}
+
+faros-provider-deployments .resource-table-row.is-interactive {
+  cursor: pointer;
+}
+
+faros-provider-deployments .resource-table-row.is-interactive:hover,
+faros-provider-deployments .resource-table-row.is-interactive:focus-within {
+  background: color-mix(in srgb, var(--color-accent) 5%, transparent);
+}
+
+faros-provider-deployments .resource-table-row:last-child .resource-table-cell {
+  border-bottom: 0;
+}
+
+faros-provider-deployments .resource-table-empty-cell {
+  padding: 32px 14px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+faros-provider-deployments .resource-table-empty-label {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+faros-provider-deployments .resource-table-empty-icon {
+  color: var(--color-text-muted);
+}
+
+faros-provider-deployments .resource-table-loading,
+faros-provider-deployments .detail-skeleton {
+  padding: 16px;
+}
+
+faros-provider-deployments .resource-table-loading-row,
+faros-provider-deployments .resource-table-loading-head {
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+faros-provider-deployments .resource-table-skeleton,
+faros-provider-deployments .skeleton-line,
+faros-provider-deployments .skeleton-block {
+  border-radius: 3px;
+  background: var(--color-surface-overlay);
+}
+
+faros-provider-deployments .resource-table-skeleton {
+  height: 12px;
+}
+
+faros-provider-deployments .resource-table-skeleton-wide {
+  width: 35%;
+}
+
+faros-provider-deployments .resource-table-skeleton-mid {
+  width: 25%;
+}
+
+faros-provider-deployments .resource-table-skeleton-small {
+  width: 15%;
+}
+
+faros-provider-deployments .resource-table-skeleton-short {
+  width: 20%;
+}
+
+faros-provider-deployments .resource-table-error,
+faros-provider-deployments .resource-table-stale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 35%, transparent);
+  padding: 10px 12px;
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+  font-size: 12px;
+}
+
+faros-provider-deployments .resource-table-retry {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+faros-provider-deployments .status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: 3px;
+  padding: 3px 6px;
+  background: var(--color-surface-overlay);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+faros-provider-deployments .status-badge-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+faros-provider-deployments .tone-success { color: var(--color-success); background: var(--color-success-subtle); }
+faros-provider-deployments .tone-warning { color: var(--color-warning); background: var(--color-warning-subtle); }
+faros-provider-deployments .tone-danger { color: var(--color-danger); background: var(--color-danger-subtle); }
+faros-provider-deployments .tone-muted { color: var(--color-text-muted); }
+faros-provider-deployments .status-badge-dot-wrap { display: inline-flex; }
+faros-provider-deployments .status-badge-pulse { display: inline-block; }
+
+faros-provider-deployments .conditions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+faros-provider-deployments .conditions-title {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+faros-provider-deployments .conditions-stale {
+  margin: 0;
+  color: var(--color-warning);
+  font-size: 11px;
+}
+
+faros-provider-deployments .conditions-message {
+  display: block;
+  max-width: 240px;
+  overflow-wrap: anywhere;
+}
+
+faros-provider-deployments .conditions-muted {
+  color: var(--color-text-muted);
+}
+
+faros-provider-deployments .skeleton-line {
+  height: 14px;
+  margin-bottom: 12px;
+}
+
+faros-provider-deployments .skeleton-wide { width: 45%; }
+
+faros-provider-deployments .skeleton-block {
+  height: 240px;
+}
+
+faros-provider-deployments .shimmer {
+  animation: deployments-shimmer 1.5s ease-in-out infinite;
+  background: linear-gradient(90deg, var(--color-surface-overlay), var(--color-surface-hover), var(--color-surface-overlay));
+  background-size: 200% 100%;
+}
+
+@keyframes deployments-spin { to { transform: rotate(360deg); } }
+@keyframes deployments-shimmer { to { background-position: -200% 0; } }
+
+@media (max-width: 900px) {
+  faros-provider-deployments .detail-grid { grid-template-columns: 1fr; }
+  faros-provider-deployments .resource-table { overflow-x: auto; }
+  faros-provider-deployments .resource-table-table { min-width: 850px; }
+}
+
+@media (max-width: 560px) {
+  faros-provider-deployments .page-head,
+  faros-provider-deployments .detail-head,
+  faros-provider-deployments .stale-card { align-items: flex-start; flex-direction: column; }
+  faros-provider-deployments .condition-summary { grid-template-columns: 1fr; }
+  faros-provider-deployments .facts > div,
+  faros-provider-deployments .outputs-list > div,
+  faros-provider-deployments .artifact-list li { grid-template-columns: 1fr; gap: 3px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  faros-provider-deployments .spinning,
+  faros-provider-deployments .shimmer { animation: none; }
+}

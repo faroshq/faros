@@ -21,15 +21,25 @@ const (
 
 var instanceResources = []string{"instances"}
 
-func deploymentClaims(identityHash string) ([]sdkinstall.PermissionClaim, error) {
-	hash := strings.TrimSpace(identityHash)
-	if hash == "" {
+func deploymentClaims(infrastructureIdentityHash, codeIdentityHash string) ([]sdkinstall.PermissionClaim, error) {
+	infraHash := strings.TrimSpace(infrastructureIdentityHash)
+	if infraHash == "" {
 		return nil, fmt.Errorf("DEPLOYMENTS_INFRA_IDENTITY_HASH is required")
 	}
-	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceResources))
-	for _, resource := range instanceResources {
-		claims = append(claims, sdkinstall.PermissionClaim{Group: "infrastructure.faros.sh", Resource: resource, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}, IdentityHash: hash})
+	codeHash := strings.TrimSpace(codeIdentityHash)
+	if codeHash == "" {
+		return nil, fmt.Errorf("DEPLOYMENTS_CODE_IDENTITY_HASH is required")
 	}
+	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceResources)+1)
+	for _, resource := range instanceResources {
+		claims = append(claims, sdkinstall.PermissionClaim{Group: "infrastructure.faros.sh", Resource: resource, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}, IdentityHash: infraHash})
+	}
+	claims = append(claims, sdkinstall.PermissionClaim{
+		Group:        "code.faros.sh",
+		Resource:     "repositorycheckouts",
+		Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+		IdentityHash: codeHash,
+	})
 	return claims, nil
 }
 
@@ -38,7 +48,7 @@ func runInitCmd(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	claims, err := deploymentClaims(os.Getenv("DEPLOYMENTS_INFRA_IDENTITY_HASH"))
+	claims, err := deploymentClaims(os.Getenv("DEPLOYMENTS_INFRA_IDENTITY_HASH"), os.Getenv("DEPLOYMENTS_CODE_IDENTITY_HASH"))
 	if err != nil {
 		return err
 	}

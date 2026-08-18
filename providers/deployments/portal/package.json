@@ -1,0 +1,23 @@
+{
+  "name": "faros-provider-deployments-portal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only Deployments provider micro-frontend.",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-dist/api.test.js .test-dist/mapper.test.js .test-dist/route.test.js .test-dist/state.test.js"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.475.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.1",
+    "vue-tsc": "^2.1.10"
+  }
+}

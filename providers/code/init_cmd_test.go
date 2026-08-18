@@ -7,20 +7,12 @@ package main
 
 import "testing"
 
-func TestCodeClaimsRequireDeploymentsIdentity(t *testing.T) {
-	if _, err := codeClaims(""); err == nil {
-		t.Fatal("expected missing deployments identity to fail closed")
+func TestCodeClaimsContainOnlyCredentialSecretAuthority(t *testing.T) {
+	claims := codeClaims()
+	if len(claims) != 1 {
+		t.Fatalf("got %d claims, want only the credential Secret claim", len(claims))
 	}
-	claims, err := codeClaims("deployments-hash")
-	if err != nil {
-		t.Fatalf("codeClaims returned error: %v", err)
-	}
-	if len(claims) != 3 {
-		t.Fatalf("got %d claims, want secret + release + deployment", len(claims))
-	}
-	for _, claim := range claims[1:] {
-		if claim.IdentityHash != "deployments-hash" {
-			t.Fatalf("claim %s has identity %q", claim.Resource, claim.IdentityHash)
-		}
+	if claims[0].Group != "" || claims[0].Resource != "secrets" || claims[0].IdentityHash != "" {
+		t.Fatalf("unexpected Code claim: %#v", claims[0])
 	}
 }

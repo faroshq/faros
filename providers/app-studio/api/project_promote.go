@@ -933,11 +933,14 @@ type projectPromotionReadinessResponse struct {
 	ProductionValues          map[string]any          `json:"productionValues,omitempty"`
 	RequestedRolloutRevision  string                  `json:"requestedRolloutRevision,omitempty"`
 	ObservedRolloutRevision   string                  `json:"observedRolloutRevision,omitempty"`
+	ProductionObserved        bool                    `json:"productionObserved"`
 	Promotable                bool                    `json:"promotable"`
 	Build                     projectBuildCheckResult `json:"build"`
 	// Production reports the live production environment when the project has
 	// been promoted at least once: its phase and, once serving, its URL. Nil
-	// when the project has never been promoted.
+	// when the project has never been promoted. ProductionObserved separately
+	// reports whether the referenced provider object was successfully fetched;
+	// a Pending status alone is not evidence that the Deployment exists.
 	Production *aiv1alpha1.ProjectProviderBindingStatus `json:"production,omitempty"`
 }
 
@@ -999,26 +1002,39 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 	// (development) environment status surface, so read the production
 	// binding's status directly for its phase and serving URL.
 	if prod := findProjectProductionBinding(p); prod != nil {
-		resp.ProductionValues = projectProductionConfiguration(prod)
-		resp.RequestedRolloutRevision = projectRequestedRedeployRevision(prod)
-		st := projectProviderBindingStatus(r.Context(), c, p, *prod, id)
-		resp.Production = &st
-		// Read the provider instance's spec, not the desired Project binding,
-		// so clients can distinguish the old Ready deployment from a rollout
-		// revision the Project controller has actually delivered downstream.
-		if instance, observeErr := observeProjectProviderBinding(r.Context(), c, p, *prod, id); observeErr == nil {
-			if projectProductionIsGitManaged(p) && projectIsDeploymentBinding(prod) {
-				if configuration, rolloutID := projectGitOpsObservedProduction(instance); configuration != nil {
-					resp.ProductionValues = configuration
-					if rolloutID != "" {
-						resp.RequestedRolloutRevision = rolloutID
-					}
-				}
-			}
-			resp.ObservedRolloutRevision = projectObservedRedeployRevision(instance)
-		}
+		populateProjectPromotionProduction(r.Context(), c, p, *prod, id, &resp)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// populateProjectPromotionProduction keeps desired binding state separate
+// from provider observation. In particular, a status synthesized for a
+// missing object must not make the portal believe that a Deployment exists.
+func populateProjectPromotionProduction(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, prod aiv1alpha1.ProjectProviderBindingSpec, id identity, resp *projectPromotionReadinessResponse) {
+	if resp == nil {
+		return
+	}
+	resp.ProductionValues = projectProductionConfiguration(&prod)
+	resp.RequestedRolloutRevision = projectRequestedRedeployRevision(&prod)
+	st := projectProviderBindingStatus(ctx, c, p, prod, id)
+	resp.Production = &st
+	// Read the provider instance's spec, not the desired Project binding,
+	// so clients can distinguish the old Ready deployment from a rollout
+	// revision the Project controller has actually delivered downstream.
+	instance, observeErr := observeProjectProviderBinding(ctx, c, p, prod, id)
+	if observeErr != nil {
+		return
+	}
+	resp.ProductionObserved = true
+	if projectProductionIsGitManaged(p) && projectIsDeploymentBinding(&prod) {
+		if configuration, rolloutID := projectGitOpsObservedProduction(instance); configuration != nil {
+			resp.ProductionValues = configuration
+			if rolloutID != "" {
+				resp.RequestedRolloutRevision = rolloutID
+			}
+		}
+	}
+	resp.ObservedRolloutRevision = projectObservedRedeployRevision(instance)
 }
 
 func projectGitOpsObservedProduction(instance *unstructured.Unstructured) (map[string]any, string) {

@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -115,7 +116,7 @@ func ReconcileClient(ctx context.Context, c client.Client, key types.NamespacedN
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	got, err := ensureInstance(ctx, c, want)
+	got, err := ensureInstance(ctx, c, want, d.UID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -135,18 +136,27 @@ func ReconcileClient(ctx context.Context, c client.Client, key types.NamespacedN
 // production mapping deterministic here until Release carries an immutable
 // snapshot of the resolved Template contract.
 func builtinTemplateContract(name string) (*unstructured.Unstructured, error) {
-	if strings.TrimSpace(name) != "application" {
+	name = strings.TrimSpace(name)
+	var components map[string]any
+	switch name {
+	case "application":
+		components = map[string]any{
+			"web": map[string]any{"imageInput": "webImage"},
+			"api": map[string]any{"imageInput": "apiImage"},
+		}
+	case "simple-webapp":
+		components = map[string]any{
+			"app": map[string]any{"imageInput": "image"},
+		}
+	default:
 		return nil, fmt.Errorf("blueprint %q is not supported by class %q", name, deploymentsv1alpha1.DeploymentClassKRODirect)
 	}
 	template := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": templateGVK.GroupVersion().String(),
 		"kind":       templateGVK.Kind,
-		"metadata":   map[string]any{"name": "application"},
+		"metadata":   map[string]any{"name": name},
 		"spec": map[string]any{
-			"development": map[string]any{"components": map[string]any{
-				"web": map[string]any{"imageInput": "webImage"},
-				"api": map[string]any{"imageInput": "apiImage"},
-			}},
+			"development": map[string]any{"components": components},
 		},
 	}}
 	template.SetGroupVersionKind(templateGVK)
@@ -249,7 +259,7 @@ func effectiveDeletionPolicy(policy deploymentsv1alpha1.DeploymentDeletionPolicy
 
 func boolPtr(v bool) *bool { return &v }
 
-func ensureInstance(ctx context.Context, c client.Client, want *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+func ensureInstance(ctx context.Context, c client.Client, want *unstructured.Unstructured, ownerUID types.UID) (*unstructured.Unstructured, error) {
 	desired, _, _ := unstructured.NestedMap(want.Object, "spec")
 	encodedDesired, err := json.Marshal(desired)
 	if err != nil {
@@ -262,43 +272,92 @@ func ensureInstance(ctx context.Context, c client.Client, want *unstructured.Uns
 	wantAnnotations[lastAppliedSpecKey] = string(encodedDesired)
 	want.SetAnnotations(wantAnnotations)
 
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(want.GroupVersionKind())
-	err = c.Get(ctx, client.ObjectKey{Name: want.GetName()}, got)
-	if apierrors.IsNotFound(err) {
-		created := want.DeepCopy()
-		if err := c.Create(ctx, created); err != nil {
-			return nil, fmt.Errorf("create backend instance: %w", err)
+	var result *unstructured.Unstructured
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(want.GroupVersionKind())
+		err := c.Get(ctx, client.ObjectKey{Name: want.GetName()}, got)
+		if apierrors.IsNotFound(err) {
+			created := want.DeepCopy()
+			if err := c.Create(ctx, created); err != nil {
+				if apierrors.IsAlreadyExists(err) {
+					return apierrors.NewConflict(schema.GroupResource{Group: want.GroupVersionKind().Group, Resource: instanceResource}, want.GetName(), err)
+				}
+				return fmt.Errorf("create backend instance: %w", err)
+			}
+			result = created
+			return nil
 		}
-		return created, nil
-	}
+		if err != nil {
+			return fmt.Errorf("get backend instance: %w", err)
+		}
+		next := got.DeepCopy()
+		observed, _, _ := unstructured.NestedMap(got.Object, "spec")
+		previous := lastAppliedSpec(got)
+		next.Object["spec"] = MergeManagedSpec(observed, previous, desired)
+		labels := next.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels["deployments.faros.sh/deployment"] = want.GetName()
+		next.SetLabels(labels)
+		annotations := next.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[lastAppliedSpecKey] = string(encodedDesired)
+		next.SetAnnotations(annotations)
+		next.SetOwnerReferences(managedOwnerReferences(got.GetOwnerReferences(), want.GetOwnerReferences(), want.GetName(), ownerUID))
+		if equality.Semantic.DeepEqual(got.Object["spec"], next.Object["spec"]) && equality.Semantic.DeepEqual(got.GetLabels(), next.GetLabels()) && equality.Semantic.DeepEqual(got.GetAnnotations(), next.GetAnnotations()) && equality.Semantic.DeepEqual(got.GetOwnerReferences(), next.GetOwnerReferences()) {
+			result = got
+			return nil
+		}
+		if err := c.Update(ctx, next); err != nil {
+			return err
+		}
+		result = next
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get backend instance: %w", err)
+		return nil, fmt.Errorf("ensure backend instance: %w", err)
 	}
-	next := got.DeepCopy()
-	observed, _, _ := unstructured.NestedMap(got.Object, "spec")
-	previous := lastAppliedSpec(got)
-	next.Object["spec"] = MergeManagedSpec(observed, previous, desired)
-	labels := next.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
+	return result, nil
+}
+
+func managedOwnerReferences(observed, desired []metav1.OwnerReference, deploymentName string, deploymentUID types.UID) []metav1.OwnerReference {
+	retained := make([]metav1.OwnerReference, 0, len(observed)+1)
+	foreignController := false
+	for _, owner := range observed {
+		if deploymentUID != "" && isDeploymentOwner(owner, deploymentName) && owner.UID == deploymentUID {
+			continue
+		}
+		if owner.Controller != nil && *owner.Controller {
+			foreignController = true
+		}
+		retained = append(retained, owner)
 	}
-	labels["deployments.faros.sh/deployment"] = want.GetName()
-	next.SetLabels(labels)
-	annotations := next.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
+	if deploymentUID != "" {
+		for _, owner := range desired {
+			if isDeploymentOwner(owner, deploymentName) && owner.UID == deploymentUID {
+				if foreignController {
+					// Kubernetes permits at most one controller owner. Preserve a
+					// foreign controller and keep this reference informational;
+					// the Deployment finalizer still owns Delete semantics.
+					owner = *owner.DeepCopy()
+					owner.Controller = boolPtr(false)
+				}
+				retained = append(retained, owner)
+			}
+		}
 	}
-	annotations[lastAppliedSpecKey] = string(encodedDesired)
-	next.SetAnnotations(annotations)
-	next.SetOwnerReferences(want.GetOwnerReferences())
-	if equality.Semantic.DeepEqual(got.Object["spec"], next.Object["spec"]) && equality.Semantic.DeepEqual(got.GetLabels(), next.GetLabels()) && equality.Semantic.DeepEqual(got.GetAnnotations(), next.GetAnnotations()) && equality.Semantic.DeepEqual(got.GetOwnerReferences(), next.GetOwnerReferences()) {
-		return got, nil
+	if len(retained) == 0 {
+		return nil
 	}
-	if err := c.Update(ctx, next); err != nil {
-		return nil, fmt.Errorf("update backend instance: %w", err)
-	}
-	return next, nil
+	return retained
+}
+
+func isDeploymentOwner(owner metav1.OwnerReference, deploymentName string) bool {
+	return owner.APIVersion == deploymentsv1alpha1.GroupVersion.String() && owner.Kind == "Deployment" && owner.Name == deploymentName
 }
 
 func lastAppliedSpec(obj *unstructured.Unstructured) map[string]any {
@@ -419,8 +478,7 @@ func finalize(ctx context.Context, c client.Client, d *deploymentsv1alpha1.Deplo
 		if err := detachBackend(ctx, c, d); err != nil {
 			return ctrl.Result{}, err
 		}
-		controllerutil.RemoveFinalizer(d, Finalizer)
-		if err := c.Update(ctx, d); err != nil {
+		if err := removeFinalizer(ctx, c, d); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -435,8 +493,24 @@ func finalize(ctx context.Context, c client.Client, d *deploymentsv1alpha1.Deplo
 			return ctrl.Result{}, fmt.Errorf("observe backend instance deletion: %w", err)
 		}
 		if err == nil {
+			if !backendReferenceMatches(ref, obj, d) {
+				// The recorded backend UID is gone and this name now belongs to a
+				// replacement. Complete safely without touching the replacement.
+				if err := removeFinalizer(ctx, c, d); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, nil
+			}
 			if obj.GetDeletionTimestamp().IsZero() {
-				if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+				uid := obj.GetUID()
+				deleteOptions := &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}
+				if err := c.Delete(ctx, obj, deleteOptions); err != nil && !apierrors.IsNotFound(err) {
+					if apierrors.IsConflict(err) {
+						// A UID precondition conflict means the original object was
+						// replaced between GET and DELETE. Requeue so the next
+						// observation can complete without touching the replacement.
+						return ctrl.Result{RequeueAfter: deletePollInterval}, nil
+					}
 					return ctrl.Result{}, fmt.Errorf("delete backend instance: %w", err)
 				}
 			}
@@ -445,8 +519,7 @@ func finalize(ctx context.Context, c client.Client, d *deploymentsv1alpha1.Deplo
 			return ctrl.Result{RequeueAfter: deletePollInterval}, nil
 		}
 	}
-	controllerutil.RemoveFinalizer(d, Finalizer)
-	if err := c.Update(ctx, d); err != nil {
+	if err := removeFinalizer(ctx, c, d); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -457,36 +530,98 @@ func detachBackend(ctx context.Context, c client.Client, d *deploymentsv1alpha1.
 	if ref == nil || ref.APIVersion == "" || ref.Kind == "" || ref.Name == "" {
 		return nil
 	}
-	obj := &unstructured.Unstructured{}
-	obj.SetAPIVersion(ref.APIVersion)
-	obj.SetKind(ref.Kind)
-	if err := c.Get(ctx, client.ObjectKey{Name: ref.Name}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion(ref.APIVersion)
+		obj.SetKind(ref.Kind)
+		if err := c.Get(ctx, client.ObjectKey{Name: ref.Name}, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("observe retained backend instance: %w", err)
+		}
+		if !backendReferenceMatches(ref, obj, d) {
+			// The original backend has disappeared; do not detach metadata from a
+			// same-name replacement.
 			return nil
 		}
-		return fmt.Errorf("observe retained backend instance: %w", err)
-	}
-	ownerReferences := obj.GetOwnerReferences()
-	retainedReferences := ownerReferences[:0]
-	for _, owner := range ownerReferences {
-		if owner.APIVersion == deploymentsv1alpha1.GroupVersion.String() && owner.Kind == "Deployment" && owner.Name == d.Name && (d.UID == "" || owner.UID == d.UID) {
-			continue
+		next := obj.DeepCopy()
+		changed := false
+		ownerReferences := managedOwnerReferences(obj.GetOwnerReferences(), nil, d.Name, d.UID)
+		if !equality.Semantic.DeepEqual(obj.GetOwnerReferences(), ownerReferences) {
+			next.SetOwnerReferences(ownerReferences)
+			changed = true
 		}
-		retainedReferences = append(retainedReferences, owner)
-	}
-	obj.SetOwnerReferences(retainedReferences)
-	labels := obj.GetLabels()
-	if labels != nil && labels["deployments.faros.sh/deployment"] == d.Name {
-		delete(labels, "deployments.faros.sh/deployment")
-		obj.SetLabels(labels)
-	}
-	annotations := obj.GetAnnotations()
-	if annotations != nil {
-		delete(annotations, lastAppliedSpecKey)
-		obj.SetAnnotations(annotations)
-	}
-	if err := c.Update(ctx, obj); err != nil {
+		labels := next.GetLabels()
+		if labels != nil && labels["deployments.faros.sh/deployment"] == d.Name {
+			delete(labels, "deployments.faros.sh/deployment")
+			next.SetLabels(labels)
+			changed = true
+		}
+		annotations := next.GetAnnotations()
+		if annotations != nil {
+			if _, found := annotations[lastAppliedSpecKey]; found {
+				delete(annotations, lastAppliedSpecKey)
+				next.SetAnnotations(annotations)
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		if err := c.Update(ctx, next); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("detach retained backend instance: %w", err)
+	}
+	return nil
+}
+
+func backendReferenceMatches(ref *deploymentsv1alpha1.BackendReference, obj *unstructured.Unstructured, d *deploymentsv1alpha1.Deployment) bool {
+	if ref.UID != "" {
+		return ref.UID == string(obj.GetUID())
+	}
+	// The target coordinates are intentionally persisted before backend create.
+	// If create succeeds but the following status write is interrupted, the
+	// Deployment owner reference is the only durable identity proof available.
+	// Require the exact current Deployment UID; never infer ownership from the
+	// backend name or management label alone.
+	if d == nil || d.UID == "" {
+		return false
+	}
+	for _, owner := range obj.GetOwnerReferences() {
+		if isDeploymentOwner(owner, d.Name) && owner.UID == d.UID {
+			return true
+		}
+	}
+	return false
+}
+
+func removeFinalizer(ctx context.Context, c client.Client, d *deploymentsv1alpha1.Deployment) error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &deploymentsv1alpha1.Deployment{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: d.Namespace, Name: d.Name}, current); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if !controllerutil.ContainsFinalizer(current, Finalizer) {
+			return nil
+		}
+		if d.UID != "" && current.UID != d.UID {
+			// A stale reconcile must never remove a finalizer from a same-name
+			// replacement Deployment.
+			return nil
+		}
+		controllerutil.RemoveFinalizer(current, Finalizer)
+		return c.Update(ctx, current)
+	})
+	if err != nil {
+		return fmt.Errorf("remove deployment finalizer: %w", err)
 	}
 	return nil
 }

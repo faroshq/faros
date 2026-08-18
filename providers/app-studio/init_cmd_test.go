@@ -20,8 +20,8 @@ func TestDeploymentPermissionClaimsUseDeploymentIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims) != 2 {
-		t.Fatalf("deployment claims = %d, want Release and Deployment", len(claims))
+	if len(claims) != 3 {
+		t.Fatalf("deployment claims = %d, want Release, Deployment, and RepositorySync", len(claims))
 	}
 	if claims[0].Group != "deployments.faros.sh" || claims[0].Resource != "releases" ||
 		!slices.Equal(claims[0].Verbs, []string{"get", "list", "watch", "create"}) ||
@@ -33,14 +33,19 @@ func TestDeploymentPermissionClaimsUseDeploymentIdentity(t *testing.T) {
 		claims[1].IdentityHash != "deployments-hash" {
 		t.Fatalf("Deployment claim = %+v", claims[1])
 	}
+	if claims[2].Group != "deployments.faros.sh" || claims[2].Resource != "repositorysyncs" ||
+		!slices.Equal(claims[2].Verbs, []string{"get", "list", "watch", "create", "update", "patch", "delete"}) ||
+		claims[2].IdentityHash != "deployments-hash" {
+		t.Fatalf("RepositorySync claim = %+v", claims[2])
+	}
 }
 
 func TestCodePermissionClaimsIncludeGitOpsSourceAndApproval(t *testing.T) {
 	claims := codePermissionClaims("code-hash")
-	if len(claims) != 3 {
-		t.Fatalf("code claims = %d, want Repository, RepositorySync, ChangeRequest", len(claims))
+	if len(claims) != 2 {
+		t.Fatalf("code claims = %d, want Repository and ChangeRequest", len(claims))
 	}
-	for i, resource := range []string{"repositories", "repositorysyncs", "changerequests"} {
+	for i, resource := range []string{"repositories", "changerequests"} {
 		if claims[i].Group != "code.faros.sh" || claims[i].Resource != resource || claims[i].IdentityHash != "code-hash" {
 			t.Fatalf("claim %d = %+v", i, claims[i])
 		}
@@ -79,12 +84,15 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 			"- name: deployments",
 			"- resource: releases\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\"]",
 			"- resource: deployments\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
-			"- resource: repositorysyncs\n        group: code.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
+			"- resource: repositorysyncs\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
 			"- resource: changerequests\n        group: code.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
 		} {
 			if !strings.Contains(source.body, required) {
 				t.Errorf("%s is missing synchronized deployment contract %q", source.name, required)
 			}
+		}
+		if strings.Contains(source.body, "- resource: repositorysyncs\n        group: code.faros.sh") {
+			t.Errorf("%s still advertises RepositorySync under the Code APIExport", source.name)
 		}
 	}
 

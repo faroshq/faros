@@ -24,6 +24,7 @@ spec:
           env:
             - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
             - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ required "infrastructureIdentityHash is required" .Values.infrastructureIdentityHash | quote }} }
+            - { name: DEPLOYMENTS_CODE_IDENTITY_HASH, value: {{ required "codeIdentityHash is required" .Values.codeIdentityHash | quote }} }
             - { name: FAROS_SCHEMAS_DIR, value: /etc/faros/schemas }
             {{- if .Values.catalogEntry.enabled }}
             - { name: FAROS_CATALOGENTRY_FILE, value: /etc/faros/catalogentry/catalogentry.yaml }
@@ -48,6 +49,7 @@ spec:
             - { name: PORT, value: "8093" }
             - { name: FAROS_PROVIDER_NAME, value: deployments }
             - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
+            - { name: DEPLOYMENTS_CODE_URL, value: {{ required "code.url is required" .Values.code.url | quote }} }
             - { name: FAROS_HUB_URL, value: {{ .Values.hub.url | quote }} }
             {{- if .Values.hub.insecure }}
             - { name: FAROS_HUB_INSECURE, value: "true" }

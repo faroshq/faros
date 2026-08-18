@@ -56,7 +56,7 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 		t.Fatalf("manifest and chart CatalogEntry specs differ\nmanifest: %#v\nchart:    %#v", manifest["spec"], chart["spec"])
 	}
 
-	claims, err := deploymentClaims("test-infrastructure-identity")
+	claims, err := deploymentClaims("test-infrastructure-identity", "test-code-identity")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,8 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 	}
 	for _, contract := range [][]byte{
 		[]byte(`required "infrastructureIdentityHash is required"`),
+		[]byte(`required "codeIdentityHash is required"`),
+		[]byte(`required "code.url is required"`),
 		[]byte("automountServiceAccountToken: false"),
 		[]byte("imagePullPolicy: {{ .Values.image.pullPolicy }}"),
 	} {
@@ -129,6 +131,8 @@ func extractChartCatalogEntry(t *testing.T, raw []byte) []byte {
 func normalizeCatalogEntry(entry map[string]any) {
 	spec, _ := entry["spec"].(map[string]any)
 	spec["version"] = "normalized"
+	ui, _ := spec["ui"].(map[string]any)
+	ui["url"] = "normalized"
 	backend, _ := spec["backend"].(map[string]any)
 	backend["url"] = "normalized"
 }

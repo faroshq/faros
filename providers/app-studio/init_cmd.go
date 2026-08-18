@@ -129,12 +129,6 @@ func codePermissionClaims(identityHash string) []sdkinstall.PermissionClaim {
 		},
 		{
 			Group:        "code.faros.sh",
-			Resource:     "repositorysyncs",
-			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-			IdentityHash: identityHash,
-		},
-		{
-			Group:        "code.faros.sh",
 			Resource:     "changerequests",
 			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			IdentityHash: identityHash,
@@ -157,6 +151,12 @@ func deploymentPermissionClaims(identityHash string) ([]sdkinstall.PermissionCla
 		{
 			Group:        "deployments.faros.sh",
 			Resource:     "deployments",
+			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			IdentityHash: hash,
+		},
+		{
+			Group:        "deployments.faros.sh",
+			Resource:     "repositorysyncs",
 			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 			IdentityHash: hash,
 		},

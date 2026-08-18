@@ -15,15 +15,16 @@ The design deliberately separates three responsibilities:
 
 | Concern | Owner |
 | --- | --- |
-| Repository operations, branches, pull requests, and merged-tree projection | Code provider |
+| Repository operations, branches, pull requests, and bounded RepositoryCheckout requests | Code provider |
 | Project bootstrap, build admission, and proposing configuration changes | App Studio |
-| Release/Deployment API, runtime reconciliation, finalization, and status | Deployments provider |
+| RepositorySync projection, Release/Deployment API, runtime reconciliation, finalization, and status | Deployments provider |
 | Template schema, instance CRDs, cloud/runtime resources, and provider health | Infrastructure provider |
 
 App Studio is an author of proposed Git changes, not a second desired-state
-writer. The Code provider is the only component that talks to the Git host. The
-Deployments provider never reads Git and never accepts an App Studio-specific
-repository credential.
+writer. The Code provider is the only component that talks to the Git host and
+owns Git credentials. Deployments owns `RepositorySync` and requests bounded
+`RepositoryCheckout` results from Code; it never reads credentials or talks to
+the Git host directly.
 
 ## Per-environment delivery policy
 
@@ -72,7 +73,8 @@ Deployment.
 Create project (recommended policy)
   ├─ App Studio scaffolds source and directly provisions development
   └─ Project controller creates RepositorySync for production
-       └─ Code watches .faros on the default branch
+       └─ Deployments requests a bounded RepositoryCheckout from Code
+            ├─ Deployments projects the merged .faros tree
             └─ an empty manifest tree is valid until the first promotion
 
 Development change
@@ -82,7 +84,7 @@ Production configuration or image change
   └─ App Studio commits generated manifests to a branch based on the default branch
        └─ Code ChangeRequest opens an approval-gated pull request
             └─ merge changes the default branch
-                 └─ RepositorySync projects the merged revision
+                 └─ Deployments RepositorySync projects the merged revision
                       └─ Deployments reconciles it
 ```
 
@@ -96,7 +98,7 @@ its initial scaffold. Direct/Direct projects get neither RepositorySync nor
 explicit migration establishes a valid Git inventory; the POC does not silently
 overwrite an imported repository.
 
-## Code provider GitOps API
+## Code and Deployments GitOps APIs
 
 The Code provider adds two cluster-scoped resources:
 
@@ -105,18 +107,30 @@ The Code provider adds two cluster-scoped resources:
   approval count, merge revision, phase, and conditions. `AfterApproval` may
   ask the host to merge after the configured approval threshold, but repository
   branch protection remains authoritative.
-- `RepositorySync` identifies a repository, ref, and bounded path (normally
-  `.faros`). It resolves the ref to an immutable commit, validates every YAML
-  document before applying any of them, accepts only
-  `deployments.faros.sh/v1alpha1` `Release` and `Deployment` objects, and records
-  the applied revision and inventory.
+- `RepositoryCheckout` identifies a managed repository, ref, and bounded path
+  (normally `.faros`). Code resolves the ref to an immutable commit, stores the
+  bounded tree outside Kubernetes, and publishes only bundle metadata plus a
+  short-lived capability bound to the tenant scope, bundle name, and digest.
+  Deployments redeems that capability once; Git credentials never cross the
+  provider boundary and source contents never land in CR status.
+
+The Deployments provider owns `RepositorySync`. It requests a
+`RepositoryCheckout`, validates every returned YAML document before applying
+any of them, accepts only `deployments.faros.sh/v1alpha1` `Release` and
+`Deployment` objects, and records the applied revision and inventory.
+
+The internal bundle transfer is intentionally narrower than Code's portal or
+MCP surface. It accepts only an exact capability-bound request, disables
+caching and redirects, and deletes the bundle after a successful response.
+Expired or already-consumed capabilities cause Deployments to replace the
+helper checkout and retry rather than leaving the sync permanently failed.
 
 `RepositoryCommit` also has an optional base ref. Creating a new proposal branch
 must fork the repository's default branch (or the requested base), never create
 an unrelated root commit.
 
-The sync controller labels/annotates its projected resources and treats the
-repository tree as the exact desired specification. A removed Release is
+The Deployments sync controller labels/annotates its projected resources and
+treats the repository tree as the exact desired specification. A removed Release is
 retained because it is immutable deployment history. A removed Deployment is
 retained by default and deleted only when its last Git-owned specification
 explicitly selected `deletionPolicy: Delete`. This makes repository pruning
@@ -192,26 +206,29 @@ would create two competing writers.
 
 ## GitOps engine scope
 
-This POC uses a hand-rolled, deliberately narrow pull reconciler in the Code
-provider. It is not a general-purpose Flux or Argo CD replacement: it reads one
-bounded repository subtree and supports only Release and Deployment resources.
-The stable hand-off is the Deployments API, so a future Flux/Argo source adapter
-could project the same resources without changing App Studio or the runtime
-driver.
+This POC uses a hand-rolled, deliberately narrow pull reconciler in the
+Deployments provider. It is not a general-purpose Flux or Argo CD replacement:
+it requests one bounded repository checkout and supports only Release and
+Deployment resources. The stable hand-off is the Deployments API, so a future
+Flux/Argo source adapter could project the same resources without changing App
+Studio or the runtime driver.
 
 ## Claims and rollout compatibility
 
-The Code APIExport needs delegated access to Releases and Deployments, and App
-Studio needs claims for Code `RepositorySync` and `ChangeRequest` resources in
-addition to its existing repository and deployment reads. These claims require
-the serving APIExport identity hashes and must match provider init,
-`manifest.yaml`, and Helm CatalogEntry copies. Code and App Studio init/chart
-bootstrap fail closed when the Code or Deployments identities required by this
-flow are absent.
+The Code APIExport keeps only its existing core secret claim; it has no
+Deployments dependency or Deployments claims. The Deployments APIExport claims
+Code `repositorycheckouts` (get, list, watch, create, update, patch, and
+delete) and Infrastructure `instances` write access. It does not claim Code
+connections, repositories, or secrets, and it never reads Git credentials.
+These claims require the Code and Infrastructure APIExport identity hashes and
+must match provider init, `manifest.yaml`, and Helm CatalogEntry copies.
 
-This POC deliberately does not preserve existing tenant APIBindings. Re-enable
-the affected providers or create a fresh tenant so the new cross-provider
-claims are accepted.
+Bootstrap initializes Code and Infrastructure independently, then Deployments,
+then App Studio. Existing tenants need an explicit binding migration or
+re-enable: old Code bindings may retain removed claims, while old Deployments
+bindings do not contain the new `repositorycheckouts` and Code identity claim.
+Do not declare the rollout complete until each tenant's accepted claims match
+the new exports.
 
 App Studio does not yet collapse the three native lifecycle resources into one
 durable aggregate phase. Its promotion response reports `PendingApproval`, then
@@ -234,16 +251,18 @@ First-class provider acceptance against the Tilt multi-shard stack is:
 
 ```sh
 make tilt-cluster
-# After infrastructure-init, deployments-register, and deployments-init are ready:
+# After code-init, infrastructure-init, deployments-register, and
+# deployments-init are ready:
 make e2e-tilt-cluster
 ```
 
 That gate proves the provider process is ready, its authoritative CatalogEntry
-is Ready, its APIExport publishes `releases` and `deployments`, and its exact
-Infrastructure permission claims carry the live Infrastructure identity hash.
-It also creates an isolated tenant, binds both providers with accepted claims,
-materializes an Infrastructure `Instance` from a `Release`/`Deployment`, and
-verifies default `Retain` finalization detaches rather than deletes the backend.
+is Ready, its APIExport publishes `releases`, `deployments`, and
+`repositorysyncs`, and its exact Code and Infrastructure permission claims
+carry the live identity hashes. It also creates an isolated tenant, binds Code,
+Infrastructure, and Deployments with accepted claims, materializes an
+Infrastructure `Instance` from a `Release`/`Deployment`, and verifies default
+`Retain` finalization detaches rather than deletes the backend.
 
 Full product acceptance additionally requires a real repository:
 

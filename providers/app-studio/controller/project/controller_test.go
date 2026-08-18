@@ -95,7 +95,8 @@ func TestProviderBindingsSpansAllEnvironmentModes(t *testing.T) {
 func TestProviderBindingsEnforcesDeliveryWriter(t *testing.T) {
 	runtimeBinding := binding("development")
 	syncBinding := binding("gitops")
-	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.Provider = "deployments"
+	syncBinding.ResourceRef.APIVersion = "deployments.faros.sh/v1alpha1"
 	syncBinding.ResourceRef.Resource = "repositorysyncs"
 	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{Environments: []aiv1alpha1.ProjectEnvironmentSpec{
 		{Name: projectDevelopmentEnvironmentName, Bindings: []aiv1alpha1.ProjectProviderBindingSpec{runtimeBinding}},
@@ -124,7 +125,8 @@ func TestProviderBindingsEnforcesDeliveryWriter(t *testing.T) {
 
 func TestGitOpsProductionRejectsConflictingDirectWriter(t *testing.T) {
 	syncBinding := binding("gitops")
-	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.Provider = "deployments"
+	syncBinding.ResourceRef.APIVersion = "deployments.faros.sh/v1alpha1"
 	syncBinding.ResourceRef.Resource = "repositorysyncs"
 	production := binding("prod")
 	production.Provider = "deployments"
@@ -167,6 +169,8 @@ func TestGitOpsDeliveryRequiresRepositorySync(t *testing.T) {
 
 func TestDirectDeliveryRejectsStaleRepositorySync(t *testing.T) {
 	syncBinding := binding("gitops")
+	syncBinding.Provider = "code"
+	syncBinding.ResourceRef.Kind = "RepositorySync"
 	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
 	syncBinding.ResourceRef.Resource = "repositorysyncs"
 	project := &aiv1alpha1.Project{
@@ -180,9 +184,32 @@ func TestDirectDeliveryRejectsStaleRepositorySync(t *testing.T) {
 	}
 }
 
+func TestLegacyCodeRepositorySyncRequiresMigration(t *testing.T) {
+	syncBinding := binding("gitops")
+	syncBinding.Provider = "code"
+	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.ResourceRef.Kind = "RepositorySync"
+	syncBinding.ResourceRef.Resource = "repositorysyncs"
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Delivery:   controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps),
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding},
+			}},
+		},
+	}
+	err := validateDeliveryBindings(project, providerBindings(project))
+	if err == nil || !strings.Contains(err.Error(), "legacy Code RepositorySync") || !strings.Contains(err.Error(), "migration") {
+		t.Fatalf("validation error = %v, want explicit legacy RepositorySync migration failure", err)
+	}
+}
+
 func TestGitOpsDeliveryRequiresRepository(t *testing.T) {
 	syncBinding := binding("gitops")
-	syncBinding.ResourceRef.APIVersion = "code.faros.sh/v1alpha1"
+	syncBinding.Provider = "deployments"
+	syncBinding.ResourceRef.APIVersion = "deployments.faros.sh/v1alpha1"
 	syncBinding.ResourceRef.Resource = "repositorysyncs"
 	project := &aiv1alpha1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
@@ -436,6 +463,109 @@ func TestEnsureInstanceDeepMergesComputedFieldsAndRetriesConflict(t *testing.T) 
 	}
 	if updates != 3 {
 		t.Fatalf("explicit desired update calls = %d, want 3", updates)
+	}
+}
+
+func TestEnsureRepositorySyncPreservesNativeSpecAcrossReconcile(t *testing.T) {
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
+		Spec: aiv1alpha1.ProjectSpec{
+			Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+		},
+	}
+	b := binding("gitops")
+	b.Provider = "deployments"
+	b.ResourceRef = &aiv1alpha1.ProjectProviderResourceReference{
+		Name:       "demo-gitops",
+		APIVersion: "deployments.faros.sh/v1alpha1",
+		Kind:       "RepositorySync",
+		Resource:   "repositorysyncs",
+	}
+	b.Values = runtime.RawExtension{Raw: []byte(`{"repositoryRef":"demo-repo","ref":"main","path":".faros","prune":true,"intervalSeconds":30}`)}
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": b.ResourceRef.APIVersion,
+		"kind":       b.ResourceRef.Kind,
+		"metadata": map[string]any{
+			"name":   "demo-gitops",
+			"labels": map[string]any{bindings.ProjectLabel: "demo"},
+		},
+		"spec": map[string]any{
+			"repositoryRef":    "demo-repo",
+			"ref":              "old",
+			"path":             ".faros",
+			"prune":            true,
+			"intervalSeconds":  float64(10),
+			"providerComputed": "preserve",
+		},
+	}}
+	instance.SetGroupVersionKind(instance.GroupVersionKind())
+	updates := 0
+	c := fake.NewClientBuilder().WithObjects(instance).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			return underlying.Update(ctx, obj)
+		},
+	}).Build()
+
+	if _, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b); err != nil {
+		t.Fatalf("first RepositorySync reconcile: %v", err)
+	}
+	stored := &unstructured.Unstructured{}
+	stored.SetGroupVersionKind(instance.GroupVersionKind())
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "demo-gitops"}, stored); err != nil {
+		t.Fatalf("get first RepositorySync result: %v", err)
+	}
+	assertNativeRepositorySyncSpec(t, stored, "main", float64(30))
+
+	if _, err := (&Reconciler{}).ensureInstance(context.Background(), c, p, b); err != nil {
+		t.Fatalf("second RepositorySync reconcile: %v", err)
+	}
+	if updates != 1 {
+		t.Fatalf("RepositorySync Update calls = %d, want one drift convergence and no second-reconcile shape churn; object=%#v labels=%#v owners=%#v", updates, stored.Object, stored.GetLabels(), stored.GetOwnerReferences())
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "demo-gitops"}, stored); err != nil {
+		t.Fatalf("get second RepositorySync result: %v", err)
+	}
+	assertNativeRepositorySyncSpec(t, stored, "main", float64(30))
+}
+
+func assertNativeRepositorySyncSpec(t *testing.T, obj *unstructured.Unstructured, wantRef string, wantInterval float64) {
+	t.Helper()
+	spec, ok, err := unstructured.NestedMap(obj.Object, "spec")
+	if err != nil || !ok {
+		t.Fatalf("RepositorySync spec = %#v, err = %v", spec, err)
+	}
+	if spec["repositoryRef"] != "demo-repo" || spec["ref"] != wantRef || spec["path"] != ".faros" || spec["prune"] != true {
+		t.Fatalf("RepositorySync spec = %#v, want flat desired fields", spec)
+	}
+	if got, ok := repositorySyncNumber(spec["intervalSeconds"]); !ok || got != wantInterval {
+		t.Fatalf("RepositorySync spec.intervalSeconds = %#v, want %v", spec["intervalSeconds"], wantInterval)
+	}
+	if spec["providerComputed"] != "preserve" {
+		t.Fatalf("provider-computed field = %#v, want preserve", spec["providerComputed"])
+	}
+	if _, found := spec["template"]; found {
+		t.Fatalf("RepositorySync spec unexpectedly contains template wrapper: %#v", spec)
+	}
+	if _, found := spec["values"]; found {
+		t.Fatalf("RepositorySync spec unexpectedly contains values wrapper: %#v", spec)
+	}
+}
+
+func repositorySyncNumber(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	default:
+		return 0, false
 	}
 }
 

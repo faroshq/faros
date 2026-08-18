@@ -39,6 +39,7 @@ type Deps struct {
 	PortalFS         fs.FS
 	ServePortalAsset AssetServer
 	OAuth            OAuthMounter // /oauth/github/* connect flow; may be nil
+	BundleAccess     http.Handler // capability-gated internal bundle transfer
 }
 
 // Server is the wired-up HTTP server.
@@ -59,6 +60,9 @@ func New(d Deps) *Server {
 
 	if d.OAuth != nil {
 		d.OAuth.Mount(s.mux)
+	}
+	if d.BundleAccess != nil {
+		s.mux.Handle("/internal/bundles", d.BundleAccess)
 	}
 
 	// Portal fallback — last so explicit routes win. Tries the embedded FS

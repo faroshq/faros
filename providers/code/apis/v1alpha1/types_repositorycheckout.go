@@ -69,6 +69,13 @@ type RepositoryCheckoutSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
 	Ref string `json:"ref,omitempty"`
+
+	// Path optionally selects a repository-relative subtree. The provider
+	// still stores the result in its existing bundle store; this field only
+	// narrows the source tree before storage.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	Path string `json:"path,omitempty"`
 }
 
 // RepositoryCheckoutPhase is the high-level lifecycle of a checkout request.
@@ -122,6 +129,12 @@ type RepositoryCheckoutStatus struct {
 	// +optional
 	BundleRef *RepositoryCommitBundleReference `json:"bundleRef,omitempty"`
 
+	// Access is a short-lived capability for retrieving BundleRef from the
+	// Code provider. It is bound to this checkout's tenant scope, bundle name,
+	// and digest; it conveys no Git-host credential.
+	// +optional
+	Access *RepositoryCheckoutAccess `json:"access,omitempty"`
+
 	// Skipped lists repository paths the checkout left out (binary content,
 	// oversized files, tree/file-count caps), so consumers know the bundle is
 	// not the complete tree.
@@ -134,4 +147,18 @@ type RepositoryCheckoutStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// RepositoryCheckoutAccess authorizes one bounded bundle transfer from Code
+// to a consumer that already has access to this RepositoryCheckout status.
+type RepositoryCheckoutAccess struct {
+	// Token is an opaque, short-lived bearer capability.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Token string `json:"token"`
+
+	// ExpiresAt is when Code will reject the capability.
+	// +required
+	ExpiresAt metav1.Time `json:"expiresAt"`
 }

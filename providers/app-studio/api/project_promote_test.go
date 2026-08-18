@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	asclient "github.com/faroshq/provider-app-studio/client"
 	"github.com/faroshq/provider-app-studio/tenant"
 )
 
@@ -96,6 +97,9 @@ func TestGitManagedPromotionCreatesChangeRequestWithoutDirectDeploymentWrites(t 
 	changeRequest, err := client.Resource(tenant.Resource{GVR: projectChangeRequestGVR, Kind: projectChangeRequestKind, Plural: "ChangeRequests"}, "").Get(context.Background(), response.GitOps.ChangeRequest, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get ChangeRequest: %v", err)
+	}
+	if changeRequest.GetAPIVersion() != projectChangeRequestAPIVersion {
+		t.Fatalf("ChangeRequest apiVersion = %q, want %q", changeRequest.GetAPIVersion(), projectChangeRequestAPIVersion)
 	}
 	if policy, _, _ := unstructured.NestedString(changeRequest.Object, "spec", "mergePolicy"); policy != "AfterApproval" {
 		t.Fatalf("merge policy = %q", policy)
@@ -578,6 +582,53 @@ func TestProjectPromoteResponseIncludesRolloutRevision(t *testing.T) {
 	}
 	if got, _ := decoded["rolloutRevision"].(string); got != revision {
 		t.Fatalf("rolloutRevision = %q, want %q", got, revision)
+	}
+}
+
+func TestProjectPromotionReadinessRequiresObservedProviderObject(t *testing.T) {
+	p := projectForPromote("shop")
+	binding := aiv1alpha1.ProjectProviderBindingSpec{
+		Name:     projectProductionBindingName,
+		Provider: projectDeploymentProvider,
+		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+			Name:       projectTemplateProdInstanceName(p),
+			APIVersion: projectDeploymentAPIVersion,
+			Kind:       projectDeploymentKind,
+			Resource:   projectDeploymentResource,
+		},
+		Values: runtime.RawExtension{Raw: []byte(`{"releaseRef":"release-1","configuration":{},"rolloutID":"rollout-1"}`)},
+	}
+
+	missingClient := asclient.NewFromDynamic(publishingTestDynamic())
+	missing := projectPromotionReadinessResponse{}
+	populateProjectPromotionProduction(context.Background(), missingClient, p, binding, identity{}, &missing)
+	if missing.ProductionObserved {
+		t.Fatal("productionObserved = true when the referenced Deployment is absent")
+	}
+	raw, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatalf("marshal missing-object response: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode missing-object response: %v", err)
+	}
+	if observed, ok := decoded["productionObserved"].(bool); !ok || observed {
+		t.Fatalf("productionObserved JSON = %#v, want explicit false", decoded["productionObserved"])
+	}
+
+	deployment := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": projectDeploymentAPIVersion,
+		"kind":       projectDeploymentKind,
+		"metadata":   map[string]any{"name": projectTemplateProdInstanceName(p)},
+		"status":     map[string]any{"phase": "Pending"},
+	}}
+	presentClient := asclient.NewFromDynamic(publishingTestDynamic(deployment))
+	present := projectPromotionReadinessResponse{}
+	populateProjectPromotionProduction(context.Background(), presentClient, p, binding, identity{}, &present)
+	if !present.ProductionObserved {
+		t.Fatal("productionObserved = false after the referenced Deployment was fetched")
 	}
 }
 

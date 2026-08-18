@@ -16,13 +16,18 @@ package kcp
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/faroshq/faros/pkg/hub/providers"
 )
@@ -89,5 +94,141 @@ func TestEnsureBuiltinCatalogEntries_DoesNotTouchChartOwnedEntry(t *testing.T) {
 	}
 	if !found || displayName != "Provider from Chart" {
 		t.Fatalf("displayName = %q, want chart-owned value", displayName)
+	}
+}
+
+func TestReconcileProviderAPIBinding(t *testing.T) {
+	desiredClaims := []any{
+		map[string]any{"group": "infrastructure.faros.sh", "resource": "instances", "state": "Accepted"},
+		map[string]any{"group": "code.faros.sh", "resource": "repositorysyncs", "state": "Accepted"},
+	}
+	desired := providerAPIBindingForTest("app-studio", "root:faros:providers:app-studio", "ai.faros.sh", desiredClaims)
+
+	newClient := func(objects ...runtime.Object) *fake.FakeDynamicClient {
+		return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+			apiBindingGVR: "APIBindingList",
+		}, objects...)
+	}
+
+	t.Run("creates missing binding", func(t *testing.T) {
+		dyn := newClient()
+		if err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		got, err := dyn.Resource(apiBindingGVR).Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get created binding: %v", err)
+		}
+		assertProviderBindingClaims(t, got, desiredClaims)
+	})
+
+	t.Run("updates stale claims and preserves server state", func(t *testing.T) {
+		existing := providerAPIBindingForTest("app-studio", "root:faros:providers:app-studio", "ai.faros.sh", []any{
+			map[string]any{"group": "infrastructure.faros.sh", "resource": "applications", "state": "Accepted"},
+		})
+		existing.SetLabels(map[string]string{"preserve": "true"})
+		existing.Object["status"] = map[string]any{"phase": "Bound"}
+		dyn := newClient(existing)
+
+		if err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		got, err := dyn.Resource(apiBindingGVR).Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get updated binding: %v", err)
+		}
+		assertProviderBindingClaims(t, got, desiredClaims)
+		if got.GetLabels()["preserve"] != "true" {
+			t.Fatalf("labels were not preserved: %#v", got.GetLabels())
+		}
+		phase, _, _ := unstructured.NestedString(got.Object, "status", "phase")
+		if phase != "Bound" {
+			t.Fatalf("status.phase = %q, want Bound", phase)
+		}
+	})
+
+	t.Run("skips update when current", func(t *testing.T) {
+		dyn := newClient(desired.DeepCopy())
+		updates := 0
+		dyn.PrependReactor("update", "apibindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+			updates++
+			return false, nil, nil
+		})
+		if err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if updates != 0 {
+			t.Fatalf("updates = %d, want 0", updates)
+		}
+	})
+
+	t.Run("retries update conflict from fresh read", func(t *testing.T) {
+		existing := providerAPIBindingForTest("app-studio", "root:faros:providers:app-studio", "ai.faros.sh", []any{})
+		dyn := newClient(existing)
+		updates := 0
+		dyn.PrependReactor("update", "apibindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+			updates++
+			if updates == 1 {
+				return true, nil, apierrors.NewConflict(apiBindingGVR.GroupResource(), desired.GetName(), nil)
+			}
+			return false, nil, nil
+		})
+		if err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if updates != 2 {
+			t.Fatalf("updates = %d, want 2", updates)
+		}
+		got, err := dyn.Resource(apiBindingGVR).Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get updated binding: %v", err)
+		}
+		assertProviderBindingClaims(t, got, desiredClaims)
+	})
+
+	t.Run("rejects mismatched export", func(t *testing.T) {
+		existing := providerAPIBindingForTest("app-studio", "root:faros:providers:other", "other.faros.sh", []any{})
+		dyn := newClient(existing)
+		err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired)
+		if err == nil || !strings.Contains(err.Error(), "expected") {
+			t.Fatalf("error = %v, want export mismatch", err)
+		}
+	})
+
+	t.Run("rejects terminating binding", func(t *testing.T) {
+		existing := desired.DeepCopy()
+		now := metav1.NewTime(time.Now())
+		existing.SetDeletionTimestamp(&now)
+		dyn := newClient(existing)
+		err := reconcileProviderAPIBinding(context.Background(), dyn.Resource(apiBindingGVR), desired)
+		if err == nil || !strings.Contains(err.Error(), "terminating") {
+			t.Fatalf("error = %v, want terminating binding", err)
+		}
+	})
+}
+
+func providerAPIBindingForTest(name, path, export string, claims []any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apis.kcp.io/v1alpha2",
+		"kind":       "APIBinding",
+		"metadata":   map[string]any{"name": name},
+		"spec": map[string]any{
+			"reference":        map[string]any{"export": map[string]any{"path": path, "name": export}},
+			"permissionClaims": claims,
+		},
+	}}
+}
+
+func assertProviderBindingClaims(t *testing.T, binding *unstructured.Unstructured, want []any) {
+	t.Helper()
+	got, found, err := unstructured.NestedSlice(binding.Object, "spec", "permissionClaims")
+	if err != nil {
+		t.Fatalf("read permission claims: %v", err)
+	}
+	if !found {
+		t.Fatal("permission claims not found")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("permission claims = %#v, want %#v", got, want)
 	}
 }

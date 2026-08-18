@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"net/url"
+	"strconv"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -426,6 +428,13 @@ func MergeProviderSpec(observed, desired map[string]any) map[string]any {
 
 func mergeProviderSpecMap(dst, desired map[string]any) {
 	for key, desiredValue := range desired {
+		// Dynamic Kubernetes clients commonly decode the same JSON number as
+		// int64 on a read and float64 from a RawExtension. Retain the observed
+		// representation when the values are numerically equal so a harmless
+		// type difference does not trigger an update on every reconcile.
+		if equivalentJSONNumbers(dst[key], desiredValue) {
+			continue
+		}
 		desiredMap, desiredIsMap := desiredValue.(map[string]any)
 		if !desiredIsMap {
 			dst[key] = runtime.DeepCopyJSONValue(desiredValue)
@@ -442,6 +451,50 @@ func mergeProviderSpecMap(dst, desired map[string]any) {
 		mergeProviderSpecMap(mergedMap, desiredMap)
 		dst[key] = mergedMap
 	}
+}
+
+func equivalentJSONNumbers(left, right any) bool {
+	leftNumber, leftOK := jsonNumber(left)
+	rightNumber, rightOK := jsonNumber(right)
+	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+}
+
+func jsonNumber(value any) (*big.Rat, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		return parseJSONNumber(string(typed))
+	case float32:
+		return parseJSONNumber(strconv.FormatFloat(float64(typed), 'g', -1, 32))
+	case float64:
+		return parseJSONNumber(strconv.FormatFloat(typed, 'g', -1, 64))
+	case int:
+		return parseJSONNumber(strconv.FormatInt(int64(typed), 10))
+	case int8:
+		return parseJSONNumber(strconv.FormatInt(int64(typed), 10))
+	case int16:
+		return parseJSONNumber(strconv.FormatInt(int64(typed), 10))
+	case int32:
+		return parseJSONNumber(strconv.FormatInt(int64(typed), 10))
+	case int64:
+		return parseJSONNumber(strconv.FormatInt(typed, 10))
+	case uint:
+		return parseJSONNumber(strconv.FormatUint(uint64(typed), 10))
+	case uint8:
+		return parseJSONNumber(strconv.FormatUint(uint64(typed), 10))
+	case uint16:
+		return parseJSONNumber(strconv.FormatUint(uint64(typed), 10))
+	case uint32:
+		return parseJSONNumber(strconv.FormatUint(uint64(typed), 10))
+	case uint64:
+		return parseJSONNumber(strconv.FormatUint(typed, 10))
+	default:
+		return nil, false
+	}
+}
+
+func parseJSONNumber(value string) (*big.Rat, bool) {
+	number, ok := new(big.Rat).SetString(value)
+	return number, ok
 }
 
 // ResourceName resolves the instance name: explicit resourceRef.name, then a
@@ -495,11 +548,13 @@ func IsInvalidBinding(err error) bool {
 	return errors.As(err, &invalid)
 }
 
-// Desired builds the desired instance object for a binding: the flattened
-// Instance shape, with the Project's template name under spec.template and
-// the binding values under spec.values. Returns the GVR alongside so callers
-// can address the right resource. Errors are InvalidBindingError — the spec,
-// not the world, is wrong.
+// Desired builds the desired provider object for a binding. Infrastructure
+// Instances use the flattened Instance shape, with the Project's template
+// name under spec.template and the binding values under spec.values. Native
+// provider resources (currently Deployments RepositorySync) use their binding values
+// as the provider-native spec instead. Returns the GVR alongside so callers can
+// address the right resource. Errors are InvalidBindingError — the spec, not
+// the world, is wrong.
 func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) (*unstructured.Unstructured, schema.GroupVersionResource, error) {
 	gvr, err := GVR(binding.ResourceRef)
 	if err != nil {
@@ -522,6 +577,17 @@ func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpe
 	}
 	vals := map[string]any{}
 	maps.Copy(vals, values)
+	spec := map[string]any{
+		"template": templateName,
+		"values":   vals,
+	}
+	if IsRepositorySyncResource(gvr, binding.ResourceRef.Kind) {
+		// RepositorySync is a Deployments API resource, not an Infrastructure Instance.
+		// Its CRD expects repositoryRef/ref/path/prune/intervalSeconds directly
+		// under spec; wrapping those values as spec.values makes the required
+		// repositoryRef disappear and leaves the object invalid.
+		spec = vals
+	}
 	want := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": binding.ResourceRef.APIVersion,
@@ -533,16 +599,20 @@ func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpe
 					TemplateLabel: templateName,
 				},
 			},
-			"spec": map[string]any{
-				"template": templateName,
-				"values":   vals,
-			},
+			"spec": spec,
 		},
 	}
 	if owner := OwnerRef(p); owner != nil {
 		want.SetOwnerReferences([]metav1.OwnerReference{*owner})
 	}
 	return want, gvr, nil
+}
+
+// IsRepositorySyncResource reports whether a binding addresses Deployments'
+// RepositorySync resource rather than an Infrastructure Instance.
+func IsRepositorySyncResource(gvr schema.GroupVersionResource, kind string) bool {
+	return gvr.Group == "deployments.faros.sh" && gvr.Version == "v1alpha1" &&
+		gvr.Resource == "repositorysyncs" && strings.TrimSpace(kind) == "RepositorySync"
 }
 
 // Phase reads an instance's phase: status.phase, then the Ready condition,

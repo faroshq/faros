@@ -14,7 +14,8 @@
 // Routes on a single port ($PORT, default 8081):
 //
 //   - /, /main.js, /icon.svg, /assets/*  — embedded Vite bundle
-//   - /healthz                           — liveness; gates BackendHealthy
+//   - /healthz                           — liveness
+//   - /readyz                            — controller/backend readiness
 //   - /mcp, /mcp/sse                     — MCP transport
 //
 // Templates and instances are NOT served as REST here: the portal and
@@ -129,11 +130,37 @@ func runServe() {
 // serveWithConfig runs the HTTP/MCP server + controller manager + heartbeat
 // against the supplied kcp config, blocking until ctx is cancelled. The caller
 // owns ctx (runServe wires signals; the operator shares its own ctx with the
-// bootstrap loop). A nil kcpConfig keeps the REST-only/stub flow.
+// bootstrap loop). A nil kcpConfig keeps the REST-only/stub flow alive, but it
+// remains unready until the provider/controller dependencies are available.
 func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
+	}
+	readiness := server.NewReadiness("provider", "controller", "backend")
+	if kcpConfig == nil {
+		cause := errors.New("provider kubeconfig unavailable")
+		readiness.Set("provider", cause)
+		readiness.Set("controller", fmt.Errorf("controller manager disabled: %w", cause))
+		readiness.Set("backend", fmt.Errorf("backend unavailable: %w", cause))
+	}
+	lifecycle := &controllerReadiness{
+		onBackendReady: func() {
+			readiness.Set("backend", nil)
+		},
+		onReady: func() {
+			// Cache synchronization is the provider-side authority signal: the
+			// manager can now discover and reconcile the API resources it owns.
+			readiness.Set("provider", nil)
+			readiness.Set("controller", nil)
+		},
+		onStopped: func(err error) {
+			if err == nil {
+				err = errors.New("controller manager stopped")
+			}
+			readiness.Set("provider", err)
+			readiness.Set("controller", err)
+		},
 	}
 
 	// Data-plane subresource proxy (logs/sync/restart/preview proxy/status).
@@ -162,6 +189,7 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 		PortalFileServer: fileServer,
 		PortalFS:         distFS,
 		ServePortalAsset: servePortalAsset,
+		Readiness:        readiness.Check,
 	})
 
 	httpSrv := &http.Server{
@@ -180,7 +208,9 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 	// Platform controller manager (PR A). Opt-in: when no kubeconfig
 	// is in scope the provider stays in REST-only mode, preserving the
 	// existing dev/stub flow while the new code lands.
-	if err := startControllerManager(ctx, kcpConfig); err != nil {
+	if err := startControllerManager(ctx, kcpConfig, lifecycle); err != nil {
+		readiness.Set("provider", err)
+		readiness.Set("controller", err)
 		if errors.Is(err, errControllerDisabled) {
 			log.Printf("controller manager: disabled (no kubeconfig); set INFRASTRUCTURE_CONTROLLER_KUBECONFIG to enable")
 		} else {
@@ -192,7 +222,7 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 	// client-secret bridge). Opt-in via FAROS_APP_BASE_DOMAIN + KRO_KUBECONFIG.
 	startInstanceController(ctx, kcpConfig)
 
-	go runHeartbeat(ctx)
+	go runHeartbeat(ctx, readiness.Check)
 
 	<-ctx.Done()
 	log.Printf("shutting down")

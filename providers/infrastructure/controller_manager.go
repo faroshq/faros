@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -41,13 +42,70 @@ import (
 	"github.com/faroshq/provider-infrastructure/install"
 )
 
+// controllerReadiness reports lifecycle transitions back to the HTTP
+// readiness gate. The manager is not ready when it is merely constructed: the
+// provider cache must synchronize first, and an actual backend must be
+// registered before /readyz can pass.
+type controllerReadiness struct {
+	mu       sync.Mutex
+	terminal bool
+
+	onBackendReady func()
+	onReady        func()
+	onStopped      func(error)
+}
+
+func (r *controllerReadiness) backendReady() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.terminal || r.onBackendReady == nil {
+		return
+	}
+	r.onBackendReady()
+}
+
+func (r *controllerReadiness) ready() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.terminal || r.onReady == nil {
+		return
+	}
+	r.onReady()
+}
+
+func (r *controllerReadiness) stopped(err error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.terminal {
+		return
+	}
+	r.terminal = true
+	if r.onStopped != nil {
+		r.onStopped(err)
+	}
+}
+
 // startControllerManager builds a controller-runtime manager pointed
 // at the provider's own kcp workspace, installs the platform CRDs,
 // registers the stub backend, and starts the Template controller.
 // The caller loads the kcp config (shared with the tenant client) and
 // passes it in; a nil config means "skip the manager, run REST-only".
-func startControllerManager(ctx context.Context, config *rest.Config) error {
+func startControllerManager(ctx context.Context, config *rest.Config, readiness ...*controllerReadiness) error {
+	var lifecycle *controllerReadiness
+	if len(readiness) > 0 {
+		lifecycle = readiness[0]
+	}
 	if config == nil {
+		lifecycle.stopped(errControllerDisabled)
 		return errControllerDisabled
 	}
 
@@ -137,18 +195,52 @@ func startControllerManager(ctx context.Context, config *rest.Config) error {
 	} else {
 		log.Printf("controller manager: no kro runtime config (KRO_KUBECONFIG unset, not in a pod) — kro backend not registered (stub-only)")
 	}
-
+	// The stub is a valid backend for the intentionally supported local
+	// REST-only/demo flow; a kro backend is added above when a runtime cluster is
+	// configured. In either case, readiness must wait until registration has
+	// completed before the manager cache can advertise the provider as usable.
+	// A runtime cluster selects kro as the required backend. The stub is only
+	// the intentionally supported local/demo backend when no runtime cluster is
+	// configured. Verify the selected backend is actually in the registry before
+	// acknowledging backend readiness; registering an unconditional stub must
+	// never mask a configured-but-unavailable kro backend.
+	requiredBackend := stub.Name
+	if kroCfg != nil {
+		requiredBackend = krobackend.Name
+	}
+	if _, ok := registry.Get(requiredBackend); !ok {
+		return fmt.Errorf("required backend %q is not registered", requiredBackend)
+	}
 	if err := (&template.Reconciler{
 		Client:   mgr.GetClient(),
 		Backends: registry,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("template controller: %w", err)
 	}
+	// The selected backend is now registered and the controller that dispatches
+	// to it is wired. Cache sync below still gates provider/controller
+	// readiness, but backend readiness must not be acknowledged if setup failed.
+	lifecycle.backendReady()
 
 	go func() {
 		log.Printf("infrastructure controller manager starting (backends=%v)", registry.Names())
 		if err := mgr.Start(ctx); err != nil {
 			log.Printf("controller manager exited: %v", err)
+			lifecycle.stopped(fmt.Errorf("controller manager exited: %w", err))
+			return
+		}
+		lifecycle.stopped(errors.New("controller manager stopped"))
+	}()
+	go func() {
+		// WaitForCacheSync observes the actual provider cache, not merely the
+		// asynchronous Start call. This keeps /readyz false until the manager
+		// can serve the API resources its controllers reconcile.
+		if mgr.GetCache().WaitForCacheSync(ctx) && ctx.Err() == nil {
+			lifecycle.ready()
+			return
+		}
+		if ctx.Err() == nil {
+			lifecycle.stopped(errors.New("controller manager cache did not synchronize"))
 		}
 	}()
 	return nil

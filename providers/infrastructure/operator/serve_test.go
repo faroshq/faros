@@ -50,6 +50,13 @@ func TestEnsureProviderServePropagatesPlatformPreviewConsoleJWKS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get managed provider Deployment: %v", err)
 	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if got := container.LivenessProbe.HTTPGet.Path; got != "/healthz" {
+		t.Fatalf("managed provider liveness path = %q, want /healthz", got)
+	}
+	if got := container.ReadinessProbe.HTTPGet.Path; got != "/readyz" {
+		t.Fatalf("managed provider readiness path = %q, want /readyz", got)
+	}
 	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == "FAROS_PREVIEW_CONSOLE_VERIFICATION_JWKS" {
 			if env.Value != jwks {

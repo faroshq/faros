@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": "src",
+    "allowImportingTsExtensions": false
+  },
+  "include": [
+    "src/api.ts",
+    "src/mapper.ts",
+    "src/state.ts",
+    "src/route.ts",
+    "src/api.test.ts",
+    "src/mapper.test.ts",
+    "src/route.test.ts",
+    "src/state.test.ts"
+  ]
+}

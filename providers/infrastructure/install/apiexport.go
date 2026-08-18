@@ -10,18 +10,17 @@ You may obtain a copy of the License at
 
 package install
 
-// PlatformSchemaInAPIExport: register the platform's own catalog CRD
-// (templates.infrastructure.faros.sh) as a resource on the
-// provider's APIExport. The Template controller (which mints
-// per-template entries dynamically) deliberately does NOT do this —
-// otherwise tenants who APIBind before the FIRST Template is applied
-// wouldn't see Templates either.
+// PlatformSchemaInAPIExport registers the platform's tenant-facing CRDs
+// (templates.infrastructure.faros.sh and instances.infrastructure.faros.sh)
+// on the provider's APIExport. The install set is authoritative for the
+// infrastructure.faros.sh group: stale entries from an older provider
+// version are removed, while entries from other API groups are left alone.
 //
 // Lives in install/ rather than controller/template/ because it's a
 // one-shot startup task tied to the binary's bootstrap, not a CR
 // reconcile loop. Same code shape as the runtime path (mint
-// APIResourceSchema, upsert APIExport.spec.resources) so a future
-// refactor could collapse them; PR A keeps the duplication shallow.
+// APIResourceSchema, reconcile APIExport.spec.resources) so a future
+// refactor could collapse them; install keeps the duplication shallow.
 
 import (
 	"context"
@@ -42,6 +41,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
@@ -64,11 +64,10 @@ var (
 	}
 )
 
-// PlatformSchemaInAPIExport reads every embedded platform CRD,
-// mints an APIResourceSchema for each, and appends a corresponding
-// entry to APIExport.spec.resources. Idempotent on every axis: a
-// content-equal schema reuses its existing name; an already-present
-// resource entry is left alone.
+// PlatformSchemaInAPIExport reads every embedded platform CRD, mints an
+// APIResourceSchema for each, and reconciles the complete desired resource
+// set in one APIExport update. Content-equal schemas reuse their existing
+// names, and resources outside the infrastructure API group are preserved.
 //
 // templatesIdentityHash, when non-empty, switches the
 // templates.infrastructure.faros.sh entry to use storage.virtual
@@ -92,6 +91,7 @@ func PlatformSchemaInAPIExport(ctx context.Context, config *rest.Config, templat
 	if err != nil {
 		return fmt.Errorf("read embedded crds/: %w", err)
 	}
+	desired := make([]apisv1alpha2.ResourceSchema, 0, len(entries))
 	var processed int
 	for _, e := range entries {
 		if e.IsDir() {
@@ -109,21 +109,17 @@ func PlatformSchemaInAPIExport(ctx context.Context, config *rest.Config, templat
 		if err != nil {
 			return fmt.Errorf("ensure APIResourceSchema for %s: %w", crd.Name, err)
 		}
-		storage := storageForResource(crd.Spec.Group, crd.Spec.Names.Plural, templatesIdentityHash)
-		if err := ensureAPIExportEntry(ctx, dyn, schemaName, crd.Spec.Names.Plural, crd.Spec.Group, storage); err != nil {
-			return fmt.Errorf("upsert APIExport entry for %s: %w", crd.Name, err)
-		}
+		desired = append(desired, resourceSchemaForCRD(&crd, schemaName, templatesIdentityHash))
 		processed++
+	}
+	if err := reconcileAPIExportResources(ctx, dyn, desired); err != nil {
+		return fmt.Errorf("reconcile APIExport resources: %w", err)
 	}
 	log.Info("platform schemas registered on APIExport",
 		"count", processed,
 		"apiExport", APIExportName,
 		"templatesStorage", storageKindLabel(templatesIdentityHash),
 	)
-	// Anchor on the platform group import so the linter doesn't strip
-	// the dependency the controller package will share once PR B
-	// collapses the two install/controller flows.
-	_ = infrav1alpha1.GroupName
 	return nil
 }
 
@@ -147,6 +143,15 @@ func storageForResource(group, plural, templatesIdentityHash string) apisv1alpha
 	}
 	return apisv1alpha2.ResourceSchemaStorage{
 		CRD: &apisv1alpha2.ResourceSchemaStorageCRD{},
+	}
+}
+
+func resourceSchemaForCRD(crd *apiextensionsv1.CustomResourceDefinition, schemaName, templatesIdentityHash string) apisv1alpha2.ResourceSchema {
+	return apisv1alpha2.ResourceSchema{
+		Name:    crd.Spec.Names.Plural,
+		Group:   crd.Spec.Group,
+		Schema:  schemaName,
+		Storage: storageForResource(crd.Spec.Group, crd.Spec.Names.Plural, templatesIdentityHash),
 	}
 }
 
@@ -185,81 +190,103 @@ func ensureAPIResourceSchema(ctx context.Context, dyn dynamic.Interface, crd *ap
 	return schemaObj.Name, nil
 }
 
-func ensureAPIExportEntry(ctx context.Context, dyn dynamic.Interface, schemaName, resource, group string, storage apisv1alpha2.ResourceSchemaStorage) error {
-	export, err := dyn.Resource(apiExportGVR).Get(ctx, APIExportName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("APIExport %q not found; ensure the CatalogEntry has reconciled", APIExportName)
+func reconcileAPIExportResources(ctx context.Context, dyn dynamic.Interface, desired []apisv1alpha2.ResourceSchema) error {
+	// Fetch inside RetryOnConflict so every retry recomputes the desired
+	// entries from the latest APIExport, preserving unrelated concurrent
+	// changes rather than replaying a stale object.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		export, err := dyn.Resource(apiExportGVR).Get(ctx, APIExportName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("APIExport %q not found; ensure the CatalogEntry has reconciled: %w", APIExportName, err)
+			}
+			return err
 		}
-		return fmt.Errorf("get APIExport: %w", err)
-	}
-	raw, found, err := unstructured.NestedFieldNoCopy(export.Object, "spec", "resources")
-	if err != nil {
-		return err
-	}
-	var resources []apisv1alpha2.ResourceSchema
-	if found && raw != nil {
-		data, err := json.Marshal(raw)
+		raw, found, err := unstructured.NestedFieldNoCopy(export.Object, "spec", "resources")
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(data, &resources); err != nil {
+		var resources []apisv1alpha2.ResourceSchema
+		if found && raw != nil {
+			data, err := json.Marshal(raw)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(data, &resources); err != nil {
+				return err
+			}
+		}
+
+		updated := reconcileResourceEntries(resources, desired, infrav1alpha1.GroupName)
+		if resourcesEqual(resources, updated) {
+			return nil
+		}
+		data, err := json.Marshal(updated)
+		if err != nil {
 			return err
 		}
-	}
-
-	updated := upsertResource(resources, resource, group, schemaName, storage)
-	if resourcesEqual(resources, updated) {
-		return nil
-	}
-	data, err := json.Marshal(updated)
-	if err != nil {
+		var asAny []any
+		if err := json.Unmarshal(data, &asAny); err != nil {
+			return err
+		}
+		if err := unstructured.SetNestedField(export.Object, asAny, "spec", "resources"); err != nil {
+			return err
+		}
+		_, err = dyn.Resource(apiExportGVR).Update(ctx, export, metav1.UpdateOptions{})
 		return err
-	}
-	var asAny []any
-	if err := json.Unmarshal(data, &asAny); err != nil {
-		return err
-	}
-	if err := unstructured.SetNestedField(export.Object, asAny, "spec", "resources"); err != nil {
-		return err
-	}
-	if _, err := dyn.Resource(apiExportGVR).Update(ctx, export, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update APIExport: %w", err)
-	}
-	return nil
+	})
 }
 
-// upsertResource replaces (or appends) the {group, name} entry. The
-// caller-supplied storage is always preferred over whatever the
-// existing entry carried: that's how the templates resource flips
-// from CRD storage to Virtual storage once the CachedResource is
-// ready, without us having to special-case the storage type at the
-// call site beyond storageForResource.
-func upsertResource(in []apisv1alpha2.ResourceSchema, name, group, schemaName string, storage apisv1alpha2.ResourceSchemaStorage) []apisv1alpha2.ResourceSchema {
-	out := make([]apisv1alpha2.ResourceSchema, 0, len(in)+1)
-	replaced := false
-	for _, r := range in {
-		if r.Name == name && r.Group == group {
-			out = append(out, apisv1alpha2.ResourceSchema{
-				Name:    name,
-				Group:   group,
-				Schema:  schemaName,
-				Storage: storage,
-			})
-			replaced = true
+// reconcileResourceEntries makes the entries for managedGroup authoritative.
+// Existing entries in every other group are copied unchanged. For managed
+// entries, the desired value replaces the existing value in place, stale
+// entries are dropped, and new desired values are appended. Keeping existing
+// positions makes a no-op reconcile byte-for-byte stable while avoiding an
+// unnecessary reorder of foreign-group entries.
+func reconcileResourceEntries(in, desired []apisv1alpha2.ResourceSchema, managedGroup string) []apisv1alpha2.ResourceSchema {
+	desiredByKey := make(map[string]apisv1alpha2.ResourceSchema, len(desired))
+	desiredOrder := make([]string, 0, len(desired))
+	for _, resource := range desired {
+		if resource.Group != managedGroup {
 			continue
 		}
-		out = append(out, r)
+		key := resourceEntryKey(resource.Group, resource.Name)
+		if _, exists := desiredByKey[key]; exists {
+			continue
+		}
+		desiredByKey[key] = resource
+		desiredOrder = append(desiredOrder, key)
 	}
-	if !replaced {
-		out = append(out, apisv1alpha2.ResourceSchema{
-			Name:    name,
-			Group:   group,
-			Schema:  schemaName,
-			Storage: storage,
-		})
+
+	out := make([]apisv1alpha2.ResourceSchema, 0, len(in)+len(desiredByKey))
+	emitted := make(map[string]struct{}, len(desiredByKey))
+	for _, resource := range in {
+		if resource.Group != managedGroup {
+			out = append(out, resource)
+			continue
+		}
+		key := resourceEntryKey(resource.Group, resource.Name)
+		desiredResource, exists := desiredByKey[key]
+		if !exists {
+			continue
+		}
+		if _, alreadyEmitted := emitted[key]; alreadyEmitted {
+			continue
+		}
+		out = append(out, desiredResource)
+		emitted[key] = struct{}{}
+	}
+	for _, key := range desiredOrder {
+		if _, alreadyEmitted := emitted[key]; alreadyEmitted {
+			continue
+		}
+		out = append(out, desiredByKey[key])
 	}
 	return out
+}
+
+func resourceEntryKey(group, name string) string {
+	return group + "\x00" + name
 }
 
 // resourcesEqual is deliberately a shallow check on the discriminating
@@ -291,12 +318,20 @@ func storageEqual(a, b apisv1alpha2.ResourceSchemaStorage) bool {
 		if a.Virtual.IdentityHash != b.Virtual.IdentityHash {
 			return false
 		}
-		if a.Virtual.Reference.Name != b.Virtual.Reference.Name ||
+		if !stringPtrEqual(a.Virtual.Reference.APIGroup, b.Virtual.Reference.APIGroup) ||
+			a.Virtual.Reference.Name != b.Virtual.Reference.Name ||
 			a.Virtual.Reference.Kind != b.Virtual.Reference.Kind {
 			return false
 		}
 	}
 	return true
+}
+
+func stringPtrEqual(a, b *string) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
 }
 
 func schemaPrefix(crd *apiextensionsv1.CustomResourceDefinition) string {

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260817-28ab3066.repositorycommits.code.faros.sh
+  name: v260818-a3192d4d.repositorycommits.code.faros.sh
 spec:
   group: code.faros.sh
   names:

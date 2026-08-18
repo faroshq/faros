@@ -1,24 +1,19 @@
-/*
-Copyright 2026 The Faros Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-*/
+// Copyright 2026 The Faros Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
 
 package v1alpha1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-// +crd
-// +genclient
-// +genclient:nonNamespaced
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:storageversion
-// +kubebuilder:subresource:status
+// RepositorySync projects a bounded, reviewed deployment tree from a Code
+// repository into this workspace. It is cluster-scoped because tenant
+// workspaces are already represented by the kcp logical cluster.
+//
+// +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,categories=faros,shortName=gsync
+// +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Repository",type=string,JSONPath=`.spec.repositoryRef`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=`.status.appliedRevision`
@@ -29,7 +24,7 @@ type RepositorySync struct {
 	Status            RepositorySyncStatus `json:"status,omitempty"`
 }
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:object:root=true
 type RepositorySyncList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -37,7 +32,6 @@ type RepositorySyncList struct {
 }
 
 type RepositorySyncSpec struct {
-	// +required
 	// +kubebuilder:validation:MinLength=1
 	RepositoryRef string `json:"repositoryRef"`
 	// +optional

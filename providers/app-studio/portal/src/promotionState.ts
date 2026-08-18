@@ -128,13 +128,15 @@ export function releasePipelineView(
   const runStatus = clean(run?.status).toLowerCase()
   const conclusion = clean(run?.conclusion).toLowerCase()
   const productionPhase = clean(readiness?.production?.phase).toLowerCase()
+  const productionObserved = readiness?.productionObserved === true
+  const productionProjectionPending = !!readiness?.production && !productionObserved
   const requestedRevision = clean(readiness?.requestedRolloutRevision)
   const observedRevision = clean(readiness?.observedRolloutRevision)
   const rolloutConverged = !requestedRevision || observedRevision === requestedRevision
-  const productionFailed = ['failed', 'error', 'degraded'].includes(productionPhase)
-  const currentProductionReady = productionPhase === 'ready' && rolloutConverged
+  const productionFailed = productionObserved && ['failed', 'error', 'degraded'].includes(productionPhase)
+  const currentProductionReady = productionObserved && productionPhase === 'ready' && rolloutConverged
   const selectedReleaseDeployed = !!readiness && currentProductionReady && selectedReleaseMatchesProduction(readiness, components)
-  const deploying = !!readiness?.production && !currentProductionReady
+  const deploying = productionObserved && !!readiness?.production && !currentProductionReady
   // A workflow lookup is explanatory evidence, not the promotion gate. It is
   // still only allowed to explain a release when the provider echoed the
   // exact reviewed SHA requested through code__build_status. A missing SHA is
@@ -184,6 +186,11 @@ export function releasePipelineView(
     tone = 'muted'
     message = 'Commit your latest changes to create a release.'
     detail = 'Deployment stays disabled until a successful commit has exact-commit images.'
+  } else if (productionProjectionPending && build?.status === 'built') {
+    state = 'waiting'
+    tone = 'warning'
+    message = 'Waiting for Git sync to project the production Deployment…'
+    detail = 'The production binding is recorded, but the referenced Deployment has not been observed yet.'
   } else if (build?.status === 'built') {
     state = 'ready'
     tone = 'success'
@@ -237,6 +244,9 @@ export function releasePipelineView(
 
   if (currentProductionReady && !selectedReleaseDeployed && build?.status !== 'built') {
     detail = `Current production remains online at ${shortSHA(observedRevision || requestedRevision) || 'its observed revision'}. ${detail}`
+  }
+  if (productionProjectionPending && build?.status !== 'built' && state !== 'needs_commit') {
+    detail = `${detail} The production binding is recorded, but Git sync has not projected the referenced Deployment yet.`
   }
 
   // A provider rollout failure is independent from image production. Keep

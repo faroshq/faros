@@ -68,6 +68,10 @@ spec:
         group: deployments.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
+      - resource: repositorysyncs
+        group: deployments.faros.sh
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        tenantScoped: true
       # Infrastructure instances the Project reconciler lifecycles from a
       # project's live bindings, plus the Studio's shared searxng + browser —
       # every template's instances are ONE flattened resource (product
@@ -80,10 +84,6 @@ spec:
       - resource: repositories
         group: code.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch"]
-        tenantScoped: true
-      - resource: repositorysyncs
-        group: code.faros.sh
-        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
       - resource: changerequests
         group: code.faros.sh

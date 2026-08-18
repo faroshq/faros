@@ -14,6 +14,7 @@
  * would silently couple them to this build again).
  */
 @source "../../../providers/infrastructure/portal/src/**/*.{vue,ts}";
+@source "../../../providers/deployments/portal/src/**/*.{vue,ts}";
 
 /*
  * Theme tokens — "Violet Circuit". DARK is the base (in @theme) and is what

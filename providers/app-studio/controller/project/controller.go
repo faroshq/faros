@@ -455,7 +455,7 @@ func (r *Reconciler) overlayDevelopmentBinding(p *aiv1alpha1.Project, binding ai
 // and ownerRef on drift (promote rolls image refs by updating binding values —
 // the update path is what makes that land).
 func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) (*unstructured.Unstructured, error) {
-	want, _, err := bindings.Desired(p, binding)
+	want, gvr, err := bindings.Desired(p, binding)
 	if err != nil {
 		return nil, err
 	}
@@ -483,21 +483,33 @@ func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *aiv
 		}
 
 		next := got.DeepCopy()
-		// The merge operates on the values level — spec.template is the
-		// instance's immutable identity and spec.values is where the provider
-		// stamps its computed fields (fqdn, credential references).
-		observedValues, _, _ := unstructured.NestedMap(got.Object, "spec", "values")
-		desiredValues, _, _ := unstructured.NestedMap(want.Object, "spec", "values")
-		// A template that exposes no URL declares no access input; asking for
-		// it anyway would make every reconcile see drift it can never resolve.
-		bindings.DropUnsupportedAccess(observedValues, desiredValues)
-		observedTemplate, _, _ := unstructured.NestedString(got.Object, "spec", "template")
-		if observedTemplate == "" {
-			observedTemplate, _, _ = unstructured.NestedString(want.Object, "spec", "template")
-		}
-		next.Object["spec"] = map[string]any{
-			"template": observedTemplate,
-			"values":   bindings.MergeProviderSpec(observedValues, desiredValues),
+		if bindings.IsRepositorySyncResource(gvr, binding.ResourceRef.Kind) {
+			// RepositorySync is a native Deployments resource: its binding values are
+			// already the complete flat provider spec. Merge at that level so
+			// provider-computed fields survive a later Project reconcile without
+			// wrapping the resource in the Infrastructure Instance shape.
+			observedSpec, _, _ := unstructured.NestedMap(got.Object, "spec")
+			desiredSpec, _, _ := unstructured.NestedMap(want.Object, "spec")
+			delete(observedSpec, "template")
+			delete(observedSpec, "values")
+			next.Object["spec"] = bindings.MergeProviderSpec(observedSpec, desiredSpec)
+		} else {
+			// The merge operates on the values level — spec.template is the
+			// instance's immutable identity and spec.values is where the provider
+			// stamps its computed fields (fqdn, credential references).
+			observedValues, _, _ := unstructured.NestedMap(got.Object, "spec", "values")
+			desiredValues, _, _ := unstructured.NestedMap(want.Object, "spec", "values")
+			// A template that exposes no URL declares no access input; asking for
+			// it anyway would make every reconcile see drift it can never resolve.
+			bindings.DropUnsupportedAccess(observedValues, desiredValues)
+			observedTemplate, _, _ := unstructured.NestedString(got.Object, "spec", "template")
+			if observedTemplate == "" {
+				observedTemplate, _, _ = unstructured.NestedString(want.Object, "spec", "template")
+			}
+			next.Object["spec"] = map[string]any{
+				"template": observedTemplate,
+				"values":   bindings.MergeProviderSpec(observedValues, desiredValues),
+			}
 		}
 		labels := next.GetLabels()
 		if labels == nil {
@@ -603,6 +615,11 @@ func providerBindings(p *aiv1alpha1.Project) []boundEnv {
 }
 
 func isRepositorySyncBinding(binding aiv1alpha1.ProjectProviderBindingSpec) bool {
+	return binding.ResourceRef != nil && binding.ResourceRef.APIVersion == "deployments.faros.sh/v1alpha1" &&
+		binding.ResourceRef.Resource == "repositorysyncs"
+}
+
+func isLegacyRepositorySyncBinding(binding aiv1alpha1.ProjectProviderBindingSpec) bool {
 	return binding.ResourceRef != nil && binding.ResourceRef.APIVersion == "code.faros.sh/v1alpha1" &&
 		binding.ResourceRef.Resource == "repositorysyncs"
 }
@@ -648,6 +665,9 @@ func validateDeliveryBindings(p *aiv1alpha1.Project, bound []boundEnv) error {
 	repositorySyncs := 0
 	for _, environment := range p.Spec.Environments {
 		for _, binding := range environment.Bindings {
+			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderResource && isLegacyRepositorySyncBinding(binding) {
+				return fmt.Errorf("Project %q declares legacy Code RepositorySync binding %q; explicit migration or cleanup is required (migrate to deployments.faros.sh/v1alpha1)", p.Name, binding.Name)
+			}
 			if binding.Kind == aiv1alpha1.ProjectBindingKindProviderResource && isRepositorySyncBinding(binding) {
 				repositorySyncs++
 				continue

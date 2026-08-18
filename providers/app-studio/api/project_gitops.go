@@ -42,13 +42,14 @@ import (
 const (
 	projectGitOpsEnvironmentName = "configuration"
 	projectGitOpsBindingName     = "gitops"
-	projectGitOpsProvider        = "code"
+	projectGitOpsProvider        = "deployments"
 	projectGitOpsPath            = ".faros"
 	projectGitOpsDefaultBranch   = "main"
 
-	projectRepositorySyncAPIVersion = "code.faros.sh/v1alpha1"
+	projectRepositorySyncAPIVersion = "deployments.faros.sh/v1alpha1"
 	projectRepositorySyncKind       = "RepositorySync"
 	projectRepositorySyncResource   = "repositorysyncs"
+	projectChangeRequestAPIVersion  = "code.faros.sh/v1alpha1"
 	projectChangeRequestKind        = "ChangeRequest"
 	projectChangeRequestResource    = "changerequests"
 )
@@ -415,7 +416,7 @@ func (s *Server) proposeProjectGitOpsPromotion(ctx context.Context, c *asclient.
 	}
 	crName := dns1123LabelWithSuffix(p.Name, "prod-"+digest[:10])
 	changeRequest := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": projectRepositorySyncAPIVersion,
+		"apiVersion": projectChangeRequestAPIVersion,
 		"kind":       projectChangeRequestKind,
 		"metadata": map[string]any{
 			"name":   crName,

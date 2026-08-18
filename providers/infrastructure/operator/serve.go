@@ -211,9 +211,15 @@ func EnsureProviderServe(
 						Env:          env,
 						Ports:        []corev1.ContainerPort{{ContainerPort: port, Name: "http"}},
 						VolumeMounts: volMounts,
-						ReadinessProbe: &corev1.Probe{
+						LivenessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(port)},
+							},
+							PeriodSeconds: 20,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt32(port)},
 							},
 							PeriodSeconds: 5,
 						},

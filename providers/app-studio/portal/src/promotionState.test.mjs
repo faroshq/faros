@@ -207,6 +207,7 @@ test('only marks external access done when a ready publication has a URL', () =>
     promotable: true,
     build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
     production: { name: 'demo-prod', phase: 'Ready' },
+    productionObserved: true,
   }
   const resolving = releasePipelineView(readiness, { published: true, ready: true })
   assert.equal(resolving.steps.find((step) => step.key === 'access').state, 'current')
@@ -250,6 +251,7 @@ test('production readiness advances access without claiming it is already enable
     promotable: true,
     build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
     production: { name: 'demo-prod', phase: 'Ready' },
+    productionObserved: true,
   }, { published: false, ready: false })
   assert.equal(pipeline.state, 'production_ready')
   assert.match(pipeline.message, /Choose who can access it/)
@@ -260,6 +262,7 @@ test('keeps old production online without claiming a newer selected release is d
   const base = {
     requestedRolloutRevision: 'live-7', observedRolloutRevision: 'live-7',
     production: { name: 'demo-prod', phase: 'Ready' },
+    productionObserved: true,
     productionValues: { webImage: 'registry/web@sha256:old' },
   }
   const building = releasePipelineView({
@@ -296,6 +299,7 @@ test('claims production readiness only when deployed image values match the sele
     productionValues: { webImage: 'registry/web@sha256:same' },
     requestedRolloutRevision: '8', observedRolloutRevision: '8',
     production: { name: 'demo-prod', phase: 'Ready' },
+    productionObserved: true,
   })
   assert.equal(pipeline.state, 'production_ready')
 })
@@ -307,6 +311,7 @@ test('keeps a stale Ready production revision in deployment until the requested 
     requestedRolloutRevision: 'requested-42',
     observedRolloutRevision: 'older-41',
     production: { name: 'demo-prod', phase: 'Ready' },
+    productionObserved: true,
   })
   assert.equal(pipeline.state, 'deploying')
   assert.equal(pipeline.transitional, true)
@@ -321,10 +326,54 @@ test('stops the transitional release state when the provider reports a terminal 
     requestedRolloutRevision: 'requested-42',
     observedRolloutRevision: 'older-41',
     production: { name: 'demo-prod', phase: 'Failed' },
+    productionObserved: true,
   })
   assert.equal(pipeline.state, 'failed')
   assert.equal(pipeline.transitional, false)
   assert.match(pipeline.message, /failed/i)
   assert.equal(pipeline.steps.find((step) => step.key === 'build').state, 'done')
   assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'error')
+})
+
+test('waits for Git sync when the production Deployment has not been observed', () => {
+  const pipeline = releasePipelineView({
+    promotable: true,
+    build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
+    production: { name: 'demo-prod', phase: 'Pending' },
+    productionObserved: false,
+  })
+  assert.equal(pipeline.state, 'waiting')
+  assert.equal(pipeline.transitional, true)
+  assert.match(pipeline.message, /Git sync.*project.*Deployment/i)
+  assert.doesNotMatch(pipeline.message, /Deploying/i)
+  assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'pending')
+})
+
+test('keeps an observed Pending production Deployment in deploying', () => {
+  const pipeline = releasePipelineView({
+    promotable: true,
+    build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
+    production: { name: 'demo-prod', phase: 'Pending' },
+    productionObserved: true,
+  })
+  assert.equal(pipeline.state, 'deploying')
+  assert.equal(pipeline.transitional, true)
+  assert.match(pipeline.message, /Deploying/i)
+  assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'current')
+})
+
+test('keeps build status primary while an unobserved Deployment waits for projection', () => {
+  const pipeline = releasePipelineView({
+    promotable: false,
+    build: {
+      status: 'incomplete', commitSHA: 'release123', note: '', missing: ['web'],
+      components: [{ name: 'web', imageInput: 'webImage', built: false }],
+    },
+    production: { name: 'demo-prod', phase: 'Pending' },
+    productionObserved: false,
+  })
+  assert.equal(pipeline.state, 'waiting')
+  assert.match(pipeline.message, /Partial release artifacts/i)
+  assert.match(pipeline.detail, /Git sync.*projected.*Deployment/i)
+  assert.doesNotMatch(pipeline.message, /Deploying/i)
 })

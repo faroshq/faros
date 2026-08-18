@@ -6,52 +6,47 @@ spec:
   resources:
   - group: code.faros.sh
     name: changerequests
-    schema: v260817-28ab3066.changerequests.code.faros.sh
+    schema: v260818-a3192d4d.changerequests.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: collaborators
-    schema: v260609-fc69fa2.collaborators.code.faros.sh
+    schema: v260818-a3192d4d.collaborators.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: connections
-    schema: v260609-fc69fa2.connections.code.faros.sh
+    schema: v260818-a3192d4d.connections.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: deploykeys
-    schema: v260609-fc69fa2.deploykeys.code.faros.sh
+    schema: v260818-a3192d4d.deploykeys.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: packages
-    schema: v260712-dabfd8e.packages.code.faros.sh
+    schema: v260818-a3192d4d.packages.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: repositories
-    schema: v260609-fc69fa2.repositories.code.faros.sh
+    schema: v260818-a3192d4d.repositories.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: repositorybuildstatuses
-    schema: v260712-dabfd8e.repositorybuildstatuses.code.faros.sh
+    schema: v260818-a3192d4d.repositorybuildstatuses.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: repositorycheckouts
-    schema: v260704-6d52bca.repositorycheckouts.code.faros.sh
+    schema: v260818-a3192d4d.repositorycheckouts.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh
     name: repositorycommits
-    schema: v260817-28ab3066.repositorycommits.code.faros.sh
-    storage:
-      crd: {}
-  - group: code.faros.sh
-    name: repositorysyncs
-    schema: v260817-28ab3066.repositorysyncs.code.faros.sh
+    schema: v260818-a3192d4d.repositorycommits.code.faros.sh
     storage:
       crd: {}
 status: {}

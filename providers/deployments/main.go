@@ -13,9 +13,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	repositorysynccontroller "github.com/faroshq/provider-deployments/controller/repositorysync"
 )
 
 func main() {
@@ -64,7 +67,12 @@ func runServe() error {
 		return fmt.Errorf("controller config: %w", err)
 	}
 	managerExited := make(chan error, 1)
-	if err := startControllerManager(ctx, cfg, &ready, stop, managerExited); err != nil {
+	fetcher, err := repositorysynccontroller.NewHTTPBundleFetcher(os.Getenv("DEPLOYMENTS_CODE_URL"))
+	if err != nil {
+		return fmt.Errorf("Code provider client: %w", err)
+	}
+	source := repositorysynccontroller.NewCodeRepositoryCheckoutReader(fetcher)
+	if err := startControllerManager(ctx, cfg, &ready, stop, managerExited, source); err != nil {
 		return fmt.Errorf("controller manager: %w", err)
 	}
 	mux := http.NewServeMux()
@@ -73,6 +81,23 @@ func runServe() error {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", readinessHandler(&ready))
+	fileServer, distFS, err := portalHandler()
+	if err != nil {
+		return fmt.Errorf("portal embed: %w", err)
+	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		clean := strings.TrimPrefix(r.URL.Path, "/")
+		if clean != "" && servePortalAsset(w, r, distFS, clean) {
+			return
+		}
+		fallback := r.Clone(r.Context())
+		fallback.URL.Path = "/"
+		fileServer.ServeHTTP(w, fallback)
+	})
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8093"

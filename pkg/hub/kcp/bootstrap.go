@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	"github.com/faroshq/faros/config/kcp"
@@ -1533,7 +1534,7 @@ type ProviderClaim struct {
 	Accepted bool
 }
 
-// EnsureProviderAPIBinding creates (or no-ops on AlreadyExists) an
+// EnsureProviderAPIBinding creates or reconciles an
 // APIBinding named `bindingName` in the child workspace
 // root:faros:tenants:{orgUUID}:{wsUUID}, pointing at exportPath/exportName.
 //
@@ -1625,13 +1626,98 @@ func (b *Bootstrapper) EnsureProviderAPIBinding(
 	if err != nil {
 		return fmt.Errorf("converting APIBinding to unstructured: %w", err)
 	}
-	if _, err := wsClient.Resource(apiBindingGVR).Create(ctx, u, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating APIBinding %q in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
+	if err := reconcileProviderAPIBinding(ctx, wsClient.Resource(apiBindingGVR), u); err != nil {
+		return fmt.Errorf("reconciling APIBinding %q in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
 	}
 	if err := waitForAPIBindingBound(ctx, wsClient, bindingName); err != nil {
 		return fmt.Errorf("waiting for APIBinding %q to bind in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
 	}
 	return nil
+}
+
+// reconcileProviderAPIBinding converges the permission claims on an existing
+// binding. Provider APIs evolve after tenants have enabled them; treating
+// AlreadyExists as success leaves those tenants without newly required claims
+// and can strand provider finalizers that can no longer address their owned
+// resources. The export reference is an identity boundary, so an existing
+// binding that points anywhere else is never adopted or rewritten here.
+func reconcileProviderAPIBinding(ctx context.Context, bindings dynamic.ResourceInterface, desired *unstructured.Unstructured) error {
+	if bindings == nil || desired == nil || strings.TrimSpace(desired.GetName()) == "" {
+		return fmt.Errorf("binding resource, desired object, and name are required")
+	}
+
+	desiredPath, desiredExport, err := apiBindingExportReference(desired)
+	if err != nil {
+		return fmt.Errorf("desired APIBinding: %w", err)
+	}
+	desiredClaims, found, err := unstructured.NestedSlice(desired.Object, "spec", "permissionClaims")
+	if err != nil {
+		return fmt.Errorf("desired APIBinding permission claims: %w", err)
+	}
+	if !found {
+		desiredClaims = []any{}
+	}
+
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		existing, err := bindings.Get(ctx, desired.GetName(), metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			_, createErr := bindings.Create(ctx, desired.DeepCopy(), metav1.CreateOptions{})
+			if errors.IsAlreadyExists(createErr) {
+				return errors.NewConflict(apiBindingGVR.GroupResource(), desired.GetName(), createErr)
+			}
+			return createErr
+		}
+		if err != nil {
+			return err
+		}
+		if existing.GetDeletionTimestamp() != nil {
+			return fmt.Errorf("existing APIBinding is terminating")
+		}
+
+		existingPath, existingExport, err := apiBindingExportReference(existing)
+		if err != nil {
+			return fmt.Errorf("existing APIBinding: %w", err)
+		}
+		if existingPath != desiredPath || existingExport != desiredExport {
+			return fmt.Errorf("existing APIBinding references %q/%q, expected %q/%q",
+				existingPath, existingExport, desiredPath, desiredExport)
+		}
+
+		existingClaims, found, err := unstructured.NestedSlice(existing.Object, "spec", "permissionClaims")
+		if err != nil {
+			return fmt.Errorf("existing APIBinding permission claims: %w", err)
+		}
+		if !found {
+			existingClaims = []any{}
+		}
+		if reflect.DeepEqual(existingClaims, desiredClaims) {
+			return nil
+		}
+
+		updated := existing.DeepCopy()
+		if err := unstructured.SetNestedSlice(updated.Object, desiredClaims, "spec", "permissionClaims"); err != nil {
+			return fmt.Errorf("setting APIBinding permission claims: %w", err)
+		}
+		_, err = bindings.Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func apiBindingExportReference(binding *unstructured.Unstructured) (string, string, error) {
+	path, pathFound, err := unstructured.NestedString(binding.Object, "spec", "reference", "export", "path")
+	if err != nil {
+		return "", "", err
+	}
+	name, nameFound, err := unstructured.NestedString(binding.Object, "spec", "reference", "export", "name")
+	if err != nil {
+		return "", "", err
+	}
+	path = strings.TrimSpace(path)
+	name = strings.TrimSpace(name)
+	if !pathFound || !nameFound || path == "" || name == "" {
+		return "", "", fmt.Errorf("spec.reference.export.path and name are required")
+	}
+	return path, name, nil
 }
 
 // exportClaimIdentities returns, per claim, the identityHash the bound

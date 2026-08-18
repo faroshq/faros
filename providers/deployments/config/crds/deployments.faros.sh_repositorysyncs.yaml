@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: repositorysyncs.code.faros.sh
+  name: repositorysyncs.deployments.faros.sh
 spec:
-  group: code.faros.sh
+  group: deployments.faros.sh
   names:
     categories:
     - faros
@@ -31,6 +31,10 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: |-
+          RepositorySync projects a bounded, reviewed deployment tree from a Code
+          repository into this workspace. It is cluster-scoped because tenant
+          workspaces are already represented by the kcp logical cluster.
         properties:
           apiVersion:
             description: |-

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260609-fc69fa2.deploykeys.code.faros.sh
+  name: v260818-a3192d4d.deploykeys.code.faros.sh
 spec:
   group: code.faros.sh
   names:

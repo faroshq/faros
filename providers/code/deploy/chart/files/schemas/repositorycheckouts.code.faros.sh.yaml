@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260704-6d52bca.repositorycheckouts.code.faros.sh
+  name: v260818-a3192d4d.repositorycheckouts.code.faros.sh
 spec:
   group: code.faros.sh
   names:
@@ -61,6 +61,13 @@ spec:
         spec:
           description: RepositoryCheckoutSpec is the desired checkout operation.
           properties:
+            path:
+              description: |-
+                Path optionally selects a repository-relative subtree. The provider
+                still stores the result in its existing bundle store; this field only
+                narrows the source tree before storage.
+              maxLength: 255
+              type: string
             ref:
               description: |-
                 Ref is the branch, tag, or commit SHA to read. Empty uses the
@@ -80,6 +87,25 @@ spec:
           description: RepositoryCheckoutStatus is the observed result of the checkout
             operation.
           properties:
+            access:
+              description: |-
+                Access is a short-lived capability for retrieving BundleRef from the
+                Code provider. It is bound to this checkout's tenant scope, bundle name,
+                and digest; it conveys no Git-host credential.
+              properties:
+                expiresAt:
+                  description: ExpiresAt is when Code will reject the capability.
+                  format: date-time
+                  type: string
+                token:
+                  description: Token is an opaque, short-lived bearer capability.
+                  maxLength: 4096
+                  minLength: 1
+                  type: string
+              required:
+              - expiresAt
+              - token
+              type: object
             bundleRef:
               description: |-
                 BundleRef names the provider-owned bundle holding the checked-out

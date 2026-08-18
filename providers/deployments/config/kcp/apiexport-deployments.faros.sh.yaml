@@ -6,12 +6,17 @@ spec:
   resources:
   - group: deployments.faros.sh
     name: deployments
-    schema: v260817-28ab3066.deployments.deployments.faros.sh
+    schema: v260818-a3192d4d.deployments.deployments.faros.sh
     storage:
       crd: {}
   - group: deployments.faros.sh
     name: releases
-    schema: v260817-28ab3066.releases.deployments.faros.sh
+    schema: v260818-a3192d4d.releases.deployments.faros.sh
+    storage:
+      crd: {}
+  - group: deployments.faros.sh
+    name: repositorysyncs
+    schema: v260818-a3192d4d.repositorysyncs.deployments.faros.sh
     storage:
       crd: {}
 status: {}

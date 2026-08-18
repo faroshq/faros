@@ -660,6 +660,8 @@ export interface ProjectPromotionReadiness {
   immutableProductionInputs?: string[]
   requestedRolloutRevision?: string
   observedRolloutRevision?: string
+  /** True only when the referenced production provider object was fetched. */
+  productionObserved: boolean
   promotable: boolean
   build: ProjectBuildCheck
   production?: ProjectProviderBinding

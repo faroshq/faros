@@ -1,9 +1,9 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260817-28ab3066.repositorysyncs.code.faros.sh
+  name: v260818-a3192d4d.repositorysyncs.deployments.faros.sh
 spec:
-  group: code.faros.sh
+  group: deployments.faros.sh
   names:
     categories:
     - faros
@@ -27,6 +27,10 @@ spec:
       type: string
     name: v1alpha1
     schema:
+      description: |-
+        RepositorySync projects a bounded, reviewed deployment tree from a Code
+        repository into this workspace. It is cluster-scoped because tenant
+        workspaces are already represented by the kcp logical cluster.
       properties:
         apiVersion:
           description: |-
