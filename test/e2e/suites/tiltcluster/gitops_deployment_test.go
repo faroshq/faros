@@ -84,7 +84,10 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 	if codeIdentity == "" {
 		t.Fatal("Code APIExport has no identityHash")
 	}
-	createBinding(t, tenant, infrastructureBinding())
+	// Infrastructure reads optional per-instance registry credentials from the
+	// tenant workspace. Accept its advertised Secret claim so the runtime
+	// readiness assertion exercises a fully authorized target provider.
+	createBinding(t, tenant, bindingAcceptingExportClaims(providerName, providerWorkspace, infraAPIExportName, infraExport))
 	waitBindingBound(t, tenant, "infrastructure")
 	createBinding(t, tenant, deploymentsBinding(infraIdentity, codeIdentity))
 	waitBindingBound(t, tenant, deploymentsProviderName)

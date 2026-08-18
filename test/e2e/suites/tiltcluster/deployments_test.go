@@ -236,10 +236,6 @@ func createDeploymentsWorkspace(t *testing.T, parent dynamic.Interface, name str
 	return path
 }
 
-func infrastructureBinding() *unstructured.Unstructured {
-	return providerBinding("infrastructure", providerWorkspace, infraAPIExportName, nil)
-}
-
 func deploymentsBinding(infrastructureIdentityHash, codeIdentityHash string) *unstructured.Unstructured {
 	resources := []struct {
 		group, resource, identity string
