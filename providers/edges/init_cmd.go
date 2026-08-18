@@ -60,26 +60,30 @@ func runInitCmd(ctx context.Context) error {
 		// cluster never engages. These are the tenant-workspace objects the
 		// token/RBAC/lifecycle reconcilers create per edge. Built-in types →
 		// empty Group + no IdentityHash. Verbs MUST match the CatalogEntry.
-		Claims: []sdkinstall.PermissionClaim{
-			{Resource: "namespaces", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-			{Resource: "serviceaccounts", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-			{Resource: "secrets", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-			{Group: "rbac.authorization.k8s.io", Resource: "clusterroles", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-			{Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
-			// Delegated authn/authz for the data plane (kcp#4279 / kcp#4280): the
-			// provider validates presented tokens and authorizes the resolved
-			// identity against the consumer workspace via the APIExport virtual
-			// workspace. Non-persisted built-in review APIs — no identityHash.
-			// MUST match the CatalogEntry claims (manifest.yaml).
-			{Group: "authentication.k8s.io", Resource: "tokenreviews", Verbs: []string{"create"}},
-			{Group: "authorization.k8s.io", Resource: "subjectaccessreviews", Verbs: []string{"create"}},
-		},
+		Claims:           edgesPermissionClaims(),
 		CatalogEntryFile: catalogEntryFile,
 	}); err != nil {
 		return fmt.Errorf("provider workspace bootstrap: %w", err)
 	}
 	log.Info("edges init: workspace bootstrapped", "export", apiExportName, "path", workspacePath)
 	return nil
+}
+
+func edgesPermissionClaims() []sdkinstall.PermissionClaim {
+	return []sdkinstall.PermissionClaim{
+		{Resource: "namespaces", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{Resource: "serviceaccounts", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{Resource: "secrets", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{Group: "rbac.authorization.k8s.io", Resource: "clusterroles", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		// Delegated authn/authz for the data plane (kcp#4279 / kcp#4280): the
+		// provider validates presented tokens and authorizes the resolved
+		// identity against the consumer workspace via the APIExport virtual
+		// workspace. Non-persisted built-in review APIs — no identityHash.
+		// MUST match the CatalogEntry claims (manifest.yaml).
+		{Group: "authentication.k8s.io", Resource: "tokenreviews", Verbs: []string{"create"}},
+		{Group: "authorization.k8s.io", Resource: "subjectaccessreviews", Verbs: []string{"create"}},
+	}
 }
 
 func loadInitConfig() (*rest.Config, error) {
