@@ -46,7 +46,8 @@ go build -o bin/faros-hub ./cmd/faros-hub
   --graphql-grpc-addr=localhost:50051 \
   --graphql-playground \
   --portal-dev-url=http://localhost:3000 \
-  --portal-frame-source=https://*.preview.localhost:10443 \
+  --portal-frame-source=https://*.apps.127.0.0.1.sslip.io:10443 \
+  --published-apps-domain=apps.127.0.0.1.sslip.io \
   --kubeconfig=.faros-kro.kubeconfig \
   --hub-internal-url=https://host.docker.internal:9443
 ''',
@@ -82,7 +83,8 @@ go build -o bin/faros-hub ./cmd/faros-hub
 #
 # Each provider has four lifecycle resources:
 #   <name>            build + serve; auto-restarts on src change
-#   <name>-register   manual ▶ to kubectl apply the Provider + CatalogEntry.
+#   <name>-register   manual ▶ to kubectl apply the Provider + CatalogEntry
+#                     (Code is automatic; see its section below).
 #                     Applying the Provider CR is what provisions the
 #                     sub-workspace + ServiceAccount + kubeconfig Secret —
 #                     the hub's Provider controller does it declaratively
@@ -95,7 +97,8 @@ go build -o bin/faros-hub ./cmd/faros-hub
 #                     host-binary simplicity; in production the provider's init
 #                     self-registers the CatalogEntry into its own workspace via
 #                     FAROS_CATALOGENTRY_FILE.
-#   <name>-init       manual ▶ to bootstrap schemas, APIExport, and claims.
+#   <name>-init       manual ▶ to bootstrap schemas, APIExport, and claims
+#                     (Code is automatic so its runtime credential stays fresh).
 #   <name>-unregister manual ▶ to kubectl delete them (deleting the Provider
 #                     triggers full teardown of the sub-workspace)
 #
@@ -110,6 +113,16 @@ go build -o bin/faros-hub ./cmd/faros-hub
 # The provider's `make run-...` target auto-detects the
 # .faros-kro.kubeconfig file and passes it as KRO_KUBECONFIG.
 # ---------------------------------------------------------------------------
+
+preview_gateway_name = 'app-studio-preview'
+preview_gateway_namespace = 'envoy-gateway-system'
+preview_app_base_domain = 'apps.127.0.0.1.sslip.io'
+preview_app_public_port = '10443'
+preview_hub_public_url = 'https://console.127.0.0.1.sslip.io:9443'
+preview_kro_kubeconfig = '.faros-kro.kubeconfig'
+preview_kro_context = 'kind-faros-kro'
+preview_kro_node = 'faros-kro-control-plane'
+docker_gateway_format = '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'
 
 # --- providers-quickstart ---
 local_resource(
@@ -262,9 +275,18 @@ local_resource(
 
 local_resource(
     'code-register',
-    cmd='make install-provider-code',
-    trigger_mode=TRIGGER_MODE_MANUAL,
-    auto_init=False,
+    # The embedded kcp admin credential is regenerated when the hub starts.
+    # Wait for that process to be healthy before applying the idempotent
+    # provider declarations on every `tilt up`.
+    cmd='''
+until curl --silent --show-error --fail --insecure https://localhost:9443/healthz >/dev/null; do sleep 1; done
+make install-provider-code
+''',
+    deps=[
+        'providers/code/provider.yaml',
+        'providers/code/manifest.yaml',
+        '.kcp/admin.kubeconfig',
+    ],
     resource_deps=['hub'],
     labels=['providers-code'],
 )
@@ -277,9 +299,29 @@ local_resource(
 #   code (serve)   → Tilt restarts it when the kubeconfig dep appears
 local_resource(
     'code-init',
-    cmd='make init-provider-code',
-    trigger_mode=TRIGGER_MODE_MANUAL,
-    auto_init=False,
+    # Re-mint the workspace-targeted runtime kubeconfig after every embedded
+    # kcp restart. Keeping yesterday's copied admin token leaves the HTTP
+    # server healthy while leader election loops on Unauthorized and no Code
+    # resources reconcile.
+cmd='''
+while true; do
+  provider_token="$(kubectl --kubeconfig=.kcp/admin.kubeconfig \
+    --server=https://localhost:6443/clusters/root:faros:providers:code \
+    --insecure-skip-tls-verify \
+    get secret -n default provider-token \
+    -o jsonpath='{.data.token}' 2>/dev/null || true)"
+  [ -n "$provider_token" ] && break
+  sleep 1
+done
+make init-provider-code
+''',
+    deps=[
+        'Makefile',
+        'providers/code/init_cmd.go',
+        'providers/code/install',
+        'providers/code/deploy/chart/files/schemas',
+        '.kcp/admin.kubeconfig',
+    ],
     resource_deps=['hub', 'code-register'],
     labels=['providers-code'],
 )
@@ -636,6 +678,23 @@ local_resource(
     labels=['providers-kro'],
 )
 
+# The preview Gateway lives in the faros-kro management cluster, rather than
+# the embedded-kcp hub process. Keep its bootstrap as a separate idempotent
+# one-shot so both the Infrastructure provider and its host-side tunnel can
+# wait for the Gateway, TLS secret, and Envoy Gateway controller together.
+local_resource(
+    'preview-gateway-up',
+    cmd=('PREVIEW_GATEWAY_CONTEXT=%s make dev-preview-gateway-up' %
+         preview_kro_context),
+    deps=[
+        'Makefile',
+        'hack/scripts/configure-tilt-preview-gateway.sh',
+        preview_kro_kubeconfig,
+    ],
+    resource_deps=['kro-mgmt-up'],
+    labels=['providers-kro'],
+)
+
 local_resource(
     'kro-mgmt-down',
     cmd='make dev-kro-down',
@@ -647,7 +706,29 @@ local_resource(
 local_resource(
     'infrastructure',
     cmd='make build-infrastructure-provider',
-    serve_cmd='make run-provider-infrastructure',
+    serve_cmd=('''
+set -eu
+host_gateway="$(docker inspect -f '{docker_gateway_format}' {kro_node})"
+test -n "$host_gateway"
+KRO_KUBECONFIG={kro_kubeconfig} \
+FAROS_GATEWAY_NAME={gateway_name} \
+FAROS_GATEWAY_NAMESPACE={gateway_namespace} \
+FAROS_APP_BASE_DOMAIN={base_domain} \
+FAROS_APP_PUBLIC_PORT={public_port} \
+FAROS_ACCESS_HUB_URL="https://$host_gateway:9443" \
+FAROS_ACCESS_HUB_PUBLIC_URL={hub_public_url} \
+FAROS_ACCESS_HUB_INSECURE=true \
+make run-provider-infrastructure
+''').format(
+                   docker_gateway_format=docker_gateway_format,
+                   kro_node=preview_kro_node,
+                   kro_kubeconfig=preview_kro_kubeconfig,
+                   gateway_name=preview_gateway_name,
+                   gateway_namespace=preview_gateway_namespace,
+                   base_domain=preview_app_base_domain,
+                   public_port=preview_app_public_port,
+                   hub_public_url=preview_hub_public_url,
+               ),
     deps=[
         'providers/infrastructure/main.go',
         'providers/infrastructure/heartbeat.go',
@@ -680,10 +761,17 @@ local_resource(
         '.kcp/infrastructure-runtime.kubeconfig',
     ],
     # hub for CatalogEntry registration target, kro-mgmt-up for the
-    # backend cluster the catalog reads from. Both must be green
+    # backend cluster the catalog reads from, plus the preview Gateway and
+    # host forward used by app exposure. All must be green
     # before the provider starts; otherwise it boots in stub mode
     # which is fine but confusing for the dev who just ran `tilt up`.
-    resource_deps=['hub', 'kro-mgmt-up', 'app-studio-preview-console-key'],
+    resource_deps=[
+        'hub',
+        'kro-mgmt-up',
+        'preview-gateway-up',
+        'app-studio-preview-port-forward',
+        'app-studio-preview-console-key',
+    ],
     readiness_probe=probe(
         period_secs=5,
         http_get=http_get_action(port=8082, path='/readyz'),
@@ -754,6 +842,97 @@ local_resource(
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
     labels=['providers-kro'],
+)
+
+# Preview/apps ingress tunnel — forwards the Envoy Gateway's HTTPS listener
+# from faros-kro to the host on :10443. The kubeconfig and context are explicit
+# on every kubectl invocation: the developer's ambient context commonly points
+# at an embedded-kcp workspace and must never control this loop.
+#
+# The probe MUST send SNI. The Gateway listener is hostname-scoped HTTPS, so a
+# TLS hello without a matching server name selects no filter chain and Envoy
+# resets the connection. `--resolve` supplies both the matching SNI/Host and
+# the loopback address without requiring /etc/hosts.
+local_resource(
+    'app-studio-preview-port-forward',
+    cmd='true',
+    serve_cmd='''
+set -eu
+KRO_KUBECONFIG=%s
+CTX=%s
+GW=%s
+PROBE_HOST=tilt-probe.%s
+pf=''
+cleanup_forward() {
+  if [ -n "$pf" ] && kill -0 "$pf" 2>/dev/null; then
+    kill "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+  fi
+}
+trap cleanup_forward EXIT
+trap 'exit 0' INT TERM
+while true; do
+  if [ ! -f "$KRO_KUBECONFIG" ]; then
+    sleep 2
+    continue
+  fi
+  svc="$(kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+    get svc -n %s \
+    -l gateway.envoyproxy.io/owning-gateway-name=$GW \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$svc" ]; then
+    sleep 2
+    continue
+  fi
+  kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+    -n %s port-forward "svc/$svc" %s:%s &
+  pf=$!
+  fails=0
+  while kill -0 "$pf" 2>/dev/null; do
+    sleep 15
+    # Any HTTP response (including 404) means the listener is programmed.
+    if curl -sk --max-time 5 -o /dev/null \
+         --resolve "$PROBE_HOST:%s:127.0.0.1" \
+         "https://$PROBE_HOST:%s/"; then
+      fails=0
+    else
+      fails=$((fails + 1))
+      echo "preview tunnel unhealthy ($fails/3)"
+      if [ "$fails" -ge 3 ]; then
+        echo "restarting forward and bouncing the Envoy proxy pod"
+        kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+          delete pod -n %s \
+          -l gateway.envoyproxy.io/owning-gateway-name=$GW \
+          --wait=false 2>/dev/null || true
+        kill "$pf" 2>/dev/null || true
+        break
+      fi
+    fi
+  done
+  wait "$pf" 2>/dev/null || true
+  pf=''
+  sleep 3
+done
+'''.strip() % (
+        preview_kro_kubeconfig,
+        preview_kro_context,
+        preview_gateway_name,
+        preview_app_base_domain,
+        preview_gateway_namespace,
+        preview_gateway_namespace,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_gateway_namespace,
+    ),
+    resource_deps=['preview-gateway-up'],
+    readiness_probe=probe(
+        period_secs=2,
+        timeout_secs=1,
+        tcp_socket=tcp_socket_action(port=int(preview_app_public_port)),
+    ),
+    labels=['providers-app-studio'],
 )
 
 # ---------------------------------------------------------------------------

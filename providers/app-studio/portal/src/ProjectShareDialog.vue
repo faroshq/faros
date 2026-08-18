@@ -3,7 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Check, Copy, Link2, Loader2, Users, X } from 'lucide-vue-next'
 import { copyTextWithFallback } from './clipboard'
 import { confirmState } from './portalkit/confirm'
-import type { ProjectPublishingGrant, ProjectPublishingMember, ProjectPublishingMode } from './types'
+import type {
+  ProjectPublishingGrant,
+  ProjectPublishingMember,
+  ProjectPublishingMode,
+  ProjectShareSaveRequest,
+} from './types'
 
 type ShareLoadState = 'idle' | 'loading' | 'partial' | 'ready' | 'error'
 
@@ -29,6 +34,7 @@ const props = withDefaults(defineProps<{
   // just-changed mode, so the dialog says pending instead of claiming the URL
   // already changed hands.
   previewMode?: ProjectPublishingMode
+  previewSavedMode?: ProjectPublishingMode
   previewURL?: string
   previewSupported?: boolean
   previewConverged?: boolean
@@ -46,6 +52,7 @@ const props = withDefaults(defineProps<{
   publicationStateAvailable: false,
   productionURL: '',
   previewMode: 'restricted',
+  previewSavedMode: 'restricted',
   previewURL: '',
   previewSupported: false,
   previewConverged: true,
@@ -64,8 +71,7 @@ const emit = defineEmits<{
   (event: 'close'): void
   (event: 'update:mode', mode: ProjectPublishingMode): void
   (event: 'update:previewMode', mode: ProjectPublishingMode): void
-  (event: 'save'): void
-  (event: 'save-preview'): void
+  (event: 'save', request: ProjectShareSaveRequest): void
   (event: 'grant', user: string): void
   (event: 'invite', email: string): void
   (event: 'revoke', grant: string): void
@@ -225,10 +231,10 @@ watch(() => props.loading, (loading, wasLoading) => {
 
 // Once the saved preview mode matches the selection, the edit is no longer a
 // draft — same settle rule the production channel uses.
-watch(() => props.previewMode, (mode) => {
+watch(() => props.previewSavedMode, (mode) => {
   if (!props.open || props.loading || !previewModeTouched.value) return
-  if (mode === selectedPreviewMode.value && props.previewConverged) {
-    initialPreviewMode.value = mode
+  if (mode === selectedPreviewMode.value) {
+    initialPreviewMode.value = selectedPreviewMode.value
     previewModeTouched.value = false
   }
 })
@@ -255,7 +261,11 @@ function close() {
     // Cancel, Escape, and backdrop dismissal cannot leak an unsaved mode.
     emit('update:mode', initialMode.value)
   }
+  if (previewModeTouched.value && selectedPreviewMode.value !== initialPreviewMode.value) {
+    emit('update:previewMode', initialPreviewMode.value)
+  }
   modeTouched.value = false
+  previewModeTouched.value = false
   emit('close')
 }
 
@@ -264,7 +274,11 @@ function openProductionSettings() {
   if (modeTouched.value && selectedMode.value !== initialMode.value) {
     emit('update:mode', initialMode.value)
   }
+  if (previewModeTouched.value && selectedPreviewMode.value !== initialPreviewMode.value) {
+    emit('update:previewMode', initialPreviewMode.value)
+  }
   modeTouched.value = false
+  previewModeTouched.value = false
   emit('open-production-settings')
 }
 
@@ -275,19 +289,24 @@ function addMember() {
   selectedMember.value = ''
 }
 
-// The two channels save independently, so a dialog with both edited applies
-// both rather than making the user choose an order.
+// Submit both channel edits as one parent-owned transaction. Separate emits
+// race on the parent's shared mutation lock and can silently drop publishing.
 function primaryAction() {
   if (!canSave.value) return
-  const savedPreview = previewDirty.value
-  if (savedPreview) emit('save-preview')
-  if (modeDirty.value || !props.published) {
-    // A never-published project with only a preview change must not be pushed
-    // into publishing production as a side effect.
-    if (props.published || props.productionReady || !savedPreview) emit('save')
+  const request: ProjectShareSaveRequest = {}
+  if (previewDirty.value) request.previewMode = selectedPreviewMode.value
+  // A never-published project with only a preview change must not be pushed
+  // into publishing production as a side effect. Once that preview save is
+  // acknowledged, the primary action returns to the explicit Publish app.
+  const shouldSavePublication = modeDirty.value || (!props.published && !previewDirty.value)
+  if (shouldSavePublication && (props.published || props.productionReady)) {
+    request.publicationMode = selectedMode.value
+  }
+  if (request.publicationMode || request.previewMode) {
+    emit('save', request)
     return
   }
-  if (!savedPreview) close()
+  close()
 }
 
 async function copyLink() {

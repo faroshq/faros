@@ -700,6 +700,14 @@ export interface ProjectPromoteResult {
 
 export type ProjectPublishingMode = 'public' | 'restricted'
 
+// One Share submission can update either access channel or both. Keeping the
+// requested modes in one payload lets the parent apply both mutations under a
+// single busy lifecycle instead of racing independent component events.
+export interface ProjectShareSaveRequest {
+  publicationMode?: ProjectPublishingMode
+  previewMode?: ProjectPublishingMode
+}
+
 // ProjectPreviewAccess is the visibility of the development preview URL.
 // `converged` is false while the reconciler has not yet applied a just-changed
 // mode — the URL still has its previous visibility, so the UI must show pending

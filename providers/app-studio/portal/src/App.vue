@@ -236,6 +236,7 @@ import type {
   ProjectPublishingGrant,
   ProjectPublishingMode,
   ProjectPublishingMember,
+  ProjectShareSaveRequest,
   ProviderItem,
 } from './types'
 
@@ -2462,6 +2463,7 @@ async function loadPublishing() {
   const requestSerial = ++publishingLoadSerial
   const stateWasLoaded = publishingStateAvailable.value
   const membersWereLoaded = publishingMembersLoaded.value
+  const previewWasLoaded = previewAccess.value !== null
   if (!stateWasLoaded && !membersWereLoaded) publishingLoadState.value = 'loading'
   publishingLoadError.value = null
   publishingMembersError.value = null
@@ -2481,7 +2483,7 @@ async function loadPublishing() {
   if (stateSucceeded) {
     publishing.value = stateResult.value
     publishingStateAvailable.value = true
-    if (!shareDialogOpen.value) {
+    if (!shareDialogOpen.value || !stateWasLoaded) {
       shareMode.value = publishingAccessSelection(stateResult.value) === 'public' ? 'public' : 'restricted'
     }
   } else if (!isProjectAPIInitializingError(stateResult.reason)) {
@@ -2497,7 +2499,7 @@ async function loadPublishing() {
   // failure leaves the previous value rather than degrading the whole dialog.
   if (previewResult.status === 'fulfilled') {
     previewAccess.value = previewResult.value
-    if (!shareDialogOpen.value) {
+    if (!shareDialogOpen.value || !previewWasLoaded) {
       previewMode.value = previewResult.value.mode === 'public' ? 'public' : 'restricted'
     }
   }
@@ -2568,49 +2570,52 @@ function onProductionVisibilityChange(event: Event) {
   void setProductionVisibility(value)
 }
 
-async function publishCurrentProject() {
-  const name = selected.value?.name
-  if (!name || !publishingStateAvailable.value || publishingActionBusy.value) return
-  const mode = shareMode.value
-  beginPublishingAction('save', mode)
-  publishingActionError.value = null
+async function settleShareMutation<T>(run?: () => Promise<T>): Promise<PromiseSettledResult<T | null>> {
+  if (!run) return { status: 'fulfilled', value: null }
   try {
-    const state = await api.publishProject(props.ctx, name, mode)
-    if (selected.value?.name !== name) return
-    publishing.value = state
-    // Share stays open after a successful save. Reflect the acknowledged
-    // publication immediately; the background refresh intentionally does not
-    // overwrite a live Share draft while the dialog is open.
-    shareMode.value = state.publication?.mode === 'public' ? 'public' : mode
-    await loadPublishing()
-  } catch (err) {
-    if (selected.value?.name === name) {
-      publishingActionError.value = err instanceof Error ? err.message : String(err)
-    }
-  } finally {
-    finishPublishingAction()
+    return { status: 'fulfilled', value: await run() }
+  } catch (reason) {
+    return { status: 'rejected', reason }
   }
 }
 
-// savePreviewAccess writes the preview policy. The platform applies it to the
-// running preview asynchronously, so the response's `converged` flag is what
-// the dialog shows as pending — not this call returning.
-async function savePreviewAccess() {
+async function saveShareSettings(request: ProjectShareSaveRequest) {
   const name = selected.value?.name
   if (!name || publishingActionBusy.value) return
-  publishingActionBusy.value = true
+  const publicationMode = publishingStateAvailable.value ? request.publicationMode : undefined
+  const requestedPreviewMode = request.previewMode
+  if (!publicationMode && !requestedPreviewMode) return
+  beginPublishingAction('save', publicationMode ?? requestedPreviewMode ?? null)
   publishingActionError.value = null
   try {
-    const state = await api.setPreviewAccess(props.ctx, name, previewMode.value)
+    // Both APIs update the same Project CR, so serialize them to avoid a
+    // resourceVersion conflict. Each result is captured independently so a
+    // failure in the first channel still allows the second one to be tried.
+    const publicationResult = await settleShareMutation(
+      publicationMode ? () => api.publishProject(props.ctx, name, publicationMode) : undefined,
+    )
+    const previewResult = await settleShareMutation(
+      requestedPreviewMode ? () => api.setPreviewAccess(props.ctx, name, requestedPreviewMode) : undefined,
+    )
     if (selected.value?.name !== name) return
-    previewAccess.value = state
-    previewMode.value = state.mode === 'public' ? 'public' : 'restricted'
-  } catch (err) {
-    if (selected.value?.name === name) {
-      publishingActionError.value = err instanceof Error ? err.message : String(err)
+
+    const failures: string[] = []
+    if (publicationResult.status === 'fulfilled' && publicationResult.value) {
+      publishing.value = publicationResult.value
+      shareMode.value = publicationResult.value.publication?.mode === 'public' ? 'public' : publicationMode!
+    } else if (publicationResult.status === 'rejected') {
+      failures.push(publicationResult.reason instanceof Error ? publicationResult.reason.message : String(publicationResult.reason))
     }
+    if (previewResult.status === 'fulfilled' && previewResult.value) {
+      previewAccess.value = previewResult.value
+      previewMode.value = previewResult.value.mode === 'public' ? 'public' : 'restricted'
+    } else if (previewResult.status === 'rejected') {
+      failures.push(previewResult.reason instanceof Error ? previewResult.reason.message : String(previewResult.reason))
+    }
+    publishingActionError.value = failures.length > 0 ? failures.join(' ') : null
+    await loadPublishing()
   } finally {
-    publishingActionBusy.value = false
+    finishPublishingAction()
   }
 }
 
@@ -4494,6 +4499,7 @@ function developmentPreviewAuthorizationRetryable(error: unknown): boolean {
 
 function openShareDialog() {
   if (!selected.value?.name) return
+  restoreShareDraftsFromSavedState()
   shareDialogOpen.value = true
 }
 
@@ -4503,9 +4509,18 @@ function restoreShareModeFromPublication() {
     : 'restricted'
 }
 
+function restorePreviewModeFromAccess() {
+  previewMode.value = previewAccess.value?.mode === 'public' ? 'public' : 'restricted'
+}
+
+function restoreShareDraftsFromSavedState() {
+  restoreShareModeFromPublication()
+  restorePreviewModeFromAccess()
+}
+
 function closeShareDialog() {
   if (publishingActionBusy.value) return
-  restoreShareModeFromPublication()
+  restoreShareDraftsFromSavedState()
   shareDialogOpen.value = false
   void nextTick(() => shareButtonRef.value?.focus())
   if (!productionSettingsVisible.value) {
@@ -4519,7 +4534,7 @@ function openProductionSettingsFromShare() {
   // Production settings is another Share exit path. Treat an edited access
   // mode as a draft here too, so navigating away cannot leak it into the next
   // publish action.
-  restoreShareModeFromPublication()
+  restoreShareDraftsFromSavedState()
   shareDialogOpen.value = false
   projectSettingsPane.value = 'production'
   projectSettingsPaneAnnouncement.value = 'Production settings opened from Share.'
@@ -8055,6 +8070,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     :members="publishingMembers"
     :grants="publishing?.grants ?? []"
     v-model:preview-mode="previewMode"
+    :preview-saved-mode="previewAccess?.mode"
     :preview-url="previewAccess?.url ?? ''"
     :preview-supported="Boolean(previewAccess?.supported)"
     :preview-converged="previewAccess?.converged !== false"
@@ -8068,8 +8084,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     :load-error="publishingLoadError"
     :members-error="publishingMembersError"
     @close="closeShareDialog"
-    @save="publishCurrentProject"
-    @save-preview="savePreviewAccess"
+    @save="saveShareSettings"
     @preview-grant="grantCurrentProjectPreviewAccess"
     @preview-invite="inviteCurrentProjectPreviewAccess"
     @preview-revoke="revokeCurrentProjectPreviewAccess"

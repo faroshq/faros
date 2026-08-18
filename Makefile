@@ -420,14 +420,19 @@ $(GOLANGCI_LINT):
 
 # --- Dev environment ---
 
-certs: certs/apiserver.crt
-
-certs/apiserver.crt:
+.PHONY: certs
+certs:
 	@mkdir -p certs
+	@if [ -s certs/apiserver.crt ] && [ -s certs/apiserver.key ] && \
+		openssl x509 -in certs/apiserver.crt -noout -checkend 86400 >/dev/null 2>&1 && \
+		openssl x509 -in certs/apiserver.crt -noout \
+			-checkhost console.127.0.0.1.sslip.io >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
 	openssl req -x509 -newkey rsa:2048 -nodes \
 		-keyout certs/apiserver.key -out certs/apiserver.crt \
 		-days 365 -subj "/CN=localhost" \
-		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+		-addext "subjectAltName=DNS:localhost,DNS:*.127.0.0.1.sslip.io,IP:127.0.0.1"
 
 dev-setup: certs
 
@@ -2098,13 +2103,11 @@ uninstall-provider-code: ## Delete the code CatalogEntry + Provider (full teardo
 		delete -f $(CODE_MANIFEST) -f $(CODE_PROVIDER_MANIFEST)
 
 CODE_WORKSPACE_PATH ?= root:faros:providers:code
-## Dev bootstrap for the code provider. The hub mints a real provider
-## kubeconfig only when it runs with a host cluster (--kubeconfig); the dev hubs
-## (embedded + Tiltfile.cluster) do not, so we derive a runtime kubeconfig from
-## the admin kubeconfig — reusing its working credential (a static token in
-## embedded mode, a client cert in cluster mode) and retargeting only the server
-## URL to the provider workspace — and ensure the APIExportEndpointSlice the
-## controller manager needs. run-provider-code reads it via FAROS_PROVIDER_KUBECONFIG.
+## Dev bootstrap for the code provider. The Provider controller mints a
+## workspace-scoped provider-token Secret; use that credential rather than
+## copying the rotating kcp admin token into the long-lived runtime kubeconfig.
+## The generated config also ensures the APIExportEndpointSlice the controller
+## manager needs. run-provider-code reads it via FAROS_PROVIDER_KUBECONFIG.
 ## Order: install-provider-code (creates the workspace) → init-provider-code →
 ## run-provider-code. Re-runnable. The Tiltfile.cluster flow reuses this target
 ## verbatim, overriding KROMC_KCP_KUBECONFIG / KROMC_KCP_SERVER.
@@ -2114,16 +2117,16 @@ init-provider-code: build-code-provider ## Write the dev kubeconfig + ensure the
 		echo "start the hub first with: make run-hub-embedded-static"; \
 		exit 1; \
 	}
-	@mkdir -p $(KCP_DATA_DIR)
-	@# The provider workspace (root:faros:providers:code) is created
-	@# declaratively by the Provider controller when code-register applies the
-	@# Provider CR — no need to create it here.
-	@echo "Writing dev kubeconfig $(CODE_RUNTIME_KUBECONFIG) (workspace $(CODE_WORKSPACE_PATH), server $(KROMC_KCP_SERVER))"
-	@kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) config view --minify --flatten > $(CODE_RUNTIME_KUBECONFIG)
-	@CL=$$(kubectl --kubeconfig=$(CODE_RUNTIME_KUBECONFIG) config view -o jsonpath='{.clusters[0].name}'); \
-		kubectl --kubeconfig=$(CODE_RUNTIME_KUBECONFIG) config set-cluster "$$CL" \
-			--server=$(KROMC_KCP_SERVER)/clusters/$(CODE_WORKSPACE_PATH) \
-			--insecure-skip-tls-verify=true >/dev/null
+	@echo "Reading provider-token from $(CODE_WORKSPACE_PATH) and writing $(CODE_RUNTIME_KUBECONFIG)"
+	@TOKEN=$$(kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
+		--server=$(KROMC_KCP_SERVER)/clusters/$(CODE_WORKSPACE_PATH) \
+		--insecure-skip-tls-verify \
+		get secret -n default provider-token -o jsonpath='{.data.token}' | base64 -d); \
+	test -n "$$TOKEN" || { echo "provider-token Secret empty — wait for the Provider controller to provision the workspace"; exit 1; }; \
+	mkdir -p $(KCP_DATA_DIR); \
+	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
+		"$(KROMC_KCP_SERVER)/clusters/$(CODE_WORKSPACE_PATH)" "$$TOKEN" \
+		> $(CODE_RUNTIME_KUBECONFIG)
 	FAROS_PROVIDER_KUBECONFIG=$(CODE_RUNTIME_KUBECONFIG) \
 	CODE_WORKSPACE_PATH=$(CODE_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/code/deploy/chart/files/schemas \
@@ -2323,13 +2326,87 @@ KRO_CHART_VERSION ?= 0.9.3
 KRO_NAMESPACE ?= kro-system
 KRO_SEED_DIR ?= providers/infrastructure/examples/rgds
 
+# --- Local application-preview Gateway --------------------------------------
+# The base Tiltfile uses the faros-kro kind cluster for application-template
+# runtimes. Keep the Envoy Gateway install separate from the kro release so it
+# can be reconciled independently and so `dev-kro-down` remains the one command
+# that owns cluster teardown.
+ENVOY_GATEWAY_CHART ?= oci://docker.io/envoyproxy/gateway-helm
+# Gateway API CRDs are pinned to v1.5.1 below. Envoy Gateway v1.8.3 is the
+# matching upstream release line for the Kubernetes 1.33 kind cluster.
+ENVOY_GATEWAY_VERSION ?= v1.8.3
+ENVOY_GATEWAY_RELEASE ?= envoy-gateway
+ENVOY_GATEWAY_CRDS_CHART ?= oci://docker.io/envoyproxy/gateway-crds-helm
+PREVIEW_GATEWAY_KUBECONFIG ?= $(KRO_KIND_KUBECONFIG)
+PREVIEW_GATEWAY_CONTEXT ?= kind-$(KRO_KIND_NAME)
+PREVIEW_GATEWAY_NAMESPACE ?= envoy-gateway-system
+PREVIEW_GATEWAY_NAME ?= app-studio-preview
+PREVIEW_GATEWAY_CLASS ?= eg
+PREVIEW_GATEWAY_CONTROLLER ?= gateway.envoyproxy.io/gatewayclass-controller
+PREVIEW_GATEWAY_PROXY_CONFIG ?= app-studio-preview-proxy
+PREVIEW_GATEWAY_HOSTNAME ?= *.apps.127.0.0.1.sslip.io
+PREVIEW_GATEWAY_LISTENER_NAME ?= https
+PREVIEW_GATEWAY_TLS_SECRET ?= app-studio-preview-tls
+PREVIEW_GATEWAY_PORT ?= 10443
+PREVIEW_GATEWAY_STATE_DIR ?= $(KCP_DATA_DIR)/tilt-preview-gateway-tls
+PREVIEW_GATEWAY_TIMEOUT ?= 5m
+PREVIEW_GATEWAY_UNINSTALL ?= false
+PREVIEW_GATEWAY_SCRIPT ?= hack/scripts/configure-tilt-preview-gateway.sh
+
+.PHONY: dev-preview-gateway-up dev-preview-gateway-down
+
+dev-preview-gateway-up: ## Install Envoy Gateway + local HTTPS parent for app previews
+	@test -f "$(PREVIEW_GATEWAY_KUBECONFIG)" || { \
+		echo "no kubeconfig at $(PREVIEW_GATEWAY_KUBECONFIG); run 'make dev-kro-up' first"; \
+		exit 1; \
+	}
+	@test -x "$(PREVIEW_GATEWAY_SCRIPT)" || { \
+		echo "preview Gateway helper is not executable: $(PREVIEW_GATEWAY_SCRIPT)"; \
+		exit 1; \
+	}
+	KUBECONFIG="$(PREVIEW_GATEWAY_KUBECONFIG)" \
+	PREVIEW_GATEWAY_CONTEXT="$(PREVIEW_GATEWAY_CONTEXT)" \
+	ENVOY_GATEWAY_CHART="$(ENVOY_GATEWAY_CHART)" \
+	ENVOY_GATEWAY_CRDS_CHART="$(ENVOY_GATEWAY_CRDS_CHART)" \
+	ENVOY_GATEWAY_VERSION="$(ENVOY_GATEWAY_VERSION)" \
+	ENVOY_GATEWAY_RELEASE="$(ENVOY_GATEWAY_RELEASE)" \
+	PREVIEW_GATEWAY_NAMESPACE="$(PREVIEW_GATEWAY_NAMESPACE)" \
+	PREVIEW_GATEWAY_NAME="$(PREVIEW_GATEWAY_NAME)" \
+	PREVIEW_GATEWAY_CLASS="$(PREVIEW_GATEWAY_CLASS)" \
+	PREVIEW_GATEWAY_CONTROLLER="$(PREVIEW_GATEWAY_CONTROLLER)" \
+	PREVIEW_GATEWAY_PROXY_CONFIG="$(PREVIEW_GATEWAY_PROXY_CONFIG)" \
+	PREVIEW_GATEWAY_HOSTNAME="$(PREVIEW_GATEWAY_HOSTNAME)" \
+	PREVIEW_GATEWAY_LISTENER_NAME="$(PREVIEW_GATEWAY_LISTENER_NAME)" \
+	PREVIEW_GATEWAY_TLS_SECRET="$(PREVIEW_GATEWAY_TLS_SECRET)" \
+	PREVIEW_GATEWAY_PORT="$(PREVIEW_GATEWAY_PORT)" \
+	PREVIEW_GATEWAY_STATE_DIR="$(PREVIEW_GATEWAY_STATE_DIR)" \
+	PREVIEW_GATEWAY_TIMEOUT="$(PREVIEW_GATEWAY_TIMEOUT)" \
+		"$(PREVIEW_GATEWAY_SCRIPT)" apply
+
+dev-preview-gateway-down: ## Remove the local preview Gateway and Secret (keep controller by default)
+	@test -x "$(PREVIEW_GATEWAY_SCRIPT)" || { \
+		echo "preview Gateway helper is not executable: $(PREVIEW_GATEWAY_SCRIPT)"; \
+		exit 1; \
+	}
+	KUBECONFIG="$(PREVIEW_GATEWAY_KUBECONFIG)" \
+	PREVIEW_GATEWAY_CONTEXT="$(PREVIEW_GATEWAY_CONTEXT)" \
+	PREVIEW_GATEWAY_RELEASE="$(ENVOY_GATEWAY_RELEASE)" \
+	PREVIEW_GATEWAY_NAMESPACE="$(PREVIEW_GATEWAY_NAMESPACE)" \
+	PREVIEW_GATEWAY_NAME="$(PREVIEW_GATEWAY_NAME)" \
+	PREVIEW_GATEWAY_PROXY_CONFIG="$(PREVIEW_GATEWAY_PROXY_CONFIG)" \
+	PREVIEW_GATEWAY_TLS_SECRET="$(PREVIEW_GATEWAY_TLS_SECRET)" \
+	PREVIEW_GATEWAY_STATE_DIR="$(PREVIEW_GATEWAY_STATE_DIR)" \
+	PREVIEW_GATEWAY_UNINSTALL="$(PREVIEW_GATEWAY_UNINSTALL)" \
+		"$(PREVIEW_GATEWAY_SCRIPT)" cleanup
+
 # --- Infrastructure template e2e (RGD acceptance against a real kro) ---
 # A throwaway kind cluster running STANDALONE kro (no kcp) — enough to validate
 # that every seeded Template authors a kro graph kro accepts. See
 # providers/infrastructure/backend/kro/e2e_test.go.
 E2E_KRO_KIND_NAME ?= faros-kro-e2e
 E2E_KRO_KUBECONFIG ?= $(CURDIR)/.faros-kro-e2e.kubeconfig
-GATEWAY_API_VERSION ?= v1.2.1
+# Envoy Gateway v1.8.x supports Gateway API v1.5.1 on Kubernetes 1.32–1.35.
+GATEWAY_API_VERSION ?= v1.5.1
 
 ## Bring up the management kro cluster + install upstream kro. Idempotent:
 ## re-running just helm-upgrades the chart (with an explicit CRD apply —

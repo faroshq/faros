@@ -141,9 +141,12 @@ test('keeps publication success deployment-scoped while Live remains URL-depende
 
 test('routes sharing through the modular dialog and current access contracts only', () => {
   assert.match(app, /import ProjectShareDialog from '\.\/ProjectShareDialog\.vue'/)
-  assert.match(app, /<ProjectShareDialog[\s\S]*v-model:mode="shareMode"[\s\S]*@save="publishCurrentProject"[\s\S]*@grant="grantCurrentProjectAccess"[\s\S]*@invite="inviteCurrentProjectAccess"[\s\S]*@revoke="revokeCurrentProjectAccess"[\s\S]*@disable="unpublishCurrentProject"/)
+  assert.match(app, /<ProjectShareDialog[\s\S]*v-model:mode="shareMode"[\s\S]*@save="saveShareSettings"[\s\S]*@grant="grantCurrentProjectAccess"[\s\S]*@invite="inviteCurrentProjectAccess"[\s\S]*@revoke="revokeCurrentProjectAccess"[\s\S]*@disable="unpublishCurrentProject"/)
   assert.match(app, /@open-production-settings="openProductionSettingsFromShare"/)
-  assert.match(app, /const mode = shareMode\.value[\s\S]*api\.publishProject\(props\.ctx, name, mode\)/)
+  assert.match(app, /async function saveShareSettings\(request: ProjectShareSaveRequest\)/)
+  assert.match(app, /const publicationResult = await settleShareMutation\([\s\S]*api\.publishProject\(props\.ctx, name, publicationMode\)[\s\S]*const previewResult = await settleShareMutation\([\s\S]*api\.setPreviewAccess\(props\.ctx, name, requestedPreviewMode\)/)
+  assert.doesNotMatch(dialog, /save-preview/)
+  assert.match(dialog, /emit\('save', request\)/)
   assert.match(dialog, /Production access/)
   assert.match(dialog, /Development preview access/)
   assert.match(dialog, /value="restricted">Restricted/)
@@ -222,13 +225,14 @@ test('keeps members from a state-failed initial load but blocks publication muta
   assert.match(load, /const membersSucceeded = membersResult\.status === 'fulfilled'/)
   assert.match(load, /if \(membersSucceeded\) \{[\s\S]*publishingMembers\.value = membersResult\.value[\s\S]*publishingMembersLoaded\.value = true/)
   assert.match(load, /if \(stateSucceeded\) \{[\s\S]*publishingStateAvailable\.value = true/)
+  assert.match(load, /if \(!shareDialogOpen\.value \|\| !stateWasLoaded\)/)
+  assert.match(load, /if \(!shareDialogOpen\.value \|\| !previewWasLoaded\)/)
   assert.match(load, /const stateAvailable = publishingStateAvailable\.value/)
   assert.doesNotMatch(load, /if \(!stateSucceeded\) \{[\s\S]*publishingStateAvailable\.value = false/)
   assert.match(load, /publishingLoadState\.value = stateSucceeded && membersSucceeded[\s\S]*'partial'[\s\S]*'error'/)
   assert.match(app, /:publication-state-available="publishingStateAvailable"/)
   for (const action of [
     'setProductionVisibility',
-    'publishCurrentProject',
     'unpublishCurrentProject',
     'grantOrInviteProjectAccess',
     'revokeCurrentProjectAccess',
@@ -239,6 +243,10 @@ test('keeps members from a state-failed initial load but blocks publication muta
     const actionSource = app.slice(actionStart, nextAction >= 0 ? nextAction : undefined)
     assert.match(actionSource, /!publishingStateAvailable\.value/, `${action} requires known publication state`)
   }
+  const shareSaveStart = app.indexOf('async function saveShareSettings')
+  const shareSaveEnd = app.indexOf('\n\n// Preview grants', shareSaveStart)
+  const shareSave = app.slice(shareSaveStart, shareSaveEnd)
+  assert.match(shareSave, /const publicationMode = publishingStateAvailable\.value \? request\.publicationMode : undefined/)
   assert.match(app, /aria-label="Production visibility"\s+:disabled="publishingActionBusy \|\| !publishingStateAvailable"/)
   assert.match(dialog, /props\.publicationStateAvailable &&[\s\S]*\(props\.published \|\| props\.productionReady\)/)
 })
@@ -390,26 +398,34 @@ test('commits a thread selection only after history succeeds and restores prior 
   assert.ok(select.includes("selectingThreadID.value = ''"))
 })
 
-test('restores the opening Share mode on every unsaved exit while reflecting successful saves', () => {
+test('restores both opening Share modes and saves both dirty channels in one transaction', () => {
   const closeStart = dialog.indexOf('function close()')
   const settingsStart = dialog.indexOf('function openProductionSettings()', closeStart)
   assert.ok(closeStart >= 0 && settingsStart > closeStart)
   const close = dialog.slice(closeStart, settingsStart)
   assert.ok(close.includes('modeTouched.value && selectedMode.value !== initialMode.value'))
   assert.ok(close.includes("emit('update:mode', initialMode.value)"))
+  assert.ok(close.includes('previewModeTouched.value && selectedPreviewMode.value !== initialPreviewMode.value'))
+  assert.ok(close.includes("emit('update:previewMode', initialPreviewMode.value)"))
 
   const settingsEnd = dialog.indexOf('\n\nfunction addMember', settingsStart)
   assert.ok(settingsEnd > settingsStart)
   const settingsExit = dialog.slice(settingsStart, settingsEnd)
   assert.ok(settingsExit.includes("emit('update:mode', initialMode.value)"))
+  assert.ok(settingsExit.includes("emit('update:previewMode', initialPreviewMode.value)"))
   assert.ok(settingsExit.includes("emit('open-production-settings')"))
 
   const parentCloseStart = app.indexOf('function closeShareDialog()')
   const parentSettingsStart = app.indexOf('function openProductionSettingsFromShare()', parentCloseStart)
   assert.ok(parentCloseStart >= 0 && parentSettingsStart > parentCloseStart)
-  assert.ok(app.slice(parentCloseStart, parentSettingsStart).includes('restoreShareModeFromPublication()'))
-  const publishStart = app.indexOf('async function publishCurrentProject()')
-  const publishEnd = app.indexOf('\n\nasync function unpublishCurrentProject', publishStart)
-  assert.ok(publishEnd > publishStart)
-  assert.ok(app.slice(publishStart, publishEnd).includes("shareMode.value = state.publication?.mode === 'public' ? 'public' : mode"))
+  assert.ok(app.slice(parentCloseStart, parentSettingsStart).includes('restoreShareDraftsFromSavedState()'))
+  const saveStart = app.indexOf('async function saveShareSettings(')
+  const saveEnd = app.indexOf('\n\n// Preview grants', saveStart)
+  assert.ok(saveEnd > saveStart)
+  const save = app.slice(saveStart, saveEnd)
+  assert.ok(save.indexOf('const publicationResult = await settleShareMutation') < save.indexOf('const previewResult = await settleShareMutation'))
+  assert.ok(save.includes('publicationResult.status'))
+  assert.ok(save.includes('previewResult.status'))
+  assert.ok(save.includes("failures.join(' ')"))
+  assert.match(dialog, /const shouldSavePublication = modeDirty\.value \|\| \(!props\.published && !previewDirty\.value\)/)
 })
