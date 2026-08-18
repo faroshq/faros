@@ -1930,9 +1930,11 @@ watch(settingsProject, (project, previousProject) => {
   if (showSettings.value) syncProjectSettingsForm()
 })
 
-watch(messages, async () => {
+watch([messages, conversationLoading], async () => {
   await nextTick()
-  if (messagesRef.value) messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+  if (!conversationLoading.value && messagesRef.value) {
+    messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+  }
 })
 
 useEscapeKey(() => {
@@ -2361,6 +2363,7 @@ function canPromoteRelease(release: ProjectRelease | null): boolean {
   return Boolean(
     releaseHasPromotionEvidence(release) &&
     promotion.value &&
+    !promotionError.value &&
     !promotionBusy.value &&
     (productionBinding.value || productionFormValid.value),
   )
@@ -2368,6 +2371,7 @@ function canPromoteRelease(release: ProjectRelease | null): boolean {
 const canPromoteSelectedRelease = computed(() => canPromoteRelease(selectedRelease.value))
 const releaseActionDisabledReason = computed(() => {
   if (promotionBusy.value) return 'A production deployment is already in progress.'
+  if (promotionError.value) return 'Production status is unavailable. Check again before deploying.'
   if (!selectedRelease.value) {
     if (releaseLoadState.value === 'loading' && releases.value.length === 0) return 'Loading releases before enabling deployment.'
     return 'Select a complete release before deploying.'
@@ -2388,11 +2392,13 @@ const canRedeployCurrentProduction = computed(() => Boolean(
   productionBinding.value &&
   currentProductionRelease.value &&
   promotion.value &&
+  !promotionError.value &&
   !promotionBusy.value &&
   productionFormValid.value,
 ))
 const productionSettingsActionDisabledReason = computed(() => {
   if (!productionBinding.value) return 'Deploy a release from Deployments before saving production settings.'
+  if (promotionError.value) return 'Production status is unavailable. Check again before redeploying.'
   if (!currentProductionRelease.value) return 'The current production release is unavailable. Refresh Deployments to retry.'
   if (!productionFormValid.value) return 'Fix the highlighted production settings before redeploying.'
   return ''
