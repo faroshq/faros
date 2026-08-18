@@ -160,7 +160,8 @@ func TestMain(m *testing.M) {
 	}
 	adminToken = tok
 
-	if err := applyEdgesManifests(); err != nil {
+	catalogEntryFile := filepath.Join(dataDir, "edges-catalogentry.yaml")
+	if err := applyEdgesManifests(catalogEntryFile); err != nil {
 		cleanup()
 		fmt.Fprintln(os.Stderr, "apply edges manifests:", err)
 		os.Exit(1)
@@ -179,6 +180,7 @@ func TestMain(m *testing.M) {
 		"FAROS_PROVIDER_KUBECONFIG="+runtimeKubeconfig,
 		"EDGES_WORKSPACE_PATH="+edgesWorkspacePath,
 		"FAROS_SCHEMAS_DIR="+filepath.Join(repoRoot, "providers", "edges", "deploy", "chart", "files", "schemas"),
+		"FAROS_CATALOGENTRY_FILE="+catalogEntryFile,
 	)
 	initCmd.Stdout = initLog
 	initCmd.Stderr = initLog
@@ -211,9 +213,19 @@ func TestMain(m *testing.M) {
 	}
 	fmt.Fprintf(os.Stderr, "edges-provider started (pid=%d, port=:%s)\n", provCmd.Process.Pid, providerPort)
 
-	if err := waitReady("http://127.0.0.1:"+providerPort+"/healthz", 30*time.Second); err != nil {
+	providerReadyURL := "http://127.0.0.1:" + providerPort + "/readyz"
+	if err := waitReady(providerReadyURL, 90*time.Second); err != nil {
 		cleanup()
 		fmt.Fprintln(os.Stderr, "edges provider never ready:", err)
+		os.Exit(1)
+	}
+	// Readiness is controller-backed. Verify it remains open after the initial
+	// transition so a manager that exits immediately cannot hand the tests a
+	// briefly healthy HTTP process.
+	time.Sleep(time.Second)
+	if err := waitReady(providerReadyURL, 5*time.Second); err != nil {
+		cleanup()
+		fmt.Fprintln(os.Stderr, "edges provider did not remain ready:", err)
 		os.Exit(1)
 	}
 
@@ -222,15 +234,12 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func applyEdgesManifests() error {
+func applyEdgesManifests(catalogEntryFile string) error {
 	cl, err := kcpDynamicRaw("root:faros:system:providers", adminToken)
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
-	gvrByKind := map[string]schema.GroupVersionResource{
-		"Provider":     {Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"},
-		"CatalogEntry": {Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries"},
-	}
+	providerGVR := schema.GroupVersionResource{Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"}
 	overrideURL := "http://localhost:" + providerPort
 	for _, file := range []string{"provider.yaml", "manifest.yaml"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot, "providers", "edges", file))
@@ -248,18 +257,25 @@ func applyEdgesManifests() error {
 			if obj.GetKind() == "" {
 				continue
 			}
-			gvr, ok := gvrByKind[obj.GetKind()]
-			if !ok {
+			if obj.GetKind() != "Provider" && obj.GetKind() != "CatalogEntry" {
 				return fmt.Errorf("%s: unexpected kind %q", file, obj.GetKind())
 			}
 			if obj.GetKind() == "CatalogEntry" {
 				_ = unstructured.SetNestedField(obj.Object, overrideURL, "spec", "ui", "url")
 				_ = unstructured.SetNestedField(obj.Object, overrideURL, "spec", "backend", "url")
+				rendered, err := yaml.Marshal(obj.Object)
+				if err != nil {
+					return fmt.Errorf("marshal %s: %w", file, err)
+				}
+				if err := os.WriteFile(catalogEntryFile, rendered, 0o600); err != nil {
+					return fmt.Errorf("write CatalogEntry: %w", err)
+				}
+				continue
 			}
 			deadline := time.Now().Add(90 * time.Second)
 			for {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_, err = cl.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
+				_, err = cl.Resource(providerGVR).Create(ctx, obj, metav1.CreateOptions{})
 				cancel()
 				if err == nil || apierrors.IsAlreadyExists(err) {
 					break

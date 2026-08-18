@@ -47,7 +47,7 @@ var (
 // holds the APIResourceSchemas + APIExport (with the 5 permission claims) that
 // `edges-provider init` authored.
 func TestACatalogProvisioning(t *testing.T) {
-	cl := kcpDynamic(t, "root:faros:system:providers", adminToken)
+	cl := kcpDynamic(t, edgesWorkspacePath, adminToken)
 	gvr := schema.GroupVersionResource{Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries"}
 	ready := waitForCondition(t, 90*time.Second, func() (bool, string) {
 		got, err := cl.Resource(gvr).Get(ctxWithTimeout(t, 5*time.Second), "edges", metav1.GetOptions{})
