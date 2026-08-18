@@ -6,7 +6,7 @@ const page = await readFile(new URL('./ProvidersPage.vue', import.meta.url), 'ut
 const dialog = await readFile(new URL('../components/ProviderEnableDialog.vue', import.meta.url), 'utf8')
 
 test('enabled providers expose update access while preserving disable', () => {
-  assert.match(page, /function openUpdateDialog\(p: ProviderDTO\)/)
+  assert.match(page, /async function openUpdateDialog\(p: ProviderDTO, preselectClaims: string\[\] = \[\]\)/)
   assert.match(page, /dialogMode\.value = 'update'/)
   assert.match(
     page,
@@ -15,14 +15,24 @@ test('enabled providers expose update access while preserving disable', () => {
   assert.match(page, /:mode="dialogMode"/)
 })
 
-test('update access resubmits through the idempotent provider enable action', () => {
-  assert.match(page, /await providers\.enable\(p, accept\)/)
-  assert.match(page, /The enable endpoint is idempotent and reconciles an existing binding/)
+test('update access loads current state and uses the additive authorization action', () => {
+  assert.match(page, /const access = await providers\.loadAccess\(p\)/)
+  assert.match(page, /await providers\.authorize\(p, accept\)/)
+  assert.match(page, /:access="dialogAccess"/)
 })
 
-test('update mode uses declared consent defaults without inferring applied claims', () => {
-  assert.match(dialog, /next\[claimKey\(c\)\] = !!c\.tenantScoped && !c\.optional/)
+test('update mode preselects and locks existing grants without revoking by omission', () => {
+  assert.match(dialog, /!!current\?\.accepted \|\| \(requested\.has\(claimKey\(c\)\) && !!current\?\.offered\)/)
+  assert.match(dialog, /alreadyAccepted\(c\) \|\| isUnavailable\(c\)/)
   assert.match(dialog, /mode === 'update'/)
-  assert.match(dialog, /This replaces the current grant set\. Re-select any optional access you want to retain\./)
-  assert.match(page, /We do not infer which optional claims the existing binding/)
+  assert.match(dialog, /Access updates are additive\. Existing grants remain authorized/)
+  assert.doesNotMatch(dialog, /replaces the current grant set/)
+})
+
+test('provider access deep links preselect all requested claims and honor an internal return path', () => {
+  assert.match(page, /route\.query\.configure/)
+  assert.match(page, /dialogPreselectClaims\.value = requested/)
+  assert.match(page, /Array\.isArray\(claim\)/)
+  assert.match(page, /returnPath\.startsWith\('\/'\) && !returnPath\.startsWith\('\/\/'\)/)
+  assert.match(dialog, /`\$\{c\.group \?\? ''\}\/\$\{c\.resource\}`/)
 })

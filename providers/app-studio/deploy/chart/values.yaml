@@ -68,7 +68,7 @@ apiExport:
   codeIdentityHash: ""
   # OPTIONAL: identityHash of the deployments provider's APIExport
   # (deployments.faros.sh). When empty, App Studio omits the optional
-  # RepositorySync, Release, and Deployment claims and remains usable with
+  # RepositorySync claim and remains usable with
   # Direct delivery. Supply it when reviewed-production GitOps is enabled.
   deploymentsIdentityHash: ""
 

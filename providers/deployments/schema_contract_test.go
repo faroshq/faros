@@ -15,26 +15,43 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestDeploymentSchemaModeAndDeletionPolicyContract(t *testing.T) {
-	kcpSchema, err := os.ReadFile("config/kcp/apiresourceschema-deployments.deployments.faros.sh.yaml")
+func TestRepositorySyncSchemaContract(t *testing.T) {
+	kcpSchema, err := os.ReadFile("config/kcp/apiresourceschema-repositorysyncs.deployments.faros.sh.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	chartSchema, err := os.ReadFile("deploy/chart/files/schemas/deployments.deployments.faros.sh.yaml")
+	chartSchema, err := os.ReadFile("deploy/chart/files/schemas/repositorysyncs.deployments.faros.sh.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(kcpSchema, chartSchema) {
-		t.Fatal("deployment chart schema is not synchronized with the generated kcp schema")
+		t.Fatal("RepositorySync chart schema is not synchronized with the generated kcp schema")
 	}
 	for _, required := range [][]byte{
-		[]byte("deletionPolicy:\n              default: Retain"),
-		[]byte("- Retain\n              - Delete"),
-		[]byte("mode:\n              default: production"),
-		[]byte("- development\n              - production"),
+		[]byte("- AwaitingAuthorization"),
+		[]byte("- Synced"),
+		[]byte("targetRequirements:"),
+		[]byte("sourcePath:"),
 	} {
 		if !bytes.Contains(kcpSchema, required) {
-			t.Fatalf("deployment schema does not contain %q", required)
+			t.Fatalf("RepositorySync schema does not contain %q", required)
+		}
+	}
+	export, err := os.ReadFile("config/kcp/apiexport-deployments.faros.sh.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(export, []byte("name: deployments\n")) || bytes.Contains(export, []byte("name: releases\n")) {
+		t.Fatal("Deployments APIExport still publishes the removed Release/Deployment APIs")
+	}
+	for _, removed := range []string{
+		"config/crds/deployments.faros.sh_deployments.yaml",
+		"config/crds/deployments.faros.sh_releases.yaml",
+		"config/kcp/apiresourceschema-deployments.deployments.faros.sh.yaml",
+		"config/kcp/apiresourceschema-releases.deployments.faros.sh.yaml",
+	} {
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Fatalf("removed schema %q still exists or cannot be inspected: %v", removed, err)
 		}
 	}
 }
@@ -55,6 +72,11 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 	if !reflect.DeepEqual(manifest, chart) {
 		t.Fatalf("manifest and chart CatalogEntry specs differ\nmanifest: %#v\nchart:    %#v", manifest["spec"], chart["spec"])
 	}
+	spec, _ := manifest["spec"].(map[string]any)
+	dependencies, _ := spec["dependencies"].([]any)
+	if len(dependencies) != 1 || !reflect.DeepEqual(dependencies[0], map[string]any{"name": "code"}) {
+		t.Fatalf("Deployments dependencies = %#v, want Code only", dependencies)
+	}
 
 	claims, err := deploymentClaims("test-infrastructure-identity", "test-code-identity")
 	if err != nil {
@@ -71,6 +93,16 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 			"verbs":        stringValues(claim.Verbs),
 			"tenantScoped": true,
 		}
+		switch {
+		case claim.Group == "code.faros.sh":
+			want["purpose"] = "Read bounded repository checkouts for desired-state sync."
+		case claim.Group == "infrastructure.faros.sh":
+			want["optional"] = true
+			want["purpose"] = "Apply Infrastructure instances from repository syncs."
+		case claim.Group == "" && claim.Resource == "configmaps":
+			want["optional"] = true
+			want["purpose"] = "Apply ConfigMaps from repository syncs."
+		}
 		if !reflect.DeepEqual(manifestClaims[i], want) {
 			t.Fatalf("CatalogEntry claim %d differs from deploymentClaims\nmanifest: %#v\nruntime:  %#v", i, manifestClaims[i], want)
 		}
@@ -81,7 +113,6 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, contract := range [][]byte{
-		[]byte(`required "infrastructureIdentityHash is required"`),
 		[]byte(`required "codeIdentityHash is required"`),
 		[]byte(`required "code.url is required"`),
 		[]byte("automountServiceAccountToken: false"),
@@ -90,6 +121,9 @@ func TestCatalogAndChartProviderContract(t *testing.T) {
 		if !bytes.Contains(chartDeployment, contract) {
 			t.Fatalf("chart Deployment is missing %q", contract)
 		}
+	}
+	if bytes.Contains(chartDeployment, []byte(`required "infrastructureIdentityHash is required"`)) {
+		t.Fatal("chart still requires the optional Infrastructure identity hash")
 	}
 }
 

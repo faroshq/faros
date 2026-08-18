@@ -37,10 +37,10 @@ export function failRead<T>(state: ReadState<T>, message: string, retryable = tr
 }
 
 export function readStatusText(phase: ReadPhase, hasData: boolean): string {
-  if (phase === 'loading' && !hasData) return 'Loading deployments…'
+  if (phase === 'loading' && !hasData) return 'Loading repository syncs…'
   if (phase === 'stale') return 'Showing the last successful result; refresh failed.'
-  if (phase === 'error') return 'Deployments are unavailable.'
-  if (phase === 'loaded' && !hasData) return 'No deployments have been projected into this workspace.'
+  if (phase === 'error') return 'Repository syncs are unavailable.'
+  if (phase === 'loaded' && !hasData) return 'No repository syncs are configured in this workspace.'
   return ''
 }
 
@@ -53,9 +53,9 @@ export function readErrorMessage(error: unknown, fallback: string): string {
     case 'Unauthorized':
       return 'Workspace access is unauthorized. Sign in again or choose a workspace with Deployments enabled.'
     case 'MissingBackend':
-      return 'Deployments resources are not available in this workspace. Enable Deployments and its Infrastructure dependency, then retry.'
+      return 'Deployments resources are not available in this workspace. Enable Deployments, then retry.'
     case 'NotFound':
-      return detail || 'The requested Deployment was not found in this workspace.'
+      return detail || 'The requested RepositorySync was not found in this workspace.'
     case 'NetworkError':
       return 'The workspace gateway is unavailable. Retry the read.'
     case 'ProtocolError':

@@ -1534,6 +1534,29 @@ type ProviderClaim struct {
 	Accepted bool
 }
 
+// ProviderBindingClaim is the observed kcp state for one APIBinding
+// permission claim. The REST layer joins these authoritative binding/export
+// facts with the tenant-facing metadata declared by the provider catalog.
+type ProviderBindingClaim struct {
+	Group        string
+	Resource     string
+	Verbs        []string
+	IdentityHash string
+	Accepted     bool
+}
+
+// ProviderAPIBindingAccess separates what a tenant selected (SpecClaims),
+// what the provider's current APIExport offers, and what kcp has actually
+// applied. Keeping those stages distinct prevents the portal from presenting
+// a catalog checkbox as proof that authorization is active.
+type ProviderAPIBindingAccess struct {
+	BindingName   string
+	Phase         string
+	SpecClaims    []ProviderBindingClaim
+	ExportClaims  []ProviderBindingClaim
+	AppliedClaims []ProviderBindingClaim
+}
+
 // EnsureProviderAPIBinding creates or reconciles an
 // APIBinding named `bindingName` in the child workspace
 // root:faros:tenants:{orgUUID}:{wsUUID}, pointing at exportPath/exportName.
@@ -1786,6 +1809,49 @@ func (b *Bootstrapper) exportClaimIdentities(ctx context.Context, exportPath, ex
 	return out, nil
 }
 
+// exportClaimVerbs reads the APIExport's current verb set for each requested
+// tuple. Catalog metadata is useful for discovery and consent copy, but the
+// export is the authorization authority; accepting a stale catalog verb list
+// would make the binding invalid or accidentally retain access the export no
+// longer requests.
+func (b *Bootstrapper) exportClaimVerbs(ctx context.Context, exportPath, exportName string, claims []ProviderClaim) (map[string][]string, error) {
+	exportConfig := configForPath(b.config, exportPath)
+	exportClient, err := dynamic.NewForConfig(exportConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating export workspace client for %s: %w", exportPath, err)
+	}
+	ex, err := exportClient.Resource(apiExportGVR).Get(ctx, exportName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting APIExport %q in %s: %w", exportName, exportPath, err)
+	}
+	key := func(group, resource string) string { return group + "/" + resource }
+	available := map[string][]string{}
+	pcs, _, _ := unstructured.NestedSlice(ex.Object, "spec", "permissionClaims")
+	for _, pc := range pcs {
+		m, ok := pc.(map[string]any)
+		if !ok {
+			continue
+		}
+		group, _ := m["group"].(string)
+		resource, _ := m["resource"].(string)
+		verbs, _, err := unstructured.NestedStringSlice(m, "verbs")
+		if err != nil {
+			return nil, fmt.Errorf("reading APIExport claim %s verbs: %w", key(group, resource), err)
+		}
+		available[key(group, resource)] = append([]string(nil), verbs...)
+	}
+	out := make(map[string][]string, len(claims))
+	for _, claim := range claims {
+		claimKey := key(claim.Group, claim.Resource)
+		verbs, found := available[claimKey]
+		if !found {
+			return nil, fmt.Errorf("APIExport %q (%s) does not offer permission claim %s", exportName, exportPath, claimKey)
+		}
+		out[claimKey] = append([]string(nil), verbs...)
+	}
+	return out, nil
+}
+
 // ListProviderAPIBindings returns the set of Bound provider APIBindings
 // present in the child workspace root:faros:tenants:{orgUUID}:{wsUUID},
 // keyed by provider name. Used by the GET /api/orgs/{org}/workspaces/{ws}/
@@ -1828,6 +1894,181 @@ func (b *Bootstrapper) ListProviderAPIBindings(ctx context.Context, orgUUID, wsU
 		out[providerName] = item.GetName()
 	}
 	return out, nil
+}
+
+// GetProviderAPIBindingAccess returns the desired, offered, and applied claim
+// state for one provider binding. A missing binding returns (nil, nil).
+func (b *Bootstrapper) GetProviderAPIBindingAccess(ctx context.Context, orgUUID, wsUUID, bindingName string) (*ProviderAPIBindingAccess, error) {
+	if orgUUID == "" || wsUUID == "" || bindingName == "" {
+		return nil, fmt.Errorf("GetProviderAPIBindingAccess: orgUUID, wsUUID, and bindingName are required")
+	}
+	wsConfig := configForPath(b.config, childWorkspacePath(orgUUID, wsUUID))
+	wsClient, err := dynamic.NewForConfig(wsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating child workspace client: %w", err)
+	}
+	binding, err := wsClient.Resource(apiBindingGVR).Get(ctx, bindingName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting APIBinding %q in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
+	}
+	access, err := providerAPIBindingAccess(binding)
+	if err != nil {
+		return nil, fmt.Errorf("reading APIBinding %q access state: %w", bindingName, err)
+	}
+	return access, nil
+}
+
+func providerAPIBindingAccess(binding *unstructured.Unstructured) (*ProviderAPIBindingAccess, error) {
+	if binding == nil {
+		return nil, fmt.Errorf("binding is required")
+	}
+	var typed apisv1alpha2.APIBinding
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(binding.Object, &typed); err != nil {
+		return nil, err
+	}
+	claim := func(pc apisv1alpha2.PermissionClaim, accepted bool) ProviderBindingClaim {
+		return ProviderBindingClaim{
+			Group:        pc.Group,
+			Resource:     pc.Resource,
+			Verbs:        append([]string(nil), pc.Verbs...),
+			IdentityHash: pc.IdentityHash,
+			Accepted:     accepted,
+		}
+	}
+	out := &ProviderAPIBindingAccess{BindingName: typed.Name, Phase: string(typed.Status.Phase)}
+	for _, pc := range typed.Spec.PermissionClaims {
+		out.SpecClaims = append(out.SpecClaims, claim(pc.PermissionClaim, pc.State == apisv1alpha2.ClaimAccepted))
+	}
+	for _, pc := range typed.Status.ExportPermissionClaims {
+		out.ExportClaims = append(out.ExportClaims, claim(pc, false))
+	}
+	for _, pc := range typed.Status.AppliedPermissionClaims {
+		out.AppliedClaims = append(out.AppliedClaims, claim(pc.PermissionClaim, true))
+	}
+	return out, nil
+}
+
+// AuthorizeProviderAPIBindingClaims additively accepts declared claims on an
+// existing binding. Existing entries are preserved byte-for-byte; requested
+// entries are created or refreshed with verbs and identity hashes sourced
+// from the provider's current APIExport. Conflicts are retried from a fresh
+// read so concurrent grants cannot be lost.
+func (b *Bootstrapper) AuthorizeProviderAPIBindingClaims(
+	ctx context.Context,
+	orgUUID, wsUUID, bindingName, exportPath, exportName string,
+	claims []ProviderClaim,
+) error {
+	if orgUUID == "" || wsUUID == "" || bindingName == "" || exportPath == "" || exportName == "" {
+		return fmt.Errorf("AuthorizeProviderAPIBindingClaims: orgUUID, wsUUID, bindingName, exportPath, and exportName are required")
+	}
+	if len(claims) == 0 {
+		return nil
+	}
+	identities, err := b.exportClaimIdentities(ctx, exportPath, exportName, claims)
+	if err != nil {
+		return err
+	}
+	verbs, err := b.exportClaimVerbs(ctx, exportPath, exportName, claims)
+	if err != nil {
+		return err
+	}
+	for i := range claims {
+		claims[i].Verbs = append([]string(nil), verbs[claims[i].Group+"/"+claims[i].Resource]...)
+	}
+	wsConfig := configForPath(b.config, childWorkspacePath(orgUUID, wsUUID))
+	wsClient, err := dynamic.NewForConfig(wsConfig)
+	if err != nil {
+		return fmt.Errorf("creating child workspace client: %w", err)
+	}
+	if err := authorizeProviderClaims(ctx, wsClient.Resource(apiBindingGVR), bindingName, exportPath, exportName, claims, identities); err != nil {
+		return fmt.Errorf("authorizing APIBinding %q claims in %s/%s: %w", bindingName, orgUUID, wsUUID, err)
+	}
+	return nil
+}
+
+func authorizeProviderClaims(
+	ctx context.Context,
+	bindings dynamic.ResourceInterface,
+	bindingName, exportPath, exportName string,
+	claims []ProviderClaim,
+	identities map[string]string,
+) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		existing, err := bindings.Get(ctx, bindingName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		existingPath, existingExport, err := apiBindingExportReference(existing)
+		if err != nil {
+			return err
+		}
+		if existingPath != exportPath || existingExport != exportName {
+			return fmt.Errorf("existing APIBinding references %q/%q, expected %q/%q", existingPath, existingExport, exportPath, exportName)
+		}
+		existingClaims, found, err := unstructured.NestedSlice(existing.Object, "spec", "permissionClaims")
+		if err != nil {
+			return err
+		}
+		if !found {
+			existingClaims = []any{}
+		}
+		indexes := make(map[string]int, len(existingClaims))
+		for i, raw := range existingClaims {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("spec.permissionClaims[%d] is not an object", i)
+			}
+			group, _, _ := unstructured.NestedString(m, "group")
+			resource, _, _ := unstructured.NestedString(m, "resource")
+			indexes[group+"/"+resource] = i
+		}
+
+		updatedClaims := append([]any(nil), existingClaims...)
+		for _, c := range claims {
+			key := c.Group + "/" + c.Resource
+			authorized := apisv1alpha2.AcceptablePermissionClaim{
+				ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+					PermissionClaim: apisv1alpha2.PermissionClaim{
+						GroupResource: apisv1alpha2.GroupResource{Group: c.Group, Resource: c.Resource},
+						Verbs:         append([]string(nil), c.Verbs...),
+						IdentityHash:  identities[key],
+					},
+					Selector: apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+				},
+				State: apisv1alpha2.ClaimAccepted,
+			}
+			authorizedMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&authorized)
+			if err != nil {
+				return fmt.Errorf("converting authorized claim %s: %w", key, err)
+			}
+			if i, ok := indexes[key]; ok {
+				// Preserve a tenant's existing selector. Re-authorizing a stale
+				// tuple may refresh its provider-controlled verbs/identity/state,
+				// but must never silently widen a tenant-narrowed object scope.
+				if current, ok := existingClaims[i].(map[string]any); ok {
+					if selector, found := current["selector"]; found {
+						authorizedMap["selector"] = runtime.DeepCopyJSONValue(selector)
+					}
+				}
+				updatedClaims[i] = authorizedMap
+			} else {
+				indexes[key] = len(updatedClaims)
+				updatedClaims = append(updatedClaims, authorizedMap)
+			}
+		}
+		if reflect.DeepEqual(existingClaims, updatedClaims) {
+			return nil
+		}
+		updated := existing.DeepCopy()
+		if err := unstructured.SetNestedSlice(updated.Object, updatedClaims, "spec", "permissionClaims"); err != nil {
+			return err
+		}
+		_, err = bindings.Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // DeleteProviderAPIBinding removes the named provider APIBinding from the

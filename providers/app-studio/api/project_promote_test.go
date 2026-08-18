@@ -27,11 +27,9 @@ import (
 	"testing"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -91,8 +89,8 @@ func TestGitManagedPromotionCreatesChangeRequestWithoutDirectDeploymentWrites(t 
 		t.Fatalf("commit arguments = %#v", commitArguments)
 	}
 	binding := findProjectProductionBinding(promoted)
-	if binding == nil || binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || !projectIsDeploymentBinding(binding) {
-		t.Fatalf("production binding = %+v, want read-only Deployment reference", binding)
+	if binding == nil || binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference || !projectIsGitManagedTargetBinding(binding) {
+		t.Fatalf("production binding = %+v, want read-only Infrastructure target reference", binding)
 	}
 	changeRequest, err := client.Resource(tenant.Resource{GVR: projectChangeRequestGVR, Kind: projectChangeRequestKind, Plural: "ChangeRequests"}, "").Get(context.Background(), response.GitOps.ChangeRequest, metav1.GetOptions{})
 	if err != nil {
@@ -104,12 +102,16 @@ func TestGitManagedPromotionCreatesChangeRequestWithoutDirectDeploymentWrites(t 
 	if policy, _, _ := unstructured.NestedString(changeRequest.Object, "spec", "mergePolicy"); policy != "AfterApproval" {
 		t.Fatalf("merge policy = %q", policy)
 	}
-	if _, err := client.Resource(tenant.Resource{GVR: projectReleaseGVR, Kind: projectReleaseKind, Plural: "Releases"}, "").Get(context.Background(), projectBindingValues(binding)["releaseRef"].(string), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("direct Release read error = %v, want NotFound", err)
+	if binding.ResourceRef.APIVersion != "infrastructure.faros.sh/v1alpha1" || binding.ResourceRef.Kind != "Instance" || binding.ResourceRef.Resource != "instances" {
+		t.Fatalf("production target = %+v, want concrete Infrastructure Instance", binding.ResourceRef)
 	}
-	deploymentGVR := schema.GroupVersionResource{Group: "deployments.faros.sh", Version: "v1alpha1", Resource: "deployments"}
-	if _, err := client.Resource(tenant.Resource{GVR: deploymentGVR, Kind: projectDeploymentKind, Plural: "Deployments"}, "").Get(context.Background(), projectTemplateProdInstanceName(p), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("direct Deployment read error = %v, want NotFound", err)
+	files, _ := commitArguments["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("committed files = %#v, want one concrete target manifest", commitArguments["files"])
+	}
+	file, _ := files[0].(map[string]any)
+	if !strings.HasSuffix(file["path"].(string), "/environments/production/instance.yaml") || !strings.Contains(file["content"].(string), "kind: Instance") {
+		t.Fatalf("committed target file = %#v", file)
 	}
 }
 
@@ -441,84 +443,70 @@ func TestProjectRequestedRedeployRevisionReadsPersistedProductionValues(t *testi
 	}
 }
 
-func TestProjectDeploymentBindingUsesNestedConfigurationAndRolloutID(t *testing.T) {
+func TestProjectGitOpsProductionBindingReferencesConcreteTarget(t *testing.T) {
 	p := projectForPromote("shop")
 	info := applicationTemplateForPromote()
 	images := map[string]string{
 		"frontendImage": "ghcr.io/acme/shop/frontend@sha256:aaa",
 		"backendImage":  "ghcr.io/acme/shop/backend@sha256:bbb",
 	}
-	binding, err := projectDeploymentProdBinding(p, info, "shop-release-abc", images, map[string]any{
+	direct, err := projectTemplateProdBinding(p, info, images, map[string]any{
 		"frontendPort": 8080,
 		"name":         "attacker",
 		"farosMode":    "development",
 	}, "rollout-42")
 	if err != nil {
-		t.Fatalf("projectDeploymentProdBinding: %v", err)
+		t.Fatalf("projectTemplateProdBinding: %v", err)
 	}
-	if binding.Provider != projectDeploymentProvider || binding.ResourceRef == nil ||
-		binding.ResourceRef.APIVersion != projectDeploymentAPIVersion ||
-		binding.ResourceRef.Kind != projectDeploymentKind ||
-		binding.ResourceRef.Resource != projectDeploymentResource ||
+	binding, err := projectGitOpsProductionBinding(p, info, projectBindingValues(&direct))
+	if err != nil {
+		t.Fatalf("projectGitOpsProductionBinding: %v", err)
+	}
+	if binding.Provider != projectInfrastructureProvider || binding.ResourceRef == nil ||
+		binding.ResourceRef.APIVersion != info.APIVersion ||
+		binding.ResourceRef.Kind != info.Kind ||
+		binding.ResourceRef.Resource != info.Resource ||
 		binding.ResourceRef.Name != "shop-prod" {
-		t.Fatalf("deployment binding = %+v", binding)
+		t.Fatalf("target binding = %+v", binding)
 	}
 	values, err := aiv1alpha1BindingValues(binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["releaseRef"] != "shop-release-abc" || values["className"] != projectDeploymentClassName || values["rolloutID"] != "rollout-42" {
-		t.Fatalf("deployment values = %#v", values)
+	if values[projectRedeployRevisionField] != "rollout-42" || values["frontendImage"] != images["frontendImage"] || values["farosMode"] != "production" {
+		t.Fatalf("target values = %#v", values)
 	}
-	configuration, _ := values["configuration"].(map[string]any)
-	if configuration["frontendPort"] != float64(8080) {
-		t.Fatalf("configuration = %#v, want tenant production input", configuration)
+	if values["frontendPort"] != float64(8080) {
+		t.Fatalf("target values = %#v, want tenant production input", values)
 	}
-	for _, reserved := range []string{"name", "farosMode", "frontendImage", "backendImage", projectRedeployRevisionField} {
-		if _, found := configuration[reserved]; found {
-			t.Fatalf("configuration retained platform-owned %q: %#v", reserved, configuration)
-		}
-	}
-	if got := projectProductionConfiguration(&binding); !reflect.DeepEqual(got, configuration) {
-		t.Fatalf("production configuration = %#v, want %#v", got, configuration)
+	if got := projectProductionConfiguration(&binding); !reflect.DeepEqual(got, values) {
+		t.Fatalf("production configuration = %#v, want %#v", got, values)
 	}
 	if got := projectRequestedRedeployRevision(&binding); got != "rollout-42" {
 		t.Fatalf("requested rollout = %q, want rollout-42", got)
 	}
 }
 
-func TestProjectReleaseForPromotionIsDeterministicAndArtifactOrdered(t *testing.T) {
+func TestProjectGitOpsTargetRevisionIsDeterministicAndTracksSourceAndIntent(t *testing.T) {
 	p := projectForPromoteWithRepository("shop", "repo-a")
 	info := applicationTemplateForPromote()
-	firstName, first, err := projectReleaseForPromotion(p, info, "commit-abc", map[string]string{
-		"frontend": "frontend@sha256:aaa",
-		"backend":  "backend@sha256:bbb",
-	})
+	first, err := projectGitOpsTargetRevision(p, info, "commit-abc", map[string]string{"frontendImage": "frontend@sha256:aaa", "backendImage": "backend@sha256:bbb"}, map[string]any{"replicas": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondName, second, err := projectReleaseForPromotion(p, info, "commit-abc", map[string]string{
-		"backend":  "backend@sha256:bbb",
-		"frontend": "frontend@sha256:aaa",
-	})
+	second, err := projectGitOpsTargetRevision(p, info, "commit-abc", map[string]string{"backendImage": "backend@sha256:bbb", "frontendImage": "frontend@sha256:aaa"}, map[string]any{"replicas": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstName != secondName || !reflect.DeepEqual(first, second) {
-		t.Fatalf("release is not deterministic: %q %#v / %q %#v", firstName, first, secondName, second)
+	if first != second || !strings.HasPrefix(first, "git-") {
+		t.Fatalf("target revision is not deterministic: %q / %q", first, second)
 	}
-	if first.Source.RepositoryRef != "repo-a" || first.Source.Revision != "commit-abc" || first.BlueprintRef.Name != "application" {
-		t.Fatalf("release source/blueprint = %#v", first)
-	}
-	if len(first.Artifacts) != 2 || first.Artifacts[0].Name != "backend" || first.Artifacts[1].Name != "frontend" {
-		t.Fatalf("release artifacts = %#v, want stable component-name ordering", first.Artifacts)
-	}
-	changedName, _, err := projectReleaseForPromotion(p, info, "commit-def", map[string]string{"frontend": "frontend@sha256:aaa"})
+	changed, err := projectGitOpsTargetRevision(p, info, "commit-def", map[string]string{"frontendImage": "frontend@sha256:aaa", "backendImage": "backend@sha256:bbb"}, map[string]any{"replicas": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changedName == firstName {
-		t.Fatalf("different release evidence reused name %q", firstName)
+	if changed == first {
+		t.Fatalf("different source revision reused target revision %q", first)
 	}
 }
 
@@ -589,22 +577,22 @@ func TestProjectPromotionReadinessRequiresObservedProviderObject(t *testing.T) {
 	p := projectForPromote("shop")
 	binding := aiv1alpha1.ProjectProviderBindingSpec{
 		Name:     projectProductionBindingName,
-		Provider: projectDeploymentProvider,
-		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		Provider: projectInfrastructureProvider,
+		Kind:     aiv1alpha1.ProjectBindingKindProviderReference,
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
 			Name:       projectTemplateProdInstanceName(p),
-			APIVersion: projectDeploymentAPIVersion,
-			Kind:       projectDeploymentKind,
-			Resource:   projectDeploymentResource,
+			APIVersion: "infrastructure.faros.sh/v1alpha1",
+			Kind:       "Instance",
+			Resource:   "instances",
 		},
-		Values: runtime.RawExtension{Raw: []byte(`{"releaseRef":"release-1","configuration":{},"rolloutID":"rollout-1"}`)},
+		Values: runtime.RawExtension{Raw: []byte(`{"farosRedeployRevision":"rollout-1"}`)},
 	}
 
 	missingClient := asclient.NewFromDynamic(publishingTestDynamic())
 	missing := projectPromotionReadinessResponse{}
 	populateProjectPromotionProduction(context.Background(), missingClient, p, binding, identity{}, &missing)
 	if missing.ProductionObserved {
-		t.Fatal("productionObserved = true when the referenced Deployment is absent")
+		t.Fatal("productionObserved = true when the referenced target is absent")
 	}
 	raw, err := json.Marshal(missing)
 	if err != nil {
@@ -618,17 +606,17 @@ func TestProjectPromotionReadinessRequiresObservedProviderObject(t *testing.T) {
 		t.Fatalf("productionObserved JSON = %#v, want explicit false", decoded["productionObserved"])
 	}
 
-	deployment := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectDeploymentKind,
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Instance",
 		"metadata":   map[string]any{"name": projectTemplateProdInstanceName(p)},
 		"status":     map[string]any{"phase": "Pending"},
 	}}
-	presentClient := asclient.NewFromDynamic(publishingTestDynamic(deployment))
+	presentClient := asclient.NewFromDynamic(publishingTestDynamic(instance))
 	present := projectPromotionReadinessResponse{}
 	populateProjectPromotionProduction(context.Background(), presentClient, p, binding, identity{}, &present)
 	if !present.ProductionObserved {
-		t.Fatal("productionObserved = false after the referenced Deployment was fetched")
+		t.Fatal("productionObserved = false after the referenced target was fetched")
 	}
 }
 
@@ -642,24 +630,15 @@ func TestProjectObservedRedeployRevisionReadsProviderInstanceSpec(t *testing.T) 
 	if got := projectObservedRedeployRevision(nil); got != "" {
 		t.Fatalf("nil instance revision = %q, want empty", got)
 	}
-	deployment := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectDeploymentKind,
-		"status":     map[string]any{"observedRolloutID": " deployment-rollout-42 "},
-	}}
-	if got := projectObservedRedeployRevision(deployment); got != "deployment-rollout-42" {
-		t.Fatalf("deployment observed rollout = %q, want deployment-rollout-42", got)
-	}
 }
 
-func TestGitOpsProductionReadUsesLiveDeploymentInsteadOfProjectSnapshot(t *testing.T) {
+func TestGitOpsProductionReadUsesLiveTargetInsteadOfProjectSnapshot(t *testing.T) {
 	instance := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
-		"configuration": map[string]any{"replicas": int64(4)},
-		"rolloutID":     "merged-config-sha",
+		"values": map[string]any{"replicas": int64(4), projectRedeployRevisionField: "merged-config-sha"},
 	}}}
-	configuration, rolloutID := projectGitOpsObservedProduction(instance)
-	if !reflect.DeepEqual(configuration, map[string]any{"replicas": int64(4)}) || rolloutID != "merged-config-sha" {
-		t.Fatalf("observed configuration = %#v rollout = %q", configuration, rolloutID)
+	values := projectObservedTargetValues(instance)
+	if values["replicas"] != int64(4) || values[projectRedeployRevisionField] != "merged-config-sha" {
+		t.Fatalf("observed target values = %#v", values)
 	}
 }
 
@@ -744,38 +723,25 @@ func TestProjectBuildAndPromotionRequireExactReviewedCommitImages(t *testing.T) 
 				t.Fatalf("promoteProject returned error for complete exact tags: %v", promoteErr)
 			} else {
 				binding := findProjectProductionBinding(promoted)
-				if !projectIsDeploymentBinding(binding) {
-					t.Fatalf("promotion binding = %+v, want deployment provider", binding)
+				if binding == nil || binding.Kind != aiv1alpha1.ProjectBindingKindProviderResource || binding.ResourceRef == nil || binding.ResourceRef.Resource != "instances" {
+					t.Fatalf("promotion binding = %+v, want direct Infrastructure target", binding)
 				}
 				values := projectBindingValues(binding)
-				releaseName, _ := values["releaseRef"].(string)
-				if releaseName == "" || values["rolloutID"] != response.RolloutRevision {
+				if values[projectRedeployRevisionField] != response.RolloutRevision {
 					t.Fatalf("promotion values = %#v, response = %+v", values, response)
 				}
-				release, getErr := client.Resource(tenant.Resource{GVR: projectReleaseGVR, Kind: projectReleaseKind, Plural: "Releases"}, "").Get(context.Background(), releaseName, metav1.GetOptions{})
-				if getErr != nil {
-					t.Fatalf("get immutable release: %v", getErr)
-				}
-				if revision, _, _ := unstructured.NestedString(release.Object, "spec", "source", "revision"); revision != "commit-current" {
-					t.Fatalf("release revision = %q, want commit-current", revision)
-				}
-				artifacts, _, _ := unstructured.NestedSlice(release.Object, "spec", "artifacts")
-				if len(artifacts) != 2 {
-					t.Fatalf("release artifacts = %#v, want exact two-component evidence", artifacts)
+				if values["frontendImage"] != "ghcr.io/acme/shop/frontend@sha256:front" || values["backendImage"] != "ghcr.io/acme/shop/backend@sha256:back" {
+					t.Fatalf("promotion values = %#v, want immutable image digests", values)
 				}
 
-				// Re-promoting the same exact evidence reuses the immutable Release
-				// while minting a fresh rollout identity.
-				again, secondResponse, secondErr := (&Server{}).promoteProject(context.Background(), client, identity{}, promoted, nil, nil)
+				// Direct re-promotion mints a fresh rollout identity while retaining
+				// the exact immutable image digests.
+				_, secondResponse, secondErr := (&Server{}).promoteProject(context.Background(), client, identity{}, promoted, nil, nil)
 				if secondErr != nil {
 					t.Fatalf("re-promote exact release: %v", secondErr)
 				}
-				secondValues := projectBindingValues(findProjectProductionBinding(again))
-				if secondValues["releaseRef"] != releaseName {
-					t.Fatalf("re-promote releaseRef = %#v, want %q", secondValues["releaseRef"], releaseName)
-				}
 				if secondResponse.RolloutRevision == response.RolloutRevision {
-					t.Fatalf("re-promote rolloutID reused %q", response.RolloutRevision)
+					t.Fatalf("re-promote revision reused %q", response.RolloutRevision)
 				}
 			}
 		})
@@ -826,11 +792,12 @@ func TestUpsertProjectProductionBindingReplacesGitManagedReference(t *testing.T)
 	if err := enableProjectGitOps(p); err != nil {
 		t.Fatal(err)
 	}
-	first, err := projectGitOpsProductionBinding(p, map[string]any{"releaseRef": "release-a", "configuration": map[string]any{"replicas": 1}})
+	info := applicationTemplateForPromote()
+	first, err := projectGitOpsProductionBinding(p, info, map[string]any{projectRedeployRevisionField: "release-a", "replicas": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := projectGitOpsProductionBinding(p, map[string]any{"releaseRef": "release-b", "configuration": map[string]any{"replicas": 2}})
+	second, err := projectGitOpsProductionBinding(p, info, map[string]any{projectRedeployRevisionField: "release-b", "replicas": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,7 +807,7 @@ func TestUpsertProjectProductionBindingReplacesGitManagedReference(t *testing.T)
 	if len(production.Bindings) != 1 {
 		t.Fatalf("production bindings = %+v, want one current Git reference", production.Bindings)
 	}
-	if values := projectBindingValues(&production.Bindings[0]); values["releaseRef"] != "release-b" {
+	if values := projectBindingValues(&production.Bindings[0]); values[projectRedeployRevisionField] != "release-b" {
 		t.Fatalf("production snapshot = %#v, want release-b", values)
 	}
 }

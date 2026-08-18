@@ -17,23 +17,13 @@ import (
 
 func TestDeploymentPermissionClaimsUseDeploymentIdentity(t *testing.T) {
 	claims := deploymentPermissionClaims(" deployments-hash ")
-	if len(claims) != 3 {
-		t.Fatalf("deployment claims = %d, want Release, Deployment, and RepositorySync", len(claims))
+	if len(claims) != 1 {
+		t.Fatalf("deployment claims = %d, want RepositorySync only", len(claims))
 	}
-	if claims[0].Group != "deployments.faros.sh" || claims[0].Resource != "releases" ||
-		!slices.Equal(claims[0].Verbs, []string{"get", "list", "watch", "create"}) ||
+	if claims[0].Group != "deployments.faros.sh" || claims[0].Resource != "repositorysyncs" ||
+		!slices.Equal(claims[0].Verbs, []string{"get", "list", "watch", "create", "update", "patch", "delete"}) ||
 		claims[0].IdentityHash != "deployments-hash" {
-		t.Fatalf("Release claim = %+v", claims[0])
-	}
-	if claims[1].Group != "deployments.faros.sh" || claims[1].Resource != "deployments" ||
-		!slices.Equal(claims[1].Verbs, []string{"get", "list", "watch", "create", "update", "patch", "delete"}) ||
-		claims[1].IdentityHash != "deployments-hash" {
-		t.Fatalf("Deployment claim = %+v", claims[1])
-	}
-	if claims[2].Group != "deployments.faros.sh" || claims[2].Resource != "repositorysyncs" ||
-		!slices.Equal(claims[2].Verbs, []string{"get", "list", "watch", "create", "update", "patch", "delete"}) ||
-		claims[2].IdentityHash != "deployments-hash" {
-		t.Fatalf("RepositorySync claim = %+v", claims[2])
+		t.Fatalf("RepositorySync claim = %+v", claims[0])
 	}
 }
 
@@ -74,10 +64,6 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 		{name: "chart", body: string(chart)},
 	} {
 		for _, required := range []string{
-			"- resource: releases\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\"]",
-			"- resource: releases\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\"]\n        tenantScoped: true\n        optional: true",
-			"- resource: deployments\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
-			"- resource: deployments\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n        tenantScoped: true\n        optional: true",
 			"- resource: repositorysyncs\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
 			"- resource: repositorysyncs\n        group: deployments.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n        tenantScoped: true\n        optional: true",
 			"- resource: changerequests\n        group: code.faros.sh\n        verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]",
@@ -91,6 +77,11 @@ func TestCatalogAndChartKeepDeploymentContractInSync(t *testing.T) {
 		}
 		if strings.Contains(source.body, "- name: deployments") {
 			t.Errorf("%s still declares Deployments as a hard CatalogEntry dependency", source.name)
+		}
+		for _, removed := range []string{"- resource: releases\n        group: deployments.faros.sh", "- resource: deployments\n        group: deployments.faros.sh"} {
+			if strings.Contains(source.body, removed) {
+				t.Errorf("%s still advertises target-specific Deployments API %q", source.name, removed)
+			}
 		}
 	}
 

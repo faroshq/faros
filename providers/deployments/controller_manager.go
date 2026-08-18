@@ -23,7 +23,6 @@ import (
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
-	deploymentcontroller "github.com/faroshq/provider-deployments/controller/deployment"
 	repositorysynccontroller "github.com/faroshq/provider-deployments/controller/repositorysync"
 	deploymentscheme "github.com/faroshq/provider-deployments/scheme"
 	sdkinstall "github.com/faroshq/provider-sdk/install"
@@ -77,9 +76,6 @@ func startControllerManager(
 	mgr, err := mcmanager.New(config, provider, manager.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}})
 	if err != nil {
 		return fmt.Errorf("create multicluster manager: %w", err)
-	}
-	if err := (&deploymentcontroller.Reconciler{}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("deployment controller: %w", err)
 	}
 	if err := (&repositorysynccontroller.Reconciler{Source: source}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("repositorysync controller: %w", err)

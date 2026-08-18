@@ -126,7 +126,7 @@ func TestCatalogReconcilerPropagatesOptionalPermissionClaims(t *testing.T) {
 			APIExport: &providersv1alpha1.ProviderAPIExport{
 				Name: "optional-claims.faros.sh",
 				PermissionClaims: []providersv1alpha1.ProviderPermissionClaim{
-					{Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
+					{Purpose: "Create repository syncs", Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
 					{Group: "code.faros.sh", Resource: "repositories", TenantScoped: true},
 				},
 			},
@@ -152,6 +152,9 @@ func TestCatalogReconcilerPropagatesOptionalPermissionClaims(t *testing.T) {
 	}
 	if !got.PermissionClaims[0].Optional {
 		t.Fatalf("optional claim was not propagated: %#v", got.PermissionClaims[0])
+	}
+	if got.PermissionClaims[0].Purpose != "Create repository syncs" {
+		t.Fatalf("claim purpose was not propagated: %#v", got.PermissionClaims[0])
 	}
 	if got.PermissionClaims[1].Optional {
 		t.Fatalf("required claim became optional: %#v", got.PermissionClaims[1])

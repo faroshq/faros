@@ -2037,12 +2037,11 @@ local_resource(
     labels=['providers-code'],
 )
 
-# --- providers-deployments (reviewed-production reconciliation) ---
-# Deployments consumes Code's checkout API and Infrastructure's Instance API.
-# The host-side init resource resolves both identity hashes, bootstraps the
-# provider workspace, and writes the runtime kubeconfig. The pod chart then
-# skips its duplicate init container and serves entirely in-cluster, matching
-# main's provider development model.
+# --- providers-deployments (reviewed desired-state sync) ---
+# Code is the required source provider. Infrastructure and other target APIs
+# are optional tenant-authorized capabilities. The host-side init resource
+# bootstraps the provider workspace and writes the runtime kubeconfig; the pod
+# chart then skips its duplicate init container and serves in-cluster.
 provider_kubeconfig_sync('deployments', '.kcp/deployments-runtime.kubeconfig', ['providers-deployments'])
 provider_pod(
     'deployments', 8093,
@@ -2075,7 +2074,7 @@ local_resource(
              kc=KCP_ADMIN_KUBECONFIG, sv=KCP_ADMIN_SERVER),
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['faros-hub', 'infrastructure-init', 'code-init', 'deployments-register'],
+    resource_deps=['faros-hub', 'code-init', 'deployments-register'],
     labels=['providers-deployments'],
 )
 

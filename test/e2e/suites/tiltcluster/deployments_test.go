@@ -35,9 +35,6 @@ const (
 var (
 	deploymentsAPIBindingGVR = schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings"}
 	deploymentsWorkspaceGVR  = schema.GroupVersionResource{Group: "tenancy.kcp.io", Version: "v1alpha1", Resource: "workspaces"}
-	deploymentsReleaseGVR    = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "releases"}
-	deploymentsDeploymentGVR = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "deployments"}
-	deploymentsTemplateGVR   = schema.GroupVersionResource{Group: infraGroup, Version: "v1alpha1", Resource: "templates"}
 	deploymentsInstanceGVR   = schema.GroupVersionResource{
 		Group: infraGroup, Version: "v1alpha1", Resource: "instances",
 	}
@@ -68,21 +65,22 @@ func TestDeploymentsProviderRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get APIExport %q in %s: %v", deploymentsAPIExport, deploymentsWorkspace, err)
 	}
-	for _, resource := range []string{"releases", "deployments", "repositorysyncs"} {
-		if !apiExportHasResource(export.Object, resource, deploymentsGroup) {
-			t.Fatalf("APIExport %q missing %s/%s; spec.resources=%v",
-				deploymentsAPIExport, deploymentsGroup, resource, nestedSlice(export.Object, "spec", "resources"))
-		}
+	resources := nestedSlice(export.Object, "spec", "resources")
+	if len(resources) != 1 || !apiExportHasResource(export.Object, "repositorysyncs", deploymentsGroup) {
+		t.Fatalf("APIExport %q resources = %v, want only %s/repositorysyncs", deploymentsAPIExport, resources, deploymentsGroup)
 	}
 
 	infraExport, err := kcpAdminDynamic(t, providerWorkspace).
 		Resource(apiExportGVR).Get(ctx, infraAPIExportName, metav1.GetOptions{})
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		t.Fatalf("get Infrastructure APIExport identity: %v", err)
 	}
-	infraIdentity, _, _ := nestedString(infraExport.Object, "status", "identityHash")
-	if infraIdentity == "" {
-		t.Fatal("Infrastructure APIExport has no identityHash")
+	infraIdentity := ""
+	if err == nil {
+		infraIdentity, _, _ = nestedString(infraExport.Object, "status", "identityHash")
+		if infraIdentity == "" {
+			t.Fatal("installed Infrastructure APIExport has no identityHash")
+		}
 	}
 	codeExport := mustAPIExport(t, codeWorkspace, codeAPIExport)
 	codeIdentity, _, _ := nestedString(codeExport.Object, "status", "identityHash")
@@ -90,18 +88,24 @@ func TestDeploymentsProviderRegistered(t *testing.T) {
 		t.Fatal("Code APIExport has no identityHash")
 	}
 
-	wantClaims := []struct {
+	wantExportClaims := []struct {
 		group, resource, identity string
 		verbs                     []string
 	}{
-		{infraGroup, "instances", infraIdentity, []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 		{codeGroup, "repositorycheckouts", codeIdentity, []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{"", "configmaps", "", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+	}
+	if infraIdentity != "" {
+		wantExportClaims = append(wantExportClaims, struct {
+			group, resource, identity string
+			verbs                     []string
+		}{infraGroup, "instances", infraIdentity, []string{"get", "create", "update", "patch", "delete"}})
 	}
 	claims := nestedSlice(export.Object, "spec", "permissionClaims")
-	if len(claims) != len(wantClaims) {
-		t.Fatalf("permissionClaims count = %d, want %d: %v", len(claims), len(wantClaims), claims)
+	if len(claims) != len(wantExportClaims) {
+		t.Fatalf("permissionClaims count = %d, want %d: %v", len(claims), len(wantExportClaims), claims)
 	}
-	for _, want := range wantClaims {
+	for _, want := range wantExportClaims {
 		claim, ok := permissionClaim(claims, want.group, want.resource)
 		if !ok {
 			t.Fatalf("missing permission claim for %s/%s", want.group, want.resource)
@@ -109,147 +113,53 @@ func TestDeploymentsProviderRegistered(t *testing.T) {
 		if got, _ := claim["identityHash"].(string); got != want.identity {
 			t.Fatalf("claim %s identityHash = %q, want %q", want.resource, got, want.identity)
 		}
-		for _, verb := range want.verbs {
-			if !slices.Contains(stringSlice(claim["verbs"]), verb) {
-				t.Fatalf("claim %s missing verb %q: %v", want.resource, verb, claim["verbs"])
-			}
+		if got := stringSlice(claim["verbs"]); !slices.Equal(got, want.verbs) {
+			t.Fatalf("claim %s verbs = %v, want %v", want.resource, got, want.verbs)
 		}
 	}
 
-	t.Logf("deployments provider registered and ready: APIExport=%s identity=%s", deploymentsAPIExport, infraIdentity)
-}
-
-// TestDeploymentsProviderReconcilesTenantDeployment proves the controller's
-// effective tenant authority, not only its registration metadata. A fresh
-// workspace binds Infrastructure and Deployments with accepted claims, then a
-// Release/Deployment must materialize a current, Ready Infrastructure Instance.
-// It then proves both lifecycle policies: Retain detaches before the caller
-// explicitly cleans up the Instance, while Delete removes both the Instance and
-// its runtime object through the full finalizer chain.
-func TestDeploymentsProviderReconcilesTenantDeployment(t *testing.T) {
-	requireStack(t)
-	ctx := context.Background()
-	runtimeClient := infrastructureRuntimeClient(t)
-	testStarted := time.Now()
-
-	infraExport, err := kcpAdminDynamic(t, providerWorkspace).
-		Resource(apiExportGVR).Get(ctx, infraAPIExportName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Infrastructure APIExport identity: %v", err)
+	wantCatalogClaims := []struct {
+		group, resource string
+		verbs           []string
+		optional        bool
+	}{
+		{codeGroup, "repositorycheckouts", []string{"get", "list", "watch", "create", "update", "patch", "delete"}, false},
+		{infraGroup, "instances", []string{"get", "create", "update", "patch", "delete"}, true},
+		{"", "configmaps", []string{"get", "list", "watch", "create", "update", "patch", "delete"}, true},
 	}
-	infraIdentity, _, _ := nestedString(infraExport.Object, "status", "identityHash")
-	if infraIdentity == "" {
-		t.Fatal("Infrastructure APIExport has no identityHash")
+	catalogClaims := nestedSlice(entry.Object, "spec", "apiExport", "permissionClaims")
+	if len(catalogClaims) != len(wantCatalogClaims) {
+		t.Fatalf("CatalogEntry permissionClaims count = %d, want %d: %v", len(catalogClaims), len(wantCatalogClaims), catalogClaims)
 	}
-	codeExport := mustAPIExport(t, codeWorkspace, codeAPIExport)
-	codeIdentity, _, _ := nestedString(codeExport.Object, "status", "identityHash")
-	if codeIdentity == "" {
-		t.Fatal("Code APIExport has no identityHash")
-	}
-
-	workspaceName := "e2e-deployments-" + shortNonce()
-	parent := kcpAdminDynamic(t, "root:faros")
-	workspacePath := createDeploymentsWorkspace(t, parent, workspaceName)
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := parent.Resource(deploymentsWorkspaceGVR).Delete(cleanupCtx, workspaceName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			t.Errorf("cleanup deployments workspace %q: %v", workspaceName, err)
+	for _, want := range wantCatalogClaims {
+		catalogClaim, ok := permissionClaim(catalogClaims, want.group, want.resource)
+		if !ok {
+			t.Fatalf("CatalogEntry missing permission claim for %s/%s", want.group, want.resource)
 		}
-		waitTiltResourceGone(t, parent.Resource(deploymentsWorkspaceGVR), workspaceName, time.Minute)
-	})
-
-	tenant := kcpAdminDynamic(t, workspacePath)
-	createBinding(t, tenant, infrastructureBinding())
-	waitBindingBound(t, tenant, "infrastructure")
-	createBinding(t, tenant, deploymentsBinding(infraIdentity, codeIdentity))
-	waitBindingBound(t, tenant, deploymentsProviderName)
-
-	if !waitTilt(t, deploymentsTestWait, func() (bool, string) {
-		_, err := tenant.Resource(deploymentsTemplateGVR).Get(ctx, "application", metav1.GetOptions{})
-		return err == nil, fmt.Sprintf("application Template: %v", err)
-	}) {
-		t.Fatalf("application Template was not visible in tenant %s", workspacePath)
+		if got := stringSlice(catalogClaim["verbs"]); !slices.Equal(got, want.verbs) {
+			t.Fatalf("CatalogEntry claim %s verbs = %v, want %v", want.resource, got, want.verbs)
+		}
+		if got, _ := catalogClaim["optional"].(bool); got != want.optional {
+			t.Fatalf("CatalogEntry claim %s optional = %t, want %t", want.resource, got, want.optional)
+		}
+		if tenantScoped, _ := catalogClaim["tenantScoped"].(bool); !tenantScoped {
+			t.Fatalf("CatalogEntry claim %s is not tenant-scoped", want.resource)
+		}
+		if purpose, _ := catalogClaim["purpose"].(string); purpose == "" {
+			t.Fatalf("CatalogEntry claim %s has no human-readable purpose", want.resource)
+		}
 	}
 
-	releaseName := "release-" + shortNonce()
-	deploymentName := "deployment-" + shortNonce()
-	release := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": deploymentsGroup + "/v1alpha1",
-		"kind":       "Release",
-		"metadata":   map[string]any{"name": releaseName},
-		"spec": map[string]any{
-			"source":       map[string]any{"repositoryRef": "e2e-repository", "revision": "0123456789abcdef"},
-			"blueprintRef": map[string]any{"name": "application"},
-			"artifacts": []any{
-				map[string]any{"name": "web", "image": "ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3"},
-				map[string]any{"name": "api", "image": "ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3"},
-			},
-		},
-	}}
-	createTenantObject(t, tenant, deploymentsReleaseGVR, release)
-	deployment := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": deploymentsGroup + "/v1alpha1",
-		"kind":       "Deployment",
-		"metadata":   map[string]any{"name": deploymentName},
-		"spec": map[string]any{
-			"releaseRef": releaseName,
-			"className":  "kro-direct",
-			"rolloutID":  "e2e-rollout-1",
-			"configuration": map[string]any{
-				"database": map[string]any{"version": "16"},
-				"oidc":     map[string]any{"mode": "none"},
-			},
-		},
-	}}
-	createTenantObject(t, tenant, deploymentsDeploymentGVR, deployment)
+	dependencies := nestedSlice(entry.Object, "spec", "dependencies")
+	if len(dependencies) != 1 {
+		t.Fatalf("CatalogEntry dependencies = %v, want only Code", dependencies)
+	}
+	dependency, ok := dependencies[0].(map[string]any)
+	if !ok || dependency["name"] != codeProviderName {
+		t.Fatalf("CatalogEntry dependency = %v, want Code", dependencies[0])
+	}
 
-	instance := waitDeploymentInstanceReady(t, tenant, deploymentName, "e2e-rollout-1")
-	retainRuntime := deploymentRuntimeTarget(t, instance)
-	t.Logf("Retain Deployment %q reached a current Ready backend in %s", deploymentName, time.Since(testStarted).Round(time.Second))
-
-	if err := tenant.Resource(deploymentsDeploymentGVR).Delete(ctx, deploymentName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("delete retained Deployment %q: %v", deploymentName, err)
-	}
-	waitTiltResourceGone(t, tenant.Resource(deploymentsDeploymentGVR), deploymentName, deploymentsTestWait)
-	instance, err = tenant.Resource(deploymentsInstanceGVR).Get(ctx, deploymentName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Retain policy removed Instance %q: %v", deploymentName, err)
-	}
-	if instance.GetLabels()["deployments.faros.sh/deployment"] != "" {
-		t.Fatalf("retained Instance still carries Deployment ownership label: %v", instance.GetLabels())
-	}
-	if instance.GetAnnotations()["deployments.faros.sh/last-applied-spec"] != "" {
-		t.Fatalf("retained Instance still carries managed-spec ownership: %v", instance.GetAnnotations())
-	}
-	if err := tenant.Resource(deploymentsInstanceGVR).Delete(ctx, deploymentName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("delete retained Instance %q during cleanup: %v", deploymentName, err)
-	}
-	waitTiltResourceGone(t, tenant.Resource(deploymentsInstanceGVR), deploymentName, deploymentsTestWait)
-	waitTiltResourceGone(t, runtimeClient.Resource(retainRuntime.gvr).Namespace(retainRuntime.namespace), retainRuntime.name, deploymentsTestWait)
-	t.Logf("Retain cleanup removed Instance and runtime object in %s", time.Since(testStarted).Round(time.Second))
-
-	deleteName := "deployment-delete-" + shortNonce()
-	deleteDeployment := deployment.DeepCopy()
-	deleteDeployment.SetName(deleteName)
-	if err := unstructured.SetNestedField(deleteDeployment.Object, "Delete", "spec", "deletionPolicy"); err != nil {
-		t.Fatalf("set Delete policy: %v", err)
-	}
-	if err := unstructured.SetNestedField(deleteDeployment.Object, "e2e-rollout-2", "spec", "rolloutID"); err != nil {
-		t.Fatalf("set Delete rollout: %v", err)
-	}
-	createTenantObject(t, tenant, deploymentsDeploymentGVR, deleteDeployment)
-	deleteInstance := waitDeploymentInstanceReady(t, tenant, deleteName, "e2e-rollout-2")
-	deleteRuntime := deploymentRuntimeTarget(t, deleteInstance)
-	t.Logf("Delete Deployment %q reached a current Ready backend in %s", deleteName, time.Since(testStarted).Round(time.Second))
-
-	if err := tenant.Resource(deploymentsDeploymentGVR).Delete(ctx, deleteName, metav1.DeleteOptions{}); err != nil {
-		t.Fatalf("delete Delete-policy Deployment %q: %v", deleteName, err)
-	}
-	waitTiltResourceGone(t, tenant.Resource(deploymentsDeploymentGVR), deleteName, deploymentsTestWait)
-	waitTiltResourceGone(t, tenant.Resource(deploymentsInstanceGVR), deleteName, deploymentsTestWait)
-	waitTiltResourceGone(t, runtimeClient.Resource(deleteRuntime.gvr).Namespace(deleteRuntime.namespace), deleteRuntime.name, deploymentsTestWait)
-	t.Logf("Delete policy removed Deployment, Instance, and runtime object in %s", time.Since(testStarted).Round(time.Second))
+	t.Logf("deployments provider registered and ready: APIExport=%s codeIdentity=%s", deploymentsAPIExport, codeIdentity)
 }
 
 type deploymentRuntimeRef struct {
@@ -258,44 +168,25 @@ type deploymentRuntimeRef struct {
 	name      string
 }
 
-func waitDeploymentInstanceReady(t *testing.T, tenant dynamic.Interface, deploymentName, rolloutID string) *unstructured.Unstructured {
+func waitInfrastructureInstanceReady(t *testing.T, tenant dynamic.Interface, instanceName string) *unstructured.Unstructured {
 	t.Helper()
 	var ready *unstructured.Unstructured
 	if !waitTilt(t, deploymentsTestWait, func() (bool, string) {
-		instance, err := tenant.Resource(deploymentsInstanceGVR).Get(context.Background(), deploymentName, metav1.GetOptions{})
+		instance, err := tenant.Resource(deploymentsInstanceGVR).Get(context.Background(), instanceName, metav1.GetOptions{})
 		if err != nil {
 			return false, err.Error()
 		}
-		template, _, _ := nestedString(instance.Object, "spec", "template")
-		values, _, _ := unstructured.NestedMap(instance.Object, "spec", "values")
-		if template != "application" ||
-			values["webImage"] != "ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3" ||
-			values["apiImage"] != "ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3" ||
-			values["farosRedeployRevision"] != rolloutID {
-			return false, fmt.Sprintf("instance template=%q values not projected: %#v", template, values)
-		}
-
-		current, err := tenant.Resource(deploymentsDeploymentGVR).Get(context.Background(), deploymentName, metav1.GetOptions{})
-		if err != nil {
-			return false, err.Error()
-		}
-		backendName, _, _ := nestedString(current.Object, "status", "backendRef", "name")
-		observedRollout, _, _ := nestedString(current.Object, "status", "observedRolloutID")
-		deploymentObserved, _, _ := unstructured.NestedInt64(current.Object, "status", "observedGeneration")
-		deploymentPhase, _, _ := nestedString(current.Object, "status", "phase")
 		observedGeneration, _, _ := unstructured.NestedInt64(instance.Object, "status", "observedGeneration")
 		phase, _, _ := nestedString(instance.Object, "status", "phase")
-		if backendName != deploymentName || observedRollout != rolloutID ||
-			deploymentObserved != current.GetGeneration() || deploymentPhase != "Ready" || !conditionTrue(current.Object, "Ready") ||
-			observedGeneration != instance.GetGeneration() || phase != "Ready" || !conditionTrue(instance.Object, "Ready") {
+		if observedGeneration != instance.GetGeneration() || phase != "Ready" || !conditionTrue(instance.Object, "Ready") {
 			status, reason, message := conditionState(instance.Object, "Ready")
-			return false, fmt.Sprintf("backend=%q rollout=%q deployment phase=%q observedGeneration=%d/%d instance phase=%q observedGeneration=%d/%d Ready=%s reason=%s message=%s",
-				backendName, observedRollout, deploymentPhase, deploymentObserved, current.GetGeneration(), phase, observedGeneration, instance.GetGeneration(), status, reason, message)
+			return false, fmt.Sprintf("phase=%q observedGeneration=%d/%d Ready=%s reason=%s message=%s",
+				phase, observedGeneration, instance.GetGeneration(), status, reason, message)
 		}
 		ready = instance
 		return true, ""
 	}) {
-		t.Fatalf("Deployment %q did not reach a current Ready Infrastructure Instance", deploymentName)
+		t.Fatalf("Infrastructure Instance %q did not become current and Ready", instanceName)
 	}
 	return ready
 }
@@ -352,25 +243,29 @@ func infrastructureBinding() *unstructured.Unstructured {
 func deploymentsBinding(infrastructureIdentityHash, codeIdentityHash string) *unstructured.Unstructured {
 	resources := []struct {
 		group, resource, identity string
+		verbs                     []string
 	}{
-		{infraGroup, "instances", infrastructureIdentityHash},
-		{codeGroup, "repositorycheckouts", codeIdentityHash},
+		{codeGroup, "repositorycheckouts", codeIdentityHash, []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+		{infraGroup, "instances", infrastructureIdentityHash, []string{"get", "create", "update", "patch", "delete"}},
+		{"", "configmaps", "", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 	}
-	verbs := []string{"get", "list", "watch", "create", "update", "patch", "delete"}
 	claims := make([]any, 0, len(resources))
 	for _, item := range resources {
-		claimVerbs := make([]any, len(verbs))
-		for i, verb := range verbs {
+		claimVerbs := make([]any, len(item.verbs))
+		for i, verb := range item.verbs {
 			claimVerbs[i] = verb
 		}
-		claims = append(claims, map[string]any{
-			"group":        item.group,
-			"resource":     item.resource,
-			"verbs":        claimVerbs,
-			"identityHash": item.identity,
-			"selector":     map[string]any{"matchAll": true},
-			"state":        "Accepted",
-		})
+		claim := map[string]any{
+			"group":    item.group,
+			"resource": item.resource,
+			"verbs":    claimVerbs,
+			"selector": map[string]any{"matchAll": true},
+			"state":    "Accepted",
+		}
+		if item.identity != "" {
+			claim["identityHash"] = item.identity
+		}
+		claims = append(claims, claim)
 	}
 	return providerBinding(deploymentsProviderName, deploymentsWorkspace, deploymentsAPIExport, claims)
 }
@@ -427,7 +322,12 @@ func createTenantObject(t *testing.T, tenant dynamic.Interface, gvr schema.Group
 func permissionClaim(claims []any, group, resource string) (map[string]any, bool) {
 	for _, raw := range claims {
 		claim, ok := raw.(map[string]any)
-		if ok && claim["group"] == group && claim["resource"] == resource {
+		if !ok {
+			continue
+		}
+		claimGroup, _ := claim["group"].(string)
+		claimResource, _ := claim["resource"].(string)
+		if claimGroup == group && claimResource == resource {
 			return claim, true
 		}
 	}

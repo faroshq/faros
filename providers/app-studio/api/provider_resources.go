@@ -170,6 +170,13 @@ func (s *Server) deleteProjectProviderResources(ctx context.Context, c *asclient
 			if err != nil {
 				return err
 			}
+			if bindings.IsRepositorySyncResource(gvr, binding.ResourceRef.Kind) {
+				// Deployments is optional and the RepositorySync is already owned
+				// by the Project. Let garbage collection remove it when that API is
+				// available instead of blocking Project deletion on an optional
+				// provider or claim.
+				continue
+			}
 			values, err := projectProviderBindingValues(binding)
 			if err != nil {
 				return err

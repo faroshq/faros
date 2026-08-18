@@ -11,13 +11,12 @@ data:
       name: deployments
     spec:
       displayName: "Deployments"
-      description: "Reconcile immutable application releases into production runtimes."
+      description: "Sync reviewed repository desired state into tenant workspaces."
       vendor: "faros"
       version: {{ .Chart.AppVersion | quote }}
       category: "Developer"
       dependencies:
         - name: code
-        - name: infrastructure
       iconURL: "/ui/providers/deployments/icon.svg"
       ui:
         url: "http://{{ include "deployments.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
@@ -28,12 +27,21 @@ data:
       apiExport:
         name: "deployments.faros.sh"
         permissionClaims:
-          - group: infrastructure.faros.sh
-            resource: instances
-            verbs: [get, list, watch, create, update, patch, delete]
-            tenantScoped: true
           - group: code.faros.sh
             resource: repositorycheckouts
             verbs: [get, list, watch, create, update, patch, delete]
             tenantScoped: true
+            purpose: "Read bounded repository checkouts for desired-state sync."
+          - group: infrastructure.faros.sh
+            resource: instances
+            verbs: [get, create, update, patch, delete]
+            tenantScoped: true
+            optional: true
+            purpose: "Apply Infrastructure instances from repository syncs."
+          - group: ""
+            resource: configmaps
+            verbs: [get, list, watch, create, update, patch, delete]
+            tenantScoped: true
+            optional: true
+            purpose: "Apply ConfigMaps from repository syncs."
 {{- end }}

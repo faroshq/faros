@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,7 @@ type fakeOps struct {
 	providerBindings  map[wsKey]map[string]string   // (org,ws) → provider → binding name
 	providerBindCalls map[wsKey]int                 // (org,ws) → count
 	providerClaims    map[wsKey][]kcp.ProviderClaim // (org,ws) → latest provider claims
+	providerAccess    map[wsKey]map[string]*kcp.ProviderAPIBindingAccess
 }
 
 type wsKey struct{ Org, WS string }
@@ -77,6 +79,7 @@ func newFakeOps() *fakeOps {
 		providerBindings:  map[wsKey]map[string]string{},
 		providerBindCalls: map[wsKey]int{},
 		providerClaims:    map[wsKey][]kcp.ProviderClaim{},
+		providerAccess:    map[wsKey]map[string]*kcp.ProviderAPIBindingAccess{},
 	}
 }
 
@@ -178,6 +181,56 @@ func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, b
 	f.providerBindings[key][bindingName] = bindingName
 	f.providerBindCalls[key]++
 	f.providerClaims[key] = append([]kcp.ProviderClaim(nil), claims...)
+	if f.providerAccess[key] == nil {
+		f.providerAccess[key] = map[string]*kcp.ProviderAPIBindingAccess{}
+	}
+	access := &kcp.ProviderAPIBindingAccess{BindingName: bindingName, Phase: "Bound"}
+	for _, claim := range claims {
+		access.SpecClaims = append(access.SpecClaims, kcp.ProviderBindingClaim{Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...), Accepted: claim.Accepted})
+		if claim.Accepted {
+			access.AppliedClaims = append(access.AppliedClaims, kcp.ProviderBindingClaim{Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...), Accepted: true})
+		}
+	}
+	f.providerAccess[key][bindingName] = access
+	return nil
+}
+
+func (f *fakeOps) GetProviderAPIBindingAccess(_ context.Context, orgUUID, wsUUID, bindingName string) (*kcp.ProviderAPIBindingAccess, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	access := f.providerAccess[wsKey{orgUUID, wsUUID}][bindingName]
+	if access == nil {
+		return nil, nil
+	}
+	copy := *access
+	copy.SpecClaims = append([]kcp.ProviderBindingClaim(nil), access.SpecClaims...)
+	copy.ExportClaims = append([]kcp.ProviderBindingClaim(nil), access.ExportClaims...)
+	copy.AppliedClaims = append([]kcp.ProviderBindingClaim(nil), access.AppliedClaims...)
+	return &copy, nil
+}
+
+func (f *fakeOps) AuthorizeProviderAPIBindingClaims(_ context.Context, orgUUID, wsUUID, bindingName, _, _ string, claims []kcp.ProviderClaim) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := wsKey{orgUUID, wsUUID}
+	access := f.providerAccess[key][bindingName]
+	if access == nil {
+		return apierrors.NewNotFound(schema.GroupResource{Group: "apis.kcp.io", Resource: "apibindings"}, bindingName)
+	}
+	for _, claim := range claims {
+		found := false
+		for i := range access.SpecClaims {
+			if access.SpecClaims[i].Group == claim.Group && access.SpecClaims[i].Resource == claim.Resource {
+				access.SpecClaims[i].Verbs = append([]string(nil), claim.Verbs...)
+				access.SpecClaims[i].Accepted = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			access.SpecClaims = append(access.SpecClaims, kcp.ProviderBindingClaim{Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...), Accepted: true})
+		}
+	}
 	return nil
 }
 
@@ -197,7 +250,9 @@ func (f *fakeOps) ListProviderAPIBindings(_ context.Context, orgUUID, wsUUID str
 func (f *fakeOps) DeleteProviderAPIBinding(_ context.Context, orgUUID, wsUUID, providerName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.providerBindings[wsKey{orgUUID, wsUUID}], providerName)
+	key := wsKey{orgUUID, wsUUID}
+	delete(f.providerBindings[key], providerName)
+	delete(f.providerAccess[key], providerName)
 	return nil
 }
 
@@ -1022,6 +1077,158 @@ func TestEnableProviderOmitsUnacceptedOptionalClaims(t *testing.T) {
 	claims = ops.providerClaims[key]
 	if len(claims) != 2 || !claims[1].Accepted {
 		t.Fatalf("claims with optional acceptance = %#v, want accepted optional claim", claims)
+	}
+}
+
+func TestEnableProviderPreservesAcceptedOptionalClaimsOnReenable(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	key := wsKey{"org-a", "ws-1"}
+	reg := hubproviders.NewRegistry()
+	reg.Upsert(hubproviders.Provider{
+		Name:          "app-studio",
+		APIExportPath: "root:providers:app-studio",
+		APIExportName: "app-studio",
+		PermissionClaims: []hubproviders.PermissionClaim{
+			{Group: "infrastructure.faros.sh", Resource: "instances", TenantScoped: true, Optional: true},
+		},
+	})
+	mgr.WithProviderRegistry(reg)
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
+
+	body, _ := json.Marshal(EnableProviderRequest{AcceptedClaims: []AcceptedClaim{{
+		Group: "infrastructure.faros.sh", Resource: "instances",
+	}}})
+	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/app-studio/enable", "application/json", jsonBody(body))
+	if err != nil {
+		t.Fatalf("initial enable: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initial enable status = %d, want 200", resp.StatusCode)
+	}
+	if claims := ops.providerClaims[key]; len(claims) != 1 || !claims[0].Accepted {
+		t.Fatalf("initial claims = %#v, want accepted infrastructure instances", claims)
+	}
+
+	// A retry/re-enable from a dialog that does not include the optional claim
+	// must not silently revoke the grant made by the first request.
+	body, _ = json.Marshal(EnableProviderRequest{})
+	resp, err = http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/app-studio/enable", "application/json", jsonBody(body))
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-enable status = %d, want 200", resp.StatusCode)
+	}
+	claims := ops.providerClaims[key]
+	if len(claims) != 1 || claims[0].Group != "infrastructure.faros.sh" || claims[0].Resource != "instances" || !claims[0].Accepted {
+		t.Fatalf("claims after re-enable = %#v, want accepted infrastructure instances preserved", claims)
+	}
+}
+
+func TestProviderAccessReportsEffectiveStateAndAuthorizationIsAdditive(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	key := wsKey{"org-a", "ws-1"}
+	ops.providerBindings[key] = map[string]string{"deployments": "deployments"}
+	ops.providerAccess[key] = map[string]*kcp.ProviderAPIBindingAccess{
+		"deployments": {
+			BindingName: "deployments",
+			Phase:       "Bound",
+			SpecClaims: []kcp.ProviderBindingClaim{
+				{Group: "code.faros.sh", Resource: "repositorycheckouts", Verbs: []string{"get", "list"}, Accepted: true},
+			},
+			ExportClaims: []kcp.ProviderBindingClaim{
+				{Group: "code.faros.sh", Resource: "repositorycheckouts", Verbs: []string{"get", "list"}},
+				{Group: "infrastructure.faros.sh", Resource: "instances", Verbs: []string{"get", "create"}},
+			},
+			AppliedClaims: []kcp.ProviderBindingClaim{
+				{Group: "code.faros.sh", Resource: "repositorycheckouts", Verbs: []string{"get", "list"}, Accepted: true},
+			},
+		},
+	}
+	reg := hubproviders.NewRegistry()
+	reg.Upsert(hubproviders.Provider{
+		Name: "deployments", APIExportPath: "root:faros:providers:deployments", APIExportName: "deployments.faros.sh",
+		PermissionClaims: []hubproviders.PermissionClaim{
+			{Purpose: "Read checked-out source", Group: "code.faros.sh", Resource: "repositorycheckouts", Verbs: []string{"get", "list"}, TenantScoped: true},
+			{Purpose: "Apply infrastructure resources", Group: "infrastructure.faros.sh", Resource: "instances", Verbs: []string{"get", "create"}, TenantScoped: true, Optional: true},
+		},
+	})
+	mgr.WithProviderRegistry(reg)
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/orgs/org-a/workspaces/ws-1/providers/deployments/access")
+	if err != nil {
+		t.Fatalf("GET access: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
+	}
+	var access ProviderAccessResponse
+	if err := json.NewDecoder(resp.Body).Decode(&access); err != nil {
+		t.Fatalf("decode access: %v", err)
+	}
+	if !access.Enabled || len(access.Claims) != 2 {
+		t.Fatalf("access = %#v", access)
+	}
+	if !access.Claims[0].Declared || !access.Claims[0].Offered || !access.Claims[0].Accepted || !access.Claims[0].Applied {
+		t.Fatalf("existing claim state = %#v", access.Claims[0])
+	}
+	if access.Claims[1].Purpose != "Apply infrastructure resources" || access.Claims[1].Accepted || access.Claims[1].Applied {
+		t.Fatalf("available claim state = %#v", access.Claims[1])
+	}
+
+	body, _ := json.Marshal(AuthorizeProviderAccessRequest{Claims: []AcceptedClaim{{Group: "infrastructure.faros.sh", Resource: "instances"}}})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/deployments/access", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH access: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("PATCH status = %d, want 204", resp.StatusCode)
+	}
+	claims := ops.providerAccess[key]["deployments"].SpecClaims
+	if len(claims) != 2 || !claims[0].Accepted || !claims[1].Accepted {
+		t.Fatalf("additive claims = %#v, want both existing and added grants", claims)
+	}
+	if got := claims[1].Verbs; !reflect.DeepEqual(got, []string{"get", "create"}) {
+		t.Fatalf("authorized verbs = %#v, want catalog verbs", got)
+	}
+}
+
+func TestAuthorizeProviderAccessRejectsUndeclaredClaim(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	key := wsKey{"org-a", "ws-1"}
+	ops.providerAccess[key] = map[string]*kcp.ProviderAPIBindingAccess{
+		"deployments": {BindingName: "deployments", Phase: "Bound"},
+	}
+	reg := hubproviders.NewRegistry()
+	reg.Upsert(hubproviders.Provider{
+		Name: "deployments", APIExportPath: "root:faros:providers:deployments", APIExportName: "deployments.faros.sh",
+		PermissionClaims: []hubproviders.PermissionClaim{{Group: "code.faros.sh", Resource: "repositorycheckouts", Verbs: []string{"get"}}},
+	})
+	mgr.WithProviderRegistry(reg)
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
+	body, _ := json.Marshal(AuthorizeProviderAccessRequest{Claims: []AcceptedClaim{{Group: "rbac.authorization.k8s.io", Resource: "clusterroles"}}})
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/deployments/access", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH access: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(ops.providerAccess[key]["deployments"].SpecClaims) != 0 {
+		t.Fatalf("undeclared claim mutated access: %#v", ops.providerAccess[key]["deployments"])
 	}
 }
 

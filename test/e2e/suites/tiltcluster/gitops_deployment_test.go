@@ -40,13 +40,14 @@ var (
 	deploymentsRepositorySyncGVR = schema.GroupVersionResource{Group: deploymentsGroup, Version: "v1alpha1", Resource: "repositorysyncs"}
 	coreNamespaceGVR             = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 	coreSecretGVR                = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	coreConfigMapGVR             = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
 )
 
-// TestReviewedGitConfigurationReachesReadyInstance proves the live, Git-owned
-// half of App Studio promotion. A local GitHub-compatible host reports one
-// approved change request; the real Code controller merges it, the Deployments
-// RepositorySync controller reads the reviewed YAML, and the real Deployments
-// and Infrastructure controllers carry it through to a current Ready runtime.
+// TestReviewedGitConfigurationReachesReadyInstance proves target-neutral Git
+// reconciliation. A local GitHub-compatible host reports one approved change
+// request; Code merges it, then RepositorySync applies both an Infrastructure
+// Instance and a native ConfigMap. Infrastructure readiness is asserted
+// separately from RepositorySync's applied-state contract.
 //
 // The mock is only the external Git host boundary. All provider controllers,
 // APIBindings, permission claims, status transitions, and runtime reconciliation
@@ -163,29 +164,56 @@ func TestReviewedGitConfigurationReachesReadyInstance(t *testing.T) {
 		}
 		phase, _, _ := nestedString(syncObj.Object, "status", "phase")
 		applied, _, _ := nestedString(syncObj.Object, "status", "appliedRevision")
-		return phase == "Ready" && applied == promotionGitRevision,
-			fmt.Sprintf("phase=%q appliedRevision=%q conditions=%v", phase, applied, conditionsOf(syncObj.Object))
+		observed, _, _ := unstructured.NestedInt64(syncObj.Object, "status", "observedGeneration")
+		return phase == "Synced" && applied == promotionGitRevision && observed == syncObj.GetGeneration() && conditionTrue(syncObj.Object, "Applied"),
+			fmt.Sprintf("phase=%q appliedRevision=%q observedGeneration=%d/%d conditions=%v", phase, applied, observed, syncObj.GetGeneration(), conditionsOf(syncObj.Object))
 	}) {
 		t.Fatalf("RepositorySync %q did not apply reviewed revision", syncName)
 	}
 
-	instance := waitDeploymentInstanceReady(t, tenant, promotionDeploymentName, promotionGitRevision)
+	instance, err := tenant.Resource(deploymentsInstanceGVR).Get(ctx, promotionInstanceName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get synced Infrastructure Instance %q: %v", promotionInstanceName, err)
+	}
+	template, _, _ := nestedString(instance.Object, "spec", "template")
+	values, _, _ := unstructured.NestedMap(instance.Object, "spec", "values")
+	database, _, _ := unstructured.NestedMap(instance.Object, "spec", "values", "database")
+	oidc, _, _ := unstructured.NestedMap(instance.Object, "spec", "values", "oidc")
+	if template != "application" || values["name"] != promotionInstanceName || values["farosMode"] != "production" ||
+		values["farosRedeployRevision"] != promotionGitRevision || values["webImage"] != promotionWebImage || values["apiImage"] != promotionAPIImage ||
+		database["version"] != "16" || oidc["mode"] != "none" {
+		t.Fatalf("synced Instance does not match reviewed desired state: template=%q values=%#v", template, values)
+	}
+
+	configMap, err := tenant.Resource(coreConfigMapGVR).Namespace("default").Get(ctx, promotionConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get synced ConfigMap %q: %v", promotionConfigMapName, err)
+	}
+	data, _, _ := unstructured.NestedStringMap(configMap.Object, "data")
+	if data["source"] != "repositorysync" || data["revision"] != promotionGitRevision {
+		t.Fatalf("synced ConfigMap data = %v, want source and reviewed revision", data)
+	}
+
+	instance = waitInfrastructureInstanceReady(t, tenant, promotionInstanceName)
 	runtimeRef := deploymentRuntimeTarget(t, instance)
-	t.Logf("reviewed Git revision %s reached Ready Instance %q and runtime %s/%s",
-		promotionGitRevision, instance.GetName(), runtimeRef.namespace, runtimeRef.name)
+	t.Logf("reviewed Git revision %s was synced to Instance %q, ConfigMap %q, and Ready runtime %s/%s",
+		promotionGitRevision, instance.GetName(), promotionConfigMapName, runtimeRef.namespace, runtimeRef.name)
 
 	if err := tenant.Resource(deploymentsRepositorySyncGVR).Delete(ctx, syncName, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete RepositorySync %q: %v", syncName, err)
 	}
 	waitTiltResourceGone(t, tenant.Resource(deploymentsRepositorySyncGVR), syncName, deploymentsTestWait)
-	waitTiltResourceGone(t, tenant.Resource(deploymentsDeploymentGVR), promotionDeploymentName, deploymentsTestWait)
-	waitTiltResourceGone(t, tenant.Resource(deploymentsInstanceGVR), promotionDeploymentName, deploymentsTestWait)
+	waitTiltResourceGone(t, tenant.Resource(deploymentsInstanceGVR), promotionInstanceName, deploymentsTestWait)
+	waitTiltResourceGone(t, tenant.Resource(coreConfigMapGVR).Namespace("default"), promotionConfigMapName, deploymentsTestWait)
 	waitTiltResourceGone(t, runtimeClient.Resource(runtimeRef.gvr).Namespace(runtimeRef.namespace), runtimeRef.name, deploymentsTestWait)
 }
 
 const (
-	promotionGitRevision    = "merge-e2e-0123456789abcdef"
-	promotionDeploymentName = "gitops-e2e-production"
+	promotionGitRevision   = "merge-e2e-0123456789abcdef"
+	promotionInstanceName  = "gitops-e2e-production"
+	promotionConfigMapName = "gitops-e2e-config"
+	promotionWebImage      = "ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3"
+	promotionAPIImage      = "ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3"
 )
 
 type promotionGitHost struct {
@@ -230,14 +258,14 @@ func newPromotionGitHost(t *testing.T) *promotionGitHost {
 			_, _ = w.Write([]byte(promotionGitRevision))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/application/git/trees/"+promotionGitRevision:
 			_, _ = w.Write([]byte(`{"sha":"` + promotionGitRevision + `","truncated":false,"tree":[` +
-				`{"path":".faros/release.yaml","type":"blob","sha":"release-blob","size":500},` +
-				`{"path":".faros/deployment.yaml","type":"blob","sha":"deployment-blob","size":500}]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/application/git/blobs/release-blob":
+				`{"path":".faros/instance.yaml","type":"blob","sha":"instance-blob","size":500},` +
+				`{"path":".faros/configmap.yaml","type":"blob","sha":"configmap-blob","size":300}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/application/git/blobs/instance-blob":
 			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write([]byte(promotionReleaseYAML))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/application/git/blobs/deployment-blob":
+			_, _ = w.Write([]byte(promotionInstanceYAML))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/application/git/blobs/configmap-blob":
 			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write([]byte(promotionDeploymentYAML))
+			_, _ = w.Write([]byte(promotionConfigMapYAML))
 		default:
 			http.Error(w, fmt.Sprintf("unexpected request %s %s", r.Method, r.URL.RequestURI()), http.StatusNotFound)
 		}
@@ -246,38 +274,32 @@ func newPromotionGitHost(t *testing.T) *promotionGitHost {
 	return host
 }
 
-const promotionReleaseYAML = `apiVersion: deployments.faros.sh/v1alpha1
-kind: Release
-metadata:
-  name: gitops-e2e-release
-spec:
-  source:
-    repositoryRef: application
-    revision: source-e2e-0123456789abcdef
-  blueprintRef:
-    name: application
-  artifacts:
-    - name: web
-      image: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3
-    - name: api
-      image: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3
-`
-
-const promotionDeploymentYAML = `apiVersion: deployments.faros.sh/v1alpha1
-kind: Deployment
+const promotionInstanceYAML = `apiVersion: infrastructure.faros.sh/v1alpha1
+kind: Instance
 metadata:
   name: gitops-e2e-production
 spec:
-  releaseRef: gitops-e2e-release
-  className: kro-direct
-  mode: production
-  deletionPolicy: Delete
-  rolloutID: replaced-by-repositorysync
-  configuration:
+  template: application
+  values:
+    name: gitops-e2e-production
+    farosMode: production
+    farosRedeployRevision: merge-e2e-0123456789abcdef
+    webImage: ghcr.io/faroshq/faros-scaffold-application/web:v0.1.3
+    apiImage: ghcr.io/faroshq/faros-scaffold-application/api:v0.1.3
     database:
       version: "16"
     oidc:
       mode: none
+`
+
+const promotionConfigMapYAML = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitops-e2e-config
+  namespace: default
+data:
+  source: repositorysync
+  revision: merge-e2e-0123456789abcdef
 `
 
 func mustAPIExport(t *testing.T, workspace, name string) *unstructured.Unstructured {

@@ -543,8 +543,12 @@ func newProjectBuildProvenanceClient(project *aiv1alpha1.Project, commits []*uns
 	_ = json.Unmarshal(projectRaw, &projectObject.Object)
 	projectObject.SetAPIVersion(aiv1alpha1.SchemeGroupVersion.String())
 	projectObject.SetKind("Project")
-	objects := make([]runtime.Object, 0, 2+len(commits)+len(packages))
-	objects = append(objects, applicationTemplateObject(), projectObject)
+	objects := make([]runtime.Object, 0, 4+len(commits)+len(packages))
+	objects = append(objects,
+		applicationTemplateObject(), projectObject,
+		apiBindingObject("deployments", deploymentsAPIExportName, "Bound", deploymentsGitOpsClaims...),
+		apiBindingObject("app-studio", appStudioAPIExportName, "Bound", appStudioGitOpsClaims...),
+	)
 	for _, commit := range commits {
 		objects = append(objects, commit)
 	}
@@ -558,6 +562,7 @@ func newProjectBuildProvenanceClient(project *aiv1alpha1.Project, commits []*uns
 			templatesGVR:             "TemplateList",
 			codeRepositoryCommitsGVR: "RepositoryCommitList",
 			codePackagesGVR:          "PackageList",
+			apiBindingsResource.GVR:  "APIBindingList",
 		},
 		objects...,
 	))

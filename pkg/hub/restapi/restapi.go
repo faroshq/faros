@@ -113,6 +113,8 @@ type WorkspaceOps interface {
 	// defaultCluster pre-check would 403 any user attempt against a
 	// non-default workspace, even with valid RBAC).
 	EnsureProviderAPIBinding(ctx context.Context, orgUUID, wsUUID, bindingName, exportPath, exportName string, claims []kcp.ProviderClaim) error
+	GetProviderAPIBindingAccess(ctx context.Context, orgUUID, wsUUID, bindingName string) (*kcp.ProviderAPIBindingAccess, error)
+	AuthorizeProviderAPIBindingClaims(ctx context.Context, orgUUID, wsUUID, bindingName, exportPath, exportName string, claims []kcp.ProviderClaim) error
 
 	// ListProviderAPIBindings returns the set of provider APIBindings
 	// (those referencing root:faros:providers:*) in the target
@@ -305,6 +307,8 @@ func (h *Handler) RegisterTenantScoped(r *mux.Router) {
 	// via kcp-admin so the kcp user-proxy's defaultCluster pre-check
 	// doesn't block sibling-workspace operations). See providers_enable.go.
 	r.HandleFunc("/{org}/workspaces/{ws}/providers/{name}/enable", h.enableProvider).Methods(http.MethodPost)
+	r.HandleFunc("/{org}/workspaces/{ws}/providers/{name}/access", h.getProviderAccess).Methods(http.MethodGet)
+	r.HandleFunc("/{org}/workspaces/{ws}/providers/{name}/access", h.authorizeProviderAccess).Methods(http.MethodPatch)
 	r.HandleFunc("/{org}/workspaces/{ws}/providers/{name}/disable", h.disableProvider).Methods(http.MethodPost)
 
 	// Read-side counterpart: list the provider APIBindings in this

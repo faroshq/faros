@@ -70,11 +70,27 @@ export interface NavChildDTO {
 }
 
 export interface PermissionClaim {
+  purpose?: string
   group?: string
   resource: string
   verbs?: string[]
   tenantScoped?: boolean
   optional?: boolean
+}
+
+export interface ProviderAccessClaim extends PermissionClaim {
+  declared: boolean
+  offered: boolean
+  accepted: boolean
+  applied: boolean
+}
+
+export interface ProviderAccessState {
+  providerName: string
+  enabled: boolean
+  bindingName?: string
+  phase?: string
+  claims?: ProviderAccessClaim[]
 }
 
 interface ProvidersResponse {
@@ -384,6 +400,43 @@ export const useProvidersStore = defineStore('providers', () => {
     bindingNamesByProvider.value = { ...bindingNamesByProvider.value, [p.name]: p.name }
   }
 
+  async function loadAccess(p: ProviderDTO): Promise<ProviderAccessState> {
+    const t = readTenantSelection()
+    if (!t.orgUUID || !t.workspaceUUID) {
+      throw new Error('select an organization and workspace before reviewing provider access')
+    }
+    const url = `/api/orgs/${encodeURIComponent(t.orgUUID)}/workspaces/${encodeURIComponent(t.workspaceUUID)}/providers/${encodeURIComponent(p.name)}/access`
+    const res = await authFetch(url, { tenant: true })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      throw new Error(`load ${p.name} access failed: ${res.status} ${res.statusText} ${detail}`)
+    }
+    return (await res.json()) as ProviderAccessState
+  }
+
+  // authorize is intentionally additive. The server validates every tuple
+  // against the current provider declaration, supplies authoritative verbs
+  // and identity hashes, and leaves omitted grants untouched.
+  async function authorize(p: ProviderDTO, claims: PermissionClaim[]): Promise<void> {
+    const t = readTenantSelection()
+    if (!t.orgUUID || !t.workspaceUUID) {
+      throw new Error('select an organization and workspace before authorizing provider access')
+    }
+    const url = `/api/orgs/${encodeURIComponent(t.orgUUID)}/workspaces/${encodeURIComponent(t.workspaceUUID)}/providers/${encodeURIComponent(p.name)}/access`
+    const res = await authFetch(url, {
+      method: 'PATCH',
+      tenant: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        claims: claims.map((c) => ({ group: c.group ?? '', resource: c.resource })),
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      throw new Error(`authorize ${p.name} access failed: ${res.status} ${res.statusText} ${detail}`)
+    }
+  }
+
   // readTenantSelection mirrors the storage shape written by
   // tenant.ts's savePersisted — kept inline to avoid an import cycle
   // with @/stores/tenant. Used for the enable/disable request *body*;
@@ -446,6 +499,8 @@ export const useProvidersStore = defineStore('providers', () => {
     load,
     refreshBindings,
     enable,
+    loadAccess,
+    authorize,
     disable,
     byName,
   }

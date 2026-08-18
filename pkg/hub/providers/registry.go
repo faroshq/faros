@@ -152,6 +152,7 @@ func (p Provider) Ready() bool {
 // portal can render the Enable confirmation dialog without coupling to the
 // CRD types.
 type PermissionClaim struct {
+	Purpose      string
 	Group        string
 	Resource     string
 	Verbs        []string

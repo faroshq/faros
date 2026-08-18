@@ -358,7 +358,7 @@ codegen-deployments-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for
 		$(CURDIR)/$(CONTROLLER_GEN) crd paths="./apis/..." \
 			output:crd:artifacts:config=$(CURDIR)/providers/deployments/config/crds
 	./hack/apigen.sh --input-dir providers/deployments/config/crds --output-dir providers/deployments/config/kcp
-	@for r in deployments releases repositorysyncs; do \
+	@for r in repositorysyncs; do \
 		cp providers/deployments/config/kcp/apiresourceschema-$$r.deployments.faros.sh.yaml \
 		   providers/deployments/deploy/chart/files/schemas/$$r.deployments.faros.sh.yaml; \
 	done
@@ -1421,10 +1421,8 @@ KROMC_MANIFEST ?= providers/infrastructure/manifest.yaml
 KROMC_PROVIDER_MANIFEST ?= providers/infrastructure/provider.yaml
 
 # --- Deployments provider (local dev) ---
-# The provider is intentionally UI-less: Deployments RepositorySync (or kubectl and
-# legacy App Studio projects) writes Release and Deployment CRs, while this
-# standalone process owns reconciliation and the stable deployment status
-# contract. Keep its port separate from the existing provider processes.
+# RepositorySync fetches reviewed source through Code and applies the exact
+# desired objects to tenant workspaces. Target providers own runtime behavior.
 DEPLOYMENTS_PORT ?= 8093
 DEPLOYMENTS_HUB_URL ?= https://localhost:9443
 DEPLOYMENTS_TOKEN ?= $(STATIC_AUTH_TOKEN)
@@ -2053,9 +2051,8 @@ init-provider-infrastructure: build-infrastructure-provider ## Bootstrap infrast
 
 # ── code provider (git repository management) ──────────────────────────────
 # Local-dev flow mirrors the infrastructure provider. Code owns Git connection
-# and repository APIs; Deployments requests RepositoryCheckout results and
-# consumes Infrastructure instances when it runs RepositorySync and reconciles
-# the resulting intent.
+# and repository APIs, and supplies the bounded RepositoryCheckout capability
+# consumed by Deployments.
 #   Terminal 1: make run-hub-embedded-static          # hub + embedded kcp
 #   Terminal 2: make install-provider-code            # admin: register entry
 #   Terminal 3: make run-provider-code                # tenant: run binary
@@ -2185,9 +2182,9 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/databricks/deploy/chart/files/schemas \
 		$(BINDIR)/databricks-provider init
 
-# --- Deployments provider (GitOps projection + release/deployment reconciliation) ---
-# Deployments is initialized after Code and Infrastructure because its
-# RepositorySync runtime consumes both providers' exported contracts.
+# --- Deployments provider (reviewed desired-state sync) ---
+# Deployments initializes after Code for bounded repository checkout. Target
+# APIs are optional capabilities authorized independently by each tenant.
 # Local flow:
 #   Terminal 1: make run-hub-embedded-static
 #   Terminal 2: make install-provider-deployments
@@ -2241,7 +2238,7 @@ init-provider-deployments: build-deployments-provider ## Bootstrap deployments A
 		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/root:faros:providers:infrastructure \
 		--insecure-skip-tls-verify \
 		get apiexport infrastructure.providers.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
-	test -n "$$INFRA_HASH" || { echo "could not discover infrastructure APIExport identityHash; install/init infrastructure first or set DEPLOYMENTS_INFRA_IDENTITY_HASH"; exit 1; }; \
+	test -z "$$INFRA_HASH" || echo "Advertising optional Infrastructure Instance target capability"; \
 	CODE_HASH=$${DEPLOYMENTS_CODE_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(DEPLOYMENTS_KCP_KUBECONFIG) \
 		--server=$(DEPLOYMENTS_KCP_SERVER)/clusters/root:faros:providers:code \
 		--insecure-skip-tls-verify \
@@ -2515,7 +2512,7 @@ help-dev: ## Show development environment options
 	@echo "  APP_STUDIO_DEV_DATABASE_URL - Local App Studio Postgres DSN (default: postgres://appstudio:appstudio@localhost:55432/appstudio?sslmode=disable)"
 	@echo "  APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true - Force non-durable App Studio message store"
 	@echo "  DEPLOYMENTS_PORT   - Port the deployments provider listens on (default: 8093)"
-	@echo "  DEPLOYMENTS_INFRA_IDENTITY_HASH - Infrastructure APIExport identity hash (auto-discovered by init)"
+	@echo "  DEPLOYMENTS_INFRA_IDENTITY_HASH - Optional Infrastructure Instance target identity hash (auto-discovered when available)"
 	@echo "  DEPLOYMENTS_CODE_IDENTITY_HASH - Code APIExport identity hash (auto-discovered by Deployments init)"
 	@echo "  DEPLOYMENTS_CODE_URL - Internal Code provider URL used for bounded checkout transfer (default: http://localhost:8083)"
 	@echo ""

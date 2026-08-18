@@ -61,7 +61,7 @@ test('keeps Direct creation independent while exposing unavailable GitOps access
   }
 
   assert.equal(gitOpsAvailable(readiness), false)
-  assert.match(gitOpsReadinessMessage(readiness), /Enable Deployments \/ update App Studio access/)
+  assert.match(gitOpsReadinessMessage(readiness), /Open Providers and update access/)
   assert.match(gitOpsReadinessMessage(readiness), /Deployments is not enabled/)
   assert.equal(canSubmitCreatePrompt('build a dashboard', readiness), true)
 })

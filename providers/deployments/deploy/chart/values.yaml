@@ -12,6 +12,8 @@ providerKubeconfig:
 # resulting runtime kubeconfig (the Tilt cluster flow does this explicitly).
 bootstrap:
   enabled: true
+# Optional identity hash for the first advertised target capability. Omit when
+# Infrastructure is not installed; Deployments still syncs other authorized APIs.
 infrastructureIdentityHash: ""
 codeIdentityHash: ""
 code:

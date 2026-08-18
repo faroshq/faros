@@ -203,7 +203,7 @@ func TestListHandlerProjectsOptionalPermissionClaim(t *testing.T) {
 		EndpointsValid: true,
 		UIURL:          mustProviderURL(t, "https://provider.example/ui"),
 		PermissionClaims: []PermissionClaim{
-			{Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
+			{Purpose: "Create repository syncs", Group: "deployments.faros.sh", Resource: "repositorysyncs", TenantScoped: true, Optional: true},
 			{Group: "code.faros.sh", Resource: "repositories", TenantScoped: true},
 		},
 	})
@@ -229,6 +229,9 @@ func TestListHandlerProjectsOptionalPermissionClaim(t *testing.T) {
 	optional := raw.Items[0].PermissionClaims[0]
 	if optional["optional"] != true {
 		t.Fatalf("optional claim = %#v, want optional=true", optional)
+	}
+	if optional["purpose"] != "Create repository syncs" {
+		t.Fatalf("optional claim purpose = %#v", optional)
 	}
 	required := raw.Items[0].PermissionClaims[1]
 	if _, ok := required["optional"]; ok {

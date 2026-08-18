@@ -26,4 +26,4 @@ assert(readErrorMessage({ reason: 'Unauthorized', message: '403' }, 'fallback').
 assert(readErrorMessage({ reason: 'MissingBackend', message: 'binding missing' }, 'fallback').includes('not available'), 'missing backend state was not explicit')
 
 const empty = completeRead<string[]>([])
-assert(readStatusText(empty.phase, empty.data.length > 0).includes('No deployments'), 'empty success was not explicit')
+assert(readStatusText(empty.phase, empty.data.length > 0).includes('No repository syncs'), 'empty success was not explicit')

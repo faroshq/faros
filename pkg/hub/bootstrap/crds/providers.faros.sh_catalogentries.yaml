@@ -285,6 +285,12 @@ spec:
                             dialog; callers must explicitly opt in before the claim is included.
                             Required claims retain the existing Rejected semantics when not accepted.
                           type: boolean
+                        purpose:
+                          description: |-
+                            Purpose explains in tenant-facing language why the provider needs this
+                            access. It is displayed alongside the exact group, resource, and verbs
+                            when a tenant reviews or extends the provider's grants.
+                          type: string
                         resource:
                           description: Resource is the resource name (plural).
                           minLength: 1

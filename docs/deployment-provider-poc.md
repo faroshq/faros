@@ -1,34 +1,117 @@
-# Git-owned deployments provider POC
+# Reviewed desired-state delivery POC
 
-This POC lets a project choose the desired-state boundary independently for
-development and production. Its recommended policy keeps development direct and
-fast while making the repository authoritative for production. Deployments is
-implemented as a standalone, first-class Faros provider: it owns an APIExport,
-CatalogEntry, provider workspace, minted runtime identity, multicluster
-controller, Helm chart, heartbeat/readiness contract, Tilt lifecycle, image and
-split-module publishing, and live provider-registration e2e coverage. The
-complete Git-host promotion flow remains a manual acceptance path.
+This POC makes a reviewed Git tree authoritative for selected App Studio
+environments. Deployments is a standalone Faros provider, but it is deliberately
+not an application runtime provider: it fetches a bounded repository directory,
+validates it, and applies the exact Kubernetes objects it contains to the tenant
+workspace. The APIs serving those objects remain responsible for interpretation,
+reconciliation, status, and runtime readiness.
 
 ## Ownership boundary
 
-The design deliberately separates three responsibilities:
-
 | Concern | Owner |
 | --- | --- |
-| Repository operations, branches, pull requests, and bounded RepositoryCheckout requests | Code provider |
-| Project bootstrap, build admission, and proposing configuration changes | App Studio |
-| RepositorySync projection, Release/Deployment API, runtime reconciliation, finalization, and status | Deployments provider |
-| Template schema, instance CRDs, cloud/runtime resources, and provider health | Infrastructure provider |
+| Repositories, branches, pull requests, credentials, and bounded checkouts | Code provider |
+| Project scaffolding, build admission, and proposed environment changes | App Studio |
+| Source resolution, preflight, apply, inventory, pruning, and cleanup | Deployments provider |
+| Target API behavior and runtime readiness | The provider serving each target API |
 
-App Studio is an author of proposed Git changes, not a second desired-state
-writer. The Code provider is the only component that talks to the Git host and
-owns Git credentials. Deployments owns `RepositorySync` and requests bounded
-`RepositoryCheckout` results from Code; it never reads credentials or talks to
-the Git host directly.
+This produces the dependency `Deployments -> Code`. Deployments does not depend
+on Infrastructure or App Templates. Infrastructure `Instance`, core `ConfigMap`,
+and other resources are target capabilities, not part of Deployments' domain.
 
-## Per-environment delivery policy
+App Studio is an author of proposed Git changes, not another writer for a
+Git-managed environment. Code is the only component that talks to the Git host
+or holds Git credentials. Deployments obtains content through Code's bounded,
+short-lived `RepositoryCheckout` capability.
 
-Each Project declares one writer for each environment:
+## RepositorySync
+
+Deployments exposes one API:
+
+```yaml
+apiVersion: deployments.faros.sh/v1alpha1
+kind: RepositorySync
+metadata:
+  name: pen-store-production
+spec:
+  repositoryRef: pen-store-app
+  ref: main
+  path: .faros/environments/production
+  intervalSeconds: 30
+  prune: true
+```
+
+Every YAML document below `spec.path` is desired state. The controller:
+
+1. Requests an immutable, path-bounded checkout from Code.
+2. Parses all documents and resolves each GVK through workspace discovery.
+3. Dry-run preflights the entire revision before the first persistent write.
+4. Refuses conflicting documents and objects owned by another writer.
+5. Applies objects with server-side apply and records exact inventory.
+6. When `prune` is true, deletes inventory removed from Git using UID
+   preconditions.
+
+The engine contains no target-kind allowlist and no target-specific adapter.
+Target objects may be namespaced or cluster-scoped. Inventory records API
+version, kind, resource, namespace, name, UID, and source path.
+
+`RepositorySync.status` separates delivery stages:
+
+- `SourceReady`: Code resolved and transferred the reviewed revision.
+- `AuthorizationReady`: every target API is available and authorized.
+- `Applied`: the exact revision was applied and requested pruning completed.
+
+`phase: Synced` means desired state was applied. It never means the resulting
+application or infrastructure is ready. Consumers observe readiness directly on
+the target resource.
+
+## Authorization
+
+Kubernetes and kcp authorization still apply to a generic engine. Deployments
+cannot safely grant itself access merely because a repository contains a new
+kind. Its APIExport therefore has:
+
+- one required Code `repositorycheckouts` claim; and
+- explicit optional claims for target resource types an installation chooses to
+  offer.
+
+The initial POC advertises optional Infrastructure `instances` and core
+`configmaps`. These demonstrate a provider-owned API and a native Kubernetes API;
+they are not hard-coded controller dependencies. Additional target types require
+an explicit optional CatalogEntry/APIExport claim with the target export's
+identity hash where kcp requires one.
+
+Before applying anything, RepositorySync evaluates every desired object. Missing
+or unaccepted access produces `phase: AwaitingAuthorization` and a
+`targetRequirements` entry; no document from that revision is partially applied.
+The Deployments portal links to the provider access dialog with the exact claim
+tuples preselected. Authorization is additive: accepting a new claim preserves
+all existing grants and uses the APIExport's authoritative identity and verbs.
+
+This makes capability changes visible tenant decisions without coupling the
+sync engine to the target provider.
+
+## Interchangeability boundary
+
+`RepositorySync` is intentionally a small declarative draft contract, but the
+POC does not yet promise a provider-swappable ABI. App Studio currently names
+the `deployments.faros.sh` API group, the Deployments APIExport identity, and the
+Deployments catalog entry when guiding access setup. Another implementation can
+reuse the behavior and schema, but a different kcp APIExport identity is not a
+transparent replacement.
+
+Before promoting this API beyond the POC, move the contract to a platform-owned
+group such as `delivery.faros.sh`, add a controller or class identity so exactly
+one implementation owns each sync, and publish conformance tests for source,
+authorization, apply, inventory, pruning, and status semantics. App Studio would
+then claim only the platform delivery API; Deployments would become one
+replaceable implementation of that contract. The current target-neutral spec
+and status model are designed to be the input to that extraction.
+
+## App Studio delivery policy
+
+Each Project chooses one writer per environment:
 
 ```yaml
 spec:
@@ -44,247 +127,55 @@ spec:
       requiredApprovals: 1
 ```
 
-`Direct` gives App Studio a writable provider-resource binding for that
-environment. `GitOps` gives App Studio only a read-only runtime reference; one
-shared `RepositorySync` projects the selected repository branch into the
-Git-owned environments.
+In `Direct` mode, App Studio manages the Infrastructure `Instance` immediately.
+In `GitOps` mode, App Studio commits the concrete target manifest under
+`.faros/environments/<environment>/instance.yaml`, opens a Code
+`ChangeRequest`, and treats the target binding as read-only. After merge,
+RepositorySync applies the target object. App Studio observes production phase,
+URL, and rollout revision directly from the Infrastructure Instance.
 
-New repositories default to Direct development plus GitOps production. The
-project wizard also offers Direct everywhere. The API can represent the other
-environment combinations explicitly; GitOps development retains the initial
-development Release/Deployment bootstrap, while the recommended hybrid writes
-no development manifests to Git. Imported repositories default to Direct for
-both environments, and any GitOps import is rejected until a bootstrap
-migration can prove and transfer ownership without overwriting the existing
-tree. Projects stored before this field existed also resolve to Direct/Direct.
+App Studio's Deployments permission claim is optional. Direct delivery, project
+operation, and project deletion do not require Deployments to be installed or
+enabled. Reviewed delivery is disabled with actionable access guidance until
+Deployments is available and the `repositorysyncs` claim is applied.
 
-The complete delivery policy is immutable in this POC. Switching either
-environment is an ownership migration, not a settings toggle: a future workflow
-must stop the old writer, snapshot the live and Git inventories, transfer
-ownership metadata, start the new writer, and verify convergence before
-declaring success. The Project controller selects bindings per environment, so
-it can reconcile a direct development backend and the production
-`RepositorySync` concurrently without writing the Git-owned production
-Deployment.
+The delivery policy is immutable in this POC because changing writers requires a
+real ownership migration. Projects created by older POC revisions whose
+production bindings reference the removed Deployments `Deployment` API must be
+recreated or explicitly migrated.
 
-## Bootstrap and steady state
+## Cleanup and finalizers
 
-```text
-Create project (recommended policy)
-  ├─ App Studio scaffolds source and directly provisions development
-  └─ Project controller creates RepositorySync for production
-       └─ Deployments requests a bounded RepositoryCheckout from Code
-            ├─ Deployments projects the merged .faros tree
-            └─ an empty manifest tree is valid until the first promotion
+Applied objects carry RepositorySync owner, source-path, and revision
+annotations. A sync refuses to overwrite an object owned by another writer.
 
-Development change
-  └─ App Studio updates the direct development binding immediately
+- With `prune: true`, removing an object from Git or deleting the
+  RepositorySync deletes its recorded inventory and waits for target finalizers.
+- With `prune: false`, RepositorySync deletion removes its ownership annotations
+  and retains the target objects.
+- Revoked target access is reported as `AwaitingAuthorization`; the controller
+  does not silently leak inventory and remove its finalizer.
 
-Production configuration or image change
-  └─ App Studio commits generated manifests to a branch based on the default branch
-       └─ Code ChangeRequest opens an approval-gated pull request
-            └─ merge changes the default branch
-                 └─ Deployments RepositorySync projects the merged revision
-                      └─ Deployments reconciles it
-```
+App Studio does not explicitly delete optional RepositorySync resources during
+Project finalization. Their Project owner reference provides garbage collection,
+so an unavailable Deployments provider cannot strand the Project finalizer.
 
-Any project with a GitOps environment gets exactly one `RepositorySync`
-binding. RepositorySync safely accepts zero manifests, so the recommended
-hybrid does not fabricate a development Release merely to make `.faros`
-non-empty. Production manifests first enter the tree through promotion. A
-project using GitOps development still receives the development inventory in
-its initial scaffold. Direct/Direct projects get neither RepositorySync nor
-`.faros` inventory. Existing and adopted projects remain Direct/Direct until an
-explicit migration establishes a valid Git inventory; the POC does not silently
-overwrite an imported repository.
+## Local development and verification
 
-## Code and Deployments GitOps APIs
-
-The Code provider adds two cluster-scoped resources:
-
-- `ChangeRequest` describes a pull request independently of a specific Git
-  host. Its observed state includes the host URL and number, head revision,
-  approval count, merge revision, phase, and conditions. `AfterApproval` may
-  ask the host to merge after the configured approval threshold, but repository
-  branch protection remains authoritative.
-- `RepositoryCheckout` identifies a managed repository, ref, and bounded path
-  (normally `.faros`). Code resolves the ref to an immutable commit, stores the
-  bounded tree outside Kubernetes, and publishes only bundle metadata plus a
-  short-lived capability bound to the tenant scope, bundle name, and digest.
-  Deployments redeems that capability once; Git credentials never cross the
-  provider boundary and source contents never land in CR status.
-
-The Deployments provider owns `RepositorySync`. It requests a
-`RepositoryCheckout`, validates every returned YAML document before applying
-any of them, accepts only `deployments.faros.sh/v1alpha1` `Release` and
-`Deployment` objects, and records the applied revision and inventory.
-
-The internal bundle transfer is intentionally narrower than Code's portal or
-MCP surface. It accepts only an exact capability-bound request, disables
-caching and redirects, and deletes the bundle after a successful response.
-Expired or already-consumed capabilities cause Deployments to replace the
-helper checkout and retry rather than leaving the sync permanently failed.
-
-`RepositoryCommit` also has an optional base ref. Creating a new proposal branch
-must fork the repository's default branch (or the requested base), never create
-an unrelated root commit.
-
-The Deployments sync controller labels/annotates its projected resources and
-treats the repository tree as the exact desired specification. A removed Release is
-retained because it is immutable deployment history. A removed Deployment is
-retained by default and deleted only when its last Git-owned specification
-explicitly selected `deletionPolicy: Delete`. This makes repository pruning
-intentional rather than an accidental infrastructure teardown.
-
-`RepositorySync` has a cleanup finalizer. Deleting a Project therefore cannot
-drop the source registration and strand objects with stale Git ownership:
-retained inventory is detached, while only a Deployment whose controller-
-recorded last-applied policy is `Delete` is removed. The config revision is
-recorded separately from the Release's source revision.
-
-## Deployments API and runtime adapter
-
-The provider exposes `deployments.faros.sh/v1alpha1`:
-
-- `Release` is immutable after creation. It records source repository and code
-  revision, a blueprint reference, and admitted component image references.
-- `Deployment` is mutable Git-projected desired state. It selects a Release,
-  configuration, mode (`development` or `production`), deletion policy, class,
-  and rollout identity.
-
-The built-in `kro-direct` class currently admits the canonical `application`
-blueprint contract and translates it into the stable Infrastructure `Instance`
-API with `spec.template: application` and template inputs under `spec.values`.
-Infrastructure Templates use virtual storage and therefore cannot be selected
-through another provider's permission claim; the POC keeps this mapping
-provider-owned until Release can carry an immutable resolved blueprint
-snapshot. Production maps admitted Release image artifacts to component image
-inputs. Development leaves image selection to the Infrastructure development
-overlay. In both modes the adapter reserves the platform-owned name, mode, and
-rollout revision, then projects backend phase, URL, outputs, and release
-references into `Deployment.status`.
-
-Configuration fields removed from Git are removed from the backend instance;
-provider-computed and unrelated backend-managed fields are preserved. This is a
-managed ownership merge, not a blanket replacement or an indefinitely additive
-merge.
-
-## Revision semantics
-
-Two revisions are intentionally distinct:
-
-- `Release.spec.source.revision` is the source commit whose admitted build
-  produced the image artifacts.
-- `RepositorySync.status.appliedRevision` is the merged configuration commit.
-  The sync controller uses it as the Deployment rollout identity.
-
-A configuration-only merge therefore rolls out the same artifacts with changed
-configuration without pretending that a new source build occurred. CI for a
-shared source/config repository should path-filter `.faros`-only changes to
-avoid an image-build loop.
-
-## App Studio promotion
-
-When production is GitOps-managed, promotion retains the clean-workspace and
-exact-build artifact gates, then generates an immutable production Release
-manifest and a production Deployment manifest. It commits them to a
-deterministic proposal branch and creates an approval-gated `ChangeRequest`. It
-does not create the Release or directly update the Deployment. Approval alone
-also does not deploy: only a merge that is subsequently applied by
-`RepositorySync` can change runtime desired state. Direct production preserves
-the existing immediate Release/Deployment path.
-
-Project environment bindings may retain read-only references to the Git-owned
-Deployment or its Infrastructure backend so existing App Studio status and
-preview surfaces can observe it. Those references are not mutation authority.
-Production publishing or access changes for a Git-owned production environment
-must use the same proposal flow or fail explicitly; this POC rejects those
-direct mutations where it does not yet provide a specialized proposal endpoint.
-With the recommended policy, development preview access and Template changes
-remain direct App Studio mutations. Falling back to a direct production patch
-would create two competing writers.
-
-## GitOps engine scope
-
-This POC uses a hand-rolled, deliberately narrow pull reconciler in the
-Deployments provider. It is not a general-purpose Flux or Argo CD replacement:
-it requests one bounded repository checkout and supports only Release and
-Deployment resources. The stable hand-off is the Deployments API, so a future
-Flux/Argo source adapter could project the same resources without changing App
-Studio or the runtime driver.
-
-## Claims and rollout compatibility
-
-The Code APIExport keeps only its existing core secret claim; it has no
-Deployments dependency or Deployments claims. The Deployments APIExport claims
-Code `repositorycheckouts` (get, list, watch, create, update, patch, and
-delete) and Infrastructure `instances` write access. It does not claim Code
-connections, repositories, or secrets, and it never reads Git credentials.
-These claims require the Code and Infrastructure APIExport identity hashes and
-must match provider init, `manifest.yaml`, and Helm CatalogEntry copies.
-
-Bootstrap initializes Code and Infrastructure independently, then Deployments,
-then App Studio. Existing tenants need an explicit binding migration or
-re-enable: old Code bindings may retain removed claims, while old Deployments
-bindings do not contain the new `repositorycheckouts` and Code identity claim.
-Do not declare the rollout complete until each tenant's accepted claims match
-the new exports.
-
-App Studio does not yet collapse the three native lifecycle resources into one
-durable aggregate phase. Its promotion response reports `PendingApproval`, then
-`ChangeRequest`, `RepositorySync`, and `Deployment` remain authoritative for
-review/merge, config application, and runtime readiness respectively.
-
-## Acceptance path
-
-Source-level acceptance includes:
+Initialize Code before Deployments. Infrastructure is initialized independently
+and is needed only for RepositorySync trees that contain Infrastructure objects.
 
 ```sh
-make codegen-code-provider codegen-deployments-provider codegen-app-studio-provider
-(cd providers/code && go test -count=1 ./...)
-(cd providers/deployments && go test -count=1 ./...)
-(cd providers/app-studio && go test -count=1 ./...)
-git diff --check
+make install-provider-code
+make init-provider-code
+make install-provider-deployments
+make init-provider-deployments
 ```
 
-First-class provider acceptance against the Tilt multi-shard stack is:
+The Tilt dependency graph follows the same rule: `deployments-init` waits for
+`code-init`, not `infrastructure-init` or App Studio.
 
-```sh
-make tilt-cluster
-# After code-init, infrastructure-init, deployments-register, and
-# deployments-init are ready:
-make e2e-tilt-cluster
-```
-
-That gate proves the provider process is ready, its authoritative CatalogEntry
-is Ready, its APIExport publishes `releases`, `deployments`, and
-`repositorysyncs`, and its exact Code and Infrastructure permission claims
-carry the live identity hashes. It also creates an isolated tenant, binds Code,
-Infrastructure, and Deployments with accepted claims, materializes an
-Infrastructure `Instance` from a `Release`/`Deployment`, and verifies default
-`Retain` finalization detaches rather than deletes the backend.
-
-Full product acceptance additionally requires a real repository:
-
-1. Create a default project and verify development has a writable
-   provider-resource binding, production is GitOps, one RepositorySync exists,
-   and no development manifests were added to `.faros`.
-2. Change the Template or preview policy and verify development converges
-   directly without a pull request.
-3. Verify an empty RepositorySync inventory does not make production appear
-   deployed or ready.
-4. Admit an exact build, promote it, and verify App Studio creates a proposal
-   branch and open ChangeRequest without changing Release/Deployment resources.
-5. Approve but do not merge and verify runtime state remains unchanged.
-6. Merge and verify the new config revision is projected, reconciled, and
-   reported separately from the Release source revision.
-7. Create a Direct/Direct project and verify it has no RepositorySync and
-   preserves the immediate production path.
-8. Commit an invalid or partially valid `.faros` tree and verify none of that
-   revision is applied.
-9. Remove a retained Deployment and verify infrastructure is not deleted; then
-   repeat with explicit `deletionPolicy: Delete` and verify finalizer behavior.
-
-Passing generated-schema or unit checks alone does not establish live Git-host
-authorization, tenant claim acceptance, merge protection, runtime readiness,
-registry access, or endpoint publication.
+The Tiltcluster acceptance flow registers the provider, verifies that
+RepositorySync is its only exported API, syncs an exact Infrastructure Instance
+and ConfigMap from the Git fixture, checks `Synced`/`Applied`, independently
+checks Infrastructure runtime readiness, and verifies generic cleanup.

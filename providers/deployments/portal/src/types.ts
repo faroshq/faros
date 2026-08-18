@@ -7,30 +7,7 @@ export interface FarosContext {
   subPath?: string
 }
 
-export interface ReleaseArtifact {
-  name: string
-  image: string
-}
-
-export interface ReleaseIntent {
-  name: string
-  generation?: number
-  repositoryRef: string
-  revision: string
-  blueprint: string
-  artifacts: ReleaseArtifact[]
-  createdAt?: string
-}
-
-export interface BackendReference {
-  apiVersion: string
-  kind: string
-  resource: string
-  name: string
-  uid?: string
-}
-
-export interface DeploymentCondition {
+export interface SyncCondition {
   type: string
   status: string
   reason?: string
@@ -39,37 +16,65 @@ export interface DeploymentCondition {
   observedGeneration?: number
 }
 
-export interface DeploymentSnapshot {
+export interface SyncClaimReference {
+  group: string
+  resource: string
+  verbs: string[]
+}
+
+export interface SyncTargetRequirement {
+  apiVersion: string
+  kind: string
+  resource: string
+  namespace?: string
+  state: 'Granted' | 'AuthorizationRequired' | 'TargetAPIUnavailable' | 'Unsupported' | string
+  message?: string
+  claim?: SyncClaimReference
+}
+
+export interface SyncInventoryItem {
+  apiVersion: string
+  kind: string
+  resource: string
+  namespace?: string
+  name: string
+  uid?: string
+  sourcePath?: string
+}
+
+export interface RepositorySyncSnapshot {
   name: string
   uid?: string
   generation?: number
   createdAt?: string
   deletionTimestamp?: string
-  releaseRef: string
-  className: string
-  mode: string
-  deletionPolicy: string
-  rolloutID: string
-  configuration?: Record<string, unknown>
+  repositoryRef: string
+  ref?: string
+  path?: string
+  intervalSeconds?: number
+  prune: boolean
   observedGeneration?: number
   phase?: string
-  conditions: DeploymentCondition[]
-  activeReleaseRef?: string
-  lastSuccessfulReleaseRef?: string
-  observedRolloutID?: string
-  url?: string
-  outputs: Record<string, string>
-  backendRef?: BackendReference
-  release?: ReleaseIntent
+  observedRevision?: string
+  appliedRevision?: string
+  inventory: SyncInventoryItem[]
+  targetRequirements: SyncTargetRequirement[]
+  conditions: SyncCondition[]
 }
 
-export type EvidenceState = 'pending' | 'invalid' | 'deleting' | 'ready' | 'applied' | 'unknown'
+export type SyncEvidenceState =
+  | 'pending'
+  | 'awaiting-authorization'
+  | 'failed'
+  | 'deleting'
+  | 'ready'
+  | 'unknown'
 
 export interface ErrorResponse extends Error {
   reason: 'Unauthorized' | 'MissingBackend' | 'NotFound' | 'ProtocolError' | 'NetworkError' | 'GraphQLError' | 'TenantMissing'
   retryable?: boolean
 }
 
-export interface DeploymentListResult {
-  items: DeploymentSnapshot[]
+export interface RepositorySyncListResult {
+  items: RepositorySyncSnapshot[]
 }

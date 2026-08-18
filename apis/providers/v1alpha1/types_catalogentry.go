@@ -479,6 +479,12 @@ type ProviderAPIExport struct {
 // ProviderPermissionClaim describes a permission the provider's APIExport
 // claims against bound tenants' workspaces.
 type ProviderPermissionClaim struct {
+	// Purpose explains in tenant-facing language why the provider needs this
+	// access. It is displayed alongside the exact group, resource, and verbs
+	// when a tenant reviews or extends the provider's grants.
+	// +optional
+	Purpose string `json:"purpose,omitempty"`
+
 	// Group is the API group (empty for core).
 	// +optional
 	Group string `json:"group,omitempty"`

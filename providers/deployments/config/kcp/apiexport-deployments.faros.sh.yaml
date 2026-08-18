@@ -5,18 +5,8 @@ metadata:
 spec:
   resources:
   - group: deployments.faros.sh
-    name: deployments
-    schema: v260818-a3192d4d.deployments.deployments.faros.sh
-    storage:
-      crd: {}
-  - group: deployments.faros.sh
-    name: releases
-    schema: v260818-a3192d4d.releases.deployments.faros.sh
-    storage:
-      crd: {}
-  - group: deployments.faros.sh
     name: repositorysyncs
-    schema: v260818-a3192d4d.repositorysyncs.deployments.faros.sh
+    schema: v260818-e0e92525.repositorysyncs.deployments.faros.sh
     storage:
       crd: {}
 status: {}

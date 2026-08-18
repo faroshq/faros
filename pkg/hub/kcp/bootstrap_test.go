@@ -207,6 +207,98 @@ func TestReconcileProviderAPIBinding(t *testing.T) {
 	})
 }
 
+func TestAuthorizeProviderClaimsIsAdditiveAndRetriesConflicts(t *testing.T) {
+	existingClaims := []any{
+		map[string]any{
+			"group": "example.io", "resource": "preserved", "verbs": []any{"get"},
+			"identityHash": "preserved-identity", "selector": map[string]any{"matchAll": true}, "state": "Accepted",
+		},
+		map[string]any{
+			"group": "infrastructure.faros.sh", "resource": "instances", "verbs": []any{"get"},
+			"identityHash": "stale-identity", "selector": map[string]any{"matchLabels": map[string]any{"team": "blue"}}, "state": "Rejected",
+		},
+	}
+	existing := providerAPIBindingForTest("deployments", "root:faros:providers:deployments", "deployments.faros.sh", existingClaims)
+	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		apiBindingGVR: "APIBindingList",
+	}, existing)
+	updates := 0
+	dyn.PrependReactor("update", "apibindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+		updates++
+		if updates == 1 {
+			return true, nil, apierrors.NewConflict(apiBindingGVR.GroupResource(), "deployments", nil)
+		}
+		return false, nil, nil
+	})
+
+	err := authorizeProviderClaims(
+		context.Background(), dyn.Resource(apiBindingGVR), "deployments",
+		"root:faros:providers:deployments", "deployments.faros.sh",
+		[]ProviderClaim{{Group: "infrastructure.faros.sh", Resource: "instances", Verbs: []string{"get", "list", "create", "update"}}},
+		map[string]string{"infrastructure.faros.sh/instances": "authoritative-identity"},
+	)
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	if updates != 2 {
+		t.Fatalf("updates = %d, want 2", updates)
+	}
+	got, err := dyn.Resource(apiBindingGVR).Get(context.Background(), "deployments", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated binding: %v", err)
+	}
+	claims, _, err := unstructured.NestedSlice(got.Object, "spec", "permissionClaims")
+	if err != nil {
+		t.Fatalf("read claims: %v", err)
+	}
+	if len(claims) != 2 {
+		t.Fatalf("claims = %#v, want two", claims)
+	}
+	if !reflect.DeepEqual(claims[0], existingClaims[0]) {
+		t.Fatalf("unrelated grant changed: got %#v, want %#v", claims[0], existingClaims[0])
+	}
+	updated := claims[1].(map[string]any)
+	if state, _, _ := unstructured.NestedString(updated, "state"); state != "Accepted" {
+		t.Fatalf("state = %q, want Accepted", state)
+	}
+	if identityHash, _, _ := unstructured.NestedString(updated, "identityHash"); identityHash != "authoritative-identity" {
+		t.Fatalf("identityHash = %q, want authoritative-identity", identityHash)
+	}
+	team, _, _ := unstructured.NestedString(updated, "selector", "matchLabels", "team")
+	if team != "blue" {
+		t.Fatalf("selector was widened: %#v", updated["selector"])
+	}
+	verbs, _, _ := unstructured.NestedStringSlice(updated, "verbs")
+	if want := []string{"get", "list", "create", "update"}; !reflect.DeepEqual(verbs, want) {
+		t.Fatalf("verbs = %#v, want %#v", verbs, want)
+	}
+}
+
+func TestProviderAPIBindingAccessSeparatesConsentOfferAndApplication(t *testing.T) {
+	binding := providerAPIBindingForTest("deployments", "root:faros:providers:deployments", "deployments.faros.sh", []any{
+		map[string]any{"group": "example.io", "resource": "widgets", "verbs": []any{"get"}, "identityHash": "id", "state": "Accepted"},
+	})
+	binding.Object["status"] = map[string]any{
+		"phase": "Bound",
+		"exportPermissionClaims": []any{
+			map[string]any{"group": "example.io", "resource": "widgets", "verbs": []any{"get", "list"}, "identityHash": "id"},
+		},
+		"appliedPermissionClaims": []any{
+			map[string]any{"group": "example.io", "resource": "widgets", "verbs": []any{"get"}, "identityHash": "id", "selector": map[string]any{"matchAll": true}},
+		},
+	}
+	access, err := providerAPIBindingAccess(binding)
+	if err != nil {
+		t.Fatalf("parse access: %v", err)
+	}
+	if access.Phase != "Bound" || len(access.SpecClaims) != 1 || !access.SpecClaims[0].Accepted {
+		t.Fatalf("spec access = %#v", access)
+	}
+	if len(access.ExportClaims) != 1 || len(access.AppliedClaims) != 1 {
+		t.Fatalf("status access = %#v", access)
+	}
+}
+
 func providerAPIBindingForTest(name, path, export string, claims []any) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apis.kcp.io/v1alpha2",

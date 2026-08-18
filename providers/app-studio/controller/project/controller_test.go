@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -102,8 +103,8 @@ func TestProviderBindingsEnforcesDeliveryWriter(t *testing.T) {
 		{Name: projectDevelopmentEnvironmentName, Bindings: []aiv1alpha1.ProjectProviderBindingSpec{runtimeBinding}},
 		{Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding}},
 		{Name: "production", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{{
-			Name: "prod", Provider: "deployments", Kind: aiv1alpha1.ProjectBindingKindProviderReference,
-			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{APIVersion: "deployments.faros.sh/v1alpha1", Kind: "Deployment", Resource: "deployments", Name: "demo-prod"},
+			Name: "prod", Provider: "infrastructure", Kind: aiv1alpha1.ProjectBindingKindProviderReference,
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances", Name: "demo-prod"},
 		}}},
 	}}}
 
@@ -527,6 +528,48 @@ func TestEnsureRepositorySyncPreservesNativeSpecAcrossReconcile(t *testing.T) {
 		t.Fatalf("get second RepositorySync result: %v", err)
 	}
 	assertNativeRepositorySyncSpec(t, stored, "main", float64(30))
+}
+
+func TestFinalizeDoesNotRequireOptionalRepositorySyncAPI(t *testing.T) {
+	syncBinding := binding("gitops")
+	syncBinding.Provider = "deployments"
+	syncBinding.ResourceRef = &aiv1alpha1.ProjectProviderResourceReference{
+		Name:       "demo-gitops",
+		APIVersion: "deployments.faros.sh/v1alpha1",
+		Kind:       "RepositorySync",
+		Resource:   "repositorysyncs",
+	}
+	syncBinding.Values = runtime.RawExtension{Raw: []byte(`{"repositoryRef":"demo","ref":"main","path":".faros"}`)}
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Finalizers: []string{finalizer}},
+		Spec: aiv1alpha1.ProjectSpec{
+			Template:   &aiv1alpha1.ProjectTemplateSpec{Name: "application"},
+			Repository: &aiv1alpha1.ProjectRepositoryBinding{RepositoryRef: "demo"},
+			Delivery:   controllerTestDelivery(aiv1alpha1.ProjectDeliveryModeDirect, aiv1alpha1.ProjectDeliveryModeGitOps),
+			Environments: []aiv1alpha1.ProjectEnvironmentSpec{{
+				Name: "configuration", Bindings: []aiv1alpha1.ProjectProviderBindingSpec{syncBinding},
+			}},
+		},
+	}
+	scheme := runtime.NewScheme()
+	if err := aiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(p).Build()
+	stored := &aiv1alpha1.Project{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: p.Name}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Reconciler{}).finalize(context.Background(), c, stored); err != nil {
+		t.Fatalf("finalize with unavailable optional Deployments API: %v", err)
+	}
+	updated := &aiv1alpha1.Project{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: p.Name}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(updated.Finalizers, finalizer) {
+		t.Fatalf("optional RepositorySync stranded finalizer: %v", updated.Finalizers)
+	}
 }
 
 func assertNativeRepositorySyncSpec(t *testing.T, obj *unstructured.Unstructured, wantRef string, wantInterval float64) {

@@ -185,7 +185,11 @@ function onNavigate(e: Event) {
   const ce = e as CustomEvent<{ path: string }>
   const p = ce.detail?.path
   if (typeof p !== 'string' || !entry.value) return
-  router.push(`/providers/${entry.value.name}/${p.replace(/^\//, '')}`)
+  // A leading slash is an explicit shell-level destination. This lets a
+  // provider open portal-owned flows such as the provider access dialog while
+  // preserving the historical relative-path contract for its own pages.
+  if (p.startsWith('//')) return
+  router.push(p.startsWith('/') ? p : `/providers/${entry.value.name}/${p}`)
 }
 
 onMounted(() => mountRef.value?.addEventListener('faros-navigate', onNavigate))

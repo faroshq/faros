@@ -346,8 +346,7 @@ func TestCreateExplicitGitOpsDevelopmentUsesReferenceAndTrackedInventory(t *test
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		".faros/releases/development.yaml":                true,
-		".faros/environments/development/deployment.yaml": true,
+		".faros/environments/development/instance.yaml": true,
 	}
 	for _, file := range listed.Files {
 		delete(want, file.Path)

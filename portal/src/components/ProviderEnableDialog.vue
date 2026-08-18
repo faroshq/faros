@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { X, ShieldCheck, ShieldAlert, Loader2 } from 'lucide-vue-next'
-import type { ProviderDTO, PermissionClaim } from '@/stores/providers'
+import type { ProviderDTO, PermissionClaim, ProviderAccessClaim, ProviderAccessState } from '@/stores/providers'
 
 const props = defineProps<{
   provider: ProviderDTO | null
   // Update mode reuses the same consent surface when an already-bound
   // provider gains optional capabilities or the user changes their grants.
   mode?: 'enable' | 'update'
+  access?: ProviderAccessState | null
+  accessLoading?: boolean
+  preselectClaims?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -25,12 +28,16 @@ const busy = ref(false)
 const claimKey = (c: PermissionClaim) => `${c.group ?? ''}/${c.resource}`
 
 watch(
-  () => props.provider,
-  (p) => {
+  () => [props.provider, props.mode, props.access, props.preselectClaims] as const,
+  ([p, mode, access, preselectClaims]) => {
     if (!p) return
     const next: Record<string, boolean> = {}
+    const requested = new Set(preselectClaims ?? [])
     for (const c of p.permissionClaims ?? []) {
-      next[claimKey(c)] = !!c.tenantScoped && !c.optional
+      const current = access?.claims?.find((candidate) => claimKey(candidate) === claimKey(c))
+      next[claimKey(c)] = mode === 'update'
+        ? !!current?.accepted || (requested.has(claimKey(c)) && !!current?.offered)
+        : (!!c.tenantScoped && !c.optional) || requested.has(claimKey(c))
     }
     accepted.value = next
     busy.value = false
@@ -39,11 +46,17 @@ watch(
 )
 
 const claims = computed(() => props.provider?.permissionClaims ?? [])
+const currentClaim = (c: PermissionClaim): ProviderAccessClaim | undefined =>
+  props.access?.claims?.find((candidate) => claimKey(candidate) === claimKey(c))
+const alreadyAccepted = (c: PermissionClaim): boolean => !!currentClaim(c)?.accepted
+const isUnavailable = (c: PermissionClaim): boolean =>
+  props.mode === 'update' && !!props.access && !currentClaim(c)?.offered
 const hasUntrustedAccepted = computed(() =>
   claims.value.some((c) => !c.tenantScoped && accepted.value[claimKey(c)]),
 )
 
 function toggle(c: PermissionClaim) {
+  if (alreadyAccepted(c) || isUnavailable(c)) return
   const k = claimKey(c)
   accepted.value = { ...accepted.value, [k]: !accepted.value[k] }
 }
@@ -51,7 +64,9 @@ function toggle(c: PermissionClaim) {
 function onConfirm() {
   if (!props.provider) return
   busy.value = true
-  const accept = claims.value.filter((c) => accepted.value[claimKey(c)])
+  const accept = claims.value.filter(
+    (c) => accepted.value[claimKey(c)] && (props.mode !== 'update' || !alreadyAccepted(c)),
+  )
   emit('confirm', accept)
 }
 </script>
@@ -72,7 +87,7 @@ function onConfirm() {
             Review what this provider will be able to access in your workspace.
           </p>
           <p v-if="mode === 'update'" class="mt-1 text-[10px] text-warning">
-            This replaces the current grant set. Re-select any optional access you want to retain.
+            Access updates are additive. Existing grants remain authorized and cannot be removed here.
           </p>
         </div>
         <button class="text-text-muted hover:text-text-primary" @click="$emit('cancel')">
@@ -81,7 +96,11 @@ function onConfirm() {
       </div>
 
       <div class="max-h-[60vh] overflow-y-auto px-4 py-3">
-        <div v-if="claims.length === 0" class="rounded-lg border border-border-subtle bg-surface-overlay/50 px-3 py-4 text-center text-xs text-text-muted">
+        <div v-if="accessLoading" class="space-y-2" aria-label="Loading provider access">
+          <div v-for="i in 3" :key="i" class="h-16 rounded-lg border border-border-subtle bg-surface-overlay/50 shimmer" />
+        </div>
+
+        <div v-else-if="claims.length === 0" class="rounded-lg border border-border-subtle bg-surface-overlay/50 px-3 py-4 text-center text-xs text-text-muted">
           This provider does not request access to any tenant resources.
           Clicking Confirm will bind its APIs into your workspace.
         </div>
@@ -98,6 +117,7 @@ function onConfirm() {
                 type="checkbox"
                 class="mt-1 h-3.5 w-3.5 accent-accent"
                 :checked="!!accepted[claimKey(c)]"
+                :disabled="alreadyAccepted(c) || isUnavailable(c)"
                 @change="toggle(c)"
               />
               <div class="min-w-0 flex-1">
@@ -110,12 +130,21 @@ function onConfirm() {
                   <span v-if="c.optional" class="rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
                     Optional
                   </span>
+                  <span v-if="alreadyAccepted(c)" class="rounded-sm border border-success/30 bg-success-subtle px-1.5 py-0.5 font-mono text-[10px] text-success">
+                    {{ currentClaim(c)?.applied ? 'Applied' : 'Pending' }}
+                  </span>
                 </div>
+                <p v-if="c.purpose" class="mt-1 text-[11px] leading-relaxed text-text-secondary">
+                  {{ c.purpose }}
+                </p>
                 <p class="mt-0.5 text-[10px] text-text-muted">
                   Verbs: <span class="font-mono">{{ (c.verbs ?? []).join(', ') || 'none' }}</span>
                 </p>
                 <p v-if="c.optional" class="mt-1 text-[10px] text-accent">
                   Optional capability — leave unchecked to omit this access from the APIBinding.
+                </p>
+                <p v-if="isUnavailable(c)" class="mt-1 text-[10px] text-warning">
+                  This capability is declared in the catalog but is not offered by the provider's current APIExport.
                 </p>
                 <p v-if="!c.tenantScoped" class="mt-1 text-[10px] text-warning">
                   Not marked tenant-scoped — provider could reach beyond your workspace.
@@ -157,7 +186,7 @@ function onConfirm() {
         </button>
         <button
           class="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/15 px-3 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-60"
-          :disabled="busy"
+          :disabled="busy || accessLoading"
           @click="onConfirm"
         >
           <Loader2 v-if="busy" class="h-3 w-3 animate-spin" :stroke-width="2" />

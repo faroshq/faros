@@ -189,8 +189,8 @@ export function releasePipelineView(
   } else if (productionProjectionPending && build?.status === 'built') {
     state = 'waiting'
     tone = 'warning'
-    message = 'Waiting for Git sync to project the production Deployment…'
-    detail = 'The production binding is recorded, but the referenced Deployment has not been observed yet.'
+    message = 'Waiting for Git sync to apply the production target…'
+    detail = 'The production binding is recorded, but the referenced target object has not been observed yet.'
   } else if (build?.status === 'built') {
     state = 'ready'
     tone = 'success'
@@ -246,7 +246,7 @@ export function releasePipelineView(
     detail = `Current production remains online at ${shortSHA(observedRevision || requestedRevision) || 'its observed revision'}. ${detail}`
   }
   if (productionProjectionPending && build?.status !== 'built' && state !== 'needs_commit') {
-    detail = `${detail} The production binding is recorded, but Git sync has not projected the referenced Deployment yet.`
+    detail = `${detail} The production binding is recorded, but Git sync has not applied the referenced target object yet.`
   }
 
   // A provider rollout failure is independent from image production. Keep

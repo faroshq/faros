@@ -39,8 +39,10 @@ import (
 // Mirrors the dialog state — for each declared permission claim, whether
 // the user accepted it. Claims the user didn't tick are sent through to
 // kcp as state=Rejected for required claims, which preserves the existing
-// binding semantics. Optional claims the user didn't tick are omitted from
-// the APIBinding entirely so they do not block a partial capability grant.
+// binding semantics. On an initial enable, optional claims the user didn't
+// tick are omitted from the APIBinding entirely so they do not block a partial
+// capability grant. On a re-enable, already accepted claims are preserved;
+// provider disable or a future explicit revoke flow may remove a grant.
 type EnableProviderRequest struct {
 	AcceptedClaims []AcceptedClaim `json:"acceptedClaims"`
 }
@@ -59,7 +61,8 @@ type AcceptedClaim struct {
 // Rejected state when the user did not accept them. Optional claims are
 // omitted unless explicitly accepted, allowing a provider to publish a
 // capability that tenants can add later without making the initial binding
-// invalid.
+// invalid. The enable handler merges previously accepted claims into accepted
+// before calling this helper, so an idempotent re-enable cannot revoke access.
 func providerClaimsForAccepted(declared []providers.PermissionClaim, accepted map[string]bool) []kcp.ProviderClaim {
 	acceptedKey := func(group, resource string) string { return group + "/" + resource }
 	claims := make([]kcp.ProviderClaim, 0, len(declared))
@@ -82,6 +85,37 @@ func providerClaimsForAccepted(declared []providers.PermissionClaim, accepted ma
 // can use it unchanged.
 type EnableProviderResponse struct {
 	BindingName string `json:"bindingName"`
+}
+
+// ProviderAccessResponse is the tenant-facing view of one provider's access.
+// Declared, offered, accepted, and applied are deliberately separate: the
+// catalog describes intent, the APIExport describes what kcp currently
+// offers, spec records tenant consent, and status records effective access.
+type ProviderAccessResponse struct {
+	ProviderName string                `json:"providerName"`
+	Enabled      bool                  `json:"enabled"`
+	BindingName  string                `json:"bindingName,omitempty"`
+	Phase        string                `json:"phase,omitempty"`
+	Claims       []ProviderAccessClaim `json:"claims,omitempty"`
+}
+
+type ProviderAccessClaim struct {
+	Purpose      string   `json:"purpose,omitempty"`
+	Group        string   `json:"group,omitempty"`
+	Resource     string   `json:"resource"`
+	Verbs        []string `json:"verbs,omitempty"`
+	TenantScoped bool     `json:"tenantScoped,omitempty"`
+	Optional     bool     `json:"optional,omitempty"`
+	Declared     bool     `json:"declared"`
+	Offered      bool     `json:"offered"`
+	Accepted     bool     `json:"accepted"`
+	Applied      bool     `json:"applied"`
+}
+
+// AuthorizeProviderAccessRequest is additive by construction. Every tuple in
+// Claims is accepted; omitted tuples retain their current state.
+type AuthorizeProviderAccessRequest struct {
+	Claims []AcceptedClaim `json:"claims"`
 }
 
 // enableProvider handles POST /api/orgs/{org}/workspaces/{ws}/providers/{name}/enable.
@@ -151,6 +185,26 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 		accepted[acceptedKey(c.Group, c.Resource)] = true
 	}
 
+	// Re-enabling is intentionally monotonic. The request normally comes from
+	// the provider dialog and may omit optional claims that were granted by a
+	// previous enable (for example, after the catalog gained a new optional
+	// target). Treating that omission as a revoke would make a harmless retry
+	// silently remove access. Provider disable or a future explicit revoke flow
+	// owns removal; preserve every currently accepted tuple here before building
+	// the desired binding claims.
+	access, err := h.mgr.bootstrapper.GetProviderAPIBindingAccess(r.Context(), tc.OrgUUID, tc.WorkspaceUUID, providerName)
+	if err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "get existing provider access: "+err.Error())
+		return
+	}
+	if access != nil {
+		for _, claim := range access.SpecClaims {
+			if claim.Accepted {
+				accepted[acceptedKey(claim.Group, claim.Resource)] = true
+			}
+		}
+	}
+
 	claims := providerClaimsForAccepted(prov.PermissionClaims, accepted)
 
 	// Precondition (checked BEFORE creating anything): a provider that requests
@@ -195,6 +249,163 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(EnableProviderResponse{BindingName: providerName})
+}
+
+func (h *Handler) getProviderAccess(w http.ResponseWriter, r *http.Request) {
+	tc, ok := h.requireTenantContext(w, r, true, false)
+	if !ok {
+		return
+	}
+	prov, ok := h.providerForAccess(w, mux.Vars(r)["name"])
+	if !ok {
+		return
+	}
+	access, err := h.mgr.bootstrapper.GetProviderAPIBindingAccess(r.Context(), tc.OrgUUID, tc.WorkspaceUUID, prov.Name)
+	if err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "get provider access: "+err.Error())
+		return
+	}
+	response := buildProviderAccessResponse(prov, access)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func buildProviderAccessResponse(prov providers.Provider, access *kcp.ProviderAPIBindingAccess) ProviderAccessResponse {
+	out := ProviderAccessResponse{ProviderName: prov.Name}
+	indexes := make(map[string]int, len(prov.PermissionClaims))
+	key := func(group, resource string) string { return group + "/" + resource }
+	for _, claim := range prov.PermissionClaims {
+		indexes[key(claim.Group, claim.Resource)] = len(out.Claims)
+		out.Claims = append(out.Claims, ProviderAccessClaim{
+			Purpose: claim.Purpose, Group: claim.Group, Resource: claim.Resource,
+			Verbs: append([]string(nil), claim.Verbs...), TenantScoped: claim.TenantScoped,
+			Optional: claim.Optional, Declared: true,
+		})
+	}
+	if access == nil {
+		return out
+	}
+	out.Enabled = true
+	out.BindingName = access.BindingName
+	out.Phase = access.Phase
+	ensure := func(claim kcp.ProviderBindingClaim) int {
+		claimKey := key(claim.Group, claim.Resource)
+		if i, found := indexes[claimKey]; found {
+			return i
+		}
+		indexes[claimKey] = len(out.Claims)
+		out.Claims = append(out.Claims, ProviderAccessClaim{
+			Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...),
+		})
+		return len(out.Claims) - 1
+	}
+	for _, claim := range access.ExportClaims {
+		i := ensure(claim)
+		out.Claims[i].Offered = true
+		// The current APIExport, not its catalog projection, is authoritative
+		// for the verbs the tenant is being asked to grant.
+		out.Claims[i].Verbs = append([]string(nil), claim.Verbs...)
+	}
+	for _, claim := range access.SpecClaims {
+		i := ensure(claim)
+		out.Claims[i].Accepted = claim.Accepted
+	}
+	for _, claim := range access.AppliedClaims {
+		i := ensure(claim)
+		out.Claims[i].Applied = true
+	}
+	return out
+}
+
+func (h *Handler) authorizeProviderAccess(w http.ResponseWriter, r *http.Request) {
+	tc, ok := h.requireTenantContext(w, r, true, false)
+	if !ok {
+		return
+	}
+	prov, ok := h.providerForAccess(w, mux.Vars(r)["name"])
+	if !ok {
+		return
+	}
+	var req AuthorizeProviderAccessRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	declared := make(map[string]providers.PermissionClaim, len(prov.PermissionClaims))
+	for _, claim := range prov.PermissionClaims {
+		declared[claim.Group+"/"+claim.Resource] = claim
+	}
+	requested := make([]kcp.ProviderClaim, 0, len(req.Claims))
+	seen := make(map[string]struct{}, len(req.Claims))
+	for _, tuple := range req.Claims {
+		claimKey := tuple.Group + "/" + tuple.Resource
+		if strings.TrimSpace(tuple.Resource) == "" {
+			writeError(w, newValidationError("claim resource is required"))
+			return
+		}
+		claim, found := declared[claimKey]
+		if !found {
+			writeError(w, newValidationError("provider does not declare permission claim "+claimKey))
+			return
+		}
+		if _, duplicate := seen[claimKey]; duplicate {
+			continue
+		}
+		seen[claimKey] = struct{}{}
+		requested = append(requested, kcp.ProviderClaim{
+			Group: claim.Group, Resource: claim.Resource, Verbs: append([]string(nil), claim.Verbs...), Accepted: true,
+		})
+	}
+	access, err := h.mgr.bootstrapper.GetProviderAPIBindingAccess(r.Context(), tc.OrgUUID, tc.WorkspaceUUID, prov.Name)
+	if err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "get provider access: "+err.Error())
+		return
+	}
+	if access == nil {
+		writeStatus(w, http.StatusConflict, "Conflict", "provider "+prov.Name+" must be enabled before access can be extended")
+		return
+	}
+	offered := make(map[string]struct{}, len(access.ExportClaims))
+	for _, claim := range access.ExportClaims {
+		offered[claim.Group+"/"+claim.Resource] = struct{}{}
+	}
+	for _, claim := range requested {
+		claimKey := claim.Group + "/" + claim.Resource
+		if _, found := offered[claimKey]; !found {
+			writeStatus(w, http.StatusConflict, "Conflict", "provider APIExport does not currently offer permission claim "+claimKey)
+			return
+		}
+	}
+	if err := h.mgr.bootstrapper.AuthorizeProviderAPIBindingClaims(
+		r.Context(), tc.OrgUUID, tc.WorkspaceUUID, prov.Name,
+		prov.APIExportPath, prov.APIExportName, requested,
+	); err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "authorize provider access: "+err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) providerForAccess(w http.ResponseWriter, providerName string) (providers.Provider, bool) {
+	if h.mgr.providers == nil {
+		writeStatus(w, http.StatusNotImplemented, "NotImplemented", "provider registry not wired on this hub")
+		return providers.Provider{}, false
+	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		writeError(w, newValidationError("provider name is required"))
+		return providers.Provider{}, false
+	}
+	prov, found := h.mgr.providers.Get(providerName)
+	if !found {
+		writeStatus(w, http.StatusNotFound, "NotFound", "provider "+providerName+" not found")
+		return providers.Provider{}, false
+	}
+	if prov.APIExportPath == "" || prov.APIExportName == "" {
+		writeStatus(w, http.StatusBadRequest, "BadRequest", "provider "+providerName+" declares no APIExport to authorize")
+		return providers.Provider{}, false
+	}
+	return prov, true
 }
 
 func (h *Handler) missingProviderDependencies(ctx context.Context, orgUUID, wsUUID string, dependencies []providers.Dependency) ([]string, error) {

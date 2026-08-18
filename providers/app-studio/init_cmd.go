@@ -77,9 +77,9 @@ func runInitCmd(ctx context.Context) error {
 		return fmt.Errorf("APP_STUDIO_CODE_IDENTITY_HASH is required")
 	}
 	claims = append(claims, codePermissionClaims(codeHash)...)
-	// Production intent is expressed through immutable Releases and owned
-	// Deployments. The deployment provider translates those into the selected
-	// backend; App Studio no longer owns production Infrastructure instances.
+	// Reviewed delivery uses Deployments only for RepositorySync. The target
+	// directory contains concrete provider objects, so App Studio never needs
+	// Release or Deployment API access.
 	deploymentClaims := deploymentPermissionClaims(os.Getenv("APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH"))
 	if len(deploymentClaims) == 0 {
 		log.Printf("WARNING: APP_STUDIO_DEPLOYMENTS_IDENTITY_HASH is empty — reviewed-production claims will be omitted; tenants can still use Direct delivery")
@@ -142,18 +142,6 @@ func deploymentPermissionClaims(identityHash string) []sdkinstall.PermissionClai
 		return nil
 	}
 	return []sdkinstall.PermissionClaim{
-		{
-			Group:        "deployments.faros.sh",
-			Resource:     "releases",
-			Verbs:        []string{"get", "list", "watch", "create"},
-			IdentityHash: hash,
-		},
-		{
-			Group:        "deployments.faros.sh",
-			Resource:     "deployments",
-			Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-			IdentityHash: hash,
-		},
 		{
 			Group:        "deployments.faros.sh",
 			Resource:     "repositorysyncs",

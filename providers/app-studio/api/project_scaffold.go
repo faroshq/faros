@@ -45,7 +45,7 @@ func (s *Server) seedProjectScaffold(ctx context.Context, id identity, p *aiv1al
 	// Starter source is only attached to an empty workspace. Explicit GitOps
 	// development inventory is narrower and may be added without replacing
 	// existing application source. The default Direct development policy never
-	// writes development Release/Deployment YAML.
+	// writes a development target manifest.
 	existing, err := s.workspaces.ListFiles(ctx, scope, workspace.ListOptions{})
 	workspacePopulated := false
 	gitOpsRoot := projectGitOpsDeliverySettings(p).Path + "/"

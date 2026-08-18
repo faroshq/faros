@@ -1,32 +1,31 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
-import { listDeployments } from '../api'
-import { conditionIsTrue, evidenceLabel, evidenceTone, evidenceState } from '../mapper'
+import { listRepositorySyncs } from '../api'
+import { evidenceLabel, evidenceTone, syncEvidenceState } from '../mapper'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { beginRead, completeRead, failRead, initialReadState, readErrorMessage } from '../state'
-import type { DeploymentSnapshot, FarosContext } from '../types'
+import type { FarosContext, RepositorySyncSnapshot } from '../types'
 
 const props = defineProps<{ tenant?: FarosContext['tenant'] }>()
 const emit = defineEmits<{ open: [name: string] }>()
 
-const read = ref(initialReadState<DeploymentSnapshot[]>([]))
+const read = ref(initialReadState<RepositorySyncSnapshot[]>([]))
 let requestSerial = 0
 let inFlight: Promise<void> | null = null
 const POLL_INTERVAL_MS = 10_000
 let pollTimer: number | undefined
 
-const rows = computed(() => read.value.data.map(deployment => {
-  const state = evidenceState(deployment)
+const rows = computed(() => read.value.data.map(sync => {
+  const state = syncEvidenceState(sync)
   return {
-    name: deployment.name,
-    release: deployment.releaseRef,
-    rollout: `${deployment.rolloutID} / ${deployment.observedRolloutID ?? '—'}`,
-    applied: conditionIsTrue(deployment, 'Applied') ? 'Applied' : 'Not applied',
-    ready: conditionIsTrue(deployment, 'Ready') ? 'Ready' : 'Not ready',
-    phase: deployment.phase || 'Unknown',
-    state: evidenceLabel(state),
+    name: sync.name,
+    repository: sync.repositoryRef,
+    source: `${sync.ref || 'default'} / ${sync.path || '.faros'}`,
+    revision: sync.appliedRevision || sync.observedRevision || '—',
+    targets: sync.targetRequirements.length || sync.inventory.length,
+    phase: evidenceLabel(state),
     tone: evidenceTone(state),
   }
 }))
@@ -39,13 +38,15 @@ async function refresh(): Promise<void> {
   read.value = beginRead(read.value)
   inFlight = (async () => {
     try {
-      const result = await listDeployments()
+      const result = await listRepositorySyncs()
       if (serial === requestSerial) read.value = completeRead(result.items)
     } catch (error) {
       if (serial !== requestSerial) return
-      const message = readErrorMessage(error, 'Deployments could not be read.')
-      const retryable = (error as { retryable?: boolean }).retryable !== false
-      read.value = failRead(read.value, message, retryable)
+      read.value = failRead(
+        read.value,
+        readErrorMessage(error, 'Repository syncs could not be read.'),
+        (error as { retryable?: boolean }).retryable !== false,
+      )
     } finally {
       inFlight = null
     }
@@ -58,15 +59,13 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer === undefined) return
-  window.clearInterval(pollTimer)
-  pollTimer = undefined
+  if (pollTimer !== undefined) window.clearInterval(pollTimer)
 })
 
 watch(() => props.tenant, () => {
   requestSerial++
   inFlight = null
-  read.value = initialReadState<DeploymentSnapshot[]>([])
+  read.value = initialReadState<RepositorySyncSnapshot[]>([])
   void refresh()
 }, { immediate: true })
 </script>
@@ -76,16 +75,10 @@ watch(() => props.tenant, () => {
     <header class="page-head">
       <div>
         <p class="eyebrow">Deployments</p>
-        <h1 class="page-title">Runtime evidence</h1>
-        <p class="page-meta">Read-only view of immutable Release intent and observed Infrastructure state.</p>
+        <h1 class="page-title">Repository syncs</h1>
+        <p class="page-meta">Git revisions projected into this workspace. Target providers own runtime readiness.</p>
       </div>
-      <button
-        class="button ghost"
-        type="button"
-        :disabled="read.loading"
-        :aria-busy="read.loading"
-        @click="refresh"
-      >
+      <button class="button ghost" type="button" :disabled="read.loading" :aria-busy="read.loading" @click="refresh">
         <RefreshCw :size="14" :class="{ spinning: read.loading }" aria-hidden="true" />
         {{ read.loading ? 'Refreshing…' : 'Refresh' }}
       </button>
@@ -93,20 +86,19 @@ watch(() => props.tenant, () => {
 
     <div class="read-contract" role="note">
       <span class="read-contract-dot" aria-hidden="true" />
-      <span>Deployments observes evidence only. Release, review, and rollout mutations remain owned by their source providers.</span>
+      <span>Applied means the desired objects were synchronized. It does not assert that their workloads are healthy.</span>
     </div>
 
-    <p v-if="!loaded && read.loading" class="read-status" role="status">Loading deployments…</p>
+    <p v-if="!loaded && read.loading" class="read-status" role="status">Loading repository syncs…</p>
 
     <ResourceTable
       :columns="[
-        { key: 'name', label: 'Deployment' },
-        { key: 'release', label: 'Desired release' },
-        { key: 'rollout', label: 'Rollout desired / observed' },
-        { key: 'applied', label: 'Applied' },
-        { key: 'ready', label: 'Ready' },
-        { key: 'phase', label: 'Backend phase' },
-        { key: 'state', label: 'Evidence' },
+        { key: 'name', label: 'Sync' },
+        { key: 'repository', label: 'Repository' },
+        { key: 'source', label: 'Ref / path' },
+        { key: 'revision', label: 'Applied revision' },
+        { key: 'targets', label: 'Targets' },
+        { key: 'phase', label: 'Sync state' },
       ]"
       :rows="rows"
       row-key="name"
@@ -115,30 +107,20 @@ watch(() => props.tenant, () => {
       :error="read.error"
       :stale="read.phase === 'stale'"
       :retryable="read.retryable"
-      empty-text="No Deployments have been projected into this workspace."
+      empty-text="No repository syncs are configured in this workspace."
       @row-click="row => emit('open', String(row.name))"
       @retry="refresh"
     >
       <template #name="{ value }">
-        <button
-          class="deployment-name-trigger"
-          type="button"
-          :aria-label="`Open deployment ${String(value)}`"
-          @click.stop="emit('open', String(value))"
-        >
+        <button class="deployment-name-trigger" type="button" :aria-label="`Open repository sync ${String(value)}`" @click.stop="emit('open', String(value))">
           <span class="mono link-text">{{ value }}</span>
         </button>
       </template>
-      <template #release="{ value }"><span class="mono">{{ value }}</span></template>
-      <template #rollout="{ value }"><span class="mono rollout-value">{{ value }}</span></template>
-      <template #applied="{ value }">
-        <StatusBadge :status="String(value)" tone="warning" />
-      </template>
-      <template #ready="{ value }">
-        <StatusBadge :status="String(value)" :tone="value === 'Ready' ? 'success' : 'warning'" />
-      </template>
-      <template #phase="{ value }"><span class="mono">{{ value }}</span></template>
-      <template #state="{ value, row }">
+      <template #repository="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #source="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #revision="{ value }"><span class="mono breakable">{{ value }}</span></template>
+      <template #targets="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #phase="{ value, row }">
         <StatusBadge :status="String(value)" :tone="row.tone as 'success' | 'warning' | 'danger' | 'muted'" />
       </template>
     </ResourceTable>

@@ -161,7 +161,7 @@ local_resource(
     labels=['providers-quickstart'],
 )
 
-# --- providers-deployments (read-only release/deployment evidence, :8093) ---
+# --- providers-deployments (reviewed desired-state sync, :8093) ---
 local_resource(
     'deployments',
     cmd='make build-deployments-provider',
@@ -206,9 +206,9 @@ local_resource(
     cmd='make init-provider-deployments',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    # RepositorySync is projected by Deployments and consumes Code's exported
-    # repository contracts as well as Infrastructure's Instance contract.
-    resource_deps=['hub', 'infrastructure-init', 'code-init', 'deployments-register'],
+    # Code is the required source contract. Infrastructure and other target
+    # APIs are optional tenant-authorized capabilities.
+    resource_deps=['hub', 'code-init', 'deployments-register'],
     labels=['providers-deployments'],
 )
 
@@ -271,7 +271,7 @@ local_resource(
 
 # Writes the dev kubeconfig (.kcp/code-runtime.kubeconfig) and ensures the
 # APIExportEndpointSlice the controller manager watches. Code is independent
-# of Deployments; Deployments initializes after Code and Infrastructure. Order:
+# of Deployments; Deployments initializes after Code. Order:
 #   code-register  → creates root:faros:providers:code
 #   code-init      → writes kubeconfig + endpoint slice
 #   code (serve)   → Tilt restarts it when the kubeconfig dep appears

@@ -335,7 +335,7 @@ test('stops the transitional release state when the provider reports a terminal 
   assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'error')
 })
 
-test('waits for Git sync when the production Deployment has not been observed', () => {
+test('waits for Git sync when the production target has not been observed', () => {
   const pipeline = releasePipelineView({
     promotable: true,
     build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
@@ -344,12 +344,12 @@ test('waits for Git sync when the production Deployment has not been observed', 
   })
   assert.equal(pipeline.state, 'waiting')
   assert.equal(pipeline.transitional, true)
-  assert.match(pipeline.message, /Git sync.*project.*Deployment/i)
+  assert.match(pipeline.message, /Git sync.*apply.*target/i)
   assert.doesNotMatch(pipeline.message, /Deploying/i)
   assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'pending')
 })
 
-test('keeps an observed Pending production Deployment in deploying', () => {
+test('keeps an observed Pending production target in deploying', () => {
   const pipeline = releasePipelineView({
     promotable: true,
     build: { status: 'built', commitSHA: 'release123', note: '', components: [] },
@@ -362,7 +362,7 @@ test('keeps an observed Pending production Deployment in deploying', () => {
   assert.equal(pipeline.steps.find((step) => step.key === 'deploy').state, 'current')
 })
 
-test('keeps build status primary while an unobserved Deployment waits for projection', () => {
+test('keeps build status primary while an unobserved target waits for apply', () => {
   const pipeline = releasePipelineView({
     promotable: false,
     build: {
@@ -374,6 +374,6 @@ test('keeps build status primary while an unobserved Deployment waits for projec
   })
   assert.equal(pipeline.state, 'waiting')
   assert.match(pipeline.message, /Partial release artifacts/i)
-  assert.match(pipeline.detail, /Git sync.*projected.*Deployment/i)
+  assert.match(pipeline.detail, /Git sync.*applied.*target object/i)
   assert.doesNotMatch(pipeline.message, /Deploying/i)
 })

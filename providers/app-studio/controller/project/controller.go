@@ -289,7 +289,7 @@ func reconcileDevelopmentPreviewPolicy(p *aiv1alpha1.Project) (bool, error) {
 	}
 	desiredAccess := bindings.PreviewAccessForMode(normalized)
 	if projectDeliveryModeForEnvironment(p, projectDevelopmentEnvironmentName) == aiv1alpha1.ProjectDeliveryModeGitOps {
-		// Git owns the referenced development Deployment configuration. Sharing
+		// Git owns the referenced development target configuration. Sharing
 		// policy may still be normalized above, but this controller must never
 		// project it into a read-only binding and become a second writer.
 		return changed, nil
@@ -547,9 +547,16 @@ func (r *Reconciler) finalize(ctx context.Context, c client.Client, p *aiv1alpha
 	}
 	for _, env := range providerBindings(p) {
 		for _, binding := range env.bindings {
-			want, _, err := bindings.Desired(p, binding)
+			want, gvr, err := bindings.Desired(p, binding)
 			if err != nil {
 				// Un-buildable desired state also means nothing was created.
+				continue
+			}
+			if bindings.IsRepositorySyncResource(gvr, binding.ResourceRef.Kind) {
+				// Deployments is optional. RepositorySync carries the Project
+				// ownerReference and is garbage-collected when its API is present;
+				// an unavailable/disabled optional provider must never strand the
+				// Project's finalizer.
 				continue
 			}
 			obj := &unstructured.Unstructured{}

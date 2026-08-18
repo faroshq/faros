@@ -51,8 +51,8 @@ const hasInitialPrompt = computed(() => Boolean(props.initialPrompt?.trim()))
 const canPlan = computed(() => prompt.value.trim().length > 0 && !planning.value)
 const gitOpsOptionDisabled = computed(() => props.gitOpsChecking === true || props.gitOpsAvailable !== true)
 const gitOpsOptionMessage = computed(() => {
-  if (props.gitOpsChecking) return 'Checking Deployments availability…'
-  return props.gitOpsReason?.trim() || 'Enable Deployments / update App Studio access to use reviewed production.'
+  if (props.gitOpsChecking) return 'Checking sync and target access…'
+  return props.gitOpsReason?.trim() || 'Open Providers, enable Deployments, and approve its requested target access to use reviewed production.'
 })
 const createDisabled = computed(() =>
   props.disabled || (deliveryPreset.value === 'reviewed-production' && gitOpsOptionDisabled.value),
@@ -389,7 +389,7 @@ watch(
             <span>
               <span class="block text-[13px] font-semibold text-text-primary">Reviewed production <span class="font-mono text-[10px] text-accent">Recommended</span></span>
               <span class="mt-1 block text-[12px] leading-5 text-text-muted">Develop directly in App Studio. Promote production changes through reviewed pull requests.</span>
-              <span v-if="gitOpsOptionDisabled" id="gitops-availability" class="mt-2 block text-[11px] leading-4 text-warning">{{ gitOpsOptionMessage }}</span>
+              <span v-if="gitOpsOptionDisabled" id="gitops-availability" class="mt-2 block text-[11px] leading-4 text-warning">{{ gitOpsOptionMessage }} Choose Direct everywhere to continue without reviewed delivery.</span>
             </span>
           </label>
           <label

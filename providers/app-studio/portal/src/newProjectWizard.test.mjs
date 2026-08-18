@@ -109,7 +109,7 @@ test('confirmed review emits the exact durable create payload and honors the dis
   assert.match(wizardSource, /@click="confirmCreate"/)
   assert.match(wizardSource, /:disabled="createDisabled"/)
   assert.match(wizardSource, /:disabled="gitOpsOptionDisabled"/)
-  assert.match(wizardSource, /Enable Deployments \/ update App Studio access/)
+  assert.match(wizardSource, /enable Deployments, and approve its requested target access/)
 })
 
 test('App replaces the landing composer with the wizard and wires cancel to restore the exact prompt focus', () => {

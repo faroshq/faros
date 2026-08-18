@@ -19,26 +19,31 @@ const (
 	defaultWorkspacePath = "root:faros:providers:deployments"
 )
 
-var instanceResources = []string{"instances"}
-
 func deploymentClaims(infrastructureIdentityHash, codeIdentityHash string) ([]sdkinstall.PermissionClaim, error) {
-	infraHash := strings.TrimSpace(infrastructureIdentityHash)
-	if infraHash == "" {
-		return nil, fmt.Errorf("DEPLOYMENTS_INFRA_IDENTITY_HASH is required")
-	}
 	codeHash := strings.TrimSpace(codeIdentityHash)
 	if codeHash == "" {
 		return nil, fmt.Errorf("DEPLOYMENTS_CODE_IDENTITY_HASH is required")
 	}
-	claims := make([]sdkinstall.PermissionClaim, 0, len(instanceResources)+1)
-	for _, resource := range instanceResources {
-		claims = append(claims, sdkinstall.PermissionClaim{Group: "infrastructure.faros.sh", Resource: resource, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}, IdentityHash: infraHash})
-	}
-	claims = append(claims, sdkinstall.PermissionClaim{
+	claims := []sdkinstall.PermissionClaim{{
 		Group:        "code.faros.sh",
 		Resource:     "repositorycheckouts",
 		Verbs:        []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		IdentityHash: codeHash,
+	}}
+	// Infrastructure is one optional target capability, not a Deployments
+	// runtime dependency. When its APIExport is installed, advertising the
+	// claim lets a tenant explicitly authorize Instance apply from the portal.
+	if infraHash := strings.TrimSpace(infrastructureIdentityHash); infraHash != "" {
+		claims = append(claims, sdkinstall.PermissionClaim{
+			Group:        "infrastructure.faros.sh",
+			Resource:     "instances",
+			Verbs:        []string{"get", "create", "update", "patch", "delete"},
+			IdentityHash: infraHash,
+		})
+	}
+	claims = append(claims, sdkinstall.PermissionClaim{
+		Resource: "configmaps",
+		Verbs:    []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 	})
 	return claims, nil
 }

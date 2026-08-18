@@ -572,32 +572,36 @@ func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpe
 	if p != nil && p.Spec.Template != nil {
 		templateName = strings.TrimSpace(p.Spec.Template.Name)
 	}
-	if templateName == "" {
+	isRepositorySync := IsRepositorySyncResource(gvr, binding.ResourceRef.Kind)
+	if !isRepositorySync && templateName == "" {
 		return nil, schema.GroupVersionResource{}, &InvalidBindingError{Err: fmt.Errorf("provider binding %q: project names no template — spec.template is required on the instance", binding.Name)}
 	}
 	vals := map[string]any{}
 	maps.Copy(vals, values)
-	spec := map[string]any{
-		"template": templateName,
-		"values":   vals,
-	}
-	if IsRepositorySyncResource(gvr, binding.ResourceRef.Kind) {
+	spec := map[string]any{}
+	if isRepositorySync {
 		// RepositorySync is a Deployments API resource, not an Infrastructure Instance.
 		// Its CRD expects repositoryRef/ref/path/prune/intervalSeconds directly
 		// under spec; wrapping those values as spec.values makes the required
 		// repositoryRef disappear and leaves the object invalid.
 		spec = vals
+	} else {
+		spec = map[string]any{
+			"template": templateName,
+			"values":   vals,
+		}
+	}
+	labels := map[string]any{ProjectLabel: p.Name}
+	if templateName != "" {
+		labels[TemplateLabel] = templateName
 	}
 	want := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": binding.ResourceRef.APIVersion,
 			"kind":       binding.ResourceRef.Kind,
 			"metadata": map[string]any{
-				"name": name,
-				"labels": map[string]any{
-					ProjectLabel:  p.Name,
-					TemplateLabel: templateName,
-				},
+				"name":   name,
+				"labels": labels,
 			},
 			"spec": spec,
 		},

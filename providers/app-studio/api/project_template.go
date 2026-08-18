@@ -378,9 +378,9 @@ func projectTemplateDevBindingWithContext(p *aiv1alpha1.Project, info projectTem
 	}
 	bindingKind := aiv1alpha1.ProjectBindingKindProviderResource
 	if projectDevelopmentIsGitManaged(p) {
-		// RepositorySync owns the development Deployment and its Infrastructure
-		// backend. The Project keeps a read-only reference so preview and live
-		// workspace sync continue addressing the same deterministic backend.
+		// RepositorySync owns the concrete development target. The Project keeps
+		// a read-only reference so preview and live workspace sync continue
+		// addressing the same deterministic object.
 		bindingKind = aiv1alpha1.ProjectBindingKindProviderReference
 	}
 	return aiv1alpha1.ProjectProviderBindingSpec{

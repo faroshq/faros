@@ -1,18 +1,16 @@
 import type {
-  BackendReference,
-  DeploymentSnapshot,
-  DeploymentCondition,
-  EvidenceState,
-  ReleaseArtifact,
-  ReleaseIntent,
+  RepositorySyncSnapshot,
+  SyncClaimReference,
+  SyncCondition,
+  SyncEvidenceState,
+  SyncInventoryItem,
+  SyncTargetRequirement,
 } from './types.js'
 
 type RecordLike = Record<string, unknown>
 
 function record(value: unknown, label: string): RecordLike {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`)
-  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`)
   return value as RecordLike
 }
 
@@ -31,29 +29,17 @@ function optionalNumber(value: unknown): number | undefined {
 }
 
 function objectValue(value: unknown): RecordLike | undefined {
-  if (!value) return undefined
-  if (typeof value === 'string') {
-    try {
-      return objectValue(JSON.parse(value))
-    } catch {
-      return undefined
-    }
-  }
-  if (typeof value !== 'object' || Array.isArray(value)) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as RecordLike
 }
 
-function stringMap(value: unknown): Record<string, string> {
-  const source = objectValue(value)
-  if (!source) return {}
-  return Object.fromEntries(
-    Object.entries(source)
-      .filter(([, item]) => typeof item === 'string')
-      .map(([key, item]) => [key, String(item)]),
-  )
+function list(value: unknown, label: string): unknown[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
+  return value
 }
 
-export function mapCondition(value: unknown): DeploymentCondition {
+export function mapCondition(value: unknown): SyncCondition {
   const condition = record(value, 'condition')
   return {
     type: requiredString(condition.type, 'condition.type'),
@@ -65,140 +51,122 @@ export function mapCondition(value: unknown): DeploymentCondition {
   }
 }
 
-export function mapRelease(value: unknown): ReleaseIntent {
-  const raw = record(value, 'release')
-  const metadata = record(raw.metadata, 'release.metadata')
-  const spec = record(raw.spec, 'release.spec')
-  const source = record(spec.source, 'release.spec.source')
-  const blueprint = record(spec.blueprintRef, 'release.spec.blueprintRef')
-  const rawArtifacts = spec.artifacts === undefined ? [] : spec.artifacts
-  if (!Array.isArray(rawArtifacts)) throw new Error('release.spec.artifacts must be an array')
-  const artifacts: ReleaseArtifact[] = rawArtifacts.map((item, index) => {
-    const artifact = record(item, `release.spec.artifacts[${index}]`)
-    return {
-      name: requiredString(artifact.name, `release.spec.artifacts[${index}].name`),
-      image: requiredString(artifact.image, `release.spec.artifacts[${index}].image`),
-    }
-  })
+function mapClaim(value: unknown): SyncClaimReference | undefined {
+  if (value === undefined || value === null) return undefined
+  const claim = record(value, 'targetRequirement.claim')
+  const verbs = list(claim.verbs, 'targetRequirement.claim.verbs')
+  if (!verbs.every(verb => typeof verb === 'string')) throw new Error('targetRequirement.claim.verbs must contain strings')
   return {
-    name: requiredString(metadata.name, 'release.metadata.name'),
-    generation: optionalNumber(metadata.generation),
-    repositoryRef: requiredString(source.repositoryRef, 'release.spec.source.repositoryRef'),
-    revision: requiredString(source.revision, 'release.spec.source.revision'),
-    blueprint: requiredString(blueprint.name, 'release.spec.blueprintRef.name'),
-    artifacts,
-    createdAt: optionalString(metadata.creationTimestamp),
+    group: typeof claim.group === 'string' ? claim.group : '',
+    resource: requiredString(claim.resource, 'targetRequirement.claim.resource'),
+    verbs: verbs as string[],
   }
 }
 
-function mapBackendRef(value: unknown): BackendReference | undefined {
-  if (value === null || value === undefined) return undefined
-  const ref = record(value, 'deployment.status.backendRef')
+function mapRequirement(value: unknown): SyncTargetRequirement {
+  const requirement = record(value, 'targetRequirement')
   return {
-    apiVersion: requiredString(ref.apiVersion, 'backendRef.apiVersion'),
-    kind: requiredString(ref.kind, 'backendRef.kind'),
-    resource: requiredString(ref.resource, 'backendRef.resource'),
-    name: requiredString(ref.name, 'backendRef.name'),
-    uid: optionalString(ref.uid),
+    apiVersion: requiredString(requirement.apiVersion, 'targetRequirement.apiVersion'),
+    kind: requiredString(requirement.kind, 'targetRequirement.kind'),
+    resource: requiredString(requirement.resource, 'targetRequirement.resource'),
+    namespace: optionalString(requirement.namespace),
+    state: requiredString(requirement.state, 'targetRequirement.state'),
+    message: optionalString(requirement.message),
+    claim: mapClaim(requirement.claim),
   }
 }
 
-export function mapDeployment(value: unknown, releases: ReadonlyMap<string, ReleaseIntent> = new Map()): DeploymentSnapshot {
-  const raw = record(value, 'deployment')
-  const metadata = record(raw.metadata, 'deployment.metadata')
-  const spec = record(raw.spec, 'deployment.spec')
+function mapInventoryItem(value: unknown): SyncInventoryItem {
+  const item = record(value, 'inventory item')
+  return {
+    apiVersion: requiredString(item.apiVersion, 'inventory.apiVersion'),
+    kind: requiredString(item.kind, 'inventory.kind'),
+    resource: requiredString(item.resource, 'inventory.resource'),
+    namespace: optionalString(item.namespace),
+    name: requiredString(item.name, 'inventory.name'),
+    uid: optionalString(item.uid),
+    sourcePath: optionalString(item.sourcePath),
+  }
+}
+
+export function mapRepositorySync(value: unknown): RepositorySyncSnapshot {
+  const raw = record(value, 'repositorySync')
+  const metadata = record(raw.metadata, 'repositorySync.metadata')
+  const spec = record(raw.spec, 'repositorySync.spec')
   const status = objectValue(raw.status) ?? {}
-  const rawConditions = status.conditions === undefined ? [] : status.conditions
-  if (!Array.isArray(rawConditions)) throw new Error('deployment.status.conditions must be an array')
-  const releaseRef = requiredString(spec.releaseRef, 'deployment.spec.releaseRef')
   return {
-    name: requiredString(metadata.name, 'deployment.metadata.name'),
+    name: requiredString(metadata.name, 'repositorySync.metadata.name'),
     uid: optionalString(metadata.uid),
     generation: optionalNumber(metadata.generation),
     createdAt: optionalString(metadata.creationTimestamp),
     deletionTimestamp: optionalString(metadata.deletionTimestamp),
-    releaseRef,
-    className: optionalString(spec.className) ?? 'kro-direct',
-    mode: optionalString(spec.mode) ?? 'production',
-    deletionPolicy: optionalString(spec.deletionPolicy) ?? 'Retain',
-    rolloutID: requiredString(spec.rolloutID, 'deployment.spec.rolloutID'),
-    configuration: objectValue(spec.configuration),
+    repositoryRef: requiredString(spec.repositoryRef, 'repositorySync.spec.repositoryRef'),
+    ref: optionalString(spec.ref),
+    path: optionalString(spec.path),
+    intervalSeconds: optionalNumber(spec.intervalSeconds),
+    prune: spec.prune === true,
     observedGeneration: optionalNumber(status.observedGeneration),
     phase: optionalString(status.phase),
-    conditions: rawConditions.map(mapCondition),
-    activeReleaseRef: optionalString(status.activeReleaseRef),
-    lastSuccessfulReleaseRef: optionalString(status.lastSuccessfulReleaseRef),
-    observedRolloutID: optionalString(status.observedRolloutID),
-    url: optionalString(status.url),
-    outputs: stringMap(status.outputs),
-    backendRef: mapBackendRef(status.backendRef),
-    release: releases.get(releaseRef),
+    observedRevision: optionalString(status.observedRevision),
+    appliedRevision: optionalString(status.appliedRevision),
+    inventory: list(status.inventory, 'repositorySync.status.inventory').map(mapInventoryItem),
+    targetRequirements: list(status.targetRequirements, 'repositorySync.status.targetRequirements').map(mapRequirement),
+    conditions: list(status.conditions, 'repositorySync.status.conditions').map(mapCondition),
   }
 }
 
-export function mapResourceList(
-  releasesValue: unknown,
-  deploymentsValue: unknown,
-): DeploymentSnapshot[] {
-  if (!Array.isArray(releasesValue) || !Array.isArray(deploymentsValue)) {
-    throw new Error('GraphQL returned malformed Deployments or Releases list')
-  }
-  const releases = new Map<string, ReleaseIntent>()
-  for (const item of releasesValue) {
-    const release = mapRelease(item)
-    releases.set(release.name, release)
-  }
-  return deploymentsValue.map(item => mapDeployment(item, releases))
+export function mapRepositorySyncList(value: unknown): RepositorySyncSnapshot[] {
+  if (!Array.isArray(value)) throw new Error('GraphQL returned a malformed RepositorySync list')
+  return value.map(mapRepositorySync)
 }
 
-function condition(snapshot: DeploymentSnapshot, type: string): DeploymentCondition | undefined {
+function condition(snapshot: RepositorySyncSnapshot, type: string): SyncCondition | undefined {
   return snapshot.conditions.find(item => item.type.toLowerCase() === type.toLowerCase())
 }
 
-export function isCurrentEvidence(snapshot: DeploymentSnapshot, item?: DeploymentCondition): boolean {
+export function isCurrentEvidence(snapshot: RepositorySyncSnapshot, item?: SyncCondition): boolean {
   const observed = item?.observedGeneration ?? snapshot.observedGeneration
   if (observed === undefined) return false
   if (snapshot.generation === undefined) return observed > 0
   return observed >= snapshot.generation
 }
 
-export function conditionIsTrue(snapshot: DeploymentSnapshot, type: string): boolean {
+export function conditionIsTrue(snapshot: RepositorySyncSnapshot, type: string): boolean {
   const item = condition(snapshot, type)
   return item?.status === 'True' && isCurrentEvidence(snapshot, item)
 }
 
-export function evidenceState(snapshot: DeploymentSnapshot): EvidenceState {
+export function syncEvidenceState(snapshot: RepositorySyncSnapshot): SyncEvidenceState {
   if (snapshot.deletionTimestamp) return 'deleting'
-  if (snapshot.phase?.toLowerCase() === 'invalid') return 'invalid'
-  if (snapshot.phase?.toLowerCase() === 'ready' && conditionIsTrue(snapshot, 'Ready')) return 'ready'
-  if (conditionIsTrue(snapshot, 'Applied')) return 'applied'
-  if (snapshot.phase?.toLowerCase() === 'pending' || snapshot.conditions.length > 0) return 'pending'
-  return 'unknown'
+  switch (snapshot.phase?.toLowerCase()) {
+    case 'awaitingauthorization': return 'awaiting-authorization'
+    case 'failed': return 'failed'
+    case 'synced':
+    case 'ready': return conditionIsTrue(snapshot, 'Applied') ? 'ready' : 'pending'
+    case 'pending':
+    case 'reconciling': return 'pending'
+    default: return snapshot.conditions.length ? 'pending' : 'unknown'
+  }
 }
 
-export function evidenceLabel(state: EvidenceState): string {
+export function evidenceLabel(state: SyncEvidenceState): string {
   switch (state) {
-    case 'ready': return 'Ready'
-    case 'applied': return 'Applied'
-    case 'pending': return 'Pending'
-    case 'invalid': return 'Invalid'
+    case 'ready': return 'Applied'
+    case 'awaiting-authorization': return 'Access required'
+    case 'pending': return 'Reconciling'
+    case 'failed': return 'Failed'
     case 'deleting': return 'Deleting'
     default: return 'Unknown'
   }
 }
 
-export function evidenceTone(state: EvidenceState): 'success' | 'warning' | 'danger' | 'muted' {
+export function evidenceTone(state: SyncEvidenceState): 'success' | 'warning' | 'danger' | 'muted' {
   switch (state) {
-    case 'ready':
-      return 'success'
-    case 'applied':
-      return 'warning'
-    case 'pending':
-      return 'warning'
-    case 'invalid':
-    case 'deleting':
-      return 'danger'
-    default:
-      return 'muted'
+    case 'ready': return 'success'
+    case 'awaiting-authorization':
+    case 'pending': return 'warning'
+    case 'failed':
+    case 'deleting': return 'danger'
+    default: return 'muted'
   }
 }

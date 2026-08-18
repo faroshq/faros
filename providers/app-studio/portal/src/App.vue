@@ -1166,7 +1166,7 @@ const createReadinessChecking = computed(() => createReadinessLoading.value || (
 const gitOpsCreateReady = computed(() => gitOpsAvailable(createReadiness.value))
 const gitOpsCreateReadinessChecking = computed(() => createReadinessChecking.value)
 const gitOpsCreateReadinessMessage = computed(() => {
-  if (createReadinessError.value) return `Unable to verify Deployments availability: ${createReadinessError.value}`
+  if (createReadinessError.value) return `Unable to verify reviewed-delivery access: ${createReadinessError.value}`
   return gitOpsReadinessMessage(createReadiness.value)
 })
 const createSetupItemsForPrompt = computed(() => createSetupItems({

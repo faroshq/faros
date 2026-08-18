@@ -69,7 +69,7 @@ type component struct {
 // provider-sdk is first: the providers depend on it, so when releasing `all`
 // the SDK tag is cut (and published to the mirror) before the providers that
 // will eventually `require` that published version.
-var componentOrder = []string{"provider-sdk", "hub", "quickstart", "kuery", "infrastructure", "deployments", "code", "app-studio", "edges", "databricks", "agents"}
+var componentOrder = []string{"provider-sdk", "hub", "quickstart", "kuery", "infrastructure", "code", "deployments", "app-studio", "edges", "databricks", "agents"}
 
 var components = map[string]component{
 	"provider-sdk":   {"provider-sdk/v", "split → faroshq/provider-sdk; publishes the go-gettable SDK module (providers require this version once the replace is dropped)"},

@@ -1,73 +1,75 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowLeft, Copy, ExternalLink, RefreshCw } from 'lucide-vue-next'
-import { copyText, followableURL, getDeployment } from '../api'
-import { evidenceLabel, evidenceState, evidenceTone, isCurrentEvidence } from '../mapper'
+import { ArrowLeft, Copy, RefreshCw, ShieldCheck } from 'lucide-vue-next'
+import { copyText, getRepositorySync } from '../api'
+import { evidenceLabel, evidenceTone, isCurrentEvidence, syncEvidenceState } from '../mapper'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
+import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { beginRead, completeRead, failRead, initialReadState, readErrorMessage } from '../state'
-import type { DeploymentCondition, DeploymentSnapshot, FarosContext } from '../types'
+import type { FarosContext, RepositorySyncSnapshot, SyncClaimReference, SyncCondition } from '../types'
 
 const props = defineProps<{ name: string; tenant?: FarosContext['tenant'] }>()
-const emit = defineEmits<{ back: [] }>()
+const emit = defineEmits<{ back: []; authorize: [claims: SyncClaimReference[]] }>()
 
-const read = ref(initialReadState<DeploymentSnapshot | null>(null))
-const copied = ref<string | null>(null)
+const read = ref(initialReadState<RepositorySyncSnapshot | null>(null))
+const copied = ref(false)
 let requestSerial = 0
 let inFlight: Promise<void> | null = null
 const POLL_INTERVAL_MS = 10_000
 let pollTimer: number | undefined
 
-const deployment = computed(() => read.value.data)
-const state = computed(() => deployment.value ? evidenceState(deployment.value) : 'unknown')
-const loaded = computed(() => (read.value.phase === 'loaded' || read.value.phase === 'stale') && deployment.value !== null)
-const runtimeURL = computed(() => followableURL(deployment.value?.url))
-const rolloutMatches = computed(() => {
-  const current = deployment.value
-  return !!current && !!current.observedRolloutID && current.observedRolloutID === current.rolloutID && isCurrentEvidence(current)
+const sync = computed(() => read.value.data)
+const state = computed(() => sync.value ? syncEvidenceState(sync.value) : 'unknown')
+const loaded = computed(() => (read.value.phase === 'loaded' || read.value.phase === 'stale') && sync.value !== null)
+const missingClaims = computed(() => {
+  const unique = new Map<string, SyncClaimReference>()
+  for (const requirement of sync.value?.targetRequirements ?? []) {
+    if (requirement.state.toLowerCase() !== 'awaitingauthorization' || !requirement.claim) continue
+    unique.set(`${requirement.claim.group}/${requirement.claim.resource}`, requirement.claim)
+  }
+  return [...unique.values()]
 })
+const inventoryRows = computed(() => (sync.value?.inventory ?? []).map(item => ({
+  key: `${item.apiVersion}/${item.resource}/${item.namespace || ''}/${item.name}`,
+  identity: `${item.apiVersion}/${item.resource}`,
+  kind: item.kind,
+  location: item.namespace ? `${item.namespace}/${item.name}` : item.name,
+  source: item.sourcePath || '—',
+  uid: item.uid || '—',
+})))
+const requirementRows = computed(() => (sync.value?.targetRequirements ?? []).map(item => ({
+  target: `${item.apiVersion}/${item.kind}`,
+  resource: item.resource,
+  state: item.state,
+  message: item.message || '—',
+})))
 
-function currentCondition(type: string): DeploymentCondition | undefined {
-  return deployment.value?.conditions.find(condition => condition.type.toLowerCase() === type.toLowerCase())
+function currentCondition(type: string): SyncCondition | undefined {
+  return sync.value?.conditions.find(condition => condition.type.toLowerCase() === type.toLowerCase())
 }
 
 function conditionLabel(type: string): string {
-  const current = deployment.value
-  const item = currentCondition(type)
-  if (!current || !item) return 'Unknown'
-  if (!isCurrentEvidence(current, item)) return 'Stale evidence'
-  return item.status === 'True' ? type : item.status === 'False' ? `Not ${type.toLowerCase()}` : 'Unknown'
+  const current = sync.value
+  const condition = currentCondition(type)
+  if (!current || !condition) return 'Not observed'
+  if (!isCurrentEvidence(current, condition)) return 'Stale'
+  return condition.status === 'True' ? 'Complete' : condition.status === 'False' ? 'Blocked' : 'Unknown'
 }
 
 function conditionTone(type: string): 'success' | 'warning' | 'danger' | 'muted' {
-  const current = deployment.value
-  const item = currentCondition(type)
-  if (!current || !item || !isCurrentEvidence(current, item)) return 'muted'
-  if (item.status === 'True') return type.toLowerCase() === 'applied' ? 'warning' : 'success'
-  if (current.phase?.toLowerCase() === 'invalid') return 'danger'
-  return 'warning'
+  const current = sync.value
+  const condition = currentCondition(type)
+  if (!current || !condition || !isCurrentEvidence(current, condition)) return 'muted'
+  if (condition.status === 'True') return 'success'
+  return type === 'AuthorizationReady' ? 'warning' : 'danger'
 }
 
-function refText(value: DeploymentSnapshot['backendRef']): string {
-  if (!value) return ''
-  return `${value.apiVersion}/${value.resource}/${value.name}`
-}
-
-async function copyValue(value: string, key: string): Promise<void> {
-  if (!(await copyText(value))) return
-  copied.value = key
-  window.setTimeout(() => {
-    if (copied.value === key) copied.value = null
-  }, 1800)
-}
-
-function openRuntimeURL(): void {
-  if (!runtimeURL.value) return
-  window.open(runtimeURL.value, '_blank', 'noopener,noreferrer')
-}
-
-function followBackendEvidence(): void {
-  document.getElementById('backend-evidence')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+async function copyRevision(): Promise<void> {
+  const revision = sync.value?.appliedRevision || sync.value?.observedRevision
+  if (!revision || !(await copyText(revision))) return
+  copied.value = true
+  window.setTimeout(() => { copied.value = false }, 1800)
 }
 
 async function refresh(): Promise<void> {
@@ -76,13 +78,15 @@ async function refresh(): Promise<void> {
   read.value = beginRead(read.value)
   inFlight = (async () => {
     try {
-      const result = await getDeployment(props.name)
+      const result = await getRepositorySync(props.name)
       if (serial === requestSerial) read.value = completeRead(result)
     } catch (error) {
       if (serial !== requestSerial) return
-      const message = readErrorMessage(error, 'Deployment could not be read.')
-      const retryable = (error as { retryable?: boolean }).retryable !== false
-      read.value = failRead(read.value, message, retryable)
+      read.value = failRead(
+        read.value,
+        readErrorMessage(error, 'Repository sync could not be read.'),
+        (error as { retryable?: boolean }).retryable !== false,
+      )
     } finally {
       inFlight = null
     }
@@ -95,15 +99,13 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer === undefined) return
-  window.clearInterval(pollTimer)
-  pollTimer = undefined
+  if (pollTimer !== undefined) window.clearInterval(pollTimer)
 })
 
 watch(() => [props.name, props.tenant], () => {
   requestSerial++
   inFlight = null
-  read.value = initialReadState<DeploymentSnapshot | null>(null)
+  read.value = initialReadState<RepositorySyncSnapshot | null>(null)
   void refresh()
 }, { immediate: true })
 </script>
@@ -113,173 +115,135 @@ watch(() => [props.name, props.tenant], () => {
     <header class="page-head detail-head">
       <div>
         <button class="button text-button" type="button" @click="emit('back')">
-          <ArrowLeft :size="14" aria-hidden="true" /> Back to Deployments
+          <ArrowLeft :size="14" aria-hidden="true" /> Back to repository syncs
         </button>
-        <p class="eyebrow">Deployment evidence</p>
+        <p class="eyebrow">Repository sync</p>
         <h1 class="page-title mono">{{ name }}</h1>
-        <p class="page-meta">Immutable intent, controller observation, and backend evidence.</p>
+        <p class="page-meta">Source, authorization, and apply evidence for one Git revision.</p>
       </div>
       <div class="detail-actions">
         <button class="button ghost" type="button" :disabled="read.loading" :aria-busy="read.loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spinning: read.loading }" aria-hidden="true" />
           {{ read.loading ? 'Refreshing…' : 'Refresh' }}
         </button>
-        <button v-if="loaded && deployment?.backendRef" class="button ghost" type="button" @click="followBackendEvidence">
-          Follow backend evidence
-        </button>
       </div>
     </header>
 
     <div v-if="read.phase === 'stale'" class="state-card stale-card" role="alert">
-      <strong>Showing the last successful result.</strong>
-      <span>{{ read.error }}</span>
+      <strong>Showing the last successful result.</strong><span>{{ read.error }}</span>
       <button v-if="read.retryable" class="button text-button" type="button" @click="refresh">Retry</button>
     </div>
-
     <div v-if="read.phase === 'error'" class="state-card error-card" role="alert">
-      <p class="eyebrow">Deployment unavailable</p>
-      <p>{{ read.error }}</p>
+      <p class="eyebrow">Repository sync unavailable</p><p>{{ read.error }}</p>
       <button v-if="read.retryable" class="button ghost" type="button" @click="refresh">Retry read</button>
     </div>
-
-    <div v-else-if="!loaded" class="detail-skeleton" role="status" aria-label="Loading deployment evidence">
-      <div class="shimmer skeleton-line skeleton-wide" />
-      <div class="detail-grid">
-        <div class="shimmer skeleton-block" />
-        <div class="shimmer skeleton-block" />
-      </div>
+    <div v-else-if="!loaded" class="detail-skeleton" role="status" aria-label="Loading repository sync evidence">
+      <div class="shimmer skeleton-line skeleton-wide" /><div class="detail-grid"><div class="shimmer skeleton-block" /><div class="shimmer skeleton-block" /></div>
     </div>
 
-    <template v-else-if="deployment">
+    <template v-else-if="sync">
       <div class="evidence-banner" :class="`evidence-${state}`" role="status">
         <StatusBadge :status="evidenceLabel(state)" :tone="evidenceTone(state)" />
-        <span v-if="state === 'ready'">Current Ready evidence is present for this rollout.</span>
-        <span v-else-if="state === 'applied'">The backend has applied the desired release; runtime Ready evidence is not current yet.</span>
-        <span v-else-if="state === 'pending'">The controller has not produced current Ready evidence.</span>
-        <span v-else-if="state === 'invalid'">The desired release or blueprint is invalid; no runtime readiness is claimed.</span>
-        <span v-else-if="state === 'deleting'">Deletion is in progress; runtime evidence is being retired.</span>
-        <span v-else>Readiness evidence is unavailable or has not been observed.</span>
+        <span v-if="state === 'ready'">The observed Git revision is applied. Runtime health remains owned by each target provider.</span>
+        <span v-else-if="state === 'awaiting-authorization'">The complete revision is blocked before writes until the requested access is granted.</span>
+        <span v-else-if="state === 'pending'">Source, planning, or apply reconciliation is still in progress.</span>
+        <span v-else-if="state === 'failed'">The revision could not be applied. Inspect the controller conditions below.</span>
+        <span v-else-if="state === 'deleting'">Cleanup is in progress for objects owned by this sync.</span>
+        <span v-else>No current synchronization evidence is available.</span>
+      </div>
+
+      <div v-if="missingClaims.length" class="authorization-card" role="alert">
+        <div>
+          <p class="eyebrow">Access required</p>
+          <h2 class="panel-title">Authorize {{ missingClaims.length }} target resource {{ missingClaims.length === 1 ? 'type' : 'types' }}</h2>
+          <p class="page-meta">The grant is explicit and workspace-scoped. Existing provider grants will be preserved.</p>
+        </div>
+        <button class="button primary" type="button" @click="emit('authorize', missingClaims)">
+          <ShieldCheck :size="14" aria-hidden="true" /> Review access
+        </button>
       </div>
 
       <div class="detail-grid">
-        <section class="panel" aria-labelledby="intent-heading">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Desired state</p>
-              <h2 id="intent-heading" class="panel-title">Release intent</h2>
-            </div>
-            <StatusBadge :status="deployment.release ? 'Available' : 'Unavailable'" :tone="deployment.release ? 'success' : 'warning'" />
-          </div>
-          <template v-if="deployment.release">
-            <dl class="facts">
-              <div><dt>Release</dt><dd class="mono">{{ deployment.release.name }}</dd></div>
-              <div><dt>Repository</dt><dd class="mono breakable">{{ deployment.release.repositoryRef }}</dd></div>
-              <div><dt>Revision</dt><dd class="mono breakable">{{ deployment.release.revision }}</dd></div>
-              <div><dt>Blueprint</dt><dd class="mono">{{ deployment.release.blueprint }}</dd></div>
-            </dl>
-            <div class="copy-row">
-              <button class="button small" type="button" @click="copyValue(deployment.release.revision, 'revision')">
-                <Copy :size="13" aria-hidden="true" /> {{ copied === 'revision' ? 'Copied' : 'Copy revision' }}
-              </button>
-            </div>
-            <h3 class="subheading">Immutable artifacts</h3>
-            <ul v-if="deployment.release.artifacts.length" class="artifact-list">
-              <li v-for="artifact in deployment.release.artifacts" :key="artifact.name">
-                <span class="mono">{{ artifact.name }}</span>
-                <span class="mono breakable">{{ artifact.image }}</span>
-              </li>
-            </ul>
-            <p v-else class="muted">No artifacts were declared in this Release.</p>
-          </template>
-          <div v-else class="state-card warning-card">
-            <strong>Release intent unavailable.</strong>
-            <span>The referenced Release <code>{{ deployment.releaseRef }}</code> is not readable in this workspace yet.</span>
-          </div>
-        </section>
-
-        <section class="panel" aria-labelledby="rollout-heading">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Desired / observed</p>
-              <h2 id="rollout-heading" class="panel-title">Rollout</h2>
-            </div>
-            <StatusBadge :status="rolloutMatches ? 'Current' : 'Not current'" :tone="rolloutMatches ? 'success' : 'warning'" />
-          </div>
+        <section class="panel" aria-labelledby="source-heading">
+          <p class="eyebrow">Desired state source</p><h2 id="source-heading" class="panel-title">Git directory</h2>
           <dl class="facts">
-            <div><dt>Desired release</dt><dd class="mono">{{ deployment.releaseRef }}</dd></div>
-            <div><dt>Active release</dt><dd class="mono">{{ deployment.activeReleaseRef || '—' }}</dd></div>
-            <div><dt>Last successful</dt><dd class="mono">{{ deployment.lastSuccessfulReleaseRef || '—' }}</dd></div>
-            <div><dt>Desired rollout ID</dt><dd class="mono breakable">{{ deployment.rolloutID }}</dd></div>
-            <div><dt>Observed rollout ID</dt><dd class="mono breakable">{{ deployment.observedRolloutID || '—' }}</dd></div>
-            <div><dt>Generation observed</dt><dd class="mono">{{ deployment.observedGeneration ?? '—' }} / {{ deployment.generation ?? '—' }}</dd></div>
-            <div><dt>Mode</dt><dd class="mono">{{ deployment.mode }}</dd></div>
-            <div><dt>Deletion policy</dt><dd class="mono">{{ deployment.deletionPolicy }}</dd></div>
+            <div><dt>Repository</dt><dd class="mono breakable">{{ sync.repositoryRef }}</dd></div>
+            <div><dt>Ref</dt><dd class="mono">{{ sync.ref || 'repository default' }}</dd></div>
+            <div><dt>Path</dt><dd class="mono">{{ sync.path || '.faros' }}</dd></div>
+            <div><dt>Observed revision</dt><dd class="mono breakable">{{ sync.observedRevision || '—' }}</dd></div>
+            <div><dt>Applied revision</dt><dd class="mono breakable">{{ sync.appliedRevision || '—' }}</dd></div>
+            <div><dt>Prune</dt><dd class="mono">{{ sync.prune ? 'Enabled' : 'Disabled' }}</dd></div>
           </dl>
+          <button v-if="sync.appliedRevision || sync.observedRevision" class="button small" type="button" @click="copyRevision">
+            <Copy :size="13" aria-hidden="true" /> {{ copied ? 'Copied' : 'Copy revision' }}
+          </button>
         </section>
-      </div>
 
-      <div class="detail-grid">
-        <section class="panel" aria-labelledby="reconciliation-heading">
-          <p class="eyebrow">Controller evidence</p>
-          <h2 id="reconciliation-heading" class="panel-title">Applied versus Ready</h2>
+        <section class="panel" aria-labelledby="stages-heading">
+          <p class="eyebrow">Convergence</p><h2 id="stages-heading" class="panel-title">Sync stages</h2>
           <div class="condition-summary">
-            <div class="condition-summary-item">
-              <span class="condition-summary-label">Applied</span>
-              <StatusBadge :status="conditionLabel('Applied')" :tone="conditionTone('Applied')" />
-              <span class="muted">Desired backend configuration</span>
-            </div>
-            <div class="condition-summary-item">
-              <span class="condition-summary-label">Ready</span>
-              <StatusBadge :status="conditionLabel('Ready')" :tone="conditionTone('Ready')" />
-              <span class="muted">Current runtime health</span>
+            <div v-for="stage in ['SourceReady', 'AuthorizationReady', 'Applied']" :key="stage" class="condition-summary-item">
+              <span class="condition-summary-label">{{ stage.replace('Ready', '') || stage }}</span>
+              <StatusBadge :status="conditionLabel(stage)" :tone="conditionTone(stage)" />
             </div>
           </div>
-          <ConditionsPanel
-            :conditions="deployment.conditions"
-            :generation="deployment.generation"
-            :observed-generation="deployment.observedGeneration"
-            empty-text="No controller conditions have been observed yet."
-          />
-        </section>
-
-        <section id="backend-evidence" class="panel" tabindex="-1" aria-labelledby="backend-heading">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Infrastructure handoff</p>
-              <h2 id="backend-heading" class="panel-title">Backend evidence</h2>
-            </div>
-            <StatusBadge :status="deployment.phase || 'Unknown'" :tone="evidenceTone(state)" />
-          </div>
-          <template v-if="deployment.backendRef">
-            <dl class="facts">
-              <div><dt>Reference</dt><dd class="mono breakable">{{ refText(deployment.backendRef) }}</dd></div>
-              <div><dt>Kind</dt><dd class="mono">{{ deployment.backendRef.kind }}</dd></div>
-              <div><dt>UID</dt><dd class="mono breakable">{{ deployment.backendRef.uid || '—' }}</dd></div>
-              <div><dt>Phase</dt><dd class="mono">{{ deployment.phase || 'Unknown' }}</dd></div>
-            </dl>
-            <button class="button small" type="button" @click="copyValue(refText(deployment.backendRef), 'backend')">
-              <Copy :size="13" aria-hidden="true" /> {{ copied === 'backend' ? 'Copied' : 'Copy backend ref' }}
-            </button>
-            <div class="runtime-link-row">
-              <span class="field-label">Reported URL</span>
-              <a v-if="runtimeURL" class="runtime-link mono breakable" :href="runtimeURL" target="_blank" rel="noopener noreferrer">{{ deployment.url }} <ExternalLink :size="12" aria-hidden="true" /></a>
-              <span v-else class="muted">No safe runtime URL reported.</span>
-              <button v-if="runtimeURL" class="button small" type="button" @click="openRuntimeURL">Open reported URL</button>
-            </div>
-            <div>
-              <span class="field-label">Outputs</span>
-              <dl v-if="Object.keys(deployment.outputs).length" class="outputs-list">
-                <div v-for="(value, key) in deployment.outputs" :key="key"><dt class="mono">{{ key }}</dt><dd class="mono breakable">{{ value }}</dd></div>
-              </dl>
-              <p v-else class="muted">No backend outputs have been reported.</p>
-            </div>
-          </template>
-          <div v-else class="state-card warning-card">
-            <strong>Backend evidence unavailable.</strong>
-            <span>The controller has not recorded an Infrastructure backend reference for this Deployment.</span>
-          </div>
+          <p class="muted">Applied is the terminal claim here. Target object status is intentionally not projected as deployment readiness.</p>
         </section>
       </div>
+
+      <section class="panel" aria-labelledby="requirements-heading">
+        <p class="eyebrow">Preflight</p><h2 id="requirements-heading" class="panel-title">Target resource access</h2>
+        <ResourceTable
+          :columns="[
+            { key: 'target', label: 'Target type' },
+            { key: 'resource', label: 'Resource' },
+            { key: 'state', label: 'Access' },
+            { key: 'message', label: 'Evidence' },
+          ]"
+          :rows="requirementRows"
+          row-key="target"
+          :loaded="true"
+          empty-text="No target resources have been planned for this revision."
+        >
+          <template #target="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #resource="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #state="{ value }"><StatusBadge :status="String(value)" :tone="String(value).toLowerCase() === 'authorized' ? 'success' : 'warning'" /></template>
+          <template #message="{ value }"><span class="muted">{{ value }}</span></template>
+        </ResourceTable>
+      </section>
+
+      <section class="panel" aria-labelledby="inventory-heading">
+        <p class="eyebrow">Applied inventory</p><h2 id="inventory-heading" class="panel-title">Objects owned by this sync</h2>
+        <ResourceTable
+          :columns="[
+            { key: 'identity', label: 'API / resource' },
+            { key: 'kind', label: 'Kind' },
+            { key: 'location', label: 'Namespace / name' },
+            { key: 'source', label: 'Source file' },
+            { key: 'uid', label: 'UID' },
+          ]"
+          :rows="inventoryRows"
+          row-key="key"
+          :loaded="true"
+          empty-text="No objects have been applied for this revision."
+        >
+          <template #identity="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #kind="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #location="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #source="{ value }"><span class="mono">{{ value }}</span></template>
+          <template #uid="{ value }"><span class="mono breakable">{{ value }}</span></template>
+        </ResourceTable>
+      </section>
+
+      <section class="panel" aria-labelledby="conditions-heading">
+        <p class="eyebrow">Controller evidence</p><h2 id="conditions-heading" class="panel-title">Conditions</h2>
+        <ConditionsPanel
+          :conditions="sync.conditions"
+          :generation="sync.generation"
+          :observed-generation="sync.observedGeneration"
+          empty-text="No synchronization conditions have been observed yet."
+        />
+      </section>
     </template>
   </section>
 </template>

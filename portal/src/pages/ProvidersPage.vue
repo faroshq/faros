@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/AppLayout.vue'
 import ProviderEnableDialog from '@/components/ProviderEnableDialog.vue'
-import { useProvidersStore, type ProviderDTO, type PermissionClaim } from '@/stores/providers'
+import { useProvidersStore, type ProviderAccessState, type ProviderDTO, type PermissionClaim } from '@/stores/providers'
 import { categoryIcons, fallbackCategoryIcon } from '@/lib/categoryIcons'
 import { Puzzle, ExternalLink, AlertCircle, Plus, X, Loader2, Search, ShieldCheck } from 'lucide-vue-next'
 
 const providers = useProvidersStore()
+const route = useRoute()
+const router = useRouter()
 
 // A card is a provider plus the resolved category metadata it belongs to.
 // We carry the category on each card (rather than in a section header) so
@@ -102,6 +105,9 @@ const actionError = ref<string | null>(null)
 // APIBinding is actually POSTed.
 const dialogProvider = ref<ProviderDTO | null>(null)
 const dialogMode = ref<'enable' | 'update'>('enable')
+const dialogAccess = ref<ProviderAccessState | null>(null)
+const dialogAccessLoading = ref(false)
+const dialogPreselectClaims = ref<string[]>([])
 
 // Always refetch on mount. The store's initial load happens at app boot
 // (App.vue), but new CatalogEntry installs are common while the portal is
@@ -120,23 +126,34 @@ function openEnableDialog(p: ProviderDTO) {
     return
   }
   dialogMode.value = 'enable'
+  dialogAccess.value = null
+  dialogPreselectClaims.value = []
   dialogProvider.value = p
 }
 
-function openUpdateDialog(p: ProviderDTO) {
+async function openUpdateDialog(p: ProviderDTO, preselectClaims: string[] = []) {
   actionError.value = null
-  // The dialog deliberately starts from the declared consent contract:
-  // required tenant-scoped claims are checked and optional claims are
-  // unchecked. We do not infer which optional claims the existing binding
-  // currently contains because the catalog endpoint does not expose that
-  // per-claim state.
   dialogMode.value = 'update'
+  dialogAccess.value = null
+  dialogPreselectClaims.value = preselectClaims
   dialogProvider.value = p
+  dialogAccessLoading.value = true
+  try {
+    const access = await providers.loadAccess(p)
+    if (dialogProvider.value?.name === p.name) dialogAccess.value = access
+  } catch (e) {
+    actionError.value = e instanceof Error ? e.message : String(e)
+    if (dialogProvider.value?.name === p.name) closeDialog()
+  } finally {
+    dialogAccessLoading.value = false
+  }
 }
 
 function closeDialog() {
   dialogProvider.value = null
   dialogMode.value = 'enable'
+  dialogAccess.value = null
+  dialogPreselectClaims.value = []
 }
 
 async function onDialogConfirm(accept: PermissionClaim[]) {
@@ -145,10 +162,22 @@ async function onDialogConfirm(accept: PermissionClaim[]) {
   busy.value = { ...busy.value, [p.name]: true }
   actionError.value = null
   try {
-    // The enable endpoint is idempotent and reconciles an existing binding,
-    // so Update access uses the same request path as initial Enable.
-    await providers.enable(p, accept)
+    if (dialogMode.value === 'update') {
+      await providers.authorize(p, accept)
+    } else {
+      await providers.enable(p, accept)
+    }
     closeDialog()
+    const returnPath = typeof route.query.return === 'string' ? route.query.return : ''
+    if (returnPath.startsWith('/') && !returnPath.startsWith('//')) {
+      await router.push(returnPath)
+    } else if (route.query.configure) {
+      const query = { ...route.query }
+      delete query.configure
+      delete query.claim
+      delete query.return
+      await router.replace({ query })
+    }
   } catch (e) {
     actionError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -157,6 +186,33 @@ async function onDialogConfirm(accept: PermissionClaim[]) {
     busy.value = next
   }
 }
+
+let handledDeepLink = ''
+watch(
+  () => [providers.loaded, route.query.configure, route.query.claim] as const,
+  ([loaded, configure, claim]) => {
+    if (typeof configure !== 'string') {
+      handledDeepLink = ''
+      return
+    }
+    if (!loaded) return
+    const requested = Array.isArray(claim)
+      ? claim.filter((value): value is string => typeof value === 'string')
+      : typeof claim === 'string' ? [claim] : []
+    const signature = `${configure}|${requested.join('|')}`
+    if (handledDeepLink === signature) return
+    const p = providers.byName(configure)
+    if (!p) return
+    handledDeepLink = signature
+    if (providers.isEnabled(p.name)) {
+      void openUpdateDialog(p, requested)
+    } else {
+      openEnableDialog(p)
+      dialogPreselectClaims.value = requested
+    }
+  },
+  { immediate: true },
+)
 
 async function onDisable(p: ProviderDTO) {
   busy.value = { ...busy.value, [p.name]: true }
@@ -389,6 +445,9 @@ function dependencyNotice(p: ProviderDTO): string {
     <ProviderEnableDialog
       :provider="dialogProvider"
       :mode="dialogMode"
+      :access="dialogAccess"
+      :access-loading="dialogAccessLoading"
+      :preselect-claims="dialogPreselectClaims"
       @cancel="closeDialog"
       @confirm="onDialogConfirm"
     />

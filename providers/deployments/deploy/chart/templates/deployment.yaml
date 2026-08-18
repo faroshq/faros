@@ -24,7 +24,9 @@ spec:
           args: ["init"]
           env:
             - { name: FAROS_PROVIDER_KUBECONFIG, value: /var/run/secrets/faros/kubeconfig }
-            - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ required "infrastructureIdentityHash is required" .Values.infrastructureIdentityHash | quote }} }
+            {{- if .Values.infrastructureIdentityHash }}
+            - { name: DEPLOYMENTS_INFRA_IDENTITY_HASH, value: {{ .Values.infrastructureIdentityHash | quote }} }
+            {{- end }}
             - { name: DEPLOYMENTS_CODE_IDENTITY_HASH, value: {{ required "codeIdentityHash is required" .Values.codeIdentityHash | quote }} }
             - { name: FAROS_SCHEMAS_DIR, value: /etc/faros/schemas }
             {{- if .Values.catalogEntry.enabled }}

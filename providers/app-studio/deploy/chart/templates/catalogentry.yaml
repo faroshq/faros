@@ -33,23 +33,14 @@ spec:
     # the hub writes these into the tenant APIBinding at Enable time; a claim
     # missing here is silently denied at reconcile.
     permissionClaims:
-      # Immutable release evidence and deployment desired state. The deployment
-      # provider owns translation to Infrastructure (or another CD backend).
-      - resource: releases
-        group: deployments.faros.sh
-        verbs: ["get", "list", "watch", "create"]
-        tenantScoped: true
-        optional: true
-      - resource: deployments
-        group: deployments.faros.sh
-        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-        tenantScoped: true
-        optional: true
+      # Optional reviewed delivery. RepositorySync applies the concrete target
+      # objects committed under the project's configured .faros directory.
       - resource: repositorysyncs
         group: deployments.faros.sh
         verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         tenantScoped: true
         optional: true
+        purpose: "Deliver reviewed project manifests from Code into this workspace."
       # Infrastructure instances the Project reconciler lifecycles from a
       # project's live bindings, plus the Studio's shared searxng + browser —
       # every template's instances are ONE flattened resource (product

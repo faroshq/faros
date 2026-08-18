@@ -126,6 +126,7 @@ type providerAssistantSkillResource struct {
 }
 
 type permissionClaimDTO struct {
+	Purpose      string   `json:"purpose,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	Resource     string   `json:"resource"`
 	Verbs        []string `json:"verbs,omitempty"`
@@ -189,6 +190,7 @@ func NewListHandler(reg *Registry) http.Handler {
 			var claims []permissionClaimDTO
 			for _, c := range p.PermissionClaims {
 				claims = append(claims, permissionClaimDTO{
+					Purpose:      c.Purpose,
 					Group:        c.Group,
 					Resource:     c.Resource,
 					Verbs:        append([]string(nil), c.Verbs...),

@@ -113,6 +113,13 @@ faros-provider-deployments .button:focus-visible {
   outline: none;
 }
 
+faros-provider-deployments .button.primary {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-surface);
+  box-shadow: 0 0 16px var(--color-accent-glow);
+}
+
 faros-provider-deployments .button:disabled {
   cursor: wait;
   opacity: .55;
@@ -221,6 +228,27 @@ faros-provider-deployments .evidence-banner.evidence-ready,
 faros-provider-deployments .evidence-banner.evidence-applied {
   border-color: color-mix(in srgb, var(--color-success) 35%, transparent);
   background: var(--color-success-subtle);
+}
+
+faros-provider-deployments .evidence-banner.evidence-awaiting-authorization {
+  border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+  background: var(--color-warning-subtle);
+}
+
+faros-provider-deployments .evidence-banner.evidence-failed {
+  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+  background: var(--color-danger-subtle);
+}
+
+faros-provider-deployments .authorization-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 40%, transparent);
+  border-radius: 6px;
+  padding: 14px;
+  background: var(--color-warning-subtle);
 }
 
 faros-provider-deployments .evidence-banner.evidence-invalid,

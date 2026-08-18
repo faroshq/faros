@@ -1,104 +1,83 @@
 # Deployments provider
 
-This headless provider owns the deployment lifecycle boundary between App
-Studio and Infrastructure. App Studio creates an immutable `Release` and points
-a `Deployment` at it; this provider resolves the admitted `kro-direct`
-blueprint contract, materializes its Infrastructure instance, and projects
-stable status.
+Deployments applies reviewed desired state from a Code repository to a tenant
+workspace. It owns source resolution, validation, authorization reporting,
+server-side apply, inventory, pruning, and cleanup. It does not interpret the
+objects it applies or claim that their runtimes are ready.
 
-The provider exposes a Kubernetes API, a controller, and a small read-only
-portal. The portal explains projected `Release` intent, observed rollout
-conditions, and Infrastructure backend evidence; it does not patch, delete,
-force-sync, redeploy, or present Code review state. Code remains the Git and
-credential owner; Deployments requests bounded source trees through Code's
-`RepositoryCheckout` contract and consumes only that result plus its own
-`Release`/`Deployment` resources.
-
-The initial runtime adapter supports `className: kro-direct` with these
-blueprints:
-
-- `application`: launchable components `web` (`webImage`) and `api` (`apiImage`).
-- `simple-webapp`: one launchable component `app` (`image`).
-
-The mapping is provider-owned because Infrastructure Templates use virtual
-storage and cannot be read through a cross-provider KCP permission claim. A
-future API can move that resolved contract into the immutable Release without
-changing the controller authority boundary. A Deployment can select
-`mode: development` to let the Infrastructure development overlay supply the
-runtime image, or `mode: production` (the default) to require and map immutable
-Release artifacts. Git-authored configuration is reconciled exactly: fields
-removed from the Deployment are removed from the backend, while fields computed
-by Infrastructure remain untouched.
-
-`deletionPolicy: Retain` is the default and detaches the backend when the
-Deployment is removed. `deletionPolicy: Delete` gives the Deployment ownership
-of the backend and waits for its deletion before completing finalization. The
-provider currently manages only the stable Infrastructure `instances` resource;
-additional adapters must add their own claims when they are implemented.
-
-The Infrastructure handoff is always the flattened Instance contract:
+The provider exposes one API:
 
 ```yaml
-apiVersion: infrastructure.faros.sh/v1alpha1
-kind: Instance
+apiVersion: deployments.faros.sh/v1alpha1
+kind: RepositorySync
+metadata:
+  name: pen-store-production
 spec:
-  template: application
-  values: # template-shaped values, including release image overrides
-    webImage: ghcr.io/example/web@sha256:...
+  repositoryRef: pen-store-app
+  ref: production
+  path: .faros/production
+  intervalSeconds: 30
+  prune: true
 ```
 
-`application` is a template name carried as data. It does not create a
-template-specific kind or claim; the only Infrastructure permission claim is
-for the stable `instances` resource.
+Every YAML document below the selected directory is treated as exact desired
+state. A tree may contain an Infrastructure `Instance`, a core `ConfigMap`, or
+another provider's resource. Deployments resolves each GVK through the tenant
+workspace API, preflights every document before the first write, and applies
+the objects using the `deployments-repository-sync` server-side apply field
+manager. Target providers reconcile their resources and publish runtime status
+on those resources.
 
-Bootstrap requires `FAROS_PROVIDER_KUBECONFIG`,
-`DEPLOYMENTS_CODE_IDENTITY_HASH` (the Code APIExport identity), and
-`DEPLOYMENTS_INFRA_IDENTITY_HASH` (the Infrastructure APIExport identity).
-`deployments-provider init` installs the APIResourceSchemas, APIExport,
-endpoint slice, bind grant, and optional CatalogEntry. The default server port
-is 8093 and exposes `/healthz` and controller-gated `/readyz`.
-Serving also requires `DEPLOYMENTS_CODE_URL`, the internal Code provider base
-URL used to redeem short-lived, scope/name/digest-bound checkout capabilities.
-The transfer contains only the bounded source bundle; Deployments never sees a
-Git credential and source contents are not stored in Kubernetes status.
+RepositorySync status separates the stages:
 
-## Provider lifecycle
+- `SourceReady`: Code resolved and transferred the reviewed revision.
+- `AuthorizationReady`: all target APIs are available to Deployments.
+- `Applied`: the revision was applied and any requested pruning completed.
 
-Deployments follows the same standalone lifecycle as Code:
+`phase: Synced` means desired state was applied. It does not mean the target
+workload is operational. `targetRequirements` reports the API, resource,
+namespace, authorization state, and an advertised optional claim when one can
+be granted through the provider access UI.
 
-1. The platform applies `provider.yaml` and `manifest.yaml` to onboard the
-   provider workspace and runtime identity.
-2. Code and Infrastructure initialize independently, then Deployments init
-   uses the provider-workspace kubeconfig and `provider-sdk/install` to apply
-   schemas, the APIExport, permission claims, APIExportEndpointSlice, and bind
-   grant.
-3. `deployments-provider serve` starts the multicluster controller and reports
-   ready only after its APIExport discovery cache synchronizes.
-4. Tenants enable Code and Infrastructure before Deployments. The accepted
-   Code `RepositoryCheckout` and Infrastructure `instances` claims are the
-   controller's only cross-provider authority.
+## Authorization
 
-The CatalogEntry declares Code and Infrastructure as enable-time dependencies.
-Init requires both provider identity hashes, so bootstrap fails closed if either
-claim identity was not supplied.
+Code is the only provider dependency. Its `repositorycheckouts` permission
+claim is required because Code owns Git credentials and transfers a bounded,
+short-lived source bundle. Deployments never receives repository credentials.
+
+Target access is optional and tenant-authorized. The initial catalog advertises:
+
+- `infrastructure.faros.sh/instances` for Infrastructure desired state.
+- core `configmaps` as a native workspace example.
+
+If a desired target is unavailable because its optional claim was not accepted,
+the sync reports `AwaitingAuthorization` without partially applying the
+revision. Other target APIs can be added as explicit optional claims without
+adding provider dependencies or target-specific controller code.
+
+`DEPLOYMENTS_CODE_IDENTITY_HASH` is required during bootstrap. The optional
+`DEPLOYMENTS_INFRA_IDENTITY_HASH` adds the Infrastructure Instance claim to the
+APIExport when Infrastructure is installed. Core ConfigMaps require no identity
+hash. Serving also requires `DEPLOYMENTS_CODE_URL` for Code's internal bundle
+transfer endpoint.
+
+## Ownership, pruning, and deletion
+
+Applied objects carry source-owner, source-path, and revision annotations. A
+sync refuses to overwrite an object owned by a different writer. Inventory
+records exact API version, kind, resource, namespace, name, UID, and source
+path.
+
+With `prune: true`, objects removed from Git are deleted using the recorded UID
+as a precondition. Deleting the RepositorySync also deletes its owned inventory
+and waits for target finalizers. With `prune: false`, deletion removes only the
+sync annotations and retains the target objects. Missing APIs are treated as
+already unavailable during cleanup; denied access is surfaced as
+`AwaitingAuthorization` rather than silently abandoning objects.
 
 ## Local development
 
-Both `Tiltfile` and `Tiltfile.cluster` expose four resources under the
-`providers-deployments` label:
-
-- `deployments-register`
-- `deployments-init`
-- `deployments`
-- `deployments-unregister`
-
-Initialize providers in dependency order:
-
-```text
-Code + Infrastructure -> Deployments -> App Studio
-```
-
-For the embedded-kcp workflow, the equivalent commands are:
+Deployments follows the standalone provider lifecycle:
 
 ```sh
 make install-provider-deployments
@@ -106,66 +85,16 @@ make init-provider-deployments
 make run-provider-deployments
 ```
 
-For `Tiltfile.cluster`, use the Tilt resources; they supply the front-proxy
-kubeconfig/server overrides and rewrite the host backend URL for the in-cluster
-hub.
+In Tilt, initialize `code-init` before `deployments-init`. Infrastructure is not
+an ordering dependency. Install and authorize it only when a repository sync
+needs Infrastructure resources.
 
-## Build and test
+Focused verification:
 
 ```sh
-make build-deployments-provider-portal
-make build-deployments-provider
-make test-deployments-provider
 make codegen-deployments-provider
+make test-deployments-provider
 ```
 
-The portal is served from the same binary at `/` (and through the hub UI proxy
-at `/ui/providers/deployments/`). It reads tenant resources with the caller's
-bearer token through `/graphql/<tenant>`. Refreshes preserve the last
-successful result and label stale, pending, invalid, deleting, unknown, and
-unavailable evidence explicitly.
-
-The live multi-shard provider contract is part of:
-
-```sh
-make e2e-tilt-cluster
-```
-
-That suite verifies CatalogEntry readiness, exported
-`RepositorySync`/`Release`/`Deployment`
-resources, the exact Code `RepositoryCheckout` and Infrastructure claims and
-identity hashes, both health endpoints, and a fresh tenant's accepted-claim
-path from Release/Deployment to an Infrastructure Instance with `Retain`
-finalization. Controller unit tests
-cover status projection, managed configuration removal, and both finalization
-policies in more detail.
-
-## Helm
-
-The chart is at `deploy/chart`. Required deployment inputs are:
-
-- `providerKubeconfig.secretName`: provider-workspace kubeconfig Secret.
-- `codeIdentityHash`: identity hash of `code.providers.faros.sh`.
-- `code.url`: internal base URL of the Code provider bundle endpoint.
-- `infrastructureIdentityHash`: identity hash of
-  `infrastructure.providers.faros.sh`.
-- `hub.url` and, when required, `hub.tokenSecretRef`.
-
-`bootstrap.enabled` defaults to `true` and runs the chart init container. Set
-it to `false` only when an external bootstrap has already initialized the
-Deployments workspace and supplied `providerKubeconfig.secretName`; this is
-the split used by `Tiltfile.cluster` after its explicit `deployments-init`
-resource.
-
-The pod uses a dedicated ServiceAccount with host-cluster token automounting
-disabled. Both init and serve authenticate to kcp only through the mounted
-provider kubeconfig.
-
-## Publishing
-
-The provider module path is `github.com/faroshq/provider-deployments`. The
-split workflow is configured to publish source to the read-only
-`faroshq/provider-deployments` mirror, while release tags of the form
-`providers/deployments/vX.Y.Z` publish
-`ghcr.io/faroshq/faros-deployments-provider` and the Helm chart from this
-monorepo.
+The provider module path is `github.com/faroshq/provider-deployments`; release
+tags `providers/deployments/vX.Y.Z` publish the standalone image and Helm chart.

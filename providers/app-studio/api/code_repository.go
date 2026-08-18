@@ -92,15 +92,15 @@ type projectGitOpsRequiredClaim struct {
 }
 
 var (
-	// Deployments translates RepositorySyncs into immutable deployment intent.
-	// It needs both the Code source checkout and Infrastructure runtime claims
-	// before a GitOps project can safely be created.
+	// Deployments fetches the desired-state directory through Code and applies
+	// the concrete target objects. Infrastructure is one supported target, not
+	// a deployment backend encoded into RepositorySync.
 	deploymentsGitOpsClaims = []projectGitOpsRequiredClaim{
 		{Group: "code.faros.sh", Resource: "repositorycheckouts"},
 		{Group: "infrastructure.faros.sh", Resource: "instances"},
 	}
 	// App Studio creates the RepositorySync at project creation and later reads
-	// the resulting Release/Deployment state during promotion and convergence.
+	// the concrete target object's state during promotion and convergence.
 	// Its existing Code and Infrastructure claims are included too: a GitOps
 	// project still has to create its Repository and reconcile development
 	// instances before Deployments can consume the source contract.
@@ -108,8 +108,6 @@ var (
 		{Group: "code.faros.sh", Resource: "repositories"},
 		{Group: "code.faros.sh", Resource: "changerequests"},
 		{Group: "infrastructure.faros.sh", Resource: "instances"},
-		{Group: "deployments.faros.sh", Resource: "releases"},
-		{Group: "deployments.faros.sh", Resource: "deployments"},
 		{Group: "deployments.faros.sh", Resource: "repositorysyncs"},
 	}
 )
@@ -368,7 +366,7 @@ func projectGitOpsReadiness(ctx context.Context, c *asclient.Client) (ProjectCre
 		reasons = append(reasons, "App Studio APIBinding is missing applied claims: "+strings.Join(appStudio.MissingClaims, ", "))
 	}
 	readiness.Reason = strings.Join(reasons, "; ")
-	readiness.Message = "Reviewed production requires Bound Deployments and App Studio APIBindings with all required claims applied"
+	readiness.Message = "Open Providers, enable Deployments, and update provider access to approve the listed source and target claims"
 	return readiness, nil
 }
 

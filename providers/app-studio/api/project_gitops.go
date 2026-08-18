@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/bindings"
 	asclient "github.com/faroshq/provider-app-studio/client"
 	"github.com/faroshq/provider-app-studio/tenant"
 	"github.com/faroshq/provider-app-studio/workspace"
@@ -281,62 +282,18 @@ func projectGitOpsDevelopmentFiles(p *aiv1alpha1.Project, info projectTemplateIn
 	if len(info.PreviewAccessModes) > 0 {
 		configuration["access"] = effectiveProjectPreviewAccess(p.Spec.Sharing.Preview.Mode)
 	}
-	releaseName := dns1123LabelWithSuffix(p.Name, "dev-bootstrap")
 	path := projectGitOpsDeliverySettings(p).Path
-	release := map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectReleaseKind,
-		"metadata":   map[string]any{"name": releaseName},
-		"spec": map[string]any{
-			"source":       map[string]any{"repositoryRef": p.Spec.Repository.RepositoryRef, "revision": "bootstrap"},
-			"blueprintRef": map[string]any{"name": info.Name},
-			"artifacts":    []any{},
-		},
-	}
-	deployment := map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectDeploymentKind,
-		"metadata":   map[string]any{"name": projectTemplateInstanceName(p)},
-		"spec": map[string]any{
-			"releaseRef":     releaseName,
-			"className":      projectDeploymentClassName,
-			"mode":           "development",
-			"deletionPolicy": "Retain",
-			"configuration":  configuration,
-			"rolloutID":      "git",
-		},
-	}
+	instance := projectGitOpsTargetObject(p, info, projectTemplateInstanceName(p), configuration)
 	return gitOpsYAMLFiles(map[string]any{
-		path + "/releases/development.yaml":                release,
-		path + "/environments/development/deployment.yaml": deployment,
+		path + "/environments/development/instance.yaml": instance,
 	})
 }
 
-func projectGitOpsProductionFiles(p *aiv1alpha1.Project, releaseName string, releaseSpec projectReleaseSpec, configuration map[string]any) ([]map[string]string, string, error) {
+func projectGitOpsProductionFiles(p *aiv1alpha1.Project, info projectTemplateInfo, values map[string]any) ([]map[string]string, string, error) {
 	path := projectGitOpsDeliverySettings(p).Path
-	release := map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectReleaseKind,
-		"metadata":   map[string]any{"name": releaseName},
-		"spec":       releaseSpec,
-	}
-	deploymentSpec := map[string]any{
-		"releaseRef":     releaseName,
-		"className":      projectDeploymentClassName,
-		"mode":           "production",
-		"deletionPolicy": "Retain",
-		"configuration":  configuration,
-		"rolloutID":      "git",
-	}
-	deployment := map[string]any{
-		"apiVersion": projectDeploymentAPIVersion,
-		"kind":       projectDeploymentKind,
-		"metadata":   map[string]any{"name": projectTemplateProdInstanceName(p)},
-		"spec":       deploymentSpec,
-	}
+	instance := projectGitOpsTargetObject(p, info, projectTemplateProdInstanceName(p), values)
 	files, err := gitOpsYAMLFiles(map[string]any{
-		path + "/releases/" + releaseName + ".yaml":       release,
-		path + "/environments/production/deployment.yaml": deployment,
+		path + "/environments/production/instance.yaml": instance,
 	})
 	if err != nil {
 		return nil, "", err
@@ -350,6 +307,57 @@ func projectGitOpsProductionFiles(p *aiv1alpha1.Project, releaseName string, rel
 		_, _ = hasher.Write([]byte(file.Content))
 	}
 	return commitFiles, hex.EncodeToString(hasher.Sum(nil))[:12], nil
+}
+
+// projectGitOpsTargetObject is the provider-neutral handoff: App Studio
+// authors the concrete object selected by the Template, while RepositorySync
+// only validates/applies it. Runtime interpretation and status remain owned by
+// the target provider.
+func projectGitOpsTargetObject(p *aiv1alpha1.Project, info projectTemplateInfo, name string, values map[string]any) map[string]any {
+	return map[string]any{
+		"apiVersion": info.APIVersion,
+		"kind":       info.Kind,
+		"metadata": map[string]any{
+			"name": name,
+			"labels": map[string]any{
+				bindings.ProjectLabel:  p.Name,
+				bindings.TemplateLabel: info.Name,
+			},
+		},
+		"spec": map[string]any{
+			"template": info.Name,
+			"values":   values,
+		},
+	}
+}
+
+// projectGitOpsTargetRevision gives the target manifest a deterministic
+// redeploy input before the promotion branch exists. It is derived from the
+// reviewed source commit and the complete target intent, so a changed source,
+// image digest, or production setting changes the workload revision without
+// relying on a target-specific Deployments controller.
+func projectGitOpsTargetRevision(p *aiv1alpha1.Project, info projectTemplateInfo, commitSHA string, images map[string]string, values map[string]any) (string, error) {
+	targetValues := projectProductionInputValues(info, images, values)
+	for imageInput, image := range images {
+		targetValues[imageInput] = image
+	}
+	targetValues["name"] = projectTemplateProdInstanceName(p)
+	targetValues["farosMode"] = "production"
+	canonical, err := json.Marshal(map[string]any{
+		"repositoryRef":  strings.TrimSpace(p.Spec.Repository.RepositoryRef),
+		"sourceRevision": strings.TrimSpace(commitSHA),
+		"target": map[string]any{
+			"apiVersion": info.APIVersion,
+			"kind":       info.Kind,
+			"template":   info.Name,
+		},
+		"values": targetValues,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return "git-" + hex.EncodeToString(digest[:])[:16], nil
 }
 
 func gitOpsYAMLFiles(objects map[string]any) ([]workspace.File, error) {
@@ -369,37 +377,38 @@ func gitOpsYAMLFiles(objects map[string]any) ([]workspace.File, error) {
 	return files, nil
 }
 
-func projectGitOpsProductionBinding(p *aiv1alpha1.Project, deploymentSpec map[string]any) (aiv1alpha1.ProjectProviderBindingSpec, error) {
-	raw, err := json.Marshal(deploymentSpec)
+func projectGitOpsProductionBinding(p *aiv1alpha1.Project, info projectTemplateInfo, values map[string]any) (aiv1alpha1.ProjectProviderBindingSpec, error) {
+	raw, err := json.Marshal(values)
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, err
 	}
 	return aiv1alpha1.ProjectProviderBindingSpec{
 		Name:     projectProductionBindingName,
-		Provider: projectDeploymentProvider,
+		Provider: projectInfrastructureProvider,
 		Kind:     aiv1alpha1.ProjectBindingKindProviderReference,
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
 			Name:       projectTemplateProdInstanceName(p),
-			APIVersion: projectDeploymentAPIVersion,
-			Kind:       projectDeploymentKind,
-			Resource:   projectDeploymentResource,
+			APIVersion: info.APIVersion,
+			Kind:       info.Kind,
+			Resource:   info.Resource,
 		},
 		// Values are an observed desired-state snapshot for the App Studio
-		// form. providerReference means the Project reconciler never writes it.
+		// form. providerReference means the Project reconciler never writes it;
+		// RepositorySync applies the exact object committed to Git.
 		Values: runtime.RawExtension{Raw: raw},
 	}, nil
 }
 
-func (s *Server) proposeProjectGitOpsPromotion(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, httpReq *http.Request, releaseName string, releaseSpec projectReleaseSpec, configuration map[string]any) (aiv1alpha1.ProjectProviderBindingSpec, projectGitOpsPromotionView, error) {
+func (s *Server) proposeProjectGitOpsPromotion(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, httpReq *http.Request, info projectTemplateInfo, values map[string]any) (aiv1alpha1.ProjectProviderBindingSpec, projectGitOpsPromotionView, error) {
 	settings := projectGitOpsDeliverySettings(p)
 	if settings.ChangePolicy != aiv1alpha1.ProjectGitOpsChangePolicyPullRequest {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, projectGitOpsPromotionView{}, fmt.Errorf("unsupported GitOps change policy %q", settings.ChangePolicy)
 	}
-	files, digest, err := projectGitOpsProductionFiles(p, releaseName, releaseSpec, configuration)
+	files, digest, err := projectGitOpsProductionFiles(p, info, values)
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, projectGitOpsPromotionView{}, err
 	}
-	branch := "faros/promote-" + releaseName + "-" + digest[:6]
+	branch := "faros/promote-" + p.Name + "-" + digest[:6]
 	baseBranch := projectRepositoryDefaultBranch(ctx, c, p)
 	args := map[string]any{
 		"repositoryRef": p.Spec.Repository.RepositoryRef,
@@ -447,12 +456,7 @@ func (s *Server) proposeProjectGitOpsPromotion(ctx context.Context, c *asclient.
 			return aiv1alpha1.ProjectProviderBindingSpec{}, projectGitOpsPromotionView{}, fmt.Errorf("ChangeRequest %q already exists with different contents", crName)
 		}
 	}
-	deploymentSpec := map[string]any{
-		"releaseRef": releaseName, "className": projectDeploymentClassName,
-		"mode": "production", "deletionPolicy": "Retain",
-		"configuration": configuration, "rolloutID": "git",
-	}
-	binding, err := projectGitOpsProductionBinding(p, deploymentSpec)
+	binding, err := projectGitOpsProductionBinding(p, info, values)
 	return binding, projectGitOpsPromotionView{
 		Phase: "PendingApproval", ChangeRequest: crName, Branch: branch,
 	}, err

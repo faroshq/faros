@@ -32,9 +32,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          RepositorySync projects a bounded, reviewed deployment tree from a Code
-          repository into this workspace. It is cluster-scoped because tenant
-          workspaces are already represented by the kcp logical cluster.
+          RepositorySync projects a bounded, reviewed desired-state tree from a Code
+          repository into this workspace. The objects in that tree may belong to any
+          API available in the workspace; their owning providers remain responsible
+          for runtime reconciliation and readiness.
         properties:
           apiVersion:
             description: |-
@@ -141,7 +142,11 @@ spec:
                       type: string
                     name:
                       type: string
+                    namespace:
+                      type: string
                     resource:
+                      type: string
+                    sourcePath:
                       type: string
                     uid:
                       type: string
@@ -161,9 +166,54 @@ spec:
                 enum:
                 - Pending
                 - Reconciling
-                - Ready
+                - AwaitingAuthorization
+                - Synced
                 - Failed
                 type: string
+              targetRequirements:
+                items:
+                  description: |-
+                    RepositorySyncTargetRequirement reports the workspace capability needed by
+                    one desired object. It describes apply authorization only; it deliberately
+                    does not project the target provider's runtime readiness.
+                  properties:
+                    apiVersion:
+                      type: string
+                    claim:
+                      properties:
+                        group:
+                          type: string
+                        resource:
+                          type: string
+                        verbs:
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - resource
+                      type: object
+                    kind:
+                      type: string
+                    message:
+                      type: string
+                    namespace:
+                      type: string
+                    resource:
+                      type: string
+                    state:
+                      enum:
+                      - Authorized
+                      - AwaitingAuthorization
+                      - Unavailable
+                      - Conflict
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - resource
+                  - state
+                  type: object
+                type: array
             type: object
         required:
         - spec

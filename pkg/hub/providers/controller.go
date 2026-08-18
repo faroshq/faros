@@ -187,6 +187,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		prov.APIExportPath = providersParentWorkspace + ":" + entry.Name
 		for _, c := range entry.Spec.APIExport.PermissionClaims {
 			prov.PermissionClaims = append(prov.PermissionClaims, PermissionClaim{
+				Purpose:      c.Purpose,
 				Group:        c.Group,
 				Resource:     c.Resource,
 				Verbs:        append([]string(nil), c.Verbs...),

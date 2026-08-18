@@ -30,7 +30,7 @@ export interface CreateSetupItem {
 }
 
 const defaultGitConnectionMessage = 'You need to connect to a Git account before you can continue'
-const defaultGitOpsMessage = 'Enable Deployments / update App Studio access to use reviewed production.'
+const defaultGitOpsMessage = 'Open Providers, enable Deployments, and approve its requested target access to use reviewed production.'
 
 export function gitConnectionReady(readiness: ProjectCreateReadiness | null): boolean {
   return readiness?.gitConnection.ready === true
@@ -43,7 +43,7 @@ export function gitOpsAvailable(readiness: ProjectCreateReadiness | null): boole
 export function gitOpsReadinessMessage(readiness: ProjectCreateReadiness | null): string {
   if (gitOpsAvailable(readiness)) return ''
   const detail = readiness?.gitOps?.reason?.trim() || readiness?.gitOps?.message?.trim()
-  return detail ? `Enable Deployments / update App Studio access: ${detail}` : defaultGitOpsMessage
+  return detail ? `Open Providers and update access for Deployments or App Studio: ${detail}` : defaultGitOpsMessage
 }
 
 export function createPromptBlockedMessage(readiness: ProjectCreateReadiness | null): string {

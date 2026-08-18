@@ -55,7 +55,7 @@ func TestDeploymentsComponentReleaseContract(t *testing.T) {
 	code := slices.Index(componentOrder, "code")
 	appStudio := slices.Index(componentOrder, "app-studio")
 	if infra < 0 || deployments < 0 || code < 0 || appStudio < 0 ||
-		!(infra < deployments && deployments < code && code < appStudio) {
+		(infra >= code || code >= deployments || deployments >= appStudio) {
 		t.Fatalf("provider dependency release order is invalid: %v", componentOrder)
 	}
 }

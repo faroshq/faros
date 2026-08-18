@@ -132,6 +132,47 @@ func TestDesiredRepositorySyncUsesNativeSpecShape(t *testing.T) {
 	}
 }
 
+func TestDesiredRepositorySyncDoesNotRequireProjectTemplate(t *testing.T) {
+	p := testProject()
+	p.Spec.Template = nil
+	b := testBinding()
+	b.Name = "gitops"
+	b.Provider = "deployments"
+	b.ResourceRef = &aiv1alpha1.ProjectProviderResourceReference{
+		Name:       "demo-gitops",
+		APIVersion: "deployments.faros.sh/v1alpha1",
+		Kind:       "RepositorySync",
+		Resource:   "repositorysyncs",
+	}
+	b.Values = runtime.RawExtension{Raw: []byte(`{"repositoryRef":"demo-repo","ref":"main","path":".faros","prune":true,"intervalSeconds":30}`)}
+
+	want, _, err := Desired(p, b)
+	if err != nil {
+		t.Fatalf("Desired: %v", err)
+	}
+	spec, ok, err := unstructured.NestedMap(want.Object, "spec")
+	if err != nil || !ok {
+		t.Fatalf("spec = %#v, err = %v", spec, err)
+	}
+	if got := spec["repositoryRef"]; got != "demo-repo" {
+		t.Fatalf("spec.repositoryRef = %#v, want demo-repo", got)
+	}
+	if labels := want.GetLabels(); labels[ProjectLabel] != "demo" {
+		t.Fatalf("labels = %#v, want %s=demo", labels, ProjectLabel)
+	} else if _, found := labels[TemplateLabel]; found {
+		t.Fatalf("template label = %#v, want omitted for template-less RepositorySync", labels[TemplateLabel])
+	}
+}
+
+func TestDesiredInstanceStillRequiresProjectTemplate(t *testing.T) {
+	p := testProject()
+	p.Spec.Template = nil
+
+	if _, _, err := Desired(p, testBinding()); !IsInvalidBinding(err) || !strings.Contains(err.Error(), "spec.template is required on the instance") {
+		t.Fatalf("Desired without project template: err = %v, want instance template validation", err)
+	}
+}
+
 func TestDesiredNameFallbacks(t *testing.T) {
 	p := testProject()
 
