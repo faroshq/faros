@@ -1087,47 +1087,34 @@ func TestProviderBindingMutationsRequireWorkspaceAdmin(t *testing.T) {
 	})
 }
 
-func TestEnableProviderRequiresCatalogApprovalForUntrustedClaims(t *testing.T) {
-	for _, tt := range []struct {
-		name       string
-		approved   bool
-		wantStatus int
-		wantCalls  int
-	}{
-		{name: "not approved", wantStatus: http.StatusForbidden},
-		{name: "catalog owner approved", approved: true, wantStatus: http.StatusOK, wantCalls: 1},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			mgr, ops, _ := newTestManager(t)
-			reg := hubproviders.NewRegistry()
-			reg.Upsert(hubproviders.Provider{
-				Name:                 "vendor",
-				APIExportPath:        "root:faros:providers:vendor",
-				APIExportName:        "vendor.example.com",
-				APIExportReady:       true,
-				AllowUntrustedClaims: tt.approved,
-				PermissionClaims: []hubproviders.PermissionClaim{
-					{Resource: "secrets", Verbs: []string{"get"}},
-				},
-			})
-			mgr.WithProviderRegistry(reg)
-			srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
-			defer srv.Close()
+func TestEnableProviderRejectsNonTenantScopedClaimsBeforeMutation(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	reg := hubproviders.NewRegistry()
+	reg.Upsert(hubproviders.Provider{
+		Name:           "vendor",
+		APIExportPath:  "root:faros:providers:vendor",
+		APIExportName:  "vendor.example.com",
+		APIExportReady: true,
+		PermissionClaims: []hubproviders.PermissionClaim{
+			{Resource: "secrets", Verbs: []string{"get"}},
+		},
+	})
+	mgr.WithProviderRegistry(reg)
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
 
-			body := []byte(`{"acceptedClaims":[{"resource":"secrets"}]}`)
-			resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/vendor/enable", "application/json", jsonBody(body))
-			if err != nil {
-				t.Fatalf("POST enable: %v", err)
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != tt.wantStatus {
-				payload, _ := io.ReadAll(resp.Body)
-				t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, tt.wantStatus, payload)
-			}
-			if calls := ops.providerBindCalls[wsKey{"org-a", "ws-1"}]; calls != tt.wantCalls {
-				t.Fatalf("APIBinding calls = %d, want %d", calls, tt.wantCalls)
-			}
-		})
+	body := []byte(`{"acceptedClaims":[{"resource":"secrets"}]}`)
+	resp, err := http.Post(srv.URL+"/api/orgs/org-a/workspaces/ws-1/providers/vendor/enable", "application/json", jsonBody(body))
+	if err != nil {
+		t.Fatalf("POST enable: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, http.StatusForbidden, payload)
+	}
+	if calls := ops.providerBindCalls[wsKey{"org-a", "ws-1"}]; calls != 0 {
+		t.Fatalf("APIBinding calls = %d, want 0", calls)
 	}
 }
 

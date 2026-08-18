@@ -89,9 +89,6 @@ type Provider struct {
 	APIExportReady    bool
 	RequiredResources []APIExportResource
 	PermissionClaims  []PermissionClaim
-	// AllowUntrustedClaims is true only when the CatalogEntry owner set the
-	// explicit faros.sh/accept-untrusted-claims annotation.
-	AllowUntrustedClaims bool
 
 	// EdgeProxyAccess mirrors CatalogEntry.spec.edgeProxyAccess: on tenant
 	// Enable, the hub grants the provider SA the "proxy" verb on edges in
@@ -203,10 +200,6 @@ type PermissionClaim struct {
 	// is never accepted from a CatalogEntry.
 	ExpectedIdentityHash string
 }
-
-// AcceptUntrustedClaimsAnnotation is the explicit catalog-owner override that
-// permits a tenant admin to accept claims not marked tenantScoped.
-const AcceptUntrustedClaimsAnnotation = "faros.sh/accept-untrusted-claims"
 
 // APIExportResource identifies one stable API that a provider must publish
 // before its APIExport is safe for new tenant bindings.
