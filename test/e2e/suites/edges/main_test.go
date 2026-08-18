@@ -18,10 +18,10 @@ limitations under the License.
 // provider (group edges.faros.sh, kinds KubernetesCluster + LinuxServer)
 // that was extracted out of the hub core. It mirrors the provider suite: the
 // faros-hub runs with embedded kcp and the edges-provider runs as a host
-// subprocess, following the current bootstrap flow — Provider + CatalogEntry
-// applied into root:faros:system:providers (the hub's Provider controller
-// materializes the sub-workspace + SA + provider-token), then `edges-provider
-// init` with the minted SA kubeconfig (APIExport + schemas + bind grant), then
+// subprocess, following the current bootstrap flow — Provider applied into
+// root:faros:system:providers (the hub's Provider controller materializes the
+// sub-workspace + SA + provider-token), then `edges-provider init` with the
+// minted SA kubeconfig (APIExport + schemas + bind grant + CatalogEntry), then
 // `edges-provider serve`.
 //
 // This suite covers the CONTROL-PLANE + AUTH surface that is testable without a
@@ -67,6 +67,7 @@ var (
 	kcpServer   string // https://127.0.0.1:<port> (admin kubeconfig)
 	adminToken  string // kcp admin token (from .kcp/admin.kubeconfig)
 	staticToken = "test:user-default"
+	dataDir     string
 )
 
 const (
@@ -103,7 +104,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	dataDir, err := os.MkdirTemp("", "faros-e2e-edges-")
+	var err error
+	dataDir, err = os.MkdirTemp("", "faros-e2e-edges-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tempdir:", err)
 		os.Exit(1)
@@ -153,8 +155,8 @@ func TestMain(m *testing.M) {
 	}
 	adminToken = tok
 
-	// Provisioning: Provider + CatalogEntry into root:faros:system:providers
-	// (mirrors `make install-provider-edges`); the hub's Provider controller
+	// Provisioning: Provider into root:faros:system:providers (mirrors
+	// `make install-provider-edges`); the hub's Provider controller
 	// materializes root:faros:providers:edges + the provider SA + provider-token.
 	if err := applyEdgesManifests(); err != nil {
 		cleanup()
@@ -178,6 +180,7 @@ func TestMain(m *testing.M) {
 		"FAROS_PROVIDER_KUBECONFIG="+runtimeKubeconfig,
 		"EDGES_WORKSPACE_PATH="+edgesWorkspacePath,
 		"FAROS_SCHEMAS_DIR="+filepath.Join(repoRoot, "providers", "edges", "deploy", "chart", "files", "schemas"),
+		"FAROS_CATALOGENTRY_FILE="+filepath.Join(dataDir, "edges-catalogentry.yaml"),
 	)
 	initCmd.Stdout = initLog
 	initCmd.Stderr = initLog
@@ -224,20 +227,16 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// applyEdgesManifests applies provider.yaml (kind Provider) + manifest.yaml
-// (kind CatalogEntry) into root:faros:system:providers, mirroring `make
-// install-provider-edges`. The CatalogEntry's ui/backend url is overridden to
-// the test provider port. Retried until the API answers (the hub reports
-// /readyz before those APIs are fully servable).
+// applyEdgesManifests applies provider.yaml into root:faros:system:providers
+// and writes a port-adjusted CatalogEntry for init to self-register in the
+// provider workspace, mirroring the Makefile flow. Provider creation is retried
+// until the API answers (the hub reports /readyz slightly earlier).
 func applyEdgesManifests() error {
 	cl, err := kcpDynamicRaw("root:faros:system:providers", adminToken)
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
-	gvrByKind := map[string]schema.GroupVersionResource{
-		"Provider":     {Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"},
-		"CatalogEntry": {Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries"},
-	}
+	providerGVR := schema.GroupVersionResource{Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"}
 	overrideURL := "http://localhost:" + providerPort
 	for _, file := range []string{"provider.yaml", "manifest.yaml"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot, "providers", "edges", file))
@@ -255,18 +254,25 @@ func applyEdgesManifests() error {
 			if obj.GetKind() == "" {
 				continue
 			}
-			gvr, ok := gvrByKind[obj.GetKind()]
-			if !ok {
+			if obj.GetKind() != "Provider" && obj.GetKind() != "CatalogEntry" {
 				return fmt.Errorf("%s: unexpected kind %q", file, obj.GetKind())
 			}
 			if obj.GetKind() == "CatalogEntry" {
 				_ = unstructured.SetNestedField(obj.Object, overrideURL, "spec", "ui", "url")
 				_ = unstructured.SetNestedField(obj.Object, overrideURL, "spec", "backend", "url")
+				rendered, err := yaml.Marshal(obj.Object)
+				if err != nil {
+					return fmt.Errorf("marshal %s: %w", file, err)
+				}
+				if err := os.WriteFile(filepath.Join(dataDir, "edges-catalogentry.yaml"), rendered, 0o600); err != nil {
+					return fmt.Errorf("write CatalogEntry: %w", err)
+				}
+				continue
 			}
 			deadline := time.Now().Add(90 * time.Second)
 			for {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_, err = cl.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
+				_, err = cl.Resource(providerGVR).Create(ctx, obj, metav1.CreateOptions{})
 				cancel()
 				if err == nil || apierrors.IsAlreadyExists(err) {
 					break
