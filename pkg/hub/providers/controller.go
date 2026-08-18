@@ -231,7 +231,6 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		CatalogEntryCluster: string(req.ClusterName),
 	}
 	prov.EdgeProxyAccess = entry.Spec.EdgeProxyAccess
-	prov.AllowUntrustedClaims = entry.Annotations[AcceptUntrustedClaimsAnnotation] == "true"
 	// Liveness travels through status so it reaches every hub replica, not just
 	// the one whose heartbeat endpoint the provider happened to hit.
 	if entry.Status.LastHeartbeat != nil {

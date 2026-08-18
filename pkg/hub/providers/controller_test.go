@@ -511,10 +511,7 @@ func TestCatalogReconcilerAPIExportOnlyProviderIsReady(t *testing.T) {
 	reg := NewRegistry()
 	scheme := newProviderTestScheme(t)
 	entry := &providersv1alpha1.CatalogEntry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "database", Generation: 3,
-			Annotations: map[string]string{AcceptUntrustedClaimsAnnotation: "true"},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "database", Generation: 3},
 		Spec: providersv1alpha1.CatalogEntrySpec{
 			APIExport: &providersv1alpha1.ProviderAPIExport{
 				Name: "database.providers.faros.sh",
@@ -566,9 +563,6 @@ func TestCatalogReconcilerAPIExportOnlyProviderIsReady(t *testing.T) {
 	got, ok := reg.Get("database")
 	if !ok || !got.Ready() {
 		t.Fatalf("APIExport-only provider is not Ready: found=%v provider=%+v", ok, got)
-	}
-	if !got.AllowUntrustedClaims {
-		t.Fatal("catalog owner untrusted-claim approval was not projected into the registry")
 	}
 	if got.RuntimeReady() {
 		t.Fatal("APIExport-only provider was marked routable")

@@ -140,8 +140,8 @@ func (h *Handler) enableProvider(w http.ResponseWriter, r *http.Request) {
 	claims := make([]kcp.ProviderClaim, 0, len(prov.PermissionClaims))
 	for _, declared := range prov.PermissionClaims {
 		isAccepted := accepted[acceptedKey(declared.Group, declared.Resource)]
-		if isAccepted && !declared.TenantScoped && !prov.AllowUntrustedClaims {
-			writeStatus(w, http.StatusForbidden, "Forbidden", "provider "+providerName+" claim "+acceptedKey(declared.Group, declared.Resource)+" is not tenant-scoped and has not been approved by the catalog owner")
+		if isAccepted && !declared.TenantScoped {
+			writeStatus(w, http.StatusForbidden, "Forbidden", "provider "+providerName+" claim "+acceptedKey(declared.Group, declared.Resource)+" is not tenant-scoped and cannot be accepted")
 			return
 		}
 		claims = append(claims, kcp.ProviderClaim{

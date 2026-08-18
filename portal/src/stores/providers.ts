@@ -39,10 +39,9 @@ export interface ProviderDTO {
   // Populated when the provider declares spec.apiExport. The portal uses
   // these coordinates to build the APIBinding it POSTs into the tenant
   // workspace on Enable.
-  apiExportPath?: string
-  apiExportName?: string
-  permissionClaims?: PermissionClaim[]
-  allowUntrustedClaims?: boolean
+	apiExportPath?: string
+	apiExportName?: string
+	permissionClaims?: PermissionClaim[]
   // Builtin = true for first-party providers shipped with the hub
   // binary, regardless of how they surface UI (legacy builtinRoute or
   // new custom-element via embedded assets). Side-nav skips the

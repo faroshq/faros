@@ -15,9 +15,8 @@ const emit = defineEmits<{
   confirm: [accept: PermissionClaim[]]
 }>()
 
-// One boolean per claim, indexed by claim key. tenantScoped claims default
-// to accepted; non-tenantScoped default to rejected so the user has to
-// explicitly opt-in to anything that escapes their workspace.
+// One boolean per claim, indexed by claim key. Tenant-scoped claims default
+// to accepted; non-tenant-scoped claims cannot be accepted.
 const accepted = ref<Record<string, boolean>>({})
 const dialogRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
@@ -37,10 +36,9 @@ watch(
     const next: Record<string, boolean> = {}
     for (const c of p.permissionClaims ?? []) {
       const key = claimKey(c)
-      const canAccept = !!c.tenantScoped || !!p.allowUntrustedClaims
-      next[key] = canAccept && (claimDecisions && Object.prototype.hasOwnProperty.call(claimDecisions, key)
-        ? claimDecisions[key]
-        : !!c.tenantScoped)
+		next[key] = !!c.tenantScoped && (claimDecisions && Object.prototype.hasOwnProperty.call(claimDecisions, key)
+			? claimDecisions[key]
+			: true)
     }
     accepted.value = next
     void nextTick(() => dialogRef.value?.focus())
@@ -49,12 +47,9 @@ watch(
 )
 
 const claims = computed(() => props.provider?.permissionClaims ?? [])
-const hasUntrustedAccepted = computed(() =>
-  claims.value.some((c) => !c.tenantScoped && accepted.value[claimKey(c)]),
-)
-
 function toggle(c: PermissionClaim) {
-  const k = claimKey(c)
+	if (!c.tenantScoped) return
+	const k = claimKey(c)
   accepted.value = { ...accepted.value, [k]: !accepted.value[k] }
 }
 
@@ -153,7 +148,7 @@ onUnmounted(() => {
                 type="checkbox"
                 class="mt-1 h-3.5 w-3.5 accent-accent"
                 :checked="!!accepted[claimKey(c)]"
-                :disabled="busy || (!c.tenantScoped && !provider.allowUntrustedClaims)"
+				:disabled="busy || !c.tenantScoped"
                 @change="toggle(c)"
               />
               <div class="min-w-0 flex-1">
@@ -168,9 +163,7 @@ onUnmounted(() => {
                   Verbs: <span class="font-mono">{{ (c.verbs ?? []).join(', ') || 'none' }}</span>
                 </p>
                 <p v-if="!c.tenantScoped" class="mt-1 text-[10px] text-warning">
-                  {{ provider.allowUntrustedClaims
-                    ? 'Not marked tenant-scoped — the catalog owner approved this elevated request, but you must still choose whether to accept it.'
-                    : 'Not marked tenant-scoped — the catalog owner has not approved this elevated request, so it cannot be accepted.' }}
+					Not marked tenant-scoped — Faros does not support accepting this elevated request.
                 </p>
               </div>
             </label>
@@ -192,11 +185,6 @@ onUnmounted(() => {
           </p>
         </div>
 
-        <div v-if="hasUntrustedAccepted" class="mt-3 rounded-md border border-warning/30 bg-warning-subtle px-3 py-2 text-[11px] text-warning">
-          You've accepted at least one claim that isn't tenant-scoped. The
-          provider's controllers will be able to read or write the indicated
-          resources cluster-wide subject to its MaximalPermissionPolicy.
-        </div>
       </div>
 
       <div class="flex items-center justify-end gap-2 border-t border-border-subtle px-4 py-3">

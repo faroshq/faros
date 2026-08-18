@@ -512,6 +512,31 @@ func TestGTenantDisableRemovesCR(t *testing.T) {
 }
 
 func TestHHeartbeatEndpoint(t *testing.T) {
+	// The heartbeat changes routing state and CatalogEntry.status, so anonymous
+	// or invalid callers must be rejected before the provider registry is touched.
+	for _, test := range []struct {
+		name  string
+		token string
+	}{
+		{name: "anonymous"},
+		{name: "invalid bearer", token: "not-a-valid-token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/providers/quickstart/heartbeat", strings.NewReader("{}"))
+			if test.token != "" {
+				req.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("heartbeat POST: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+
 	// Known name → 200.
 	req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/providers/quickstart/heartbeat",
 		strings.NewReader(`{"version":"0.1.0","status":"healthy"}`))

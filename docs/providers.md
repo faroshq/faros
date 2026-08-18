@@ -28,7 +28,7 @@ the how):
 | 6 | VW = **APIExport-only by default**; `spec.virtualWorkspace.url` is an opt-in escape hatch under `/services/providers/{name}/vw/*` | Most providers won't need a VW; lowers bar |
 | 7 | Provider→kcp identity = SA `provider` in the provider's workspace; admin onboarding mints a kubeconfig for provider init and runtime | Keeps the provider inside its own workspace and separates credentials from CatalogEntry registration |
 | 8 | Schema delivery = provider-owned `APIResourceSchema` files applied by provider `init`; `CatalogEntry.spec.apiExport.requiredResources` declares the stable minimum the hub must observe before Enable | Prevents bindings to an empty or incomplete export without making the hub own provider schemas |
-| 9 | PermissionClaim acceptance = **auto-accept-all** at Enable time, but ONLY for claims marked `tenantScoped: true`. Non-tenant-scoped claims refused unless admin sets `faros.sh/accept-untrusted-claims=true` on the `CatalogEntry` | Simplest safe default; per-claim toggles deferred to v2 |
+| 9 | PermissionClaim acceptance = **auto-accept-all** at Enable time, but ONLY for claims marked `tenantScoped: true`. Non-tenant-scoped claims cannot be accepted | Simplest safe default; per-claim toggles deferred to v2 |
 | 10 | Tenant Enable = **server-mediated creation of a direct kcp `APIBinding` in the tenant workspace**. No `ProviderBinding` CRD. Provider init installs the export bind grant; the hub verifies provider readiness and exact declared claims before creating the binding. | Keeps lifecycle kcp-native while making the mutation boundary deterministic and auditable |
 
 **Deferred (do NOT block phase 1):**
@@ -419,8 +419,8 @@ spec:
 - **Permission claims cross two gates.** Catalog readiness requires the
   CatalogEntry and APIExport to carry the exact same group/resource/verb set,
   with identity hashes for every identity-bearing custom API claim. Enable
-  auto-accepts only the declared `tenantScoped` claims unless an administrator
-  explicitly permits an untrusted claim.
+  accepts only the declared `tenantScoped` claims. Non-tenant-scoped claims may
+  be explicitly rejected, but cannot be accepted.
 - **Claim upgrades preserve tenant consent and bound resources.** When an
   APIExport adds or replaces a claim, kcp leaves the new tuple unapplied on
   existing APIBindings. The enabled-provider inventory compares each binding's
@@ -564,8 +564,7 @@ server-side Enable endpoint then:
 2. **Re-checks provider readiness before mutation.** A missing, incomplete, or
    drifted APIExport returns a conflict before any tenant APIBinding is created.
 3. **Builds accepted claims from the verified CatalogEntry declaration.** Only
-   claims marked `tenantScoped` are auto-accepted unless the administrator has
-   explicitly allowed an untrusted claim. The APIExport must carry the exact
+   claims marked `tenantScoped` can be accepted. The APIExport must carry the exact
    same group/resource/verb set.
 4. **Creates the tenant APIBinding** and, when requested, the separate
    edge-proxy access grant.
@@ -979,10 +978,8 @@ A provider's UI MUST:
 - How published apps get their URL and access control (the template-embedded
   access gate + kcp RBAC grants) is documented in
   [Published apps: template-native access](./app-studio-publishing.md).
-- **Permission claim gate**: the binding controller refuses any claim not
-  marked `tenantScoped`. An override exists
-  (`faros.sh/accept-untrusted-claims=true`) but is admin-only
-  (host-cluster RBAC on the `CatalogEntry` resource).
+- **Permission claim gate**: the binding controller refuses acceptance of any
+  claim not marked `tenantScoped`; there is no provider-controlled override.
 - **iframe sandboxing**: `sandbox` attribute set; no
   `allow-top-navigation`.
 - **CSP**: hub portal CSP allows `frame-src 'self'` plus explicitly configured
