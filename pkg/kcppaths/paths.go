@@ -21,25 +21,24 @@ limitations under the License.
 // Topology:
 //
 //	root:faros
-//	  providers:<provider>        provider sub-workspaces (parent stays universal)
+//	  providers:<provider>        standalone provider APIs + CatalogEntry
 //	  tenants:<uuid>:<ws>:<edge>  tenant fleet (org/team/edge workspaces)
 //	  system
-//	    controllers               ALL platform APIExports + APIResourceSchemas
-//	    providers                 Provider + CatalogEntry OBJECTS
+//	    controllers               platform APIExports + APIResourceSchemas
+//	    providers                 admin Provider + builtin CatalogEntry objects
 //	    tenants                   User/Organization/Membership CR OBJECTS
 //
-// The naming is symmetric: `providers` + `system:providers` are the provider
-// workspaces vs. their objects; `tenants` + `system:tenants` are the tenant
-// workspaces vs. their objects.
+// Standalone provider init owns its APIExport, schemas, and CatalogEntry in its
+// provider sub-workspace. The system workspaces contain only platform-owned API
+// contracts and administration objects.
 package kcppaths
 
 const (
 	// Root is the faros root workspace.
 	Root = "root:faros"
 
-	// ProvidersParent is the parent of per-provider sub-workspaces. It is NOT
-	// where APIExports or Provider/CatalogEntry objects live anymore — only the
-	// sub-workspaces root:faros:providers:<name> hang off it.
+	// ProvidersParent is the parent of per-provider sub-workspaces. Objects live
+	// in the named children, not in this parent workspace.
 	ProvidersParent = Root + ":providers"
 
 	// TenantsParent is the parent of per-tenant (organization) workspaces. The
@@ -49,13 +48,13 @@ const (
 	// System groups the platform-internal workspaces.
 	System = Root + ":system"
 
-	// SystemControllers holds ALL platform APIExports + APIResourceSchemas
+	// SystemControllers holds platform APIExports + APIResourceSchemas
 	// (core / faros / tenancy / providers / admin .faros.sh). Every
 	// consumer binds the exports from here.
 	SystemControllers = System + ":controllers"
 
-	// SystemProviders holds the Provider + CatalogEntry OBJECTS (and the
-	// builtin CatalogEntries). The catalog + provisioning controllers target it.
+	// SystemProviders holds admin Provider objects and builtin CatalogEntries.
+	// Standalone CatalogEntries live in their provider sub-workspaces.
 	SystemProviders = System + ":providers"
 
 	// SystemTenants holds the User / Organization / Membership CR OBJECTS

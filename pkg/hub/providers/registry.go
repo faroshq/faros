@@ -17,7 +17,7 @@ limitations under the License.
 // Package providers backs the hub's pluggable-provider extension surface:
 // an in-memory routing table, reverse proxies for /ui/providers/{name}/*
 // and /services/providers/{name}/*, and the controller that keeps the
-// table in sync with ProviderCatalogEntry resources.
+// table in sync with CatalogEntry resources.
 package providers
 
 import (
@@ -47,7 +47,7 @@ const SweepInterval = 30 * time.Second
 
 // Provider is the in-memory record the proxies consult to route a request.
 // Fields are nil-able to reflect that UI/backend/VW are independently optional
-// in the source ProviderCatalogEntry.
+// in the source CatalogEntry.
 type Provider struct {
 	Name        string
 	DisplayName string // human-readable label, surfaced to the portal
@@ -60,6 +60,12 @@ type Provider struct {
 	Dependencies []Dependency
 	UIURL        *url.URL // proxy target for /ui/providers/{name}/*; nil → 404
 	BackendURL   *url.URL // proxy target for /services/providers/{name}/*; nil → 404
+	// BackendHealthRequired is true when the CatalogEntry declares a backend.
+	// BackendHealthy is the most recent bounded healthPath probe result. Keeping
+	// these separate preserves providers without a backend: they have no health
+	// dependency and remain compatible with the pre-probe readiness contract.
+	BackendHealthRequired bool
+	BackendHealthy        bool
 	// VirtualWorkspaceURL is the provider-declared action transport target.
 	// Provider Actions append /actions/{name}/{version} to this URL; they never
 	// use BackendURL or a provider MCP endpoint.
@@ -69,13 +75,23 @@ type Provider struct {
 	// Studio packages. It intentionally carries no provider URL, credential, or
 	// runtime handle; the authenticated catalog API is the sole distribution
 	// boundary.
-	AssistantSkills  []ProviderAssistantSkill
-	BuiltinRoute     string     // when set, portal renders this Vue route instead of loading /main.js
-	Children         []NavChild // sub-nav entries surfaced indented under this provider
-	Version          string     // CatalogEntry.spec.version (chart-declared)
-	APIExportPath    string     // kcp workspace path hosting the APIExport (e.g. root:faros:providers:cost)
-	APIExportName    string     // APIExport name (e.g. cost.providers.faros.sh)
-	PermissionClaims []PermissionClaim
+	AssistantSkills []ProviderAssistantSkill
+	BuiltinRoute    string     // when set, portal renders this Vue route instead of loading /main.js
+	Children        []NavChild // sub-nav entries surfaced indented under this provider
+	Version         string     // CatalogEntry.spec.version (chart-declared)
+	APIExportPath   string     // kcp workspace path hosting the APIExport (e.g. root:faros:providers:cost)
+	APIExportName   string     // APIExport name (e.g. cost.providers.faros.sh)
+	// APIExportReady is set only after the catalog reconciler has read the
+	// declared APIExport from APIExportPath and verified that kcp accepted its
+	// identity and every identity-bearing permission claim against its declared
+	// trusted source. A declaration alone is not enough: provider init may still
+	// be creating the export.
+	APIExportReady    bool
+	RequiredResources []APIExportResource
+	PermissionClaims  []PermissionClaim
+	// AllowUntrustedClaims is true only when the CatalogEntry owner set the
+	// explicit faros.sh/accept-untrusted-claims annotation.
+	AllowUntrustedClaims bool
 
 	// EdgeProxyAccess mirrors CatalogEntry.spec.edgeProxyAccess: on tenant
 	// Enable, the hub grants the provider SA the "proxy" verb on edges in
@@ -107,6 +123,10 @@ type Provider struct {
 	// and at least one endpoint was declared (or LocalUIAssets is set).
 	// The catalog controller sets this; the sweeper does not touch it.
 	EndpointsValid bool
+	// RuntimeDeclared distinguishes an APIExport-only provider from a provider
+	// whose declared endpoint failed validation. Both have EndpointsValid=false,
+	// but only the former is valid for API enablement.
+	RuntimeDeclared bool
 
 	// LastHeartbeat is the provider's most recent beat. It is set both by the
 	// POST /api/providers/{name}/heartbeat handler on the replica that served
@@ -135,11 +155,32 @@ type Dependency struct {
 	Name string
 }
 
-// Ready returns true when the proxy should forward to the provider. The
-// catalog controller's URL parse must have succeeded AND, if the provider
-// has heartbeated at least once, its most recent heartbeat must be fresh.
+// Ready returns true when the provider is available for its declared purpose.
+// An APIExport-only provider is valid and enableable without a runtime
+// endpoint. Providers that do declare runtime endpoints must have at least one
+// valid endpoint. In both cases, declared health and heartbeat gates apply.
 func (p Provider) Ready() bool {
-	if !p.EndpointsValid {
+	if p.APIExportName != "" && !p.APIExportReady {
+		return false
+	}
+	if p.RuntimeDeclared && !p.EndpointsValid {
+		return false
+	}
+	if !p.RuntimeDeclared && !p.EndpointsValid && p.APIExportName == "" {
+		return false
+	}
+	return p.healthGatesReady()
+}
+
+// RuntimeReady returns true only when a proxy route has a valid runtime target
+// and all health gates pass. Keep this distinct from Ready: APIExport-only
+// providers are enableable, but must never be treated as routable.
+func (p Provider) RuntimeReady() bool {
+	return p.EndpointsValid && p.healthGatesReady()
+}
+
+func (p Provider) healthGatesReady() bool {
+	if p.BackendHealthRequired && !p.BackendHealthy {
 		return false
 	}
 	if p.HeartbeatRequired && p.HeartbeatStale {
@@ -152,10 +193,26 @@ func (p Provider) Ready() bool {
 // portal can render the Enable confirmation dialog without coupling to the
 // CRD types.
 type PermissionClaim struct {
-	Group        string
-	Resource     string
-	Verbs        []string
-	TenantScoped bool
+	Group                  string
+	Resource               string
+	Verbs                  []string
+	TenantScoped           bool
+	IdentitySourceKind     string
+	IdentitySourceProvider string
+	// ExpectedIdentityHash is resolved live by the hub from IdentitySource and
+	// is never accepted from a CatalogEntry.
+	ExpectedIdentityHash string
+}
+
+// AcceptUntrustedClaimsAnnotation is the explicit catalog-owner override that
+// permits a tenant admin to accept claims not marked tenantScoped.
+const AcceptUntrustedClaimsAnnotation = "faros.sh/accept-untrusted-claims"
+
+// APIExportResource identifies one stable API that a provider must publish
+// before its APIExport is safe for new tenant bindings.
+type APIExportResource struct {
+	Group string
+	Name  string
 }
 
 // NavChild mirrors CatalogEntry.spec.ui.children — a single sub-nav
@@ -434,10 +491,10 @@ func (r *Registry) Upsert(p Provider) {
 			if existing.ReportedVersion != "" {
 				p.ReportedVersion = existing.ReportedVersion
 			}
+			p.HeartbeatStale = existing.HeartbeatStale
 		}
 		// A provider that has ever heartbeated is expected to keep doing so.
 		p.HeartbeatRequired = p.HeartbeatRequired || existing.HeartbeatRequired
-		p.HeartbeatStale = existing.HeartbeatStale
 		if p.WorkspaceCluster == "" {
 			// Provisioning sets this after the Upsert in the same reconcile;
 			// don't lose it on the next reconcile's fresh Provider value.
@@ -469,6 +526,7 @@ func cloneProviderAssistantSkills(in []ProviderAssistantSkill) []ProviderAssista
 func cloneProvider(p Provider) Provider {
 	p.Dependencies = append([]Dependency(nil), p.Dependencies...)
 	p.PermissionClaims = append([]PermissionClaim(nil), p.PermissionClaims...)
+	p.RequiredResources = append([]APIExportResource(nil), p.RequiredResources...)
 	for i := range p.PermissionClaims {
 		p.PermissionClaims[i].Verbs = append([]string(nil), p.PermissionClaims[i].Verbs...)
 	}
@@ -557,6 +615,20 @@ func (r *Registry) Delete(name string) bool {
 	_, ok := r.byName[name]
 	delete(r.byName, name)
 	return ok
+}
+
+// DeleteOwned removes name only when its CatalogEntry was observed in cluster.
+// CatalogEntry watches span every consumer of providers.faros.sh, so a delete
+// event from one consumer must never evict another logical cluster's route.
+func (r *Registry) DeleteOwned(name, cluster string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.byName[name]
+	if !ok || p.CatalogEntryCluster != cluster {
+		return false
+	}
+	delete(r.byName, name)
+	return true
 }
 
 // ParseURL is a small helper for the controller that converts a spec string

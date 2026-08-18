@@ -334,8 +334,6 @@ spec:
                       in the provider-owned APIExport before tenants may bind it. Providers that
                       add resources dynamically declare only their bootstrap APIs here; dynamic
                       additions are allowed and are still validated by the hub before readiness.
-                      Optional during the provider migration; the hub begins enforcing the
-                      complete set after all first-party providers declare their contracts.
                     items:
                       description: |-
                         ProviderAPIExportResource identifies one stable API resource that must be
@@ -355,6 +353,7 @@ spec:
                       - group
                       - name
                       type: object
+                    minItems: 1
                     type: array
                     x-kubernetes-list-map-keys:
                     - group
@@ -362,6 +361,7 @@ spec:
                     x-kubernetes-list-type: map
                 required:
                 - name
+                - requiredResources
                 type: object
               assistantSkills:
                 description: |-
