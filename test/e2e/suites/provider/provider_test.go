@@ -46,14 +46,6 @@ const workspacePath = "root:faros:providers:quickstart"
 
 var secretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 
-// providersWorkspaceClient returns a dynamic client targeting
-// systemProvidersClient returns a dynamic client targeting
-// root:faros:system:providers — where Provider + CatalogEntry live since the
-// provider bootstrap refactor.
-func systemProvidersClient(t *testing.T) dynamic.Interface {
-	return kcpDynamic(t, "root:faros:system:providers", adminToken)
-}
-
 // kcpDynamicRaw is kcpDynamic for non-test callers (TestMain bootstrap).
 func kcpDynamicRaw(clusterPath, token string) (dynamic.Interface, error) {
 	cfg := &rest.Config{
@@ -89,20 +81,17 @@ func kcpDynamic(t *testing.T, clusterPath, token string) dynamic.Interface {
 	return c
 }
 
-// applyQuickstartManifests applies provider.yaml (kind Provider) +
-// manifest.yaml (kind CatalogEntry) into root:faros:system:providers,
-// mirroring `make install-provider-quickstart`. Called from TestMain. The
-// hub reports /readyz before those APIs are fully servable, so creates are
-// retried until the API answers.
+// applyQuickstartManifests applies provider.yaml into
+// root:faros:system:providers and writes a port-adjusted CatalogEntry for init
+// to self-register in the provider workspace, mirroring the Makefile flow.
+// The hub reports /readyz before the admin API is fully servable, so Provider
+// creation is retried until the API answers.
 func applyQuickstartManifests() error {
 	cl, err := kcpDynamicRaw("root:faros:system:providers", adminToken)
 	if err != nil {
 		return fmt.Errorf("dynamic client: %w", err)
 	}
-	gvrByKind := map[string]schema.GroupVersionResource{
-		"Provider":     {Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"},
-		"CatalogEntry": {Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries"},
-	}
+	providerGVR := schema.GroupVersionResource{Group: "admin.faros.sh", Version: "v1alpha1", Resource: "providers"}
 	for _, file := range []string{"provider.yaml", "manifest.yaml"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot, "providers", "quickstart", file))
 		if err != nil {
@@ -119,8 +108,7 @@ func applyQuickstartManifests() error {
 			if obj.GetKind() == "" {
 				continue
 			}
-			gvr, ok := gvrByKind[obj.GetKind()]
-			if !ok {
+			if obj.GetKind() != "Provider" && obj.GetKind() != "CatalogEntry" {
 				return fmt.Errorf("%s: unexpected kind %q", file, obj.GetKind())
 			}
 			if obj.GetKind() == "CatalogEntry" {
@@ -134,11 +122,19 @@ func applyQuickstartManifests() error {
 				if err := unstructured.SetNestedField(obj.Object, overrideURL, "spec", "backend", "url"); err != nil {
 					return fmt.Errorf("%s: override spec.backend.url: %w", file, err)
 				}
+				rendered, err := yaml.Marshal(obj.Object)
+				if err != nil {
+					return fmt.Errorf("marshal %s: %w", file, err)
+				}
+				if err := os.WriteFile(filepath.Join(dataDir, "quickstart-catalogentry.yaml"), rendered, 0o600); err != nil {
+					return fmt.Errorf("write CatalogEntry: %w", err)
+				}
+				continue
 			}
 			deadline := time.Now().Add(90 * time.Second)
 			for {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				_, err = cl.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
+				_, err = cl.Resource(providerGVR).Create(ctx, obj, metav1.CreateOptions{})
 				cancel()
 				if err == nil || apierrors.IsAlreadyExists(err) {
 					break
@@ -154,12 +150,12 @@ func applyQuickstartManifests() error {
 }
 
 // TestACatalogProvisioning asserts every kcp-side artefact provisioning is
-// supposed to leave behind. TestMain already applied Provider + CatalogEntry
-// (into root:faros:system:providers) and ran `quickstart-provider init`, so
-// the sub-workspace artifacts here come from the Provider controller + init.
+// supposed to leave behind. TestMain applied Provider onboarding and ran
+// `quickstart-provider init`, so CatalogEntry and the API artifacts live in the
+// provider workspace.
 func TestACatalogProvisioning(t *testing.T) {
 	// Wait for status.conditions[Ready] == True on the CatalogEntry.
-	cl := systemProvidersClient(t)
+	cl := providerSubClient(t, "quickstart")
 	gvr := schema.GroupVersionResource{
 		Group: "providers.faros.sh", Version: "v1alpha1", Resource: "catalogentries",
 	}
