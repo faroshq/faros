@@ -42,9 +42,9 @@ Prereqs: a running hub with embedded kcp (`make run-hub-embedded-static`), which
 writes `data/kcp/admin.kubeconfig`.
 
 ```sh
-make install-provider-edges   # admin: apply Provider + CatalogEntry
+make install-provider-edges   # admin: apply Provider onboarding record
 # wait for the hub Provider controller to provision the workspace + SA token
-make init-provider-edges      # bootstrap APIExport/schemas/slice/grant
+make init-provider-edges      # publish APIs + self-register CatalogEntry
 make run-provider-edges       # serve (SINGLE process) on :8088
 
 # in another terminal, register + connect a Kubernetes edge
