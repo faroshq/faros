@@ -18,39 +18,83 @@ package providers
 
 import (
 	"context"
+	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
 
 	authnv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/faroshq/faros/pkg/apiurl"
 )
 
-// HeartbeatAuthenticator validates a bearer token against the same kcp
-// authentication boundary that protects the rest of the provider plane.
-type HeartbeatAuthenticator func(ctx context.Context, token string) (bool, error)
+// HeartbeatAuthenticator validates that a bearer token belongs to the named
+// provider. Authentication alone is insufficient: otherwise any signed-in
+// tenant could spoof another provider's liveness.
+type HeartbeatAuthenticator func(ctx context.Context, name, token string) (bool, error)
 
-// NewTokenReviewHeartbeatAuthenticator authenticates heartbeat credentials
-// online. This intentionally accepts every identity kcp authenticates: local
-// development uses the hub's static token, while deployed providers can use
-// OIDC or ServiceAccount credentials. Provider-specific credential binding is
-// a separate protocol change because FAROS_HUB_TOKEN is currently independent
-// from the provider kubeconfig.
-func NewTokenReviewHeartbeatAuthenticator(kcpConfig *rest.Config) (HeartbeatAuthenticator, error) {
-	client, err := kubernetes.NewForConfig(kcpConfig)
-	if err != nil {
-		return nil, err
+// NewProviderHeartbeatAuthenticator verifies the token online in the provider
+// workspace and binds it to that workspace's exact default/provider
+// ServiceAccount UID. A same-named ServiceAccount from another workspace does
+// not pass the UID check.
+func NewProviderHeartbeatAuthenticator(kcpConfig *rest.Config, clusters ClusterResolver) (HeartbeatAuthenticator, error) {
+	if kcpConfig == nil {
+		return nil, fmt.Errorf("kcp config is required")
 	}
-	return func(ctx context.Context, token string) (bool, error) {
+	if clusters == nil {
+		return nil, fmt.Errorf("cluster resolver is required")
+	}
+	return func(ctx context.Context, name, token string) (bool, error) {
+		cluster, ok := clusters.CatalogEntryCluster(name)
+		if !ok || cluster == "" {
+			return false, nil
+		}
+		cfg := rest.CopyConfig(kcpConfig)
+		cfg.Host = apiurl.KCPClusterURL(cfg.Host, cluster)
+		client, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return false, err
+		}
 		review, err := client.AuthenticationV1().TokenReviews().Create(ctx, &authnv1.TokenReview{
 			Spec: authnv1.TokenReviewSpec{Token: token},
 		}, metav1.CreateOptions{})
 		if err != nil {
 			return false, err
 		}
-		return review.Status.Authenticated && strings.TrimSpace(review.Status.User.Username) != "", nil
+		expectedUsername := "system:serviceaccount:" + ProviderSANamespace + ":" + ProviderSAName
+		if !review.Status.Authenticated || review.Status.User.Username != expectedUsername || strings.TrimSpace(review.Status.User.UID) == "" {
+			return false, nil
+		}
+		sa, err := client.CoreV1().ServiceAccounts(ProviderSANamespace).Get(ctx, ProviderSAName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return string(sa.UID) == review.Status.User.UID, nil
 	}, nil
+}
+
+// WithHeartbeatStaticTokenFallback permits exact configured static tokens
+// before provider-SA verification. The hub uses this only in explicit DevMode,
+// where local Make/Tilt providers share the development login token.
+func WithHeartbeatStaticTokenFallback(authenticate HeartbeatAuthenticator, tokens []string) HeartbeatAuthenticator {
+	return func(ctx context.Context, name, token string) (bool, error) {
+		for _, allowed := range tokens {
+			if allowed != "" && subtle.ConstantTimeCompare([]byte(token), []byte(allowed)) == 1 {
+				return true, nil
+			}
+		}
+		if authenticate == nil {
+			return false, nil
+		}
+		return authenticate(ctx, name, token)
+	}
 }
 
 // RequireHeartbeatAuthentication fails closed unless the request carries a
@@ -69,7 +113,12 @@ func RequireHeartbeatAuthentication(authenticate HeartbeatAuthenticator, next ht
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		authenticated, err := authenticate(r.Context(), token)
+		name, ok := parseHeartbeatPath(r.URL.Path)
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authenticated, err := authenticate(r.Context(), name, token)
 		if err != nil {
 			http.Error(w, "heartbeat authentication unavailable", http.StatusServiceUnavailable)
 			return
