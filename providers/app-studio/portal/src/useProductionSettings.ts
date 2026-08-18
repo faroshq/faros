@@ -16,6 +16,7 @@ export interface ProductionSettingsInputs {
   promotionLoading: Readonly<Ref<boolean>>
   promotionBusy: Readonly<Ref<boolean>>
   promotionError: Readonly<Ref<string | null>>
+  releaseArtifactNeedsAttention?: Readonly<Ref<boolean>>
   productionFormValid: Readonly<Ref<boolean>>
   selectedProjectName: Readonly<Ref<string>>
 }
@@ -65,6 +66,9 @@ export function useProductionSettings(input: ProductionSettingsInputs): Producti
     published: input.publishing.value?.published,
     ready: input.publishing.value?.publication?.ready,
     url: productionURL.value,
+  }, {
+    artifactNeedsAttention: input.releaseArtifactNeedsAttention?.value ?? false,
+    statusError: input.promotionError.value,
   }))
   const canPromote = computed(() => !!input.promotion.value?.promotable && input.productionFormValid.value && !input.promotionBusy.value)
   const promotionDisabledReason = computed(() => {

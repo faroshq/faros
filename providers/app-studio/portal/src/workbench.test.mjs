@@ -18,6 +18,9 @@ const {
   openWorkbenchBuiltInTab,
   openWorkbenchProviderTool,
   reorderWorkbenchTab,
+  selectExistingWorkbenchTabFromLauncher,
+  selectWorkbenchLauncherBuiltInTab,
+  selectWorkbenchLauncherProviderTool,
 } = await import(moduleURL)
 
 const connectionsTool = {
@@ -49,6 +52,29 @@ test('opens the launcher from the plus nub without duplicating it', () => {
   assert.deepEqual(closedLauncher.tabs.map((tab) => tab.id), ['preview'])
   assert.equal(activatedAgain.activeTabID, 'launcher')
   assert.equal(activatedAgain.tabs.filter((tab) => tab.id === 'launcher').length, 1)
+})
+
+test('replaces the active launcher with a selected built-in tab', () => {
+  const selected = selectWorkbenchLauncherBuiltInTab(createDefaultWorkbenchState(), 'providers')
+
+  assert.deepEqual(selected.tabs.map((tab) => tab.id), ['preview', 'providers'])
+  assert.equal(selected.activeTabID, 'providers')
+  assert.equal(selected.tabs.some((tab) => tab.kind === 'launcher'), false)
+})
+
+test('replaces the active launcher with a selected provider tool', () => {
+  const selected = selectWorkbenchLauncherProviderTool(createDefaultWorkbenchState(), connectionsTool)
+
+  assert.deepEqual(selected.tabs.map((tab) => tab.id), ['preview', 'provider:code/connections'])
+  assert.equal(selected.activeTabID, 'provider:code/connections')
+  assert.equal(selected.tabs.some((tab) => tab.kind === 'launcher'), false)
+})
+
+test('consumes the active launcher when selecting an already-open tab', () => {
+  const selected = selectExistingWorkbenchTabFromLauncher(createDefaultWorkbenchState(), 'preview')
+
+  assert.deepEqual(selected.tabs.map((tab) => tab.id), ['preview'])
+  assert.equal(selected.activeTabID, 'preview')
 })
 
 test('opens a provider tool as a closeable active tab without duplicating it', () => {

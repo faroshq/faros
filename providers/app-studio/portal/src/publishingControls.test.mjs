@@ -94,7 +94,7 @@ test('keeps Publishing focused on deployment and technical details', () => {
   assert.match(pane, /Redeploy/)
   assert.match(pane, /Open app/)
   assert.match(pane, /aria-label="Technical details"/)
-  assert.match(pane, /<ReleasePipeline :pipeline="releasePipeline"/)
+  assert.match(pane, /<ReleasePipeline[\s\S]*:pipeline="releasePipeline"[\s\S]*@refresh="refreshProduction"/)
   assert.match(pane, /Redeploy updates the production deployment only\. It does not publish or change access\./)
   assert.match(pane, /The publication is ready/)
   assert.doesNotMatch(pane, /publishing && !publishing\.published[\s\S]{0,240}Publication is ready/)
@@ -153,15 +153,19 @@ test('redeploying settings is bound to the current production release', () => {
   assert.doesNotMatch(promote, /canPromoteSelectedRelease\.value/)
 })
 
-test('renders release progress as an announced four-stage pipeline with build drill-through', () => {
-  for (const label of ['Commit', 'Build images', 'Deploy', 'Enable access']) {
+test('renders release progress as an announced five-stage pipeline with actionable verification evidence', () => {
+  for (const label of ['Commit', 'Build', 'Verify images', 'Deploy', 'Enable access']) {
     assert.match(promotionState, new RegExp(`label: '${label}'`))
   }
   assert.match(releasePipeline, /aria-label="Release pipeline"/)
+  assert.match(releasePipeline, /aria-label="Release image evidence"/)
   assert.match(releasePipeline, /aria-live=/)
   assert.match(releasePipeline, /pipeline\.state === 'failed' \? 'alert' : 'status'/)
   assert.match(releasePipeline, />View build<\/a>/)
+  assert.match(releasePipeline, /Check again/)
   assert.match(releasePipeline, /Taking longer than usual/)
+  assert.match(releasePipeline, /Expected package and tag/)
+  assert.doesNotMatch(releasePipeline, /Re-run build|Reconnect GitHub/)
 })
 
 test('keeps publication success deployment-scoped while Live remains URL-dependent', () => {

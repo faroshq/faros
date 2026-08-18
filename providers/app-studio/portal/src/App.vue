@@ -157,6 +157,9 @@ import {
   openWorkbenchBuiltInTab,
   openWorkbenchProviderTool,
   reorderWorkbenchTab,
+  selectExistingWorkbenchTabFromLauncher,
+  selectWorkbenchLauncherBuiltInTab,
+  selectWorkbenchLauncherProviderTool,
   updateWorkbenchProviderToolPath,
   type WorkbenchBuiltInTab,
   type WorkbenchProviderToolRef,
@@ -198,6 +201,9 @@ import {
   promotionObservationMatches,
   promotionPollDelay,
   PROMOTION_POLL_MAX_DELAY_MS,
+  RELEASE_ARTIFACT_BACKGROUND_POLL_MS,
+  releaseArtifactPollDelay,
+  releaseArtifactWaitPhase,
   promotionReadyFeedback,
   type PromotionFeedback,
   type PromotionPollState,
@@ -658,6 +664,7 @@ let promotionLastTarget: PromotionPollState | null = null
 let promotionLoadSerial = 0
 let releaseLoadSerial = 0
 let promotionTransitionStartedAt = 0
+let releaseArtifactWaitStartedAt = 0
 let publishingPollTimer: number | undefined
 let publishingLoadSerial = 0
 const conversationStatus = ref('')
@@ -2323,6 +2330,7 @@ async function applyDevelopmentTemplate(template: string) {
 }
 
 const releaseTakingLonger = ref(false)
+const releaseArtifactNeedsAttention = ref(false)
 const {
   releasePipeline,
   productionBinding,
@@ -2342,6 +2350,7 @@ const {
   promotionLoading,
   promotionBusy,
   promotionError,
+  releaseArtifactNeedsAttention,
   productionFormValid,
   selectedProjectName: productionProjectName,
 })
@@ -2396,6 +2405,13 @@ function clearPromotionPoll() {
   }
 }
 
+function resetReleaseTransitionTracking() {
+  promotionTransitionStartedAt = 0
+  releaseArtifactWaitStartedAt = 0
+  releaseTakingLonger.value = false
+  releaseArtifactNeedsAttention.value = false
+}
+
 function promotionObservation(readiness: ProjectPromotionReadiness) {
   return {
     instance: readiness.instance,
@@ -2429,17 +2445,38 @@ function schedulePromotionPoll() {
     promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, promotionPollDelay(promotionPollState.attempts))
     return
   }
-  // Build and deploy transitions are durable server observations. Keep them
-  // fresh while Publishing/Share is visible, then back off without converting
-  // a slow registry observation into a false failure.
+  // A failed refresh must replace any stale spinner with an honest unavailable
+  // state. Retry quietly so the pane can recover without user intervention.
+  if (promotionError.value && promotion.value) {
+    promotionTransitionStartedAt = 0
+    releaseTakingLonger.value = false
+    releaseArtifactNeedsAttention.value = false
+    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, RELEASE_ARTIFACT_BACKGROUND_POLL_MS)
+    return
+  }
+  // CI completion and exact-commit package verification are separate facts.
+  // Keep checking registry evidence, but turn the spinner into a stable
+  // attention state after the bounded grace period.
+  if (releasePipeline.value.artifactLag) {
+    promotionTransitionStartedAt = 0
+    if (!releaseArtifactWaitStartedAt) releaseArtifactWaitStartedAt = Date.now()
+    const phase = releaseArtifactWaitPhase(Date.now() - releaseArtifactWaitStartedAt)
+    releaseTakingLonger.value = phase !== 'waiting'
+    releaseArtifactNeedsAttention.value = phase === 'attention'
+    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, releaseArtifactPollDelay(phase))
+    return
+  }
+  releaseArtifactWaitStartedAt = 0
+  releaseArtifactNeedsAttention.value = false
+  // Other build and deploy transitions are durable server observations. Keep
+  // them fresh while Publishing/Share is visible and back off after two minutes.
   if (releasePipeline.value.transitional) {
     if (!promotionTransitionStartedAt) promotionTransitionStartedAt = Date.now()
     const elapsed = Date.now() - promotionTransitionStartedAt
     releaseTakingLonger.value = elapsed >= 2 * 60 * 1000
     promotionPollTimer = window.setTimeout(loadPromotion, releaseTakingLonger.value ? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay(0))
   } else {
-    promotionTransitionStartedAt = 0
-    releaseTakingLonger.value = false
+    resetReleaseTransitionTracking()
   }
 }
 
@@ -2472,8 +2509,10 @@ async function loadPromotion() {
   const requestSerial = ++promotionLoadSerial
   const pollAtStart = promotionPollState
   const firstHydration = promotion.value === null
-  if (firstHydration) promotionLoading.value = true
-  promotionError.value = null
+  if (firstHydration) {
+    promotionLoading.value = true
+    promotionError.value = null
+  }
   try {
     const readiness = await api.getPromotion(props.ctx, name)
     if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
@@ -2912,14 +2951,12 @@ watch(
     const [previousSurfaceActive, previousProjectName] = previous ?? [false, undefined]
     const surfaceOrProjectChanged = surfaceActive && (!previousSurfaceActive || projectName !== previousProjectName)
     if (surfaceOrProjectChanged) {
-      promotionTransitionStartedAt = 0
-      releaseTakingLonger.value = false
+      resetReleaseTransitionTracking()
       void loadPromotion()
       void loadReleases()
       void loadPublishing()
     } else if (!surfaceActive) {
-      promotionTransitionStartedAt = 0
-      releaseTakingLonger.value = false
+      resetReleaseTransitionTracking()
       clearPromotionPoll()
       clearPublishingPoll()
     }
@@ -4732,12 +4769,17 @@ function openWorkbenchLauncher() {
 
 function openWorkbenchLauncherItem(item: WorkbenchLauncherItem) {
   if (item.providerTool) {
-    openTool(item.providerTool)
+    workbench.value = selectWorkbenchLauncherProviderTool(workbench.value, item.providerTool)
+    toolError.value = null
     return
   }
   if (item.builtInTab) {
-    openBuiltInWorkbenchTab(item.builtInTab)
+    workbench.value = selectWorkbenchLauncherBuiltInTab(workbench.value, item.builtInTab)
   }
+}
+
+function selectExistingWorkbenchLauncherTab(tabID: string) {
+  workbench.value = selectExistingWorkbenchTabFromLauncher(workbench.value, tabID)
 }
 
 function activateWorkbenchTabByID(tabID: string) {
@@ -7137,7 +7179,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               :key="tab.id"
               type="button"
               class="group flex min-h-[56px] w-full items-center gap-3 rounded-md border border-transparent bg-surface-hover/60 px-2.5 py-2 text-left transition hover:border-border-subtle hover:bg-surface-hover"
-              @click="activateWorkbenchTabByID(tab.id)"
+              @click="selectExistingWorkbenchLauncherTab(tab.id)"
             >
               <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
                 <img v-if="tab.kind === 'provider' && tab.providerTool?.iconURL" :src="tab.providerTool.iconURL" alt="" class="h-5 w-5 object-contain" />
@@ -7834,7 +7876,14 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <div>{{ promotionError }}</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
               </div>
-              <ReleasePipeline :pipeline="releasePipeline" :taking-longer="releaseTakingLonger" v-else-if="promotion" />
+              <ReleasePipeline
+                v-else-if="promotion"
+                :pipeline="releasePipeline"
+                :taking-longer="releaseTakingLonger"
+                :needs-attention="releaseArtifactNeedsAttention"
+                :refreshing="publishingRefreshBusy"
+                @refresh="refreshProduction"
+              />
               <div v-else class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-lg border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
                 <div>Production status is unavailable. Refresh to retry.</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
@@ -7963,7 +8012,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
               </div>
             </section>
-            <div v-if="promotionError" class="rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ promotionError }}</div>
             <section class="grid gap-3 rounded-lg border border-border-subtle bg-surface p-3" aria-label="Technical details">
               <button type="button" class="flex w-full items-center justify-between gap-2 text-left" :aria-expanded="productionTechnicalOpen" @click="productionTechnicalOpen = !productionTechnicalOpen">
                 <span class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted"><Settings2 class="h-3.5 w-3.5" :stroke-width="1.75" />Technical details</span>
