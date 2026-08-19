@@ -24,9 +24,10 @@ import (
 
 // bindProjectAssistantStartModelAudit fixes the selected registry entry to the
 // durable run before worker startup. Credentials remain in the workspace
-// Secret; the audit stores only the stable, non-secret registry identifier.
-func bindProjectAssistantStartModelAudit(run *store.AssistantRun, modelID string) error {
+// Secret; the audit stores only stable, non-secret logical and revision IDs.
+func bindProjectAssistantStartModelAudit(run *store.AssistantRun, modelID, modelRevisionID string) error {
 	modelID = strings.TrimSpace(modelID)
+	modelRevisionID = strings.TrimSpace(modelRevisionID)
 	if run == nil || modelID == "" {
 		return nil
 	}
@@ -40,6 +41,10 @@ func bindProjectAssistantStartModelAudit(run *store.AssistantRun, modelID string
 		return fmt.Errorf("%w: client request ID was already used with a different model", store.ErrAssistantRunConflict)
 	}
 	audit.ModelID = modelID
+	if audit.ModelRevisionID != "" && audit.ModelRevisionID != modelRevisionID {
+		return fmt.Errorf("%w: client request ID was already used with a different model revision", store.ErrAssistantRunConflict)
+	}
+	audit.ModelRevisionID = modelRevisionID
 	raw, err := json.Marshal(audit)
 	if err != nil {
 		return fmt.Errorf("encode assistant model run audit: %w", err)
@@ -48,12 +53,22 @@ func bindProjectAssistantStartModelAudit(run *store.AssistantRun, modelID string
 	return nil
 }
 
-func projectAssistantModelIDFromRunAudit(run store.AssistantRun) string {
+func projectAssistantModelReferenceFromRunAudit(run store.AssistantRun) (string, string) {
 	var audit projectAssistantRunAudit
 	if len(run.Audit) == 0 || json.Unmarshal(run.Audit, &audit) != nil {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(audit.ModelID)
+	return strings.TrimSpace(audit.ModelID), strings.TrimSpace(audit.ModelRevisionID)
+}
+
+func projectAssistantModelIDFromRunAudit(run store.AssistantRun) string {
+	modelID, _ := projectAssistantModelReferenceFromRunAudit(run)
+	return modelID
+}
+
+func projectAssistantModelRevisionIDFromRunAudit(run store.AssistantRun) string {
+	_, revisionID := projectAssistantModelReferenceFromRunAudit(run)
+	return revisionID
 }
 
 func validateProjectAssistantStartModelSelection(run store.AssistantRun, modelID string) error {

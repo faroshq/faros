@@ -16,6 +16,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +39,7 @@ import (
 const (
 	projectLLMLegacyDefaultModelID = "default"
 	projectLLMMaxModels            = 20
+	projectLLMMaxStoredRevisions   = 200
 )
 
 var projectLLMModelIDInvalid = regexp.MustCompile(`[^a-z0-9]+`)
@@ -71,18 +75,22 @@ type SetDefaultProjectLLMModelRequest struct {
 }
 
 type projectLLMStoredModel struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	BaseURL  string `json:"baseURL"`
-	Model    string `json:"model"`
-	APIKey   string `json:"apiKey,omitempty"`
+	ID         string `json:"id"`
+	RevisionID string `json:"revisionID,omitempty"`
+	Archived   bool   `json:"archived,omitempty"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"`
+	BaseURL    string `json:"baseURL"`
+	Model      string `json:"model"`
+	APIKey     string `json:"apiKey,omitempty"`
 }
 
 type projectLLMModelSettings struct {
-	ID       string
-	Name     string
-	Settings projectLLMSettings
+	ID         string
+	RevisionID string
+	Archived   bool
+	Name       string
+	Settings   projectLLMSettings
 }
 
 type projectLLMRegistry struct {
@@ -101,6 +109,31 @@ func (r projectLLMRegistry) model(id string) (projectLLMModelSettings, bool) {
 		id = strings.TrimSpace(r.DefaultModelID)
 	}
 	for _, model := range r.Models {
+		if !model.Archived && model.ID == id {
+			return model, true
+		}
+	}
+	return projectLLMModelSettings{}, false
+}
+
+func (r projectLLMRegistry) modelRevision(id, revisionID string) (projectLLMModelSettings, bool) {
+	id = strings.TrimSpace(id)
+	revisionID = strings.TrimSpace(revisionID)
+	if id == "" && revisionID == "" {
+		id = strings.TrimSpace(r.DefaultModelID)
+	}
+	if revisionID != "" {
+		for _, model := range r.Models {
+			if model.RevisionID == revisionID && (id == "" || model.ID == id) {
+				return model, true
+			}
+		}
+		return projectLLMModelSettings{}, false
+	}
+	// Runs created before revision pinning carry only the logical ID. Resolve
+	// those to the oldest retained revision so a later patch cannot silently
+	// change the model used by a resumable legacy run.
+	for _, model := range r.Models {
 		if model.ID == id {
 			return model, true
 		}
@@ -108,10 +141,10 @@ func (r projectLLMRegistry) model(id string) (projectLLMModelSettings, bool) {
 	return projectLLMModelSettings{}, false
 }
 
-func (r projectLLMRegistry) selectedSettings(id string) (projectLLMSettings, error) {
-	model, ok := r.model(id)
+func (r projectLLMRegistry) selectedSettings(id, revisionID string) (projectLLMSettings, error) {
+	model, ok := r.modelRevision(id, revisionID)
 	if !ok {
-		if strings.TrimSpace(id) == "" && len(r.Models) == 0 {
+		if strings.TrimSpace(id) == "" && strings.TrimSpace(revisionID) == "" && len(r.Models) == 0 {
 			return r.Runtime, nil
 		}
 		return projectLLMSettings{}, newValidationError("selected model configuration was not found")
@@ -135,9 +168,23 @@ func (r projectLLMRegistry) selectedModelID(requested string) (string, error) {
 	return model.ID, nil
 }
 
+func (r projectLLMRegistry) selectedModel(requested string) (projectLLMModelSettings, error) {
+	model, ok := r.model(requested)
+	if !ok {
+		return projectLLMModelSettings{}, newValidationError("selected model configuration was not found")
+	}
+	if strings.TrimSpace(model.Settings.APIKey) == "" {
+		return projectLLMModelSettings{}, newValidationError("selected model configuration does not have a credential")
+	}
+	return model, nil
+}
+
 func (r projectLLMRegistry) view() ProjectLLMSettingsView {
 	views := make([]ProjectLLMModelView, 0, len(r.Models))
 	for _, model := range r.Models {
+		if model.Archived {
+			continue
+		}
 		views = append(views, ProjectLLMModelView{
 			ID:         model.ID,
 			Name:       model.Name,
@@ -191,6 +238,13 @@ func projectLLMModelID(value string) string {
 	return value
 }
 
+func projectLLMLegacyRevision(item projectLLMStoredModel) string {
+	item.RevisionID = ""
+	raw, _ := json.Marshal(item)
+	sum := sha256.Sum256(raw)
+	return "legacy-" + hex.EncodeToString(sum[:16])
+}
+
 func normalizeProjectLLMModel(model *projectLLMModelSettings, runtime projectLLMSettings) error {
 	name, err := normalizeProjectLLMModelName(model.Name)
 	if err != nil {
@@ -198,6 +252,10 @@ func normalizeProjectLLMModel(model *projectLLMModelSettings, runtime projectLLM
 	}
 	model.Name = name
 	model.ID = projectLLMModelID(model.ID)
+	model.RevisionID = strings.TrimSpace(model.RevisionID)
+	if model.RevisionID == "" {
+		model.RevisionID = uuid.NewString()
+	}
 	model.Settings.MaxRetries = runtime.MaxRetries
 	model.Settings.MaxRetriesConfigured = runtime.MaxRetriesConfigured
 	model.Settings.RetryBackoff = runtime.RetryBackoff
@@ -220,23 +278,39 @@ func readProjectLLMRegistry(ctx context.Context, c *asclient.Client) (projectLLM
 		if err := json.Unmarshal([]byte(raw), &stored); err != nil {
 			return registry, fmt.Errorf("decode model registry: %w", err)
 		}
-		seen := map[string]struct{}{}
+		seenRevisions := map[string]struct{}{}
+		activeIDs := map[string]struct{}{}
 		for _, item := range stored {
-			model := projectLLMModelSettings{ID: item.ID, Name: item.Name, Settings: projectLLMSettings{
+			if strings.TrimSpace(item.RevisionID) == "" {
+				item.RevisionID = projectLLMLegacyRevision(item)
+			}
+			model := projectLLMModelSettings{ID: item.ID, RevisionID: item.RevisionID, Archived: item.Archived, Name: item.Name, Settings: projectLLMSettings{
 				Provider: item.Provider, BaseURL: item.BaseURL, Model: item.Model, APIKey: item.APIKey,
 			}}
 			if err := normalizeProjectLLMModel(&model, registry.Runtime); err != nil {
 				return registry, err
 			}
-			if _, exists := seen[model.ID]; exists {
-				return registry, fmt.Errorf("model registry contains duplicate id %q", model.ID)
+			if _, exists := seenRevisions[model.RevisionID]; exists {
+				return registry, fmt.Errorf("model registry contains duplicate revision %q", model.RevisionID)
 			}
-			seen[model.ID] = struct{}{}
+			seenRevisions[model.RevisionID] = struct{}{}
+			if !model.Archived {
+				if _, exists := activeIDs[model.ID]; exists {
+					return registry, fmt.Errorf("model registry contains duplicate active id %q", model.ID)
+				}
+				activeIDs[model.ID] = struct{}{}
+			}
 			registry.Models = append(registry.Models, model)
 		}
 		registry.DefaultModelID = strings.TrimSpace(secretDataValue(secret, "defaultModelID"))
-		if _, ok := registry.model(registry.DefaultModelID); !ok && len(registry.Models) > 0 {
-			registry.DefaultModelID = registry.Models[0].ID
+		if _, ok := registry.model(registry.DefaultModelID); !ok {
+			registry.DefaultModelID = ""
+			for _, model := range registry.Models {
+				if !model.Archived {
+					registry.DefaultModelID = model.ID
+					break
+				}
+			}
 		}
 		return registry, nil
 	}
@@ -256,7 +330,8 @@ func readProjectLLMRegistry(ctx context.Context, c *asclient.Client) (projectLLM
 		return registry, err
 	}
 	registry.DefaultModelID = projectLLMLegacyDefaultModelID
-	registry.Models = []projectLLMModelSettings{{ID: projectLLMLegacyDefaultModelID, Name: legacy.Model, Settings: legacy}}
+	legacyStored := projectLLMStoredModel{ID: projectLLMLegacyDefaultModelID, Name: legacy.Model, Provider: legacy.Provider, BaseURL: legacy.BaseURL, Model: legacy.Model, APIKey: legacy.APIKey}
+	registry.Models = []projectLLMModelSettings{{ID: projectLLMLegacyDefaultModelID, RevisionID: projectLLMLegacyRevision(legacyStored), Name: legacy.Model, Settings: legacy}}
 	return registry, nil
 }
 
@@ -298,28 +373,42 @@ func writeProjectLLMRegistry(ctx context.Context, c *asclient.Client, registry p
 }
 
 func projectLLMRegistrySecret(registry projectLLMRegistry) (*unstructured.Unstructured, error) {
-	if len(registry.Models) > projectLLMMaxModels {
-		return nil, newValidationError("at most 20 model configurations are supported")
+	if len(registry.Models) > projectLLMMaxStoredRevisions {
+		return nil, newValidationError("model configuration revision history is full")
 	}
 	stored := make([]projectLLMStoredModel, 0, len(registry.Models))
-	seen := map[string]struct{}{}
+	seenRevisions := map[string]struct{}{}
+	activeIDs := map[string]struct{}{}
+	activeCount := 0
 	for index := range registry.Models {
 		model := registry.Models[index]
 		if err := normalizeProjectLLMModel(&model, registry.Runtime); err != nil {
 			return nil, err
 		}
-		if _, exists := seen[model.ID]; exists {
-			return nil, newValidationError("model configuration IDs must be unique")
+		if _, exists := seenRevisions[model.RevisionID]; exists {
+			return nil, newValidationError("model configuration revisions must be unique")
 		}
-		seen[model.ID] = struct{}{}
+		seenRevisions[model.RevisionID] = struct{}{}
+		if !model.Archived {
+			activeCount++
+			if _, exists := activeIDs[model.ID]; exists {
+				return nil, newValidationError("active model configuration IDs must be unique")
+			}
+			activeIDs[model.ID] = struct{}{}
+		}
 		registry.Models[index] = model
-		stored = append(stored, projectLLMStoredModel{ID: model.ID, Name: model.Name, Provider: model.Settings.Provider, BaseURL: model.Settings.BaseURL, Model: model.Settings.Model, APIKey: model.Settings.APIKey})
+		stored = append(stored, projectLLMStoredModel{ID: model.ID, RevisionID: model.RevisionID, Archived: model.Archived, Name: model.Name, Provider: model.Settings.Provider, BaseURL: model.Settings.BaseURL, Model: model.Settings.Model, APIKey: model.Settings.APIKey})
+	}
+	if activeCount > projectLLMMaxModels {
+		return nil, newValidationError("at most 20 model configurations are supported")
 	}
 	if _, ok := registry.model(registry.DefaultModelID); !ok {
-		if len(registry.Models) > 0 {
-			registry.DefaultModelID = registry.Models[0].ID
-		} else {
-			registry.DefaultModelID = ""
+		registry.DefaultModelID = ""
+		for _, model := range registry.Models {
+			if !model.Archived {
+				registry.DefaultModelID = model.ID
+				break
+			}
 		}
 	}
 	raw, err := json.Marshal(stored)
@@ -367,7 +456,7 @@ func (s *Server) createProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
-	if len(registry.Models) >= projectLLMMaxModels {
+	if len(registry.view().Models) >= projectLLMMaxModels {
 		writeProjectError(w, newValidationError("at most 20 model configurations are supported"))
 		return
 	}
@@ -381,7 +470,7 @@ func (s *Server) createProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, newValidationError("a model configuration with this name already exists"))
 		return
 	}
-	model := projectLLMModelSettings{ID: id, Name: name, Settings: projectLLMSettings{
+	model := projectLLMModelSettings{ID: id, RevisionID: uuid.NewString(), Name: name, Settings: projectLLMSettings{
 		Provider: request.Provider, BaseURL: request.BaseURL, Model: request.Model, APIKey: strings.TrimSpace(request.APIKey),
 	}}
 	if err := normalizeProjectLLMModel(&model, registry.Runtime); err != nil {
@@ -416,7 +505,7 @@ func (s *Server) patchProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(muxVar(r, "model"))
 	index := -1
 	for i := range registry.Models {
-		if registry.Models[i].ID == id {
+		if !registry.Models[i].Archived && registry.Models[i].ID == id {
 			index = i
 			break
 		}
@@ -449,7 +538,10 @@ func (s *Server) patchProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
-	registry.Models[index] = model
+	registry.Models[index].Archived = true
+	model.RevisionID = uuid.NewString()
+	model.Archived = false
+	registry.Models = append(registry.Models, model)
 	if err := writeProjectLLMRegistry(r.Context(), c, registry); err != nil {
 		writeProjectError(w, err)
 		return
@@ -468,24 +560,25 @@ func (s *Server) deleteProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(muxVar(r, "model"))
-	next := make([]projectLLMModelSettings, 0, len(registry.Models))
 	found := false
-	for _, model := range registry.Models {
-		if model.ID == id {
+	for index := range registry.Models {
+		if !registry.Models[index].Archived && registry.Models[index].ID == id {
 			found = true
-			continue
+			registry.Models[index].Archived = true
+			break
 		}
-		next = append(next, model)
 	}
 	if !found {
 		writeStatus(w, http.StatusNotFound, "NotFound", "model configuration not found")
 		return
 	}
-	registry.Models = next
 	if registry.DefaultModelID == id {
 		registry.DefaultModelID = ""
-		if len(next) > 0 {
-			registry.DefaultModelID = next[0].ID
+		for _, model := range registry.Models {
+			if !model.Archived {
+				registry.DefaultModelID = model.ID
+				break
+			}
 		}
 	}
 	if err := writeProjectLLMRegistry(r.Context(), c, registry); err != nil {

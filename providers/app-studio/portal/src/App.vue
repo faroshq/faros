@@ -3615,10 +3615,14 @@ async function createProjectAndStartConversation(
   content: string,
   createOverrides?: { templateName?: string; displayName?: string },
 ) {
-  const retry = pendingFirstProjectSubmission?.projectName && pendingFirstProjectSubmission.content === content
+  const pendingProjectName = pendingFirstProjectSubmission?.content === content ? pendingFirstProjectSubmission.projectName : ''
+  const retry = Boolean(pendingProjectName && pendingFirstProjectSubmission?.modelID === selectedLLMModelID.value)
   let submission = retry
     ? pendingFirstProjectSubmission!
-    : newFirstProjectSubmission(content, crypto.randomUUID())
+    : firstProjectSubmissionWithProject(
+        newFirstProjectSubmission(content, crypto.randomUUID(), selectedLLMModelID.value),
+        pendingProjectName,
+      )
   pendingFirstProjectSubmission = submission
   const generation = ++projectCreateGeneration
   const now = new Date().toISOString()
@@ -3630,7 +3634,7 @@ async function createProjectAndStartConversation(
   messageStreaming.value = true
   conversationStatus.value = 'Starting'
   error.value = null
-  if (!retry) {
+  if (!submission.projectName) {
     prompt.value = ''
     selectedLandingCategory.value = null
     resetWorkbench()
@@ -3685,7 +3689,7 @@ async function createProjectAndStartConversation(
     const canonical = await api.startAssistantTurn(props.ctx, projectName, thread.id, {
       content: startPlan.content,
       clientUserMessageID: startPlan.clientRequestID,
-      modelID: selectedLLMModelID.value,
+      modelID: startPlan.modelID,
       collaborationMode: 'default',
     })
     replaceAssistantThread(canonical.thread)
@@ -5398,12 +5402,13 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
   busy.value = true
   messageStreaming.value = true
   error.value = null
-  const firstProjectPending = firstProjectSubmissionMatches(pendingFirstProjectSubmission, projectName, content)
+  const firstProjectPending = firstProjectSubmissionMatches(pendingFirstProjectSubmission, projectName, content, selectedLLMModelID.value)
     ? pendingFirstProjectSubmission
     : null
   const startOperation = {
     content,
     collaborationMode: firstProjectPending ? 'default' as const : assistantIntent.value,
+    ...(!steeringActiveRun ? { modelID: selectedLLMModelID.value } : {}),
     ...(turnSkills.length ? { skills: turnSkills.map((skill) => skill.id) } : {}),
     ...(turnResources.length ? { contextResources: turnResources } : {}),
     ...(turnContentParts.length ? { contentParts: turnContentParts } : {}),
@@ -5474,7 +5479,7 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
       const canonical = startOperation.collaborationMode === 'review'
         ? await api.startAssistantReview(props.ctx, projectName, thread.id, {
             clientUserMessageID: clientRequestID,
-            modelID: selectedLLMModelID.value,
+            modelID: payload.modelID,
             target: { type: 'current_workspace', instructions: content },
             ...(turnSkills.length ? { skills: turnSkills.map((skill) => skill.id) } : {}),
             ...(turnResources.length ? { contextResources: turnResources } : {}),
@@ -5483,7 +5488,7 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
         : await api.startAssistantTurn(props.ctx, projectName, thread.id, {
             content,
             clientUserMessageID: clientRequestID,
-            modelID: selectedLLMModelID.value,
+            modelID: payload.modelID,
             collaborationMode: startOperation.collaborationMode,
             ...(turnSkills.length ? { skills: turnSkills.map((skill) => skill.id) } : {}),
             ...(turnResources.length ? { contextResources: turnResources } : {}),

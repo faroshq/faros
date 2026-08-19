@@ -117,8 +117,9 @@ test('composer exposes the configured model picker and sends its stable ID', asy
     readFile(new URL('./ModelPicker.vue', import.meta.url), 'utf8'),
   ])
   assert.match(app, /<template #actions>[\s\S]*<ModelPicker[\s\S]*:models="configuredLLMModels"[\s\S]*@select="selectedLLMModelID = \$event"/)
-  assert.match(app, /startAssistantTurn[\s\S]*modelID: selectedLLMModelID\.value/)
-  assert.match(app, /startAssistantReview[\s\S]*modelID: selectedLLMModelID\.value/)
+  assert.match(app, /const startOperation = \{[\s\S]*modelID: selectedLLMModelID\.value/)
+  assert.match(app, /startAssistantTurn[\s\S]*modelID: payload\.modelID/)
+  assert.match(app, /startAssistantReview[\s\S]*modelID: payload\.modelID/)
   assert.match(picker, /aria-label="Choose model"/)
   assert.match(picker, /aria-haspopup="listbox"/)
 })

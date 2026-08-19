@@ -413,7 +413,8 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	if err != nil {
 		return projectAssistantRunResult{}, err
 	}
-	settings, err := registry.selectedSettings(projectAssistantModelIDFromRunAudit(durable))
+	modelID, modelRevisionID := projectAssistantModelReferenceFromRunAudit(durable)
+	settings, err := registry.selectedSettings(modelID, modelRevisionID)
 	if err != nil {
 		return projectAssistantRunResult{}, err
 	}
@@ -1842,7 +1843,7 @@ func readProjectLLMSettings(ctx context.Context, c *asclient.Client) (projectLLM
 	if err != nil {
 		return projectLLMSettings{}, err
 	}
-	return registry.selectedSettings("")
+	return registry.selectedSettings("", "")
 }
 
 func writeProjectLLMSettings(ctx context.Context, c *asclient.Client, settings projectLLMSettings) error {

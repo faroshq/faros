@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -69,6 +70,7 @@ type projectThumbnailCaptureRequest struct {
 	commitSHA       string
 	commitCreatedAt time.Time
 	commitOrder     string
+	sourceRevision  uint64
 }
 
 type projectThumbnailCommit struct {
@@ -81,7 +83,8 @@ func projectThumbnailRequestMatches(left, right *projectThumbnailCaptureRequest)
 	return left != nil && right != nil &&
 		left.commitSHA == right.commitSHA &&
 		left.commitCreatedAt.Equal(right.commitCreatedAt) &&
-		left.commitOrder == right.commitOrder
+		left.commitOrder == right.commitOrder &&
+		left.sourceRevision == right.sourceRevision
 }
 
 func projectThumbnailCaptureKey(id identity, project *aiv1alpha1.Project) string {
@@ -140,18 +143,19 @@ func (s *Server) projectViewWithThumbnail(ctx context.Context, view ProjectView,
 	if view.Thumbnail == nil {
 		view.Thumbnail = &ProjectThumbnailView{}
 	}
-	view.Thumbnail.Refreshing = s.scheduleProjectThumbnailCapture(id, project, latestCommit)
+	view.Thumbnail.Refreshing = s.scheduleProjectThumbnailCapture(id, project, latestCommit, view.SourceRevision)
 	return view
 }
 
-func (s *Server) scheduleProjectThumbnailCapture(id identity, project *aiv1alpha1.Project, commit projectThumbnailCommit) bool {
-	if s == nil || project == nil || strings.TrimSpace(commit.SHA) == "" || commit.CreatedAt.IsZero() || strings.TrimSpace(commit.Order) == "" {
+func (s *Server) scheduleProjectThumbnailCapture(id identity, project *aiv1alpha1.Project, commit projectThumbnailCommit, sourceRevision uint64) bool {
+	if s == nil || project == nil || strings.TrimSpace(commit.SHA) == "" || commit.CreatedAt.IsZero() || strings.TrimSpace(commit.Order) == "" || sourceRevision == 0 {
 		return false
 	}
 	keyString := projectThumbnailCaptureKey(id, project)
 	request := &projectThumbnailCaptureRequest{
 		id: id, project: project.DeepCopy(), commitSHA: strings.TrimSpace(commit.SHA),
 		commitCreatedAt: commit.CreatedAt, commitOrder: strings.TrimSpace(commit.Order),
+		sourceRevision: sourceRevision,
 	}
 	s.mu.Lock()
 	if s.projectThumbnailCaptures == nil {
@@ -279,6 +283,17 @@ func (s *Server) captureProjectThumbnail(parent context.Context, key string, req
 	defer cancel()
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		if currentErr := s.requireProjectThumbnailCurrentRevision(ctx, request); currentErr != nil {
+			lastErr = currentErr
+			if attempt < 2 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(projectThumbnailRetryDelay):
+				}
+			}
+			continue
+		}
 		result, inspectErr := s.inspectProjectDevelopmentPreviewResult(ctx, projectAssistantToolCallRequest{
 			Identity: request.id,
 			Project:  request.project,
@@ -287,6 +302,17 @@ func (s *Server) captureProjectThumbnail(parent context.Context, key string, req
 			},
 		}, true)
 		if inspectErr == nil && result.Screenshot != nil && result.ScreenshotStatus == projectAssistantPreviewScreenshotCaptured {
+			if currentErr := s.requireProjectThumbnailCurrentRevision(ctx, request); currentErr != nil {
+				lastErr = currentErr
+				if attempt < 2 {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(projectThumbnailRetryDelay):
+					}
+				}
+				continue
+			}
 			data, decodeErr := base64.StdEncoding.DecodeString(result.Screenshot.Base64)
 			if decodeErr != nil {
 				return fmt.Errorf("decode preview screenshot: %w", decodeErr)
@@ -326,6 +352,59 @@ func (s *Server) captureProjectThumbnail(parent context.Context, key string, req
 		}
 	}
 	return lastErr
+}
+
+func (s *Server) requireProjectThumbnailCurrentRevision(ctx context.Context, request *projectThumbnailCaptureRequest) error {
+	if s.projectThumbnailCurrentness != nil {
+		return s.projectThumbnailCurrentness(ctx, request.id, request.project, request.sourceRevision)
+	}
+	if s.workspaces == nil {
+		return errors.New("project workspace store is unavailable")
+	}
+	scope := projectWorkspaceScope(request.id, request.project)
+	current, err := s.workspaces.SourceRevision(ctx, scope)
+	if err != nil {
+		return fmt.Errorf("read current workspace revision: %w", err)
+	}
+	if current != request.sourceRevision {
+		return fmt.Errorf("workspace revision changed from %d to %d before thumbnail capture", request.sourceRevision, current)
+	}
+	dirty, err := s.workspaces.UncommittedPaths(ctx, scope)
+	if err != nil {
+		return fmt.Errorf("read workspace commit state: %w", err)
+	}
+	if len(dirty) > 0 {
+		return errors.New("workspace has uncommitted changes; preview does not exactly represent the latest successful commit")
+	}
+	c, err := s.clientFor(request.id)
+	if err != nil {
+		return err
+	}
+	target, err := s.projectDevelopmentTarget(ctx, c, request.project, request.id)
+	if err != nil {
+		return err
+	}
+	components := target.sortedComponents()
+	if len(components) == 0 {
+		components = []string{""}
+	}
+	for _, component := range components {
+		body, status, getErr := s.dataPlaneGet(ctx, request.id, target.dataPlaneRefFor(component), dataPlaneVerbProcess, 16<<10)
+		if getErr != nil {
+			return getErr
+		}
+		if status < 200 || status >= 300 {
+			return fmt.Errorf("component %s process status returned %d", firstNonEmpty(component, "default"), status)
+		}
+		var process projectAssistantProcessStatus
+		if err := json.Unmarshal(body, &process); err != nil {
+			return fmt.Errorf("decode component %s process status: %w", firstNonEmpty(component, "default"), err)
+		}
+		if process.SourceRevision != request.sourceRevision {
+			return fmt.Errorf("component %s is serving workspace revision %d, want %d", firstNonEmpty(component, "default"), process.SourceRevision, request.sourceRevision)
+		}
+	}
+	return nil
 }
 
 func (s *Server) projectThumbnailClaimOwner() string {

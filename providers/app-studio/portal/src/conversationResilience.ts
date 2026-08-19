@@ -28,6 +28,7 @@ export interface AssistantRunStartRequest {
   content: string
   clientRequestID: string
   collaborationMode: ProjectAssistantRunMode
+  modelID?: string
   expectedRunID?: string
   skills?: string[]
   contextResources?: ProjectAssistantContextResource[]
@@ -146,10 +147,11 @@ export interface PendingFirstProjectSubmission {
   content: string
   clientRequestID: string
   projectName: string
+  modelID: string
 }
 
-export function newFirstProjectSubmission(content: string, clientRequestID: string): PendingFirstProjectSubmission {
-  return { content, clientRequestID, projectName: '' }
+export function newFirstProjectSubmission(content: string, clientRequestID: string, modelID = ''): PendingFirstProjectSubmission {
+  return { content, clientRequestID, projectName: '', modelID }
 }
 
 export function firstProjectSubmissionWithProject(submission: PendingFirstProjectSubmission, projectName: string): PendingFirstProjectSubmission {
@@ -162,6 +164,7 @@ export function firstProjectStartPlan(submission: PendingFirstProjectSubmission)
     projectName: submission.projectName,
     content: submission.content,
     clientRequestID: submission.clientRequestID,
+    modelID: submission.modelID,
   }
 }
 
@@ -174,6 +177,7 @@ export function assistantRunStartFingerprint(projectName: string, request: Omit<
     projectName,
     request.content,
     request.collaborationMode,
+    request.modelID ?? '',
     request.expectedRunID ?? '',
     request.skills ?? [],
     request.contextResources ?? [],
@@ -190,8 +194,8 @@ export function firstProjectSubmissionAccepted(submission: PendingFirstProjectSu
 	return Boolean(user?.id && user.content === submission.content)
 }
 
-export function firstProjectSubmissionMatches(submission: PendingFirstProjectSubmission | null | undefined, projectName: string, content: string): submission is PendingFirstProjectSubmission {
-	return Boolean(submission && submission.projectName === projectName && submission.content === content)
+export function firstProjectSubmissionMatches(submission: PendingFirstProjectSubmission | null | undefined, projectName: string, content: string, modelID?: string): submission is PendingFirstProjectSubmission {
+	return Boolean(submission && submission.projectName === projectName && submission.content === content && (modelID === undefined || submission.modelID === modelID))
 }
 
 export function firstProjectSubmissionIsCurrent(submission: PendingFirstProjectSubmission, generation: number, currentGeneration: number, selectedProject: string, routeProject: string, draftProject: string): boolean {
@@ -466,6 +470,7 @@ export class ConversationRunController {
     // interrupt request remains authoritative, but late chunks should not keep
     // appearing while that request is in flight.
     this.disconnect()
+    const generation = this.generation
     try {
       await this.transport.abort(runID)
     } catch (error) {
@@ -479,7 +484,7 @@ export class ConversationRunController {
       // The accepted abort remains authoritative. Reconnect below so the
       // durable terminal transition can still converge when refresh failed.
     }
-    if (settled || this.runID !== runID) return
+    if (settled || this.runID !== runID || this.generation !== generation) return
     // The interrupt endpoint intentionally returns the observable `stopping`
     // state before Eino reaches a safe cancellation boundary. Resume the SSE
     // subscription after the one-shot refresh so the eventual terminal event

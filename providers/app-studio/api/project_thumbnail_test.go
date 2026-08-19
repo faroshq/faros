@@ -51,6 +51,9 @@ func TestProjectViewWithThumbnailCapturesLatestSuccessfulCommit(t *testing.T) {
 		store:                   memory,
 		previewInspector:        inspector,
 		projectThumbnailContext: thumbnailContext,
+		projectThumbnailCurrentness: func(context.Context, identity, *aiv1alpha1.Project, uint64) error {
+			return nil
+		},
 		previewInspectionResolveURL: func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
 			return "https://preview.example/", nil
 		},
@@ -58,7 +61,7 @@ func TestProjectViewWithThumbnailCapturesLatestSuccessfulCommit(t *testing.T) {
 	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "app", UID: types.UID("uid")}}
 	id := identity{orgUUID: "org", workspaceUUID: "workspace"}
 	now := time.Now().UTC()
-	view := ProjectView{Repository: &ProjectRepositoryView{Commits: []ProjectRepositoryCommitView{
+	view := ProjectView{SourceRevision: 7, Repository: &ProjectRepositoryView{Commits: []ProjectRepositoryCommitView{
 		{Name: "commit-newest", Phase: "Succeeded", CommitSHA: "newest", CreatedAt: now},
 		{Name: "commit-older", Phase: "Succeeded", CommitSHA: "older", CreatedAt: now.Add(-time.Hour)},
 	}}}
@@ -203,6 +206,9 @@ func TestProjectThumbnailCaptureUsesBoundedWorkerPool(t *testing.T) {
 	memory := store.NewMemoryStore()
 	s := &Server{
 		store: memory, previewInspector: inspector, projectThumbnailContext: thumbnailContext,
+		projectThumbnailCurrentness: func(context.Context, identity, *aiv1alpha1.Project, uint64) error {
+			return nil
+		},
 		previewInspectionResolveURL: func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
 			return "https://preview.example/", nil
 		},
@@ -212,7 +218,7 @@ func TestProjectThumbnailCaptureUsesBoundedWorkerPool(t *testing.T) {
 		project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("app-%d", index), UID: types.UID(fmt.Sprintf("uid-%d", index))}}
 		if !s.scheduleProjectThumbnailCapture(identity{orgUUID: "org", workspaceUUID: "workspace"}, project, projectThumbnailCommit{
 			SHA: fmt.Sprintf("sha-%d", index), CreatedAt: now.Add(time.Duration(index) * time.Second), Order: fmt.Sprintf("commit-%d", index),
-		}) {
+		}, uint64(index+1)) {
 			t.Fatalf("capture %d was not scheduled", index)
 		}
 	}
@@ -235,6 +241,49 @@ func TestProjectThumbnailCaptureUsesBoundedWorkerPool(t *testing.T) {
 		t.Fatalf("peak browser captures = %d, want %d", peak, projectThumbnailWorkerCount)
 	}
 	close(inspector.release)
+}
+
+func TestCaptureProjectThumbnailRejectsScreenshotWhenRuntimeRevisionTurnsStale(t *testing.T) {
+	imageData := testProjectThumbnailPNG(t, 640, 360)
+	inspector := &fakeProjectAssistantPreviewInspector{result: projectAssistantPreviewInspectionResult{
+		Status: "succeeded",
+		Screenshot: &projectAssistantPreviewInspectionScreenshot{
+			MIMEType: "image/png", Base64: base64.StdEncoding.EncodeToString(imageData),
+		},
+	}}
+	memory := store.NewMemoryStore()
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "app", UID: types.UID("uid")}}
+	id := identity{orgUUID: "org", workspaceUUID: "workspace"}
+	ctx, cancel := context.WithCancel(context.Background())
+	checks := 0
+	s := &Server{
+		store: memory, previewInspector: inspector,
+		previewInspectionResolveURL: func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
+			return "https://preview.example/", nil
+		},
+		projectThumbnailCurrentness: func(context.Context, identity, *aiv1alpha1.Project, uint64) error {
+			checks++
+			if checks == 1 {
+				return nil
+			}
+			cancel()
+			return errors.New("runtime revision changed")
+		},
+	}
+	request := &projectThumbnailCaptureRequest{
+		id: id, project: project, commitSHA: "commit", commitCreatedAt: time.Now().UTC(), commitOrder: "commit-name", sourceRevision: 7,
+	}
+	key := projectThumbnailCaptureKey(id, project)
+	s.projectThumbnailCaptures = map[string]*projectThumbnailCaptureRequest{key: request}
+	if err := s.captureProjectThumbnail(ctx, key, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("capture error = %v, want cancellation after stale evidence", err)
+	}
+	if _, err := memory.GetProjectThumbnail(context.Background(), projectMessageScope(id.orgUUID, id.workspaceUUID, project)); !errors.Is(err, store.ErrProjectThumbnailNotFound) {
+		t.Fatalf("stale screenshot was persisted: %v", err)
+	}
+	if inspector.calls != 1 || checks != 2 {
+		t.Fatalf("inspector calls/currentness checks = %d/%d, want 1/2", inspector.calls, checks)
+	}
 }
 
 func testProjectThumbnailPNG(t *testing.T, width, height int) []byte {

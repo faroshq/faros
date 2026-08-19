@@ -379,8 +379,8 @@ test('reload ordering keeps a tied user message before its assistant response', 
 })
 
 test('first-project retry reuses the created project and durable request identity', () => {
-  const pending = state.newFirstProjectSubmission('ship it', 'request-1')
-  assert.deepEqual(state.firstProjectStartPlan(pending), { createProject: true, projectName: '', content: 'ship it', clientRequestID: 'request-1' })
+  const pending = state.newFirstProjectSubmission('ship it', 'request-1', 'gpt-high')
+  assert.deepEqual(state.firstProjectStartPlan(pending), { createProject: true, projectName: '', content: 'ship it', clientRequestID: 'request-1', modelID: 'gpt-high' })
   const created = state.firstProjectSubmissionWithProject(pending, 'demo')
   const firstRun = state.firstProjectStartPlan(created)
   assert.deepEqual(
@@ -400,20 +400,23 @@ test('first-project retry reuses the created project and durable request identit
 })
 
 test('first-project pending submission matches the project/message handoff into normal send', () => {
-  const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1'), 'demo')
+  const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1', 'gpt-high'), 'demo')
   assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'ship it'), true)
+  assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'ship it', 'gpt-high'), true)
+  assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'ship it', 'gemini-fast'), false)
   assert.equal(state.firstProjectSubmissionMatches(pending, 'other', 'ship it'), false)
   assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'different'), false)
 })
 
 test('message retry identity is bound to the requested operation', () => {
-  const normal = { content: 'ship it', collaborationMode: 'default' }
+  const normal = { content: 'ship it', collaborationMode: 'default', modelID: 'gpt-high' }
   const plan = { content: 'ship it', collaborationMode: 'plan' }
   const review = { content: 'check it', collaborationMode: 'review' }
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', plan))
   assert.notEqual(state.assistantRunStartFingerprint('demo', plan), state.assistantRunStartFingerprint('demo', review))
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('other', normal))
   assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', { ...normal, content: 'different' }))
+  assert.notEqual(state.assistantRunStartFingerprint('demo', normal), state.assistantRunStartFingerprint('demo', { ...normal, modelID: 'gemini-fast' }))
 })
 
 test('conflict recovery only accepts the run created for the exact retry identity and operation', () => {
@@ -609,6 +612,28 @@ test('stop does not reconnect after recovery confirms the run is terminal', asyn
   controller.setDisconnect(() => events.push('disconnect'))
   await controller.stop()
   assert.deepEqual(events, ['connect', 'disconnect', 'abort', 'recover'])
+})
+
+test('stop does not open a duplicate stream when recovery already restarted the controller', async () => {
+  const events = []
+  let controller
+  controller = new state.ConversationRunController({
+    connect: async () => { events.push('connect') },
+    abort: async () => { events.push('abort') },
+    recover: async () => {
+      events.push('recover')
+      controller.start('run-1', 2)
+      return false
+    },
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  })
+  controller.start('run-1', 1)
+  await Promise.resolve()
+  controller.setDisconnect(() => events.push('disconnect'))
+  await controller.stop()
+  await Promise.resolve()
+  assert.deepEqual(events, ['connect', 'disconnect', 'abort', 'recover', 'connect'])
 })
 
 test('stop restores the live subscription when the interrupt request fails', async () => {

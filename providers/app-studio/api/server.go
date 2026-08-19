@@ -113,6 +113,7 @@ type Server struct {
 	projectThumbnailContext     context.Context
 	projectThumbnailCancel      context.CancelFunc
 	projectThumbnailCaptures    map[string]*projectThumbnailCaptureRequest
+	projectThumbnailCurrentness func(context.Context, identity, *aiv1alpha1.Project, uint64) error
 	projectThumbnailFailures    map[string]time.Time
 	projectThumbnailQueue       chan string
 	projectThumbnailWorkersUp   bool

@@ -213,7 +213,7 @@ func (s *Server) startProjectAssistantRunDurablyWithModeAndSkills(ctx context.Co
 	if err := bindProjectAssistantStartRequestWithSelectionsAndParts(&run, actor, content, skills, resources, parts); err != nil {
 		return projectAssistantDurableStartResult{}, err
 	}
-	if err := bindProjectAssistantStartModelAudit(&run, selection.ModelID); err != nil {
+	if err := bindProjectAssistantStartModelAudit(&run, selection.ModelID, selection.ModelRevisionID); err != nil {
 		return projectAssistantDurableStartResult{}, err
 	}
 	if err := bindProjectAssistantStartSkillAudit(&run, selection); err != nil {

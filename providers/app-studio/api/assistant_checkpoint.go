@@ -150,6 +150,7 @@ type projectAssistantRunAudit struct {
 	StartRequestDigest       string                                   `json:"startRequestDigest,omitempty"`
 	ActorDigest              string                                   `json:"actorDigest,omitempty"`
 	ModelID                  string                                   `json:"modelID,omitempty"`
+	ModelRevisionID          string                                   `json:"modelRevisionID,omitempty"`
 	CatalogDigest            string                                   `json:"catalogDigest,omitempty"`
 	SelectedSkills           []projectAssistantSkillReceipt           `json:"selectedSkills,omitempty"`
 	SelectedContextResources []projectAssistantContextResourceReceipt `json:"selectedContextResources,omitempty"`
@@ -797,7 +798,8 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 	if err != nil {
 		return s.completeClaimedProjectAssistantRunAfterResumeError(ctx, messageScope, run, state, resumeReq, decision, id.user, out, nil, err)
 	}
-	settings, err := registry.selectedSettings(projectAssistantModelIDFromRunAudit(run))
+	modelID, modelRevisionID := projectAssistantModelReferenceFromRunAudit(run)
+	settings, err := registry.selectedSettings(modelID, modelRevisionID)
 	if err != nil {
 		return s.completeClaimedProjectAssistantRunAfterResumeError(ctx, messageScope, run, state, resumeReq, decision, id.user, out, nil, err)
 	}
