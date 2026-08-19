@@ -112,14 +112,39 @@ var e2ePlatformStamped = map[string]map[string]any{
 }
 
 // e2eApplyErrorMarkers are substrings kro puts in an instance condition when it
-// FAILS to apply a child resource (the bug class we guard against). Readiness
-// waits (pods not up because an image can't pull in CI) do not contain these.
+// FAILS to apply a child resource (the bug class we guard against).
 var e2eApplyErrorMarkers = []string{
 	"apply results contain errors",
 	"is invalid",
 	"Required value",
 	"failed to apply",
 	"admission webhook",
+}
+
+// e2eReadinessWaitMarkers identify a condition that is kro WAITING on a node's
+// readyWhen, not failing to apply anything. They are checked first and win,
+// because kro nests the wait inside its apply-results message — a node stuck on
+// readyWhen reads as:
+//
+//	resource reconciliation failed: apply results contain errors: waiting for
+//	node "httpRoute": ... failed to evaluate readyWhen expression: ...
+//	(waiting for readiness)
+//
+// which matches "apply results contain errors" despite nothing having failed to
+// apply. This suite deliberately scopes itself to "the RGD is accepted and its
+// objects get applied"; readiness is out of scope because the throwaway kind
+// cluster cannot satisfy it. Two examples, both environmental rather than
+// template bugs:
+//
+//   - images that cannot be pulled, so pods never go Ready;
+//   - HTTPRoute readyWhen (added for the exposure layer in #540), which waits
+//     for the platform Gateway to accept the route. `make e2e-infrastructure-up`
+//     installs the Gateway API CRDs but no Gateway controller, so nothing ever
+//     writes status.parents and the route can never be Accepted here.
+var e2eReadinessWaitMarkers = []string{
+	"waiting for readiness",
+	"readyWhen",
+	"waiting for node",
 }
 
 func TestE2ESeedTemplates(t *testing.T) {
@@ -336,6 +361,17 @@ func createInstance(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersion
 // waitInstanceApplied waits until kro has reconciled the instance and asserts it
 // applied its objects without an apply error. A readiness wait (images not
 // pulled in CI) is success — apply succeeded. An apply-error marker is failure.
+// isReadinessWait reports whether an instance condition message describes kro
+// waiting on a node's readiness rather than failing to apply it.
+func isReadinessWait(msg string) bool {
+	for _, marker := range e2eReadinessWaitMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func waitInstanceApplied(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, name, tmplName string) {
 	t.Helper()
 	deadline := time.Now().Add(e2eInstanceWait)
@@ -354,6 +390,12 @@ func waitInstanceApplied(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVe
 			}
 			sawConditions = true
 			msg, _, _ := unstructured.NestedString(cond, "message")
+			if isReadinessWait(msg) {
+				// Applied fine; kro is just waiting on a readyWhen this
+				// cluster can never satisfy. Keep polling — a later condition
+				// may still report a real apply error.
+				continue
+			}
 			for _, marker := range e2eApplyErrorMarkers {
 				if strings.Contains(msg, marker) {
 					ctype, _, _ := unstructured.NestedString(cond, "type")
