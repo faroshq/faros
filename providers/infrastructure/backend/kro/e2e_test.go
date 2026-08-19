@@ -141,10 +141,14 @@ var e2eApplyErrorMarkers = []string{
 //     for the platform Gateway to accept the route. `make e2e-infrastructure-up`
 //     installs the Gateway API CRDs but no Gateway controller, so nothing ever
 //     writes status.parents and the route can never be Accepted here.
+// Deliberately just the one phrase kro appends when it is WAITING, and not
+// broader substrings like "readyWhen" or "waiting for node". A readyWhen that
+// fails to COMPILE is a real template bug and also mentions readyWhen, so
+// matching on that would silently pass exactly the defect this suite exists to
+// catch. If kro ever reports a wait without this phrase, the test fails loudly
+// rather than skipping something it should not — the safe direction.
 var e2eReadinessWaitMarkers = []string{
 	"waiting for readiness",
-	"readyWhen",
-	"waiting for node",
 }
 
 func TestE2ESeedTemplates(t *testing.T) {
