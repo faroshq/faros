@@ -2391,8 +2391,8 @@ const currentBuildActionDisabledReason = computed(() => {
   if (promotionError.value) return 'Production status is unavailable. Check again before deploying.'
   if (!latestDeployableRelease.value) {
     if (releaseLoadState.value === 'loading' && releases.value.length === 0) return 'Loading releases before enabling deployment.'
-    if (releaseLoadError.value) return 'Current build evidence is unavailable. Refresh publishing status to retry.'
-    return 'The current build does not have a complete image for every component yet.'
+    if (releaseLoadError.value) return 'Build evidence is unavailable. Refresh publishing status to retry.'
+    return 'No complete image is available for every component yet.'
   }
   if (!promotion.value) {
     return promotionLoading.value
@@ -2411,7 +2411,7 @@ const canRedeployCurrentProduction = computed(() => Boolean(
   productionFormValid.value,
 ))
 const productionSettingsActionDisabledReason = computed(() => {
-  if (!productionBinding.value) return 'Deploy the current build before saving production settings.'
+  if (!productionBinding.value) return 'Deploy to production before saving production settings.'
   if (promotionError.value) return 'Production status is unavailable. Check again before redeploying.'
   if (!currentProductionRelease.value) return 'The current production release is unavailable. Refresh Publishing to retry.'
   if (!productionFormValid.value) return 'Fix the highlighted production settings before redeploying.'
@@ -2477,11 +2477,24 @@ function updateProductionForm(values: ProductionFormValues) {
   promotionValuesDirty.value = true
 }
 
+async function pollPromotionAndReleases() {
+  // Promotion readiness and immutable release evidence are separate API
+  // observations, but they jointly own whether Deploy is enabled. Refresh
+  // both in one poll cycle so a newly-indexed image becomes actionable
+  // without requiring a manual Publishing refresh.
+  const projectName = selected.value?.name
+  await Promise.allSettled([loadPromotionStatus(false), loadReleases()])
+  // Wait for release evidence before scheduling the next cycle. Otherwise a
+  // slow registry lookup can be superseded by every subsequent request and
+  // never become the serial that updates deployment eligibility.
+  if (projectName && selected.value?.name === projectName) schedulePromotionPoll()
+}
+
 function schedulePromotionPoll() {
   clearPromotionPoll()
   if (!productionSurfaceActive.value) return
   if (promotionPollState && promotionPollState.attempts < promotionPollState.maxAttempts) {
-    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, promotionPollDelay(promotionPollState.attempts))
+    promotionPollTimer = window.setTimeout(() => { void pollPromotionAndReleases() }, promotionPollDelay(promotionPollState.attempts))
     return
   }
   // A failed refresh must replace any stale spinner with an honest unavailable
@@ -2490,7 +2503,7 @@ function schedulePromotionPoll() {
     promotionTransitionStartedAt = 0
     releaseTakingLonger.value = false
     releaseArtifactNeedsAttention.value = false
-    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, RELEASE_ARTIFACT_BACKGROUND_POLL_MS)
+    promotionPollTimer = window.setTimeout(() => { void pollPromotionAndReleases() }, RELEASE_ARTIFACT_BACKGROUND_POLL_MS)
     return
   }
   // CI completion and exact-commit package verification are separate facts.
@@ -2502,7 +2515,7 @@ function schedulePromotionPoll() {
     const phase = releaseArtifactWaitPhase(Date.now() - releaseArtifactWaitStartedAt)
     releaseTakingLonger.value = phase !== 'waiting'
     releaseArtifactNeedsAttention.value = phase === 'attention'
-    promotionPollTimer = window.setTimeout(() => { void loadPromotion() }, releaseArtifactPollDelay(phase))
+    promotionPollTimer = window.setTimeout(() => { void pollPromotionAndReleases() }, releaseArtifactPollDelay(phase))
     return
   }
   releaseArtifactWaitStartedAt = 0
@@ -2513,7 +2526,7 @@ function schedulePromotionPoll() {
     if (!promotionTransitionStartedAt) promotionTransitionStartedAt = Date.now()
     const elapsed = Date.now() - promotionTransitionStartedAt
     releaseTakingLonger.value = elapsed >= 2 * 60 * 1000
-    promotionPollTimer = window.setTimeout(loadPromotion, releaseTakingLonger.value ? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay(0))
+    promotionPollTimer = window.setTimeout(() => { void pollPromotionAndReleases() }, releaseTakingLonger.value ? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay(0))
   } else {
     resetReleaseTransitionTracking()
   }
@@ -2533,7 +2546,7 @@ function schedulePublishingPoll() {
   }
 }
 
-async function loadPromotion() {
+async function loadPromotionStatus(scheduleNext: boolean) {
   const name = selected.value?.name
   if (!name) {
     promotion.value = null
@@ -2593,7 +2606,13 @@ async function loadPromotion() {
   }
   if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
   if (requestSerial === promotionLoadSerial) promotionLoading.value = false
-  schedulePromotionPoll()
+  if (scheduleNext) schedulePromotionPoll()
+}
+
+// Keep the UI/event handler parameterless. Vue passes PointerEvent to direct
+// click handlers, while scheduling policy is an internal polling concern.
+async function loadPromotion() {
+  await loadPromotionStatus(true)
 }
 
 async function loadReleases() {
@@ -7971,14 +7990,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 :refreshing="publishingRefreshBusy"
                 @refresh="refreshProduction"
               />
-              <div v-if="!productionBinding || !latestDeployableRelease?.live" class="flex flex-wrap items-center justify-between gap-3 border-y border-border-subtle py-3" aria-label="Current build deployment">
-                <div class="min-w-0">
-                  <div class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Current build</div>
-                  <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[12px] text-text-secondary">
-                    <code class="font-mono">{{ latestDeployableRelease?.commitSHA || releasePipeline.commitSHA || 'No complete build yet' }}</code>
-                    <span v-if="productionBinding">A newer complete build can replace the current production deployment.</span>
-                  </div>
-                </div>
+              <div v-if="!productionBinding || !latestDeployableRelease?.live" class="flex flex-wrap items-center justify-end gap-3 border-y border-border-subtle py-3" aria-label="Production deployment action">
                 <button
                   type="button"
                   class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent px-3 text-[12px] font-semibold text-surface shadow-[0_0_16px_var(--color-accent-glow)] transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
@@ -7986,7 +7998,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   @click="promoteToProd(false, latestDeployableRelease)"
                 >
                   <Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" :stroke-width="1.75" aria-hidden="true" />
-                  {{ promotionBusy ? 'Deploying…' : productionBinding ? 'Deploy current build' : 'Deploy to production' }}
+                  {{ promotionBusy ? 'Deploying…' : productionBinding ? 'Deploy update' : 'Deploy to production' }}
                 </button>
                 <p v-if="currentBuildActionDisabledReason" class="basis-full text-[11px] leading-4 text-text-muted" role="status">{{ currentBuildActionDisabledReason }}</p>
               </div>

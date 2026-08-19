@@ -87,42 +87,5 @@ const emit = defineEmits<{
       </p>
     </div>
 
-    <div
-      v-if="pipeline.artifacts.length && (pipeline.artifactLag || ['artifact_attention', 'unavailable'].includes(pipeline.state))"
-      class="grid gap-2 border-t border-border-subtle pt-3"
-      aria-label="Release image evidence"
-    >
-      <div>
-        <p class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Release image evidence</p>
-        <p class="mt-0.5 text-[11px] leading-4 text-text-muted">Deployment requires an image matching the full commit tag for every component.</p>
-      </div>
-      <dl class="grid gap-2">
-        <div
-          v-for="artifact in pipeline.artifacts"
-          :key="artifact.component"
-          class="grid gap-2 rounded-lg border border-border-subtle bg-surface px-3 py-2 sm:grid-cols-[minmax(7rem,0.7fr)_minmax(0,1.3fr)_minmax(0,1fr)]"
-        >
-          <div class="min-w-0">
-            <dt class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Component</dt>
-            <dd class="mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-text-primary">
-              <Check v-if="artifact.verified" class="h-3.5 w-3.5 shrink-0 text-success" :stroke-width="2" aria-hidden="true" />
-              <CircleAlert v-else class="h-3.5 w-3.5 shrink-0 text-warning" :stroke-width="1.75" aria-hidden="true" />
-              <span class="truncate">{{ artifact.component }}</span>
-            </dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Expected package and tag</dt>
-            <dd class="mt-0.5 break-all font-mono text-[10px] leading-4 text-text-secondary">{{ artifact.packageMatcher }} · {{ artifact.expectedTag || 'No commit tag yet' }}</dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Observed</dt>
-            <dd class="mt-0.5 break-all font-mono text-[10px] leading-4" :class="artifact.verified ? 'text-success' : 'text-text-muted'">
-              <template v-if="artifact.observedTag || artifact.digest">{{ artifact.observedTag || 'tag unavailable' }}<br v-if="artifact.observedTag && artifact.digest">{{ artifact.digest }}</template>
-              <template v-else>Not observed</template>
-            </dd>
-          </div>
-        </div>
-      </dl>
-    </div>
   </section>
 </template>

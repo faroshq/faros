@@ -122,12 +122,32 @@ test('keeps Publishing focused on deployment and technical details', () => {
   assert.match(pane, /Saving settings redeploys the current production release\. It does not change production access\./)
   assert.match(pane, /aria-label="Current production release"/)
   assert.match(pane, /@click="redeployCurrentProduction"/)
-  assert.match(pane, /aria-label="Current build deployment"/)
+  assert.match(pane, /aria-label="Production deployment action"/)
+  assert.doesNotMatch(pane, />Current build</)
+  assert.doesNotMatch(pane, /Current build evidence|The current build|Deploy the current build/)
   assert.match(pane, /@click="promoteToProd\(false, latestDeployableRelease\)"/)
   assert.match(pane, /Deploy to production/)
+  assert.match(pane, /Deploy update/)
   assert.match(pane, /:disabled="promotionBusy \|\| !promotionValuesDirty \|\| !canRedeployCurrentProduction"/)
   assert.doesNotMatch(pane, /<ReleasePicker/)
   assert.doesNotMatch(pane, /<textarea[^>]*promotionValuesText/)
+})
+
+test('refreshes release evidence in every scheduled promotion poll', () => {
+  const pollStart = app.indexOf('async function pollPromotionAndReleases()')
+  const scheduleStart = app.indexOf('function schedulePromotionPoll()', pollStart)
+  const scheduleEnd = app.indexOf('\n\nfunction clearPublishingPoll()', scheduleStart)
+  assert.ok(pollStart >= 0 && scheduleStart > pollStart && scheduleEnd > scheduleStart)
+
+  const poll = app.slice(pollStart, scheduleStart)
+  const schedule = app.slice(scheduleStart, scheduleEnd)
+  assert.match(poll, /Promise\.allSettled\(\[loadPromotionStatus\(false\), loadReleases\(\)\]\)/)
+  assert.match(poll, /selected\.value\?\.name === projectName\) schedulePromotionPoll\(\)/)
+  assert.equal((schedule.match(/pollPromotionAndReleases/g) ?? []).length, 4)
+  assert.doesNotMatch(schedule, /setTimeout\([^\n]*loadPromotion/)
+  assert.match(app, /async function loadPromotionStatus\(scheduleNext: boolean\)/)
+  assert.match(app, /if \(scheduleNext\) schedulePromotionPoll\(\)/)
+  assert.match(app, /async function loadPromotion\(\) \{[\s\S]*await loadPromotionStatus\(true\)[\s\S]*\}/)
 })
 
 test('keeps Git filesystem restoration in History and out of production promotion', () => {
@@ -159,18 +179,18 @@ test('redeploying settings is bound to the current production release', () => {
   assert.doesNotMatch(promote, /selectedHistory|canPromoteSelectedRelease\.value/)
 })
 
-test('renders release progress as an announced five-stage pipeline with actionable verification evidence', () => {
+test('renders release progress as an announced five-stage pipeline without image evidence details', () => {
   for (const label of ['Commit', 'Build', 'Verify images', 'Deploy', 'Enable access']) {
     assert.match(promotionState, new RegExp(`label: '${label}'`))
   }
   assert.match(releasePipeline, /aria-label="Release pipeline"/)
-  assert.match(releasePipeline, /aria-label="Release image evidence"/)
+  assert.doesNotMatch(releasePipeline, /aria-label="Release image evidence"/)
   assert.match(releasePipeline, /aria-live=/)
   assert.match(releasePipeline, /pipeline\.state === 'failed' \? 'alert' : 'status'/)
   assert.match(releasePipeline, />View build<\/a>/)
   assert.match(releasePipeline, /Check again/)
   assert.match(releasePipeline, /Taking longer than usual/)
-  assert.match(releasePipeline, /Expected package and tag/)
+  assert.doesNotMatch(releasePipeline, /Expected package and tag/)
   assert.doesNotMatch(releasePipeline, /Re-run build|Reconnect GitHub/)
 })
 

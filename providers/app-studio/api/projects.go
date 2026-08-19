@@ -575,13 +575,7 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	view := projectView(r.Context(), c, p, id)
-	if s.workspaces != nil {
-		if revision, err := s.workspaces.SourceRevision(r.Context(), projectWorkspaceScope(id, p)); err == nil {
-			view.SourceRevision = revision
-		}
-	}
-	writeJSON(w, http.StatusOK, view)
+	writeJSON(w, http.StatusOK, s.projectViewWithSourceRevision(r.Context(), c, p, id))
 }
 
 func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
@@ -612,7 +606,7 @@ func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projectView(r.Context(), c, updated, id))
+	writeJSON(w, http.StatusOK, s.projectViewWithSourceRevision(r.Context(), c, updated, id))
 }
 
 func applyProjectPatchRequest(p *aiv1alpha1.Project, req PatchProjectRequest) (bool, error) {
@@ -1604,6 +1598,21 @@ func projectView(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project,
 	if p.Status.UpdatedAt != nil {
 		t := p.Status.UpdatedAt.Time
 		view.UpdatedAt = &t
+	}
+	return view
+}
+
+// projectViewWithSourceRevision adds the owner workspace's optimistic-lock
+// fence to a project response. Project PATCH does not mutate source, so its
+// response must preserve the same authority that GET exposes; otherwise the
+// portal loses the revision when it replaces its selected project model.
+func (s *Server) projectViewWithSourceRevision(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, id identity) ProjectView {
+	view := projectView(ctx, c, p, id)
+	if s == nil || s.workspaces == nil || p == nil {
+		return view
+	}
+	if revision, err := s.workspaces.SourceRevision(ctx, projectWorkspaceScope(id, p)); err == nil {
+		view.SourceRevision = revision
 	}
 	return view
 }
