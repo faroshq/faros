@@ -114,6 +114,57 @@ func UserOnlyMiddleware(userResolver UserResolver) func(next http.Handler) http.
 	}
 }
 
+// OptionalMiddleware resolves a tenant context when the caller supplies one and
+// it checks out, and otherwise lets the request through with only the User
+// populated. It never rejects for a missing or unusable Org.
+//
+// This exists for endpoints that are legitimately callable both with and
+// without an active Org — chiefly GET /api/providers, which the portal fetches
+// to render its app shell before the user has picked an Org, and again
+// afterwards to pick up that Org's own providers.
+//
+// A supplied-but-unverifiable Org degrades to no context rather than 403. The
+// caller then sees exactly what an anonymous-org caller sees, which for the
+// catalog is the platform-global providers. Failing the request instead would
+// let a stale Org UUID in a browser's localStorage break the whole shell, and
+// there is nothing to protect by doing so: dropping the context can only ever
+// show LESS than the caller asked for. Handlers behind this middleware must
+// therefore treat an empty OrgUUID as "global scope only", never as "trusted".
+func OptionalMiddleware(userResolver UserResolver, lookup MembershipLookup) func(next http.Handler) http.Handler {
+	if userResolver == nil {
+		panic("tenant.OptionalMiddleware: userResolver is required")
+	}
+	if lookup == nil {
+		panic("tenant.OptionalMiddleware: lookup is required")
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, err := userResolver.ResolveUser(r)
+			if err != nil {
+				if errors.Is(err, ErrUserNotResolved) {
+					writeStatus(w, http.StatusUnauthorized, "Unauthorized", "Unauthorized")
+					return
+				}
+				writeStatus(w, http.StatusInternalServerError, "InternalError", "failed to resolve caller identity: "+err.Error())
+				return
+			}
+
+			tc := TenantContext{User: user}
+			if orgUUID := r.Header.Get(HeaderFarosOrg); orgUUID != "" {
+				if index, err := lookup.GetUserMembershipIndex(r.Context(), user); err == nil {
+					workspaceUUID := r.Header.Get(HeaderFarosWorkspace)
+					if role, ok := matchEntry(index, orgUUID, workspaceUUID); ok {
+						tc.OrgUUID = orgUUID
+						tc.WorkspaceUUID = workspaceUUID
+						tc.Role = role
+					}
+				}
+			}
+			next.ServeHTTP(w, r.WithContext(WithContext(r.Context(), tc)))
+		})
+	}
+}
+
 // Middleware returns the tenant-context HTTP middleware. The returned
 // function wraps an http.Handler chain so handlers downstream of it can
 // trust TenantContext from r.Context().

@@ -238,7 +238,11 @@ func NewKCPProxy(kcpConfig *rest.Config, verifier *oidc.IDTokenVerifier, farosCl
 			return farosClient.UserMembershipIndices().Get(ctx, userName, metav1.GetOptions{})
 		},
 		bootstrapper.GetChildWorkspaceClusterName,
-		bootstrapper.ListChildWorkspaces,
+		// Team workspaces only. An Org workspace can also hold the `providers`
+		// container for org-owned providers, and authorizing that here would
+		// give every org member access to the workspace that parents provider
+		// credentials.
+		bootstrapper.ListChildTeamWorkspaces,
 	)
 
 	return &KCPProxy{
