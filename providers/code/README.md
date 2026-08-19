@@ -146,7 +146,6 @@ the Secret appears.
 helm install code providers/code/deploy/chart \
   -n code --create-namespace \
   --set hub.url=https://faros-hub.faros.svc.cluster.local:9443 \
-  --set hub.tokenSecretRef.name=faros-code-hub-token \
   --set image.tag=0.1.0
 ```
 
@@ -164,7 +163,6 @@ kubectl -n code create secret generic faros-code-github-oauth \
 helm install code providers/code/deploy/chart \
   -n code --create-namespace \
   --set hub.url=https://faros-hub.faros.svc.cluster.local:9443 \
-  --set hub.tokenSecretRef.name=faros-code-hub-token \
   --set githubOAuth.enabled=true \
   --set githubOAuth.clientId=<oauth-app-client-id> \
   --set githubOAuth.clientSecretRef.name=faros-code-github-oauth \
@@ -316,3 +314,18 @@ APIExportEndpointSlice exists (the multicluster provider watches it), then exits
 It uses `CODE_KUBECONFIG` and `CODE_WORKSPACE_PATH`. The Helm deployment does not
 run it — the hub provisions everything; `make init-provider-code` runs it for the
 local dev flow.
+
+## Running it yourself
+
+This provider can run in your own cluster instead of on the platform. faros
+creates a workspace for it in your organization, mints a credential scoped to
+that workspace alone, and generates the exact `helm` commands — under
+**Providers → Self-Hosting** in the portal.
+
+Nothing to fill in by faros. You still configure your Git backend (GitHub app or
+token) as you would on the platform — see the chart values.
+
+Once installed, the provider registers itself and your workspaces enable it
+exactly like the platform copy. See
+[docs/byo-providers.md](../../docs/byo-providers.md) for how the flow works, and
+[deploy/chart/README.md](deploy/chart/README.md) for every chart value.

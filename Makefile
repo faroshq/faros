@@ -155,9 +155,17 @@ init-provider-edges: build-edges-provider ## Bootstrap edges APIExport + write d
 	EDGES_WORKSPACE_PATH=$(EDGES_WORKSPACE_PATH) \
 		$(BINDIR)/edges-provider init
 
+# Replica identity for the tunnel-routing registry (multi-replica dev): every
+# instance needs a distinct POD_NAME/EDGES_INTERNAL_PORT; POD_IP is loopback
+# for host binaries. A second instance: make run-provider-edges
+# EDGES_PORT=18088 EDGES_INTERNAL_PORT=18090 POD_NAME=edges-local-2
+EDGES_INTERNAL_PORT ?= 8090
 run-provider-edges: build-edges-provider ## Run the edges provider (needs: hub + install + init)
-	@echo "Starting edges provider on :$(EDGES_PORT) (SINGLE-REPLICA)"
+	@echo "Starting edges provider on :$(EDGES_PORT) (replica $${POD_NAME:-edges-local-1}, relay :$(EDGES_INTERNAL_PORT))"
 	PORT=$(EDGES_PORT) \
+	POD_NAME=$${POD_NAME:-edges-local-1} \
+	POD_IP=$${POD_IP:-127.0.0.1} \
+	EDGES_INTERNAL_PORT=$(EDGES_INTERNAL_PORT) \
 	FAROS_HUB_URL=$(EDGES_HUB_URL) \
 	FAROS_HUB_EXTERNAL_URL=$(EDGES_HUB_EXTERNAL_URL) \
 	FAROS_HUB_TOKEN=$(EDGES_TOKEN) \
@@ -380,14 +388,19 @@ $(GOLANGCI_LINT):
 
 # --- Dev environment ---
 
-certs: certs/apiserver.crt
-
-certs/apiserver.crt:
+.PHONY: certs
+certs:
 	@mkdir -p certs
+	@if [ -s certs/apiserver.crt ] && [ -s certs/apiserver.key ] && \
+		openssl x509 -in certs/apiserver.crt -noout -checkend 86400 >/dev/null 2>&1 && \
+		openssl x509 -in certs/apiserver.crt -noout \
+			-checkhost console.127.0.0.1.sslip.io >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
 	openssl req -x509 -newkey rsa:2048 -nodes \
 		-keyout certs/apiserver.key -out certs/apiserver.crt \
 		-days 365 -subj "/CN=localhost" \
-		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+		-addext "subjectAltName=DNS:localhost,DNS:*.127.0.0.1.sslip.io,IP:127.0.0.1"
 
 dev-setup: certs
 
@@ -735,7 +748,39 @@ run-hub-embedded-graphql: build-hub certs
 TILT_KCP_DIR ?= $(or $(KCP_DIR),$(HOME)/go/src/github.com/kcp-dev/kcp)
 # Tilt's KIND image loader stages a full `docker save` tarball in TMPDIR. Keep
 # that payload off capacity-limited /tmp tmpfs mounts used by development hosts.
+# Both stacks load images into kind (the agent image, and in cluster mode the
+# provider images), so both need it.
 TILT_TMPDIR ?= $(CURDIR)/.kcp/tmp/tilt
+# Tilt's own API/UI port. Only used to detect an already-running instance.
+TILT_PORT ?= 10350
+
+.PHONY: tilt tilt-cluster
+
+## faros-hub as a host binary with embedded kcp + host-run portal and providers.
+## The default loop: no kind cluster for the hub itself, so it starts in seconds
+## and every Go change is a plain rebuild. Use tilt-cluster when you need real
+## multi-shard kcp, in-cluster deployment, or to iterate on a kcp checkout.
+tilt: ## Run Tiltfile (embedded binary mode); see tilt-cluster for the in-cluster stack
+	@source $(SERVICE_HOOKS) && require_service_not_running kcp "embedded kcp mode"
+	@# Tilt refuses a second instance on its API port, but its own message
+	@# suggests TILT_PORT to run both — which is wrong here: the two stacks
+	@# fight over :9443 and the shared .kcp state dir. Say so instead.
+	@if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:$(TILT_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "ERROR: a Tilt instance is already running (port $(TILT_PORT))."; \
+		echo "       Only one stack at a time — both bind :9443 and share .kcp/."; \
+		echo "       Stop the other one first: tilt down -f Tiltfile.cluster"; \
+		exit 1; \
+	fi
+	@# A stray faros-hub or leftover port-forward on :9443 gets no such check
+	@# from Tilt; it surfaces as an opaque bind failure inside the `hub`
+	@# resource long after `tilt up` looks healthy.
+	@if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:9443 -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "ERROR: something is already listening on :9443 — stop it before starting the hub."; \
+		lsof -nP -iTCP:9443 -sTCP:LISTEN; \
+		exit 1; \
+	fi
+	@mkdir -p "$(TILT_TMPDIR)"
+	TMPDIR="$(TILT_TMPDIR)" tilt up -f Tiltfile
 
 ## Full multi-shard kcp in a kind cluster + faros-hub in-cluster, against a local kcp checkout
 tilt-cluster: ## Run Tiltfile.cluster against a local kcp tree (override with TILT_KCP_DIR=... or KCP_DIR=...)
@@ -2131,7 +2176,7 @@ helm-deploy-provider-infrastructure: ## (experimental) Build+load image, helm in
 	@command -v kind >/dev/null || { echo "kind not found; brew install kind"; exit 1; }
 	@test -f $(KRO_KIND_KUBECONFIG) || { echo "faros-kro cluster missing; run 'make dev-kro-up' first"; exit 1; }
 	@echo ">>> building $(INFRASTRUCTURE_IMAGE)"
-	docker build -t $(INFRASTRUCTURE_IMAGE) providers/infrastructure
+	docker build -t $(INFRASTRUCTURE_IMAGE) -f providers/infrastructure/Dockerfile .
 	@echo ">>> loading image into kind cluster $(KRO_KIND_NAME)"
 	kind load docker-image $(INFRASTRUCTURE_IMAGE) --name $(KRO_KIND_NAME)
 	@echo ">>> ensuring namespace + heartbeat token Secret in $(INFRASTRUCTURE_NAMESPACE)"
@@ -2146,9 +2191,10 @@ helm-deploy-provider-infrastructure: ## (experimental) Build+load image, helm in
 		--set image.repository=faros-infrastructure-provider \
 		--set image.tag=dev \
 		--set image.pullPolicy=Never \
-		--set replicaCount=1 \
+		--set replicaCount=2 \
 		--set bootstrap.enabled=true \
 		--set hub.url=$(HUB_INTERNAL_URL) \
+		--set hub.tokenSecretRef.name=faros-infrastructure-hub-token \
 		--set hub.insecure=true \
 		--set catalogEntry.enabled=false
 	@echo ">>> deployed. The pod stays in ContainerCreating until the hub delivers"
@@ -2178,13 +2224,87 @@ KRO_CHART_VERSION ?= 0.9.3
 KRO_NAMESPACE ?= kro-system
 KRO_SEED_DIR ?= providers/infrastructure/examples/rgds
 
+# --- Local application-preview Gateway --------------------------------------
+# The base Tiltfile uses the faros-kro kind cluster for application-template
+# runtimes. Keep the Envoy Gateway install separate from the kro release so it
+# can be reconciled independently and so `dev-kro-down` remains the one command
+# that owns cluster teardown.
+ENVOY_GATEWAY_CHART ?= oci://docker.io/envoyproxy/gateway-helm
+# Gateway API CRDs are pinned to v1.5.1 below. Envoy Gateway v1.8.3 is the
+# matching upstream release line for the Kubernetes 1.33 kind cluster.
+ENVOY_GATEWAY_VERSION ?= v1.8.3
+ENVOY_GATEWAY_RELEASE ?= envoy-gateway
+ENVOY_GATEWAY_CRDS_CHART ?= oci://docker.io/envoyproxy/gateway-crds-helm
+PREVIEW_GATEWAY_KUBECONFIG ?= $(KRO_KIND_KUBECONFIG)
+PREVIEW_GATEWAY_CONTEXT ?= kind-$(KRO_KIND_NAME)
+PREVIEW_GATEWAY_NAMESPACE ?= envoy-gateway-system
+PREVIEW_GATEWAY_NAME ?= app-studio-preview
+PREVIEW_GATEWAY_CLASS ?= eg
+PREVIEW_GATEWAY_CONTROLLER ?= gateway.envoyproxy.io/gatewayclass-controller
+PREVIEW_GATEWAY_PROXY_CONFIG ?= app-studio-preview-proxy
+PREVIEW_GATEWAY_HOSTNAME ?= *.apps.127.0.0.1.sslip.io
+PREVIEW_GATEWAY_LISTENER_NAME ?= https
+PREVIEW_GATEWAY_TLS_SECRET ?= app-studio-preview-tls
+PREVIEW_GATEWAY_PORT ?= 10443
+PREVIEW_GATEWAY_STATE_DIR ?= $(KCP_DATA_DIR)/tilt-preview-gateway-tls
+PREVIEW_GATEWAY_TIMEOUT ?= 5m
+PREVIEW_GATEWAY_UNINSTALL ?= false
+PREVIEW_GATEWAY_SCRIPT ?= hack/scripts/configure-tilt-preview-gateway.sh
+
+.PHONY: dev-preview-gateway-up dev-preview-gateway-down
+
+dev-preview-gateway-up: ## Install Envoy Gateway + local HTTPS parent for app previews
+	@test -f "$(PREVIEW_GATEWAY_KUBECONFIG)" || { \
+		echo "no kubeconfig at $(PREVIEW_GATEWAY_KUBECONFIG); run 'make dev-kro-up' first"; \
+		exit 1; \
+	}
+	@test -x "$(PREVIEW_GATEWAY_SCRIPT)" || { \
+		echo "preview Gateway helper is not executable: $(PREVIEW_GATEWAY_SCRIPT)"; \
+		exit 1; \
+	}
+	KUBECONFIG="$(PREVIEW_GATEWAY_KUBECONFIG)" \
+	PREVIEW_GATEWAY_CONTEXT="$(PREVIEW_GATEWAY_CONTEXT)" \
+	ENVOY_GATEWAY_CHART="$(ENVOY_GATEWAY_CHART)" \
+	ENVOY_GATEWAY_CRDS_CHART="$(ENVOY_GATEWAY_CRDS_CHART)" \
+	ENVOY_GATEWAY_VERSION="$(ENVOY_GATEWAY_VERSION)" \
+	ENVOY_GATEWAY_RELEASE="$(ENVOY_GATEWAY_RELEASE)" \
+	PREVIEW_GATEWAY_NAMESPACE="$(PREVIEW_GATEWAY_NAMESPACE)" \
+	PREVIEW_GATEWAY_NAME="$(PREVIEW_GATEWAY_NAME)" \
+	PREVIEW_GATEWAY_CLASS="$(PREVIEW_GATEWAY_CLASS)" \
+	PREVIEW_GATEWAY_CONTROLLER="$(PREVIEW_GATEWAY_CONTROLLER)" \
+	PREVIEW_GATEWAY_PROXY_CONFIG="$(PREVIEW_GATEWAY_PROXY_CONFIG)" \
+	PREVIEW_GATEWAY_HOSTNAME="$(PREVIEW_GATEWAY_HOSTNAME)" \
+	PREVIEW_GATEWAY_LISTENER_NAME="$(PREVIEW_GATEWAY_LISTENER_NAME)" \
+	PREVIEW_GATEWAY_TLS_SECRET="$(PREVIEW_GATEWAY_TLS_SECRET)" \
+	PREVIEW_GATEWAY_PORT="$(PREVIEW_GATEWAY_PORT)" \
+	PREVIEW_GATEWAY_STATE_DIR="$(PREVIEW_GATEWAY_STATE_DIR)" \
+	PREVIEW_GATEWAY_TIMEOUT="$(PREVIEW_GATEWAY_TIMEOUT)" \
+		"$(PREVIEW_GATEWAY_SCRIPT)" apply
+
+dev-preview-gateway-down: ## Remove the local preview Gateway and Secret (keep controller by default)
+	@test -x "$(PREVIEW_GATEWAY_SCRIPT)" || { \
+		echo "preview Gateway helper is not executable: $(PREVIEW_GATEWAY_SCRIPT)"; \
+		exit 1; \
+	}
+	KUBECONFIG="$(PREVIEW_GATEWAY_KUBECONFIG)" \
+	PREVIEW_GATEWAY_CONTEXT="$(PREVIEW_GATEWAY_CONTEXT)" \
+	PREVIEW_GATEWAY_RELEASE="$(ENVOY_GATEWAY_RELEASE)" \
+	PREVIEW_GATEWAY_NAMESPACE="$(PREVIEW_GATEWAY_NAMESPACE)" \
+	PREVIEW_GATEWAY_NAME="$(PREVIEW_GATEWAY_NAME)" \
+	PREVIEW_GATEWAY_PROXY_CONFIG="$(PREVIEW_GATEWAY_PROXY_CONFIG)" \
+	PREVIEW_GATEWAY_TLS_SECRET="$(PREVIEW_GATEWAY_TLS_SECRET)" \
+	PREVIEW_GATEWAY_STATE_DIR="$(PREVIEW_GATEWAY_STATE_DIR)" \
+	PREVIEW_GATEWAY_UNINSTALL="$(PREVIEW_GATEWAY_UNINSTALL)" \
+		"$(PREVIEW_GATEWAY_SCRIPT)" cleanup
+
 # --- Infrastructure template e2e (RGD acceptance against a real kro) ---
 # A throwaway kind cluster running STANDALONE kro (no kcp) — enough to validate
 # that every seeded Template authors a kro graph kro accepts. See
 # providers/infrastructure/backend/kro/e2e_test.go.
 E2E_KRO_KIND_NAME ?= faros-kro-e2e
 E2E_KRO_KUBECONFIG ?= $(CURDIR)/.faros-kro-e2e.kubeconfig
-GATEWAY_API_VERSION ?= v1.2.1
+# Envoy Gateway v1.8.x supports Gateway API v1.5.1 on Kubernetes 1.32–1.35.
+GATEWAY_API_VERSION ?= v1.5.1
 
 ## Bring up the management kro cluster + install upstream kro. Idempotent:
 ## re-running just helm-upgrades the chart (with an explicit CRD apply —
@@ -2324,6 +2444,11 @@ dev-clean-hooks: ## Clean up stale service hooks
 help-dev: ## Show development environment options
 	@echo ""
 	@echo "=== Faros Hub Development Modes ==="
+	@echo ""
+	@echo "TILT (recommended — one command, portal + hub + providers):"
+	@echo "  make tilt                       - Hub binary, embedded kcp, host-run providers"
+	@echo "  make tilt-cluster               - Multi-shard kcp in kind, hub deployed in-cluster"
+	@echo "                                    Run one or the other, not both."
 	@echo ""
 	@echo "STANDALONE (no external dependencies):"
 	@echo "  make run-hub-standalone         - Embedded kcp + static token + embedded GraphQL"
@@ -2465,6 +2590,30 @@ e2e-external-kcp: build ## Run external KCP e2e suite (kcp via Helm in kind, pus
 	FAROS_HUB_IMAGE_TAG=test \
 	FAROS_HUB_IMAGE_PULL_POLICY=Never \
 	go test ./test/e2e/suites/external_kcp/... -v -timeout $(E2E_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
+
+## Docs-install e2e. These suites execute the hack/install/ scripts that
+## docs/install-external-kcp.md and docs/install-embedded-kcp.md quote,
+## keeping the installation guides honest. They create their own kind
+## cluster (faros-e2e-install) and port-forward 8443/9443 — don't run them
+## concurrently with each other or with suites using those ports.
+E2E_INSTALL_TIMEOUT ?= 45m
+
+.PHONY: e2e-install-external e2e-install-embedded
+e2e-install-external: build ## Run docs install e2e (two-shard kcp via kcp-operator + gateway)
+	docker build -f deploy/Dockerfile.hub -t ghcr.io/faroshq/faros-hub:test .
+	FAROS_E2E_INSTALL=true \
+	FAROS_HUB_IMAGE=ghcr.io/faroshq/faros-hub \
+	FAROS_HUB_IMAGE_TAG=test \
+	FAROS_HUB_IMAGE_PULL_POLICY=Never \
+	go test ./test/e2e/suites/installexternal/... -v -timeout $(E2E_INSTALL_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
+
+e2e-install-embedded: build ## Run docs install e2e (embedded kcp + gateway)
+	docker build -f deploy/Dockerfile.hub -t ghcr.io/faroshq/faros-hub:test .
+	FAROS_E2E_INSTALL=true \
+	FAROS_HUB_IMAGE=ghcr.io/faroshq/faros-hub \
+	FAROS_HUB_IMAGE_TAG=test \
+	FAROS_HUB_IMAGE_PULL_POLICY=Never \
+	go test ./test/e2e/suites/installembedded/... -v -timeout $(E2E_INSTALL_TIMEOUT) $(if $(E2E_FLAGS),-args $(E2E_FLAGS))
 
 e2e-all: build ## Run all e2e suites
 	docker build -f deploy/Dockerfile.hub -t ghcr.io/faroshq/faros-hub:test .

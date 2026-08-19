@@ -46,13 +46,36 @@ data:
 
       apiExport:
         name: "kuery.providers.faros.sh"
-        # The engagement controller watches the tenant's Edge objects (via the
-        # APIExport virtual workspace) to know which edges to engage/disengage.
-        # First-party claim: the init container stamps its identityHash from
-        # apiExport.edgesIdentityHash (Helm value, copied from /bonkers).
+        # The engagement controller watches the tenant's KubernetesCluster
+        # edges (via the APIExport virtual workspace) to know which edges to
+        # engage/disengage. LinuxServer edges carry no Kubernetes API and are
+        # not claimed. First-party claim: the init container stamps its
+        # identityHash from apiExport.edgesIdentityHash (Helm value, copied
+        # from /bonkers).
         permissionClaims:
-          - resource: edges
-            group: faros.sh
+          - resource: kubernetesclusters
+            group: edges.faros.sh
             verbs: [get, list, watch]
             tenantScoped: true
+      # Lets an organization run this provider in its own cluster
+      # (docs/byo-providers.md). Keep manifest.yaml and
+      # deploy/chart/templates/catalogentry.yaml in sync — the chart copy is the
+      # one that reaches production.
+      selfHosting:
+        supported: true
+        chart:
+          repository: "oci://ghcr.io/faroshq/charts"
+          name: "faros-kuery-provider"
+          version: {{ .Chart.Version | quote }}
+        namespace: "faros-provider-kuery"
+        releaseName: "kuery"
+        docsURL: "https://github.com/faroshq/faros/blob/main/providers/kuery/deploy/chart/README.md"
+        # The chart carries its own values reference, so the portal can show it
+        # offline and for the version actually installed.
+        valuesDoc: |{{ .Files.Get "README.md" | nindent 10 }}
+        requiredValues:
+          - name: apiExport.edgesIdentityHash
+            identityFor: "edges.providers.faros.sh"
+            description: >-
+              kcp identity hash of the edges APIExport kuery claims against. Resolved for you; a wrong value leaves kuery running but seeing no edges.
 {{- end }}

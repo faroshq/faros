@@ -31,8 +31,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/faroshq/provider-sdk/leaderelection"
 
 	"github.com/faroshq/provider-infrastructure/backend"
 	krobackend "github.com/faroshq/provider-infrastructure/backend/kro"
@@ -41,11 +44,23 @@ import (
 	"github.com/faroshq/provider-infrastructure/install"
 )
 
-// startControllerManager builds a controller-runtime manager pointed
-// at the provider's own kcp workspace, installs the platform CRDs,
-// registers the stub backend, and starts the Template controller.
-// The caller loads the kcp config (shared with the tenant client) and
-// passes it in; a nil config means "skip the manager, run REST-only".
+// Leases gating this binary's singleton write loops, all held in the provider
+// workspace ("default" namespace — kcp serves Leases in every logical
+// cluster). One lease per loop so each is independently singleton; which
+// replica holds which does not matter. REST/MCP/portal serving is untouched —
+// non-leaders keep serving.
+const (
+	controllerLeaseName = "infrastructure-controllers"
+	instanceLeaseName   = "infrastructure-instance"
+	bootstrapLeaseName  = "infrastructure-bootstrap"
+)
+
+// startControllerManager installs the platform CRDs (legacy single-binary
+// mode), then campaigns for the controller lease and — while leader — runs a
+// controller-runtime manager pointed at the provider's own kcp workspace with
+// the Template controller on it. The caller loads the kcp config (shared with
+// the tenant client) and passes it in; a nil config means "skip the manager,
+// run REST-only".
 func startControllerManager(ctx context.Context, config *rest.Config) error {
 	if config == nil {
 		return errControllerDisabled
@@ -90,11 +105,38 @@ func startControllerManager(ctx context.Context, config *rest.Config) error {
 	// called" stack trace and swallows all controller-runtime logs.
 	ctrl.SetLogger(klog.NewKlogr())
 
+	// Leader-elected: only the replica holding the lease runs the Template
+	// controller, so scaling the serve deployment past one replica stops the
+	// two-active-managers conflict churn. The manager is rebuilt fresh each
+	// term — a stopped controller-runtime manager cannot be restarted.
+	go func() {
+		if err := leaderelection.Run(ctx, leaderelection.Options{
+			Config:    config,
+			Namespace: leaderelection.DefaultNamespace,
+			Name:      controllerLeaseName,
+		}, func(termCtx context.Context) {
+			if err := runTemplateControllerManager(termCtx, config); err != nil {
+				log.Printf("controller manager exited: %v", err)
+			}
+		}); err != nil {
+			log.Printf("controller leader election failed; Template controller is not running: %v", err)
+		}
+	}()
+	return nil
+}
+
+// runTemplateControllerManager builds the Template controller manager and
+// blocks in Start until the leadership term ends. Called once per term.
+func runTemplateControllerManager(ctx context.Context, config *rest.Config) error {
+	skipNameValidation := true
 	mgr, err := manager.New(config, manager.Options{
 		// Disable the metrics server in PR A; the bind on :8080 would
 		// collide with the provider's own HTTP server in dev. PR E
 		// adds it back on a configurable port.
 		Metrics: metricsserver.Options{BindAddress: "0"},
+		// Controller names register process-globally; the manager built for a
+		// later leadership term must skip that check.
+		Controller: ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	if err != nil {
 		return fmt.Errorf("manager.New: %w", err)
@@ -145,22 +187,26 @@ func startControllerManager(ctx context.Context, config *rest.Config) error {
 		return fmt.Errorf("template controller: %w", err)
 	}
 
-	go func() {
-		log.Printf("infrastructure controller manager starting (backends=%v)", registry.Names())
-		if err := mgr.Start(ctx); err != nil {
-			log.Printf("controller manager exited: %v", err)
-		}
-	}()
-	return nil
+	log.Printf("infrastructure controller manager starting (backends=%v)", registry.Names())
+	return mgr.Start(ctx)
 }
 
 // loadControllerConfig returns a rest.Config for the workspace the
 // platform controllers target. Looked up in this order:
 //
+//	FAROS_PROVIDER_KUBECONFIG             — standardized across all providers
 //	INFRASTRUCTURE_KUBECONFIG             — minted SA kubeconfig from `init`
 //	INFRASTRUCTURE_CONTROLLER_KUBECONFIG  — legacy provider-specific override
 //	KUBECONFIG                            — standard env var
 //	in-cluster service account            — when run as a pod
+//
+// FAROS_PROVIDER_KUBECONFIG is the name every chart sets on the serve
+// container, and the name the other eight providers read. Until it was
+// honored here, a chart-deployed serve container found none of the
+// provider-specific names — only `init` is given INFRASTRUCTURE_KUBECONFIG —
+// and fell through to the in-cluster ServiceAccount. That silently pointed
+// every kcp controller at the HOST cluster, surfacing as an unrelated-looking
+// RBAC error the first time something touched the API (leases in "default").
 //
 // The minted path wins because serve mode is supposed to run with
 // the lowest-privilege identity available. If init has already run,
@@ -169,12 +215,21 @@ func startControllerManager(ctx context.Context, config *rest.Config) error {
 // stay as escape hatches for dev clusters that haven't migrated to
 // the init/serve split.
 //
-// Returns errControllerDisabled when none of the four resolve; the
+// Returns errControllerDisabled when none of them resolve; the
 // caller logs + continues without the controller.
 func loadControllerConfig() (*rest.Config, error) {
-	c, err := loadControllerConfigRaw()
+	c, source, err := loadControllerConfigRaw()
 	if err != nil {
 		return nil, err
+	}
+	// Say which source won. Every controller and both leader elections run
+	// against this config, so picking the wrong one misdirects the whole
+	// provider — and the symptom surfaces far from the cause.
+	log.Printf("kcp config resolved from %s (host=%s)", source, c.Host)
+	if source == sourceInCluster {
+		log.Printf("WARNING: no provider kubeconfig in scope, so controllers will run "+
+			"against the HOST cluster, not kcp. Set %s to the mounted provider kubeconfig.",
+			"FAROS_PROVIDER_KUBECONFIG")
 	}
 	// When INFRASTRUCTURE_WORKSPACE_PATH is set, retarget the config host at
 	// /clusters/<path>. This lets serve run with a root-scoped (admin)
@@ -191,36 +246,41 @@ func loadControllerConfig() (*rest.Config, error) {
 	return c, nil
 }
 
-func loadControllerConfigRaw() (*rest.Config, error) {
-	if p := os.Getenv("INFRASTRUCTURE_KUBECONFIG"); p != "" {
+// sourceInCluster names the last-resort branch of loadControllerConfigRaw.
+const sourceInCluster = "the in-cluster ServiceAccount"
+
+// controllerKubeconfigEnvs is the resolution order, most-specific first. The
+// standardized FAROS_PROVIDER_KUBECONFIG leads: it is what every chart sets on
+// the serve container and what the other providers read.
+var controllerKubeconfigEnvs = []string{
+	"FAROS_PROVIDER_KUBECONFIG",
+	"INFRASTRUCTURE_KUBECONFIG",
+	"INFRASTRUCTURE_CONTROLLER_KUBECONFIG",
+	"KUBECONFIG",
+}
+
+// loadControllerConfigRaw returns the config and the name of the source it
+// came from, so the caller can report which one won.
+func loadControllerConfigRaw() (*rest.Config, string, error) {
+	for _, env := range controllerKubeconfigEnvs {
+		p := os.Getenv(env)
+		if p == "" {
+			continue
+		}
 		c, err := clientcmd.BuildConfigFromFlags("", p)
 		if err != nil {
-			return nil, fmt.Errorf("INFRASTRUCTURE_KUBECONFIG: %w", err)
+			return nil, "", fmt.Errorf("%s: %w", env, err)
 		}
-		return c, nil
-	}
-	if p := os.Getenv("INFRASTRUCTURE_CONTROLLER_KUBECONFIG"); p != "" {
-		c, err := clientcmd.BuildConfigFromFlags("", p)
-		if err != nil {
-			return nil, fmt.Errorf("INFRASTRUCTURE_CONTROLLER_KUBECONFIG: %w", err)
-		}
-		return c, nil
-	}
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		c, err := clientcmd.BuildConfigFromFlags("", p)
-		if err != nil {
-			return nil, fmt.Errorf("KUBECONFIG: %w", err)
-		}
-		return c, nil
+		return c, env, nil
 	}
 	// In-cluster fallback. The error returned by InClusterConfig is
 	// the right "not running in a pod" signal so we let it surface
 	// up the chain as errControllerDisabled.
 	c, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, errControllerDisabled
+		return nil, "", errControllerDisabled
 	}
-	return c, nil
+	return c, sourceInCluster, nil
 }
 
 // errControllerDisabled is the sentinel main() checks for so it can

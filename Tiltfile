@@ -46,7 +46,8 @@ go build -o bin/faros-hub ./cmd/faros-hub
   --graphql-grpc-addr=localhost:50051 \
   --graphql-playground \
   --portal-dev-url=http://localhost:3000 \
-  --portal-frame-source=https://*.preview.localhost:10443 \
+  --portal-frame-source=https://*.apps.127.0.0.1.sslip.io:10443 \
+  --published-apps-domain=apps.127.0.0.1.sslip.io \
   --kubeconfig=.faros-kro.kubeconfig \
   --hub-internal-url=https://host.docker.internal:9443
 ''',
@@ -108,6 +109,16 @@ go build -o bin/faros-hub ./cmd/faros-hub
 # The provider's `make run-...` target auto-detects the
 # .faros-kro.kubeconfig file and passes it as KRO_KUBECONFIG.
 # ---------------------------------------------------------------------------
+
+preview_gateway_name = 'app-studio-preview'
+preview_gateway_namespace = 'envoy-gateway-system'
+preview_app_base_domain = 'apps.127.0.0.1.sslip.io'
+preview_app_public_port = '10443'
+preview_hub_public_url = 'https://console.127.0.0.1.sslip.io:9443'
+preview_kro_kubeconfig = '.faros-kro.kubeconfig'
+preview_kro_context = 'kind-faros-kro'
+preview_kro_node = 'faros-kro-control-plane'
+docker_gateway_format = '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'
 
 # --- providers-quickstart ---
 local_resource(
@@ -573,6 +584,23 @@ local_resource(
     labels=['providers-kro'],
 )
 
+# The preview Gateway lives in the faros-kro management cluster, rather than
+# the embedded-kcp hub process. Keep its bootstrap as a separate idempotent
+# one-shot so both the Infrastructure provider and its host-side tunnel can
+# wait for the Gateway, TLS secret, and Envoy Gateway controller together.
+local_resource(
+    'preview-gateway-up',
+    cmd=('PREVIEW_GATEWAY_CONTEXT=%s make dev-preview-gateway-up' %
+         preview_kro_context),
+    deps=[
+        'Makefile',
+        'hack/scripts/configure-tilt-preview-gateway.sh',
+        preview_kro_kubeconfig,
+    ],
+    resource_deps=['kro-mgmt-up'],
+    labels=['providers-kro'],
+)
+
 local_resource(
     'kro-mgmt-down',
     cmd='make dev-kro-down',
@@ -584,7 +612,29 @@ local_resource(
 local_resource(
     'infrastructure',
     cmd='make build-infrastructure-provider',
-    serve_cmd='make run-provider-infrastructure',
+    serve_cmd=('''
+set -eu
+host_gateway="$(docker inspect -f '{docker_gateway_format}' {kro_node})"
+test -n "$host_gateway"
+KRO_KUBECONFIG={kro_kubeconfig} \
+FAROS_GATEWAY_NAME={gateway_name} \
+FAROS_GATEWAY_NAMESPACE={gateway_namespace} \
+FAROS_APP_BASE_DOMAIN={base_domain} \
+FAROS_APP_PUBLIC_PORT={public_port} \
+FAROS_ACCESS_HUB_URL="https://$host_gateway:9443" \
+FAROS_ACCESS_HUB_PUBLIC_URL={hub_public_url} \
+FAROS_ACCESS_HUB_INSECURE=true \
+make run-provider-infrastructure
+''').format(
+                   docker_gateway_format=docker_gateway_format,
+                   kro_node=preview_kro_node,
+                   kro_kubeconfig=preview_kro_kubeconfig,
+                   gateway_name=preview_gateway_name,
+                   gateway_namespace=preview_gateway_namespace,
+                   base_domain=preview_app_base_domain,
+                   public_port=preview_app_public_port,
+                   hub_public_url=preview_hub_public_url,
+               ),
     deps=[
         'providers/infrastructure/main.go',
         'providers/infrastructure/heartbeat.go',
@@ -620,7 +670,13 @@ local_resource(
     # backend cluster the catalog reads from. Both must be green
     # before the provider starts; otherwise it boots in stub mode
     # which is fine but confusing for the dev who just ran `tilt up`.
-    resource_deps=['hub', 'kro-mgmt-up', 'app-studio-preview-console-key'],
+    resource_deps=[
+        'hub',
+        'kro-mgmt-up',
+        'preview-gateway-up',
+        'app-studio-preview-port-forward',
+        'app-studio-preview-console-key',
+    ],
     readiness_probe=probe(
         period_secs=5,
         http_get=http_get_action(port=8082, path='/healthz'),
@@ -669,7 +725,9 @@ local_resource(
 #     faros-provider-kubeconfig (HostSecretWriter, enabled by the hub's
 #     --kubeconfig + --hub-internal-url flags above), the init container
 #     bootstraps the workspace with it, then serve runs — all inside the
-#     faros-kro kind cluster.
+#     faros-kro kind cluster. Deploys TWO replicas (the only Tilt resource
+#     with real kube replicas + Service round-robin): exercises the
+#     leader-elected Template/Instance controllers and bootstrap loop.
 #
 #     Manual (click ▶). Order: kro-mgmt-up → infrastructure-register →
 #     infrastructure-pod. Stop the host-binary `infrastructure` resource
@@ -691,13 +749,106 @@ local_resource(
     labels=['providers-kro'],
 )
 
+# Preview/apps ingress tunnel — forwards the Envoy Gateway's HTTPS listener
+# from faros-kro to the host on :10443. The kubeconfig and context are explicit
+# on every kubectl invocation: the developer's ambient context commonly points
+# at an embedded-kcp workspace and must never control this loop.
+#
+# The probe MUST send SNI. The Gateway listener is hostname-scoped HTTPS, so a
+# TLS hello without a matching server name selects no filter chain and Envoy
+# resets the connection. `--resolve` supplies both the matching SNI/Host and
+# the loopback address without requiring /etc/hosts.
+local_resource(
+    'app-studio-preview-port-forward',
+    cmd='true',
+    serve_cmd='''
+set -eu
+KRO_KUBECONFIG=%s
+CTX=%s
+GW=%s
+PROBE_HOST=tilt-probe.%s
+pf=''
+cleanup_forward() {
+  if [ -n "$pf" ] && kill -0 "$pf" 2>/dev/null; then
+    kill "$pf" 2>/dev/null || true
+    wait "$pf" 2>/dev/null || true
+  fi
+}
+trap cleanup_forward EXIT
+trap 'exit 0' INT TERM
+while true; do
+  if [ ! -f "$KRO_KUBECONFIG" ]; then
+    sleep 2
+    continue
+  fi
+  svc="$(kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+    get svc -n %s \
+    -l gateway.envoyproxy.io/owning-gateway-name=$GW \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -z "$svc" ]; then
+    sleep 2
+    continue
+  fi
+  kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+    -n %s port-forward "svc/$svc" %s:%s &
+  pf=$!
+  fails=0
+  while kill -0 "$pf" 2>/dev/null; do
+    sleep 15
+    # Any HTTP response (including 404) means the listener is programmed.
+    if curl -sk --max-time 5 -o /dev/null \
+         --resolve "$PROBE_HOST:%s:127.0.0.1" \
+         "https://$PROBE_HOST:%s/"; then
+      fails=0
+    else
+      fails=$((fails + 1))
+      echo "preview tunnel unhealthy ($fails/3)"
+      if [ "$fails" -ge 3 ]; then
+        echo "restarting forward and bouncing the Envoy proxy pod"
+        kubectl --kubeconfig "$KRO_KUBECONFIG" --context "$CTX" \
+          delete pod -n %s \
+          -l gateway.envoyproxy.io/owning-gateway-name=$GW \
+          --wait=false 2>/dev/null || true
+        kill "$pf" 2>/dev/null || true
+        break
+      fi
+    fi
+  done
+  wait "$pf" 2>/dev/null || true
+  pf=''
+  sleep 3
+done
+'''.strip() % (
+        preview_kro_kubeconfig,
+        preview_kro_context,
+        preview_gateway_name,
+        preview_app_base_domain,
+        preview_gateway_namespace,
+        preview_gateway_namespace,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_app_public_port,
+        preview_gateway_namespace,
+    ),
+    resource_deps=['preview-gateway-up'],
+    readiness_probe=probe(
+        period_secs=2,
+        timeout_secs=1,
+        tcp_socket=tcp_socket_action(port=int(preview_app_public_port)),
+    ),
+    labels=['providers-app-studio'],
+)
+
 # ---------------------------------------------------------------------------
 # edges — the standalone edges provider (KubernetesCluster + LinuxServer under
 # one group edges.faros.sh) PLUS the dev agents that connect to it.
 #
-# The provider is SINGLE-REPLICA (revdial dialer map is process-global). It
-# terminates the agent reverse tunnels and serves kubectl/ssh/mcp; the agents
-# below dial it through the hub backend proxy at /services/providers/edges/*.
+# The provider terminates the agent reverse tunnels and serves
+# kubectl/ssh/mcp; the agents below dial it through the hub backend proxy at
+# /services/providers/edges/*. Multi-replica capable: tunnels are claimed in
+# a Lease registry and peer replicas relay to the owner (see the `edges-2`
+# standby under the `replicas` label).
 #
 # Workflow:
 #   1. `edges` serves automatically; click ▶ on `edges-register` then
@@ -850,4 +1001,61 @@ local_resource(
     resource_deps=['ha-kube-deploy'],
     links=[link('http://localhost:8123', 'Home Assistant')],
     labels=['edges'],
+)
+
+# ---------------------------------------------------------------------------
+# replicas — second instances of the scalable providers (manual, click ▶)
+#
+# The hub proxies each provider through ONE fixed URL (localhost:{port}), so
+# these standbys receive no request traffic; what they exercise is the durable
+# coordination the scaling work added: leader election (code), per-edge claim
+# sharding (kuery), and the tunnel-ownership registry + relay (edges — both
+# instances run with replica routing enabled, POD_IP=127.0.0.1, so the standby
+# sees instance 1's tunnels through the Lease registry instead of flapping
+# their status). Real replicas WITH load-balanced traffic: `infrastructure-pod`
+# (helm, replicaCount=2 in the faros-kro kind cluster).
+#
+# Not here on purpose:
+#   - hub: Tilt runs it with --embedded-kcp; HA requires external kcp.
+#   - app-studio: dev uses the in-memory message store, which is per-process —
+#     replica claims need the shared Postgres store to mean anything.
+# ---------------------------------------------------------------------------
+
+local_resource(
+    'code-2',
+    serve_cmd='make run-provider-code CODE_PORT=18083',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['code'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=18083, path='/healthz'),
+    ),
+    labels=['replicas'],
+)
+
+local_resource(
+    'kuery-2',
+    serve_cmd='make run-provider-kuery KUERY_PORT=18084',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['kuery'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=18084, path='/healthz'),
+    ),
+    labels=['replicas'],
+)
+
+local_resource(
+    'edges-2',
+    serve_cmd='POD_NAME=edges-local-2 make run-provider-edges EDGES_PORT=18088 EDGES_INTERNAL_PORT=18090',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['edges'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=18088, path='/healthz'),
+    ),
+    labels=['replicas'],
 )
