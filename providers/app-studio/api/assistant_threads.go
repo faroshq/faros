@@ -68,6 +68,7 @@ type assistantThreadPatchRequest struct {
 type assistantThreadTurnCreateRequest struct {
 	Content             string                                 `json:"content"`
 	ClientUserMessageID string                                 `json:"clientUserMessageID"`
+	ModelID             string                                 `json:"modelID,omitempty"`
 	CollaborationMode   store.AssistantRunMode                 `json:"collaborationMode,omitempty"`
 	Skills              []string                               `json:"skills,omitempty"`
 	ContextResources    []projectAssistantContextResourceInput `json:"contextResources,omitempty"`
@@ -356,6 +357,7 @@ func (s *Server) continueProjectAssistantThreadTurn(w http.ResponseWriter, r *ht
 	request := assistantThreadTurnCreateRequest{
 		Content:                 content,
 		ClientUserMessageID:     continueRequest.ClientUserMessageID,
+		ModelID:                 projectAssistantModelIDFromRunAudit(predecessorRun),
 		CollaborationMode:       predecessor.Mode,
 		Skills:                  skillIDs,
 		ContextResources:        contextResources,
@@ -419,10 +421,29 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 			s.writeAssistantThreadError(w, replayErr)
 			return
 		}
+		if request.ModelID == "" {
+			request.ModelID = projectAssistantModelIDFromRunAudit(prior)
+		}
+		if replayErr = validateProjectAssistantStartModelSelection(prior, request.ModelID); replayErr != nil {
+			s.writeAssistantThreadError(w, replayErr)
+			return
+		}
 		replay = true
 	} else if !errors.Is(replayErr, store.ErrAssistantRunNotFound) {
 		s.writeAssistantThreadError(w, replayErr)
 		return
+	}
+	if !replay {
+		registry, registryErr := readProjectLLMRegistry(r.Context(), c)
+		if registryErr != nil {
+			writeProjectError(w, registryErr)
+			return
+		}
+		request.ModelID, registryErr = registry.selectedModelID(request.ModelID)
+		if registryErr != nil {
+			writeProjectError(w, registryErr)
+			return
+		}
 	}
 	initialBootstrap := false
 	if !replay && request.continuationOfTurnID == "" && request.CollaborationMode != store.AssistantRunModeReview {
@@ -457,7 +478,8 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 	}
 	var canonicalTurn store.AssistantTurn
 	started, err := s.startProjectAssistantRunDurablyWithModeAndSkills(r.Context(), scope, id.user, request.Content, request.ClientUserMessageID, request.CollaborationMode, projectAssistantDurableSkillSelection{
-		IDs: skillIDs, CatalogDigest: skillSnapshot.CatalogDigest, Receipts: selectedSkills,
+		ModelID: request.ModelID,
+		IDs:     skillIDs, CatalogDigest: skillSnapshot.CatalogDigest, Receipts: selectedSkills,
 		ContextResources: contextResources, ContextResourceReceipts: selectedContextResources,
 		ContentParts: request.ContentParts,
 	},

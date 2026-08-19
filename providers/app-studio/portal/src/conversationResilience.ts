@@ -233,6 +233,40 @@ export function assistantRunRequiresLiveControls(run: AssistantRun | null | unde
   return Boolean(run && !assistantRunTerminal(run.status))
 }
 
+export interface AssistantComposerStopControlInput {
+  /** Reactive-only revision; value changes whenever the active run is replaced. */
+  activeRunRevision?: number
+  stopRequested: boolean
+  messageStreaming: boolean
+  activeRunID?: string
+  activeRunStatus?: unknown
+  prompt: string
+}
+
+export interface AssistantComposerStopControlState {
+  visible: boolean
+  disabled: boolean
+}
+
+/**
+ * Keeps the composer stop action stable across asynchronous run
+ * reconciliation. Once the local latch is set, transient loss of the active
+ * run or streaming flag cannot reveal the Send action before the interrupt
+ * reaches a terminal outcome.
+ */
+export function assistantComposerStopControlState(input: AssistantComposerStopControlInput): AssistantComposerStopControlState {
+  const serverStopping = Boolean(input.activeRunID) && normalizeAssistantRunStatus(input.activeRunStatus) === 'stopping'
+  const stopping = input.stopRequested || serverStopping
+  return {
+    visible: stopping || Boolean(
+      input.messageStreaming &&
+      (!input.activeRunID || !assistantRunTerminal(input.activeRunStatus)) &&
+      !input.prompt.trim(),
+    ),
+    disabled: stopping,
+  }
+}
+
 export function assistantRunCanImplementPlan(run: AssistantRun | null | undefined): run is AssistantRun {
   return Boolean(
     run &&
@@ -371,7 +405,7 @@ export function orderConversationMessages<TMessage extends ProjectMessage>(messa
 interface ConversationRunTransport {
   connect(runID: string, afterRevision: number, setDisconnect: (disconnect: () => void) => void): Promise<void>
   abort(runID: string): Promise<void>
-  recover?(): Promise<void>
+  recover?(runID: string): Promise<boolean | void>
   onState?(state: ConversationConnectionState): void
   setTimeout(fn: () => void, delay: number): ReturnType<typeof setTimeout>
   clearTimeout(timer: ReturnType<typeof setTimeout>): void
@@ -426,21 +460,39 @@ export class ConversationRunController {
   }
 
   async stop() {
-    if (!this.runID) return
-    let aborted = false
+    const runID = this.runID
+    if (!runID) return
+    // Freeze the visible stream as soon as the user asks to stop. The durable
+    // interrupt request remains authoritative, but late chunks should not keep
+    // appearing while that request is in flight.
+    this.disconnect()
     try {
-      await this.transport.abort(this.runID)
-      aborted = true
-    } finally {
-      this.disconnect()
+      await this.transport.abort(runID)
+    } catch (error) {
+      this.reconnectAfterStop(runID)
+      throw error
     }
-    if (aborted) {
-      try {
-        await this.transport.recover?.()
-      } catch {
-        // The abort response is authoritative. Recovery only updates local UI.
-      }
+    let settled = false
+    try {
+      settled = (await this.transport.recover?.(runID)) === true
+    } catch {
+      // The accepted abort remains authoritative. Reconnect below so the
+      // durable terminal transition can still converge when refresh failed.
     }
+    if (settled || this.runID !== runID) return
+    // The interrupt endpoint intentionally returns the observable `stopping`
+    // state before Eino reaches a safe cancellation boundary. Resume the SSE
+    // subscription after the one-shot refresh so the eventual terminal event
+    // cannot be missed and leave the composer latched on Stopping forever.
+    this.reconnectAfterStop(runID)
+  }
+
+  private reconnectAfterStop(runID: string) {
+    if (this.runID !== runID) return
+    this.retry = 0
+    this.disconnected = false
+    this.setConnectionState('reconnecting')
+    void this.connect(this.generation)
   }
 
   private async connect(generation: number) {
