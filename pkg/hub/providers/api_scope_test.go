@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -25,7 +26,7 @@ import (
 	"github.com/faroshq/faros/pkg/hub/tenant"
 )
 
-// These tests wire the REAL list handler behind the REAL OptionalMiddleware.
+// These tests wire the REAL list handler behind the REAL OptionalOrgMiddleware.
 // The security-critical property is that an org-owned provider reaches a
 // response ONLY when the caller's membership in that org was verified against
 // their UserMembershipIndex — a header alone must never be enough, and neither
@@ -41,8 +42,17 @@ func scopedRegistry() *Registry {
 
 func listWith(t *testing.T, reg *Registry, resolver tenant.UserResolver, lookup tenant.MembershipLookup, headers map[string]string) []string {
 	t.Helper()
+	code, names := listStatus(t, reg, resolver, lookup, headers)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	return names
+}
+
+func listStatus(t *testing.T, reg *Registry, resolver tenant.UserResolver, lookup tenant.MembershipLookup, headers map[string]string) (int, []string) {
+	t.Helper()
 	h := NewListHandler(reg)
-	h.SetMiddleware(tenant.OptionalMiddleware(resolver, lookup))
+	h.SetMiddleware(tenant.OptionalOrgMiddleware(resolver, lookup))
 
 	req := httptest.NewRequest(http.MethodGet, PathListProviders, nil)
 	for k, v := range headers {
@@ -52,7 +62,7 @@ func listWith(t *testing.T, reg *Registry, resolver tenant.UserResolver, lookup 
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		return rec.Code, nil
 	}
 	var body struct {
 		Items []struct {
@@ -73,15 +83,15 @@ func listWith(t *testing.T, reg *Registry, resolver tenant.UserResolver, lookup 
 		}
 		names = append(names, it.Name)
 	}
-	return names
+	return rec.Code, names
 }
 
 func hasName(names []string, want string) bool {
 	return slices.Contains(names, want)
 }
 
-// No credential at all: the platform catalog, and nothing owned by any org.
-func TestListHandler_AnonymousSeesOnlyPlatform(t *testing.T) {
+// The catalog is not scrapeable: no credential, no answer.
+func TestListHandler_AnonymousIsRefused(t *testing.T) {
 	resolver := tenant.UserResolverFunc(func(*http.Request) (string, error) {
 		return "", tenant.ErrUserNotResolved
 	})
@@ -89,22 +99,18 @@ func TestListHandler_AnonymousSeesOnlyPlatform(t *testing.T) {
 		return nil, errors.New("should not be consulted")
 	})
 
-	names := listWith(t, scopedRegistry(), resolver, lookup, nil)
-	if !hasName(names, "edges") {
-		t.Errorf("platform provider missing: %v", names)
-	}
-	for _, leaked := range []string{"acme-secrets", "other-corp"} {
-		if hasName(names, leaked) {
-			t.Errorf("org-owned provider %q leaked to an anonymous caller: %v", leaked, names)
-		}
+	code, names := listStatus(t, scopedRegistry(), resolver, lookup, nil)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (names: %v)", code, names)
 	}
 }
 
-// The regression CI caught: identity resolution failing must degrade to the
-// platform catalog, never expose org data and never error.
-func TestListHandler_ResolverErrorSeesOnlyPlatform(t *testing.T) {
+// A credential accepted but not resolvable to a User record still gets the
+// platform catalog — and never org data. (The CI regression, made precise.)
+func TestListHandler_AcceptedCredentialWithoutRecordSeesOnlyPlatform(t *testing.T) {
 	resolver := tenant.UserResolverFunc(func(*http.Request) (string, error) {
-		return "", errors.New("listing users: the server could not find the requested resource")
+		return "", fmt.Errorf("%w: listing users: the server could not find the requested resource",
+			tenant.ErrUserRecordUnavailable)
 	})
 	lookup := tenant.MembershipLookupFunc(func(context.Context, string) (*tenancyv1alpha1.UserMembershipIndex, error) {
 		return nil, errors.New("should not be consulted")

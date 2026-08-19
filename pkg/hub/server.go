@@ -621,6 +621,13 @@ func (s *Server) Run(ctx context.Context) error {
 					if errors.Is(err, proxy.ErrIdentifyNoBearer) {
 						return "", tenant.ErrUserNotResolved
 					}
+					// The credential was accepted but the User record could not
+					// be read. Middleware that only needs to know the caller is
+					// legitimate can still serve them; anything acting AS the
+					// user must not.
+					if errors.Is(err, proxy.ErrUserRecordUnavailable) {
+						return "", fmt.Errorf("%w: %w", tenant.ErrUserRecordUnavailable, err)
+					}
 					return "", err
 				}
 				return name, nil
@@ -629,11 +636,12 @@ func (s *Server) Run(ctx context.Context) error {
 				return userClient.UserMembershipIndices().Get(ctx, userName, metav1.GetOptions{})
 			})
 
-			// Scope GET /api/providers to the caller's Org so an Org's own
-			// providers appear in its catalog. Optional rather than required:
-			// the portal fetches the catalog to build its shell before any Org
-			// is selected, and that call must keep working.
-			providerListHandler.SetMiddleware(tenant.OptionalMiddleware(userResolver, membershipLookup))
+			// GET /api/providers: authenticated, Org optional. The catalog
+			// describes what this deployment runs, so it is not enumerable
+			// anonymously; the Org is optional because the portal fetches it
+			// before one is selected, and an Org only takes effect once the
+			// caller's membership in it is verified.
+			providerListHandler.SetMiddleware(tenant.OptionalOrgMiddleware(userResolver, membershipLookup))
 
 			// Wire the backend-proxy tenant resolver. With this in place
 			// every authenticated request to /services/providers/{name}/*

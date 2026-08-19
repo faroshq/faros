@@ -13,6 +13,7 @@ package tenant
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,13 +21,13 @@ import (
 	tenancyv1alpha1 "github.com/faroshq/faros/apis/tenancy/v1alpha1"
 )
 
-// serveOptional runs one request through OptionalMiddleware and reports the
+// serveOptional runs one request through OptionalOrgMiddleware and reports the
 // status plus whatever TenantContext reached the handler.
 func serveOptional(t *testing.T, resolver UserResolver, lookup MembershipLookup, headers map[string]string) (int, TenantContext, bool) {
 	t.Helper()
 	var got TenantContext
 	var reached bool
-	handler := OptionalMiddleware(resolver, lookup)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := OptionalOrgMiddleware(resolver, lookup)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
 		if tc, ok := FromContext(r.Context()); ok {
 			got = tc
@@ -58,42 +59,61 @@ func failingLookup() MembershipLookup {
 	})
 }
 
-// The regression this file exists for: GET /api/providers was an
-// unauthenticated endpoint before org scoping, and a resolver that errors must
-// not turn it into a 500 — that took the catalog, and with it the portal shell,
-// down for a question the endpoint does not need answered.
-func TestOptionalMiddleware_ResolverErrorStillServes(t *testing.T) {
+// No credential: refused. This is what stops the catalog being scraped.
+func TestOptionalOrgMiddleware_AnonymousIsRefused(t *testing.T) {
 	resolver := UserResolverFunc(func(*http.Request) (string, error) {
-		return "", errors.New("listing users: the server could not find the requested resource")
+		return "", ErrUserNotResolved
 	})
-	code, tc, reached := serveOptional(t, resolver, okLookup(nil), nil)
+	code, _, reached := serveOptional(t, resolver, okLookup(nil), nil)
+
+	if reached {
+		t.Error("handler was reached without a credential")
+	}
+	if code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", code)
+	}
+}
+
+// A credential that fails verification is refused too — an unrecognized or
+// forged token must not read the catalog.
+func TestOptionalOrgMiddleware_BadCredentialIsRefused(t *testing.T) {
+	resolver := UserResolverFunc(func(*http.Request) (string, error) {
+		return "", errors.New("verifying OIDC token: signature is invalid")
+	})
+	code, _, reached := serveOptional(t, resolver, okLookup(nil), nil)
+
+	if reached {
+		t.Error("handler was reached with an unverifiable credential")
+	}
+	if code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", code)
+	}
+}
+
+// The CI regression, now expressed precisely: the credential was ACCEPTED and
+// only the User record lookup failed. That caller is legitimate, so they get
+// the platform catalog rather than a 500 — but no tenant context, so no org
+// data.
+func TestOptionalOrgMiddleware_AcceptedCredentialWithoutRecordStillServes(t *testing.T) {
+	resolver := UserResolverFunc(func(*http.Request) (string, error) {
+		return "", fmt.Errorf("%w: listing users: the server could not find the requested resource",
+			ErrUserRecordUnavailable)
+	})
+	code, tc, reached := serveOptional(t, resolver, okLookup(nil),
+		map[string]string{HeaderFarosOrg: "org-1"})
 
 	if !reached {
-		t.Fatal("handler not reached — the request was rejected")
+		t.Fatal("handler not reached — an authenticated caller was refused")
 	}
 	if code != http.StatusOK {
 		t.Errorf("status = %d, want 200", code)
 	}
 	if tc.User != "" || tc.OrgUUID != "" {
-		t.Errorf("context = %+v, want empty", tc)
+		t.Errorf("context = %+v, want empty (identity is unknown)", tc)
 	}
 }
 
-func TestOptionalMiddleware_UnauthenticatedStillServes(t *testing.T) {
-	resolver := UserResolverFunc(func(*http.Request) (string, error) {
-		return "", ErrUserNotResolved
-	})
-	code, tc, reached := serveOptional(t, resolver, okLookup(nil), nil)
-
-	if !reached || code != http.StatusOK {
-		t.Fatalf("anonymous request rejected: reached=%v code=%d", reached, code)
-	}
-	if tc.OrgUUID != "" {
-		t.Errorf("anonymous caller got an Org: %+v", tc)
-	}
-}
-
-func TestOptionalMiddleware_VerifiedOrgAttaches(t *testing.T) {
+func TestOptionalOrgMiddleware_VerifiedOrgAttaches(t *testing.T) {
 	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
 		OrgUUID: "org-1", Role: tenancyv1alpha1.MembershipRoleAdmin,
 	})
@@ -110,7 +130,7 @@ func TestOptionalMiddleware_VerifiedOrgAttaches(t *testing.T) {
 
 // An Org header the caller has no membership for must be dropped, not honored
 // and not rejected: dropping it can only ever show less.
-func TestOptionalMiddleware_UnverifiedOrgIsDropped(t *testing.T) {
+func TestOptionalOrgMiddleware_UnverifiedOrgIsDropped(t *testing.T) {
 	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
 		OrgUUID: "org-1", Role: tenancyv1alpha1.MembershipRoleMember,
 	})
@@ -130,7 +150,7 @@ func TestOptionalMiddleware_UnverifiedOrgIsDropped(t *testing.T) {
 
 // A stale Org UUID in a browser's localStorage must not break the shell when
 // the membership backend is unavailable.
-func TestOptionalMiddleware_LookupErrorDropsOrgOnly(t *testing.T) {
+func TestOptionalOrgMiddleware_LookupErrorDropsOrgOnly(t *testing.T) {
 	code, tc, reached := serveOptional(t, okResolver("alice"), failingLookup(),
 		map[string]string{HeaderFarosOrg: "org-1"})
 
@@ -145,7 +165,7 @@ func TestOptionalMiddleware_LookupErrorDropsOrgOnly(t *testing.T) {
 	}
 }
 
-func TestOptionalMiddleware_WorkspaceScopeAttaches(t *testing.T) {
+func TestOptionalOrgMiddleware_WorkspaceScopeAttaches(t *testing.T) {
 	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
 		OrgUUID: "org-1", WorkspaceUUID: "ws-1", Role: tenancyv1alpha1.MembershipRoleMember,
 	})

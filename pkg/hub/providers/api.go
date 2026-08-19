@@ -108,14 +108,10 @@ type providerDTO struct {
 	// response is their only distribution surface; no provider runtime URL or
 	// credential is projected into this shape.
 	//
-	// NOTE: this endpoint is NOT authenticated — it is registered on the root
-	// router ahead of the authenticated /api subrouter, so the platform catalog
-	// (including these skill bodies) is readable by anyone who can reach the
-	// hub. That predates provider scoping. Org-owned entries are unaffected:
-	// they require a membership verified against the caller's
-	// UserMembershipIndex, which an unauthenticated caller cannot satisfy.
-	// If the platform catalog should not be public, move this route behind the
-	// authenticated subrouter rather than relaxing the org check.
+	// The endpoint requires an authenticated caller (tenant.OptionalOrgMiddleware),
+	// so these bodies are not readable by anyone who can merely reach the hub.
+	// Org-owned entries additionally require a membership verified against the
+	// caller's UserMembershipIndex.
 	AssistantSkills []providerAssistantSkillDTO `json:"assistantSkills,omitempty"`
 	// SelfHostable is true when this provider publishes enough deployment
 	// metadata for an organization to run its own copy. It drives the portal's
