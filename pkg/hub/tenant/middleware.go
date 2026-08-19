@@ -114,22 +114,32 @@ func UserOnlyMiddleware(userResolver UserResolver) func(next http.Handler) http.
 	}
 }
 
-// OptionalMiddleware resolves a tenant context when the caller supplies one and
-// it checks out, and otherwise lets the request through with only the User
-// populated. It never rejects for a missing or unusable Org.
+// OptionalMiddleware attaches a tenant context when the caller supplies one and
+// it checks out, and otherwise lets the request through with no context at all.
+// It never rejects a request — not for a missing caller, not for an
+// unresolvable one, and not for an Org the caller does not belong to.
 //
-// This exists for endpoints that are legitimately callable both with and
-// without an active Org — chiefly GET /api/providers, which the portal fetches
-// to render its app shell before the user has picked an Org, and again
-// afterwards to pick up that Org's own providers.
+// This exists for endpoints that are legitimately callable with or without an
+// identity — chiefly GET /api/providers, which the portal fetches to render its
+// app shell before any Org (or even any sign-in) exists, and again afterwards to
+// pick up that Org's own providers.
 //
-// A supplied-but-unverifiable Org degrades to no context rather than 403. The
-// caller then sees exactly what an anonymous-org caller sees, which for the
-// catalog is the platform-global providers. Failing the request instead would
-// let a stale Org UUID in a browser's localStorage break the whole shell, and
-// there is nothing to protect by doing so: dropping the context can only ever
-// show LESS than the caller asked for. Handlers behind this middleware must
-// therefore treat an empty OrgUUID as "global scope only", never as "trusted".
+// Never rejecting is the whole point, and it is safe because of the direction of
+// the failure: attaching context can only ever ADD to what a handler shows, so
+// dropping it shows less, never more. Concretely:
+//
+//   - No credential, or one this hub cannot resolve (including a backend error
+//     during the lookup): continue anonymously. GET /api/providers was an
+//     unauthenticated endpoint before org scoping existed, and turning a
+//     resolver hiccup into a 500 would take the catalog — and with it the
+//     portal shell — down for a question the endpoint does not need answered.
+//   - An Org the caller is not a member of, or a membership lookup that fails:
+//     continue without it, so a stale Org UUID in a browser's localStorage
+//     cannot break the shell.
+//
+// Handlers behind this middleware must therefore treat an empty OrgUUID as
+// "global scope only" and never as "trusted". Anything that must not be served
+// anonymously belongs behind Middleware, not here.
 func OptionalMiddleware(userResolver UserResolver, lookup MembershipLookup) func(next http.Handler) http.Handler {
 	if userResolver == nil {
 		panic("tenant.OptionalMiddleware: userResolver is required")
@@ -139,30 +149,37 @@ func OptionalMiddleware(userResolver UserResolver, lookup MembershipLookup) func
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, err := userResolver.ResolveUser(r)
-			if err != nil {
-				if errors.Is(err, ErrUserNotResolved) {
-					writeStatus(w, http.StatusUnauthorized, "Unauthorized", "Unauthorized")
-					return
-				}
-				writeStatus(w, http.StatusInternalServerError, "InternalError", "failed to resolve caller identity: "+err.Error())
-				return
-			}
-
-			tc := TenantContext{User: user}
-			if orgUUID := r.Header.Get(HeaderFarosOrg); orgUUID != "" {
-				if index, err := lookup.GetUserMembershipIndex(r.Context(), user); err == nil {
-					workspaceUUID := r.Header.Get(HeaderFarosWorkspace)
-					if role, ok := matchEntry(index, orgUUID, workspaceUUID); ok {
-						tc.OrgUUID = orgUUID
-						tc.WorkspaceUUID = workspaceUUID
-						tc.Role = role
-					}
-				}
-			}
-			next.ServeHTTP(w, r.WithContext(WithContext(r.Context(), tc)))
+			next.ServeHTTP(w, r.WithContext(WithContext(r.Context(), optionalContext(r, userResolver, lookup))))
 		})
 	}
+}
+
+// optionalContext resolves as much tenant context as it can, giving up quietly
+// at the first step that does not work out.
+func optionalContext(r *http.Request, userResolver UserResolver, lookup MembershipLookup) TenantContext {
+	user, err := userResolver.ResolveUser(r)
+	if err != nil || user == "" {
+		return TenantContext{}
+	}
+	tc := TenantContext{User: user}
+
+	orgUUID := r.Header.Get(HeaderFarosOrg)
+	if orgUUID == "" {
+		return tc
+	}
+	index, err := lookup.GetUserMembershipIndex(r.Context(), user)
+	if err != nil {
+		return tc
+	}
+	workspaceUUID := r.Header.Get(HeaderFarosWorkspace)
+	role, ok := matchEntry(index, orgUUID, workspaceUUID)
+	if !ok {
+		return tc
+	}
+	tc.OrgUUID = orgUUID
+	tc.WorkspaceUUID = workspaceUUID
+	tc.Role = role
+	return tc
 }
 
 // Middleware returns the tenant-context HTTP middleware. The returned
