@@ -383,6 +383,7 @@ export interface Project {
     message?: string
     ready?: boolean
     commits?: ProjectRepositoryCommit[]
+    commitsError?: string
   }
   memory?: ProjectMemory
   sharing?: {
@@ -392,6 +393,7 @@ export interface Project {
   environments?: ProjectEnvironment[]
   createdAt: string
   updatedAt?: string
+  sourceRevision?: number
 }
 
 export interface ProjectEnvironment {
@@ -590,6 +592,15 @@ export interface ProjectHydrateResult {
   commitSHA?: string
   written?: string[]
   skipped?: string[]
+}
+
+// Result of POST /api/projects/{name}/restore-workspace. Unlike hydration,
+// restoration replaces the public workspace tree with one exact Git commit.
+export interface ProjectRestoreResult {
+  commitSHA: string
+  written?: string[]
+  deleted?: string[]
+  sourceRevision?: number
 }
 
 // One launchable component's build state, from GET /api/projects/{name}/promotion.

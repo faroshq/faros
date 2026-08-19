@@ -93,17 +93,18 @@ func (s *Server) consumeProjectInitialBootstrap(ctx context.Context, scope store
 }
 
 type ProjectView struct {
-	Name         string                        `json:"name"`
-	DisplayName  string                        `json:"displayName"`
-	Description  string                        `json:"description,omitempty"`
-	Phase        string                        `json:"phase,omitempty"`
-	Template     string                        `json:"template,omitempty"`
-	Repository   *ProjectRepositoryView        `json:"repository,omitempty"`
-	Memory       aiv1alpha1.ProjectMemory      `json:"memory,omitempty"`
-	Sharing      aiv1alpha1.ProjectSharingSpec `json:"sharing,omitempty"`
-	Environments []ProjectEnvironmentView      `json:"environments,omitempty"`
-	CreatedAt    time.Time                     `json:"createdAt"`
-	UpdatedAt    *time.Time                    `json:"updatedAt,omitempty"`
+	Name           string                        `json:"name"`
+	DisplayName    string                        `json:"displayName"`
+	Description    string                        `json:"description,omitempty"`
+	Phase          string                        `json:"phase,omitempty"`
+	Template       string                        `json:"template,omitempty"`
+	Repository     *ProjectRepositoryView        `json:"repository,omitempty"`
+	Memory         aiv1alpha1.ProjectMemory      `json:"memory,omitempty"`
+	Sharing        aiv1alpha1.ProjectSharingSpec `json:"sharing,omitempty"`
+	Environments   []ProjectEnvironmentView      `json:"environments,omitempty"`
+	CreatedAt      time.Time                     `json:"createdAt"`
+	UpdatedAt      *time.Time                    `json:"updatedAt,omitempty"`
+	SourceRevision uint64                        `json:"sourceRevision,omitempty"`
 }
 
 type ProjectEnvironmentView struct {
@@ -134,6 +135,7 @@ type ProjectRepositoryView struct {
 	Message       string                        `json:"message,omitempty"`
 	Ready         bool                          `json:"ready,omitempty"`
 	Commits       []ProjectRepositoryCommitView `json:"commits,omitempty"`
+	CommitsError  string                        `json:"commitsError,omitempty"`
 	commitsErr    error
 }
 
@@ -573,7 +575,13 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, projectView(r.Context(), c, p, id))
+	view := projectView(r.Context(), c, p, id)
+	if s.workspaces != nil {
+		if revision, err := s.workspaces.SourceRevision(r.Context(), projectWorkspaceScope(id, p)); err == nil {
+			view.SourceRevision = revision
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {

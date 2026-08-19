@@ -31,7 +31,7 @@
 
 @source "./ProjectIntegrations.vue";
 @source "./portalkit/StatusBadge.vue";
-@source "./ReleasePicker.vue";
+@source "./ProjectHistory.vue";
 
 @theme inline {
   /* Sharp radius scale — plain values (not host pointers), mirroring the host

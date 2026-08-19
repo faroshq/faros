@@ -221,10 +221,10 @@ func listProjectRepositoryCommits(ctx context.Context, c *asclient.Client, repos
 	return commits, nil
 }
 
-// projectRepositoryCommitForSHA validates an explicit promotion target. It
-// intentionally scans the complete commit history rather than the bounded
-// release response: a valid historical commit may be older than the 100 most
-// recent entries while its package digest is still mirrored.
+// projectRepositoryCommitForSHA validates an explicit project commit target.
+// It intentionally scans the complete commit history rather than the bounded
+// project view or release response so source restoration and promotion share
+// the same repository-ownership boundary.
 func projectRepositoryCommitForSHA(ctx context.Context, c *asclient.Client, repositoryRef, requestedSHA string) (*unstructured.Unstructured, error) {
 	repositoryRef = strings.TrimSpace(repositoryRef)
 	requestedSHA = strings.TrimSpace(requestedSHA)
@@ -232,7 +232,7 @@ func projectRepositoryCommitForSHA(ctx context.Context, c *asclient.Client, repo
 		return nil, newValidationError("project has no Code repository")
 	}
 	if requestedSHA == "" {
-		return nil, newValidationError("commitSHA is required when selecting a release")
+		return nil, newValidationError("commitSHA is required")
 	}
 	if !isFullGitCommitSHA(requestedSHA) {
 		return nil, newValidationError("commitSHA must be a full 40- or 64-character hexadecimal Git object ID")

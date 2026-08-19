@@ -140,14 +140,14 @@ test('opens publishing as a closeable built-in tab', () => {
   })
 })
 
-test('opens deployments as a closeable built-in tab', () => {
-  const deployments = openWorkbenchBuiltInTab(createDefaultWorkbenchState(), 'deployments')
-  assert.equal(deployments.activeTabID, 'deployments')
-  assert.deepEqual(deployments.tabs.find((tab) => tab.id === 'deployments'), {
-    id: 'deployments',
-    kind: 'deployments',
-    title: 'Deployments',
-    subtitle: 'Review releases and roll back production',
+test('opens history as a closeable built-in tab', () => {
+  const history = openWorkbenchBuiltInTab(createDefaultWorkbenchState(), 'history')
+  assert.equal(history.activeTabID, 'history')
+  assert.deepEqual(history.tabs.find((tab) => tab.id === 'history'), {
+    id: 'history',
+    kind: 'history',
+    title: 'History',
+    subtitle: 'Restore project files from an earlier Git commit',
     closeable: true,
   })
 })

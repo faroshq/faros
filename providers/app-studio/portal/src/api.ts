@@ -5,6 +5,7 @@ import type {
   ListResponse,
   Project,
   ProjectHydrateResult,
+  ProjectRestoreResult,
   ProjectAssistantRunMode,
   ProjectAssistantReviewTarget,
   ProjectAssistantRunStatus,
@@ -507,6 +508,15 @@ export const api = {
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/hydrate-workspace`,
       ref ? { ref } : {},
+    )
+  },
+
+  async restoreWorkspace(ctx: FarosContext | null, name: string, commitSHA: string, expectedSourceRevision: number): Promise<ProjectRestoreResult> {
+    return request<ProjectRestoreResult>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/restore-workspace`,
+      { commitSHA, expectedSourceRevision },
     )
   },
 

@@ -145,7 +145,7 @@ import {
 } from './conversationResilience'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import ReleasePipeline from './ReleasePipeline.vue'
-import ReleasePicker, { type ReleaseLoadState } from './ReleasePicker.vue'
+import ProjectHistory from './ProjectHistory.vue'
 import ProductionForm from './ProductionForm.vue'
 import ProductionSettingsLoadingShell from './ProductionSettingsLoadingShell.vue'
 import { productionFormValuesFromSchema, type ProductionFormValues } from './productionForm'
@@ -209,7 +209,8 @@ import {
   type PromotionPollState,
 } from './promotionState'
 import { useProductionSettings } from './useProductionSettings'
-import { reconcileReleaseSelection, releaseHasPromotionEvidence, releaseMissingEvidence, selectedRelease as findSelectedRelease } from './releaseSelection'
+import { newestDeployableRelease, releaseHasPromotionEvidence } from './releaseSelection'
+import { reconcileHistorySelection, repositoryCommitSelectable, selectedHistoryCommit } from './sourceHistory'
 import type {
   DevelopmentTemplate,
   ImportRepository,
@@ -555,7 +556,7 @@ type ProjectSettingsPane = 'project' | 'model'
 const projectSettingsPane = ref<ProjectSettingsPane>('project')
 const projectSettingsPaneAnnouncement = ref('')
 const publishingPaneRef = ref<HTMLElement | null>(null)
-const deploymentsPaneRef = ref<HTMLElement | null>(null)
+const historyPaneRef = ref<HTMLElement | null>(null)
 const projectSettingsPanes: ReadonlyArray<readonly [ProjectSettingsPane, string]> = [
   ['project', 'Project'],
   ['model', 'Model'],
@@ -654,10 +655,16 @@ const promotionValues = ref<ProductionFormValues>({})
 const promotionValuesDirty = ref(false)
 const productionFormValid = ref(true)
 const releases = ref<ProjectRelease[]>([])
-const selectedReleaseCommitSHA = ref('')
+type ReleaseLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const releaseLoadState = ref<ReleaseLoadState>('idle')
 const releaseLoadError = ref<string | null>(null)
 const releaseRefreshing = ref(false)
+const selectedHistoryCommitSHA = ref('')
+const historyRefreshing = ref(false)
+const historyRestoreBusy = ref(false)
+const historyError = ref<string | null>(null)
+const historyFeedback = ref<string | null>(null)
+let historyLoadSerial = 0
 let promotionPollTimer: number | undefined
 let promotionPollState: PromotionPollState | null = null
 let promotionLastTarget: PromotionPollState | null = null
@@ -796,6 +803,7 @@ function invalidateProjectContextState() {
   deleteProjectRequestSerial += 1
   projectSettingsSaveSerial += 1
   releaseLoadSerial += 1
+  historyLoadSerial += 1
 
   clearInitializationRetry()
   clearPromotionPoll()
@@ -892,10 +900,14 @@ function invalidateProjectContextState() {
   promotionValues.value = {}
   promotionValuesDirty.value = false
   releases.value = []
-  selectedReleaseCommitSHA.value = ''
   releaseLoadState.value = 'idle'
   releaseLoadError.value = null
   releaseRefreshing.value = false
+  selectedHistoryCommitSHA.value = ''
+  historyRefreshing.value = false
+  historyRestoreBusy.value = false
+  historyError.value = null
+  historyFeedback.value = null
   publishing.value = null
   publishingStateAvailable.value = false
   publishingMembers.value = []
@@ -1356,15 +1368,15 @@ const activeWorkbenchTab = computed<WorkbenchTabDescriptor | null>(() => {
 })
 const settingsInWorkbench = computed(() => !!settingsProject.value && activeWorkbenchTab.value?.kind === 'settings')
 const publishingInWorkbench = computed(() => activeWorkbenchTab.value?.kind === 'publishing')
-const deploymentsInWorkbench = computed(() => activeWorkbenchTab.value?.kind === 'deployments')
-const projectControlSurfaceInWorkbench = computed(() => settingsInWorkbench.value || publishingInWorkbench.value || deploymentsInWorkbench.value)
+const historyInWorkbench = computed(() => activeWorkbenchTab.value?.kind === 'history')
+const projectControlSurfaceInWorkbench = computed(() => settingsInWorkbench.value || publishingInWorkbench.value || historyInWorkbench.value)
 const projectControlSurfaceTarget = computed(() => {
   if (publishingInWorkbench.value) return '#app-studio-publishing-host'
-  if (deploymentsInWorkbench.value) return '#app-studio-deployments-host'
+  if (historyInWorkbench.value) return '#app-studio-history-host'
   if (settingsInWorkbench.value) return '#app-studio-project-settings-host'
   return 'body'
 })
-const productionSurfaceActive = computed(() => publishingInWorkbench.value || deploymentsInWorkbench.value || shareDialogOpen.value)
+const productionSurfaceActive = computed(() => publishingInWorkbench.value || shareDialogOpen.value)
 
 const activeProviderToolRef = computed(() => {
   const tab = activeWorkbenchTab.value
@@ -1420,11 +1432,11 @@ const launcherBuiltInItems = computed<WorkbenchLauncherItem[]>(() => [
     builtInTab: 'publishing',
   },
   {
-    id: 'builtin:deployments',
-    title: 'Deployments',
-    subtitle: 'Review releases and roll back production',
+    id: 'builtin:history',
+    title: 'History',
+    subtitle: 'Restore project files from an earlier Git commit',
     icon: GitBranch,
-    builtInTab: 'deployments',
+    builtInTab: 'history',
   },
   {
     id: 'builtin:settings',
@@ -1777,10 +1789,15 @@ watch(
     clearPromotionPoll()
     releaseLoadSerial += 1
     releases.value = []
-    selectedReleaseCommitSHA.value = ''
     releaseLoadState.value = 'idle'
     releaseLoadError.value = null
     releaseRefreshing.value = false
+    historyLoadSerial += 1
+    selectedHistoryCommitSHA.value = ''
+    historyRefreshing.value = false
+    historyRestoreBusy.value = false
+    historyError.value = null
+    historyFeedback.value = null
     publishingLoadSerial += 1
     publishing.value = null
     publishingStateAvailable.value = false
@@ -2357,7 +2374,7 @@ const {
   selectedProjectName: productionProjectName,
 })
 
-const selectedRelease = computed(() => findSelectedRelease(releases.value, selectedReleaseCommitSHA.value))
+const latestDeployableRelease = computed(() => newestDeployableRelease(releases.value))
 const currentProductionRelease = computed(() => releases.value.find((release) => release.live && releaseHasPromotionEvidence(release)) ?? null)
 function canPromoteRelease(release: ProjectRelease | null): boolean {
   return Boolean(
@@ -2368,17 +2385,14 @@ function canPromoteRelease(release: ProjectRelease | null): boolean {
     (productionBinding.value || productionFormValid.value),
   )
 }
-const canPromoteSelectedRelease = computed(() => canPromoteRelease(selectedRelease.value))
-const releaseActionDisabledReason = computed(() => {
+const canPromoteLatestRelease = computed(() => canPromoteRelease(latestDeployableRelease.value))
+const currentBuildActionDisabledReason = computed(() => {
   if (promotionBusy.value) return 'A production deployment is already in progress.'
   if (promotionError.value) return 'Production status is unavailable. Check again before deploying.'
-  if (!selectedRelease.value) {
+  if (!latestDeployableRelease.value) {
     if (releaseLoadState.value === 'loading' && releases.value.length === 0) return 'Loading releases before enabling deployment.'
-    return 'Select a complete release before deploying.'
-  }
-  if (!releaseHasPromotionEvidence(selectedRelease.value)) {
-    const missing = releaseMissingEvidence(selectedRelease.value)
-    return `This release is incomplete${missing.length ? `; missing ${missing.join(', ')}` : ''}.`
+    if (releaseLoadError.value) return 'Current build evidence is unavailable. Refresh publishing status to retry.'
+    return 'The current build does not have a complete image for every component yet.'
   }
   if (!promotion.value) {
     return promotionLoading.value
@@ -2397,12 +2411,31 @@ const canRedeployCurrentProduction = computed(() => Boolean(
   productionFormValid.value,
 ))
 const productionSettingsActionDisabledReason = computed(() => {
-  if (!productionBinding.value) return 'Deploy a release from Deployments before saving production settings.'
+  if (!productionBinding.value) return 'Deploy the current build before saving production settings.'
   if (promotionError.value) return 'Production status is unavailable. Check again before redeploying.'
-  if (!currentProductionRelease.value) return 'The current production release is unavailable. Refresh Deployments to retry.'
+  if (!currentProductionRelease.value) return 'The current production release is unavailable. Refresh Publishing to retry.'
   if (!productionFormValid.value) return 'Fix the highlighted production settings before redeploying.'
   return ''
 })
+
+const historyCommits = computed(() => selected.value?.repository?.commits ?? [])
+const selectedHistoryEntry = computed(() => selectedHistoryCommit(historyCommits.value, selectedHistoryCommitSHA.value))
+const historyRestoreDisabledReason = computed(() => {
+  if (historyRestoreBusy.value) return 'Project files are being restored.'
+  if (messageStreaming.value) return 'Wait for or stop the active assistant run before restoring project files.'
+  if (!selected.value?.repository?.ref) return 'Connect a Git repository before restoring project files.'
+  if (!selected.value?.sourceRevision) return 'Refresh History before restoring project files.'
+  if (!selectedHistoryEntry.value || !repositoryCommitSelectable(selectedHistoryEntry.value)) return 'Select a successful commit to restore.'
+  return ''
+})
+
+watch(
+  historyCommits,
+  (commits) => {
+    selectedHistoryCommitSHA.value = reconcileHistorySelection(selectedHistoryCommitSHA.value, commits)
+  },
+  { immediate: true },
+)
 
 function clearPromotionPoll() {
   if (promotionPollTimer !== undefined) {
@@ -2568,7 +2601,6 @@ async function loadReleases() {
   if (!name) {
     releaseLoadSerial += 1
     releases.value = []
-    selectedReleaseCommitSHA.value = ''
     releaseLoadState.value = 'idle'
     releaseLoadError.value = null
     releaseRefreshing.value = false
@@ -2584,7 +2616,6 @@ async function loadReleases() {
     const nextReleases = await api.listReleases(props.ctx, name)
     if (requestSerial !== releaseLoadSerial || selected.value?.name !== name) return
     releases.value = nextReleases
-    selectedReleaseCommitSHA.value = reconcileReleaseSelection(selectedReleaseCommitSHA.value, nextReleases)
     releaseLoadState.value = 'ready'
   } catch (err) {
     if (requestSerial !== releaseLoadSerial || selected.value?.name !== name) return
@@ -2671,11 +2702,6 @@ async function loadPublishing() {
 function retryPublishing() {
   if (publishingActionBusy.value) return
   void loadPublishing()
-}
-
-function retryReleases() {
-  if (promotionBusy.value) return
-  void loadReleases()
 }
 
 function beginPublishingAction(action: PublishingBusyAction, target: string | null = null) {
@@ -2897,7 +2923,7 @@ async function revokeCurrentProjectAccess(grant: string) {
 
 async function promoteToProd(applyProductionValues = false, requestedRelease: ProjectRelease | null = null) {
   const name = selected.value?.name
-  const release = requestedRelease ?? selectedRelease.value
+  const release = requestedRelease ?? latestDeployableRelease.value
   if (!name || !releaseHasPromotionEvidence(release) || !canPromoteRelease(release)) return
   const commitSHA = release.commitSHA.trim()
   const releaseID = release.releaseID?.trim() ?? ''
@@ -2980,8 +3006,63 @@ onBeforeUnmount(() => {
   clearPublishingPoll()
 })
 
-// hydrateDevelopmentWorkspace replace-loads the workspace from the project's
-// git repository (the durable source of truth) and re-syncs the runtime.
+async function refreshProjectHistory() {
+  const projectName = selected.value?.name
+  if (!projectName || historyRefreshing.value || historyRestoreBusy.value) return
+  const requestSerial = ++historyLoadSerial
+  historyRefreshing.value = true
+  historyError.value = null
+  try {
+    const project = await api.getProject(props.ctx, projectName)
+    if (requestSerial !== historyLoadSerial || selected.value?.name !== projectName) return
+    selected.value = project
+  } catch (err) {
+    if (requestSerial === historyLoadSerial && selected.value?.name === projectName) {
+      historyError.value = err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    if (requestSerial === historyLoadSerial) historyRefreshing.value = false
+  }
+}
+
+async function restoreProjectHistory() {
+  const projectName = selected.value?.name
+  const commit = selectedHistoryEntry.value
+  const commitSHA = commit?.commitSHA?.trim() ?? ''
+  const expectedSourceRevision = selected.value?.sourceRevision ?? 0
+  if (!projectName || !repositoryCommitSelectable(commit) || !commitSHA || !expectedSourceRevision || historyRestoreDisabledReason.value) return
+  const confirmed = await confirmDialog({
+    title: 'Restore project files?',
+    message: `This replaces the current project files with commit ${commitSHA.slice(0, 7)}. Files added since that commit and uncommitted workspace changes will be removed. Git history and production are unchanged.`,
+    confirmLabel: 'Restore files',
+    danger: true,
+  })
+  if (!confirmed || selected.value?.name !== projectName) return
+
+  const requestSerial = ++historyLoadSerial
+  historyRestoreBusy.value = true
+  historyError.value = null
+  historyFeedback.value = null
+  try {
+    const result = await api.restoreWorkspace(props.ctx, projectName, commitSHA, expectedSourceRevision)
+    if (requestSerial !== historyLoadSerial || selected.value?.name !== projectName) return
+    const written = result.written?.length ?? 0
+    const deleted = result.deleted?.length ?? 0
+    const restoredSHA = result.commitSHA?.trim() || commitSHA
+    historyFeedback.value = `Restored project files to ${restoredSHA.slice(0, 7)}: ${written} written, ${deleted} removed. Development sync is queued.`
+    developmentSyncStatus.value = `Restored the development workspace to Git commit ${restoredSHA.slice(0, 7)}.`
+    if (selected.value && result.sourceRevision) selected.value.sourceRevision = result.sourceRevision
+  } catch (err) {
+    if (requestSerial === historyLoadSerial && selected.value?.name === projectName) {
+      historyError.value = err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    if (requestSerial === historyLoadSerial) historyRestoreBusy.value = false
+  }
+}
+
+// hydrateDevelopmentWorkspace overlay-loads files from the project's Git
+// repository and re-syncs the runtime. Exact replacement belongs to History.
 async function hydrateDevelopmentWorkspace() {
   const projectName = selected.value?.name
   if (!projectName || messageStreaming.value || developmentHydrateBusy.value) return
@@ -4676,7 +4757,7 @@ function closeShareDialog() {
   restoreShareModeFromPublication()
   shareDialogOpen.value = false
   void nextTick(() => shareButtonRef.value?.focus())
-  if (!publishingInWorkbench.value && !deploymentsInWorkbench.value) {
+  if (!publishingInWorkbench.value) {
     clearPromotionPoll()
     clearPublishingPoll()
   }
@@ -4860,7 +4941,7 @@ function workbenchTabIcon(tab: WorkbenchTabDescriptor): Component {
   if (tab.kind === 'providers') return PanelRight
   if (tab.kind === 'integrations') return Link2
   if (tab.kind === 'publishing') return Globe
-  if (tab.kind === 'deployments') return GitBranch
+  if (tab.kind === 'history') return GitBranch
   if (tab.kind === 'settings') return Settings2
   if (tab.kind === 'skills') return Plug
   if (tab.kind === 'threads') return MessageSquare
@@ -7114,13 +7195,13 @@ function isMissingCodeConnectionError(value: string | null): boolean {
       </div>
 
       <div
-        v-show="!projectRouteLoading && !projectRouteFailure && activeWorkbenchTab?.kind === 'deployments'"
+        v-show="!projectRouteLoading && !projectRouteFailure && activeWorkbenchTab?.kind === 'history'"
         class="min-h-0 flex-1 overflow-hidden"
         role="tabpanel"
-        :id="activeWorkbenchTab?.kind === 'deployments' ? workbenchTabPanelID(activeWorkbenchTab) : undefined"
-        :aria-labelledby="activeWorkbenchTab?.kind === 'deployments' ? workbenchTabControlID(activeWorkbenchTab) : undefined"
+        :id="activeWorkbenchTab?.kind === 'history' ? workbenchTabPanelID(activeWorkbenchTab) : undefined"
+        :aria-labelledby="activeWorkbenchTab?.kind === 'history' ? workbenchTabControlID(activeWorkbenchTab) : undefined"
       >
-        <div id="app-studio-deployments-host" class="h-full min-h-0 overflow-hidden" />
+        <div id="app-studio-history-host" class="h-full min-h-0 overflow-hidden" />
       </div>
 
       <template v-if="projectRouteLoading">
@@ -7705,7 +7786,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 
   <Teleport defer :to="projectControlSurfaceTarget">
     <div
-      v-if="showSettings || publishingInWorkbench || deploymentsInWorkbench"
+      v-if="showSettings || publishingInWorkbench || historyInWorkbench"
       :class="projectControlSurfaceInWorkbench
         ? 'h-full min-h-0'
         : 'fixed inset-0 z-[100] flex items-center justify-center bg-surface/60 px-4 py-6 backdrop-blur-sm'"
@@ -7717,7 +7798,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           ? 'h-full min-h-0'
           : 'max-h-[90vh] max-w-2xl rounded-xl border border-border-subtle shadow-2xl'"
       >
-        <header v-if="!publishingInWorkbench && !deploymentsInWorkbench" class="flex items-center justify-between gap-3 border-b border-border-subtle bg-surface-overlay/60 px-4 py-3">
+        <header v-if="!publishingInWorkbench && !historyInWorkbench" class="flex items-center justify-between gap-3 border-b border-border-subtle bg-surface-overlay/60 px-4 py-3">
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <Settings2 class="h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" />
@@ -7741,7 +7822,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         <div class="min-h-0 overflow-auto p-4">
           <div class="grid gap-4">
           <nav
-            v-if="settingsProject && !publishingInWorkbench && !deploymentsInWorkbench"
+            v-if="settingsProject && !publishingInWorkbench && !historyInWorkbench"
             class="flex flex-wrap items-center gap-1 border-b border-border-subtle pb-3"
             role="tablist"
             aria-label="Project Settings sections"
@@ -7761,11 +7842,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               {{ pane[1] }}
             </button>
           </nav>
-          <p v-if="!publishingInWorkbench && !deploymentsInWorkbench && projectSettingsPaneAnnouncement" class="sr-only" aria-live="polite">
+          <p v-if="!publishingInWorkbench && !historyInWorkbench && projectSettingsPaneAnnouncement" class="sr-only" aria-live="polite">
             {{ projectSettingsPaneAnnouncement }}
           </p>
           <div
-            v-if="settingsProject && !publishingInWorkbench && !deploymentsInWorkbench && projectSettingsPane === 'project'"
+            v-if="settingsProject && !publishingInWorkbench && !historyInWorkbench && projectSettingsPane === 'project'"
             id="project-settings-pane-project"
             role="tabpanel"
             aria-labelledby="project-settings-tab-project"
@@ -7882,14 +7963,34 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <div>{{ promotionError }}</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
               </div>
+              <template v-else-if="promotion">
               <ReleasePipeline
-                v-else-if="promotion"
                 :pipeline="releasePipeline"
                 :taking-longer="releaseTakingLonger"
                 :needs-attention="releaseArtifactNeedsAttention"
                 :refreshing="publishingRefreshBusy"
                 @refresh="refreshProduction"
               />
+              <div v-if="!productionBinding || !latestDeployableRelease?.live" class="flex flex-wrap items-center justify-between gap-3 border-y border-border-subtle py-3" aria-label="Current build deployment">
+                <div class="min-w-0">
+                  <div class="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Current build</div>
+                  <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[12px] text-text-secondary">
+                    <code class="font-mono">{{ latestDeployableRelease?.commitSHA || releasePipeline.commitSHA || 'No complete build yet' }}</code>
+                    <span v-if="productionBinding">A newer complete build can replace the current production deployment.</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-accent bg-accent px-3 text-[12px] font-semibold text-surface shadow-[0_0_16px_var(--color-accent-glow)] transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                  :disabled="!canPromoteLatestRelease"
+                  @click="promoteToProd(false, latestDeployableRelease)"
+                >
+                  <Loader2 v-if="promotionBusy" class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" :stroke-width="1.75" aria-hidden="true" />
+                  {{ promotionBusy ? 'Deploying…' : productionBinding ? 'Deploy current build' : 'Deploy to production' }}
+                </button>
+                <p v-if="currentBuildActionDisabledReason" class="basis-full text-[11px] leading-4 text-text-muted" role="status">{{ currentBuildActionDisabledReason }}</p>
+              </div>
+              </template>
               <div v-else class="flex min-h-[190px] flex-col items-start justify-center gap-2 rounded-lg border border-danger/30 bg-danger-subtle p-4 text-[12px] text-danger" role="alert">
                 <div>Production status is unavailable. Refresh to retry.</div>
                 <button type="button" class="font-medium underline underline-offset-2" @click="loadPromotion">Retry</button>
@@ -8042,38 +8143,36 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           </section>
 
           <section
-            v-else-if="deploymentsInWorkbench"
-            ref="deploymentsPaneRef"
+            v-else-if="historyInWorkbench"
+            ref="historyPaneRef"
             tabindex="-1"
-            aria-label="Deployments"
+            aria-label="History"
             class="grid gap-3 outline-none"
           >
             <div class="grid gap-1">
-              <h2 class="text-[14px] font-semibold text-text-primary">Deployments</h2>
-              <p class="text-[12px] leading-5 text-text-muted">Review deployable releases and choose a release to update production. Current access and settings stay unchanged.</p>
+              <h2 class="text-[14px] font-semibold text-text-primary">History</h2>
+              <p class="text-[12px] leading-5 text-text-muted">Return the current project filesystem to an earlier Git commit without changing Git history or production.</p>
             </div>
-            <ReleasePicker
-              :releases="releases"
-              :selected-commit="selectedReleaseCommitSHA"
-              :load-state="releaseLoadState"
-              :error="releaseLoadError"
-              :refreshing="releaseRefreshing"
-              :action-busy="promotionBusy"
-              :action-disabled="!canPromoteSelectedRelease"
-              :action-disabled-reason="releaseActionDisabledReason"
-              @select="selectedReleaseCommitSHA = $event"
-              @retry="retryReleases"
-              @refresh="retryReleases"
-              @promote="promoteToProd"
+            <ProjectHistory
+              :repository-ref="selected?.repository?.ref"
+              :repository-status="selected?.repository?.status"
+              :repository-message="selected?.repository?.message"
+              :commits="historyCommits"
+              :selected-commit="selectedHistoryCommitSHA"
+              :refreshing="historyRefreshing"
+              :restore-busy="historyRestoreBusy"
+              :restore-disabled="Boolean(historyRestoreDisabledReason)"
+              :restore-disabled-reason="historyRestoreDisabledReason"
+              :error="historyError || selected?.repository?.commitsError || null"
+              :feedback="historyFeedback"
+              @select="selectedHistoryCommitSHA = $event"
+              @refresh="refreshProjectHistory"
+              @restore="restoreProjectHistory"
             />
-            <div v-if="promotionError" class="rounded-lg border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">
-              <div>{{ promotionError }}</div>
-              <button type="button" class="mt-1 font-medium underline underline-offset-2" @click="loadPromotion">Retry deployment status</button>
-            </div>
           </section>
 
           <form
-            v-if="!publishingInWorkbench && !deploymentsInWorkbench && (!settingsProject || projectSettingsPane === 'model')"
+            v-if="!publishingInWorkbench && !historyInWorkbench && (!settingsProject || projectSettingsPane === 'model')"
             id="project-settings-pane-model"
             role="tabpanel"
             :aria-labelledby="settingsProject ? 'project-settings-tab-model' : undefined"
@@ -8249,7 +8348,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             </div>
           </form>
 
-          <footer v-if="settingsProject && !publishingInWorkbench && !deploymentsInWorkbench && projectSettingsPane === 'project'" class="flex flex-wrap items-center justify-between gap-3 border-t border-border-subtle pt-4">
+          <footer v-if="settingsProject && !publishingInWorkbench && !historyInWorkbench && projectSettingsPane === 'project'" class="flex flex-wrap items-center justify-between gap-3 border-t border-border-subtle pt-4">
             <div class="min-w-0">
               <div class="text-[12px] font-medium text-text-primary">Delete project</div>
               <p class="mt-1 text-[12px] text-text-muted">

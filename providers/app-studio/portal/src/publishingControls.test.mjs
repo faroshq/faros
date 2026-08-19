@@ -25,10 +25,10 @@ test('exposes Publishing as its own workbench tab and keeps it out of Project Se
   assert.match(app, /title: 'Publishing'/)
   assert.match(app, /builtInTab: 'publishing'/)
   assert.match(app, /activeWorkbenchTab\?\.kind === 'publishing'/)
-  assert.match(app, /id: 'builtin:deployments'/)
-  assert.match(app, /title: 'Deployments'/)
-  assert.match(app, /builtInTab: 'deployments'/)
-  assert.match(app, /activeWorkbenchTab\?\.kind === 'deployments'/)
+  assert.match(app, /id: 'builtin:history'/)
+  assert.match(app, /title: 'History'/)
+  assert.match(app, /builtInTab: 'history'/)
+  assert.match(app, /activeWorkbenchTab\?\.kind === 'history'/)
 })
 
 test('closes project settings before the landing route can render them as an LLM modal', () => {
@@ -46,17 +46,17 @@ test('closes project settings before the landing route can render them as an LLM
   assert.match(app.slice(openStart, openEnd), /showSettings\.value = true/)
 })
 
-test('defers project controls until the restored Settings, Publishing, or Deployments host exists', () => {
+test('defers project controls until the restored Settings, Publishing, or History host exists', () => {
   assert.match(app, /<Teleport defer :to="projectControlSurfaceTarget">/)
   assert.match(app, /if \(publishingInWorkbench\.value\) return '#app-studio-publishing-host'/)
-  assert.match(app, /if \(deploymentsInWorkbench\.value\) return '#app-studio-deployments-host'/)
+  assert.match(app, /if \(historyInWorkbench\.value\) return '#app-studio-history-host'/)
   assert.match(app, /if \(settingsInWorkbench\.value\) return '#app-studio-project-settings-host'/)
   const hostStart = app.indexOf('v-show="!projectRouteLoading && !projectRouteFailure && activeWorkbenchTab?.kind === \'settings\'"')
   const loadingPanelStart = app.indexOf('<template v-if="projectRouteLoading">', hostStart)
   assert.ok(hostStart >= 0 && loadingPanelStart > hostStart)
   assert.match(app.slice(hostStart, loadingPanelStart), /id="app-studio-project-settings-host"/)
   assert.match(app.slice(hostStart, loadingPanelStart), /id="app-studio-publishing-host"/)
-  assert.match(app.slice(hostStart, loadingPanelStart), /id="app-studio-deployments-host"/)
+  assert.match(app.slice(hostStart, loadingPanelStart), /id="app-studio-history-host"/)
   assert.doesNotMatch(app, /v-else-if="activeWorkbenchTab\?\.kind === 'settings'"/)
 })
 
@@ -82,9 +82,9 @@ test('keeps the plus in the scrolling tab strip and exposes a solid Share anchor
 
 test('keeps Publishing focused on deployment and technical details', () => {
   const productionStart = app.indexOf('ref="publishingPaneRef"')
-  const deploymentsStart = app.indexOf('v-else-if="deploymentsInWorkbench"', productionStart)
-  const productionEnd = deploymentsStart
-  assert.ok(productionStart >= 0 && deploymentsStart > productionStart && productionEnd > productionStart)
+  const historyStart = app.indexOf('v-else-if="historyInWorkbench"', productionStart)
+  const productionEnd = historyStart
+  assert.ok(productionStart >= 0 && historyStart > productionStart && productionEnd > productionStart)
   const pane = app.slice(productionStart, productionEnd)
   assert.match(pane, /aria-label="Production overview"/)
   assert.match(pane, /aria-label="Release evidence"/)
@@ -122,35 +122,41 @@ test('keeps Publishing focused on deployment and technical details', () => {
   assert.match(pane, /Saving settings redeploys the current production release\. It does not change production access\./)
   assert.match(pane, /aria-label="Current production release"/)
   assert.match(pane, /@click="redeployCurrentProduction"/)
+  assert.match(pane, /aria-label="Current build deployment"/)
+  assert.match(pane, /@click="promoteToProd\(false, latestDeployableRelease\)"/)
+  assert.match(pane, /Deploy to production/)
   assert.match(pane, /:disabled="promotionBusy \|\| !promotionValuesDirty \|\| !canRedeployCurrentProduction"/)
   assert.doesNotMatch(pane, /<ReleasePicker/)
   assert.doesNotMatch(pane, /<textarea[^>]*promotionValuesText/)
 })
 
-test('keeps release history and rollback actions in Deployments', () => {
-  const deploymentsStart = app.indexOf('v-else-if="deploymentsInWorkbench"')
-  const deploymentsEnd = app.indexOf('v-if="!publishingInWorkbench && !deploymentsInWorkbench', deploymentsStart)
-  assert.ok(deploymentsStart >= 0 && deploymentsEnd > deploymentsStart)
-  const pane = app.slice(deploymentsStart, deploymentsEnd)
-  assert.match(pane, /aria-label="Deployments"/)
-  assert.match(pane, />Deployments<\/h2>/)
-  assert.match(pane, /<ReleasePicker[\s\S]*:releases="releases"[\s\S]*@promote="promoteToProd"/)
-  assert.match(pane, /:action-disabled-reason="releaseActionDisabledReason"/)
-  assert.match(pane, /Review deployable releases and choose a release to update production\./)
+test('keeps Git filesystem restoration in History and out of production promotion', () => {
+  const historyStart = app.indexOf('v-else-if="historyInWorkbench"')
+  const historyEnd = app.indexOf('v-if="!publishingInWorkbench && !historyInWorkbench', historyStart)
+  assert.ok(historyStart >= 0 && historyEnd > historyStart)
+  const pane = app.slice(historyStart, historyEnd)
+  assert.match(pane, /aria-label="History"/)
+  assert.match(pane, />History<\/h2>/)
+  assert.match(pane, /<ProjectHistory[\s\S]*:commits="historyCommits"[\s\S]*@restore="restoreProjectHistory"/)
+  assert.match(pane, /Return the current project filesystem to an earlier Git commit/)
+  assert.doesNotMatch(pane, /ReleasePicker|promoteToProd|production images|releaseID/)
+  assert.match(app, /const expectedSourceRevision = selected\.value\?\.sourceRevision \?\? 0/)
+  assert.match(app, /api\.restoreWorkspace\(props\.ctx, projectName, commitSHA, expectedSourceRevision\)/)
+  assert.match(app, /if \(selected\.value && result\.sourceRevision\) selected\.value\.sourceRevision = result\.sourceRevision/)
 })
 
 test('redeploying settings is bound to the current production release', () => {
   assert.match(app, /const currentProductionRelease = computed\(\(\) => releases\.value\.find\(\(release\) => release\.live && releaseHasPromotionEvidence\(release\)\) \?\? null\)/)
   assert.match(app, /void promoteToProd\(true, currentProductionRelease\.value\)/)
   assert.match(app, /const canRedeployCurrentProduction = computed\(\(\) => Boolean\([\s\S]*currentProductionRelease\.value[\s\S]*productionBinding\.value/)
-  assert.match(app, /The current production release is unavailable\. Refresh Deployments to retry\./)
+  assert.match(app, /The current production release is unavailable\. Refresh Publishing to retry\./)
   const promoteStart = app.indexOf('async function promoteToProd(')
   const promoteEnd = app.indexOf('\n\nfunction redeployCurrentProduction', promoteStart)
   assert.ok(promoteStart >= 0 && promoteEnd > promoteStart)
   const promote = app.slice(promoteStart, promoteEnd)
-  assert.match(promote, /const release = requestedRelease \?\? selectedRelease\.value/)
+  assert.match(promote, /const release = requestedRelease \?\? latestDeployableRelease\.value/)
   assert.match(promote, /if \(!name \|\| !releaseHasPromotionEvidence\(release\) \|\| !canPromoteRelease\(release\)\) return/)
-  assert.doesNotMatch(promote, /canPromoteSelectedRelease\.value/)
+  assert.doesNotMatch(promote, /selectedHistory|canPromoteSelectedRelease\.value/)
 })
 
 test('renders release progress as an announced five-stage pipeline with actionable verification evidence', () => {
@@ -309,7 +315,8 @@ test('restores the Share trigger after confirmed disable and uses one production
   assert.match(unpublish, /publishingActionBusy\.value = false[\s\S]*if \(disableSucceeded\) closeShareDialog\(\)/)
   assert.doesNotMatch(unpublish, /shareDialogOpen\.value = false/)
 
-  assert.match(app, /const productionSurfaceActive = computed\(\(\) => publishingInWorkbench\.value \|\| deploymentsInWorkbench\.value \|\| shareDialogOpen\.value\)/)
+  assert.match(app, /const productionSurfaceActive = computed\(\(\) => publishingInWorkbench\.value \|\| shareDialogOpen\.value\)/)
+  assert.doesNotMatch(app, /productionSurfaceActive[^\n]*historyInWorkbench/)
   assert.match(app, /if \(releasePipeline\.value\.transitional\)/)
   assert.match(app, /releaseTakingLonger\.value \? PROMOTION_POLL_MAX_DELAY_MS : promotionPollDelay\(0\)/)
   const watcherStart = app.indexOf('watch(\n  () => [productionSurfaceActive.value')
@@ -339,7 +346,7 @@ test('restores the Share trigger after confirmed disable and uses one production
   const closeEnd = app.indexOf('function openPublishingFromShare', closeStart)
   assert.ok(closeStart >= 0 && closeEnd > closeStart)
   const closeHandler = app.slice(closeStart, closeEnd)
-  assert.match(closeHandler, /shareDialogOpen\.value = false[\s\S]*if \(!publishingInWorkbench\.value && !deploymentsInWorkbench\.value\)/)
+  assert.match(closeHandler, /shareDialogOpen\.value = false[\s\S]*if \(!publishingInWorkbench\.value\)/)
   assert.doesNotMatch(closeHandler, /kind !== 'production'/)
 })
 
