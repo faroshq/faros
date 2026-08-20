@@ -299,6 +299,65 @@ local_resource(
     labels=['providers-databricks'],
 )
 
+# --- providers-secrets (external secret stores -> synced Secrets) ---
+local_resource(
+    'secrets',
+    cmd='make build-secrets-provider',
+    serve_cmd='make run-provider-secrets',
+    deps=[
+        'providers/secrets/main.go',
+        'providers/secrets/assets.go',
+        'providers/secrets/controller_manager.go',
+        'providers/secrets/heartbeat.go',
+        'providers/secrets/init_cmd.go',
+        'providers/secrets/apis',
+        'providers/secrets/backend',
+        'providers/secrets/controller',
+        'providers/secrets/install',
+        'providers/secrets/scheme',
+        'providers/secrets/portal/src',
+        'providers/secrets/portal/public',
+        'providers/secrets/portal/package.json',
+        'providers/secrets/portal/vite.config.ts',
+        'providers/secrets/go.mod',
+        'providers/secrets/go.sum',
+        '.kcp/secrets-runtime.kubeconfig',
+    ],
+    resource_deps=['hub'],
+    readiness_probe=probe(
+        period_secs=5,
+        http_get=http_get_action(port=8090, path='/healthz'),
+    ),
+    labels=['providers-secrets'],
+)
+
+local_resource(
+    'secrets-register',
+    cmd='make install-provider-secrets',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub'],
+    labels=['providers-secrets'],
+)
+
+local_resource(
+    'secrets-init',
+    cmd='make init-provider-secrets',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub', 'secrets-register'],
+    labels=['providers-secrets'],
+)
+
+local_resource(
+    'secrets-unregister',
+    cmd='make uninstall-provider-secrets',
+    trigger_mode=TRIGGER_MODE_MANUAL,
+    auto_init=False,
+    resource_deps=['hub'],
+    labels=['providers-secrets'],
+)
+
 # --- providers-app-studio ---
 local_resource(
     'app-studio-preview-console-key',

@@ -1,6 +1,6 @@
 .PHONY: sync-portalkit verify-portalkit
 .PHONY: build-access-proxy docker-build-access-proxy
-.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
+.PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-vibe-studio-provider build-vibe-studio-provider-portal vibe-studio-db-up vibe-studio-db-down run-provider-vibe-studio install-provider-vibe-studio init-provider-vibe-studio uninstall-provider-vibe-studio build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks test-databricks-provider-chart build-secrets-provider build-secrets-provider-portal codegen-secrets-provider run-provider-secrets install-provider-secrets init-provider-secrets uninstall-provider-secrets dev-kro-up dev-kro-down dev-kro-seed e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
 
 BINDIR ?= bin
 GOFLAGS ?=
@@ -218,6 +218,12 @@ build-databricks-provider-portal: ## Build the Databricks provider's micro-front
 build-databricks-provider: build-databricks-provider-portal ## Build the Databricks provider binary (portal embedded)
 	cd providers/databricks && go build $(GOFLAGS) -ldflags "-X main.buildVersion=$(VERSION)" -o $(CURDIR)/$(BINDIR)/databricks-provider .
 
+build-secrets-provider-portal: ## Build the secrets provider's micro-frontend (Vite + Vue → portal/dist)
+	cd providers/secrets/portal && npm install --no-audit --no-fund && npm run build
+
+build-secrets-provider: build-secrets-provider-portal ## Build the secrets provider binary (portal embedded)
+	cd providers/secrets && go build $(GOFLAGS) -o $(CURDIR)/$(BINDIR)/secrets-provider .
+
 test-databricks-provider-chart: ## Lint and render both supported Databricks bootstrap modes
 	@set -eu; \
 		tmp_parent="$${CODEX_BUILD_CACHE_ROOT:-/var/tmp/codex-build}"; \
@@ -332,6 +338,19 @@ codegen-databricks-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for 
 	done
 	./hack/ensure-boilerplate.sh
 
+codegen-secrets-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for the secrets provider's local API (+ manifest + chart schemas)
+	@mkdir -p providers/secrets/config/crds providers/secrets/config/kcp providers/secrets/deploy/chart/files/schemas
+	cd providers/secrets && \
+		$(CURDIR)/$(CONTROLLER_GEN) object paths="./apis/..." && \
+		$(CURDIR)/$(CONTROLLER_GEN) crd paths="./apis/..." \
+			output:crd:artifacts:config=$(CURDIR)/providers/secrets/config/crds
+	./hack/apigen.sh --input-dir providers/secrets/config/crds --output-dir providers/secrets/config/kcp
+	@for r in secretstores syncedsecrets; do \
+		cp providers/secrets/config/kcp/apiresourceschema-$$r.secrets.faros.sh.yaml \
+		   providers/secrets/deploy/chart/files/schemas/$$r.secrets.faros.sh.yaml; \
+	done
+	./hack/ensure-boilerplate.sh
+
 test:
 	go test $(shell go list ./... | grep -v '/test/e2e')
 
@@ -358,7 +377,7 @@ verify-boilerplate: ## Verify license boilerplate on all Go files
 crds: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Generate CRDs and kcp APIResourceSchemas
 	./hack/update-codegen-crds.sh
 
-codegen: crds codegen-code-provider codegen-app-studio-provider codegen-databricks-provider codegen-infrastructure-provider boilerplate ## Generate all (CRDs + kcp resources + provider schemas + boilerplate)
+codegen: crds codegen-code-provider codegen-app-studio-provider codegen-databricks-provider codegen-infrastructure-provider codegen-secrets-provider boilerplate ## Generate all (CRDs + kcp resources + provider schemas + boilerplate)
 
 verify-codegen: codegen ## Verify codegen is up to date
 	@if ! git diff --quiet HEAD; then \
@@ -2156,6 +2175,58 @@ init-provider-databricks: build-databricks-provider ## Bootstrap Databricks APIE
 	DATABRICKS_WORKSPACE_PATH=$(DATABRICKS_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/databricks/deploy/chart/files/schemas \
 		$(BINDIR)/databricks-provider init
+
+# --- Provider Secrets (local dev) ---
+SECRETS_PORT ?= 8090
+SECRETS_MANIFEST ?= providers/secrets/manifest.yaml
+SECRETS_PROVIDER_MANIFEST ?= providers/secrets/provider.yaml
+SECRETS_WORKSPACE_PATH ?= root:faros:providers:secrets
+SECRETS_RUNTIME_KUBECONFIG ?= $(KCP_DATA_DIR)/secrets-runtime.kubeconfig
+
+run-provider-secrets: build-secrets-provider ## Run the secrets provider (requires: make run-hub-embedded-static + make install-provider-secrets)
+	@echo "Starting secrets provider on :$(SECRETS_PORT) (hub $(KROMC_HUB_URL))"
+	PORT=$(SECRETS_PORT) \
+	FAROS_HUB_URL=$(KROMC_HUB_URL) \
+	FAROS_HUB_TOKEN=$(KROMC_TOKEN) \
+	FAROS_HUB_INSECURE=true \
+	FAROS_PROVIDER_NAME=secrets \
+	FAROS_PROVIDER_KUBECONFIG=$$( [ -f "$(SECRETS_RUNTIME_KUBECONFIG)" ] && echo "$(SECRETS_RUNTIME_KUBECONFIG)" ) \
+		$(BINDIR)/secrets-provider serve
+
+install-provider-secrets: ## Apply the secrets Provider + CatalogEntry into root:faros:providers
+	@test -f $(KROMC_KCP_KUBECONFIG) || { \
+		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
+		echo "start the hub first with: make run-hub-embedded-static"; \
+		exit 1; \
+	}
+	kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
+		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
+		--insecure-skip-tls-verify \
+		apply -f $(SECRETS_PROVIDER_MANIFEST) -f $(SECRETS_MANIFEST)
+
+uninstall-provider-secrets: ## Delete the secrets CatalogEntry + Provider
+	-kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) \
+		--server=$(KROMC_KCP_SERVER)/clusters/root:faros:system:providers \
+		--insecure-skip-tls-verify \
+		delete -f $(SECRETS_MANIFEST) -f $(SECRETS_PROVIDER_MANIFEST)
+
+init-provider-secrets: build-secrets-provider ## Bootstrap secrets APIExport + write dev provider kubeconfig
+	@test -f $(KROMC_KCP_KUBECONFIG) || { \
+		echo "kubeconfig not found at $(KROMC_KCP_KUBECONFIG)"; \
+		echo "start the hub first with: make run-hub-embedded-static"; \
+		exit 1; \
+	}
+	@mkdir -p $(KCP_DATA_DIR)
+	@echo "Writing dev kubeconfig $(SECRETS_RUNTIME_KUBECONFIG) (workspace $(SECRETS_WORKSPACE_PATH), server $(KROMC_KCP_SERVER))"
+	@kubectl --kubeconfig=$(KROMC_KCP_KUBECONFIG) config view --minify --flatten > $(SECRETS_RUNTIME_KUBECONFIG)
+	@CL=$$(kubectl --kubeconfig=$(SECRETS_RUNTIME_KUBECONFIG) config view -o jsonpath='{.clusters[0].name}'); \
+		kubectl --kubeconfig=$(SECRETS_RUNTIME_KUBECONFIG) config set-cluster "$$CL" \
+			--server=$(KROMC_KCP_SERVER)/clusters/$(SECRETS_WORKSPACE_PATH) \
+			--insecure-skip-tls-verify=true >/dev/null
+	FAROS_PROVIDER_KUBECONFIG=$(SECRETS_RUNTIME_KUBECONFIG) \
+	SECRETS_WORKSPACE_PATH=$(SECRETS_WORKSPACE_PATH) \
+	FAROS_SCHEMAS_DIR=$(CURDIR)/providers/secrets/deploy/chart/files/schemas \
+		$(BINDIR)/secrets-provider init
 
 # --- Experimental: run the infrastructure provider as a POD (init-container
 #     bootstrap) instead of a host binary. Exercises the full hub-minted
