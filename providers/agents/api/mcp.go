@@ -115,20 +115,24 @@ type listAgentsOutput struct {
 
 // agentSettings is the full editable view get_agent and update_agent return.
 type agentSettings struct {
-	Name            string                         `json:"name"`
-	DisplayName     string                         `json:"displayName,omitempty"`
-	Description     string                         `json:"description,omitempty"`
-	SystemPrompt    string                         `json:"systemPrompt,omitempty"`
-	Autonomy        string                         `json:"autonomy,omitempty"`
-	Models          map[string]string              `json:"models,omitempty"`
-	ModelFallbacks  []string                       `json:"modelFallbacks,omitempty"`
-	Delegates       []string                       `json:"delegates,omitempty"`
-	Channels        []channelInput                 `json:"channels,omitempty"`
-	Tools           agentsv1alpha1.AgentToolPolicy `json:"tools,omitzero"`
-	Limits          agentsv1alpha1.AgentLimits     `json:"limits,omitzero"`
-	Budget          *agentsv1alpha1.AgentBudget    `json:"budget,omitempty"`
-	Phase           string                         `json:"phase,omitempty"`
-	SuspendedReason string                         `json:"suspendedReason,omitempty"`
+	Name           string                         `json:"name"`
+	DisplayName    string                         `json:"displayName,omitempty"`
+	Description    string                         `json:"description,omitempty"`
+	SystemPrompt   string                         `json:"systemPrompt,omitempty"`
+	Autonomy       string                         `json:"autonomy,omitempty"`
+	Models         map[string]string              `json:"models,omitempty"`
+	ModelFallbacks []string                       `json:"modelFallbacks,omitempty"`
+	Delegates      []string                       `json:"delegates,omitempty"`
+	Channels       []channelInput                 `json:"channels,omitempty"`
+	Tools          agentsv1alpha1.AgentToolPolicy `json:"tools,omitzero"`
+	Limits         agentsv1alpha1.AgentLimits     `json:"limits,omitzero"`
+	Budget         *agentsv1alpha1.AgentBudget    `json:"budget,omitempty"`
+	// Annotations exposes only server-owned create provenance. Arbitrary
+	// annotations are not reflected because a REST caller could have put
+	// secrets there.
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	Phase           string            `json:"phase,omitempty"`
+	SuspendedReason string            `json:"suspendedReason,omitempty"`
 }
 
 func settingsView(a *agentsv1alpha1.Agent) agentSettings {
@@ -149,9 +153,36 @@ func settingsView(a *agentsv1alpha1.Agent) agentSettings {
 		Tools:           a.Spec.Tools,
 		Limits:          a.Spec.Limits,
 		Budget:          a.Spec.Budget,
+		Annotations:     safeAgentAnnotations(a.Annotations),
 		Phase:           a.Status.Phase,
 		SuspendedReason: a.Status.SuspendedReason,
 	}
+}
+
+func safeAgentAnnotations(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, 9)
+	for _, key := range []string{
+		AgentCreatedViaAnnotation,
+		AgentProvenanceUserAnnotation,
+		AgentProvenanceOrgAnnotation,
+		AgentProvenanceWorkspaceAnnotation,
+		AgentProvenanceSourceAnnotation,
+		AgentProvenanceProjectNameAnnotation,
+		AgentProvenanceProjectUIDAnnotation,
+		AgentProvenanceRunIDAnnotation,
+		AgentProvenanceToolCallIDAnnotation,
+	} {
+		if value := strings.TrimSpace(in[key]); value != "" {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type getAgentInput struct {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,27 @@ import (
 
 // chatHistoryLimit bounds how many prior messages are replayed into a turn.
 const chatHistoryLimit = 40
+
+// AgentCreateMaxToolTurns and AgentCreateMaxTimeoutSeconds are the safety
+// ceilings for the narrow MCP create surface. Updates retain the broader
+// portal contract, but a caller creating an Agent through App Studio must not
+// be able to create an unbounded run.
+const (
+	AgentCreateMaxToolTurns              int32 = 32
+	AgentCreateMaxTimeoutSeconds         int32 = 3600
+	AgentCreateMaxBudgetTokens           int64 = 100000
+	AgentCreateMaxBudgetUSD                    = 25.0
+	AgentCreatedViaAnnotation                  = "agents.faros.sh/created-via"
+	AgentProvenanceUserAnnotation              = "agents.faros.sh/provenance-user"
+	AgentProvenanceOrgAnnotation               = "agents.faros.sh/provenance-org"
+	AgentProvenanceWorkspaceAnnotation         = "agents.faros.sh/provenance-workspace"
+	AgentProvenanceSourceAnnotation            = "agents.faros.sh/provenance-source"
+	AgentProvenanceProjectNameAnnotation       = "agents.faros.sh/provenance-project-name"
+	AgentProvenanceProjectUIDAnnotation        = "agents.faros.sh/provenance-project-uid"
+	AgentProvenanceRunIDAnnotation             = "agents.faros.sh/provenance-run-id"
+	AgentProvenanceToolCallIDAnnotation        = "agents.faros.sh/provenance-tool-call-id"
+	maxAgentProvenanceBytes                    = 512
+)
 
 // writeResourceError maps a tenant-API error onto an HTTP status. Validation
 // and permission failures keep their own class — mapping them all to 502 made
@@ -114,6 +136,11 @@ type createAgentRequest struct {
 	// stays undiscovered. Unknown names are dropped; core is always granted.
 	InteractiveFamilies []string `json:"interactiveFamilies,omitempty"`
 	BackgroundFamilies  []string `json:"backgroundFamilies,omitempty"`
+	// MaxToolTurns and TimeoutSeconds are bounded run limits. Pointers retain
+	// the distinction between an omitted field and an explicit provider-default
+	// zero for the MCP create surface.
+	MaxToolTurns   *int32 `json:"maxToolTurns,omitempty"`
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // channelInput is the REST shape of an agent channel binding.
@@ -216,25 +243,83 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyAgentCreate validates the request and creates the agent. Shared by the
-// REST handler and the MCP create_agent tool.
+// REST handler and the MCP create_agent tool. The typed tenant create path is
+// create-only; same-name calls return AlreadyExists instead of applying over
+// the existing object.
 func (s *Server) applyAgentCreate(ctx context.Context, c *agentsclient.Client, req *createAgentRequest) (*agentsv1alpha1.Agent, error) {
+	return s.applyAgentCreateWithOptions(ctx, c, req, agentCreateOptions{})
+}
+
+// agentCreateOptions is deliberately private: callers cannot request the
+// server-owned MCP marker or arbitrary annotations through a request body.
+type agentCreateOptions struct {
+	requireModelCredential bool
+	createdVia             string
+	provenance             map[string]string
+}
+
+func (s *Server) applyMCPAgentCreate(ctx context.Context, c *agentsclient.Client, req *createAgentRequest, provenance map[string]string) (*agentsv1alpha1.Agent, error) {
+	return s.applyAgentCreateWithOptions(ctx, c, req, agentCreateOptions{
+		requireModelCredential: true,
+		createdVia:             "mcp",
+		provenance:             provenance,
+	})
+}
+
+func (s *Server) applyAgentCreateWithOptions(ctx context.Context, c *agentsclient.Client, req *createAgentRequest, opts agentCreateOptions) (*agentsv1alpha1.Agent, error) {
+	if req == nil {
+		return nil, errBadRequest("request is required")
+	}
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return nil, errBadRequest("name is required")
 	}
 	if strings.TrimSpace(req.DisplayName) == "" {
 		req.DisplayName = req.Name
+	} else {
+		req.DisplayName = strings.TrimSpace(req.DisplayName)
+	}
+	autonomy, err := normalizeAgentAutonomy(req.Autonomy)
+	if err != nil {
+		return nil, err
+	}
+	if req.BudgetTokens < 0 {
+		return nil, errBadRequest("budgetTokens must be non-negative")
+	}
+	budgetUSDValue := 0.0
+	if budgetUSD := strings.TrimSpace(req.BudgetUSD); budgetUSD != "" {
+		value, err := strconv.ParseFloat(budgetUSD, 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return nil, errBadRequest("budgetUSD must be a non-negative decimal")
+		}
+		budgetUSDValue = value
+		req.BudgetUSD = budgetUSD
+	}
+	if opts.requireModelCredential && (req.BudgetTokens > AgentCreateMaxBudgetTokens || budgetUSDValue > AgentCreateMaxBudgetUSD) {
+		return nil, errBadRequest(fmt.Sprintf("MCP agent budgets must be at most %d tokens and $%.2f per month", AgentCreateMaxBudgetTokens, AgentCreateMaxBudgetUSD))
+	}
+	if err := validateAgentCreateLimits(req); err != nil {
+		return nil, err
+	}
+	cred := strings.TrimSpace(req.ModelCredential)
+	if opts.requireModelCredential {
+		if cred == "" {
+			return nil, errBadRequest("modelCredential is required and must name an existing model credential")
+		}
+		if err := requireExistingModelCredential(ctx, c, cred); err != nil {
+			return nil, err
+		}
 	}
 	a := &agentsv1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: req.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: req.Name, Annotations: agentCreateAnnotations(opts)},
 		Spec: agentsv1alpha1.AgentSpec{
 			DisplayName:  req.DisplayName,
 			Description:  req.Description,
 			SystemPrompt: req.SystemPrompt,
-			Autonomy:     req.Autonomy,
+			Autonomy:     autonomy,
 		},
 	}
-	if cred := strings.TrimSpace(req.ModelCredential); cred != "" {
+	if cred != "" {
 		a.Spec.Models = map[string]string{"chat": cred}
 	}
 	if fb := trimmedList(req.ModelFallbacks); len(fb) > 0 {
@@ -242,6 +327,12 @@ func (s *Server) applyAgentCreate(ctx context.Context, c *agentsclient.Client, r
 	}
 	if req.BudgetTokens > 0 || strings.TrimSpace(req.BudgetUSD) != "" {
 		a.Spec.Budget = &agentsv1alpha1.AgentBudget{Window: "month", TokenLimit: req.BudgetTokens, USDLimit: strings.TrimSpace(req.BudgetUSD)}
+	}
+	if req.MaxToolTurns != nil {
+		a.Spec.Limits.MaxToolTurns = *req.MaxToolTurns
+	}
+	if req.TimeoutSeconds != nil {
+		a.Spec.Limits.TimeoutSeconds = *req.TimeoutSeconds
 	}
 	if len(req.InteractiveFamilies) > 0 {
 		a.Spec.Tools.Interactive.Families = normalizeFamilies(req.InteractiveFamilies)
@@ -260,6 +351,82 @@ func (s *Server) applyAgentCreate(ctx context.Context, c *agentsclient.Client, r
 		a.Spec.Channels = chans
 	}
 	return c.Agents().Create(ctx, a, metav1.CreateOptions{})
+}
+
+func validateAgentCreateLimits(req *createAgentRequest) error {
+	if req.MaxToolTurns != nil && (*req.MaxToolTurns < 0 || *req.MaxToolTurns > AgentCreateMaxToolTurns) {
+		return errBadRequest(fmt.Sprintf("maxToolTurns must be between 0 and %d", AgentCreateMaxToolTurns))
+	}
+	if req.TimeoutSeconds != nil && (*req.TimeoutSeconds < 0 || *req.TimeoutSeconds > AgentCreateMaxTimeoutSeconds) {
+		return errBadRequest(fmt.Sprintf("timeoutSeconds must be between 0 and %d", AgentCreateMaxTimeoutSeconds))
+	}
+	return nil
+}
+
+func requireExistingModelCredential(ctx context.Context, c *agentsclient.Client, name string) error {
+	profile, err := llm.LoadCredential(ctx, c, name)
+	if err != nil {
+		if apierrors.IsNotFound(err) || errors.Is(err, llm.ErrNotConfigured) {
+			return errBadRequest(fmt.Sprintf("model credential %q does not exist or is not configured", name))
+		}
+		return err
+	}
+	return validateModelCredentialProfile(name, profile)
+}
+
+func normalizeAgentAutonomy(value string) (string, error) {
+	autonomy := strings.TrimSpace(value)
+	if autonomy == "" {
+		return agentsv1alpha1.AutonomyAsk, nil
+	}
+	switch autonomy {
+	case agentsv1alpha1.AutonomySuggest, agentsv1alpha1.AutonomyAsk, agentsv1alpha1.AutonomyAuto:
+		return autonomy, nil
+	default:
+		return "", errBadRequest("autonomy must be suggest, ask, or auto")
+	}
+}
+
+func validateModelCredentialProfile(name string, profile llm.Profile) error {
+	if strings.TrimSpace(profile.Model) == "" || strings.TrimSpace(profile.APIKey) == "" {
+		return errBadRequest(fmt.Sprintf("model credential %q does not have a usable model and API key", name))
+	}
+	return nil
+}
+
+func agentCreateAnnotations(opts agentCreateOptions) map[string]string {
+	annotations := map[string]string{}
+	if strings.TrimSpace(opts.createdVia) != "" {
+		annotations[AgentCreatedViaAnnotation] = strings.TrimSpace(opts.createdVia)
+	}
+	for header, key := range map[string]string{
+		"X-Faros-User":      AgentProvenanceUserAnnotation,
+		"X-Faros-Org":       AgentProvenanceOrgAnnotation,
+		"X-Faros-Workspace": AgentProvenanceWorkspaceAnnotation,
+	} {
+		value := strings.TrimSpace(opts.provenance[header])
+		if value == "" || len(value) > maxAgentProvenanceBytes || strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			continue
+		}
+		annotations[key] = value
+	}
+	for field, key := range map[string]string{
+		"source":      AgentProvenanceSourceAnnotation,
+		"projectName": AgentProvenanceProjectNameAnnotation,
+		"projectUID":  AgentProvenanceProjectUIDAnnotation,
+		"runID":       AgentProvenanceRunIDAnnotation,
+		"toolCallID":  AgentProvenanceToolCallIDAnnotation,
+	} {
+		value := strings.TrimSpace(opts.provenance[field])
+		if value == "" || len(value) > maxAgentProvenanceBytes || strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			continue
+		}
+		annotations[key] = value
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
 }
 
 // knownToolFamilies are the grantable built-in families (core is always on).

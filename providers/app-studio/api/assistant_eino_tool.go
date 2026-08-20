@@ -192,6 +192,13 @@ func projectAssistantTurnPolicyCanUseMCP(policy projectAssistantTurnPolicy, _ pr
 		projectToolInfrastructureProvision,
 		projectToolDatabricksListTables,
 		projectToolDatabricksDescribeTable,
+		projectToolAgentsListAgents,
+		projectToolAgentsGetAgent,
+		projectToolAgentsListModelCredentials,
+		projectToolAgentsListToolFamilies,
+		projectToolAgentsListToolsets,
+		projectToolAgentsListConnections,
+		projectToolAgentsCreateAgent,
 	} {
 		spec, ok := projectAssistantMCPToolSpec(projectMCPTool{Name: name})
 		if ok && policy.AllowsTool(spec) {
@@ -342,6 +349,20 @@ func (t projectEinoAssistantTool) InvokableRun(ctx context.Context, argumentsInJ
 		reason := "invalid arguments: " + truncateProjectToolInfo(argumentErr.Error())
 		failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
 		return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
+	}
+	if projectAssistantAgentsCreateTool(spec.Name) {
+		sanitized, sanitizeErr := projectAssistantSanitizeAgentsCreateArguments(args, projectAssistantToolCallRequest{
+			Project:        t.req.Project,
+			AssistantRunID: projectAssistantRunID(t.req),
+			ToolCallID:     callID,
+		})
+		if sanitizeErr != nil {
+			reason := "invalid create_agent arguments: " + truncateProjectToolInfo(sanitizeErr.Error())
+			failed := t.finishFailedToolCall(callID, spec.Name, argumentsInJSON, reason)
+			return t.finishDurableToolFailureForModel(ctx, requestDecision, failed, errors.New(reason))
+		}
+		args = sanitized
+		argumentsInJSON = projectEinoToolArgumentsString(args)
 	}
 	if wasInterrupted, hasState, state := einotool.GetInterruptState[*projectEinoFollowUpInterruptState](ctx); wasInterrupted && hasState && state != nil {
 		result, err := t.resumeFollowUp(ctx, callID, spec, state)
@@ -502,6 +523,17 @@ func (t projectEinoAssistantTool) invokeAllowedToolWithPlan(
 	if cause := context.Cause(ctx); cause != nil {
 		return "", cause
 	}
+	if projectAssistantAgentsCreateTool(spec.Name) {
+		sanitized, err := projectAssistantSanitizeAgentsCreateArguments(args, projectAssistantToolCallRequest{
+			Project:        t.req.Project,
+			AssistantRunID: projectAssistantRunID(t.req),
+			ToolCallID:     callID,
+		})
+		if err != nil {
+			return "", fmt.Errorf("sanitize create_agent arguments: %w", err)
+		}
+		args = sanitized
+	}
 	if planSnapshot == nil && projectToolBaseName(spec.Name) == projectEinoAssistantWriteTodosTool {
 		plan, err := projectEinoAssistantPlanProgressFromWriteTodos(projectEinoToolArgumentsString(args))
 		if err != nil {
@@ -550,6 +582,7 @@ func (t projectEinoAssistantTool) invokeAllowedToolWithPlan(
 		MCPEndpoint:          mcpServerURL(t.req.MCPBaseURL, t.req.Identity.clusterID, "default"),
 		SessionSnapshot:      t.runState.SessionSnapshot(),
 		AssistantRunID:       projectAssistantRunID(t.req),
+		ToolCallID:           callID,
 		InitialBuild:         projectAssistantInitialBuildActive(t.req, t.runState),
 		RunState:             t.runState,
 		Arguments:            args,
@@ -1397,6 +1430,17 @@ func (t projectEinoAssistantTool) resumePermission(ctx context.Context, callID s
 	if err != nil {
 		return t.finishFailedToolCall(callID, name, state.ArgumentsInJSON, "invalid interrupted arguments: "+truncateProjectToolInfo(err.Error())), nil
 	}
+	if projectAssistantAgentsCreateTool(name) {
+		sanitized, sanitizeErr := projectAssistantSanitizeAgentsCreateArguments(args, projectAssistantToolCallRequest{
+			Project:        t.req.Project,
+			AssistantRunID: projectAssistantRunID(t.req),
+			ToolCallID:     callID,
+		})
+		if sanitizeErr != nil {
+			return t.finishFailedToolCall(callID, name, state.ArgumentsInJSON, "invalid interrupted create_agent arguments: "+sanitizeErr.Error()), nil
+		}
+		args = sanitized
+	}
 	isResumeTarget, hasData, data := einotool.GetResumeContext[*projectEinoPermissionResumeData](ctx)
 	if !isResumeTarget {
 		return "", einotool.StatefulInterrupt(ctx, &projectEinoPermissionInterruptInfo{
@@ -1419,6 +1463,17 @@ func (t projectEinoAssistantTool) resumePermission(ctx context.Context, callID s
 				return t.finishFailedToolCall(callID, name, projectEinoToolArgumentsString(data.EditedArguments), "invalid edited arguments: "+validateErr.Error()), nil
 			}
 			args = effective
+			if projectAssistantAgentsCreateTool(name) {
+				sanitized, sanitizeErr := projectAssistantSanitizeAgentsCreateArguments(args, projectAssistantToolCallRequest{
+					Project:        t.req.Project,
+					AssistantRunID: projectAssistantRunID(t.req),
+					ToolCallID:     callID,
+				})
+				if sanitizeErr != nil {
+					return t.finishFailedToolCall(callID, name, projectEinoToolArgumentsString(args), "invalid edited create_agent arguments: "+sanitizeErr.Error()), nil
+				}
+				args = sanitized
+			}
 			if t.req.CollaborationMode != projectAssistantCollaborationModeDefault {
 				return t.finishDeniedToolCall(callID, name, args, "edited arguments cannot grant effect authority in a read-only collaboration mode"), nil
 			}

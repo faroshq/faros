@@ -80,7 +80,7 @@ func jsonrpc(t *testing.T, h http.Handler, method string, params string) (json.R
 // TestAlwaysOnEmptyAggregate is the core guarantee: with zero providers the
 // endpoint still initializes and serves an (empty) tools/list — never 501.
 func TestAlwaysOnEmptyAggregate(t *testing.T) {
-	h := New(Options{Providers: func(context.Context) []ProviderTarget { return nil }})
+	h := New(Options{Providers: func(context.Context, string) []ProviderTarget { return nil }})
 
 	if _, code := jsonrpc(t, h, "initialize", `{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}`); code != http.StatusOK {
 		t.Fatalf("initialize status = %d, want 200 (endpoint must be always-on)", code)
@@ -105,7 +105,7 @@ func TestAlwaysOnEmptyAggregate(t *testing.T) {
 
 // TestUnauthorizedAndBadPath covers the two request-level guards.
 func TestUnauthorizedAndBadPath(t *testing.T) {
-	h := New(Options{Providers: func(context.Context) []ProviderTarget { return nil }})
+	h := New(Options{Providers: func(context.Context, string) []ProviderTarget { return nil }})
 
 	noAuth := httptest.NewRequest(http.MethodPost, testMCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
 	rr := httptest.NewRecorder()
@@ -145,7 +145,7 @@ func TestFederatesReadyProvider(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	h := New(Options{Providers: func(context.Context) []ProviderTarget {
+	h := New(Options{Providers: func(context.Context, string) []ProviderTarget {
 		return []ProviderTarget{{Name: "infra", DisplayName: "Infrastructure", MCPURL: provider.URL}}
 	}})
 

@@ -35,6 +35,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
@@ -85,6 +87,47 @@ const (
 	// so this cadence only affects storage, never correctness.
 	sharedStoreGCInterval = 10 * time.Minute
 )
+
+var mcpAPIBindingGVR = schema.GroupVersionResource{
+	Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apibindings",
+}
+
+// listMCPProviderBindings reads APIBindings from the tenant logical cluster
+// using the hub's control-plane client. Provider tools are advertised only
+// after this server-side capability check; an MCP tools/list response from a
+// healthy backend is not evidence that the current workspace enabled it.
+func listMCPProviderBindings(ctx context.Context, kcpConfig *rest.Config, cluster string) ([]mcpaggregate.ProviderBinding, error) {
+	if kcpConfig == nil {
+		return nil, fmt.Errorf("kcp is not configured")
+	}
+	if strings.TrimSpace(cluster) == "" || strings.ContainsAny(cluster, "/?#") {
+		return nil, fmt.Errorf("invalid tenant cluster %q", cluster)
+	}
+
+	clusterConfig := rest.CopyConfig(kcpConfig)
+	clusterConfig.Host = apiurl.KCPClusterURL(kcpConfig.Host, cluster)
+	client, err := dynamic.NewForConfig(clusterConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating tenant APIBinding client: %w", err)
+	}
+	list, err := client.Resource(mcpAPIBindingGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing APIBindings in tenant cluster %q: %w", cluster, err)
+	}
+
+	out := make([]mcpaggregate.ProviderBinding, 0, len(list.Items))
+	for _, item := range list.Items {
+		path, _, _ := unstructured.NestedString(item.Object, "spec", "reference", "export", "path")
+		name, _, _ := unstructured.NestedString(item.Object, "spec", "reference", "export", "name")
+		phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+		out = append(out, mcpaggregate.ProviderBinding{
+			ExportPath: path,
+			ExportName: name,
+			Phase:      phase,
+		})
+	}
+	return out, nil
+}
 
 // Server is the faros hub server orchestrator.
 type Server struct {
@@ -450,10 +493,18 @@ func (s *Server) Run(ctx context.Context) error {
 	// server when nothing is registered, never edge-dependent. Providers —
 	// including the edges provider — federate in the same way. See
 	// pkg/hub/mcpaggregate.
-	// mcpProviderEnumerator returns the tenant's Ready, MCP-exposing providers.
-	// Shared by the aggregate endpoint (federates their tools per request) and
-	// the REST introspection endpoint (surfaces the same set to the portal).
-	mcpProviderEnumerator := func(ctx context.Context) []mcpaggregate.ProviderTarget {
+	// mcpProviderEnumerator returns the tenant's Ready, MCP-exposing providers
+	// whose APIExports are actually Bound in that tenant workspace. Shared by
+	// the aggregate endpoint (federates their tools per request) and the MCP
+	// controller's status introspection (surfaces the same set to the portal).
+	mcpProviderEnumerator := func(ctx context.Context, cluster string) []mcpaggregate.ProviderTarget {
+		// Without kcp there is no trusted tenant capability source. The endpoint
+		// remains always-on, but its provider set is empty rather than silently
+		// exposing every healthy backend.
+		if kcpConfig == nil {
+			logger.Info("provider federation: no kcp capability source; returning empty provider set")
+			return nil
+		}
 		all := providerRegistry.List()
 		out := make([]mcpaggregate.ProviderTarget, 0, len(all))
 		for _, p := range all {
@@ -473,12 +524,22 @@ func (s *Server) Run(ctx context.Context) error {
 			// A provider's MCP transport is mounted at /mcp under its
 			// backend URL (see providers/*/mcpserver).
 			out = append(out, mcpaggregate.ProviderTarget{
-				Name:        p.Name,
-				DisplayName: p.DisplayName,
-				MCPURL:      strings.TrimRight(p.BackendURL.String(), "/") + "/mcp",
+				Name:          p.Name,
+				DisplayName:   p.DisplayName,
+				MCPURL:        strings.TrimRight(p.BackendURL.String(), "/") + "/mcp",
+				APIExportPath: p.APIExportPath,
+				APIExportName: p.APIExportName,
 			})
 		}
-		return out
+		bindings, err := listMCPProviderBindings(ctx, kcpConfig, cluster)
+		if err != nil {
+			// Fail closed on missing/invalid tenant capability state. This is
+			// deliberately not a tools/list probe: a provider can be healthy
+			// while the caller's workspace has not enabled its APIExport.
+			logger.Info("provider federation: tenant APIBinding check failed; returning empty provider set", "cluster", cluster, "err", err)
+			return nil
+		}
+		return mcpaggregate.FilterBoundProviderTargets(out, bindings)
 	}
 	mcpAggregate := mcpaggregate.New(mcpaggregate.Options{
 		ExternalURL: s.opts.HubExternalURL,

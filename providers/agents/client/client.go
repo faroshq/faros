@@ -72,7 +72,7 @@ func NewFromGraphQL(scope *tenant.Scope) *Client {
 // Agents returns a typed interface for Agent resources.
 func (c *Client) Agents() *TypedResource[agentsv1alpha1.Agent, agentsv1alpha1.AgentList] {
 	return &TypedResource[agentsv1alpha1.Agent, agentsv1alpha1.AgentList]{
-		scope: c.scope, res: agentResource,
+		scope: c.scope, res: agentResource, createOnly: true,
 		gvk: AgentGVR.GroupVersion().WithKind("Agent"),
 	}
 }
@@ -161,9 +161,10 @@ func (c *Client) ApplySecret(ctx context.Context, s *corev1.Secret) (*corev1.Sec
 
 // TypedResource provides typed CRUD over one cluster-scoped resource.
 type TypedResource[T any, L any] struct {
-	scope *tenant.Scope
-	res   tenant.Resource
-	gvk   schema.GroupVersionKind
+	scope      *tenant.Scope
+	res        tenant.Resource
+	gvk        schema.GroupVersionKind
+	createOnly bool
 }
 
 func (r *TypedResource[T, L]) Get(ctx context.Context, name string, _ metav1.GetOptions) (*T, error) {
@@ -187,7 +188,14 @@ func (r *TypedResource[T, L]) Create(ctx context.Context, obj *T, _ metav1.Creat
 	if err != nil {
 		return nil, err
 	}
-	out, err := r.scope.Apply(ctx, u)
+	var out *unstructured.Unstructured
+	if r.createOnly {
+		out, err = r.scope.Create(ctx, r.res, "", u)
+	} else {
+		// Preserve the existing portal behavior for the other provider resources;
+		// Agent creation is the intentionally create-only surface.
+		out, err = r.scope.Apply(ctx, u)
+	}
 	if err != nil {
 		return nil, err
 	}

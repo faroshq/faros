@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -264,6 +265,35 @@ func (s *Scope) Apply(ctx context.Context, obj *unstructured.Unstructured) (*uns
 	return decodeObject(str)
 }
 
+// Create creates obj through the gateway's typed create mutation. Unlike
+// applyYaml, the typed mutation has Kubernetes create semantics and therefore
+// returns AlreadyExists for a name collision instead of replacing the
+// existing object. The gateway returns a typed GraphQL object; we request only
+// __typename because this generic client cannot know the resource's fields and
+// return the object that was submitted after the server accepted it.
+func (s *Scope) Create(ctx context.Context, res Resource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	if obj == nil {
+		return nil, fmt.Errorf("cannot create a nil object")
+	}
+	field := "create" + res.Kind
+	inputType := graphqlInputTypeName(res)
+	varDefs := "$object: " + inputType + "!"
+	args := "object: $object"
+	vars := map[string]any{"object": obj.Object}
+	if res.Namespaced {
+		varDefs += ", $namespace: String!"
+		args += ", namespace: $namespace"
+		vars["namespace"] = namespace
+	}
+	inner := fmt.Sprintf("%s(%s) { __typename }", field, args)
+	sel, _ := wrapSelection(res, inner)
+	q := fmt.Sprintf("mutation(%s) { %s }", varDefs, sel)
+	if _, err := s.exec(ctx, q, vars, &res, obj.GetName()); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 // ApplyStatus merge-patches obj's status subresource via applyStatusYaml.
 func (s *Scope) ApplyStatus(ctx context.Context, obj *unstructured.Unstructured) error {
 	y, err := yaml.Marshal(obj.Object)
@@ -297,6 +327,36 @@ func itemArgs(res Resource, namespace, name string) (string, string, map[string]
 		vars["namespace"] = namespace
 	}
 	return varDefs, args, vars
+}
+
+// graphqlInputTypeName mirrors the gateway's unique input type naming:
+// Pascalize(<sanitized-group>_<version>) + Kind + _Input. Provider modules do
+// not import the gateway's flect dependency, but API groups and versions are
+// ASCII identifiers after sanitization, so this small equivalent is stable.
+func graphqlInputTypeName(res Resource) string {
+	group := groupField(res.GVR.Group)
+	prefix := res.GVR.Version
+	if group != "" {
+		prefix = group + "_" + prefix
+	}
+	return pascalizeGraphQL(prefix) + res.Kind + "_Input"
+}
+
+func pascalizeGraphQL(s string) string {
+	var b strings.Builder
+	upperNext := true
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			upperNext = true
+			continue
+		}
+		if upperNext {
+			r = unicode.ToUpper(r)
+			upperNext = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // resourceFromObject derives a Resource for error mapping from an object's GVK.

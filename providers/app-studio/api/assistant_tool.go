@@ -127,6 +127,7 @@ type projectAssistantToolCallRequest struct {
 	HTTPRequest          *http.Request
 	SessionSnapshot      *projectEinoAssistantSessionSnapshot
 	AssistantRunID       string
+	ToolCallID           string
 	InitialBuild         bool
 	RunState             *projectEinoAssistantRunState
 	Arguments            map[string]any

@@ -59,11 +59,69 @@ type ProviderTarget struct {
 	Name        string
 	DisplayName string
 	MCPURL      string
+	// APIExportPath and APIExportName identify the provider APIExport that a
+	// tenant must bind before its tools may be advertised. The aggregate does
+	// not infer capability from a provider's tools/list response; the hub
+	// enumerator fills these fields from the authenticated provider catalog and
+	// filters targets against the tenant's Bound APIBindings first.
+	APIExportPath string
+	APIExportName string
 }
 
 // ProviderEnumerator returns the live set of Ready providers exposing an MCP
-// endpoint. Called once per MCP request from registerProviderTools.
-type ProviderEnumerator func(ctx context.Context) []ProviderTarget
+// endpoint for one verified tenant cluster. Called once per MCP request from
+// registerProviderTools. The cluster is supplied by the MCPServer path and is
+// also used by the hub-side APIBinding check; callers must not derive tenant
+// authorization from informational headers.
+type ProviderEnumerator func(ctx context.Context, cluster string) []ProviderTarget
+
+// ProviderBinding is the minimum APIBinding state needed before a provider can
+// be advertised by the aggregate. It deliberately contains no caller or
+// authorization metadata: the hub obtains these values from the tenant's
+// cluster-scoped APIBinding list using its own trusted control-plane client.
+type ProviderBinding struct {
+	ExportPath string
+	ExportName string
+	Phase      string
+}
+
+// FilterBoundProviderTargets keeps only targets whose declared APIExport has a
+// matching Bound APIBinding in the current tenant workspace. Providers with no
+// APIExport coordinates are excluded, as are bindings for a different export
+// or any phase other than Bound. This is intentionally fail-closed: a healthy
+// provider backend does not make an un-enabled provider usable.
+func FilterBoundProviderTargets(targets []ProviderTarget, bindings []ProviderBinding) []ProviderTarget {
+	bound := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if !strings.EqualFold(strings.TrimSpace(binding.Phase), "Bound") {
+			continue
+		}
+		path := strings.TrimSpace(binding.ExportPath)
+		name := strings.TrimSpace(binding.ExportName)
+		if path == "" || name == "" {
+			continue
+		}
+		bound[providerExportKey(path, name)] = struct{}{}
+	}
+
+	out := make([]ProviderTarget, 0, len(targets))
+	for _, target := range targets {
+		path := strings.TrimSpace(target.APIExportPath)
+		name := strings.TrimSpace(target.APIExportName)
+		if path == "" || name == "" {
+			continue
+		}
+		if _, ok := bound[providerExportKey(path, name)]; !ok {
+			continue
+		}
+		out = append(out, target)
+	}
+	return out
+}
+
+func providerExportKey(path, name string) string {
+	return path + "\x00" + name
+}
 
 // providerDiscoveryTimeout bounds how long the aggregate waits on ONE
 // provider's tools/list. Discovery runs in parallel, so a slow or hung
@@ -115,9 +173,9 @@ type FederatedTool struct {
 // registering proxy tools. It never fails as a whole: an unreachable provider is
 // reported with Reachable=false and a populated Error, so the UI can show
 // partial state. Providers are returned in enumeration order (deterministic).
-func DiscoverFederation(ctx context.Context, targets []ProviderTarget, bearerToken, cluster string) []FederatedProvider {
+func DiscoverFederation(ctx context.Context, targets []ProviderTarget, bearerToken, cluster string, provenance ...map[string]string) []FederatedProvider {
 	out := make([]FederatedProvider, len(targets))
-	cli := newProviderMCPClient(bearerToken, cluster, cluster)
+	cli := newProviderMCPClientWithProvenance(bearerToken, cluster, cluster, optionalProvenance(provenance))
 
 	var wg sync.WaitGroup
 	for i := range targets {
@@ -180,8 +238,8 @@ func DiscoverFederation(ctx context.Context, targets []ProviderTarget, bearerTok
 // reaches the model connecting to the aggregate, not just the provider's direct
 // endpoint. Providers with no instructions or an error contribute nothing.
 // Enumeration order is preserved for deterministic output.
-func FederatedInstructions(ctx context.Context, targets []ProviderTarget, bearerToken, cluster string) string {
-	cli := newProviderMCPClient(bearerToken, cluster, cluster)
+func FederatedInstructions(ctx context.Context, targets []ProviderTarget, bearerToken, cluster string, provenance ...map[string]string) string {
+	cli := newProviderMCPClientWithProvenance(bearerToken, cluster, cluster, optionalProvenance(provenance))
 	parts := make([]string, len(targets))
 	var wg sync.WaitGroup
 	for i := range targets {
@@ -239,7 +297,7 @@ func (c *providerMCPClient) fetchInstructions(ctx context.Context, mcpURL string
 // fanned out concurrently with a per-provider deadline. The aggregate stays
 // stateless: a fresh server is built per request, so a provider that just
 // became Ready shows up on the very next tools/list from the client.
-func registerProviderTools(ctx context.Context, srv *mcp.Server, log logr.Logger, targets []ProviderTarget, bearerToken, cluster string) {
+func registerProviderTools(ctx context.Context, srv *mcp.Server, log logr.Logger, targets []ProviderTarget, bearerToken, cluster string, provenance map[string]string) {
 	log.Info("provider federation: enumerated", "count", len(targets))
 	if len(targets) == 0 {
 		return
@@ -250,7 +308,7 @@ func registerProviderTools(ctx context.Context, srv *mcp.Server, log logr.Logger
 	// and X-Faros-Cluster so the provider sees the same identity headers it
 	// would have received via the hub backend proxy (that proxy injects them
 	// on /services/providers/*, but this federation path POSTs directly).
-	cli := newProviderMCPClient(bearerToken, cluster, cluster)
+	cli := newProviderMCPClientWithProvenance(bearerToken, cluster, cluster, provenance)
 
 	results := make([]*providerTools, len(targets))
 	var wg sync.WaitGroup
@@ -315,22 +373,7 @@ type providerTools struct {
 // "<provider>__<original>" so a model browsing tools/list can see which
 // provider owns which tool.
 func registerOneProxyTool(srv *mcp.Server, cli *providerMCPClient, p ProviderTarget, t discoveredTool) {
-	proxyName := p.Name + "__" + t.Name
-
-	title := t.Title
-	if title == "" {
-		title = t.Name
-	}
-	if p.DisplayName != "" {
-		title = title + " — " + p.DisplayName
-	}
-	tool := &mcp.Tool{
-		Name:        proxyName,
-		Title:       title,
-		Description: t.Description,
-		Annotations: t.Annotations,
-		InputSchema: t.InputSchema,
-	}
+	tool := proxyTool(p, t)
 
 	srv.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args map[string]any
@@ -347,14 +390,34 @@ func registerOneProxyTool(srv *mcp.Server, cli *providerMCPClient, p ProviderTar
 	})
 }
 
+func proxyTool(p ProviderTarget, t discoveredTool) *mcp.Tool {
+	proxyName := p.Name + "__" + t.Name
+	title := t.Title
+	if title == "" {
+		title = t.Name
+	}
+	if p.DisplayName != "" {
+		title = title + " — " + p.DisplayName
+	}
+	tool := &mcp.Tool{
+		Name:        proxyName,
+		Title:       title,
+		Description: t.Description,
+		Annotations: t.Annotations,
+		InputSchema: t.InputSchema,
+	}
+	return tool
+}
+
 // providerMCPClient is a hand-rolled MCP-over-HTTP client just sturdy enough
 // for tools/list + tools/call — federation only needs request/response, not
 // the SDK client's session/sampling lifecycle machinery.
 type providerMCPClient struct {
 	http             *http.Client
 	bearerToken      string
-	tenantPath       string // forwarded as X-Faros-Tenant
-	clusterID        string // forwarded as X-Faros-Cluster
+	tenantPath       string            // forwarded as X-Faros-Tenant
+	clusterID        string            // forwarded as X-Faros-Cluster
+	provenance       map[string]string // fixed, informational App Studio headers
 	discoveryTimeout time.Duration
 	callTimeout      time.Duration
 }
@@ -369,19 +432,62 @@ func newProviderMCPClient(bearerToken, tenantPath, clusterID string) *providerMC
 	)
 }
 
+func newProviderMCPClientWithProvenance(bearerToken, tenantPath, clusterID string, provenance map[string]string) *providerMCPClient {
+	return newProviderMCPClientWithTimeoutsAndProvenance(
+		bearerToken,
+		tenantPath,
+		clusterID,
+		providerMCPDiscoveryTimeout,
+		providerMCPCallTimeout,
+		provenance,
+	)
+}
+
 // newProviderMCPClientWithTimeouts constructs a federation client with
 // operation-specific bounds. Keeping the durations on the client makes the
 // timeout policy explicit and lets tests use short deterministic deadlines
 // without changing production defaults or global state.
 func newProviderMCPClientWithTimeouts(bearerToken, tenantPath, clusterID string, discoveryTimeout, callTimeout time.Duration) *providerMCPClient {
+	return newProviderMCPClientWithTimeoutsAndProvenance(bearerToken, tenantPath, clusterID, discoveryTimeout, callTimeout, nil)
+}
+
+func newProviderMCPClientWithTimeoutsAndProvenance(bearerToken, tenantPath, clusterID string, discoveryTimeout, callTimeout time.Duration, provenance map[string]string) *providerMCPClient {
 	return &providerMCPClient{
 		http:             &http.Client{},
 		bearerToken:      bearerToken,
 		tenantPath:       tenantPath,
 		clusterID:        clusterID,
+		provenance:       cloneProvenance(provenance),
 		discoveryTimeout: discoveryTimeout,
 		callTimeout:      callTimeout,
 	}
+}
+
+func optionalProvenance(values []map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	return values[0]
+}
+
+func cloneProvenance(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for _, name := range []string{
+		provenanceUserHeader,
+		provenanceOrgHeader,
+		provenanceWorkspaceHeader,
+		provenanceClusterHeader,
+	} {
+		value := strings.TrimSpace(in[name])
+		if value == "" || len(value) > provenanceHeaderMaxBytes {
+			continue
+		}
+		out[name] = value
+	}
+	return out
 }
 
 // discoveredTool is the subset of mcp.Tool we keep from tools/list. InputSchema
@@ -467,6 +573,18 @@ func (c *providerMCPClient) rpc(ctx context.Context, mcpURL, method string, para
 	}
 	if c.clusterID != "" {
 		req.Header.Set("X-Faros-Cluster", c.clusterID)
+	}
+	// Only the fixed App Studio attribution headers are copied. Cluster and
+	// tenant remain server-derived above; the caller's values are not trusted
+	// to authorize this request and the tenant header is never copied.
+	for _, name := range []string{
+		provenanceUserHeader,
+		provenanceOrgHeader,
+		provenanceWorkspaceHeader,
+	} {
+		if value := c.provenance[name]; value != "" {
+			req.Header.Set(name, value)
+		}
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

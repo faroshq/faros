@@ -19,10 +19,12 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/faroshq/provider-agents/apis/v1alpha1"
@@ -52,19 +54,53 @@ func (s *Server) mcpIdentity(ctx context.Context, r *http.Request) identity {
 	return id
 }
 
+// mcpCreateProvenance copies only the fixed informational attribution headers
+// that the hub aggregate forwards for App Studio. They are never used for
+// authorization and are bounded before becoming Kubernetes annotations.
+func mcpCreateProvenance(r *http.Request, input *createAgentProvenanceInput) map[string]string {
+	out := make(map[string]string, 3)
+	for _, header := range []string{"X-Faros-User", "X-Faros-Org", "X-Faros-Workspace"} {
+		value := strings.TrimSpace(r.Header.Get(header))
+		if value == "" || len(value) > maxAgentProvenanceBytes || strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			continue
+		}
+		out[header] = value
+	}
+	if input != nil {
+		out["source"] = input.Source
+		out["projectName"] = input.ProjectName
+		out["projectUID"] = input.ProjectUID
+		out["runID"] = input.RunID
+		out["toolCallID"] = input.ToolCallID
+	}
+	return out
+}
+
 // --- agents ---
 
 type createAgentInput struct {
-	Name            string         `json:"name" jsonschema:"Lowercase agent name, e.g. research-bot"`
-	DisplayName     string         `json:"displayName,omitempty" jsonschema:"Human-readable name; defaults to name"`
-	Description     string         `json:"description,omitempty" jsonschema:"Short summary of what this agent is for"`
-	SystemPrompt    string         `json:"systemPrompt,omitempty" jsonschema:"The agent's persona and standing instructions"`
-	Autonomy        string         `json:"autonomy,omitempty" jsonschema:"Action posture: suggest (drafts only), ask (approval-gated), or auto"`
-	ModelCredential string         `json:"modelCredential,omitempty" jsonschema:"Named model credential for chat (see list_model_credentials)"`
-	ModelFallbacks  []string       `json:"modelFallbacks,omitempty" jsonschema:"Ordered credential names tried when the primary model fails"`
-	BudgetTokens    int64          `json:"budgetTokens,omitempty" jsonschema:"Token cap per rolling month; 0 means unlimited"`
-	BudgetUSD       string         `json:"budgetUSD,omitempty" jsonschema:"USD spend cap per rolling month as a decimal string; empty means unlimited"`
-	Channels        []channelInput `json:"channels,omitempty" jsonschema:"Messaging channel bindings (name + connectionRef + primary)"`
+	Name            string                      `json:"name" jsonschema:"Lowercase agent name, e.g. research-bot"`
+	DisplayName     string                      `json:"displayName,omitempty" jsonschema:"Human-readable name; defaults to name"`
+	Description     string                      `json:"description,omitempty" jsonschema:"Short summary of what this agent is for"`
+	SystemPrompt    string                      `json:"systemPrompt,omitempty" jsonschema:"The agent's persona and standing instructions"`
+	Autonomy        string                      `json:"autonomy,omitempty" jsonschema:"Action posture: suggest (drafts only), ask (approval-gated, default), or auto; omitted defaults to ask"`
+	ModelCredential string                      `json:"modelCredential" jsonschema:"Existing named model credential for chat (required; see list_model_credentials)"`
+	MaxToolTurns    *int32                      `json:"maxToolTurns,omitempty" jsonschema:"Maximum tool-call iterations per run, from 0 through 32; omitted uses the provider default"`
+	TimeoutSeconds  *int32                      `json:"timeoutSeconds,omitempty" jsonschema:"Maximum run wall-clock time in seconds, from 0 through 3600; omitted uses the provider default"`
+	BudgetTokens    int64                       `json:"budgetTokens,omitempty" jsonschema:"Token cap per rolling month, at most 100000; 0 means unlimited"`
+	BudgetUSD       string                      `json:"budgetUSD,omitempty" jsonschema:"USD spend cap per rolling month, at most 25.00; empty means unlimited"`
+	Provenance      *createAgentProvenanceInput `json:"provenance,omitempty" jsonschema:"Informational App Studio project/run/tool-call attribution; never used for authorization"`
+}
+
+// createAgentProvenanceInput is a closed, non-secret allowlist matching the
+// hub/App Studio attribution payload. It intentionally has no arbitrary map
+// form, so an MCP caller cannot smuggle a credential or token into metadata.
+type createAgentProvenanceInput struct {
+	Source      string `json:"source,omitempty" jsonschema:"Attribution source, normally app-studio"`
+	ProjectName string `json:"projectName,omitempty" jsonschema:"App Studio project name"`
+	ProjectUID  string `json:"projectUID,omitempty" jsonschema:"App Studio project UID"`
+	RunID       string `json:"runID,omitempty" jsonschema:"App Studio assistant run ID"`
+	ToolCallID  string `json:"toolCallID,omitempty" jsonschema:"App Studio assistant tool-call ID"`
 }
 
 type nameInput struct {
@@ -238,8 +274,9 @@ func (s *Server) registerConfigMCPTools(srv *mcp.Server, r *http.Request) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "create_agent",
 		Title: "Create an agent",
-		Description: "Create a new agent. Assign its model with modelCredential (from list_model_credentials) and bind messaging channels with channels. " +
-			"Tool grants, limits, and prompts can be set afterwards with update_agent.",
+		Description: "Create a new agent exactly once. modelCredential must name an existing credential from list_model_credentials; autonomy defaults to ask. " +
+			"This safe creation surface does not bind channels, delegates, background execution, external connections, or tool grants. " +
+			"maxToolTurns is capped at 32 and timeoutSeconds at 3600. A same-name call returns a conflict; use get_agent to recover instead of retrying blindly.",
 		Annotations: mutating,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in createAgentInput) (*mcp.CallToolResult, agentSettings, error) {
 		c, err := s.mcpClient(r)
@@ -249,11 +286,14 @@ func (s *Server) registerConfigMCPTools(srv *mcp.Server, r *http.Request) {
 		req := createAgentRequest{
 			Name: in.Name, DisplayName: in.DisplayName, Description: in.Description,
 			SystemPrompt: in.SystemPrompt, Autonomy: in.Autonomy,
-			ModelCredential: in.ModelCredential, ModelFallbacks: in.ModelFallbacks,
-			BudgetTokens: in.BudgetTokens, BudgetUSD: in.BudgetUSD, Channels: in.Channels,
+			ModelCredential: in.ModelCredential, MaxToolTurns: in.MaxToolTurns,
+			TimeoutSeconds: in.TimeoutSeconds, BudgetTokens: in.BudgetTokens, BudgetUSD: in.BudgetUSD,
 		}
-		a, err := s.applyAgentCreate(ctx, c, &req)
+		a, err := s.applyMCPAgentCreate(ctx, c, &req, mcpCreateProvenance(r, in.Provenance))
 		if err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return nil, agentSettings{}, fmt.Errorf("%w; call get_agent with name %q to recover the existing result instead of retrying create", err, strings.TrimSpace(in.Name))
+			}
 			return nil, agentSettings{}, err
 		}
 		return nil, settingsView(a), nil

@@ -58,10 +58,11 @@ const mcpIdentityNamespace = "default"
 // enabled providers / changed toolsets without a manual refresh.
 const toolsRefreshInterval = 60 * time.Second
 
-// ProviderEnumerator returns the tenant's Ready, MCP-exposing providers. Wired
-// from the hub's provider registry — the same enumerator the aggregate endpoint
-// federates with.
-type ProviderEnumerator func(ctx context.Context) []mcpaggregate.ProviderTarget
+// ProviderEnumerator returns the tenant's Ready, MCP-exposing providers for
+// one cluster. Wired from the hub's provider registry — the same enumerator
+// the aggregate endpoint federates with — and capability-filtered by that
+// cluster's Bound APIBindings.
+type ProviderEnumerator func(ctx context.Context, cluster string) []mcpaggregate.ProviderTarget
 
 // Reconciler provisions each MCPServer's identity and publishes its status.
 type Reconciler struct {
@@ -164,7 +165,7 @@ func (r *Reconciler) discoverTools(ctx context.Context, cluster, token string) [
 	if r.enumerate == nil {
 		return nil
 	}
-	targets := r.enumerate(ctx)
+	targets := r.enumerate(ctx, cluster)
 	discovered := mcpaggregate.DiscoverFederation(ctx, targets, token, cluster)
 	out := make([]farosv1alpha1.FederatedMCPProvider, 0, len(discovered))
 	for _, p := range discovered {

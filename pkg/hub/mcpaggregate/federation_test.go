@@ -24,7 +24,125 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestFilterBoundProviderTargets(t *testing.T) {
+	targets := []ProviderTarget{
+		{Name: "bound", APIExportPath: "root:faros:providers:bound", APIExportName: "bound.providers.faros.sh"},
+		{Name: "unbound", APIExportPath: "root:faros:providers:unbound", APIExportName: "unbound.providers.faros.sh"},
+		{Name: "absent"},
+		{Name: "missing-name", APIExportPath: "root:faros:providers:missing-name"},
+	}
+
+	got := FilterBoundProviderTargets(targets, []ProviderBinding{
+		{ExportPath: "root:faros:providers:bound", ExportName: "bound.providers.faros.sh", Phase: "Bound"},
+		{ExportPath: "root:faros:providers:unbound", ExportName: "unbound.providers.faros.sh", Phase: "Pending"},
+		{ExportPath: "root:faros:providers:other-tenant", ExportName: "bound.providers.faros.sh", Phase: "Bound"},
+	})
+	if len(got) != 1 || got[0].Name != "bound" {
+		t.Fatalf("filtered targets = %#v, want only bound provider", got)
+	}
+}
+
+func TestFilterBoundProviderTargetsIsolatesBindingSnapshot(t *testing.T) {
+	target := ProviderTarget{
+		Name:          "infra",
+		APIExportPath: "root:faros:providers:infra",
+		APIExportName: "infra.providers.faros.sh",
+	}
+
+	orgA := FilterBoundProviderTargets([]ProviderTarget{target}, []ProviderBinding{{
+		ExportPath: target.APIExportPath, ExportName: target.APIExportName, Phase: "Bound",
+	}})
+	orgB := FilterBoundProviderTargets([]ProviderTarget{target}, nil)
+	if len(orgA) != 1 {
+		t.Fatalf("org A targets = %#v, want bound provider", orgA)
+	}
+	if len(orgB) != 0 {
+		t.Fatalf("org B targets = %#v, want no provider without its binding", orgB)
+	}
+}
+
+func TestProxyToolPreservesAnnotations(t *testing.T) {
+	annotations := &mcp.ToolAnnotations{ReadOnlyHint: true}
+	tool := proxyTool(
+		ProviderTarget{Name: "infra", DisplayName: "Infrastructure"},
+		discoveredTool{Name: "inspect", Title: "Inspect", Annotations: annotations},
+	)
+	if tool.Name != "infra__inspect" {
+		t.Fatalf("proxy tool name = %q, want infra__inspect", tool.Name)
+	}
+	if tool.Annotations != annotations {
+		t.Fatalf("proxy annotations pointer = %#v, want %#v", tool.Annotations, annotations)
+	}
+}
+
+func TestProviderMCPClientForwardsBoundedProvenanceAllowlist(t *testing.T) {
+	var got http.Header
+	client := newProviderMCPClientWithProvenance(
+		"caller-token",
+		"root:faros:orgs:org-a:ws-a",
+		"cluster-a",
+		map[string]string{
+			provenanceUserHeader:      "alice",
+			provenanceOrgHeader:       "org-a",
+			provenanceWorkspaceHeader: "ws-a",
+			provenanceClusterHeader:   "spoofed-cluster",
+			"X-Faros-Tenant":          "spoofed-tenant",
+			"X-Faros-Evil":            "should-not-forward",
+		},
+	)
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got = r.Header.Clone()
+		return jsonResponse(`{"jsonrpc":"2.0","id":1,"result":{}}`), nil
+	})
+
+	if _, err := client.listTools(context.Background(), "http://provider.invalid/mcp"); err != nil {
+		t.Fatalf("listTools error = %v", err)
+	}
+	if got.Get("Authorization") != "Bearer caller-token" {
+		t.Fatalf("authorization = %q, want caller token", got.Get("Authorization"))
+	}
+	if got.Get("X-Faros-Tenant") != "root:faros:orgs:org-a:ws-a" {
+		t.Fatalf("tenant = %q, want server-derived tenant", got.Get("X-Faros-Tenant"))
+	}
+	if got.Get("X-Faros-Cluster") != "cluster-a" {
+		t.Fatalf("cluster = %q, want server-derived cluster", got.Get("X-Faros-Cluster"))
+	}
+	for name, want := range map[string]string{
+		provenanceUserHeader: "alice", provenanceOrgHeader: "org-a", provenanceWorkspaceHeader: "ws-a",
+	} {
+		if got.Get(name) != want {
+			t.Errorf("%s = %q, want %q", name, got.Get(name), want)
+		}
+	}
+	for _, name := range []string{"X-Faros-Evil", "X-Faros-AppStudio-Internal-Token"} {
+		if got.Get(name) != "" {
+			t.Errorf("%s was forwarded as %q", name, got.Get(name))
+		}
+	}
+}
+
+func TestCaptureProvenanceDropsOversizedAndArbitraryHeaders(t *testing.T) {
+	oversized := strings.Repeat("x", provenanceHeaderMaxBytes+1)
+	got := captureProvenance(http.Header{
+		provenanceUserHeader: []string{"alice"},
+		provenanceOrgHeader:  []string{oversized},
+		"X-Faros-Evil":       []string{"nope"},
+		"X-Not-Faros":        []string{"nope"},
+	})
+	if got[provenanceUserHeader] != "alice" {
+		t.Fatalf("captured user = %#v, want alice", got)
+	}
+	if _, ok := got[provenanceOrgHeader]; ok {
+		t.Fatalf("oversized org provenance was retained: %#v", got)
+	}
+	if _, ok := got["X-Faros-Evil"]; ok {
+		t.Fatalf("arbitrary provenance was retained: %#v", got)
+	}
+}
 
 func TestProviderMCPClientDefaultTimeoutPolicy(t *testing.T) {
 	client := newProviderMCPClient("", "", "")

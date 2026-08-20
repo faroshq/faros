@@ -75,6 +75,11 @@ func New(opts Options) http.Handler {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// App Studio forwards a small amount of caller context so provider
+		// responses can retain useful attribution. Capture only the fixed,
+		// bounded informational allowlist; authorization remains the bearer
+		// token plus the server-derived cluster/API binding check below.
+		provenance := captureProvenance(r.Header)
 
 		// Fresh, stateless server per request so a provider that just became
 		// Ready shows up on the very next tools/list.
@@ -84,6 +89,7 @@ func New(opts Options) http.Handler {
 					cluster:     cluster,
 					name:        name,
 					token:       token,
+					provenance:  provenance,
 					externalURL: opts.ExternalURL,
 					enumerate:   opts.Providers,
 					log:         log,
@@ -99,6 +105,7 @@ type buildParams struct {
 	cluster     string
 	name        string
 	token       string
+	provenance  map[string]string
 	externalURL string
 	enumerate   ProviderEnumerator
 	log         logr.Logger
@@ -121,7 +128,7 @@ func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 
 	var targets []ProviderTarget
 	if p.enumerate != nil {
-		targets = p.enumerate(ctx)
+		targets = p.enumerate(ctx, p.cluster)
 	}
 
 	// Merge each provider's own instructions (e.g. a Home Assistant Service's
@@ -129,7 +136,7 @@ func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 	// so that context reaches the model here — not only on the provider's direct
 	// endpoint. Fetched before the server is built (instructions are fixed at
 	// construction).
-	if extra := FederatedInstructions(ctx, targets, p.token, p.cluster); extra != "" {
+	if extra := FederatedInstructions(ctx, targets, p.token, p.cluster, p.provenance); extra != "" {
 		instructions += "\n\n--- Provider guidance ---\n\n" + extra
 	}
 
@@ -143,7 +150,7 @@ func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 		EndpointURL: p.externalURL + apiurl.MCPServerPath(p.cluster, p.name),
 	})
 
-	registerProviderTools(ctx, srv, p.log, targets, p.token, p.cluster)
+	registerProviderTools(ctx, srv, p.log, targets, p.token, p.cluster, p.provenance)
 	return srv
 }
 
@@ -188,6 +195,40 @@ func extractBearer(r *http.Request) string {
 		return strings.TrimSpace(h[len(prefix):])
 	}
 	return ""
+}
+
+const (
+	// provenanceHeaderMaxBytes bounds each informational value copied from an
+	// App Studio request. Oversized values are dropped rather than truncated so
+	// a consumer cannot mistake a partial identifier for an authoritative one.
+	provenanceHeaderMaxBytes = 512
+
+	provenanceUserHeader      = "X-Faros-User"
+	provenanceOrgHeader       = "X-Faros-Org"
+	provenanceWorkspaceHeader = "X-Faros-Workspace"
+	provenanceClusterHeader   = "X-Faros-Cluster"
+)
+
+// captureProvenance returns only the fixed App Studio attribution headers. The
+// values are hints for audit/display purposes, never an authorization input:
+// the aggregate derives X-Faros-Tenant and X-Faros-Cluster from its URL and
+// the provider call keeps the original bearer token. Arbitrary X-Faros-* (or
+// other inbound) headers are intentionally not forwarded.
+func captureProvenance(headers http.Header) map[string]string {
+	out := make(map[string]string, 4)
+	for _, name := range []string{
+		provenanceUserHeader,
+		provenanceOrgHeader,
+		provenanceWorkspaceHeader,
+		provenanceClusterHeader,
+	} {
+		value := strings.TrimSpace(headers.Get(name))
+		if value == "" || len(value) > provenanceHeaderMaxBytes {
+			continue
+		}
+		out[name] = value
+	}
+	return out
 }
 
 // parseMCPServerPath extracts cluster + MCPServer name from the path seen after

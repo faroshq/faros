@@ -148,6 +148,12 @@ const (
 	projectToolAgentsGetRun                   = "agents__get_run"
 	projectToolAgentsListRuns                 = "agents__list_runs"
 	projectToolAgentsListAgents               = "agents__list_agents"
+	projectToolAgentsGetAgent                 = "agents__get_agent"
+	projectToolAgentsListModelCredentials     = "agents__list_model_credentials"
+	projectToolAgentsListToolFamilies         = "agents__list_tool_families"
+	projectToolAgentsListToolsets             = "agents__list_toolsets"
+	projectToolAgentsListConnections          = "agents__list_connections"
+	projectToolAgentsCreateAgent              = "agents__create_agent"
 )
 
 var (
@@ -2255,12 +2261,18 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 func projectMCPToolsPrompt(tools []chatTool) string {
 	hasDatabricksTools := false
 	hasPreviewInspection := false
+	hasAgentsCreate := false
+	hasAgentsModelCredentials := false
 	for _, tool := range tools {
 		switch strings.TrimSpace(tool.Function.Name) {
 		case projectToolDatabricksListTables, projectToolDatabricksDescribeTable:
 			hasDatabricksTools = true
 		case projectToolInspectDevelopmentPreview:
 			hasPreviewInspection = true
+		case projectToolAgentsCreateAgent:
+			hasAgentsCreate = true
+		case projectToolAgentsListModelCredentials:
+			hasAgentsModelCredentials = true
 		}
 	}
 	var prompt strings.Builder
@@ -2273,6 +2285,9 @@ func projectMCPToolsPrompt(tools []chatTool) string {
 			"Do not call provider backend URLs from generated code. " +
 			"Generated application code may query a Table only through the server-side provider-neutral Faros Actions SDK and only when the Project has a non-revoked integration action declaration for that alias; do not bypass the App Studio integration gateway. " +
 			"Do not create or import Databricks tables from App Studio, and do not embed Databricks credentials or raw warehouse auth config in generated code.\n")
+	}
+	if hasAgentsCreate && hasAgentsModelCredentials {
+		prompt.WriteString("Agents creation capability: first call agents__list_model_credentials and choose an existing modelCredential, then call agents__create_agent with the required name and modelCredential. App Studio creates one bounded, isolated agent, forces autonomy to ask, omits channels, delegates, tool grants, and fallbacks, and applies server-owned budget and run limits; project, run, and tool-call provenance is informational only. Creation always requires explicit approval, including AutoApprove, and is unavailable in Plan and Review. Agent update/delete and credential, connection, schedule, trigger, and toolset mutations are not exposed.\n")
 	}
 	return prompt.String()
 }
@@ -2315,7 +2330,15 @@ func projectAssistantMCPToolsForSpecs(tools []projectMCPTool, skipTLSVerify ...b
 				if req.HTTPRequest == nil {
 					return "", errors.New("HTTP request is required for aggregate MCP tools")
 				}
-				return callProjectMCPTool(ctx, req.MCPEndpoint, req.HTTPRequest, req.Identity.tenantPath, insecureSkipTLSVerify, toolSpec.Name, req.Arguments)
+				args := req.Arguments
+				if projectAssistantAgentsCreateTool(toolSpec.Name) {
+					sanitized, err := projectAssistantSanitizeAgentsCreateArguments(args, req)
+					if err != nil {
+						return "", err
+					}
+					args = sanitized
+				}
+				return callProjectMCPTool(ctx, req.MCPEndpoint, req.HTTPRequest, req.Identity.tenantPath, insecureSkipTLSVerify, toolSpec.Name, args)
 			},
 		})
 	}
@@ -2326,6 +2349,9 @@ func projectAssistantMCPToolSpec(tool projectMCPTool) (projectAssistantToolSpec,
 	name := strings.TrimSpace(tool.Name)
 	if name == "" {
 		return projectAssistantToolSpec{}, false
+	}
+	if projectAssistantAgentsCreateTool(name) {
+		return projectAssistantAgentsCreateToolSpec(name), true
 	}
 	risk := projectAssistantToolRiskRead
 	switch name {
@@ -2339,6 +2365,11 @@ func projectAssistantMCPToolSpec(tool projectMCPTool) (projectAssistantToolSpec,
 		projectToolDatabricksDescribeTable:
 		risk = projectAssistantToolRiskRead
 	case projectToolAgentsListAgents,
+		projectToolAgentsGetAgent,
+		projectToolAgentsListModelCredentials,
+		projectToolAgentsListToolFamilies,
+		projectToolAgentsListToolsets,
+		projectToolAgentsListConnections,
 		projectToolAgentsGetRun,
 		projectToolAgentsListRuns:
 		risk = projectAssistantToolRiskRead
