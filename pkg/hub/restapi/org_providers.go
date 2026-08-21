@@ -71,6 +71,12 @@ type OrgProviderOps interface {
 	DeleteOrgProviderWorkspace(ctx context.Context, orgUUID, name string) error
 	ListEdgeInstallTargets(ctx context.Context, orgUUID string) ([]kcp.EdgeInstallTarget, error)
 	GetEdgeInstallTarget(ctx context.Context, orgUUID, wsUUID, name string) (*kcp.EdgeInstallTarget, error)
+
+	// RecordProviderEdgeBinding stamps the chosen edge onto the provider
+	// Workspace at registration. The backend proxy reads it back to route this
+	// provider's data plane over the tunnel, so it must live somewhere only the
+	// hub writes — not on the tenant-authored CatalogEntry.
+	RecordProviderEdgeBinding(ctx context.Context, orgUUID, providerName, wsUUID, edgeName string) error
 }
 
 // ProviderCredentialMinter mints the workspace-scoped credential an Org installs
@@ -275,6 +281,15 @@ func (h *Handler) registerOrgProvider(w http.ResponseWriter, r *http.Request) {
 	cluster, err := h.mgr.orgProviders.EnsureOrgProviderWorkspace(r.Context(), orgUUID, name)
 	if err != nil {
 		writeStatus(w, http.StatusInternalServerError, "InternalError", "creating provider workspace: "+err.Error())
+		return
+	}
+	// Record the edge the caller chose, on the provider Workspace — an object
+	// only the hub writes. The backend proxy reads it later to route this
+	// provider's data plane over the tunnel; reading it from the CatalogEntry
+	// instead would let the tenant's own chart decide where platform traffic
+	// goes (docs/byo-provider-edge-transport.md E-1).
+	if err := h.mgr.orgProviders.RecordProviderEdgeBinding(r.Context(), orgUUID, name, req.Edge.Workspace, req.Edge.Name); err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "recording provider edge binding: "+err.Error())
 		return
 	}
 	if err := h.mgr.providerCreds.EnsureProviderSAAtPath(r.Context(), workspacePath); err != nil {
