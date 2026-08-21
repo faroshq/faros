@@ -39,6 +39,8 @@ const (
 )
 
 var podsGVR = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+var jobsGVR = schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
+var secretsGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 
 // cleanupRunSandboxTokenPods removes only the short-lived control-token Job's
 // pods for the platform-owned run-sandbox template. Jobs normally own their
@@ -83,6 +85,61 @@ func cleanupRunSandboxTokenPods(ctx context.Context, runtime dynamic.Interface, 
 		}
 	}
 	return false, nil
+}
+
+// cleanupRunSandboxTokenResources removes the exact credential resources owned
+// by a universal coding sandbox. The runtime graph normally owns these
+// resources and removes them with the runtime CR, but keeping this narrow
+// backstop is necessary for completed Jobs whose pods (or the Job itself) can
+// outlive graph teardown. Labels are checked before deletion so a stale name
+// cannot cause cleanup of an unrelated tenant resource.
+func cleanupRunSandboxTokenResources(ctx context.Context, runtime dynamic.Interface, templateName, namespace, instanceName string) (bool, error) {
+	if templateName != runSandboxTemplateName {
+		return true, nil
+	}
+	if runtime == nil {
+		return false, fmt.Errorf("runtime client is unavailable")
+	}
+	if namespace == "" || instanceName == "" {
+		return false, fmt.Errorf("run-sandbox token cleanup requires namespace and instance name")
+	}
+
+	podsDone, err := cleanupRunSandboxTokenPods(ctx, runtime, templateName, namespace, instanceName)
+	if err != nil {
+		return false, err
+	}
+	jobDone, err := cleanupRunSandboxTokenResource(ctx, runtime, jobsGVR, namespace, instanceName+"-dev-token", "Job")
+	if err != nil {
+		return false, err
+	}
+	secretDone, err := cleanupRunSandboxTokenResource(ctx, runtime, secretsGVR, namespace, instanceName+"-dev-control", "Secret")
+	if err != nil {
+		return false, err
+	}
+	return podsDone && jobDone && secretDone, nil
+}
+
+func cleanupRunSandboxTokenResource(ctx context.Context, runtime dynamic.Interface, gvr schema.GroupVersionResource, namespace, name, kind string) (bool, error) {
+	obj, err := runtime.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get run-sandbox token %s %s/%s: %w", kind, namespace, name, err)
+	}
+	if !runSandboxLabelsMatch(obj.GetLabels()) {
+		return false, fmt.Errorf("refusing to delete run-sandbox token %s %s/%s with unexpected labels", kind, namespace, name)
+	}
+	if err := runtime.Resource(gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("delete run-sandbox token %s %s/%s: %w", kind, namespace, name, err)
+	}
+	return false, nil
+}
+
+func runSandboxLabelsMatch(got map[string]string) bool {
+	return got[runSandboxNameLabel] == runSandboxTemplateName &&
+		got[runSandboxComponentLabel] == runSandboxDevComponent &&
+		got[runSandboxManagedByLabel] == runSandboxManagedBy
 }
 
 func runSandboxInstanceTemplateName(inst *unstructured.Unstructured) string {

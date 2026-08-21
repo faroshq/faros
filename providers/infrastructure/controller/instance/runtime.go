@@ -358,18 +358,18 @@ func (c *Controller) finalize(ctx context.Context, tenantClient client.Client, t
 		}
 	}
 
-	// The run-sandbox token Job is intentionally short-lived and its succeeded
-	// pods have historically outlived the runtime CR without ownerReferences.
-	// Clean those exact pods before dropping the Instance finalizer; other
-	// templates never enter this path.
+	// The run-sandbox token Job is retained for the warm cache lifetime and its
+	// succeeded pod/Job/Secret have historically outlived the runtime CR
+	// without ownerReferences. Clean those exact resources before dropping the
+	// Instance finalizer; other templates never enter this path.
 	if runSandboxInstanceTemplateName(inst) == runSandboxTemplateName {
 		cleanupNamespace := ns
 		if cleanupNamespace == "" {
 			cleanupNamespace = kro.RuntimeNamespace(tenant, inst.GetNamespace())
 		}
-		done, err := cleanupRunSandboxTokenPods(ctx, c.cfg.Runtime, runSandboxTemplateName, cleanupNamespace, inst.GetName())
+		done, err := cleanupRunSandboxTokenResources(ctx, c.cfg.Runtime, runSandboxTemplateName, cleanupNamespace, inst.GetName())
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("cleanup run-sandbox token pods: %w", err)
+			return ctrl.Result{}, fmt.Errorf("cleanup run-sandbox token resources: %w", err)
 		}
 		if !done {
 			return ctrl.Result{RequeueAfter: time.Second}, nil

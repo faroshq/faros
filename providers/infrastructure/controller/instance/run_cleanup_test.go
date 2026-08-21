@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
 )
 
@@ -38,6 +39,38 @@ func runSandboxTokenPod(name, namespace, instanceName, templateName string) *uns
 				runSandboxComponentLabel: runSandboxDevComponent,
 				runSandboxManagedByLabel: runSandboxManagedBy,
 				runSandboxJobNameLabel:   instanceName + "-dev-token",
+			},
+		},
+	}}
+}
+
+func runSandboxTokenJob(name, namespace, instanceName, templateName string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "batch/v1",
+		"kind":       "Job",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+			"labels": map[string]any{
+				runSandboxNameLabel:      templateName,
+				runSandboxComponentLabel: runSandboxDevComponent,
+				runSandboxManagedByLabel: runSandboxManagedBy,
+			},
+		},
+	}}
+}
+
+func runSandboxTokenSecret(name, namespace, templateName string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+			"labels": map[string]any{
+				runSandboxNameLabel:      templateName,
+				runSandboxComponentLabel: runSandboxDevComponent,
+				runSandboxManagedByLabel: runSandboxManagedBy,
 			},
 		},
 	}}
@@ -95,5 +128,58 @@ func TestCleanupRunSandboxTokenPodsSkipsNonRunTemplates(t *testing.T) {
 	}
 	if _, err := client.Resource(podsGVR).Namespace(namespace).Get(ctx, matching.GetName(), metav1.GetOptions{}); err != nil {
 		t.Fatalf("non-run cleanup deleted run pod: %v", err)
+	}
+}
+
+func TestCleanupRunSandboxTokenResourcesIsExactAndComplete(t *testing.T) {
+	ctx := context.Background()
+	const (
+		namespace    = "faros-sandbox-tenant-default"
+		instanceName = "run-123"
+	)
+	matchingPod := runSandboxTokenPod("run-123-dev-token-abc", namespace, instanceName, runSandboxTemplateName)
+	matchingJob := runSandboxTokenJob(instanceName+"-dev-token", namespace, instanceName, runSandboxTemplateName)
+	matchingSecret := runSandboxTokenSecret(instanceName+"-dev-control", namespace, runSandboxTemplateName)
+	wrongJob := runSandboxTokenJob("other-dev-token", namespace, "other", runSandboxTemplateName)
+	wrongSecret := runSandboxTokenSecret("other-dev-control", namespace, runSandboxTemplateName)
+	client := fake.NewSimpleDynamicClient(runtime.NewScheme(), matchingPod, matchingJob, matchingSecret, wrongJob, wrongSecret)
+
+	done, err := cleanupRunSandboxTokenResources(ctx, client, runSandboxTemplateName, namespace, instanceName)
+	if err != nil {
+		t.Fatalf("cleanupRunSandboxTokenResources() error = %v", err)
+	}
+	if done {
+		t.Fatal("cleanup reported done before matching token resources disappeared")
+	}
+	for _, resource := range []struct {
+		gvr  schema.GroupVersionResource
+		name string
+	}{
+		{podsGVR, matchingPod.GetName()},
+		{jobsGVR, matchingJob.GetName()},
+		{secretsGVR, matchingSecret.GetName()},
+	} {
+		if _, err := client.Resource(resource.gvr).Namespace(namespace).Get(ctx, resource.name, metav1.GetOptions{}); err == nil {
+			t.Fatalf("matching token resource %s/%s still exists", resource.gvr.Resource, resource.name)
+		}
+	}
+	for _, resource := range []struct {
+		gvr  schema.GroupVersionResource
+		name string
+	}{
+		{jobsGVR, wrongJob.GetName()},
+		{secretsGVR, wrongSecret.GetName()},
+	} {
+		if _, err := client.Resource(resource.gvr).Namespace(namespace).Get(ctx, resource.name, metav1.GetOptions{}); err != nil {
+			t.Fatalf("unrelated token resource %s/%s was affected: %v", resource.gvr.Resource, resource.name, err)
+		}
+	}
+
+	done, err = cleanupRunSandboxTokenResources(ctx, client, runSandboxTemplateName, namespace, instanceName)
+	if err != nil {
+		t.Fatalf("second cleanupRunSandboxTokenResources() error = %v", err)
+	}
+	if !done {
+		t.Fatal("cleanup did not report complete after matching resources disappeared")
 	}
 }

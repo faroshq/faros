@@ -12,6 +12,7 @@ package kro
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -384,6 +385,51 @@ func TestDevOverlayGatesProdWorkloadsAndAddsDevVariants(t *testing.T) {
 		if err != nil || !found || value != devActionsSchemaFieldMarker {
 			t.Errorf("RGD schema %s = %q (found=%t err=%v), want %q", field, value, found, err, devActionsSchemaFieldMarker)
 		}
+	}
+}
+
+func TestDevOverlayUniversalControlTokenJobIsRetainedForWarmCache(t *testing.T) {
+	tmpl := devTestTemplate(t)
+	tmpl.Name = infrav1alpha1.UniversalCodingSandboxTemplateName
+
+	first, err := buildRGD(tmpl, devTestTokens())
+	if err != nil {
+		t.Fatalf("build universal RGD: %v", err)
+	}
+	second, err := buildRGD(tmpl, devTestTokens())
+	if err != nil {
+		t.Fatalf("rebuild universal RGD: %v", err)
+	}
+	firstResources := rgdResources(t, first)
+	secondResources := rgdResources(t, second)
+
+	firstSecret := firstResources["farosDevControlSecret"]
+	secondSecret := secondResources["farosDevControlSecret"]
+	if !reflect.DeepEqual(firstSecret, secondSecret) {
+		t.Fatalf("control Secret changed across an equivalent graph rebuild:\nfirst=%v\nsecond=%v", firstSecret, secondSecret)
+	}
+	firstJob := firstResources["farosDevTokenJob"]
+	secondJob := secondResources["farosDevTokenJob"]
+	if !reflect.DeepEqual(firstJob, secondJob) {
+		t.Fatalf("control token Job changed across an equivalent graph rebuild:\nfirst=%v\nsecond=%v", firstJob, secondJob)
+	}
+	jobTemplate, _ := firstJob["template"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	if _, found := jobSpec["ttlSecondsAfterFinished"]; found {
+		t.Fatal("universal coding sandbox token Job has a TTL; a warm cache must retain the completed bootstrap")
+	}
+}
+
+func TestDevOverlayOrdinaryControlTokenJobKeepsShortTTL(t *testing.T) {
+	rgd, err := buildRGD(devTestTemplate(t), devTestTokens())
+	if err != nil {
+		t.Fatalf("build RGD: %v", err)
+	}
+	job := rgdResources(t, rgd)["farosDevTokenJob"]
+	template, _ := job["template"].(map[string]any)
+	spec, _ := template["spec"].(map[string]any)
+	if got := numberValue(spec["ttlSecondsAfterFinished"]); got != 600 {
+		t.Fatalf("ordinary development token Job TTL = %d, want 600", got)
 	}
 }
 

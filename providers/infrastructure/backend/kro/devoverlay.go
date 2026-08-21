@@ -981,6 +981,29 @@ else
   echo "dev control token already present for $SECRET"
 fi
 `
+	jobSpec := map[string]any{
+		"backoffLimit": int64(5),
+		// The universal sandbox is a warm, platform-owned workspace. Its
+		// completed bootstrap Job must remain present for the cache lifetime;
+		// finalization removes this exact Job (and any orphaned pod) when the
+		// Instance is deleted. Ordinary development templates keep their
+		// existing short-lived Job behavior below.
+		"template": map[string]any{
+			"metadata": map[string]any{"labels": labels},
+			"spec": map[string]any{
+				"serviceAccountName": "${farosDevTokenAccount.metadata.name}",
+				"restartPolicy":      "OnFailure",
+				"containers": []any{map[string]any{
+					"name":    "token",
+					"image":   "bitnami/kubectl",
+					"command": []any{"/bin/sh", "-c", script},
+				}},
+			},
+		},
+	}
+	if templateName != infrav1alpha1.UniversalCodingSandboxTemplateName {
+		jobSpec["ttlSecondsAfterFinished"] = int64(600)
+	}
 
 	return []any{
 		map[string]any{
@@ -1029,22 +1052,7 @@ fi
 			"template": map[string]any{
 				"apiVersion": "batch/v1", "kind": "Job",
 				"metadata": meta("${schema.spec.name}-dev-token"),
-				"spec": map[string]any{
-					"backoffLimit":            int64(5),
-					"ttlSecondsAfterFinished": int64(600),
-					"template": map[string]any{
-						"metadata": map[string]any{"labels": labels},
-						"spec": map[string]any{
-							"serviceAccountName": "${farosDevTokenAccount.metadata.name}",
-							"restartPolicy":      "OnFailure",
-							"containers": []any{map[string]any{
-								"name":    "token",
-								"image":   "bitnami/kubectl",
-								"command": []any{"/bin/sh", "-c", script},
-							}},
-						},
-					},
-				},
+				"spec":     jobSpec,
 			},
 		},
 	}, nil
