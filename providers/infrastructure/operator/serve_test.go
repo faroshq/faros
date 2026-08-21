@@ -117,9 +117,12 @@ func TestEnsureProviderServePropagatesCodingSandboxConfig(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure"},
 		Spec: v1alpha1.InfrastructureProviderSpec{
 			CodingSandbox: v1alpha1.CodingSandboxSpec{Enabled: true},
-			Development: v1alpha1.DevelopmentSpec{Images: map[string]string{
-				"universal": "example.test/universal@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			}},
+			Development: v1alpha1.DevelopmentSpec{
+				AgentImage: "example.test/dev-agent@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				Images: map[string]string{
+					"universal": "example.test/universal@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+			},
 			Provider: v1alpha1.ProviderServeSpec{
 				Image: v1alpha1.ImageSpec{Repository: "example.test/infrastructure", Tag: "test"},
 			},
@@ -141,5 +144,8 @@ func TestEnsureProviderServePropagatesCodingSandboxConfig(t *testing.T) {
 	}
 	if got := env["FAROS_DEV_IMAGE_UNIVERSAL"]; got != provider.Spec.Development.Images["universal"] {
 		t.Errorf("FAROS_DEV_IMAGE_UNIVERSAL = %q, want %q", got, provider.Spec.Development.Images["universal"])
+	}
+	if got := env["FAROS_DEV_AGENT_IMAGE"]; got != provider.Spec.Development.AgentImage {
+		t.Errorf("FAROS_DEV_AGENT_IMAGE = %q, want %q", got, provider.Spec.Development.AgentImage)
 	}
 }

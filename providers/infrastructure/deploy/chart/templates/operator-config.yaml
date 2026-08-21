@@ -4,6 +4,9 @@
 {{- if and .Values.codingSandbox.enabled (not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (default "" .Values.development.images.universal))) }}
 {{- fail "codingSandbox.enabled=true requires development.images.universal to be an immutable name@sha256:<64 lowercase hex digits> reference" }}
 {{- end }}
+{{- if and .Values.codingSandbox.enabled (not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (default "" .Values.development.agentImage))) }}
+{{- fail "codingSandbox.enabled=true requires development.agentImage to be an immutable name@sha256:<64 lowercase hex digits> reference" }}
+{{- end }}
 {{- if .Values.operator.providerKubeconfig }}
 # Provider (kcp) kubeconfig Secret, rendered from --set-file
 # operator.providerKubeconfig=... . Omit to reference an existing Secret via
@@ -87,10 +90,15 @@ spec:
     port: {{ .Values.operator.provider.port }}
   codingSandbox:
     enabled: {{ .Values.codingSandbox.enabled }}
-  {{- if .Values.development.images }}
+  {{- if or .Values.development.agentImage .Values.development.images }}
   development:
+    {{- with .Values.development.agentImage }}
+    agentImage: {{ . | quote }}
+    {{- end }}
+    {{- if .Values.development.images }}
     images:
       {{- toYaml .Values.development.images | nindent 6 }}
+    {{- end }}
   {{- end }}
   {{- if or .Values.operator.application.baseDomain .Values.operator.application.gateway.name .Values.operator.application.gateway.namespace }}
   # Exposure layer for the `application` template (serve container's

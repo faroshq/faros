@@ -25,5 +25,8 @@ func validateCodingSandboxConfig(spec infrav1alpha1.InfrastructureProviderSpec) 
 	if err := infrav1alpha1.ValidateImmutableImageRef(image); err != nil {
 		return fmt.Errorf("codingSandbox.enabled requires development.images.universal to be immutable: %w", err)
 	}
+	if err := infrav1alpha1.ValidateImmutableImageRef(spec.Development.AgentImage); err != nil {
+		return fmt.Errorf("codingSandbox.enabled requires development.agentImage to be immutable: %w", err)
+	}
 	return nil
 }

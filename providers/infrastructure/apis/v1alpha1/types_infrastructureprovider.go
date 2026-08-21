@@ -110,8 +110,8 @@ type InfrastructureProviderSpec struct {
 
 	// CodingSandbox controls the platform-owned universal coding sandbox. The
 	// feature is disabled by default; self-hosted/BYO installations opt in
-	// explicitly and must configure an immutable universal image digest in
-	// Development.Images["universal"].
+	// explicitly and must configure immutable universal and dev-agent image
+	// digests in Development.Images["universal"] and Development.AgentImage.
 	// +optional
 	CodingSandbox CodingSandboxSpec `json:"codingSandbox,omitempty"`
 }

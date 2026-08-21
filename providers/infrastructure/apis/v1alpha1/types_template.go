@@ -285,6 +285,10 @@ const (
 	// is Ready, then switches it to runtime. Templates use it only to select
 	// an explicit setup egress policy; tenants cannot choose the phase.
 	FarosNetworkPhaseField   = "farosNetworkPhase"
+	// FarosNetworkPhaseStatusField is the controller-owned status mirror of
+	// FarosNetworkPhaseField. Tenant spec values are never authoritative for
+	// execution readiness.
+	FarosNetworkPhaseStatusField = "farosNetworkPhase"
 	FarosNetworkPhaseSetup   = "setup"
 	FarosNetworkPhaseRuntime = "runtime"
 	// FarosLastActivityAnnotation is written to a runtime Instance by the

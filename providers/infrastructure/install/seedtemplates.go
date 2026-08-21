@@ -88,7 +88,10 @@ func validateSeedImageConfig() error {
 		return nil
 	}
 	if err := infrav1alpha1.ValidateImmutableImageRef(os.Getenv("FAROS_DEV_IMAGE_UNIVERSAL")); err != nil {
-		return fmt.Errorf("coding sandbox is enabled: %w", err)
+		return fmt.Errorf("coding sandbox universal image is not immutable: %w", err)
+	}
+	if err := infrav1alpha1.ValidateImmutableImageRef(os.Getenv("FAROS_DEV_AGENT_IMAGE")); err != nil {
+		return fmt.Errorf("coding sandbox dev-agent image is not immutable: %w", err)
 	}
 	return nil
 }

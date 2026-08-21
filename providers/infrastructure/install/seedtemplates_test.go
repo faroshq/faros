@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -107,13 +108,19 @@ func TestSeedTemplatesCodingSandboxIsOptIn(t *testing.T) {
 func TestSeedTemplatesRequiresImmutableUniversalImageWhenEnabled(t *testing.T) {
 	t.Setenv("FAROS_CODING_SANDBOX_ENABLED", "true")
 	t.Setenv("FAROS_DEV_IMAGE_UNIVERSAL", "ghcr.io/faroshq/faros-universal-dev:latest")
+	t.Setenv("FAROS_DEV_AGENT_IMAGE", "ghcr.io/faroshq/faros-dev-agent@sha256:"+strings.Repeat("b", 64))
 	if err := validateSeedImageConfig(); err == nil {
 		t.Fatal("expected mutable universal image to be rejected")
 	}
 
 	t.Setenv("FAROS_DEV_IMAGE_UNIVERSAL", "ghcr.io/faroshq/faros-universal-dev@sha256:"+strings.Repeat("a", 64))
 	if err := validateSeedImageConfig(); err != nil {
-		t.Fatalf("valid universal digest rejected: %v", err)
+		t.Fatalf("valid universal and agent digests rejected: %v", err)
+	}
+
+	t.Setenv("FAROS_DEV_AGENT_IMAGE", "ghcr.io/faroshq/faros-dev-agent:latest")
+	if err := validateSeedImageConfig(); err == nil || !strings.Contains(err.Error(), "dev-agent image") {
+		t.Fatalf("mutable dev-agent image error = %v, want dev-agent validation", err)
 	}
 }
 
@@ -321,27 +328,9 @@ func TestUniversalCodingSandboxContract(t *testing.T) {
 	assertPolicyTypes("workspaceSetupEgress", setup)
 	assertSelector("workspaceSetupEgress", setup, "setup")
 	setupEgress, ok := setup["egress"].([]any)
-	if !ok || len(setupEgress) != 1 {
-		t.Fatalf("setup egress = %#v, want one broad setup rule", setup["egress"])
+	if !ok || len(setupEgress) != 2 {
+		t.Fatalf("setup egress = %#v, want the same bounded DNS and public HTTPS rules as runtime", setup["egress"])
 	}
-	setupRule := asMap(setupEgress[0], "workspaceSetupEgress egress rule")
-	if _, found := setupRule["to"]; found {
-		t.Fatal("setup egress must preserve its existing destination behavior")
-	}
-	assertPorts("workspaceSetupEgress", setupRule["ports"],
-		struct {
-			protocol string
-			port     float64
-		}{"UDP", 53},
-		struct {
-			protocol string
-			port     float64
-		}{"TCP", 53},
-		struct {
-			protocol string
-			port     float64
-		}{"TCP", 443},
-	)
 
 	runtimePolicy := policy("workspaceRuntimeEgress")
 	assertIncludeWhen("workspaceRuntimeEgress", `${schema.spec.farosMode == "development" && schema.spec.farosNetworkPhase == "runtime"}`)
@@ -350,6 +339,9 @@ func TestUniversalCodingSandboxContract(t *testing.T) {
 	runtimeEgress, ok := runtimePolicy["egress"].([]any)
 	if !ok || len(runtimeEgress) != 2 {
 		t.Fatalf("runtime egress = %#v, want DNS and public HTTPS rules", runtimePolicy["egress"])
+	}
+	if !reflect.DeepEqual(setupEgress, runtimeEgress) {
+		t.Fatalf("setup egress = %#v is broader than runtime egress = %#v", setupEgress, runtimeEgress)
 	}
 
 	dnsRule := asMap(runtimeEgress[0], "workspaceRuntimeEgress DNS rule")

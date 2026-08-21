@@ -91,3 +91,74 @@ func runtimeReady(obj *unstructured.Unstructured) bool {
 	conditions, _ := status["conditions"].([]any)
 	return conditionTrue(conditions, "Ready")
 }
+
+// runtimeReadyForNetwork is the stricter readiness predicate used before the
+// controller publishes the runtime network phase to a tenant Instance. A
+// status/condition from the previous runtime generation must not survive a
+// setup -> runtime spec update and open the data plane while the new graph is
+// still converging. KRO commonly puts observedGeneration on the Ready
+// condition, while other runtimes expose it at status.observedGeneration; we
+// accept either server-owned shape, but never accept a Ready signal without a
+// matching generation.
+func runtimeReadyForNetwork(obj *unstructured.Unstructured) bool {
+	if obj == nil || obj.GetGeneration() <= 0 {
+		return false
+	}
+	status, found, err := unstructured.NestedMap(obj.Object, "status")
+	if err != nil || !found {
+		return false
+	}
+	phase, _ := status["phase"].(string)
+	phaseReady := phase == "Ready"
+	conditions, _ := status["conditions"].([]any)
+	readyConditionFound := false
+	readyConditionCurrent := false
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok || condition["type"] != "Ready" {
+			continue
+		}
+		readyConditionFound = true
+		if condition["status"] != "True" {
+			return false
+		}
+		if observed, ok := generationValue(condition["observedGeneration"]); ok && observed == obj.GetGeneration() {
+			readyConditionCurrent = true
+		}
+	}
+	if !phaseReady && !readyConditionFound {
+		return false
+	}
+
+	if observed, ok := generationValue(status["observedGeneration"]); ok {
+		return observed == obj.GetGeneration()
+	}
+	return readyConditionCurrent
+}
+
+func generationValue(value any) (int64, bool) {
+	switch value := value.(type) {
+	case int64:
+		return value, true
+	case int32:
+		return int64(value), true
+	case int:
+		return int64(value), true
+	case uint64:
+		if value > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint:
+		return int64(value), true
+	case float64:
+		if value != float64(int64(value)) {
+			return 0, false
+		}
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}

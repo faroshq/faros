@@ -223,6 +223,12 @@ func testTokens() map[string]string {
 	}
 	maps.Copy(tokens, accessGateTokens())
 	maps.Copy(tokens, devImageTokens())
+	// Graph-build fixtures model the operator's secure universal-sandbox
+	// configuration. The default token map remains mutable for ordinary
+	// development and is validated separately when the universal template is
+	// admitted.
+	tokens[devImageTokenPrefix+"universal}"] = "ghcr.io/example/universal-dev@sha256:" + strings.Repeat("a", 64)
+	tokens[devAgentImageToken] = "ghcr.io/example/dev-agent@sha256:" + strings.Repeat("b", 64)
 	return tokens
 }
 
@@ -258,6 +264,21 @@ func TestBackendRejectsMutableUniversalImageRegardlessOfGate(t *testing.T) {
 				t.Fatalf("error = %q, want immutable digest explanation", err)
 			}
 		})
+	}
+}
+
+func TestBackendRejectsMutableUniversalDevAgentImage(t *testing.T) {
+	t.Setenv("FAROS_DEV_IMAGE_UNIVERSAL", "ghcr.io/example/universal-dev@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("FAROS_DEV_AGENT_IMAGE", "ghcr.io/example/dev-agent:latest")
+	b := New(nil)
+	status, err := b.SetupTemplate(context.Background(), &infrav1alpha1.Template{
+		ObjectMeta: metav1.ObjectMeta{Name: infrav1alpha1.UniversalCodingSandboxTemplateName},
+	})
+	if err == nil || !strings.Contains(err.Error(), "dev agent image") {
+		t.Fatalf("error = %v, want mutable dev-agent rejection", err)
+	}
+	if status.Ready {
+		t.Fatal("mutable dev-agent image unexpectedly reported ready")
 	}
 }
 

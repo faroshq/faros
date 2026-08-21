@@ -398,15 +398,7 @@ func validateUniversalSetupEgress(resource map[string]any) error {
 	}
 	template, _ := resource["template"].(map[string]any)
 	spec, _ := template["spec"].(map[string]any)
-	egress, ok := spec["egress"].([]any)
-	if !ok || len(egress) != 1 {
-		return fmt.Errorf("universal coding sandbox setup policy must have one egress rule")
-	}
-	rule, ok := egress[0].(map[string]any)
-	if !ok || rule["to"] != nil || !equalPortRules(rule["ports"], []portRule{{"UDP", 53}, {"TCP", 53}, {"TCP", 443}}) {
-		return fmt.Errorf("universal coding sandbox setup policy must allow only DNS and HTTPS ports")
-	}
-	return nil
+	return validateUniversalEgress(spec, "setup")
 }
 
 func validateUniversalRuntimeEgress(resource map[string]any) error {
@@ -415,44 +407,48 @@ func validateUniversalRuntimeEgress(resource map[string]any) error {
 	}
 	template, _ := resource["template"].(map[string]any)
 	spec, _ := template["spec"].(map[string]any)
+	return validateUniversalEgress(spec, "runtime")
+}
+
+func validateUniversalEgress(spec map[string]any, phase string) error {
 	egress, ok := spec["egress"].([]any)
 	if !ok || len(egress) != 2 {
-		return fmt.Errorf("universal coding sandbox runtime policy must have DNS and public HTTPS egress rules")
+		return fmt.Errorf("universal coding sandbox %s policy must have DNS and public HTTPS egress rules", phase)
 	}
 	dns, ok := egress[0].(map[string]any)
 	if !ok || !equalPortRules(dns["ports"], []portRule{{"UDP", 53}, {"TCP", 53}}) {
-		return fmt.Errorf("universal coding sandbox runtime DNS policy is unsafe")
+		return fmt.Errorf("universal coding sandbox %s DNS policy is unsafe", phase)
 	}
 	to, ok := dns["to"].([]any)
 	if !ok || len(to) != 1 {
-		return fmt.Errorf("universal coding sandbox runtime DNS policy must target CoreDNS only")
+		return fmt.Errorf("universal coding sandbox %s DNS policy must target CoreDNS only", phase)
 	}
 	toMap, _ := to[0].(map[string]any)
 	namespaceSelector, err := objectField(toMap, "namespaceSelector")
 	if err != nil || !stringMapEqual(namespaceSelector["matchLabels"], map[string]string{"kubernetes.io/metadata.name": "kube-system"}) {
-		return fmt.Errorf("universal coding sandbox runtime DNS namespace selector is unsafe")
+		return fmt.Errorf("universal coding sandbox %s DNS namespace selector is unsafe", phase)
 	}
 	podSelector, err := objectField(toMap, "podSelector")
 	if err != nil || !stringMapEqual(podSelector["matchLabels"], map[string]string{"k8s-app": "kube-dns"}) {
-		return fmt.Errorf("universal coding sandbox runtime DNS pod selector is unsafe")
+		return fmt.Errorf("universal coding sandbox %s DNS pod selector is unsafe", phase)
 	}
 	public, ok := egress[1].(map[string]any)
 	if !ok || !equalPortRules(public["ports"], []portRule{{"TCP", 443}}) {
-		return fmt.Errorf("universal coding sandbox runtime HTTPS policy must allow TCP 443 only")
+		return fmt.Errorf("universal coding sandbox %s HTTPS policy must allow TCP 443 only", phase)
 	}
 	publicTo, ok := public["to"].([]any)
 	if !ok || len(publicTo) != 1 {
-		return fmt.Errorf("universal coding sandbox runtime HTTPS policy must target one public CIDR")
+		return fmt.Errorf("universal coding sandbox %s HTTPS policy must target one public CIDR", phase)
 	}
 	publicToMap, ok := publicTo[0].(map[string]any)
 	if !ok {
-		return fmt.Errorf("universal coding sandbox runtime HTTPS policy target is malformed")
+		return fmt.Errorf("universal coding sandbox %s HTTPS policy target is malformed", phase)
 	}
 	ipBlock, err := objectField(publicToMap, "ipBlock")
 	if err != nil || ipBlock["cidr"] != "0.0.0.0/0" || !equalStringSlice(ipBlock["except"], []string{
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.31.196.0/24", "192.52.193.0/24", "192.88.99.0/24", "192.168.0.0/16", "192.175.48.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
 	}) {
-		return fmt.Errorf("universal coding sandbox runtime HTTPS policy must exclude private, metadata, and reserved IPv4 ranges")
+		return fmt.Errorf("universal coding sandbox %s HTTPS policy must exclude private, metadata, and reserved IPv4 ranges", phase)
 	}
 	return nil
 }

@@ -119,6 +119,8 @@ func devTestTemplate(t *testing.T) *infrav1alpha1.Template {
 func devTestTokens() map[string]string {
 	tokens := testTokens()
 	tokens["${faros.devImage.python}"] = "docker.io/library/python:3.12"
+	tokens[devImageTokenPrefix+"universal}"] = "ghcr.io/example/universal-dev@sha256:" + strings.Repeat("a", 64)
+	tokens[devAgentImageToken] = "ghcr.io/example/dev-agent@sha256:" + strings.Repeat("b", 64)
 	return tokens
 }
 
@@ -430,6 +432,58 @@ func TestDevOverlayOrdinaryControlTokenJobKeepsShortTTL(t *testing.T) {
 	spec, _ := template["spec"].(map[string]any)
 	if got := numberValue(spec["ttlSecondsAfterFinished"]); got != 600 {
 		t.Fatalf("ordinary development token Job TTL = %d, want 600", got)
+	}
+}
+
+func TestDevOverlayControlTokenBootstrapIsScopedAndHardened(t *testing.T) {
+	tmpl := devTestTemplate(t)
+	tmpl.Name = infrav1alpha1.UniversalCodingSandboxTemplateName
+	rgd, err := buildRGD(tmpl, devTestTokens())
+	if err != nil {
+		t.Fatalf("build universal RGD: %v", err)
+	}
+	byID := rgdResources(t, rgd)
+
+	job := byID["farosDevTokenJob"]["template"].(map[string]any)
+	spec := job["spec"].(map[string]any)
+	if got := numberValue(spec["activeDeadlineSeconds"]); got <= 0 {
+		t.Fatalf("token Job activeDeadlineSeconds = %d, want positive deadline", got)
+	}
+	jobTemplate := spec["template"].(map[string]any)
+	podSpec := jobTemplate["spec"].(map[string]any)
+	if podSpec["automountServiceAccountToken"] != true || podSpec["restartPolicy"] != "OnFailure" {
+		t.Fatalf("token Job pod spec = %v, want ServiceAccount token and OnFailure", podSpec)
+	}
+	podSecurity := podSpec["securityContext"].(map[string]any)
+	if podSecurity["runAsNonRoot"] != true || numberValue(podSecurity["runAsUser"]) != 1001 || numberValue(podSecurity["runAsGroup"]) != 1001 {
+		t.Fatalf("token Job pod securityContext = %v", podSecurity)
+	}
+	seccomp := podSecurity["seccompProfile"].(map[string]any)
+	if seccomp["type"] != "RuntimeDefault" {
+		t.Fatalf("token Job seccompProfile = %v, want RuntimeDefault", seccomp)
+	}
+	containers := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	if container["image"] != "ghcr.io/example/dev-agent@sha256:"+strings.Repeat("b", 64) {
+		t.Fatalf("token bootstrap image = %q, want immutable dev-agent image", container["image"])
+	}
+	if got := container["command"]; !reflect.DeepEqual(got, []any{"/faros-dev-agent", "--bootstrap-control-token", "${farosDevControlSecret.metadata.name}"}) {
+		t.Fatalf("token bootstrap command = %v", got)
+	}
+	containerSecurity := container["securityContext"].(map[string]any)
+	if containerSecurity["runAsNonRoot"] != true || numberValue(containerSecurity["runAsUser"]) != 1001 || numberValue(containerSecurity["runAsGroup"]) != 1001 || containerSecurity["allowPrivilegeEscalation"] != false || containerSecurity["readOnlyRootFilesystem"] != true {
+		t.Fatalf("token container securityContext = %v", containerSecurity)
+	}
+	capabilities := containerSecurity["capabilities"].(map[string]any)
+	if !reflect.DeepEqual(capabilities["drop"], []any{"ALL"}) {
+		t.Fatalf("token container capabilities = %v, want drop ALL", capabilities)
+	}
+
+	role := byID["farosDevTokenRole"]["template"].(map[string]any)
+	rules := role["rules"].([]any)
+	rule := rules[0].(map[string]any)
+	if !reflect.DeepEqual(rule["resourceNames"], []any{"${farosDevControlSecret.metadata.name}"}) {
+		t.Fatalf("token Role resourceNames = %v, want exact control Secret", rule["resourceNames"])
 	}
 }
 

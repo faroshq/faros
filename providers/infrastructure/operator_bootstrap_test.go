@@ -30,7 +30,17 @@ func TestBootstrapOnceRejectsMutableUniversalImageBeforeSeed(t *testing.T) {
 func TestValidateLegacyCodingSandboxImagePreservesDisabledPath(t *testing.T) {
 	t.Setenv("FAROS_CODING_SANDBOX_ENABLED", "false")
 	t.Setenv("FAROS_DEV_IMAGE_UNIVERSAL", "ghcr.io/faroshq/faros-universal-dev:latest")
+	t.Setenv("FAROS_DEV_AGENT_IMAGE", "ghcr.io/faroshq/faros-dev-agent:latest")
 	if err := validateLegacyCodingSandboxImage(); err != nil {
 		t.Fatalf("disabled coding sandbox rejected mutable image: %v", err)
+	}
+}
+
+func TestValidateLegacyCodingSandboxImageRejectsMutableDevAgent(t *testing.T) {
+	t.Setenv("FAROS_CODING_SANDBOX_ENABLED", "true")
+	t.Setenv("FAROS_DEV_IMAGE_UNIVERSAL", "ghcr.io/faroshq/faros-universal-dev@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("FAROS_DEV_AGENT_IMAGE", "ghcr.io/faroshq/faros-dev-agent:latest")
+	if err := validateLegacyCodingSandboxImage(); err == nil || !strings.Contains(err.Error(), "dev-agent image") {
+		t.Fatalf("error = %v, want mutable dev-agent validation", err)
 	}
 }

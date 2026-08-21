@@ -238,6 +238,10 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		http.Error(w, "exec is unavailable on this provider", http.StatusServiceUnavailable)
 		return
 	}
+	if !instanceReadyForExec(instance, templateName) {
+		http.Error(w, "exec is unavailable until the Instance is Ready and network phase is runtime", http.StatusConflict)
+		return
+	}
 	reqBody, idempotencyKey, err := decodeExecRequest(w, r, component.Exec)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -342,6 +346,99 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		return
+	}
+}
+
+// instanceReadyForExec is deliberately fail-closed. The controller stamps the
+// platform-owned network phase while the runtime is being bootstrapped and
+// mirrors the runtime's readiness onto the Instance. Exec may only reach the
+// dev-agent after both signals say that the live runtime is ready.
+func instanceReadyForExec(instance *unstructured.Unstructured, templateName string) bool {
+	if instance == nil {
+		return false
+	}
+	generation := instance.GetGeneration()
+	if generation <= 0 {
+		return false
+	}
+	statusObserved, found, err := unstructured.NestedFieldNoCopy(instance.Object, "status", "observedGeneration")
+	if err != nil || !found {
+		return false
+	}
+	observedGeneration, ok := observedGenerationValue(statusObserved)
+	if !ok || observedGeneration != generation {
+		return false
+	}
+	phase, found, err := unstructured.NestedString(instance.Object, "status", "phase")
+	if err != nil || !found || phase != "Ready" {
+		return false
+	}
+	conditions, found, err := unstructured.NestedSlice(instance.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	ready := false
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if conditionType, _ := condition["type"].(string); conditionType != "Ready" {
+			continue
+		}
+		status, _ := condition["status"].(string)
+		conditionObserved, ok := observedGenerationValue(condition["observedGeneration"])
+		if !ok || conditionObserved != generation {
+			return false
+		}
+		ready = status == "True"
+		break
+	}
+	if !ready {
+		return false
+	}
+	// The platform-owned universal sandbox has a status phase gate that must
+	// be present and runtime. Ordinary development templates predate the
+	// universal network-phase contract; when their controller has not yet
+	// mirrored a phase, preserve their existing Ready-based exec behavior.
+	rawPhase, found, err := unstructured.NestedFieldNoCopy(instance.Object, "status", infrav1alpha1.FarosNetworkPhaseStatusField)
+	if err != nil {
+		return false
+	}
+	if templateName == infrav1alpha1.UniversalCodingSandboxTemplateName {
+		if !found {
+			return false
+		}
+		networkPhase, ok := rawPhase.(string)
+		return ok && networkPhase == infrav1alpha1.FarosNetworkPhaseRuntime
+	}
+	return true
+}
+
+func observedGenerationValue(value any) (int64, bool) {
+	switch value := value.(type) {
+	case int64:
+		return value, true
+	case int32:
+		return int64(value), true
+	case int:
+		return int64(value), true
+	case uint64:
+		if value > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint:
+		return int64(value), true
+	case float64:
+		if value != float64(int64(value)) {
+			return 0, false
+		}
+		return int64(value), true
+	default:
+		return 0, false
 	}
 }
 

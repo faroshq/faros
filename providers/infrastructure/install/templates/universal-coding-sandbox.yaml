@@ -21,7 +21,7 @@ spec:
       the platform replaces the workload image with the universal dev image,
       mounts a per-instance workspace, and injects the coordinator/executor.
       The image is platform-selected and should be pinned by the operator to a
-      digest with FAROS_DEV_IMAGE_UNIVERSAL. There is no public URL, no runtime
+      digest with FAROS_DEV_IMAGE_UNIVERSAL and FAROS_DEV_AGENT_IMAGE. There is no public URL, no runtime
       kubeconfig, and no ServiceAccount token in the workload containers.
 
       Use the component data plane at
@@ -208,8 +208,10 @@ spec:
               matchLabels:
                 app: ${schema.spec.name}
             policyTypes: [Egress]
-      # Explicit setup seam: DNS + HTTPS only, and only while the Instance
-      # controller holds the pod in setup. No policy grants arbitrary ports.
+      # Explicit setup seam: the same DNS + public HTTPS boundary used at
+      # runtime, and only while the Instance controller holds the pod in setup.
+      # Keeping setup no broader than runtime prevents a stale Ready condition
+      # during phase convergence from exposing private or metadata addresses.
       - id: workspaceSetupEgress
         includeWhen: ["${schema.spec.farosMode == \"development\" && schema.spec.farosNetworkPhase == \"setup\"}"]
         template:
@@ -228,15 +230,46 @@ spec:
                 faros.sh/network-phase: setup
             policyTypes: [Egress]
             egress:
-              - ports:
+              - to:
+                  - namespaceSelector:
+                      matchLabels:
+                        kubernetes.io/metadata.name: kube-system
+                    podSelector:
+                      matchLabels:
+                        k8s-app: kube-dns
+                ports:
                   - protocol: UDP
                     port: 53
                   - protocol: TCP
                     port: 53
+              - to:
+                  - ipBlock:
+                      cidr: 0.0.0.0/0
+                      except:
+                        # RFC 6890 special-purpose and non-public IPv4 space.
+                        - 0.0.0.0/8
+                        - 10.0.0.0/8
+                        - 100.64.0.0/10
+                        - 127.0.0.0/8
+                        - 169.254.0.0/16
+                        - 172.16.0.0/12
+                        - 192.0.0.0/24
+                        - 192.0.2.0/24
+                        - 192.31.196.0/24
+                        - 192.52.193.0/24
+                        - 192.88.99.0/24
+                        - 192.168.0.0/16
+                        - 192.175.48.0/24
+                        - 198.18.0.0/15
+                        - 198.51.100.0/24
+                        - 203.0.113.0/24
+                        - 224.0.0.0/4
+                        - 240.0.0.0/4
+                ports:
                   - protocol: TCP
                     port: 443
-      # Runtime package access is deliberately narrower than setup. DNS may
-      # reach only the cluster's CoreDNS pods; HTTPS may reach only globally
+      # Runtime package access has the same narrow boundary. DNS may reach
+      # only the cluster's CoreDNS pods; HTTPS may reach only globally
       # routable IPv4 addresses. The default-deny policy remains selected for
       # the same pod, so every other protocol and destination stays blocked.
       - id: workspaceRuntimeEgress

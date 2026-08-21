@@ -102,6 +102,8 @@ const (
 	// stable, but default omitted values to empty strings: kro evaluates every
 	// referenced schema field even when a project has no action grant.
 	devActionsSchemaFieldMarker = `string | default=""`
+
+	devTokenBootstrapActiveDeadlineSeconds = int64(120)
 )
 
 // applyDevOverlay extends simpleSpec (farosMode field), the resource graph,
@@ -223,7 +225,7 @@ func applyDevOverlay(tmpl *infrav1alpha1.Template, simpleSpec map[string]any, re
 		}
 	}
 
-	tokenRes, err := synthesizeControlToken(tmpl.Name, namespaceExpr, byID)
+	tokenRes, err := synthesizeControlToken(tmpl.Name, namespaceExpr, agentImage, byID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -959,7 +961,7 @@ func appendDevRuntimeEnv(container map[string]any, comp infrav1alpha1.TemplateDe
 // synthesizeControlToken is the instance-wide control-token Secret + one-shot
 // generator Job (the proven sandbox-runner pattern), gated to development
 // mode. The token authenticates every component's data-plane control calls.
-func synthesizeControlToken(templateName, namespace string, byID map[string]map[string]any) ([]any, error) {
+func synthesizeControlToken(templateName, namespace, agentImage string, byID map[string]map[string]any) ([]any, error) {
 	for _, id := range []string{"farosDevControlSecret", "farosDevTokenAccount", "farosDevTokenRole", "farosDevTokenBinding", "farosDevTokenJob"} {
 		if _, taken := byID[id]; taken {
 			return nil, fmt.Errorf("template %q: graph already declares resource id %q (reserved for the dev overlay)", templateName, id)
@@ -971,18 +973,9 @@ func synthesizeControlToken(templateName, namespace string, byID map[string]map[
 	}
 	include := []any{devModeCondition}
 
-	script := `set -eu
-SECRET="${farosDevControlSecret.metadata.name}"
-if [ -z "$(kubectl get secret "$SECRET" -o jsonpath='{.data.token}' 2>/dev/null)" ]; then
-  TOKEN="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 64)"
-  kubectl patch secret "$SECRET" --type merge -p "{\"stringData\":{\"token\":\"$TOKEN\"}}"
-  echo "generated dev control token for $SECRET"
-else
-  echo "dev control token already present for $SECRET"
-fi
-`
 	jobSpec := map[string]any{
-		"backoffLimit": int64(5),
+		"activeDeadlineSeconds": devTokenBootstrapActiveDeadlineSeconds,
+		"backoffLimit":          int64(2),
 		// The universal sandbox is a warm, platform-owned workspace. Its
 		// completed bootstrap Job must remain present for the cache lifetime;
 		// finalization removes this exact Job (and any orphaned pod) when the
@@ -991,12 +984,32 @@ fi
 		"template": map[string]any{
 			"metadata": map[string]any{"labels": labels},
 			"spec": map[string]any{
-				"serviceAccountName": "${farosDevTokenAccount.metadata.name}",
-				"restartPolicy":      "OnFailure",
+				"serviceAccountName":           "${farosDevTokenAccount.metadata.name}",
+				"automountServiceAccountToken": true,
+				"restartPolicy":                "OnFailure",
+				"securityContext": map[string]any{
+					"runAsNonRoot": true,
+					"runAsUser":    int64(1001),
+					"runAsGroup":   int64(1001),
+					"seccompProfile": map[string]any{
+						"type": "RuntimeDefault",
+					},
+				},
 				"containers": []any{map[string]any{
-					"name":    "token",
-					"image":   "bitnami/kubectl",
-					"command": []any{"/bin/sh", "-c", script},
+					"name":            "token",
+					"image":           agentImage,
+					"imagePullPolicy": "IfNotPresent",
+					"command":         []any{"/faros-dev-agent", "--bootstrap-control-token", "${farosDevControlSecret.metadata.name}"},
+					"securityContext": map[string]any{
+						"runAsNonRoot":             true,
+						"runAsUser":                int64(1001),
+						"runAsGroup":               int64(1001),
+						"allowPrivilegeEscalation": false,
+						"readOnlyRootFilesystem":   true,
+						"capabilities": map[string]any{
+							"drop": []any{"ALL"},
+						},
+					},
 				}},
 			},
 		},
@@ -1027,9 +1040,10 @@ fi
 				"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
 				"metadata": meta("${schema.spec.name}-dev-token"),
 				"rules": []any{map[string]any{
-					"apiGroups": []any{""},
-					"resources": []any{"secrets"},
-					"verbs":     []any{"get", "patch"},
+					"apiGroups":     []any{""},
+					"resources":     []any{"secrets"},
+					"resourceNames": []any{"${farosDevControlSecret.metadata.name}"},
+					"verbs":         []any{"get", "patch"},
 				}},
 			},
 		},

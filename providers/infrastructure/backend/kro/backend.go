@@ -247,9 +247,8 @@ func (b *Backend) SetupTemplate(ctx context.Context, tmpl *infrav1alpha1.Templat
 	// direct SetupTemplate callers and prevents a mutable tenant-code image from
 	// reaching the runtime cluster during a gate/configuration race.
 	if tmpl.Name == infrav1alpha1.UniversalCodingSandboxTemplateName {
-		image := strings.TrimSpace(b.tokens[devImageTokenPrefix+"universal}"])
-		if err := infrav1alpha1.ValidateImmutableImageRef(image); err != nil {
-			return backend.TemplateStatus{Ready: false, Message: err.Error()}, fmt.Errorf("template %q: universal coding sandbox image: %w", tmpl.Name, err)
+		if err := validateUniversalDevImages(b.tokens); err != nil {
+			return backend.TemplateStatus{Ready: false, Message: err.Error()}, fmt.Errorf("template %q: %w", tmpl.Name, err)
 		}
 	}
 	rgd, err := buildRGD(tmpl, b.tokens)
@@ -262,6 +261,21 @@ func (b *Backend) SetupTemplate(ctx context.Context, tmpl *infrav1alpha1.Templat
 	klog.FromContext(ctx).WithName("backend.kro").Info("applied ResourceGraphDefinition to runtime cluster",
 		"template", tmpl.Name, "rgd", tmpl.Name)
 	return backend.TemplateStatus{Ready: true, Message: "RGD applied to runtime cluster"}, nil
+}
+
+func validateUniversalDevImages(tokens map[string]string) error {
+	for _, image := range []struct {
+		name  string
+		token string
+	}{
+		{name: "universal", token: devImageTokenPrefix + "universal}"},
+		{name: "dev agent", token: devAgentImageToken},
+	} {
+		if err := infrav1alpha1.ValidateImmutableImageRef(strings.TrimSpace(tokens[image.token])); err != nil {
+			return fmt.Errorf("universal coding sandbox %s image: %w", image.name, err)
+		}
+	}
+	return nil
 }
 
 // TeardownTemplate removes the Template's RGD from the runtime cluster. kro

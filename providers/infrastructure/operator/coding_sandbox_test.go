@@ -29,7 +29,26 @@ func TestValidateCodingSandboxConfig(t *testing.T) {
 	spec.Development.Images = map[string]string{
 		"universal": "ghcr.io/faroshq/faros-universal-dev@sha256:" + strings.Repeat("a", 64),
 	}
+	if err := validateCodingSandboxConfig(spec); err == nil || !strings.Contains(err.Error(), "development.agentImage") {
+		t.Fatalf("missing agent image error = %v, want agent image validation", err)
+	}
+	spec.Development.AgentImage = "ghcr.io/faroshq/faros-dev-agent@sha256:" + strings.Repeat("b", 64)
 	if err := validateCodingSandboxConfig(spec); err != nil {
-		t.Fatalf("immutable universal image rejected: %v", err)
+		t.Fatalf("immutable universal and agent images rejected: %v", err)
+	}
+}
+
+func TestValidateCodingSandboxConfigRejectsMutableAgentImage(t *testing.T) {
+	spec := infrav1alpha1.InfrastructureProviderSpec{
+		CodingSandbox: infrav1alpha1.CodingSandboxSpec{Enabled: true},
+		Development: infrav1alpha1.DevelopmentSpec{
+			AgentImage: "ghcr.io/faroshq/faros-dev-agent:latest",
+			Images: map[string]string{
+				"universal": "ghcr.io/faroshq/faros-universal-dev@sha256:" + strings.Repeat("a", 64),
+			},
+		},
+	}
+	if err := validateCodingSandboxConfig(spec); err == nil || !strings.Contains(err.Error(), "development.agentImage") {
+		t.Fatalf("mutable agent image error = %v, want agent image validation", err)
 	}
 }

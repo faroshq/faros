@@ -98,7 +98,8 @@ tenantLimitRange:
 # TENANT code, so production deployments should pin them by digest. Empty
 # values fall back to the in-binary defaults (node → docker.io/library/node:22-bookworm,
 # universal → ghcr.io/faroshq/faros-universal-dev:latest,
-# agent → ghcr.io/faroshq/faros-dev-agent:latest).
+# agent → ghcr.io/faroshq/faros-dev-agent:latest). When codingSandbox.enabled
+# is true, both universal and agentImage must be immutable digest references.
 development:
   # The injector image carrying the static faros-dev-agent binary
   # (FAROS_DEV_AGENT_IMAGE).
@@ -123,9 +124,9 @@ development:
     # go: "docker.io/library/golang:1.26"
 
 # Platform-owned universal coding sandbox. Disabled by default (including the
-# hosted chart). BYO/self-hosted installs opt in explicitly and must pin the
-# universal image by digest; the chart fails rendering when the opt-in image is
-# mutable or absent.
+# hosted chart). BYO/self-hosted installs opt in explicitly and must pin both
+# the universal and dev-agent images by digest; the chart fails rendering when
+# either opt-in image is mutable or absent.
 codingSandbox:
   enabled: false
 
