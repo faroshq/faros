@@ -161,6 +161,25 @@ func TestHandlerExecStartAuthorizesAndPassesPlatformDevelopment(t *testing.T) {
 	}
 }
 
+func TestHandlerExecRecordsActivityAfterAuthorization(t *testing.T) {
+	rt := &activityRuntime{fakeRuntime: &fakeRuntime{}}
+	h := NewHandler(
+		&fakeInstanceGetter{instance: execInstance()},
+		&fakeContractGetter{contract: execContract()},
+		rt,
+		WithExec(&fakeExecutor{result: ExecResult{SessionID: "session-1", State: "running"}}, &fakeExecAuthorizer{}),
+		WithDevelopmentGetter(&fakeDevelopmentGetter{component: &infrav1alpha1.TemplateDevelopmentComponent{}}),
+	)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, execRequest(t, ExecActionStart))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
+	}
+	if rt.calls != 1 {
+		t.Fatalf("activity calls = %d, want 1", rt.calls)
+	}
+}
+
 func TestHandlerExecPollAndCancelDispatch(t *testing.T) {
 	executor := &fakeExecutor{result: ExecResult{SessionID: "session-1", State: "canceled"}}
 	authorizer := &fakeExecAuthorizer{}

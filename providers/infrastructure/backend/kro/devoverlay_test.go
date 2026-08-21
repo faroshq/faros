@@ -800,6 +800,38 @@ func TestDevOverlayStatusAdditions(t *testing.T) {
 	}
 }
 
+func TestDevOverlayCodingOnlyDisablesProviderActionsAndAutomaticSAToken(t *testing.T) {
+	tmpl := devTestTemplate(t)
+	disabled := false
+	tmpl.Spec.Development.ProviderActions = &disabled
+	rgd, err := buildRGD(tmpl, devTestTokens())
+	if err != nil {
+		t.Fatalf("buildRGD: %v", err)
+	}
+	byID := rgdResources(t, rgd)
+	dep := byID["backendDevDeployment"]["template"].(map[string]any)
+	podSpec, _, _ := nestedMap(dep, "spec", "template", "spec")
+	if podSpec["automountServiceAccountToken"] != false {
+		t.Fatalf("automountServiceAccountToken = %v, want false", podSpec["automountServiceAccountToken"])
+	}
+	containers := podSpec["containers"].([]any)
+	for _, raw := range containers {
+		container := raw.(map[string]any)
+		if _, ok := container["resources"]; !ok {
+			t.Errorf("coding-only container %q has no resource ceiling", container["name"])
+		}
+		if hasTestEnv(container, "FAROS_ACTIONS_BOOTSTRAP_TOKEN_FILE") || hasTestEnv(container, "FAROS_ACTIONS_TOKEN_FILE") {
+			t.Errorf("coding-only container %q received Provider Actions environment", container["name"])
+		}
+		if _, ok := findMount(container, devActionsBootstrapDir); ok {
+			t.Errorf("coding-only container %q mounted bootstrap SA token", container["name"])
+		}
+		if _, ok := findMount(container, devActionsDir); ok {
+			t.Errorf("coding-only container %q mounted action token", container["name"])
+		}
+	}
+}
+
 func TestDevOverlayErrors(t *testing.T) {
 	t.Run("unknown component workload", func(t *testing.T) {
 		tmpl := devTestTemplate(t)

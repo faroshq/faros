@@ -65,6 +65,14 @@ type Handler struct {
 	authorizer  ExecAuthorizer
 }
 
+// ActivityRecorder persists an accepted data-plane call on the runtime object
+// that backs an Instance. It is optional so existing in-memory/test Runtime
+// implementations remain valid; the production runtime implements it with a
+// provider-owned status.runtimeRef patch.
+type ActivityRecorder interface {
+	RecordActivity(context.Context, *unstructured.Unstructured) error
+}
+
 // HandlerOption configures optional data-plane capabilities while preserving
 // the original three-argument NewHandler call sites.
 type HandlerOption func(*Handler)
@@ -190,6 +198,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	if err := h.recordActivity(r.Context(), instance); err != nil {
+		http.Error(w, "activity marker unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 
 	// 5a. A status verb is served straight from the instance status — no hop.
 	if target.FromStatus {
@@ -289,6 +301,10 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 		writeExecAuthorizationError(w, err)
 		return
 	}
+	if err := h.recordActivity(r.Context(), instance); err != nil {
+		http.Error(w, "activity marker unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	call := ExecCall{
 		Workspace:        req.workspace,
 		Resource:         req.resource,
@@ -327,6 +343,14 @@ func (h *Handler) serveExec(w http.ResponseWriter, r *http.Request, id identity,
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		return
 	}
+}
+
+func (h *Handler) recordActivity(ctx context.Context, instance *unstructured.Unstructured) error {
+	recorder, ok := h.runtime.(ActivityRecorder)
+	if !ok {
+		return nil
+	}
+	return recorder.RecordActivity(ctx, instance)
 }
 
 func writeExecAuthorizationError(w http.ResponseWriter, err error) {

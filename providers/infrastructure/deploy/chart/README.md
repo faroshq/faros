@@ -73,6 +73,8 @@ helm upgrade --install infrastructure oci://ghcr.io/faroshq/charts/faros-infrast
 | `development.previewConsole.verificationJWKS` | `""` |  |
 | `development.images` |  | Toolchain image per ${faros.devImage.<toolchain>} token — each key K maps to FAROS_DEV_IMAGE_<K>. A template referencing an unconfigured toolchain (other than node) fails setup with a pointer to the missing env var. |
 | `development.images.node` | `""` |  |
+| `development.images.universal` | `""` | Universal coding sandbox image (`${faros.devImage.universal}`). Pin this tenant-code image by digest in production. |
+| `codingSandbox.enabled` | `false` | Platform-owned universal coding sandbox gate. Hosted deployments leave this disabled; BYO/self-hosted installs may set it `true`, but must also provide `development.images.universal` as an immutable `name@sha256:<64 lowercase hex digits>` reference. |
 | `providerKubeconfig` |  | python: "docker.io/library/python:3.12-slim" go: "docker.io/library/golang:1.26" Container images are NOT configured here. Templates declare them as schema fields with sane defaults (e.g. the database template's spec.version defaults to "16") — the same convention every template follows. See prov… |
 | `providerKubeconfig.secretName` | `faros-provider-kubeconfig` |  |
 | `bootstrap` |  | Self-bootstrap via an init container. When enabled, an init container runs `infrastructure init` BEFORE the serve container: it installs the CRDs, CachedResource, and APIExport into the provider workspace. Both containers share ONE kubeconfig (no separately-minted runtime token). |
@@ -129,4 +131,3 @@ helm upgrade --install infrastructure oci://ghcr.io/faroshq/charts/faros-infrast
 | `operator.publishing.insecure` | `false` |  |
 | `operator.publishing.publicScheme` | `https` |  |
 | `operator.publishing.publicPort` | `0` |  |
-

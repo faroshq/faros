@@ -433,11 +433,12 @@ func sanitizedExecEnvironment(workDir string) []string {
 	// network and PID namespace, so deployment-level secret/credential exposure
 	// must be handled by the dev workload itself.
 	values := map[string]string{
-		"HOME":   "/tmp",
-		"LANG":   "C.UTF-8",
-		"PATH":   "/usr/local/go/bin:/go/bin:/usr/local/bin:/usr/bin:/bin",
-		"PWD":    workDir,
-		"TMPDIR": "/tmp",
+		"HOME":             "/tmp",
+		"LANG":             "C.UTF-8",
+		"NPM_CONFIG_CACHE": "/tmp/faros-cache/npm",
+		"PATH":             "/usr/local/go/bin:/go/bin:/usr/local/bin:/usr/bin:/bin",
+		"PWD":              workDir,
+		"TMPDIR":           "/tmp",
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {

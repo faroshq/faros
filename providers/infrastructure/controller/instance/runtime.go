@@ -46,6 +46,18 @@ func runtimeGVRFor(tmpl *infrav1alpha1.Template) schema.GroupVersionResource {
 	}
 }
 
+func (c *Controller) currentRuntime(ctx context.Context, tenant string, tmpl *infrav1alpha1.Template, inst *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	ns := kro.RuntimeNamespace(tenant, inst.GetNamespace())
+	obj, err := c.cfg.Runtime.Resource(runtimeGVRFor(tmpl)).Namespace(ns).Get(ctx, inst.GetName(), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 // syncRuntime ensures the tenant's runtime namespace and converges the
 // per-template kro CR on the stamped values. Returns the live runtime
 // object (its status feeds the mirror).
@@ -343,6 +355,24 @@ func (c *Controller) finalize(ctx context.Context, tenantClient client.Client, t
 			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
 		} else if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("check runtime instance gone: %w", err)
+		}
+	}
+
+	// The run-sandbox token Job is intentionally short-lived and its succeeded
+	// pods have historically outlived the runtime CR without ownerReferences.
+	// Clean those exact pods before dropping the Instance finalizer; other
+	// templates never enter this path.
+	if runSandboxInstanceTemplateName(inst) == runSandboxTemplateName {
+		cleanupNamespace := ns
+		if cleanupNamespace == "" {
+			cleanupNamespace = kro.RuntimeNamespace(tenant, inst.GetNamespace())
+		}
+		done, err := cleanupRunSandboxTokenPods(ctx, c.cfg.Runtime, runSandboxTemplateName, cleanupNamespace, inst.GetName())
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("cleanup run-sandbox token pods: %w", err)
+		}
+		if !done {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	}
 

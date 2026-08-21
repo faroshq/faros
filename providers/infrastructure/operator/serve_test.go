@@ -110,3 +110,36 @@ func TestEnsureProviderServePropagatesPlatformPublishingConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureProviderServePropagatesCodingSandboxConfig(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := &v1alpha1.InfrastructureProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure"},
+		Spec: v1alpha1.InfrastructureProviderSpec{
+			CodingSandbox: v1alpha1.CodingSandboxSpec{Enabled: true},
+			Development: v1alpha1.DevelopmentSpec{Images: map[string]string{
+				"universal": "example.test/universal@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			}},
+			Provider: v1alpha1.ProviderServeSpec{
+				Image: v1alpha1.ImageSpec{Repository: "example.test/infrastructure", Tag: "test"},
+			},
+		},
+	}
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), nil, nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	deployment, err := client.AppsV1().Deployments(ServeNamespace).Get(context.Background(), provider.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{}
+	for _, variable := range deployment.Spec.Template.Spec.Containers[0].Env {
+		env[variable.Name] = variable.Value
+	}
+	if got := env["FAROS_CODING_SANDBOX_ENABLED"]; got != "true" {
+		t.Errorf("FAROS_CODING_SANDBOX_ENABLED = %q, want true", got)
+	}
+	if got := env["FAROS_DEV_IMAGE_UNIVERSAL"]; got != provider.Spec.Development.Images["universal"] {
+		t.Errorf("FAROS_DEV_IMAGE_UNIVERSAL = %q, want %q", got, provider.Spec.Development.Images["universal"])
+	}
+}

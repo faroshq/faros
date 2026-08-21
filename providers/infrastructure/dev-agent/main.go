@@ -624,11 +624,12 @@ type agentServer struct {
 	logs         *ringLog
 	runtime      runtimeOperations
 	mutationMu   *sync.Mutex
+	checkpoints  map[string]workspaceCheckpoint
 }
 
 func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	logs := newRingLog(500)
-	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}, checkpoints: map[string]workspaceCheckpoint{}}
 	s.supervisor = newSupervisor(ctx, cfg, logs)
 	s.runtime = &localRuntime{supervisor: s.supervisor, logs: logs}
 	s.initMux()
@@ -636,7 +637,7 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 }
 
 func newCoordinatorServer(cfg *agentConfig, runtime runtimeOperations, mutationMu *sync.Mutex) *agentServer {
-	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), runtime: runtime, mutationMu: mutationMu}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), runtime: runtime, mutationMu: mutationMu, checkpoints: map[string]workspaceCheckpoint{}}
 	s.initMux()
 	return s
 }
@@ -650,6 +651,7 @@ func (s *agentServer) initMux() {
 	mux.HandleFunc("/env", s.handleEnv)
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/workspace/", s.handleWorkspace)
 	s.mux = mux
 }
 

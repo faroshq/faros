@@ -160,7 +160,7 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 	workdir := t.TempDir()
 	srv := newTestAgent(t, &agentConfig{WorkDir: workdir, ControlToken: "test-token"})
 	executor := &statelessExecutor{workspace: workdir}
-	files := []syncFile{{Path: "main.sh", Content: "#!/bin/sh\nprintf '%s\\n' \"$ONLY_EXPLICIT\"\n"}}
+	files := []syncFile{{Path: "main.sh", Content: "#!/bin/sh\nprintf '%s\\n' \"$NPM_CONFIG_CACHE\"\nprintf '%s\\n' \"$ONLY_EXPLICIT\"\nprintf '%s\\n' \"$AWS_SECRET_ACCESS_KEY\"\n"}}
 	digest, err := digestSyncFiles(files)
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +169,8 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 		t.Fatalf("sync status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	t.Setenv("ONLY_EXPLICIT", "must-not-inherit")
+	t.Setenv("NPM_CONFIG_CACHE", "/tmp/caller-selected-cache")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-inherit")
 	raw, err := json.Marshal(persistentExecRequest{
 		Argv: []string{"/bin/sh", "main.sh"}, WorkDir: ".", SourceRevision: 7, SourceDigest: digest,
 	})
@@ -185,7 +187,7 @@ func TestPersistentExecVerifiesAppliedRevisionDigestAndSanitizesEnvironment(t *t
 	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ExitCode != 0 || got.Stdout != "\n" || got.SourceRevision != 7 || got.SourceDigest != digest {
+	if got.ExitCode != 0 || got.Stdout != "/tmp/faros-cache/npm\n\n\n" || got.SourceRevision != 7 || got.SourceDigest != digest {
 		t.Fatalf("persistent exec response = %+v", got)
 	}
 
