@@ -119,6 +119,8 @@ preview_hub_public_host = 'console.127.0.0.1.sslip.io'
 preview_kro_kubeconfig = '.faros-kro.kubeconfig'
 preview_kro_context = 'kind-faros-kro'
 preview_kro_node = 'faros-kro-control-plane'
+dev_agent_image = 'ghcr.io/faroshq/faros-dev-agent:latest'
+dev_agent_image_repository = 'ghcr.io/faroshq/faros-dev-agent'
 universal_dev_image = 'ghcr.io/faroshq/faros-universal-dev:latest'
 universal_dev_image_repository = 'ghcr.io/faroshq/faros-universal-dev'
 # The local loop keeps the historical force default, while allowing an
@@ -496,7 +498,24 @@ local_resource(
 # infrastructure provider (docs/app-studio-template-sandboxes.md §2).
 local_resource(
     'dev-agent-image',
-    cmd='make load-dev-agent-image',
+    cmd=('''
+set -eu
+make load-dev-agent-image
+dev_agent_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={dev_agent_image}' | awk 'NR == 2 {{ print $3 }}')"
+case "$dev_agent_digest" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) echo "local dev-agent image has no immutable sha256 manifest digest" >&2; exit 1 ;;
+esac
+# kind imports the local tag but does not create its digest-qualified image
+# name. Add that CRI-visible alias so Infrastructure can use the immutable
+# reference without pulling from a registry.
+docker exec {kro_node} ctr -n k8s.io images tag --force \
+  {dev_agent_image} {dev_agent_repository}@$dev_agent_digest
+''').format(
+        kro_node=preview_kro_node,
+        dev_agent_image=dev_agent_image,
+        dev_agent_repository=dev_agent_image_repository,
+    ),
     deps=[
         'providers/infrastructure/dev-agent',
     ],
@@ -717,6 +736,7 @@ infrastructure_sandbox_digest_script = ''
 infrastructure_sandbox_env = 'FAROS_CODING_SANDBOX_ENABLED=false \\'
 infrastructure_resource_deps = [
     'hub',
+    'dev-agent-image',
     'kro-mgmt-up',
     'preview-gateway-up',
     'app-studio-preview-dns',
@@ -725,6 +745,11 @@ infrastructure_resource_deps = [
 ]
 if app_studio_sandbox_force:
     infrastructure_sandbox_digest_script = ('''
+dev_agent_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={dev_agent_image}' | awk 'NR == 2 {{ print $3 }}')"
+case "$dev_agent_digest" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) echo "local dev-agent image has no immutable sha256 manifest digest" >&2; exit 1 ;;
+esac
 universal_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={universal_image}' | awk 'NR == 2 {{ print $3 }}')"
 case "$universal_digest" in
   sha256:????????????????????????????????????????????????????????????????) ;;
@@ -732,10 +757,15 @@ case "$universal_digest" in
 esac
 ''').format(
         kro_node=preview_kro_node,
+        dev_agent_image=dev_agent_image,
         universal_image=universal_dev_image,
     )
     infrastructure_sandbox_env = ('''FAROS_CODING_SANDBOX_ENABLED=true \\
-FAROS_DEV_IMAGE_UNIVERSAL="{universal_repository}@$universal_digest" \\''').format(universal_repository=universal_dev_image_repository)
+FAROS_DEV_AGENT_IMAGE="{dev_agent_repository}@$dev_agent_digest" \\
+FAROS_DEV_IMAGE_UNIVERSAL="{universal_repository}@$universal_digest" \\''').format(
+        dev_agent_repository=dev_agent_image_repository,
+        universal_repository=universal_dev_image_repository,
+    )
     infrastructure_resource_deps = infrastructure_resource_deps + ['universal-dev-image']
 
 local_resource(
