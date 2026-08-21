@@ -176,7 +176,7 @@ func TestBYOProviderBackendThroughTunnel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream request: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("stream status = %d", resp.StatusCode)
 		}
@@ -243,7 +243,7 @@ func startQuickstart(t *testing.T) {
 		if err != nil {
 			return false, err.Error()
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode)
 	}) {
 		t.Fatalf("quickstart provider never became healthy (log=%s)", logf.Name())
@@ -263,7 +263,7 @@ func getThroughTunnel(t *testing.T, url string) []byte {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body := make([]byte, 0, 4096)
 	buf := make([]byte, 1024)
 	for {
