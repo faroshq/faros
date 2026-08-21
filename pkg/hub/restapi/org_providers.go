@@ -637,6 +637,15 @@ func (h *Handler) getOrgProviderKubeconfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	workspacePath := kcppaths.OrgProviderPath(orgUUID, name)
+	// Register does this before minting; so must re-fetch, or the two disagree
+	// about what a registered provider guarantees. The workspace can exist with
+	// no ServiceAccount in it — most obviously after a delete-and-recreate,
+	// where the workspace is new but this path never re-provisions it — and the
+	// mint would then fail on a credential nobody ever created. Idempotent.
+	if err := h.mgr.providerCreds.EnsureProviderSAAtPath(r.Context(), workspacePath); err != nil {
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "ensuring provider service account: "+err.Error())
+		return
+	}
 	kubeconfig, err := h.mgr.providerCreds.MintProviderKubeconfigAtPath(r.Context(), workspacePath, h.mgr.kubeconfig.HubExternalURL)
 	if err != nil {
 		writeStatus(w, http.StatusInternalServerError, "InternalError", "minting provider kubeconfig: "+err.Error())

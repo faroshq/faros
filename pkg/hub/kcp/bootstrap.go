@@ -1545,8 +1545,30 @@ func waitForWorkspaceReady(ctx context.Context, client dynamic.Interface, name s
 		if err != nil {
 			return false, nil
 		}
+		// A terminating workspace keeps reporting Ready until it is actually
+		// gone, so phase alone would hand back a workspace whose RBAC is being
+		// garbage-collected. Writing into it then fails as
+		// "workspace access not permitted" — a permission error for what is
+		// really a lifecycle race, and one that looks nothing like its cause.
+		if ws.GetDeletionTimestamp() != nil {
+			return false, nil
+		}
 		phase, _, _ := unstructured.NestedString(ws.Object, "status", "phase")
 		return phase == "Ready", nil
+	})
+}
+
+// waitForWorkspaceGone blocks until name no longer exists under client. Used
+// before recreating a workspace that is still terminating: kcp accepts the
+// Create only once the old object is gone, and until then returns AlreadyExists
+// for an object nobody can usefully write to.
+func waitForWorkspaceGone(ctx context.Context, client dynamic.Interface, name string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		_, err := client.Resource(workspaceGVR).Get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, nil
 	})
 }
 
