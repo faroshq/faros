@@ -213,12 +213,17 @@ func TestBYOProviderBackendThroughTunnel(t *testing.T) {
 // is also closer to what a self-hoster deploys.
 func startQuickstart(t *testing.T) {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "quickstart-provider")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = filepath.Join(repoRoot, "providers", "quickstart")
+	// Via the Makefile, not a bare `go build`: the provider embeds its portal
+	// with //go:embed all:portal/dist, and that directory is a build artifact
+	// rather than something in git. A clean checkout has no dist, so compiling
+	// directly fails — which is invisible on a dev machine that still has one
+	// lying around from an earlier build, and fails only in CI.
+	build := exec.Command("make", "build-quickstart-provider")
+	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build quickstart provider: %v\n%s", err, out)
 	}
+	bin := filepath.Join(repoRoot, "bin", "quickstart-provider")
 
 	logf, _ := os.Create(filepath.Join(t.TempDir(), "quickstart.log"))
 	cmd := exec.Command(bin, "serve")
