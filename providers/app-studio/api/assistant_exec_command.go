@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -186,9 +187,12 @@ func cloneProjectAssistantExecMetadata(src *projectAssistantExecMetadata) *proje
 		return nil
 	}
 	out := *src
-	out.Argv = append([]string(nil), src.Argv...)
-	out.Stdout = append([]string(nil), src.Stdout...)
-	out.Stderr = append([]string(nil), src.Stderr...)
+	out.Argv = projectAssistantExecPublicArgv(src.Argv)
+	var stdoutTruncated, stderrTruncated bool
+	out.Stdout, stdoutTruncated = projectAssistantExecPublicOutput(src.Stdout)
+	out.Stderr, stderrTruncated = projectAssistantExecPublicOutput(src.Stderr)
+	out.Summary = trimProjectAssistantWorkflowString(projectAssistantExecRedactSecrets(src.Summary), 240)
+	out.OutputTruncated = src.OutputTruncated || stdoutTruncated || stderrTruncated
 	if src.ExitCode != nil {
 		code := *src.ExitCode
 		out.ExitCode = &code
@@ -253,6 +257,16 @@ func mergeProjectAssistantExecMetadata(existing, next *projectAssistantExecMetad
 	if !out.OutputTruncated {
 		out.OutputTruncated = existing.OutputTruncated
 	}
+	// A checkpoint assembled from mixed lifecycle events can fill fields from
+	// either side of the merge. Re-run the public boundary after those
+	// fallbacks so a malformed/internal event cannot reintroduce raw output or
+	// credential-bearing argv into the action projection.
+	out.Argv = projectAssistantExecPublicArgv(out.Argv)
+	out.Summary = trimProjectAssistantWorkflowString(projectAssistantExecRedactSecrets(out.Summary), 240)
+	var stdoutTruncated, stderrTruncated bool
+	out.Stdout, stdoutTruncated = projectAssistantExecPublicOutput(out.Stdout)
+	out.Stderr, stderrTruncated = projectAssistantExecPublicOutput(out.Stderr)
+	out.OutputTruncated = out.OutputTruncated || stdoutTruncated || stderrTruncated
 	return out
 }
 
@@ -296,7 +310,7 @@ func projectAssistantExecMetadataForToolArguments(name string, args map[string]a
 	if commandResult.Status != "" {
 		metadata.Status = commandResult.Status
 	}
-	metadata.Summary = trimProjectAssistantWorkflowString(commandResult.Summary, 240)
+	metadata.Summary = trimProjectAssistantWorkflowString(projectAssistantExecRedactSecrets(commandResult.Summary), 240)
 	metadata.ExitCode = commandResult.ExitCode
 	metadata.DurationMS = commandResult.DurationMS
 	stdout, stdoutTruncated := projectAssistantExecPublicOutput(commandResult.Stdout)
@@ -313,8 +327,12 @@ func projectAssistantExecPublicOutput(lines []string) ([]string, bool) {
 	}
 	raw := strings.Join(lines, "\n")
 	sanitized := strings.ReplaceAll(raw, "\x00", "\ufffd")
-	bounded, truncated := boundedProjectAssistantExecOutput(sanitized)
-	return bounded, truncated || sanitized != raw
+	redacted := projectAssistantExecRedactSecrets(sanitized)
+	bounded, truncated := boundedProjectAssistantExecOutput(redacted)
+	// Sanitization is not truncation. Preserve the server's explicit
+	// outputTruncated flag separately and report only whether the bounded
+	// projection had to discard bytes.
+	return bounded, truncated
 }
 
 func projectAssistantExecPublicArgv(argv []string) []string {
@@ -323,8 +341,15 @@ func projectAssistantExecPublicArgv(argv []string) []string {
 	for index, token := range out {
 		lower := strings.ToLower(strings.TrimSpace(token))
 		if redactNext {
-			out[index] = "[redacted]"
+			out[index] = projectAssistantExecRedactSecrets(token)
+			if out[index] == token {
+				out[index] = "[redacted]"
+			}
 			redactNext = false
+			continue
+		}
+		if redacted := projectAssistantExecRedactSecrets(token); redacted != token {
+			out[index] = redacted
 			continue
 		}
 		if projectAssistantExecSensitiveArg(lower) {
@@ -345,7 +370,7 @@ func projectAssistantExecPublicArgv(argv []string) []string {
 
 func projectAssistantExecSensitiveArg(value string) bool {
 	value = strings.TrimLeft(value, "-")
-	for _, marker := range []string{"token", "password", "passwd", "secret", "apikey", "api-key", "authorization", "credential", "private-key", "cookie"} {
+	for _, marker := range []string{"token", "password", "passwd", "secret", "apikey", "api-key", "api_key", "access-token", "access_token", "authorization", "credential", "private-key", "private_key", "secret-key", "secret_key", "cookie"} {
 		if value == marker || strings.HasPrefix(value, marker+"=") {
 			return true
 		}
@@ -354,12 +379,63 @@ func projectAssistantExecSensitiveArg(value string) bool {
 }
 
 func projectAssistantExecSensitiveValue(value string) bool {
-	for _, marker := range []string{"secret=", "password=", "token=", "bearer "} {
+	for _, marker := range []string{"secret=", "password=", "token=", "api_key=", "api-key=", "access_token=", "access-token=", "authorization=", "cookie=", "bearer "} {
 		if strings.Contains(value, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// These patterns include the complete value token so ReplaceAllStringFunc can
+// retain JSON/string quoting while replacing only the secret contents. A
+// replacement such as {"token":"[redacted]"} must remain valid and readable
+// rather than consuming the closing quote or object delimiter.
+var projectAssistantExecKeyValueSecretPattern = regexp.MustCompile(`(?i)(\b(?:token|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|password|passwd|secret|credential|private[_-]?key|secret[_-]?key|cookie)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|(?:Bearer\s+)?[^\s,;{}\[\]"']+)`)
+var projectAssistantExecEnvSecretPattern = regexp.MustCompile(`(?i)(\b[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|(?:Bearer\s+)?[^\s,;{}\[\]"']+)`)
+
+var projectAssistantExecSecretPatterns = []*regexp.Regexp{
+	// Authorization headers and query-string credentials are frequently
+	// emitted without a key/value delimiter around the secret itself.
+	regexp.MustCompile(`(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})`),
+	regexp.MustCompile(`(?i)([?&](?:token|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|credential)=)([^&\s,;{}\[\]"']+)`),
+	// Avoid returning private-key material even when it is presented as a
+	// multiline PEM block rather than a key/value pair.
+	regexp.MustCompile(`(?is)(-----BEGIN [^-]*PRIVATE KEY-----).*?(-----END [^-]*PRIVATE KEY-----)`),
+	// A few provider ecosystems use recognizable opaque key prefixes without
+	// printing a field name (for example sk-... or ghp-...).
+	regexp.MustCompile(`(?i)\b(?:sk|pk)[_-][A-Za-z0-9_-]{12,}\b|\b(?:ghp|github_pat)[_-][A-Za-z0-9_-]{12,}\b|\bxox[baprs][-_][A-Za-z0-9_-]{12,}\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bAIza[A-Za-z0-9_-]{20,}\b`),
+}
+
+func projectAssistantExecRedactKeyValueSecrets(value string, pattern *regexp.Regexp) string {
+	return pattern.ReplaceAllStringFunc(value, func(match string) string {
+		submatches := pattern.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return "[redacted]"
+		}
+		prefix := submatches[1]
+		secret := strings.TrimSpace(match[len(prefix):])
+		if len(secret) >= 2 && ((secret[0] == '"' && secret[len(secret)-1] == '"') || (secret[0] == '\'' && secret[len(secret)-1] == '\'')) {
+			return prefix + secret[:1] + "[redacted]" + secret[len(secret)-1:]
+		}
+		return prefix + "[redacted]"
+	})
+}
+
+func projectAssistantExecRedactSecrets(value string) string {
+	redacted := projectAssistantExecRedactKeyValueSecrets(value, projectAssistantExecKeyValueSecretPattern)
+	redacted = projectAssistantExecRedactKeyValueSecrets(redacted, projectAssistantExecEnvSecretPattern)
+	for index, pattern := range projectAssistantExecSecretPatterns {
+		replacement := "$1[redacted]"
+		if index == len(projectAssistantExecSecretPatterns)-2 {
+			replacement = "$1[redacted]$2"
+		}
+		if index == len(projectAssistantExecSecretPatterns)-1 {
+			replacement = "[redacted]"
+		}
+		redacted = pattern.ReplaceAllString(redacted, replacement)
+	}
+	return redacted
 }
 
 func newProjectAssistantExecCommandGraphTool(runCtx projectAssistantWorkflowRunContext) (einotool.BaseTool, error) {

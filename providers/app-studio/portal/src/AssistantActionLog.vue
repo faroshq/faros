@@ -22,7 +22,7 @@ import {
   groupAssistantActions,
   summarizeAssistantActions,
 } from './assistantActionFeed'
-import { formatAssistantExecCommand } from './assistantExecDisclosure'
+import { assistantExecStatusPresentation, formatAssistantExecCommand } from './assistantExecDisclosure'
 import type { ProjectAssistantActionFeedItem, ProjectAssistantActionKind, ProjectAssistantActionStatus } from './types'
 import AssistantExecDetails from './AssistantExecDetails.vue'
 
@@ -42,6 +42,15 @@ function isBusy(status: ProjectAssistantActionStatus): boolean {
   return !props.stopping && (status === 'running' || status === 'retrying')
 }
 
+function execStatus(item: typeof rows.value[number]) {
+  return item.exec ? assistantExecStatusPresentation(item.exec, item.status) : undefined
+}
+
+function isBusyItem(item: typeof rows.value[number]): boolean {
+  const exec = execStatus(item)
+  return exec ? (!props.stopping && exec.busy) : isBusy(item.status)
+}
+
 function isWaiting(status: ProjectAssistantActionStatus): boolean {
   return status === 'waiting'
 }
@@ -54,9 +63,24 @@ function isAttention(status: ProjectAssistantActionStatus, severity: ProjectAssi
   return isWaiting(status) || severity === 'attention'
 }
 
-const hasBusyAction = computed(() => rows.value.some((item) => isBusy(item.status)))
-const hasErrorAction = computed(() => rows.value.some((item) => isError(item.status, item.severity)))
-const hasAttentionAction = computed(() => rows.value.some((item) => isAttention(item.status, item.severity)))
+function isErrorItem(item: typeof rows.value[number]): boolean {
+  const exec = execStatus(item)
+  return exec ? exec.error : isError(item.status, item.severity)
+}
+
+function isAttentionItem(item: typeof rows.value[number]): boolean {
+  const exec = execStatus(item)
+  return exec ? exec.attention : isAttention(item.status, item.severity)
+}
+
+function isCanceledItem(item: typeof rows.value[number]): boolean {
+  const exec = execStatus(item)
+  return exec ? exec.state === 'canceled' : item.status === 'canceled'
+}
+
+const hasBusyAction = computed(() => rows.value.some((item) => isBusyItem(item)))
+const hasErrorAction = computed(() => rows.value.some((item) => isErrorItem(item)))
+const hasAttentionAction = computed(() => rows.value.some((item) => isAttentionItem(item)))
 const requiresVisibility = computed(() => hasBusyAction.value || hasAttentionAction.value || hasErrorAction.value)
 const expanded = computed(() => requiresVisibility.value ? !manuallyCollapsed.value : userExpanded.value)
 
@@ -82,7 +106,7 @@ function groupLabel(kind: ProjectAssistantActionKind, busy: boolean): string {
   switch (kind) {
     case 'inspect': return busy ? 'Inspecting the project' : 'Inspected the project'
     case 'edit': return busy ? 'Editing files' : 'Edited files'
-    case 'run': return busy ? 'Running commands' : 'Ran commands'
+    case 'run': return busy ? 'Running checks' : 'Ran checks'
     case 'commit': return busy ? 'Committing changes' : 'Committed changes'
     case 'clarify': return 'Waiting for input'
     default: return busy ? 'Working' : 'Other activity'
@@ -92,20 +116,21 @@ function groupLabel(kind: ProjectAssistantActionKind, busy: boolean): string {
 function execActionTitle(item: typeof rows.value[number]): string {
   const command = formatAssistantExecCommand(item.exec)
   if (!command) return item.title
-  return `${isBusy(item.status) ? 'Running' : 'Ran'} ${command}`
+  return `${execStatus(item)?.label || 'Ran'} ${command}`
 }
 
 const groups = computed<ActionGroup[]>(() => {
   const result: ActionGroup[] = []
   for (const item of rows.value) {
-    const busy = isBusy(item.status)
-    const label = item.groupTitle?.trim()
-      || (item.kind === 'run' && item.exec ? (busy ? 'Running commands' : 'Ran commands') : groupLabel(item.kind, busy))
+    const busy = isBusyItem(item)
+    const label = item.exec
+      ? (busy ? 'Running commands' : 'Ran commands')
+      : item.groupTitle?.trim() || groupLabel(item.kind, busy)
     const previous = result[result.length - 1]
     if (previous?.kind === item.kind && previous.busy === busy && previous.label === label) {
       previous.items.push(item)
-      previous.attention ||= isAttention(item.status, item.severity) || isError(item.status, item.severity)
-      previous.error ||= isError(item.status, item.severity)
+      previous.attention ||= isAttentionItem(item) || isErrorItem(item)
+      previous.error ||= isErrorItem(item)
       continue
     }
     result.push({
@@ -114,8 +139,8 @@ const groups = computed<ActionGroup[]>(() => {
       label,
       items: [item],
       busy,
-      attention: isAttention(item.status, item.severity) || isError(item.status, item.severity),
-      error: isError(item.status, item.severity),
+      attention: isAttentionItem(item) || isErrorItem(item),
+      error: isErrorItem(item),
     })
   }
   return result
@@ -222,11 +247,12 @@ async function copyDiagnostic(item: typeof rows.value[number]) {
         >
           <div v-for="item in group.items" :key="item.id" class="min-w-0">
             <div class="flex min-h-7 min-w-0 items-center gap-1.5 leading-5 text-text-muted">
-              <Loader2 v-if="isBusy(item.status)" class="h-3.5 w-3.5 shrink-0 animate-spin text-accent motion-reduce:animate-none" :stroke-width="1.75" />
-              <Square v-else-if="isAttention(item.status, item.severity)" class="h-2.5 w-2.5 shrink-0 fill-current text-warning" :stroke-width="2" />
-              <X v-else-if="isError(item.status, item.severity)" class="h-3.5 w-3.5 shrink-0 text-danger" :stroke-width="1.75" />
+              <Loader2 v-if="isBusyItem(item)" class="h-3.5 w-3.5 shrink-0 animate-spin text-accent motion-reduce:animate-none" :stroke-width="1.75" />
+              <Square v-else-if="isAttentionItem(item)" class="h-2.5 w-2.5 shrink-0 fill-current text-warning" :stroke-width="2" />
+              <X v-else-if="isErrorItem(item)" class="h-3.5 w-3.5 shrink-0 text-danger" :stroke-width="1.75" />
+              <X v-else-if="isCanceledItem(item)" class="h-3.5 w-3.5 shrink-0 text-text-muted" :stroke-width="1.75" />
               <component v-else :is="kindIcon(item.kind)" class="h-3.5 w-3.5 shrink-0 text-text-muted" :stroke-width="1.75" />
-              <span class="sr-only">{{ assistantActionStatusLabel(item.status, item.severity) }}:</span>
+              <span class="sr-only">{{ item.exec ? execStatus(item)?.label : assistantActionStatusLabel(item.status, item.severity) }}:</span>
               <button
                 v-if="item.exec"
                 type="button"

@@ -481,6 +481,47 @@ func TestProjectAssistantExecMetadataIsStructuredAndDoesNotExposeSecrets(t *test
 	}
 }
 
+func TestProjectAssistantExecPublicProjectionRedactsOutputAndMapsTimeout(t *testing.T) {
+	metadata := projectAssistantExecMetadataForToolArguments(projectToolExecCommand, map[string]any{
+		"component": "workspace",
+		"argv":      []any{"sh", "-c", "echo TOKEN=argv-secret"},
+	}, `{"status":"timed_out","summary":"timeout token=summary-secret","exitCode":124,"durationMs":99,"stdout":["TOKEN=stdout-secret","Bearer bearer-secret-value","https://example.test/?api_key=query-secret","{\"token\":\"json-secret\"}","ghp_1234567890abcdefghijkl","AKIA1234567890ABCDEF"],"stderr":["OPENAI_API_KEY=env-secret"]}`, "failed")
+	if metadata == nil {
+		t.Fatal("exec metadata is nil")
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := string(encoded)
+	for _, secret := range []string{"argv-secret", "summary-secret", "stdout-secret", "bearer-secret-value", "query-secret", "json-secret", "ghp_1234567890abcdefghijkl", "AKIA1234567890ABCDEF", "env-secret"} {
+		if strings.Contains(public, secret) {
+			t.Fatalf("public exec projection leaked %q: %s", secret, public)
+		}
+	}
+	if !strings.Contains(metadata.Summary, "token=[redacted]") || !strings.Contains(strings.Join(metadata.Stdout, "\n"), "TOKEN=[redacted]") || !strings.Contains(strings.Join(metadata.Stderr, "\n"), "OPENAI_API_KEY=[redacted]") {
+		t.Fatalf("public exec projection did not retain redaction markers: %#v", metadata)
+	}
+	if got := strings.Join(metadata.Stdout, "\n"); !strings.Contains(got, `{"token":"[redacted]"}`) {
+		t.Fatalf("quoted JSON redaction = %q, want valid readable JSON field", got)
+	}
+	if metadata.Status != "timed_out" {
+		t.Fatalf("nested exec status = %q, want timed_out", metadata.Status)
+	}
+	if metadata.OutputTruncated {
+		t.Fatalf("secret redaction alone marked output truncated: %#v", metadata)
+	}
+	action := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
+		ID:     "exec-timeout",
+		Name:   projectToolExecCommand,
+		Status: "timed_out",
+		Exec:   metadata,
+	})
+	if action.Status != projectAssistantActionFeedStatusFailed || action.Severity != projectAssistantActionFeedSeverityError {
+		t.Fatalf("timed-out public action = %#v, want failed/error", action)
+	}
+}
+
 func TestProjectAssistantExecRequestUsesPersistentWorkspaceAuthority(t *testing.T) {
 	raw, err := json.Marshal(projectSandboxExecRequest{
 		Action:         "start",

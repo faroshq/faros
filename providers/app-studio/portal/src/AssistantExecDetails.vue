@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { Check, ExternalLink, Loader2, Terminal, X } from 'lucide-vue-next'
 import {
+  assistantExecStatusPresentation,
   formatAssistantExecCommand,
   formatAssistantExecDuration,
   formatAssistantExecExit,
@@ -23,7 +24,7 @@ const disclosure = computed(() => parseAssistantExecDisclosure(props.exec))
 const command = computed(() => formatAssistantExecCommand(disclosure.value))
 const exitLabel = computed(() => formatAssistantExecExit(disclosure.value))
 const durationLabel = computed(() => formatAssistantExecDuration(disclosure.value?.durationMs))
-const outputLabel = computed(() => disclosure.value?.outputTruncated ? 'Output truncated to the latest bounded lines.' : '')
+const outputLabel = computed(() => disclosure.value?.outputTruncated ? 'Output was truncated to the bounded limit.' : '')
 const activityMetadata = computed(() => {
   const exec = disclosure.value
   if (!exec) return []
@@ -36,19 +37,15 @@ const activityMetadata = computed(() => {
 })
 const activityStatus = computed(() => {
   const exec = disclosure.value
-  switch (exec?.status) {
-    case 'succeeded': return { label: 'Success', tone: 'success', icon: Check }
-    case 'running': return { label: 'Running', tone: 'running', icon: Loader2 }
-    case 'permission_required': return { label: 'Approval required', tone: 'attention', icon: Loader2 }
-    case 'timed_out': return { label: 'Timed out', tone: 'danger', icon: X }
-    case 'canceled':
-    case 'cancelled': return { label: 'Canceled', tone: 'muted', icon: X }
-    case 'blocked': return { label: 'Blocked', tone: 'attention', icon: X }
+  const presentation = assistantExecStatusPresentation(exec)
+  switch (presentation.state) {
+    case 'running': return { label: presentation.label, tone: 'running', icon: Loader2 }
     case 'failed':
-    case 'error': return { label: exitLabel.value ? `Failed · ${exitLabel.value}` : 'Failed', tone: 'danger', icon: X }
+    case 'timed_out': return { label: presentation.label, tone: 'danger', icon: X }
+    case 'blocked': return { label: presentation.label, tone: 'attention', icon: X }
+    case 'canceled': return { label: presentation.label, tone: 'muted', icon: X }
     default:
-      if (exec?.exitCode === 0) return { label: 'Success', tone: 'success', icon: Check }
-      return { label: exitLabel.value || 'Completed', tone: 'muted', icon: Check }
+      return { label: 'Success', tone: 'success', icon: Check }
   }
 })
 const requestRows = computed(() => {
@@ -98,9 +95,9 @@ const requestRows = computed(() => {
   </div>
 
   <div v-else-if="disclosure" class="mt-1 rounded-lg border border-border-default bg-surface-raised/55 px-3 py-2.5 text-[11px] text-text-secondary">
-    <div class="font-medium text-text-muted">Shell</div>
+    <div class="font-medium text-text-muted">Direct command</div>
     <div v-if="command" class="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-text-secondary">
-      <span class="select-none text-text-muted">$ </span>{{ command }}
+      {{ command }}
     </div>
 
     <div v-if="disclosure.argv?.length" class="mt-2 min-w-0">

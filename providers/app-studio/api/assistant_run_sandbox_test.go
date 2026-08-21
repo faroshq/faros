@@ -97,6 +97,57 @@ func TestProjectAssistantRunSandboxNameIsProjectScoped(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantRunSandboxDirtyUsesRemoteCheckpointFence(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata projectAssistantRunSandboxMetadata
+		want     bool
+	}{
+		{
+			name: "warm no-op ignores local source revision",
+			metadata: projectAssistantRunSandboxMetadata{
+				SourceRevision: 99, SourceDigest: "local-new",
+				RemoteRevision: 3, RemoteDigest: "remote-base",
+				CheckpointRevision: 3, CheckpointDigest: "remote-base",
+			},
+			want: false,
+		},
+		{
+			name: "remote revision changed",
+			metadata: projectAssistantRunSandboxMetadata{
+				SourceRevision: 99, SourceDigest: "local-new",
+				RemoteRevision: 4, RemoteDigest: "remote-base",
+				CheckpointRevision: 3, CheckpointDigest: "remote-base",
+			},
+			want: true,
+		},
+		{
+			name: "remote digest changed",
+			metadata: projectAssistantRunSandboxMetadata{
+				SourceRevision: 3, SourceDigest: "local-base",
+				RemoteRevision: 3, RemoteDigest: "remote-new",
+				CheckpointRevision: 3, CheckpointDigest: "remote-base",
+			},
+			want: true,
+		},
+		{
+			name: "missing remote checkpoint fence fails closed",
+			metadata: projectAssistantRunSandboxMetadata{
+				SourceRevision: 3, SourceDigest: "remote-base",
+				RemoteRevision: 3, RemoteDigest: "remote-base",
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectAssistantRunSandboxDirty(tt.metadata); got != tt.want {
+				t.Fatalf("dirty = %t, want %t for metadata %#v", got, tt.want, tt.metadata)
+			}
+		})
+	}
+}
+
 func TestProjectAssistantRunSandboxOwnerReferenceIsDurableAndRejectsCollision(t *testing.T) {
 	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop", UID: "project-uid"}}
 	instance := newRunSandboxTestInstance("cache", projectAssistantRunSandboxCacheStateCached, time.Now().UTC())
@@ -233,6 +284,146 @@ func TestProjectAssistantSandboxManagerLimitsPerTenant(t *testing.T) {
 	releaseOne()
 	if m.claimed("cache-1") {
 		t.Fatal("manager retained released cache claim")
+	}
+}
+
+func TestProjectAssistantSandboxManagerPrunesExpiredLeasesBeforeQuota(t *testing.T) {
+	m := newProjectAssistantSandboxManager()
+	expired := time.Now().UTC().Add(-time.Second)
+	if _, err := m.acquireUntil("org/ws", "cache-expired", "run-expired", expired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.acquireUntil("org/ws", "cache-live", "run-live", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.acquireUntil("org/ws", "cache-new", "run-new", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("expired lease poisoned max-active capacity: %v", err)
+	}
+	if m.claimed("cache-expired") {
+		t.Fatal("expired lease remained locally claimed")
+	}
+}
+
+func TestProjectAssistantSupervisorStopDeletesSuspendedSandboxAndAllowsFreshRun(t *testing.T) {
+	messages := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, messages, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}
+	id := identity{orgUUID: scope.OrgUUID, workspaceUUID: scope.WorkspaceUUID}
+	now := time.Now().UTC()
+	run := store.AssistantRun{
+		ID: "run-stop", Mode: store.AssistantRunModeDefault, Status: store.AssistantRunStatusPendingInput,
+		ClientRequestID: "request-1", UserMessageID: "user-1", ActiveMessageID: "assistant-1", RequestID: "input-1",
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	user := store.Message{ID: run.UserMessageID, Role: "user", ActorID: "tester", Content: "hello", CreatedAt: now, UpdatedAt: now}
+	assistant := store.Message{ID: run.ActiveMessageID, Role: "assistant", CreatedAt: now, UpdatedAt: now}
+	name := projectAssistantRunSandboxName(workspace.Scope(scope), nil, run.ID)
+	metadata := projectAssistantRunSandboxMetadata{
+		RunID: run.ID, OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID,
+		ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID,
+		Instance: projectAssistantSandboxInstance{Name: name}, CacheGeneration: run.ID,
+	}
+	checkpoint, err := json.Marshal(projectAssistantCheckpointState{Sandbox: &projectAssistantSandboxCheckpoint{Metadata: metadata}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Checkpoint = checkpoint
+	if _, err := messages.CreateAssistantRun(context.Background(), scope, user, assistant, run); err != nil {
+		t.Fatal(err)
+	}
+	instance := newRunSandboxTestInstance(name, projectAssistantRunSandboxCacheStateActive, now)
+	annotations := instance.GetAnnotations()
+	annotations[projectAssistantRunSandboxClaimOwner] = run.ID
+	annotations[projectAssistantRunSandboxCacheGeneration] = run.ID
+	annotations[projectAssistantRunSandboxClaimExpiry] = now.Add(time.Hour).Format(time.RFC3339Nano)
+	instance.SetAnnotations(annotations)
+	client := newRunSandboxTestClient(instance)
+	server.projectClientFor = func(identity) (*asclient.Client, error) { return client, nil }
+	release, err := server.projectAssistantSandboxManager().acquire(projectAssistantRunSandboxTenantKey(id, workspace.Scope(scope)), name, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := server.projectAssistantSupervisor().Attach(scope, run, assistant); err != nil {
+		t.Fatal(err)
+	}
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped, ok, err := server.projectAssistantSupervisor().StopWithIdentity(stopCtx, id, scope, run.ID)
+	if err != nil || !ok || stopped.Status != store.AssistantRunStatusInterrupted {
+		t.Fatalf("StopWithIdentity = run=%#v stopped=%t err=%v", stopped, ok, err)
+	}
+	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("stopped sandbox lookup = %v, want NotFound", err)
+	}
+	nextRelease, err := server.projectAssistantSandboxManager().acquire(projectAssistantRunSandboxTenantKey(id, workspace.Scope(scope)), name, "run-next")
+	if err != nil {
+		t.Fatalf("fresh run was blocked by stopped sandbox lease: %v", err)
+	}
+	nextRelease()
+}
+
+func TestProjectAssistantInterruptedSandboxCleanupFailsClosedAndReleasesExactRunLease(t *testing.T) {
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}
+	id := identity{orgUUID: scope.OrgUUID, workspaceUUID: scope.WorkspaceUUID}
+	now := time.Now().UTC()
+	run := store.AssistantRun{ID: "run-stop", Status: store.AssistantRunStatusPendingInput}
+	name := projectAssistantRunSandboxName(workspace.Scope(scope), nil, run.ID)
+	base := projectAssistantRunSandboxMetadata{
+		RunID: run.ID, OrgUUID: scope.OrgUUID, WorkspaceUUID: scope.WorkspaceUUID,
+		ProjectName: scope.ProjectName, ProjectUID: scope.ProjectUID,
+		Instance: projectAssistantSandboxInstance{Name: name}, CacheGeneration: run.ID,
+	}
+	for _, tc := range []struct {
+		name        string
+		metadata    projectAssistantRunSandboxMetadata
+		remoteOwner string
+	}{
+		{name: "missing run identity", metadata: func() projectAssistantRunSandboxMetadata { value := base; value.RunID = ""; return value }()},
+		{name: "foreign remote owner", metadata: base, remoteOwner: "run-foreign"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkpoint, err := json.Marshal(projectAssistantCheckpointState{Sandbox: &projectAssistantSandboxCheckpoint{Metadata: tc.metadata}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run.Checkpoint = checkpoint
+			instance := newRunSandboxTestInstance(name, projectAssistantRunSandboxCacheStateActive, now)
+			annotations := instance.GetAnnotations()
+			owner := run.ID
+			if tc.remoteOwner != "" {
+				owner = tc.remoteOwner
+			}
+			annotations[projectAssistantRunSandboxClaimOwner] = owner
+			annotations[projectAssistantRunSandboxCacheGeneration] = owner
+			instance.SetAnnotations(annotations)
+			client := newRunSandboxTestClient(instance)
+			server := &Server{projectClientFor: func(identity) (*asclient.Client, error) { return client, nil }}
+			release, err := server.projectAssistantSandboxManager().acquire(projectAssistantRunSandboxTenantKey(id, workspace.Scope(scope)), name, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			otherName := name + "-other"
+			otherRelease, err := server.projectAssistantSandboxManager().acquire(projectAssistantRunSandboxTenantKey(id, workspace.Scope(scope)), otherName, "run-other")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer otherRelease()
+			cleanupErr := server.cleanupInterruptedProjectAssistantRunSandbox(context.Background(), id, scope, run)
+			if !errors.Is(cleanupErr, errProjectAssistantRunSandboxConflict) {
+				t.Fatalf("cleanup error = %v, want sandbox conflict", cleanupErr)
+			}
+			if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), name, metav1.GetOptions{}); err != nil {
+				t.Fatalf("fail-closed sandbox lookup = %v, want object retained", err)
+			}
+			if server.projectAssistantSandboxManager().claimed(name) {
+				t.Fatal("exact stopped-run lease was not released")
+			}
+			if !server.projectAssistantSandboxManager().claimed(otherName) {
+				t.Fatal("cleanup released a different run's lease")
+			}
+			release()
+		})
 	}
 }
 
@@ -1081,6 +1272,7 @@ func TestProjectAssistantRunSandboxCheckpointIfDirtySkipsReadOnlyAndCleanRuns(t 
 		scope: workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "uid"}, runState: state,
 		metadata: projectAssistantRunSandboxMetadata{
 			Status: "active", SourceRevision: 1, SourceDigest: "old", RemoteRevision: 2, RemoteDigest: "new", RemoteCheckpointID: "baseline",
+			CheckpointRevision: 2, CheckpointDigest: "new",
 		},
 	}
 	state.SetSandbox(sandbox)
@@ -1093,6 +1285,8 @@ func TestProjectAssistantRunSandboxCheckpointIfDirtySkipsReadOnlyAndCleanRuns(t 
 	sandbox.mu.Lock()
 	sandbox.metadata.RemoteRevision = sandbox.metadata.SourceRevision
 	sandbox.metadata.RemoteDigest = sandbox.metadata.SourceDigest
+	sandbox.metadata.CheckpointRevision = sandbox.metadata.SourceRevision
+	sandbox.metadata.CheckpointDigest = sandbox.metadata.SourceDigest
 	sandbox.mu.Unlock()
 	checkpointed, err = server.checkpointProjectAssistantRunSandboxIfDirty(context.Background(), state)
 	if err != nil || checkpointed || fake.workspaceCalls != 0 {

@@ -47,6 +47,18 @@ func TestProjectAssistantActionFeedReadHidesExecutionMechanics(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantActionFeedCanceledNonExecIsNeutral(t *testing.T) {
+	item := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
+		ID:        "read-canceled",
+		Name:      projectToolReadFile,
+		Status:    "canceled",
+		Arguments: `{"path":"src/App.vue"}`,
+	})
+	if item.Status != projectAssistantActionFeedStatusCanceled || item.Title != "Canceled" || item.Severity != projectAssistantActionFeedSeverityNormal {
+		t.Fatalf("canceled non-exec action = %#v, want neutral canceled terminal", item)
+	}
+}
+
 func TestProjectAssistantActionFeedSkillsAreVisibleWithLifecycleTitles(t *testing.T) {
 	tests := []struct {
 		name      string

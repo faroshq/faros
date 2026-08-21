@@ -127,37 +127,46 @@ func TestProjectAssistantDurableGraphToolFailureIsExactModelFeedback(t *testing.
 
 func TestProjectAssistantDurableExecGraphToolProjectsPublicActionFeed(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		result     string
-		wantStatus string
-		wantAction string
-		wantExit   int
-		wantStdout string
-		wantStderr string
+		name           string
+		result         string
+		wantStatus     string
+		wantExecStatus string
+		wantAction     string
+		wantExit       int
+		wantStdout     string
+		wantStderr     string
 	}{
 		{
 			name:       "success",
-			result:     `{"status":"succeeded","summary":"Command succeeded in component \"workspace\".","exitCode":0,"durationMs":742,"stdout":["NODE_SANDBOX_OK"],"outputTruncated":true}`,
+			result:     `{"status":"succeeded","summary":"Command succeeded in component \"workspace\".","exitCode":0,"durationMs":742,"stdout":["NODE_SANDBOX_OK","TOKEN=stdout-secret"],"outputTruncated":true}`,
 			wantStatus: "succeeded",
 			wantAction: "succeeded",
 			wantExit:   0,
-			wantStdout: "NODE_SANDBOX_OK",
+			wantStdout: "NODE_SANDBOX_OK\nTOKEN=[redacted]",
 		},
 		{
 			name:       "failure",
-			result:     `{"status":"failed","summary":"Command failed in component \"workspace\".","exitCode":1,"durationMs":1834,"stderr":["compile warning"]}`,
+			result:     `{"status":"failed","summary":"Command failed in component \"workspace\" token=summary-secret","exitCode":1,"durationMs":1834,"stderr":["compile warning","OPENAI_API_KEY=stderr-secret"]}`,
 			wantStatus: "failed",
 			wantAction: "failed",
 			wantExit:   1,
-			wantStderr: "compile warning",
+			wantStderr: "compile warning\nOPENAI_API_KEY=[redacted]",
 		},
 		{
 			name:       "canceled",
 			result:     `{"status":"canceled","summary":"Command execution was canceled.","exitCode":130,"durationMs":314,"stdout":["partial output"]}`,
 			wantStatus: "canceled",
-			wantAction: projectAssistantActionFeedStatusSucceeded,
+			wantAction: projectAssistantActionFeedStatusCanceled,
 			wantExit:   130,
 			wantStdout: "partial output",
+		},
+		{
+			name:           "timed out",
+			result:         `{"status":"timed_out","summary":"Command timed out","exitCode":124,"durationMs":2000}`,
+			wantStatus:     "failed",
+			wantExecStatus: "timed_out",
+			wantAction:     "failed",
+			wantExit:       124,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,8 +202,12 @@ func TestProjectAssistantDurableExecGraphToolProjectsPublicActionFeed(t *testing
 			if events[0].Exec.Argv[3] != "[redacted]" || events[1].Exec.Argv[3] != "[redacted]" {
 				t.Fatalf("exec argv was not sanitized: running=%#v terminal=%#v", events[0].Exec.Argv, events[1].Exec.Argv)
 			}
-			if events[1].Exec.Status != tt.wantStatus || events[1].Exec.ExitCode == nil || *events[1].Exec.ExitCode != tt.wantExit {
-				t.Fatalf("terminal exec metadata = %#v, want status %s exit %d", events[1].Exec, tt.wantStatus, tt.wantExit)
+			wantExecStatus := tt.wantExecStatus
+			if wantExecStatus == "" {
+				wantExecStatus = tt.wantStatus
+			}
+			if events[1].Exec.Status != wantExecStatus || events[1].Exec.ExitCode == nil || *events[1].Exec.ExitCode != tt.wantExit {
+				t.Fatalf("terminal exec metadata = %#v, want status %s exit %d", events[1].Exec, wantExecStatus, tt.wantExit)
 			}
 
 			metadata := projectAssistantMessageMetadata("Working", events)
@@ -225,13 +238,13 @@ func TestProjectAssistantDurableExecGraphToolProjectsPublicActionFeed(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(encoded), "secret-value") || strings.Contains(string(encoded), "sessionID") {
+			if strings.Contains(string(encoded), "secret-value") || strings.Contains(string(encoded), "stdout-secret") || strings.Contains(string(encoded), "stderr-secret") || strings.Contains(string(encoded), "summary-secret") || strings.Contains(string(encoded), "sessionID") {
 				t.Fatalf("public action metadata leaked command material: %s", encoded)
 			}
-			if tt.wantStdout != "" && !strings.Contains(string(encoded), tt.wantStdout) {
+			if tt.wantStdout != "" && !strings.Contains(strings.Join(action.Exec.Stdout, "\n"), tt.wantStdout) {
 				t.Fatalf("public action metadata lost stdout: %s", encoded)
 			}
-			if tt.wantStderr != "" && !strings.Contains(string(encoded), tt.wantStderr) {
+			if tt.wantStderr != "" && !strings.Contains(strings.Join(action.Exec.Stderr, "\n"), tt.wantStderr) {
 				t.Fatalf("public action metadata lost stderr: %s", encoded)
 			}
 
@@ -278,10 +291,10 @@ func TestProjectAssistantDurableExecGraphToolProjectsPublicActionFeed(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(publicData), "sessionID") || strings.Contains(string(publicData), "secret-value") {
+			if strings.Contains(string(publicData), "sessionID") || strings.Contains(string(publicData), "secret-value") || strings.Contains(string(publicData), "stdout-secret") || strings.Contains(string(publicData), "stderr-secret") || strings.Contains(string(publicData), "summary-secret") {
 				t.Fatalf("public dynamicToolCall leaked private execution material: %s", publicData)
 			}
-			if tt.wantStatus == "canceled" && (publicAction.Status != projectAssistantActionFeedStatusSucceeded || publicAction.Severity == projectAssistantActionFeedSeverityError || publicExec.Status != "canceled") {
+			if tt.wantStatus == "canceled" && (publicAction.Status != projectAssistantActionFeedStatusCanceled || publicAction.Severity == projectAssistantActionFeedSeverityError || publicExec.Status != "canceled") {
 				t.Fatalf("public canceled dynamicToolCall = %#v, want non-error terminal action with nested canceled exec", publicAction)
 			}
 

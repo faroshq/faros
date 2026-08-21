@@ -176,6 +176,7 @@ func NewWithWorkspaceContext(parent context.Context, gql *tenant.GraphQLClient, 
 	s.assistantEngine = NewEinoAssistantEngine(s)
 	s.assistantRunManager = newProjectAssistantRunManager()
 	s.assistantSupervisor = newProjectAssistantSupervisor(parent, msgStore)
+	s.assistantSupervisor.server = s
 	s.runSandboxManager = newProjectAssistantSandboxManager()
 	if config, _, err := ParseCodingSandboxConfig(getenv); err == nil {
 		s.runSandboxConfig = config
@@ -209,6 +210,7 @@ func (s *Server) projectAssistantSupervisor() *projectAssistantSupervisor {
 	if s.assistantSupervisor == nil {
 		s.assistantSupervisor = newProjectAssistantSupervisor(context.Background(), s.store)
 	}
+	s.assistantSupervisor.server = s
 	return s.assistantSupervisor
 }
 

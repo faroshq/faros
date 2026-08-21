@@ -103,7 +103,7 @@ func TestTerminalToolResultSettlesWhileRunIsStopping(t *testing.T) {
 			continue
 		}
 		actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
-		if len(actions) != 1 || actions[0].Status != projectAssistantActionFeedStatusSucceeded || actions[0].Exec == nil || actions[0].Exec.Status != "canceled" {
+		if len(actions) != 1 || actions[0].Status != projectAssistantActionFeedStatusCanceled || actions[0].Exec == nil || actions[0].Exec.Status != "canceled" {
 			t.Fatalf("interrupted command action = %#v, want non-error terminal canceled exec", actions)
 		}
 		return

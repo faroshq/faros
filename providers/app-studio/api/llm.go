@@ -1423,7 +1423,7 @@ func projectToolCallResultStatus(name, result string) string {
 		return "running"
 	case "canceled", "cancelled":
 		return "canceled"
-	case "failed", "partial_failure", "error":
+	case "failed", "partial_failure", "error", "timed_out":
 		return "failed"
 	}
 	if baseName != projectToolCommitFiles && baseName != projectToolCommitProjectFiles {

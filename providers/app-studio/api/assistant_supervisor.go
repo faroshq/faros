@@ -57,6 +57,7 @@ type projectAssistantRunSnapshot struct {
 
 type projectAssistantSupervisor struct {
 	store        store.Store
+	server       *Server
 	ctx          context.Context
 	cancel       context.CancelFunc
 	lifecycleLog func(string, store.Scope, store.AssistantRun)
@@ -930,7 +931,18 @@ func (s *projectAssistantSupervisor) Abort(scope store.Scope, runID string) bool
 
 // Stop makes cancellation observable before asking Eino to unwind. Pending
 // runs have no active loop, so they use the existing synchronous terminal path.
+// Callers with the authenticated request identity should use
+// StopWithIdentity so a suspended run sandbox can be deleted through the
+// caller-scoped client.
 func (s *projectAssistantSupervisor) Stop(scope store.Scope, runID string) (store.AssistantRun, bool, error) {
+	return s.stopWithIdentity(context.Background(), identity{}, scope, runID)
+}
+
+func (s *projectAssistantSupervisor) StopWithIdentity(ctx context.Context, id identity, scope store.Scope, runID string) (store.AssistantRun, bool, error) {
+	return s.stopWithIdentity(ctx, id, scope, runID)
+}
+
+func (s *projectAssistantSupervisor) stopWithIdentity(ctx context.Context, id identity, scope store.Scope, runID string) (store.AssistantRun, bool, error) {
 	if s == nil {
 		return store.AssistantRun{}, false, nil
 	}
@@ -953,7 +965,19 @@ func (s *projectAssistantSupervisor) Stop(scope store.Scope, runID string) (stor
 			return store.AssistantRun{}, ok, err
 		}
 		run, getErr := s.store.GetAssistantRun(context.Background(), scope, runID)
-		return run, true, getErr
+		if getErr != nil {
+			return run, true, getErr
+		}
+		if s.server != nil {
+			cleanupCtx := ctx
+			if cleanupCtx == nil {
+				cleanupCtx = context.Background()
+			}
+			if err := s.server.cleanupInterruptedProjectAssistantRunSandbox(cleanupCtx, id, scope, run); err != nil {
+				return run, true, err
+			}
+		}
+		return run, true, nil
 	}
 	s.mu.Unlock()
 	active.transitionMu.Lock()

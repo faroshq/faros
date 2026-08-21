@@ -24,7 +24,7 @@ test('renders a compact bounded log without execution mechanics', async () => {
   assert.match(html, /aria-expanded="false"/)
   assert.match(html, /aria-controls="app-studio-assistant-actions-assistant-1"/)
   assert.match(html, /Inspected the project/)
-  assert.match(html, /Ran commands/)
+  assert.match(html, /Ran checks/)
   assert.doesNotMatch(html, /action-chain-fade/)
   assert.doesNotMatch(html, /tool call|tool result|args:|offset|limit|read_file/)
   assert.doesNotMatch(html, /rounded-xl border border-border-subtle bg-surface/)
@@ -76,7 +76,9 @@ test('keeps exec mechanics distinct and accessible inside the click-only expansi
       stderr: ['COMMAND_WARNING'],
     },
   }))
-  assert.match(html, /\$ <\/span>go test \.\/\.\.\./)
+  assert.match(html, /Direct command/)
+  assert.match(html, />go test \.\/\.\.\.<\/div>/)
+  assert.doesNotMatch(html, /Shell|\$ /)
   assert.match(html, /Sanitized argv/)
   assert.match(html, /Relative cwd/)
   assert.match(html, /backend/)
@@ -88,6 +90,36 @@ test('keeps exec mechanics distinct and accessible inside the click-only expansi
   assert.match(html, /aria-label="Standard error"/)
   assert.match(html, /COMMAND_OUTPUT/)
   assert.match(html, /COMMAND_WARNING/)
+})
+
+test('uses nested exec state labels and keeps each disclosure collapsed by default', async () => {
+  const { default: AssistantActionLog } = await vite.ssrLoadModule('/src/AssistantActionLog.vue')
+  const states = [
+    ['running', 'running', 'Running'],
+    ['success', 'succeeded', 'Ran'],
+    ['failure', 'failed', 'Failed'],
+    ['cancel', 'canceled', 'Canceled'],
+    ['timeout', 'timed_out', 'Timed out'],
+    ['blocked', 'blocked', 'Blocked'],
+  ]
+  const html = await renderToString(createSSRApp(AssistantActionLog, {
+    messageId: 'assistant-exec-states',
+    items: states.map(([id, status]) => ({
+      id: `exec-${id}`,
+      kind: 'run',
+      // The outer action is settled successfully in this fixture. The nested
+      // command result is the authoritative state shown to the user.
+      status: 'succeeded',
+      title: 'Ran command',
+      severity: 'normal',
+      exec: { argv: ['npm', 'run', id], status },
+    })),
+  }))
+  for (const [id, , label] of states) {
+    assert.match(html, new RegExp(`${label} npm run ${id}`))
+    assert.match(html, new RegExp(`aria-expanded="false"[^>]+aria-controls="app-studio-assistant-actions-assistant-exec-states-exec-${id}-exec"`))
+  }
+  assert.doesNotMatch(html, /Direct command|stdout|stderr/)
 })
 
 test('renders only allowlisted structured failure diagnostics', async () => {
