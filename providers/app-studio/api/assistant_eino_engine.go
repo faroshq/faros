@@ -118,7 +118,7 @@ func (e projectEinoAssistantEngine) StreamProjectAssistant(
 				return e.server.setupProjectAssistantRunSandbox(initCtx, req, runState, nil)
 			}
 		}
-		runState.ConfigureSandboxCapability(eligibility, initializer)
+		runState.ConfigureSandboxCapabilityWithContext(ctx, eligibility, initializer)
 	}
 	if req.SkillSnapshot == nil && e.server != nil {
 		snapshot, err := e.server.projectAssistantSkillSnapshotForIdentity(ctx, req.WorkspaceScope, req.Identity)
@@ -276,7 +276,7 @@ func (e projectEinoAssistantEngine) ResumeProjectAssistant(
 				return e.server.setupProjectAssistantRunSandbox(initCtx, req, runState, state.Sandbox)
 			}
 		}
-		runState.ConfigureSandboxCapability(eligibility, initializer)
+		runState.ConfigureSandboxCapabilityWithContext(ctx, eligibility, initializer)
 	}
 	checkpointStore := newProjectEinoAssistantCheckpointStoreWithCheckpoint(state.Eino.CheckpointID, state.Eino.Checkpoint)
 	turn := newProjectAssistantTurnItem(projectAssistantTurnResume, req.Identity, req.Project.Name)
@@ -725,10 +725,10 @@ func (e projectEinoAssistantEngine) runProjectAssistantTurnLoop(
 	for _, item := range items {
 		loop.Push(item)
 	}
-	// Let Eino own cancellation and safe-point unwinding. The outer context is
-	// observed separately so a user Stop can request graceful cancellation,
-	// suppress a stale checkpoint, and attach a durable cause.
-	loop.Run(context.WithoutCancel(ctx))
+	// Give Eino the supervisor-owned context so a canceled run reaches the
+	// active agent and its tools immediately. The watcher below still owns the
+	// graceful-stop policy (including checkpoint suppression and stop cause).
+	loop.Run(ctx)
 	stopWatcherDone := make(chan struct{})
 	go func() {
 		select {

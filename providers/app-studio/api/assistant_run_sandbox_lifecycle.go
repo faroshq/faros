@@ -350,42 +350,71 @@ func projectAssistantRunSandboxInstanceReadiness(obj *unstructured.Unstructured,
 		}
 		return false, true, message
 	}
-	readyConditionSeen, readyConditionTrue := false, false
-	readyConditionReason := ""
-	if conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions"); err == nil && found {
-		for _, raw := range conditions {
-			condition, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			typeName, _ := condition["type"].(string)
+
+	rawGeneration, found, err := unstructured.NestedFieldNoCopy(obj.Object, "metadata", "generation")
+	if err != nil || !found {
+		return false, false, "metadata.generation is not positive"
+	}
+	generation, ok := projectAssistantRunSandboxObservedGenerationValue(rawGeneration)
+	if !ok || generation <= 0 {
+		return false, false, "metadata.generation is not positive"
+	}
+	statusObserved, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status", "observedGeneration")
+	if err != nil || !found {
+		return false, false, "status.observedGeneration is missing"
+	}
+	observedGeneration, ok := projectAssistantRunSandboxObservedGenerationValue(statusObserved)
+	if !ok || observedGeneration != generation {
+		return false, false, "status.observedGeneration does not match metadata.generation"
+	}
+	if phase != "Ready" {
+		return false, false, "status.phase is not Ready"
+	}
+
+	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return false, false, "status.conditions is missing"
+	}
+	readyCondition := false
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		conditionType, _ := condition["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(conditionType), "valid") {
 			status, _ := condition["status"].(string)
-			reasonText, _ := condition["reason"].(string)
-			message, _ := condition["message"].(string)
-			detail := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(reasonText), strings.TrimSpace(message)}, ": "))
-			switch strings.ToLower(strings.TrimSpace(typeName)) {
-			case "valid":
-				if !strings.EqualFold(strings.TrimSpace(status), "true") {
-					if detail == "" {
-						detail = "instance values are not valid"
-					}
-					return false, true, detail
+			if !strings.EqualFold(strings.TrimSpace(status), "true") {
+				reasonText, _ := condition["reason"].(string)
+				message, _ := condition["message"].(string)
+				detail := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(reasonText), strings.TrimSpace(message)}, ": "))
+				if detail == "" {
+					detail = "instance values are not valid"
 				}
-			case "ready":
-				readyConditionSeen = true
-				readyConditionTrue = strings.EqualFold(strings.TrimSpace(status), "true")
-				if !readyConditionTrue {
-					if detail == "" {
-						detail = "instance Ready condition is not true"
-					}
-					readyConditionReason = detail
-				}
+				return false, true, detail
 			}
 		}
+		if conditionType != "Ready" {
+			continue
+		}
+		conditionObserved, ok := projectAssistantRunSandboxObservedGenerationValue(condition["observedGeneration"])
+		if !ok || conditionObserved != generation {
+			return false, false, "status Ready condition is not current"
+		}
+		status, _ := condition["status"].(string)
+		readyCondition = status == "True"
+		break
+	}
+	if !readyCondition {
+		return false, false, "status Ready condition is not true"
 	}
 	runtimeNamespace, _, _ := unstructured.NestedString(obj.Object, "status", "runtimeNamespace")
 	if strings.TrimSpace(runtimeNamespace) == "" {
 		return false, false, "status.runtimeNamespace is empty"
+	}
+	networkPhase, found, err := unstructured.NestedString(obj.Object, "status", "farosNetworkPhase")
+	if err != nil || !found || networkPhase != "runtime" {
+		return false, false, "status.farosNetworkPhase is not runtime"
 	}
 	secretName, _, _ := unstructured.NestedString(obj.Object, "status", "controlSecretRef", "name")
 	if strings.TrimSpace(secretName) == "" {
@@ -401,17 +430,46 @@ func projectAssistantRunSandboxInstanceReadiness(obj *unstructured.Unstructured,
 		if strings.TrimSpace(serviceName) == "" {
 			return false, false, fmt.Sprintf("status.components.%s.controlServiceRef.name is empty", component)
 		}
-		if value, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status", "components", component, "ready"); err == nil && found {
+		value, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status", "components", component, "ready")
+		if err == nil && found {
 			componentReady, ok := value.(bool)
 			if !ok || !componentReady {
 				return false, false, fmt.Sprintf("status.components.%s.ready is not true", component)
 			}
 		}
 	}
-	if readyConditionSeen && !readyConditionTrue {
-		return false, false, readyConditionReason
-	}
 	return true, false, ""
+}
+
+// projectAssistantRunSandboxObservedGenerationValue accepts the numeric forms
+// that Kubernetes clients can produce for unstructured status fields. This
+// mirrors Infrastructure's dataplane readiness predicate without importing
+// the standalone provider module.
+func projectAssistantRunSandboxObservedGenerationValue(value any) (int64, bool) {
+	switch value := value.(type) {
+	case int64:
+		return value, true
+	case int32:
+		return int64(value), true
+	case int:
+		return int64(value), true
+	case uint64:
+		if value > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint:
+		return int64(value), true
+	case float64:
+		if value != float64(int64(value)) {
+			return 0, false
+		}
+		return int64(value), true
+	default:
+		return 0, false
+	}
 }
 
 func waitForProjectAssistantRunSandboxInstanceReady(ctx context.Context, timeout, poll time.Duration, components map[string]projectTemplateComponent, get projectAssistantRunSandboxInstanceStatusGetter) error {

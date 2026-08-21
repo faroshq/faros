@@ -138,9 +138,21 @@ type projectEinoAssistantRunState struct {
 	sandboxMetadata    *projectAssistantRunSandboxMetadata
 	sandboxEligibility *CodingSandboxEligibility
 	sandboxInitializer func(context.Context) (*projectAssistantRunSandbox, func(), error)
-	sandboxInitOnce    sync.Once
 	sandboxInitErr     error
 	sandboxRelease     func()
+	sandboxInitContext context.Context
+	sandboxInitAttempt *projectAssistantSandboxInitAttempt
+	sandboxInitSuccess bool
+}
+
+// projectAssistantSandboxInitAttempt is the single shared setup operation for
+// one lazy sandbox initialization attempt. The result belongs to the attempt,
+// rather than the run state, so a waiter that wakes after a later retry starts
+// still observes the result it waited for.
+type projectAssistantSandboxInitAttempt struct {
+	done    chan struct{}
+	sandbox *projectAssistantRunSandbox
+	err     error
 }
 
 // projectAssistantMutationRecoveryIdentity is server-owned metadata for a
@@ -235,9 +247,31 @@ func (s *projectEinoAssistantRunState) ConfigureSandboxCapability(eligibility Co
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.configureSandboxCapabilityLocked(nil, eligibility, initializer)
+}
+
+// ConfigureSandboxCapabilityWithContext configures lazy sandbox setup and the
+// run/segment context that owns that setup. Tool-call contexts are intentionally
+// not used for the shared initializer: a canceled waiter must not cancel setup
+// for the run's other tool calls.
+func (s *projectEinoAssistantRunState) ConfigureSandboxCapabilityWithContext(runCtx context.Context, eligibility CodingSandboxEligibility, initializer func(context.Context) (*projectAssistantRunSandbox, func(), error)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.configureSandboxCapabilityLocked(runCtx, eligibility, initializer)
+}
+
+func (s *projectEinoAssistantRunState) configureSandboxCapabilityLocked(runCtx context.Context, eligibility CodingSandboxEligibility, initializer func(context.Context) (*projectAssistantRunSandbox, func(), error)) {
 	copy := eligibility
 	s.sandboxEligibility = &copy
 	s.sandboxInitializer = initializer
+	if runCtx == nil {
+		s.sandboxInitContext = nil
+	} else {
+		s.sandboxInitContext = runCtx
+	}
 }
 
 func (s *projectEinoAssistantRunState) SandboxEligibility() *CodingSandboxEligibility {
@@ -266,29 +300,65 @@ func (s *projectEinoAssistantRunState) EnsureSandbox(ctx context.Context) (*proj
 	if s == nil {
 		return nil, nil
 	}
-	s.sandboxInitOnce.Do(func() {
-		s.mu.Lock()
-		initializer := s.sandboxInitializer
-		s.mu.Unlock()
-		if initializer == nil {
-			return
-		}
-		sandbox, release, err := initializer(ctx)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.sandboxInitErr = err
-		if err == nil {
-			s.sandbox = sandbox
-			s.sandboxRelease = release
-			if sandbox != nil {
-				metadata := sandbox.metadataSnapshot()
-				s.sandboxMetadata = &metadata
-			}
-		}
-	})
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sandbox, s.sandboxInitErr
+	if s.sandboxInitSuccess {
+		sandbox, err := s.sandbox, s.sandboxInitErr
+		s.mu.Unlock()
+		return sandbox, err
+	}
+	if attempt := s.sandboxInitAttempt; attempt != nil {
+		s.mu.Unlock()
+		select {
+		case <-attempt.done:
+			return attempt.sandbox, attempt.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	initializer := s.sandboxInitializer
+	initCtx := s.sandboxInitContext
+	if initializer == nil {
+		sandbox := s.sandbox
+		s.mu.Unlock()
+		return sandbox, nil
+	}
+	if initCtx == nil {
+		initCtx = ctx
+	}
+	attempt := &projectAssistantSandboxInitAttempt{done: make(chan struct{})}
+	s.sandboxInitAttempt = attempt
+	s.mu.Unlock()
+
+	sandbox, release, err := initializer(initCtx)
+
+	s.mu.Lock()
+	// SetSandbox is allowed during setup so the initializer can make the
+	// sandbox visible to its own setup helpers. The returned value remains the
+	// publication authority for the lazy initializer itself.
+	if err == nil {
+		s.sandbox = sandbox
+		s.sandboxRelease = release
+		s.sandboxInitErr = nil
+		s.sandboxInitSuccess = true
+		if sandbox != nil {
+			metadata := sandbox.metadataSnapshot()
+			s.sandboxMetadata = &metadata
+		}
+	} else {
+		s.sandboxInitErr = err
+	}
+	attempt.sandbox = s.sandbox
+	attempt.err = err
+	s.sandboxInitAttempt = nil
+	close(attempt.done)
+	sandboxResult, setupErr := attempt.sandbox, attempt.err
+	s.mu.Unlock()
+	return sandboxResult, setupErr
 }
 
 func (s *projectEinoAssistantRunState) SandboxRelease() func() {

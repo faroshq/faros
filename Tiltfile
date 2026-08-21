@@ -860,12 +860,31 @@ local_resource(
 #   infrastructure (long-lived) → picks up INFRASTRUCTURE_KUBECONFIG
 # Manual so devs control when re-bootstrap happens (it overwrites
 # the runtime kubeconfig and rotates the token).
+infrastructure_init_cmd = 'make init-provider-infrastructure'
+infrastructure_init_resource_deps = ['hub', 'infrastructure-register']
+if app_studio_sandbox_force:
+    # The init command owns Template seeding, so it must receive the same
+    # immutable universal image contract as the long-lived provider. Without
+    # this, local force mode can run against a stale platform Template even
+    # though the serving process correctly enables coding sandboxes.
+    infrastructure_init_cmd = ('''set -eu
+{sandbox_digest_script}{sandbox_env}
+make init-provider-infrastructure
+''').format(
+        sandbox_digest_script=infrastructure_sandbox_digest_script,
+        sandbox_env=infrastructure_sandbox_env,
+    )
+    infrastructure_init_resource_deps = infrastructure_init_resource_deps + [
+        'dev-agent-image',
+        'universal-dev-image',
+        'kro-mgmt-up',
+    ]
 local_resource(
     'infrastructure-init',
-    cmd='make init-provider-infrastructure',
+    cmd=infrastructure_init_cmd,
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub', 'infrastructure-register'],
+    resource_deps=infrastructure_init_resource_deps,
     labels=['providers-kro'],
 )
 

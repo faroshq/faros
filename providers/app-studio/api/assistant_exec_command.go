@@ -568,6 +568,9 @@ func execProjectAssistantCommand(runCtx projectAssistantWorkflowRunContext) func
 		}
 		sandbox, sandboxErr := current.RunState.EnsureSandbox(ctx)
 		if sandboxErr != nil {
+			if errors.Is(sandboxErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return &projectAssistantExecCommandResult{Status: "canceled", Summary: "Command canceled before the coding sandbox was ready."}, nil
+			}
 			return &projectAssistantExecCommandResult{Status: "failed", Summary: "Coding sandbox setup failed: " + sandboxErr.Error()}, nil
 		}
 		if sandbox != nil {

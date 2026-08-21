@@ -198,6 +198,30 @@ func TestProjectAssistantFirstExecLazilyInitializesSandboxExactlyOnce(t *testing
 	}
 }
 
+func TestProjectAssistantExecCanceledDuringSandboxSetupIsNotReportedFailed(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.SetTurnPolicy(projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation))
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	setupStarted := make(chan struct{})
+	state.ConfigureSandboxCapabilityWithContext(runCtx, CodingSandboxEligibility{Eligible: true}, func(ctx context.Context) (*projectAssistantRunSandbox, func(), error) {
+		close(setupStarted)
+		<-ctx.Done()
+		return nil, nil, ctx.Err()
+	})
+	run := execProjectAssistantCommand(projectAssistantWorkflowRunContext{AssistantRunID: "run-canceled-setup", RunState: state})
+	resultCh := make(chan *projectAssistantExecCommandResult, 1)
+	go func() {
+		result, _ := run(runCtx, &projectAssistantExecCommandInput{Component: projectAssistantRunSandboxWorkspaceVerb, Argv: []string{"go", "test", "./..."}})
+		resultCh <- result
+	}()
+	<-setupStarted
+	cancelRun()
+	result := <-resultCh
+	if result == nil || result.Status != "canceled" || result.Summary != "Command canceled before the coding sandbox was ready." {
+		t.Fatalf("canceled setup result = %#v, want canceled command", result)
+	}
+}
+
 func TestProjectAssistantExecCommandMultiComponentPresentationRemainsGeneric(t *testing.T) {
 	tool, err := newProjectAssistantExecCommandGraphTool(projectAssistantWorkflowRunContext{})
 	if err != nil {

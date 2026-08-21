@@ -1387,16 +1387,14 @@ func finalizeProjectAssistantActionFeed(actions []projectAssistantActionFeedItem
 		if actions[i].Status != projectAssistantActionFeedStatusRunning && actions[i].Status != projectAssistantActionFeedStatusWaiting {
 			continue
 		}
-		switch runStatus {
-		case store.AssistantRunStatusCompleted:
-			actions[i].Status = projectAssistantActionFeedStatusSucceeded
-			actions[i].Severity = projectAssistantActionFeedSeverityNormal
-			actions[i].Diagnostic = nil
-		default:
-			actions[i].Status = projectAssistantActionFeedStatusFailed
-			actions[i].Severity = projectAssistantActionFeedSeverityError
-			actions[i].Diagnostic = projectAssistantActionFeedDiagnostic(actions[i].ID, "")
+		if !assistantRunTerminal(runStatus) {
+			// Pending permission/input runs still own an unresolved action. Keep
+			// its waiting state until the user resumes or rejects it.
+			continue
 		}
+		actions[i].Status = projectAssistantActionFeedStatusFailed
+		actions[i].Severity = projectAssistantActionFeedSeverityError
+		actions[i].Diagnostic = projectAssistantActionFeedDiagnostic(actions[i].ID, "")
 		actions[i].Title = projectAssistantActionFeedItemTitle(actions[i].Kind, actions[i].Status)
 	}
 	if assistantRunTerminal(runStatus) {

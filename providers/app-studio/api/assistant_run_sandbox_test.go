@@ -71,6 +71,25 @@ func newRunSandboxTestInstance(name, state string, now time.Time) *unstructured.
 	return instance
 }
 
+func readyRunSandboxStatus(generation int64) map[string]any {
+	return map[string]any{
+		"observedGeneration": generation,
+		"phase":              "Ready",
+		"farosNetworkPhase":  "runtime",
+		"runtimeNamespace":   "run-ns",
+		"controlSecretRef":   map[string]any{"name": "run-control"},
+		"conditions": []any{map[string]any{
+			"type":               "Ready",
+			"status":             "True",
+			"observedGeneration": generation,
+		}},
+		"components": map[string]any{"workspace": map[string]any{
+			"ready":             true,
+			"controlServiceRef": map[string]any{"name": "run-workspace-control"},
+		}},
+	}
+}
+
 func TestProjectAssistantRunSandboxNameIsProjectScoped(t *testing.T) {
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "shop", ProjectUID: "uid-a"}
 	one := projectAssistantRunSandboxName(scope, &aiv1alpha1.Project{}, "run-a")
@@ -679,16 +698,8 @@ func TestProjectAssistantRunSandboxFreshFollowUpClaimsAndRebasesProjectCache(t *
 	cacheAnnotations[projectAssistantRunSandboxCacheGeneration] = "run-1"
 	delete(cacheAnnotations, projectAssistantRunSandboxClaimOwner)
 	delete(cacheAnnotations, projectAssistantRunSandboxClaimExpiry)
-	_ = unstructured.SetNestedField(cached.Object, map[string]any{
-		"phase":            "Ready",
-		"runtimeNamespace": "run-ns",
-		"controlSecretRef": map[string]any{"name": "run-control"},
-		"conditions":       []any{map[string]any{"type": "Ready", "status": "True"}},
-		"components": map[string]any{"workspace": map[string]any{
-			"ready":             true,
-			"controlServiceRef": map[string]any{"name": "run-workspace-control"},
-		}},
-	}, "status")
+	cached.SetGeneration(1)
+	_ = unstructured.SetNestedField(cached.Object, readyRunSandboxStatus(1), "status")
 	cached.SetAnnotations(cacheAnnotations)
 	template := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "infrastructure.faros.sh/v1alpha1",
@@ -763,11 +774,8 @@ func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevis
 	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop", UID: "project-uid"}}
 	cacheName := projectAssistantRunSandboxName(scope, project, "run-cold")
 	cached := newRunSandboxTestInstance(cacheName, projectAssistantRunSandboxCacheStateCached, time.Now().UTC())
-	_ = unstructured.SetNestedField(cached.Object, map[string]any{
-		"phase": "Ready", "runtimeNamespace": "run-ns", "controlSecretRef": map[string]any{"name": "run-control"},
-		"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-		"components": map[string]any{"workspace": map[string]any{"ready": true, "controlServiceRef": map[string]any{"name": "run-workspace-control"}}},
-	}, "status")
+	cached.SetGeneration(1)
+	_ = unstructured.SetNestedField(cached.Object, readyRunSandboxStatus(1), "status")
 	template := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "infrastructure.faros.sh/v1alpha1", "kind": "Template", "metadata": map[string]any{"name": projectAssistantRunSandboxDefaultTemplate},
 		"spec": map[string]any{"development": map[string]any{"components": map[string]any{"workspace": map[string]any{"workspacePath": ".", "devImage": "${faros.devImage.universal}"}}}},
@@ -879,15 +887,8 @@ func TestProjectAssistantRunSandboxQuotaDoesNotEvictLocallyClaimedCache(t *testi
 func TestProjectAssistantRunSandboxInstanceReadyWaitsForPendingStatus(t *testing.T) {
 	components := map[string]projectTemplateComponent{"workspace": {WorkspacePath: "."}}
 	pending := &unstructured.Unstructured{Object: map[string]any{"status": map[string]any{}}}
-	ready := &unstructured.Unstructured{Object: map[string]any{"status": map[string]any{
-		"runtimeNamespace": "run-ns",
-		"controlSecretRef": map[string]any{"name": "run-control"},
-		"conditions":       []any{map[string]any{"type": "Ready", "status": "True"}},
-		"components": map[string]any{"workspace": map[string]any{
-			"ready":             true,
-			"controlServiceRef": map[string]any{"name": "run-workspace-control"},
-		}},
-	}}}
+	ready := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"generation": int64(1)}}}
+	_ = unstructured.SetNestedField(ready.Object, readyRunSandboxStatus(1), "status")
 	objects := []*unstructured.Unstructured{pending, ready}
 	calls := 0
 	err := waitForProjectAssistantRunSandboxInstanceReady(context.Background(), 100*time.Millisecond, time.Millisecond, components, func(context.Context) (*unstructured.Unstructured, error) {
@@ -905,15 +906,85 @@ func TestProjectAssistantRunSandboxInstanceReadyWaitsForPendingStatus(t *testing
 
 func TestProjectAssistantRunSandboxInstanceReadyTimeoutIncludesStatus(t *testing.T) {
 	components := map[string]projectTemplateComponent{"workspace": {WorkspacePath: "."}}
-	pending := &unstructured.Unstructured{Object: map[string]any{"status": map[string]any{
-		"runtimeNamespace": "run-ns",
-		"controlSecretRef": map[string]any{"name": "run-control"},
-	}}}
+	pending := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"generation": int64(1)}}}
+	status := readyRunSandboxStatus(1)
+	delete(status["components"].(map[string]any)["workspace"].(map[string]any), "controlServiceRef")
+	_ = unstructured.SetNestedField(pending.Object, status, "status")
 	err := waitForProjectAssistantRunSandboxInstanceReady(context.Background(), 10*time.Millisecond, time.Millisecond, components, func(context.Context) (*unstructured.Unstructured, error) {
 		return pending, nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") || !strings.Contains(err.Error(), "controlServiceRef") {
 		t.Fatalf("timeout error = %v", err)
+	}
+}
+
+func TestProjectAssistantRunSandboxInstanceReadinessRequiresCurrentRuntimeState(t *testing.T) {
+	components := map[string]projectTemplateComponent{"workspace": {WorkspacePath: "."}}
+	tests := []struct {
+		name   string
+		mutate func(*unstructured.Unstructured)
+		want   bool
+	}{
+		{
+			name: "stale observed generation",
+			mutate: func(instance *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(instance.Object, int64(1), "status", "observedGeneration")
+			},
+		},
+		{
+			name: "missing network phase",
+			mutate: func(instance *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(instance.Object, "status", "farosNetworkPhase")
+			},
+		},
+		{
+			name: "setup network phase",
+			mutate: func(instance *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(instance.Object, "setup", "status", "farosNetworkPhase")
+			},
+		},
+		{
+			name: "wrong network phase casing",
+			mutate: func(instance *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(instance.Object, "Runtime", "status", "farosNetworkPhase")
+			},
+		},
+		{
+			name: "current runtime ready with component readiness field",
+			want: true,
+		},
+		{
+			name: "current runtime ready without component readiness field",
+			mutate: func(instance *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(instance.Object, "status", "components", "workspace", "ready")
+			},
+			want: true,
+		},
+		{
+			name: "current runtime ready with float64 generations and no component readiness field",
+			mutate: func(instance *unstructured.Unstructured) {
+				metadata := instance.Object["metadata"].(map[string]any)
+				metadata["generation"] = float64(2)
+				status := instance.Object["status"].(map[string]any)
+				status["observedGeneration"] = float64(2)
+				status["conditions"].([]any)[0].(map[string]any)["observedGeneration"] = float64(2)
+				unstructured.RemoveNestedField(instance.Object, "status", "components", "workspace", "ready")
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			instance := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"generation": int64(2)}}}
+			_ = unstructured.SetNestedField(instance.Object, readyRunSandboxStatus(2), "status")
+			if test.mutate != nil {
+				test.mutate(instance)
+			}
+			ready, terminal, reason := projectAssistantRunSandboxInstanceReadiness(instance, components)
+			if ready != test.want || terminal {
+				t.Fatalf("readiness = %t terminal = %t reason = %q, want ready=%t non-terminal", ready, terminal, reason, test.want)
+			}
+		})
 	}
 }
 

@@ -587,8 +587,8 @@ func TestProjectAssistantSetStatusClosesRestoredWaitingAction(t *testing.T) {
 		t.Fatal("terminal assistant message not found")
 	}
 	actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
-	if len(actions) != 1 || actions[0].Status != projectAssistantActionFeedStatusSucceeded || actions[0].Title != "Ran checks" {
-		t.Fatalf("terminal actions = %#v, want closed successful action", actions)
+	if len(actions) != 1 || actions[0].Status != projectAssistantActionFeedStatusFailed || actions[0].Title != "Run failed" || actions[0].Severity != projectAssistantActionFeedSeverityError || actions[0].Diagnostic == nil {
+		t.Fatalf("terminal actions = %#v, want failed action with diagnostic", actions)
 	}
 	if interrupt := projectAssistantUIInterruptFromMetadata(message.Metadata[projectMessageMetadataAssistantInterrupt]); interrupt != nil {
 		t.Fatalf("terminal interrupt = %#v, want cleared", interrupt)
