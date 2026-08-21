@@ -946,7 +946,7 @@ func TestProjectAssistantActionFeedMinimalDisclosureHidesTargetAndOutcome(t *tes
 	}
 }
 
-func TestProjectAssistantActionFeedExecCarriesStructuredResultWithoutOutput(t *testing.T) {
+func TestProjectAssistantActionFeedExecCarriesBoundedStructuredOutput(t *testing.T) {
 	item := projectAssistantActionFeedItemFromToolCall(projectToolCallStreamEvent{
 		ID:     "exec-1",
 		Name:   projectToolExecCommand,
@@ -962,6 +962,9 @@ func TestProjectAssistantActionFeedExecCarriesStructuredResultWithoutOutput(t *t
 			Summary:         "Command failed in component \"backend\".",
 			ExitCode:        func() *int { value := 2; return &value }(),
 			DurationMS:      123,
+			Stdout:          []string{"NODE_SANDBOX_OK"},
+			Stderr:          []string{"compile warning"},
+			OutputTruncated: true,
 		},
 	})
 	if item.Exec == nil || item.Exec.Component != "backend" || item.Exec.Status != "failed" || item.Exec.ExitCode == nil || *item.Exec.ExitCode != 2 || item.Exec.DurationMS != 123 {
@@ -971,7 +974,7 @@ func TestProjectAssistantActionFeedExecCarriesStructuredResultWithoutOutput(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "stdout") || strings.Contains(string(data), "stderr") {
-		t.Fatalf("exec action item exposed raw output fields: %s", data)
+	if !strings.Contains(string(data), "NODE_SANDBOX_OK") || !strings.Contains(string(data), "compile warning") || strings.Contains(string(data), "sessionID") {
+		t.Fatalf("exec action item lost bounded output or exposed session identity: %s", data)
 	}
 }

@@ -54,6 +54,7 @@ test('renders completed activity status, duration, and bounded stdout/stderr', a
     exec: {
       component: 'frontend',
       argv: ['npm', 'run', 'build'],
+      workdir: 'web',
       status: 'failed',
       exitCode: 2,
       durationMs: 2040,
@@ -65,8 +66,19 @@ test('renders completed activity status, duration, and bounded stdout/stderr', a
   }))
   assert.match(html, /exit 2/)
   assert.match(html, /2\.0 s/)
+  assert.match(html, /Shell/)
+  assert.match(html, /\$ <\/span>npm run build/)
+  assert.match(html, /Sanitized argv/)
+  assert.match(html, /Relative cwd/)
+  assert.match(html, /web/)
+  assert.match(html, /Exit status/)
+  assert.match(html, /aria-label="Standard output"/)
+  assert.match(html, /aria-label="Standard error"/)
+  assert.match(html, /stdout/)
+  assert.match(html, /stderr/)
   assert.match(html, /building/)
   assert.match(html, /failed/)
+  assert.match(html, /Failed/)
   assert.match(html, /Output truncated/)
 })
 

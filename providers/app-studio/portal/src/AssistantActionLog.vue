@@ -22,11 +22,13 @@ import {
   groupAssistantActions,
   summarizeAssistantActions,
 } from './assistantActionFeed'
+import { formatAssistantExecCommand } from './assistantExecDisclosure'
 import type { ProjectAssistantActionFeedItem, ProjectAssistantActionKind, ProjectAssistantActionStatus } from './types'
 import AssistantExecDetails from './AssistantExecDetails.vue'
 
 const props = withDefaults(defineProps<{ messageId: string; items: ProjectAssistantActionFeedItem[]; stopping?: boolean }>(), { stopping: false })
 const openDiagnosticID = ref<string | null>(null)
+const openExecID = ref<string | null>(null)
 const copiedDiagnosticID = ref<string | null>(null)
 const manuallyCollapsed = ref(false)
 const userExpanded = ref(false)
@@ -80,18 +82,25 @@ function groupLabel(kind: ProjectAssistantActionKind, busy: boolean): string {
   switch (kind) {
     case 'inspect': return busy ? 'Inspecting the project' : 'Inspected the project'
     case 'edit': return busy ? 'Editing files' : 'Edited files'
-    case 'run': return busy ? 'Running commands and checks' : 'Ran commands and checks'
+    case 'run': return busy ? 'Running commands' : 'Ran commands'
     case 'commit': return busy ? 'Committing changes' : 'Committed changes'
     case 'clarify': return 'Waiting for input'
     default: return busy ? 'Working' : 'Other activity'
   }
 }
 
+function execActionTitle(item: typeof rows.value[number]): string {
+  const command = formatAssistantExecCommand(item.exec)
+  if (!command) return item.title
+  return `${isBusy(item.status) ? 'Running' : 'Ran'} ${command}`
+}
+
 const groups = computed<ActionGroup[]>(() => {
   const result: ActionGroup[] = []
   for (const item of rows.value) {
     const busy = isBusy(item.status)
-    const label = item.groupTitle?.trim() || groupLabel(item.kind, busy)
+    const label = item.groupTitle?.trim()
+      || (item.kind === 'run' && item.exec ? (busy ? 'Running commands' : 'Ran commands') : groupLabel(item.kind, busy))
     const previous = result[result.length - 1]
     if (previous?.kind === item.kind && previous.busy === busy && previous.label === label) {
       previous.items.push(item)
@@ -218,9 +227,27 @@ async function copyDiagnostic(item: typeof rows.value[number]) {
               <X v-else-if="isError(item.status, item.severity)" class="h-3.5 w-3.5 shrink-0 text-danger" :stroke-width="1.75" />
               <component v-else :is="kindIcon(item.kind)" class="h-3.5 w-3.5 shrink-0 text-text-muted" :stroke-width="1.75" />
               <span class="sr-only">{{ assistantActionStatusLabel(item.status, item.severity) }}:</span>
-              <span class="min-w-0 truncate text-text-secondary">{{ item.title }}</span>
-              <span v-if="item.target" class="min-w-0 truncate font-mono text-[11px] text-text-muted">{{ item.target }}</span>
-              <span v-if="item.outcome" class="ml-auto shrink-0 truncate text-[11px]" :class="isError(item.status, item.severity) ? 'text-danger' : 'text-text-muted'">{{ item.outcome }}</span>
+              <button
+                v-if="item.exec"
+                type="button"
+                class="group/exec flex min-h-7 min-w-0 flex-1 items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+                :aria-expanded="openExecID === item.id"
+                :aria-controls="`${panelID}-${item.id}-exec`"
+                @click="openExecID = openExecID === item.id ? null : item.id"
+              >
+                <span class="min-w-0 truncate text-text-secondary transition group-hover/exec:text-text-primary">{{ execActionTitle(item) }}</span>
+                <ChevronRight
+                  class="ml-auto h-3.5 w-3.5 shrink-0 text-text-muted transition-transform"
+                  :class="openExecID === item.id ? 'rotate-90' : ''"
+                  :stroke-width="1.75"
+                  aria-hidden="true"
+                />
+              </button>
+              <template v-else>
+                <span class="min-w-0 truncate text-text-secondary">{{ item.title }}</span>
+                <span v-if="item.target" class="min-w-0 truncate font-mono text-[11px] text-text-muted">{{ item.target }}</span>
+                <span v-if="item.outcome" class="ml-auto shrink-0 truncate text-[11px]" :class="isError(item.status, item.severity) ? 'text-danger' : 'text-text-muted'">{{ item.outcome }}</span>
+              </template>
               <button
                 v-if="item.diagnostic"
                 type="button"
@@ -233,7 +260,13 @@ async function copyDiagnostic(item: typeof rows.value[number]) {
                 Details
               </button>
             </div>
-            <AssistantExecDetails v-if="item.exec" :exec="item.exec" variant="activity" />
+            <div
+              v-if="item.exec && openExecID === item.id"
+              :id="`${panelID}-${item.id}-exec`"
+              class="mb-1 ml-5 min-w-0"
+            >
+              <AssistantExecDetails :exec="item.exec" variant="activity" />
+            </div>
             <div
               v-if="item.diagnostic && openDiagnosticID === item.id"
               :id="`${panelID}-${item.id}-diagnostic`"

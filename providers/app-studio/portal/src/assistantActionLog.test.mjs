@@ -24,10 +24,70 @@ test('renders a compact bounded log without execution mechanics', async () => {
   assert.match(html, /aria-expanded="false"/)
   assert.match(html, /aria-controls="app-studio-assistant-actions-assistant-1"/)
   assert.match(html, /Inspected the project/)
-  assert.match(html, /Ran commands and checks/)
+  assert.match(html, /Ran commands/)
   assert.doesNotMatch(html, /action-chain-fade/)
   assert.doesNotMatch(html, /tool call|tool result|args:|offset|limit|read_file/)
   assert.doesNotMatch(html, /rounded-xl border border-border-subtle bg-surface/)
+})
+
+test('renders exec_command as the same compact action row with details collapsed', async () => {
+  const { default: AssistantActionLog } = await vite.ssrLoadModule('/src/AssistantActionLog.vue')
+  const html = await renderToString(createSSRApp(AssistantActionLog, {
+    messageId: 'assistant-exec',
+    items: [{
+      id: 'exec-1',
+      kind: 'run',
+      status: 'succeeded',
+      title: 'Ran command',
+      outcome: 'exit 0',
+      severity: 'normal',
+      exec: {
+        component: 'workspace',
+        argv: ['go', 'test', './...'],
+        workdir: 'backend',
+        status: 'succeeded',
+        exitCode: 0,
+        durationMs: 1250,
+        stdout: ['COMMAND_OUTPUT'],
+        stderr: ['COMMAND_WARNING'],
+      },
+    }],
+  }))
+  assert.match(html, /Ran commands/)
+  assert.match(html, /Ran go test \.\/\.\.\./)
+  assert.match(html, /aria-expanded="false"/)
+  assert.match(html, /aria-controls="app-studio-assistant-actions-assistant-exec-exec-1-exec"/)
+  assert.doesNotMatch(html, /Sanitized argv|Relative cwd|Duration|Exit status|stdout|stderr|COMMAND_OUTPUT|COMMAND_WARNING|Shell/)
+  assert.doesNotMatch(html, /bg-surface-raised\/70 p-2\.5/)
+})
+
+test('keeps exec mechanics distinct and accessible inside the click-only expansion', async () => {
+  const { default: AssistantExecDetails } = await vite.ssrLoadModule('/src/AssistantExecDetails.vue')
+  const html = await renderToString(createSSRApp(AssistantExecDetails, {
+    variant: 'activity',
+    exec: {
+      component: 'workspace',
+      argv: ['go', 'test', './...'],
+      workdir: 'backend',
+      status: 'failed',
+      exitCode: 1,
+      durationMs: 1250,
+      stdout: ['COMMAND_OUTPUT'],
+      stderr: ['COMMAND_WARNING'],
+    },
+  }))
+  assert.match(html, /\$ <\/span>go test \.\/\.\.\./)
+  assert.match(html, /Sanitized argv/)
+  assert.match(html, /Relative cwd/)
+  assert.match(html, /backend/)
+  assert.match(html, /Duration/)
+  assert.match(html, /1\.3 s/)
+  assert.match(html, /Exit status/)
+  assert.match(html, /exit 1/)
+  assert.match(html, /aria-label="Standard output"/)
+  assert.match(html, /aria-label="Standard error"/)
+  assert.match(html, /COMMAND_OUTPUT/)
+  assert.match(html, /COMMAND_WARNING/)
 })
 
 test('renders only allowlisted structured failure diagnostics', async () => {

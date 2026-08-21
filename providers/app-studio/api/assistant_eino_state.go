@@ -133,7 +133,14 @@ type projectEinoAssistantRunState struct {
 	// contextGeneration identifies the active model-visible history window.
 	// Compaction increments it after replacing history so lifecycle context
 	// reconstruction cannot rely on a digest from the previous window.
-	contextGeneration uint64
+	contextGeneration  uint64
+	sandbox            *projectAssistantRunSandbox
+	sandboxMetadata    *projectAssistantRunSandboxMetadata
+	sandboxEligibility *CodingSandboxEligibility
+	sandboxInitializer func(context.Context) (*projectAssistantRunSandbox, func(), error)
+	sandboxInitOnce    sync.Once
+	sandboxInitErr     error
+	sandboxRelease     func()
 }
 
 // projectAssistantMutationRecoveryIdentity is server-owned metadata for a
@@ -198,6 +205,120 @@ func newProjectEinoAssistantRunState() *projectEinoAssistantRunState {
 		developmentSyncChanged:     make(chan struct{}),
 		turnPolicy:                 projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileDebugging),
 	}
+}
+
+func (s *projectEinoAssistantRunState) SetSandbox(sandbox *projectAssistantRunSandbox) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.sandbox = sandbox
+	if sandbox != nil {
+		metadata := sandbox.metadataSnapshot()
+		s.sandboxMetadata = &metadata
+	}
+	s.mu.Unlock()
+}
+
+func (s *projectEinoAssistantRunState) Sandbox() *projectAssistantRunSandbox {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandbox
+}
+
+func (s *projectEinoAssistantRunState) ConfigureSandboxCapability(eligibility CodingSandboxEligibility, initializer func(context.Context) (*projectAssistantRunSandbox, func(), error)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copy := eligibility
+	s.sandboxEligibility = &copy
+	s.sandboxInitializer = initializer
+}
+
+func (s *projectEinoAssistantRunState) SandboxEligibility() *CodingSandboxEligibility {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sandboxEligibility == nil {
+		return nil
+	}
+	copy := *s.sandboxEligibility
+	return &copy
+}
+
+func (s *projectEinoAssistantRunState) SandboxRemoteEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandboxEligibility != nil && s.sandboxEligibility.Eligible && s.sandboxInitializer != nil
+}
+
+func (s *projectEinoAssistantRunState) EnsureSandbox(ctx context.Context) (*projectAssistantRunSandbox, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.sandboxInitOnce.Do(func() {
+		s.mu.Lock()
+		initializer := s.sandboxInitializer
+		s.mu.Unlock()
+		if initializer == nil {
+			return
+		}
+		sandbox, release, err := initializer(ctx)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.sandboxInitErr = err
+		if err == nil {
+			s.sandbox = sandbox
+			s.sandboxRelease = release
+			if sandbox != nil {
+				metadata := sandbox.metadataSnapshot()
+				s.sandboxMetadata = &metadata
+			}
+		}
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandbox, s.sandboxInitErr
+}
+
+func (s *projectEinoAssistantRunState) SandboxRelease() func() {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandboxRelease
+}
+
+func (s *projectEinoAssistantRunState) SetSandboxMetadata(metadata projectAssistantRunSandboxMetadata) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sandboxMetadata = &metadata
+}
+
+func (s *projectEinoAssistantRunState) SandboxMetadata() *projectAssistantSandboxCheckpoint {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sandboxMetadata == nil {
+		return nil
+	}
+	return &projectAssistantSandboxCheckpoint{Metadata: *s.sandboxMetadata}
 }
 
 func (s *projectEinoAssistantRunState) ConfigureSkillSnapshot(snapshot appskills.Snapshot, selected, loaded []projectAssistantSkillReceipt) error {
@@ -822,6 +943,12 @@ func (s *projectEinoAssistantRunState) RestoreCheckpointState(state projectAssis
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sandbox = nil
+	s.sandboxMetadata = nil
+	if state.Sandbox != nil {
+		metadata := state.Sandbox.Metadata
+		s.sandboxMetadata = &metadata
+	}
 	s.messages = cloneChatMessages(state.Messages)
 	s.lastToolMessages = cloneChatMessages(state.LastToolMessages)
 	s.catalogDigest = strings.TrimSpace(state.CatalogDigest)
@@ -2318,7 +2445,19 @@ func (s *projectEinoAssistantRunState) CheckpointState() projectAssistantCheckpo
 		MutationRecoveryIdentities:       projectEinoAssistantRecoveryIdentitySnapshot(s.mutationRecoveryIdentities),
 		SessionSnapshot:                  cloneProjectEinoAssistantSessionSnapshot(s.sessionSnapshot),
 		RolloutBudget:                    rolloutBudget,
+		Sandbox:                          s.sandboxCheckpointLocked(),
 	}
+}
+
+func (s *projectEinoAssistantRunState) sandboxCheckpointLocked() *projectAssistantSandboxCheckpoint {
+	if s.sandbox != nil {
+		metadata := s.sandbox.metadataSnapshot()
+		return &projectAssistantSandboxCheckpoint{Metadata: metadata}
+	}
+	if s.sandboxMetadata == nil {
+		return nil
+	}
+	return &projectAssistantSandboxCheckpoint{Metadata: *s.sandboxMetadata}
 }
 
 func cloneProjectAssistantRolloutBudgetStatePtr(state *projectAssistantRolloutBudgetState) *projectAssistantRolloutBudgetState {

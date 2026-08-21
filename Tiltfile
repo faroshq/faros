@@ -119,6 +119,8 @@ preview_hub_public_host = 'console.127.0.0.1.sslip.io'
 preview_kro_kubeconfig = '.faros-kro.kubeconfig'
 preview_kro_context = 'kind-faros-kro'
 preview_kro_node = 'faros-kro-control-plane'
+universal_dev_image = 'ghcr.io/faroshq/faros-universal-dev:latest'
+universal_dev_image_repository = 'ghcr.io/faroshq/faros-universal-dev'
 # Host address as seen FROM INSIDE the faros-kro containers. Resolve
 # host.docker.internal inside the node first: on Docker Desktop/OrbStack the
 # bridge gateway below is the VM, not the host, and dialing it gets connection
@@ -330,7 +332,7 @@ local_resource(
 local_resource(
     'app-studio',
     cmd='make build-app-studio-provider',
-    serve_cmd='make run-provider-app-studio',
+    serve_cmd='APP_STUDIO_RUN_SANDBOX_MODE=${APP_STUDIO_RUN_SANDBOX_MODE:-force} APP_STUDIO_DEVELOPMENT_MODE=true APP_STUDIO_REPLICA_COUNT=1 make run-provider-app-studio',
     deps=[
         'providers/app-studio/main.go',
         'providers/app-studio/heartbeat.go',
@@ -351,7 +353,7 @@ local_resource(
         'providers/app-studio/deploy/chart/values.yaml',
         'providers/app-studio/.env',
     ],
-    resource_deps=['hub', 'app-studio-db', 'dev-agent-image', 'app-studio-preview-console-key'],
+    resource_deps=['hub', 'app-studio-db', 'dev-agent-image', 'universal-dev-image', 'app-studio-preview-console-key'],
     readiness_probe=probe(
         period_secs=5,
         http_get=http_get_action(port=8085, path='/healthz'),
@@ -498,7 +500,24 @@ local_resource(
 # can be pinned independently in a production InfrastructureProvider CR.
 local_resource(
     'universal-dev-image',
-    cmd='make load-universal-dev-image',
+    cmd=('''
+set -eu
+make load-universal-dev-image
+universal_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={universal_image}' | awk 'NR == 2 {{ print $3 }}')"
+case "$universal_digest" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) echo "local universal image has no immutable sha256 manifest digest" >&2; exit 1 ;;
+esac
+# kind imports the local tag but does not create its digest-qualified image
+# name. Add that CRI-visible alias so the same immutable reference admitted by
+# Infrastructure resolves without pulling from a registry.
+docker exec {kro_node} ctr -n k8s.io images tag --force \
+  {universal_image} {universal_repository}@$universal_digest
+''').format(
+                   kro_node=preview_kro_node,
+                   universal_image=universal_dev_image,
+                   universal_repository=universal_dev_image_repository,
+               ),
     deps=[
         'providers/infrastructure/dev-agent/Dockerfile.universal',
         'Makefile',
@@ -694,6 +713,11 @@ if [ -z "$host_gateway" ]; then
   host_gateway="$(docker inspect -f '{docker_gateway_format}' {kro_node})"
 fi
 test -n "$host_gateway"
+universal_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={universal_image}' | awk 'NR == 2 {{ print $3 }}')"
+case "$universal_digest" in
+  sha256:????????????????????????????????????????????????????????????????) ;;
+  *) echo "local universal image has no immutable sha256 manifest digest" >&2; exit 1 ;;
+esac
 KRO_KUBECONFIG={kro_kubeconfig} \
 FAROS_GATEWAY_NAME={gateway_name} \
 FAROS_GATEWAY_NAMESPACE={gateway_namespace} \
@@ -702,16 +726,20 @@ FAROS_APP_PUBLIC_PORT={public_port} \
 FAROS_ACCESS_HUB_URL="https://$host_gateway:9443" \
 FAROS_ACCESS_HUB_PUBLIC_URL={hub_public_url} \
 FAROS_ACCESS_HUB_INSECURE=true \
+FAROS_CODING_SANDBOX_ENABLED=true \
+FAROS_DEV_IMAGE_UNIVERSAL="{universal_repository}@$universal_digest" \
 make run-provider-infrastructure
 ''').format(
                    docker_gateway_format=docker_gateway_format,
                    kro_node=preview_kro_node,
+                   universal_image=universal_dev_image,
                    kro_kubeconfig=preview_kro_kubeconfig,
                    gateway_name=preview_gateway_name,
                    gateway_namespace=preview_gateway_namespace,
                    base_domain=preview_app_base_domain,
                    public_port=preview_app_public_port,
                    hub_public_url=preview_hub_public_url,
+                   universal_repository=universal_dev_image_repository,
                ),
     deps=[
         'providers/infrastructure/main.go',
@@ -755,6 +783,7 @@ make run-provider-infrastructure
         'app-studio-preview-dns',
         'app-studio-preview-port-forward',
         'app-studio-preview-console-key',
+        'universal-dev-image',
     ],
     readiness_probe=probe(
         period_secs=5,
