@@ -1205,7 +1205,7 @@ func TestEinoV2UsesPriorUncommittedPathsWithoutRestoringMutationRevision(t *test
 	}
 }
 
-func TestEinoV2ResumeDoesNotTreatPlanAsMutationAuthority(t *testing.T) {
+func TestEinoV2ResumeDoesNotTreatPlanAsMutationAuthorityWhenSandboxResolutionFails(t *testing.T) {
 	ctx := context.Background()
 	h := newProjectAssistantV2ToolHarnessWithApprovalMode(t, "v2-resume-run-local-grant", store.AssistantApprovalModeAlwaysAsk)
 	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1})
@@ -1216,7 +1216,11 @@ func TestEinoV2ResumeDoesNotTreatPlanAsMutationAuthority(t *testing.T) {
 	var resolverCalls []resolverCall
 	h.server.codingSandboxResolver = func(_ context.Context, id identity, scope workspace.Scope) (CodingSandboxEligibility, error) {
 		resolverCalls = append(resolverCalls, resolverCall{id: id, scope: scope})
-		return CodingSandboxEligibility{Reason: "test has no BYO binding"}, nil
+		return CodingSandboxEligibility{}, errors.New("hub unavailable")
+	}
+	h.server.runSandboxSetupFactory = func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState, *projectAssistantSandboxCheckpoint) (*projectAssistantRunSandbox, func(), error) {
+		t.Fatal("resolver failure must fall back without provisioning Infrastructure")
+		return nil, nil, nil
 	}
 	assertResolverCalls := func(want int) {
 		t.Helper()

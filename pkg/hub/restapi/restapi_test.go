@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,7 @@ type fakeOps struct {
 	workspaceAdmins   map[wsKey]map[string]bool    // (org,ws) → rbacIdentity set
 	providerBindings  map[wsKey]map[string]string  // (org,ws) → provider → binding name
 	providerBindCalls map[wsKey]int                // (org,ws) → count
+	staleClaimErr     error
 }
 
 type wsKey struct{ Org, WS string }
@@ -184,7 +186,12 @@ func (f *fakeOps) EnsureProviderAPIBinding(_ context.Context, orgUUID, wsUUID, b
 // satisfy the interface without making every unrelated handler test carry a
 // warning field.
 func (f *fakeOps) StaleClaimIdentities(_ context.Context, _, _ string) (map[string][]kcp.ClaimIdentityMismatch, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.staleClaimErr != nil {
+		return nil, f.staleClaimErr
+	}
+	return map[string][]kcp.ClaimIdentityMismatch{}, nil
 }
 
 // ListProviderAPIBindings is the test stub for the read-side provider-enable
@@ -992,6 +999,38 @@ func TestEnableProvider_AllowsSatisfiedDependencies(t *testing.T) {
 	}
 	if got := ops.providerBindings[key]["app-studio"]; got != "app-studio" {
 		t.Fatalf("provider binding = %q, want app-studio", got)
+	}
+}
+
+func TestListEnabledProvidersRetainsEnabledSetWhenStaleClaimInspectionFails(t *testing.T) {
+	mgr, ops, _ := newTestManager(t)
+	key := wsKey{"org-a", "ws-1"}
+	ops.providerBindings[key] = map[string]string{"app-studio": "app-studio"}
+	ops.staleClaimErr = errors.New("identity lookup unavailable")
+	srv := newTestServer(t, mgr, adminTC("alice", "org-a", "ws-1"))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/orgs/org-a/workspaces/ws-1/providers/enabled")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	var payload ListEnabledProvidersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload.BindingNamesByProvider["app-studio"]; got != "app-studio" {
+		t.Fatalf("enabled binding name = %q, want app-studio", got)
+	}
+	detail, ok := payload.BindingsByProvider["app-studio"]
+	if !ok {
+		t.Fatalf("enabled provider detail missing: %#v", payload.BindingsByProvider)
+	}
+	if detail.StaleClaimsKnown {
+		t.Fatal("stale claim inspection was reported complete after the dependency failed")
 	}
 }
 

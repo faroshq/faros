@@ -222,6 +222,39 @@ func TestBackendProxyWithoutEdgesProviderIs503(t *testing.T) {
 	}
 }
 
+func TestBackendProxyUnreadyEdgesProviderIs503(t *testing.T) {
+	var transportHit atomic.Bool
+	transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transportHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(transport.Close)
+	transportURL, err := url.Parse(transport.URL)
+	if err != nil {
+		t.Fatalf("parse edges backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	// A configured endpoint is not enough: the platform transport must also be
+	// Ready, including its heartbeat/endpoint health contract.
+	reg.Upsert(Provider{Name: EdgesProviderName, BackendURL: transportURL, EndpointsValid: false})
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		EdgeRoute: &EdgeRoute{WorkspaceUUID: "ws-1", Cluster: testCluster, EdgeName: "prod-eu", ServiceName: "provider-infrastructure"},
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if transportHit.Load() {
+		t.Fatal("unready platform edges provider received organization backend traffic")
+	}
+}
+
 // The tunnel is platform infrastructure. An Org that also self-hosts `edges`
 // must not end up supplying the transport for its own traffic — that would put
 // it on both ends of the trust boundary, carrying the platform-injected

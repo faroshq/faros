@@ -43,12 +43,17 @@ type enabledProviderBindingsResponse struct {
 }
 
 type enabledProviderBinding struct {
-	BindingName     string                      `json:"bindingName"`
-	ExportPath      string                      `json:"exportPath"`
-	SelfHosted      bool                        `json:"selfHosted"`
-	StaleClaims     []enabledProviderStaleClaim `json:"staleClaims,omitempty"`
-	Terminating     bool                        `json:"terminating,omitempty"`
-	DeletionBlocked string                      `json:"deletionBlocked,omitempty"`
+	BindingName string `json:"bindingName"`
+	ExportPath  string `json:"exportPath"`
+	SelfHosted  bool   `json:"selfHosted"`
+	// StaleClaimsKnown distinguishes a completed inspection with no
+	// mismatches from an inspection that the hub could not perform. Older hubs
+	// omit this field, so sandbox mode fails closed rather than assuming the
+	// binding is safe.
+	StaleClaimsKnown bool                        `json:"staleClaimsKnown"`
+	StaleClaims      []enabledProviderStaleClaim `json:"staleClaims,omitempty"`
+	Terminating      bool                        `json:"terminating,omitempty"`
+	DeletionBlocked  string                      `json:"deletionBlocked,omitempty"`
 }
 
 type enabledProviderStaleClaim struct {
@@ -78,6 +83,9 @@ func (s *Server) resolveCodingSandboxEligibilityFromHub(ctx context.Context, id 
 	}
 	if appStudio.Terminating || infrastructure.Terminating {
 		return CodingSandboxEligibility{Reason: "App Studio or Infrastructure is being disabled in this workspace"}, nil
+	}
+	if !appStudio.StaleClaimsKnown || !infrastructure.StaleClaimsKnown {
+		return CodingSandboxEligibility{Reason: "App Studio or Infrastructure stale claim inspection is unavailable"}, nil
 	}
 	if hasStaleInfrastructureClaim(appStudio.StaleClaims) || hasStaleInfrastructureClaim(infrastructure.StaleClaims) {
 		return CodingSandboxEligibility{Reason: "App Studio has a stale Infrastructure instances claim"}, nil

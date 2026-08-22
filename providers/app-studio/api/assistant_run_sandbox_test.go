@@ -765,6 +765,51 @@ func TestProjectAssistantRunSandboxFreshFollowUpClaimsAndRebasesProjectCache(t *
 	}
 }
 
+func TestCodingSandboxSetupRequiresUniversalTemplateWithoutProjectTemplateFallback(t *testing.T) {
+	ctx := context.Background()
+	application := applicationTemplateObject()
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{runSandboxInstancesResource.GVR: "InstanceList"},
+		application,
+	)
+	client := asclient.NewFromDynamic(dynamicClient)
+	workspaces := workspace.NewFileStore(t.TempDir())
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
+		Spec:       aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+	}
+	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "demo", ProjectUID: string(project.UID)}
+	server := &Server{
+		workspaces: workspaces,
+		runSandboxClientFactory: func(*Server) projectAssistantSandboxClient {
+			t.Fatal("Infrastructure sandbox client was created before universal template resolution")
+			return nil
+		},
+	}
+	configureEligibleCodingSandboxForTest(server)
+	req := projectAssistantRunRequest{
+		Identity:       identity{orgUUID: "org", workspaceUUID: "ws", clusterID: "cluster", token: "token"},
+		Client:         client,
+		Project:        project,
+		Workspace:      workspaces,
+		WorkspaceScope: scope,
+		AssistantRun:   &store.AssistantRun{ID: "run-universal-template-missing"},
+	}
+	sandbox, release, err := server.ensureProjectAssistantRunSandbox(ctx, req, newProjectEinoAssistantRunState())
+	if sandbox != nil || release != nil {
+		t.Fatalf("missing universal template returned sandbox=%#v releaseNil=%t", sandbox, release == nil)
+	}
+	if err == nil || !strings.Contains(err.Error(), projectAssistantRunSandboxDefaultTemplate) {
+		t.Fatalf("missing universal template error = %v, want explicit universal template failure", err)
+	}
+	for _, action := range dynamicClient.Actions() {
+		if action.GetResource() == runSandboxInstancesResource.GVR {
+			t.Fatalf("missing universal template attempted Infrastructure instance action: %#v", action)
+		}
+	}
+}
+
 func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevisionDomain(t *testing.T) {
 	ctx := context.Background()
 	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}

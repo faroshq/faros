@@ -34,7 +34,7 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 |---|---|---|
 | `nameOverride` | `""` |  |
 | `fullnameOverride` | `""` |  |
-| `replicaCount` | `1` | App Studio assistant project mutations use a single active writer. The chart rejects other values and uses a Recreate deployment strategy to prevent cross-pod overlap during upgrades. Safe to scale with the default emptyDir workspace: runs and external operations are guarded by durable claims, pr… |
+| `replicaCount` | `1` | App Studio assistant project mutations use a single active writer. The chart uses RollingUpdate with the default emptyDir workspace and Recreate for a PVC-backed workspace, where a ReadWriteOnce volume must never overlap across pods. |
 | `internalPort` | `8091` | internalPort carries peer-forwarded project requests between replicas. Deliberately not part of the Service. |
 | `image` |  |  |
 | `image.repository` | `ghcr.io/faroshq/faros/app-studio-provider` |  |

@@ -95,9 +95,12 @@ func (s *Server) newDataPlaneRequest(ctx context.Context, method string, id iden
 	if err != nil {
 		return nil, err
 	}
-	if token := strings.TrimSpace(id.token); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	// The hub verified this identity before forwarding the request to App
+	// Studio. Forward the complete server-owned identity contract to the
+	// infrastructure provider; forwarding only the bearer token would force the
+	// next proxy hop to reconstruct context and would lose the workspace/cluster
+	// binding that scopes the data-plane target.
+	setHubCallerIdentityHeaders(req, id)
 	return req, nil
 }
 

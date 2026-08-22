@@ -290,6 +290,11 @@ type EnabledProviderDetail struct {
 	// as healthy while serving none of the claimed resources, so this is the
 	// only place the condition is visible before a downstream 404.
 	StaleClaims []StaleClaim `json:"staleClaims,omitempty"`
+	// StaleClaimsKnown is false when the hub could not complete the identity
+	// comparison. An empty StaleClaims slice is otherwise a successful,
+	// mismatch-free inspection; consumers that require provider ownership
+	// proof must not treat an unavailable inspection as a clean result.
+	StaleClaimsKnown bool `json:"staleClaimsKnown"`
 	// Terminating is true when the provider has been disabled but kcp is still
 	// cascade-deleting the bound APIs' resources. The binding (and the
 	// provider's API surface) remains live until that finishes, so the portal
@@ -385,9 +390,10 @@ func (h *Handler) listEnabledProviders(w http.ResponseWriter, r *http.Request) {
 	// Best-effort: a provider mid-provision, or a transient read failure, must
 	// not blank the sidebar. Losing the warning for one render is recoverable;
 	// losing the enabled-set is not.
-	stale, err := h.mgr.bootstrapper.StaleClaimIdentities(r.Context(), tc.OrgUUID, tc.WorkspaceUUID)
-	if err != nil {
-		klog.FromContext(r.Context()).Error(err, "Listing stale claim identities",
+	stale, staleErr := h.mgr.bootstrapper.StaleClaimIdentities(r.Context(), tc.OrgUUID, tc.WorkspaceUUID)
+	staleClaimsKnown := staleErr == nil
+	if staleErr != nil {
+		klog.FromContext(r.Context()).Error(staleErr, "Listing stale claim identities",
 			"org", tc.OrgUUID, "workspace", tc.WorkspaceUUID)
 		stale = nil
 	}
@@ -397,12 +403,13 @@ func (h *Handler) listEnabledProviders(w http.ResponseWriter, r *http.Request) {
 	for provider, binding := range bindings {
 		names[provider] = binding.Name
 		details[provider] = EnabledProviderDetail{
-			BindingName:     binding.Name,
-			ExportPath:      binding.ExportPath,
-			SelfHosted:      binding.SelfHosted,
-			StaleClaims:     staleClaimsFor(stale[provider], binding.SelfHosted),
-			Terminating:     binding.Terminating,
-			DeletionBlocked: binding.DeletionBlocked,
+			BindingName:      binding.Name,
+			ExportPath:       binding.ExportPath,
+			SelfHosted:       binding.SelfHosted,
+			StaleClaimsKnown: staleClaimsKnown,
+			StaleClaims:      staleClaimsFor(stale[provider], binding.SelfHosted),
+			Terminating:      binding.Terminating,
+			DeletionBlocked:  binding.DeletionBlocked,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
