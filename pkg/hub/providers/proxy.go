@@ -88,9 +88,10 @@ func (f TenantResolverFunc) Resolve(r *http.Request) (string, string, error) {
 	return f(r)
 }
 
-// NewBackendProxy returns an http.Handler serving /services/providers/{name}/*
-// by reverse proxying to the provider's spec.backend.url. The user's
-// Authorization header is forwarded as-is. If a TenantResolver is
+// NewBackendProxy returns an http.Handler serving /services/providers/{name}/*.
+// Platform providers are reverse-proxied to spec.backend.url; organization-
+// owned providers are reachable only through their registered edge route. The
+// user's Authorization header is forwarded as-is. If a TenantResolver is
 // installed via SetTenantResolver, the proxy resolves the caller's
 // identity and injects X-Faros-User + X-Faros-Tenant so the provider can
 // scope work without re-parsing the bearer token. Incoming
@@ -288,11 +289,17 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// An org-owned provider runs in the tenant's own cluster, so its backend is
-	// reached over the edge tunnel. Do this before pick(): BackendURL for such
-	// a provider is an address inside that cluster, and dialling it from here
-	// would either fail or — worse, if it happened to resolve — reach something
-	// else entirely.
-	if prov.EdgeRoute != nil {
+	// reached exclusively over the edge tunnel. Do this before pick(): its
+	// BackendURL is an address inside a tenant-controlled cluster, and direct
+	// dialing would either fail or — worse, if it happened to resolve — reach a
+	// different service. A missing/incomplete route must fail closed rather than
+	// falling through to that URL. UI resolution remains platform-scoped above.
+	if prov.OrgUUID != "" && !p.fallbackForSPA {
+		if prov.EdgeRoute == nil {
+			p.log.Info("organization provider has no edge route", "provider", name, "org", prov.OrgUUID)
+			http.Error(w, "organization provider edge route unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		p.serveOverEdge(w, r, prov, rest)
 		return
 	}

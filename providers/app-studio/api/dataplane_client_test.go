@@ -53,12 +53,34 @@ func TestNewDataPlaneRequestRequiresHubAndCluster(t *testing.T) {
 	if _, err := s.newDataPlaneRequest(context.Background(), http.MethodGet, identity{token: "tok"}, ref, dataPlaneVerbLog, "", nil); err == nil {
 		t.Fatal("expected error when clusterID is empty")
 	}
-	// Happy path forwards the caller's bearer token.
+	// Happy path forwards the caller's complete, server-verified identity.
+	id = identity{
+		token:         "tok",
+		tenantPath:    "root:faros:tenants:org-a:workspace-a",
+		orgUUID:       "org-a",
+		workspaceUUID: "workspace-a",
+		clusterID:     "cluster-a",
+		user:          "alice",
+	}
 	req, err := s.newDataPlaneRequest(context.Background(), http.MethodGet, id, ref, dataPlaneVerbLog, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer tok" {
 		t.Fatalf("Authorization = %q, want Bearer tok", got)
+	}
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{name: "X-Faros-Tenant", want: "root:faros:tenants:org-a:workspace-a"},
+		{name: "X-Faros-Org", want: "org-a"},
+		{name: "X-Faros-Workspace", want: "workspace-a"},
+		{name: "X-Faros-Cluster", want: "cluster-a"},
+		{name: "X-Faros-User", want: "alice"},
+	} {
+		if got := req.Header.Get(tc.name); got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

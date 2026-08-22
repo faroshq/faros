@@ -36,8 +36,6 @@ import (
 
 const (
 	projectAssistantRunSandboxModeEnv         = "APP_STUDIO_RUN_SANDBOX_MODE"
-	projectAssistantRunSandboxFlagEnv         = "APP_STUDIO_RUN_SANDBOX"
-	projectAssistantDevelopmentModeEnv        = "APP_STUDIO_DEVELOPMENT_MODE"
 	projectAssistantReplicaCountEnv           = "APP_STUDIO_REPLICA_COUNT"
 	projectAssistantRunSandboxTemplateEnv     = "APP_STUDIO_RUN_SANDBOX_TEMPLATE"
 	projectAssistantRunSandboxDefaultTemplate = "universal-coding-sandbox"
@@ -106,23 +104,22 @@ const (
 type CodingSandboxMode string
 
 const (
-	CodingSandboxModeOff     CodingSandboxMode = "off"
-	CodingSandboxModeBYOOnly CodingSandboxMode = "byo-only"
-	CodingSandboxModeForce   CodingSandboxMode = "force"
+	CodingSandboxModeOff CodingSandboxMode = "off"
+	CodingSandboxModeOn  CodingSandboxMode = "on"
 )
 
-// CodingSandboxConfig is process-owned policy. DevelopmentMode is an explicit
-// deployment assertion; it is never inferred from TLS, localhost, model
-// optimization, or missing credentials.
+// CodingSandboxConfig is process-owned policy. Mode is deliberately binary:
+// off always uses the existing Template-backed development image, while on
+// uses the universal sandbox only when the workspace's App Studio and
+// Infrastructure bindings form a compatible ownership pair.
 type CodingSandboxConfig struct {
-	Mode            CodingSandboxMode
-	DevelopmentMode bool
-	ReplicaCount    int
+	Mode         CodingSandboxMode
+	ReplicaCount int
 }
 
 // CodingSandboxEligibility is reevaluated at every start and resume before any
-// Infrastructure lookup. BYO resolution is intentionally fail-closed until a
-// provider export/transport resolver exists.
+// Infrastructure lookup. Binding resolution is fail-closed when the hub cannot
+// prove a compatible provider ownership pair and transport identity.
 type CodingSandboxEligibility struct {
 	Eligible            bool   `json:"eligible"`
 	Reason              string `json:"reason"`
@@ -133,35 +130,27 @@ type CodingSandboxEligibility struct {
 type CodingSandboxEligibilityResolver func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error)
 
 const (
+	projectAssistantPlatformAppStudioExportPath      = "root:faros:providers:app-studio"
 	projectAssistantPlatformInfrastructureExportPath = "root:faros:providers:infrastructure"
 	projectAssistantSandboxTransportGeneration       = "hub-virtual-workspace-v1"
 )
 
-func parseSandboxBool(raw string) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "yes", "on", "enabled", "codex_poc", "codex-poc":
-		return true
-	default:
-		return false
-	}
-}
-
-// ParseCodingSandboxConfig validates startup policy and reports compatibility
-// warnings for legacy boolean flags. A true legacy flag maps only to byo-only;
-// it never grants access to the platform Infrastructure provider.
-func ParseCodingSandboxConfig(lookup func(string) string) (CodingSandboxConfig, []string, error) {
+// ParseCodingSandboxConfig validates the operator's binary startup policy.
+// This feature is unreleased, so obsolete experimental modes are rejected
+// instead of being migrated implicitly; obsolete boolean flags are no longer
+// part of this parser.
+func ParseCodingSandboxConfig(lookup func(string) string) (CodingSandboxConfig, error) {
 	if lookup == nil {
 		lookup = func(string) string { return "" }
 	}
 	config := CodingSandboxConfig{
-		Mode:            CodingSandboxModeOff,
-		DevelopmentMode: parseSandboxBool(lookup(projectAssistantDevelopmentModeEnv)),
-		ReplicaCount:    1,
+		Mode:         CodingSandboxModeOff,
+		ReplicaCount: 1,
 	}
 	if rawReplicas := strings.TrimSpace(lookup(projectAssistantReplicaCountEnv)); rawReplicas != "" {
 		replicas, err := strconv.Atoi(rawReplicas)
 		if err != nil || replicas < 1 {
-			return CodingSandboxConfig{}, nil, fmt.Errorf("%s must be a positive integer", projectAssistantReplicaCountEnv)
+			return CodingSandboxConfig{}, fmt.Errorf("%s must be a positive integer", projectAssistantReplicaCountEnv)
 		}
 		config.ReplicaCount = replicas
 	}
@@ -169,55 +158,25 @@ func ParseCodingSandboxConfig(lookup func(string) string) (CodingSandboxConfig, 
 	if rawMode != "" {
 		config.Mode = CodingSandboxMode(rawMode)
 		switch config.Mode {
-		case CodingSandboxModeOff, CodingSandboxModeBYOOnly, CodingSandboxModeForce:
+		case CodingSandboxModeOff, CodingSandboxModeOn:
 		default:
-			return CodingSandboxConfig{}, nil, fmt.Errorf("%s must be off, byo-only, or force", projectAssistantRunSandboxModeEnv)
-		}
-	} else {
-		legacy := []string{}
-		legacyEnabled := false
-		for _, key := range []string{projectAssistantRunSandboxFlagEnv, "APP_STUDIO_CODEX_SANDBOX"} {
-			if raw := strings.TrimSpace(lookup(key)); raw != "" {
-				legacy = append(legacy, key)
-				legacyEnabled = legacyEnabled || parseSandboxBool(raw)
-			}
-		}
-		if len(legacy) > 0 {
-			if legacyEnabled {
-				config.Mode = CodingSandboxModeBYOOnly
-			}
-			return config, []string{fmt.Sprintf("legacy sandbox flag(s) %s map to %s; configure %s explicitly", strings.Join(legacy, ", "), config.Mode, projectAssistantRunSandboxModeEnv)}, nil
+			return CodingSandboxConfig{}, fmt.Errorf("%s must be off or on", projectAssistantRunSandboxModeEnv)
 		}
 	}
-	if config.Mode == CodingSandboxModeForce && !config.DevelopmentMode {
-		return CodingSandboxConfig{}, nil, fmt.Errorf("%s=force requires %s=true", projectAssistantRunSandboxModeEnv, projectAssistantDevelopmentModeEnv)
+	if config.Mode == CodingSandboxModeOn && config.ReplicaCount != 1 {
+		return CodingSandboxConfig{}, fmt.Errorf("%s=on requires %s=1 until sandbox claims have distributed CAS", projectAssistantRunSandboxModeEnv, projectAssistantReplicaCountEnv)
 	}
-	if config.Mode == CodingSandboxModeForce && config.ReplicaCount != 1 {
-		return CodingSandboxConfig{}, nil, fmt.Errorf("%s=force requires %s=1 until sandbox claims have distributed CAS", projectAssistantRunSandboxModeEnv, projectAssistantReplicaCountEnv)
-	}
-	return config, nil, nil
+	return config, nil
 }
 
 func codingSandboxEligibility(config CodingSandboxConfig) CodingSandboxEligibility {
-	switch config.Mode {
-	case CodingSandboxModeForce:
-		if !config.DevelopmentMode {
-			return CodingSandboxEligibility{Reason: "force mode requires explicit development mode"}
-		}
-		if config.ReplicaCount != 1 {
-			return CodingSandboxEligibility{Reason: "force mode requires a single App Studio replica"}
-		}
-		return CodingSandboxEligibility{
-			Eligible:            true,
-			Reason:              "explicit development force mode uses the platform Infrastructure export",
-			ProviderExportPath:  projectAssistantPlatformInfrastructureExportPath,
-			TransportGeneration: projectAssistantSandboxTransportGeneration,
-		}
-	case CodingSandboxModeBYOOnly:
-		return CodingSandboxEligibility{Reason: "BYO coding sandbox resolver is not available yet"}
-	default:
+	if config.Mode == CodingSandboxModeOn && config.ReplicaCount != 1 {
+		return CodingSandboxEligibility{Reason: "coding sandbox mode on requires a single App Studio replica"}
+	}
+	if config.Mode == CodingSandboxModeOff {
 		return CodingSandboxEligibility{Reason: "coding sandbox mode is off"}
 	}
+	return CodingSandboxEligibility{Reason: "coding sandbox binding resolver is not available"}
 }
 
 func (s *Server) codingSandboxConfigSnapshot() (CodingSandboxConfig, error) {
@@ -228,7 +187,7 @@ func (s *Server) codingSandboxConfigSnapshot() (CodingSandboxConfig, error) {
 	config, configured := s.runSandboxConfig, s.runSandboxConfigured
 	s.mu.Unlock()
 	if !configured {
-		parsed, _, err := ParseCodingSandboxConfig(getenv)
+		parsed, err := ParseCodingSandboxConfig(getenv)
 		if err != nil {
 			return CodingSandboxConfig{}, err
 		}
@@ -238,35 +197,35 @@ func (s *Server) codingSandboxConfigSnapshot() (CodingSandboxConfig, error) {
 }
 
 // ResolveCodingSandboxEligibility reevaluates policy for the exact caller and
-// Project scope. Off and force are process-owned short circuits. BYO-only must
-// resolve an organization binding through the installed server resolver and
-// returns fail-closed when that resolver is absent or incomplete.
+// Project scope. Off is a process-owned short circuit. On must resolve the
+// exact workspace bindings through the installed server resolver and returns
+// fail-closed when the resolver is absent, errors, or returns incomplete data.
 func (s *Server) ResolveCodingSandboxEligibility(ctx context.Context, id identity, scope workspace.Scope) CodingSandboxEligibility {
 	config, err := s.codingSandboxConfigSnapshot()
 	if err != nil {
 		return CodingSandboxEligibility{Reason: err.Error()}
 	}
-	if config.Mode != CodingSandboxModeBYOOnly {
+	if config.Mode == CodingSandboxModeOff || config.ReplicaCount != 1 {
 		return codingSandboxEligibility(config)
 	}
 	s.mu.Lock()
 	resolver := s.codingSandboxResolver
 	s.mu.Unlock()
 	if resolver == nil {
-		return CodingSandboxEligibility{Reason: "BYO coding sandbox resolver is not available yet"}
+		return CodingSandboxEligibility{Reason: "coding sandbox binding resolver is not available"}
 	}
 	eligibility, err := resolver(ctx, id, scope)
 	if err != nil {
-		return CodingSandboxEligibility{Reason: "BYO coding sandbox resolution failed: " + err.Error()}
+		return CodingSandboxEligibility{Reason: "coding sandbox binding resolution failed: " + err.Error()}
 	}
 	if !eligibility.Eligible {
 		if strings.TrimSpace(eligibility.Reason) == "" {
-			eligibility.Reason = "BYO coding sandbox binding is ineligible"
+			eligibility.Reason = "coding sandbox bindings are ineligible"
 		}
 		return eligibility
 	}
 	if strings.TrimSpace(eligibility.ProviderExportPath) == "" || strings.TrimSpace(eligibility.TransportGeneration) == "" {
-		return CodingSandboxEligibility{Reason: "BYO coding sandbox resolver returned incomplete provider transport identity"}
+		return CodingSandboxEligibility{Reason: "coding sandbox binding resolver returned incomplete provider transport identity"}
 	}
 	return eligibility
 }
@@ -331,7 +290,7 @@ func cloneProjectAssistantSandboxCheckpoint(src *projectAssistantSandboxCheckpoi
 // projectAssistantRunSandboxEnabled remains a narrow test seam. Runtime
 // admission uses the server-owned CodingSandboxEligibility contract.
 func projectAssistantRunSandboxEnabled() bool {
-	config, _, err := ParseCodingSandboxConfig(getenv)
+	config, err := ParseCodingSandboxConfig(getenv)
 	return err == nil && config.Mode != CodingSandboxModeOff
 }
 

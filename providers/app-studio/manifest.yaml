@@ -99,6 +99,11 @@ spec:
     releaseName: "app-studio"
     docsURL: "https://github.com/faroshq/faros/blob/main/providers/app-studio/deploy/chart/README.md"
     requiredValues:
+      - name: assistant.runSandbox.mode
+        value: "on"
+        description: >-
+          Enables universal sandboxes when this App Studio and Infrastructure
+          are both self-hosted by the organization.
       - name: apiExport.infraIdentityHash
         identityFor: "infrastructure.providers.faros.sh"
         description: >-

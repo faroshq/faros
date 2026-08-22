@@ -80,8 +80,9 @@ type Server struct {
 	runSandboxManager    *projectAssistantSandboxManager
 	runSandboxConfig     CodingSandboxConfig
 	runSandboxConfigured bool
-	// codingSandboxResolver resolves a caller's organization-scoped BYO
-	// provider binding. Nil is fail-closed. Platform force mode never calls it.
+	// codingSandboxResolver resolves the caller's exact workspace bindings and
+	// accepts only compatible platform/platform or same-Org/Org ownership.
+	// Nil is fail-closed whenever sandbox mode is on.
 	codingSandboxResolver  func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error)
 	runSandboxSetupFactory func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState, *projectAssistantSandboxCheckpoint) (*projectAssistantRunSandbox, func(), error)
 	// runSandboxClientFactory is an App Studio-only seam for the Infrastructure
@@ -178,7 +179,7 @@ func NewWithWorkspaceContext(parent context.Context, gql *tenant.GraphQLClient, 
 	s.assistantSupervisor = newProjectAssistantSupervisor(parent, msgStore)
 	s.assistantSupervisor.server = s
 	s.runSandboxManager = newProjectAssistantSandboxManager()
-	if config, _, err := ParseCodingSandboxConfig(getenv); err == nil {
+	if config, err := ParseCodingSandboxConfig(getenv); err == nil {
 		s.runSandboxConfig = config
 		s.runSandboxConfigured = true
 	}
@@ -195,6 +196,18 @@ func (s *Server) ConfigureCodingSandbox(config CodingSandboxConfig) {
 	defer s.mu.Unlock()
 	s.runSandboxConfig = config
 	s.runSandboxConfigured = true
+}
+
+// ConfigureCodingSandboxResolver installs the production resolver that reads
+// the caller-scoped provider bindings from the hub. It is separate from policy
+// configuration so tests can retain a deterministic resolver seam.
+func (s *Server) ConfigureCodingSandboxResolver() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.codingSandboxResolver = s.resolveCodingSandboxEligibilityFromHub
 }
 
 func (s *Server) Shutdown(ctx context.Context) {

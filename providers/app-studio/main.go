@@ -145,12 +145,9 @@ func runMainWith(args []string, initCmd func(context.Context) error, serve func(
 
 func runServe() {
 	port := envOr("PORT", "8081")
-	sandboxConfig, sandboxWarnings, err := api.ParseCodingSandboxConfig(os.Getenv)
+	sandboxConfig, err := api.ParseCodingSandboxConfig(os.Getenv)
 	if err != nil {
 		log.Fatalf("coding sandbox configuration: %v", err)
-	}
-	for _, warning := range sandboxWarnings {
-		log.Printf("WARNING coding sandbox configuration: %s", warning)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -193,6 +190,7 @@ func runServe() {
 			hubInsecure,
 	)
 	apiServer.ConfigureCodingSandbox(sandboxConfig)
+	apiServer.ConfigureCodingSandboxResolver()
 	apiServer.SetPreviewInsecureSkipTLSVerify(os.Getenv("APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY") == "true")
 	// Preview inspection drives the workspace's shared browser (the Studio's
 	// Playwright MCP instance) over the infrastructure data plane — no

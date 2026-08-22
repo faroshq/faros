@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -167,6 +168,38 @@ func TestBackendProxyUnusableEdgeRouteIs503(t *testing.T) {
 	}
 }
 
+// A missing route is the critical fail-closed case: the declared backend URL
+// is tenant-controlled and must never become a direct hub dial target.
+func TestBackendProxyMissingEdgeRouteNeverDialsBackendURL(t *testing.T) {
+	var directHit atomic.Bool
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		directHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(direct.Close)
+	directURL, err := url.Parse(direct.URL)
+	if err != nil {
+		t.Fatalf("parse direct backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		BackendURL: directURL,
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if directHit.Load() {
+		t.Fatal("hub directly dialed an organization provider backend without an edge route")
+	}
+}
+
 // With no platform edges provider there is no transport. Failing closed matters
 // because the alternative — falling through to the org provider's declared
 // BackendURL — is a hub-initiated request at an address the tenant chose.
@@ -186,6 +219,39 @@ func TestBackendProxyWithoutEdgesProviderIs503(t *testing.T) {
 
 	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestBackendProxyUnreadyEdgesProviderIs503(t *testing.T) {
+	var transportHit atomic.Bool
+	transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transportHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(transport.Close)
+	transportURL, err := url.Parse(transport.URL)
+	if err != nil {
+		t.Fatalf("parse edges backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	// A configured endpoint is not enough: the platform transport must also be
+	// Ready, including its heartbeat/endpoint health contract.
+	reg.Upsert(Provider{Name: EdgesProviderName, BackendURL: transportURL, EndpointsValid: false})
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		EdgeRoute: &EdgeRoute{WorkspaceUUID: "ws-1", Cluster: testCluster, EdgeName: "prod-eu", ServiceName: "provider-infrastructure"},
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if transportHit.Load() {
+		t.Fatal("unready platform edges provider received organization backend traffic")
 	}
 }
 

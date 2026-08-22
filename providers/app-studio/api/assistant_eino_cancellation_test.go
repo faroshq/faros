@@ -67,7 +67,7 @@ func TestProjectEinoAssistantSandboxExecFollowsSupervisorCancellation(t *testing
 	h := newProjectAssistantV2ToolHarness(t, "eino-cancellation-bridge")
 	h.req.TurnProfile = projectAssistantTurnProfileImplementation
 	h.req.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation)
-	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeForce, DevelopmentMode: true, ReplicaCount: 1})
+	configureEligibleCodingSandboxForTest(h.server)
 
 	probe := &cancellationProbeSandboxClient{
 		started:      make(chan struct{}),

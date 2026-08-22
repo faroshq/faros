@@ -111,8 +111,8 @@ func (b *Bootstrapper) RecordProviderEdgeBinding(ctx context.Context, orgUUID, p
 }
 
 // GetProviderEdgeRoute reads the binding back. Returns nil when the provider
-// has none — a provider registered before edge transport existed, which stays
-// on its declared backend URL rather than becoming unroutable.
+// has none; the backend proxy treats that as unavailable and never direct-dials
+// an organization-owned provider's declared backend URL.
 func (b *Bootstrapper) GetProviderEdgeRoute(ctx context.Context, orgUUID, providerName string) (*EdgeRoute, error) {
 	if orgUUID == "" || providerName == "" {
 		return nil, fmt.Errorf("GetProviderEdgeRoute: orgUUID and providerName are required")
@@ -144,8 +144,7 @@ func (b *Bootstrapper) GetProviderEdgeRoute(ctx context.Context, orgUUID, provid
 // provider, reconciling the hub-owned Service on the way.
 //
 // Implements providers.EdgeRouteResolver. Returns (nil, nil) when the provider
-// has no recorded binding — one registered before edge transport existed, which
-// keeps its old behaviour rather than becoming abruptly unroutable.
+// has no recorded binding; callers must keep that backend unroutable.
 //
 // backendURL is the address the provider published about itself; it is parsed
 // and validated as cluster DNS, never trusted as-is. A backend the hub cannot

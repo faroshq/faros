@@ -1,9 +1,9 @@
 nameOverride: ""
 fullnameOverride: ""
 
-# App Studio assistant project mutations use a single active writer. The chart
-# rejects other values and uses a Recreate deployment strategy to prevent
-# cross-pod overlap during upgrades.
+# App Studio assistant project mutations use a single active writer. With the
+# default emptyDir workspace, upgrades use RollingUpdate; PVC-backed workspaces
+# use Recreate so the ReadWriteOnce volume is never mounted by two pods.
 # Safe to scale with the default emptyDir workspace: runs and external
 # operations are guarded by durable claims, projects pin to one replica with
 # peer forwarding, and an adopting replica rebuilds the workspace from git
@@ -78,13 +78,10 @@ assistant:
   # active assistant run. This is the source authoring/compiler/test surface;
   # it is separate from the project's hosted development preview.
   runSandbox:
-    # off | byo-only | force. Force is development-only and the process
-    # rejects it unless developmentMode is explicitly true.
+    # off | on. Off always uses the existing Template-backed development
+    # image. On uses the universal sandbox only when this workspace binds a
+    # compatible platform/platform or same-organization provider pair.
     mode: "off"
-    developmentMode: false
-    # Deprecated boolean compatibility input. true maps to byo-only and emits
-    # a startup warning; it never selects the platform Infrastructure export.
-    enabled: null
 
 # Browser-console sharing starts automatically while the embedded preview is
 # open. Until both signing fields are configured, App Studio stays available

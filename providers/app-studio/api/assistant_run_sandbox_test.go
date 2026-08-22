@@ -686,8 +686,6 @@ func TestProjectAssistantRunSandboxSuspensionPreservesDurableClaim(t *testing.T)
 }
 
 func TestProjectAssistantRunSandboxFreshFollowUpClaimsAndRebasesProjectCache(t *testing.T) {
-	t.Setenv(projectAssistantRunSandboxModeEnv, string(CodingSandboxModeForce))
-	t.Setenv(projectAssistantDevelopmentModeEnv, "true")
 	ctx := context.Background()
 	now := time.Now().UTC()
 	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}
@@ -721,6 +719,7 @@ func TestProjectAssistantRunSandboxFreshFollowUpClaimsAndRebasesProjectCache(t *
 		hubBase:                 "https://hub.test",
 		runSandboxClientFactory: func(*Server) projectAssistantSandboxClient { return fake },
 	}
+	configureEligibleCodingSandboxForTest(server)
 	req := projectAssistantRunRequest{
 		Identity:       identity{orgUUID: "org", workspaceUUID: "ws", clusterID: "cluster", token: "token"},
 		Client:         client,
@@ -766,9 +765,52 @@ func TestProjectAssistantRunSandboxFreshFollowUpClaimsAndRebasesProjectCache(t *
 	}
 }
 
+func TestCodingSandboxSetupRequiresUniversalTemplateWithoutProjectTemplateFallback(t *testing.T) {
+	ctx := context.Background()
+	application := applicationTemplateObject()
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{runSandboxInstancesResource.GVR: "InstanceList"},
+		application,
+	)
+	client := asclient.NewFromDynamic(dynamicClient)
+	workspaces := workspace.NewFileStore(t.TempDir())
+	project := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"},
+		Spec:       aiv1alpha1.ProjectSpec{Template: &aiv1alpha1.ProjectTemplateSpec{Name: "application"}},
+	}
+	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "demo", ProjectUID: string(project.UID)}
+	server := &Server{
+		workspaces: workspaces,
+		runSandboxClientFactory: func(*Server) projectAssistantSandboxClient {
+			t.Fatal("Infrastructure sandbox client was created before universal template resolution")
+			return nil
+		},
+	}
+	configureEligibleCodingSandboxForTest(server)
+	req := projectAssistantRunRequest{
+		Identity:       identity{orgUUID: "org", workspaceUUID: "ws", clusterID: "cluster", token: "token"},
+		Client:         client,
+		Project:        project,
+		Workspace:      workspaces,
+		WorkspaceScope: scope,
+		AssistantRun:   &store.AssistantRun{ID: "run-universal-template-missing"},
+	}
+	sandbox, release, err := server.ensureProjectAssistantRunSandbox(ctx, req, newProjectEinoAssistantRunState())
+	if sandbox != nil || release != nil {
+		t.Fatalf("missing universal template returned sandbox=%#v releaseNil=%t", sandbox, release == nil)
+	}
+	if err == nil || !strings.Contains(err.Error(), projectAssistantRunSandboxDefaultTemplate) {
+		t.Fatalf("missing universal template error = %v, want explicit universal template failure", err)
+	}
+	for _, action := range dynamicClient.Actions() {
+		if action.GetResource() == runSandboxInstancesResource.GVR {
+			t.Fatalf("missing universal template attempted Infrastructure instance action: %#v", action)
+		}
+	}
+}
+
 func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevisionDomain(t *testing.T) {
-	t.Setenv(projectAssistantRunSandboxModeEnv, string(CodingSandboxModeForce))
-	t.Setenv(projectAssistantDevelopmentModeEnv, "true")
 	ctx := context.Background()
 	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}
 	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop", UID: "project-uid"}}
@@ -791,6 +833,7 @@ func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevis
 		projectClientFor:        func(identity) (*asclient.Client, error) { return client, nil },
 		runSandboxClientFactory: func(*Server) projectAssistantSandboxClient { return remote },
 	}
+	configureEligibleCodingSandboxForTest(server)
 	request := func(runID string) projectAssistantRunRequest {
 		return projectAssistantRunRequest{
 			Identity: identity{orgUUID: "org", workspaceUUID: "ws", clusterID: "cluster", token: "token"}, Client: client, Project: project,
@@ -1168,7 +1211,6 @@ func TestProjectAssistantRunSandboxTerminalCheckpointDetachesInterruptedContext(
 }
 
 func TestAttachProjectAssistantRunSandboxAllowsLegacyCheckpointWithoutSandbox(t *testing.T) {
-	t.Setenv(projectAssistantRunSandboxFlagEnv, "true")
 	sandbox, release, err := (&Server{}).attachProjectAssistantRunSandbox(
 		context.Background(),
 		projectAssistantRunRequest{},
@@ -1537,17 +1579,24 @@ func (f *sandboxClientFake) Exec(context.Context, identity, dataPlaneRef, projec
 
 var _ projectAssistantSandboxClient = (*sandboxClientFake)(nil)
 
+func configureEligibleCodingSandboxForTest(server *Server) {
+	server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1})
+	server.codingSandboxResolver = func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error) {
+		return eligibleCodingSandbox(projectAssistantPlatformInfrastructureExportPath, "test platform provider pair"), nil
+	}
+}
+
 func TestProjectAssistantRunSandboxFeatureFlag(t *testing.T) {
 	old := getenv
 	defer func() { getenv = old }()
 	getenv = func(key string) string {
-		if key == projectAssistantRunSandboxFlagEnv {
-			return "true"
+		if key == projectAssistantRunSandboxModeEnv {
+			return "on"
 		}
 		return os.Getenv(key)
 	}
 	if !projectAssistantRunSandboxEnabled() {
-		t.Fatal("true run-sandbox flag did not enable feature")
+		t.Fatal("on run-sandbox mode did not enable feature")
 	}
 	getenv = func(string) string { return "" }
 	if projectAssistantRunSandboxEnabled() {
@@ -1555,28 +1604,24 @@ func TestProjectAssistantRunSandboxFeatureFlag(t *testing.T) {
 	}
 }
 
-func TestCodingSandboxPolicyFailsClosedAndMigratesLegacyBoolean(t *testing.T) {
+func TestCodingSandboxPolicyIsBinaryAndFailsClosed(t *testing.T) {
 	tests := []struct {
-		name     string
-		values   map[string]string
-		mode     CodingSandboxMode
-		eligible bool
-		warn     bool
-		wantErr  bool
+		name    string
+		values  map[string]string
+		mode    CodingSandboxMode
+		wantErr bool
 	}{
 		{name: "default off", values: map[string]string{}, mode: CodingSandboxModeOff},
 		{name: "explicit off", values: map[string]string{projectAssistantRunSandboxModeEnv: "off"}, mode: CodingSandboxModeOff},
-		{name: "byo unresolved", values: map[string]string{projectAssistantRunSandboxModeEnv: "byo-only"}, mode: CodingSandboxModeBYOOnly},
-		{name: "legacy true", values: map[string]string{projectAssistantRunSandboxFlagEnv: "true"}, mode: CodingSandboxModeBYOOnly, warn: true},
-		{name: "legacy false", values: map[string]string{projectAssistantRunSandboxFlagEnv: "false"}, mode: CodingSandboxModeOff, warn: true},
-		{name: "force rejected outside dev", values: map[string]string{projectAssistantRunSandboxModeEnv: "force"}, wantErr: true},
-		{name: "force rejected with multiple replicas", values: map[string]string{projectAssistantRunSandboxModeEnv: "force", projectAssistantDevelopmentModeEnv: "true", projectAssistantReplicaCountEnv: "2"}, wantErr: true},
-		{name: "force dev", values: map[string]string{projectAssistantRunSandboxModeEnv: "force", projectAssistantDevelopmentModeEnv: "true"}, mode: CodingSandboxModeForce, eligible: true},
+		{name: "on", values: map[string]string{projectAssistantRunSandboxModeEnv: "on"}, mode: CodingSandboxModeOn},
+		{name: "on rejected with multiple replicas", values: map[string]string{projectAssistantRunSandboxModeEnv: "on", projectAssistantReplicaCountEnv: "2"}, wantErr: true},
+		{name: "obsolete byo-only rejected", values: map[string]string{projectAssistantRunSandboxModeEnv: "byo-only"}, wantErr: true},
+		{name: "obsolete force rejected", values: map[string]string{projectAssistantRunSandboxModeEnv: "force"}, wantErr: true},
 		{name: "invalid", values: map[string]string{projectAssistantRunSandboxModeEnv: "sometimes"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config, warnings, err := ParseCodingSandboxConfig(func(key string) string { return tt.values[key] })
+			config, err := ParseCodingSandboxConfig(func(key string) string { return tt.values[key] })
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ParseCodingSandboxConfig error = %v, wantErr=%t", err, tt.wantErr)
 			}
@@ -1586,15 +1631,9 @@ func TestCodingSandboxPolicyFailsClosedAndMigratesLegacyBoolean(t *testing.T) {
 			if config.Mode != tt.mode {
 				t.Fatalf("mode = %q, want %q", config.Mode, tt.mode)
 			}
-			if (len(warnings) > 0) != tt.warn {
-				t.Fatalf("warnings = %#v, want warning=%t", warnings, tt.warn)
-			}
 			eligibility := codingSandboxEligibility(config)
-			if eligibility.Eligible != tt.eligible {
-				t.Fatalf("eligibility = %#v, want eligible=%t", eligibility, tt.eligible)
-			}
-			if tt.eligible && (eligibility.ProviderExportPath == "" || eligibility.TransportGeneration == "") {
-				t.Fatalf("eligible policy lacks provider/transport identity: %#v", eligibility)
+			if eligibility.Eligible {
+				t.Fatalf("process policy alone granted eligibility: %#v", eligibility)
 			}
 		})
 	}
@@ -1662,11 +1701,11 @@ func TestCodingSandboxOffPreservesLegacyModelToolSelectionWithoutInfrastructureC
 	}
 }
 
-func TestCodingSandboxBYOResolverIsScopedAndFailsClosed(t *testing.T) {
+func TestCodingSandboxOnResolverIsScopedAndFailsClosed(t *testing.T) {
 	scope := workspace.Scope{OrgUUID: "org-a", WorkspaceUUID: "ws-a", ProjectName: "demo", ProjectUID: "uid-a"}
 	id := identity{orgUUID: "org-a", workspaceUUID: "ws-a"}
 	server := &Server{
-		runSandboxConfig:     CodingSandboxConfig{Mode: CodingSandboxModeBYOOnly, ReplicaCount: 1},
+		runSandboxConfig:     CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1},
 		runSandboxConfigured: true,
 	}
 	if eligibility := server.ResolveCodingSandboxEligibility(context.Background(), id, scope); eligibility.Eligible || !strings.Contains(eligibility.Reason, "not available") {
@@ -1698,27 +1737,24 @@ func TestCodingSandboxBYOResolverIsScopedAndFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCodingSandboxOffAndForceDoNotCallBYOResolver(t *testing.T) {
-	for _, config := range []CodingSandboxConfig{
-		{Mode: CodingSandboxModeOff, ReplicaCount: 1},
-		{Mode: CodingSandboxModeForce, DevelopmentMode: true, ReplicaCount: 1},
-	} {
-		server := &Server{runSandboxConfig: config, runSandboxConfigured: true}
-		server.codingSandboxResolver = func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error) {
-			t.Fatalf("resolver called for mode %q", config.Mode)
-			return CodingSandboxEligibility{}, nil
-		}
-		eligibility := server.ResolveCodingSandboxEligibility(context.Background(), identity{}, workspace.Scope{})
-		if eligibility.Eligible != (config.Mode == CodingSandboxModeForce) {
-			t.Fatalf("mode %q eligibility = %#v", config.Mode, eligibility)
-		}
+func TestCodingSandboxOffDoesNotCallResolver(t *testing.T) {
+	server := &Server{runSandboxConfig: CodingSandboxConfig{Mode: CodingSandboxModeOff, ReplicaCount: 1}, runSandboxConfigured: true}
+	server.codingSandboxResolver = func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error) {
+		t.Fatal("resolver called while mode is off")
+		return CodingSandboxEligibility{}, nil
+	}
+	if eligibility := server.ResolveCodingSandboxEligibility(context.Background(), identity{}, workspace.Scope{}); eligibility.Eligible {
+		t.Fatalf("off eligibility = %#v", eligibility)
 	}
 }
 
 func TestAttachCodingSandboxRejectsProviderTransportGenerationMismatch(t *testing.T) {
 	server := &Server{
-		runSandboxConfig:     CodingSandboxConfig{Mode: CodingSandboxModeForce, DevelopmentMode: true, ReplicaCount: 1},
+		runSandboxConfig:     CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1},
 		runSandboxConfigured: true,
+	}
+	server.codingSandboxResolver = func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error) {
+		return eligibleCodingSandbox(projectAssistantPlatformInfrastructureExportPath, "test platform provider pair"), nil
 	}
 	req := projectAssistantRunRequest{
 		Identity:       identity{orgUUID: "org", workspaceUUID: "ws"},

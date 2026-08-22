@@ -229,6 +229,21 @@ A `requiredValue` with no `value` is one the installer must type. Prefer a
 placeholder wherever the hub already knows the answer — every value a person has
 to look up and paste is a chance to get it wrong.
 
+### App Studio universal sandbox policy
+
+App Studio exposes one operator choice: `assistant.runSandbox.mode=off|on`.
+`off` always keeps the existing Template-backed development-image path. `on`
+allows the universal sandbox only when the workspace binds either platform App
+Studio plus platform Infrastructure, or self-hosted App Studio plus
+Infrastructure owned by the same organization. A mixed platform/self-hosted
+pair remains on the development-image path.
+
+The hosted Faros deployment sets `off`. App Studio's self-host recipe supplies
+`on`, while Infrastructure's recipe enables its coding-sandbox Template and
+requires immutable universal and dev-agent image references. Operators may
+change the binary policy later; the workspace binding resolver still prevents
+one provider copy from sending sandbox work to a differently owned copy.
+
 As a safety net, a value with no declared `value` is still filled in when the
 hub knows it authoritatively: `hub.url` / `hub.externalURL` / `hub.internalURL`,
 and the kubeconfig Secret name and key. That covers recipes published before a
@@ -404,7 +419,7 @@ Registry scoping enforces the rest:
 
 | Lookup | Scope | Why |
 |---|---|---|
-| `Get(name)` | platform only | Backs the bare-name request paths (UI/backend proxy, heartbeat) that carry no tenant context. If org records were reachable, an Org could name a provider after a platform one and capture its route. |
+| `Get(name)` | platform only | Backs platform-only UI assets and requests without verified tenant context (including heartbeat). Tenant-scoped backend requests use `GetForOrg`; keeping this lookup global prevents an Org from capturing a platform route by name. |
 | `GetForOrg(org, name)` | Org's own, else platform | The tenant-scoped Enable path, where the Org is known and verified. |
 | `ListForOrg(org)` | Org's own + platform | The catalog. An empty org means platform-only, never everything. |
 
@@ -503,15 +518,18 @@ in URL paths.
   cannot keep a platform provider of the same name looking alive. Org providers
   therefore never set `HeartbeatRequired`, leaving readiness resting on endpoint
   validity. An org-scoped heartbeat path is future work.
-- **No hub-proxied UI or backend.** `/ui/providers/{name}` and
-  `/services/providers/{name}` resolve globally. An org provider that declares
-  `spec.ui.url` will not be proxied, and gets no default `iconURL` (the portal
-  falls back to its generic glyph). API-only org providers — the common case —
-  are unaffected: `EndpointsValid` now accepts an APIExport alone as "this
-  provider offers something", which opens no route since the proxies
-  independently 404 when the URLs are nil. Closing this is the subject of
-  [byo-provider-edge-transport.md](./byo-provider-edge-transport.md), whose
-  phase 2 routes both proxies over the edge tunnel.
+- **UI remains platform-only; org backends use the edge transport.**
+  `/ui/providers/{name}` serves the platform provider's assets, while a
+  tenant-scoped `/services/providers/{name}` request resolves that Org's copy
+  and routes its backend through the platform Edges provider's tunnel. The hub
+  never dials an Org-controlled `spec.backend.url`: a missing, incomplete, or
+  unusable edge route — including a platform Edges provider that is not Ready —
+  returns `503 Service Unavailable`. An org provider that declares
+  `spec.ui.url` remains platform-UI-only and gets no default `iconURL` (the
+  portal falls back to its generic glyph). API-only org providers — the common
+  case — are unaffected: `EndpointsValid` accepts an APIExport alone as "this
+  provider offers something", which opens no route since the UI and backend
+  proxies independently require their respective endpoints.
 - **No edge-driven install.** The Org installs the chart itself with the returned
   kubeconfig. One-click install onto a chosen edge needs credential projection
   into the edge cluster (the agent's `Placement` plane ships no kcp credential
