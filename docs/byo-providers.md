@@ -229,6 +229,21 @@ A `requiredValue` with no `value` is one the installer must type. Prefer a
 placeholder wherever the hub already knows the answer — every value a person has
 to look up and paste is a chance to get it wrong.
 
+### App Studio universal sandbox policy
+
+App Studio exposes one operator choice: `assistant.runSandbox.mode=off|on`.
+`off` always keeps the existing Template-backed development-image path. `on`
+allows the universal sandbox only when the workspace binds either platform App
+Studio plus platform Infrastructure, or self-hosted App Studio plus
+Infrastructure owned by the same organization. A mixed platform/self-hosted
+pair remains on the development-image path.
+
+The hosted Faros deployment sets `off`. App Studio's self-host recipe supplies
+`on`, while Infrastructure's recipe enables its coding-sandbox Template and
+requires immutable universal and dev-agent image references. Operators may
+change the binary policy later; the workspace binding resolver still prevents
+one provider copy from sending sandbox work to a differently owned copy.
+
 As a safety net, a value with no declared `value` is still filled in when the
 hub knows it authoritatively: `hub.url` / `hub.externalURL` / `hub.internalURL`,
 and the kubeconfig Secret name and key. That covers recipes published before a

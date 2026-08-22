@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -164,6 +165,38 @@ func TestBackendProxyUnusableEdgeRouteIs503(t *testing.T) {
 
 	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+// A missing route is the critical fail-closed case: the declared backend URL
+// is tenant-controlled and must never become a direct hub dial target.
+func TestBackendProxyMissingEdgeRouteNeverDialsBackendURL(t *testing.T) {
+	var directHit atomic.Bool
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		directHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(direct.Close)
+	directURL, err := url.Parse(direct.URL)
+	if err != nil {
+		t.Fatalf("parse direct backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		BackendURL: directURL,
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if directHit.Load() {
+		t.Fatal("hub directly dialed an organization provider backend without an edge route")
 	}
 }
 

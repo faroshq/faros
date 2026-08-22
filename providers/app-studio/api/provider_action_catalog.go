@@ -302,24 +302,7 @@ func (s *Server) fetchProviderCatalog(ctx context.Context, id identity) (provide
 		return providerCatalogFetchResponse{}, fmt.Errorf("new provider catalog request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if id.token != "" {
-		req.Header.Set("Authorization", "Bearer "+id.token)
-	}
-	if id.tenantPath != "" {
-		req.Header.Set("X-Faros-Tenant", id.tenantPath)
-	}
-	if id.clusterID != "" {
-		req.Header.Set("X-Faros-Cluster", id.clusterID)
-	}
-	if id.orgUUID != "" {
-		req.Header.Set("X-Faros-Org", id.orgUUID)
-	}
-	if id.workspaceUUID != "" {
-		req.Header.Set("X-Faros-Workspace", id.workspaceUUID)
-	}
-	if id.user != "" {
-		req.Header.Set("X-Faros-User", id.user)
-	}
+	setHubCallerIdentityHeaders(req, id)
 	client := &http.Client{
 		Timeout: providerCatalogCallTimeout,
 		// Catalog lookup uses the same explicitly configured local-hub TLS

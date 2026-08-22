@@ -285,7 +285,7 @@ func TestEinoV2PublishesReconnectForPreStreamFailure(t *testing.T) {
 
 func TestEinoV2EligibleSandboxDoesNotProvisionBeforeTextOnlyModelResponse(t *testing.T) {
 	h := newProjectAssistantV2ToolHarness(t, "lazy-sandbox-text")
-	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeForce, DevelopmentMode: true, ReplicaCount: 1})
+	configureEligibleCodingSandboxForTest(h.server)
 	setupCalls := 0
 	h.server.runSandboxSetupFactory = func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState, *projectAssistantSandboxCheckpoint) (*projectAssistantRunSandbox, func(), error) {
 		setupCalls++
@@ -323,7 +323,7 @@ func TestEinoV2FirstRemoteSourceToolProvisionsSandboxExactlyOnce(t *testing.T) {
 	h := newProjectAssistantV2ToolHarness(t, "lazy-sandbox-read")
 	h.req.TurnProfile = projectAssistantTurnProfileImplementation
 	h.req.TurnPolicy = projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation)
-	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeForce, DevelopmentMode: true, ReplicaCount: 1})
+	configureEligibleCodingSandboxForTest(h.server)
 	setupCalls := 0
 	sourceRevision, err := h.workspaces.SourceRevision(context.Background(), h.req.WorkspaceScope)
 	if err != nil {
@@ -1208,7 +1208,7 @@ func TestEinoV2UsesPriorUncommittedPathsWithoutRestoringMutationRevision(t *test
 func TestEinoV2ResumeDoesNotTreatPlanAsMutationAuthority(t *testing.T) {
 	ctx := context.Background()
 	h := newProjectAssistantV2ToolHarnessWithApprovalMode(t, "v2-resume-run-local-grant", store.AssistantApprovalModeAlwaysAsk)
-	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeBYOOnly, ReplicaCount: 1})
+	h.server.ConfigureCodingSandbox(CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1})
 	type resolverCall struct {
 		id    identity
 		scope workspace.Scope
