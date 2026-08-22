@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
-import { Server, Boxes, RefreshCw, Trash2, CircleDot, Plus } from 'lucide-vue-next'
+import { Server, Boxes, RefreshCw, Plus } from 'lucide-vue-next'
 import { setToken, setTenant, listEdges, deleteEdge } from './api'
 import Wizard from './Wizard.vue'
 import Detail from './Detail.vue'
 import Workloads from './Workloads.vue'
 import Services from './Services.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
+import ResourceTable from './portalkit/ResourceTable.vue'
+import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
+import StatusBadge from './portalkit/StatusBadge.vue'
 import { confirmDialog } from './portalkit/confirm'
 import type { Edge, EdgeType, FarosContext, ErrorResponse } from './types'
 
@@ -60,6 +63,22 @@ watch(view, (v) => {
 const edges = ref<Edge[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const edgeColumns = [
+  { key: 'name', label: 'Name' },
+  { key: 'typeLabel', label: 'Type' },
+  { key: 'status', label: 'Status' },
+  { key: 'agentVersion', label: 'Agent' },
+  { key: 'lastHeartbeat', label: 'Last heartbeat' },
+  { key: 'actions', label: '' },
+]
+const edgeRows = computed<Array<Record<string, unknown>>>(() => edges.value.map(edge => ({
+  ...edge,
+  typeLabel: edge.type === 'server' ? 'Server' : 'Kubernetes',
+  status: edge.connected ? 'Connected' : (edge.phase || 'Disconnected'),
+  agentVersion: edge.agentVersion || '—',
+  lastHeartbeat: rel(edge.lastHeartbeatTime),
+  actions: '',
+})))
 
 async function refresh() {
   loading.value = true
@@ -169,51 +188,30 @@ function rel(ts?: string): string {
       </div>
     </header>
 
-    <div v-if="error" class="banner error">{{ error }}</div>
-
-    <div v-if="loading && edges.length === 0" class="muted pad">Loading edges…</div>
-
-    <div v-else-if="edges.length === 0" class="empty">
-      <Boxes :size="28" />
-      <div class="empty-title">No edges connected yet</div>
-      <div class="muted">Click <b>Connect edge</b> to onboard one, or run <code>faros edge create</code>.</div>
-    </div>
-
-    <div v-else class="edges-table-wrap">
-      <table class="edges-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>Agent</th>
-            <th>Last heartbeat</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="e in edges" :key="e.type + '/' + e.name" class="clickable" @click="openDetail(e)">
-            <td class="name">{{ e.name }}</td>
-            <td>
-              <span class="pill">
-                <component :is="e.type === 'server' ? Server : Boxes" :size="12" />
-                {{ e.type === 'server' ? 'Server' : 'Kubernetes' }}
-              </span>
-            </td>
-            <td>
-              <span class="status" :class="e.connected ? 'ok' : 'down'">
-                <CircleDot :size="11" /> {{ e.connected ? 'Connected' : (e.phase || 'Disconnected') }}
-              </span>
-            </td>
-            <td class="mono muted">{{ e.agentVersion || '—' }}</td>
-            <td class="muted">{{ rel(e.lastHeartbeatTime) }}</td>
-            <td class="actions">
-              <button class="icon danger" title="Delete" @click.stop="onDelete(e)"><Trash2 :size="14" /></button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <ResourceTable
+      :columns="edgeColumns"
+      :rows="edgeRows"
+      row-key="name"
+      :loaded="firstLoadDone"
+      :loading="loading"
+      :error="error"
+      retryable
+      searchable
+      search-placeholder="Search edges…"
+      :filters="[{ key: 'typeLabel', label: 'Type' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
+      empty-text="No edges connected yet. Connect an edge to get started."
+      @retry="refresh"
+      @row-click="(row) => openDetail(row as unknown as Edge)"
+    >
+      <template #name="{ value }"><span class="name">{{ value }}</span></template>
+      <template #typeLabel="{ value, row }"><span class="pill"><component :is="row.type === 'server' ? Server : Boxes" :size="12" />{{ value }}</span></template>
+      <template #status="{ value }"><StatusBadge :status="String(value)" /></template>
+      <template #agentVersion="{ value }"><span class="mono muted">{{ value }}</span></template>
+      <template #lastHeartbeat="{ value }"><span class="muted">{{ value }}</span></template>
+      <template #actions="{ row }"><div class="row-actions"><ResourceTableDeleteButton :label="`Delete edge ${String(row.name)}`" @click="onDelete(row as unknown as Edge)" /></div></template>
+    </ResourceTable>
     </template>
     <ConfirmDialog />
   </div>

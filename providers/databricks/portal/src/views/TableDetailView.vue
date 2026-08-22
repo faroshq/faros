@@ -242,6 +242,11 @@ onUnmounted(() => {
             { key: 'comment', label: 'Comment' },
           ]"
           :rows="schemaRows"
+          searchable
+          search-placeholder="Search columns…"
+          :filters="[{ key: 'type', label: 'Type' }, { key: 'nullableLabel', label: 'Nullable' }]"
+          paginated
+          :page-size="25"
           row-key="name"
           :loaded="schemaLoaded"
           :loading="schemaPending"

@@ -81,6 +81,7 @@ export interface EdgeService {
   targetName?: string // kube edges only
   serviceType?: string
   scheme?: string
+  host?: string // direct agent/LAN target; empty for Kubernetes Service targets
   port?: number
   hasCredentials: boolean
   instructions?: string

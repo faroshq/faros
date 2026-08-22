@@ -32,7 +32,7 @@ VUE_PORTALS=(
   "providers/edges/portal"
   "providers/infrastructure/portal"
 )
-VUE_FILES=(confirm.ts ConfirmDialog.vue ConfirmDialog.css ResourceTable.vue ResourceTableDeleteButton.vue ResourceTableDeleteButton.css ResourceTableEditButton.vue ResourceTableEditButton.css ConditionsPanel.vue StatusBadge.vue)
+VUE_FILES=(confirm.ts ConfirmDialog.vue ConfirmDialog.css ResourceTable.vue ResourceTable.css table.ts ResourceTableDeleteButton.vue ResourceTableDeleteButton.css ResourceTableEditButton.vue ResourceTableEditButton.css ConditionsPanel.vue StatusBadge.vue)
 
 sync_group() {
   local src="$1"; shift
@@ -128,8 +128,6 @@ esac
 sync_group "$TS_SRC" TS_PORTALS TS_FILES
 sync_group "$VUE_SRC" VUE_PORTALS VUE_FILES
 
-sync_group "$TS_SRC" VIBE_PORTALS VIBE_FILES
-
 # tenant.ts and toast.ts are plain TS (no framework) and shared by portals of
 # BOTH kinds, so the vanilla canonicals are also vendored into the Vue portals.
 for p in "${VUE_PORTALS[@]}"; do
@@ -141,7 +139,7 @@ done
 # dashboardtile.ts is the shared scaffolding behind every provider's
 # <faros-dashboard-tile-*> element. Plain TS for the same reason as tenant.ts,
 # and vendored into every portal that ships (or may ship) a tile.
-for p in "${VUE_PORTALS[@]}" "${TS_PORTALS[@]}" "${VIBE_PORTALS[@]}"; do
+for p in "${VUE_PORTALS[@]}" "${TS_PORTALS[@]}"; do
   cp "$TS_SRC/dashboardtile.ts" "$ROOT/$p/src/portalkit/dashboardtile.ts"
   echo "synced dashboardtile.ts -> $p/src/portalkit"
 done

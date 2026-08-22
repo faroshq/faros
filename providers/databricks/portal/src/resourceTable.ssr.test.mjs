@@ -96,6 +96,62 @@ test('background refresh keeps rows and only updates the out-of-flow live region
   assert.equal((html.match(/resource-table-row/g) ?? []).length, 2)
 })
 
+test('searchable paginated tables render one bounded page and shared controls', async () => {
+  const ResourceTable = await resourceTable()
+  const rows = Array.from({ length: 12 }, (_, index) => ({
+    name: `table-${index + 1}`,
+    status: index % 2 ? 'Ready' : 'Pending',
+  }))
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns: [{ key: 'name', label: 'Name' }, { key: 'status', label: 'Status' }],
+    rows,
+    loaded: true,
+    searchable: true,
+    filters: [{ key: 'status', label: 'Status', allLabel: 'Any status' }],
+    paginated: true,
+    pageSize: 5,
+  }))
+
+  assert.match(html, /resource-table-controls/)
+  assert.match(html, /placeholder="Search…"/)
+  assert.match(html, />Any status</)
+  assert.match(html, /Showing[\s\S]*1–5[\s\S]*of[\s\S]*12/)
+  assert.match(html, />1 \/ 3</)
+  assert.equal((html.match(/class="[^\"]*resource-table-row/g) ?? []).length, 5)
+  assert.match(html, /table-1/)
+  assert.doesNotMatch(html, /table-6/)
+
+  const controlsIndex = html.indexOf('resource-table-controls')
+  const scrollIndex = html.indexOf('resource-table-scroll')
+  const tableIndex = html.indexOf('<table')
+  const paginationIndex = html.indexOf('resource-table-pagination')
+  assert.ok(controlsIndex < scrollIndex)
+  assert.ok(scrollIndex < tableIndex)
+  assert.ok(tableIndex < paginationIndex)
+
+  const tableStyle = await readFile(new URL('./portalkit/ResourceTable.css', import.meta.url), 'utf8')
+  assert.match(tableStyle, /\.resource-table \{[\s\S]*?overflow: hidden;/)
+  assert.match(tableStyle, /\.resource-table-scroll \{[\s\S]*?overflow-x: auto;/)
+})
+
+test('table view helpers compose full-dataset search, facets, and paging', async () => {
+  const table = await vite.ssrLoadModule('/src/portalkit/table.ts')
+  const rows = [
+    { name: 'orders-api', status: 'Ready', connection: 'prod' },
+    { name: 'orders-worker', status: 'Pending', connection: 'prod' },
+    { name: 'events-api', status: 'Ready', connection: 'dev' },
+  ]
+
+  const filtered = table.filterTableRows(rows, 'orders', ['name'], { status: 'Ready' })
+  assert.deepEqual(filtered, [rows[0]])
+  assert.deepEqual(table.deriveTableFilterOptions(rows, { key: 'connection', label: 'Connection' }), [
+    { value: 'dev', label: 'dev' },
+    { value: 'prod', label: 'prod' },
+  ])
+  assert.deepEqual(table.paginateTableRows(rows, 2, 2), [rows[2]])
+  assert.deepEqual(table.tableRange(3, 2, 2), { start: 3, end: 3 })
+})
+
 test('polled resource rows cannot replay the global entrance animation', async () => {
   const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
   assert.match(style, /faros-provider-databricks \.resource-table-row \{[\s\S]*?animation: none;/)
@@ -216,6 +272,17 @@ test('Databricks resource lists use the canonical delete action', async () => {
     const source = await readFile(new URL(`./views/${view}`, import.meta.url), 'utf8')
     assert.match(source, /import ResourceTableDeleteButton from '\.\.\/portalkit\/ResourceTableDeleteButton\.vue'/)
     assert.match(source, /<ResourceTableDeleteButton/)
+  }
+})
+
+test('Databricks resource lists opt into shared search and pagination', async () => {
+  for (const view of ['ConnectionsView.vue', 'WarehousesView.vue', 'TablesView.vue']) {
+    const source = await readFile(new URL(`./views/${view}`, import.meta.url), 'utf8')
+    assert.match(source, /searchable/)
+    assert.match(source, /search-placeholder=/)
+    assert.match(source, /:filters=/)
+    assert.match(source, /paginated/)
+    assert.match(source, /:page-size=/)
   }
 })
 

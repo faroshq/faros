@@ -251,6 +251,11 @@ onUnmounted(() => {
     <ResourceTable
       :columns="columns"
       :rows="rows"
+      searchable
+      search-placeholder="Search repositories…"
+      :filters="[{ key: 'connectionRef', label: 'Connection' }, { key: 'visibility', label: 'Visibility' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
       row-key="name"
       :loaded="loaded"
       :loading="loading"

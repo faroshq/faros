@@ -232,6 +232,11 @@ onUnmounted(() => {
         { key: 'actions', label: '' },
       ]"
       :rows="rows"
+      searchable
+      search-placeholder="Search connections…"
+      :filters="[{ key: 'authType', label: 'Auth' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
       row-key="name"
       :loaded="loaded"
       :loading="loading"

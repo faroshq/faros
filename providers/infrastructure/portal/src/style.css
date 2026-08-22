@@ -515,7 +515,10 @@ faros-provider-infrastructure .resource-table {
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border-subtle);
   border-radius: 6px;
-  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
 }
 faros-provider-infrastructure .resource-table-error,
 faros-provider-infrastructure .resource-table-stale {

@@ -252,6 +252,11 @@ onUnmounted(() => {
         { key: 'actions', label: '' },
       ]"
       :rows="rows"
+      searchable
+      search-placeholder="Search warehouses…"
+      :filters="[{ key: 'connectionRef', label: 'Connection' }, { key: 'state', label: 'State' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
       row-key="name"
       :loaded="loaded"
       :loading="loading"

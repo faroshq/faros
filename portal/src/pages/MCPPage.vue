@@ -36,7 +36,7 @@ import { authFetch } from '@/auth/session'
 import { useTenantStore } from '@/stores/tenant'
 import AppLayout from '@/components/AppLayout.vue'
 import { confirmDialog } from '@/portalkit/confirm'
-import ResourceTable from '@/components/ResourceTable.vue'
+import ResourceTable from '@/portalkit/ResourceTable.vue'
 
 interface FederatedTool {
   name: string
@@ -325,6 +325,11 @@ function rel(ts?: string): string {
         <ResourceTable
           :columns="columns"
           :rows="rows"
+          searchable
+          search-placeholder="Search MCP servers…"
+          :filters="[{ key: 'phase', label: 'Status', allLabel: 'Any status' }]"
+          paginated
+          :page-size="10"
           :loading="loading"
           :error="error"
           empty-text="No MCP servers yet. Create one to connect an AI client."

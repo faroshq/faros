@@ -95,6 +95,11 @@ onUnmounted(() => {
     <ResourceTable
       :columns="columns"
       :rows="rows"
+      searchable
+      search-placeholder="Search packages…"
+      :filters="[{ key: 'type', label: 'Type' }, { key: 'visibility', label: 'Visibility' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
       row-key="rowKey"
       :loaded="loaded"
       :loading="loading"

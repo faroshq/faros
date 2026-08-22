@@ -347,12 +347,20 @@ track (`rounded-xs`), `accent` filled portion, 12×12px square 2px-radius
 readouts are mono `tabular-nums`.
 
 ### Pagination
-None exists — lists poll and truncate today. When needed:
-- Prefer "Load more" (a `.k-btn--ghost`) or infinite scroll for streams.
-- True pagination: 4px-radius ghost icon-buttons (‹ ›) + mono `tabular-nums`
-  "12–24 of 96" label in `text-muted`; current page indicator uses
-  `accent-subtle` bg + `accent` text like an active tab. No number soup —
-  never render more than 5 page buttons.
+`portalkit/ResourceTable.vue` owns filtering and true pagination for bounded
+resource lists. Opt in with `searchable`, `filters`, `paginated`, and
+`page-size`; it searches and filters the complete loaded row set before slicing
+the visible page. A filter or page-size change returns to page one, while polling
+retains the current page when it remains valid. The shared presentation is:
+- 4px-radius ghost icon-buttons (‹ ›) + mono `tabular-nums` "12–24 of 96" label
+  in `text-muted`.
+- Current page indicator in `accent-subtle` with `accent` text. No number soup.
+- Search plus compact categorical selects above the table; one `Clear filters`
+  action appears only when a filter is active.
+- For wide tables, only the table canvas scrolls horizontally. Search/filter
+  controls and the pagination footer remain pinned to the full card width.
+- Prefer "Load more" (a `.k-btn--ghost`) or infinite scroll for streams such as
+  activity/event feeds; do not force page navigation onto an append-only flow.
 
 ### Date / time picker
 None exists — all dates are read-only mono output via `portal/src/utils/time.ts`

@@ -1,15 +1,37 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
-import { RefreshCw, Trash2, Plus, Boxes, ChevronRight, ChevronDown, Store, Rocket } from 'lucide-vue-next'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { RefreshCw, Plus, ChevronRight, ChevronDown, Store, Rocket } from 'lucide-vue-next'
 import { listWorkloads, createWorkload, deleteWorkload, deployMarketplaceApp, listEdges, type WorkloadDraft } from './api'
 import type { Workload, Edge, ErrorResponse } from './types'
 import { confirmDialog } from './portalkit/confirm'
+import ResourceTable from './portalkit/ResourceTable.vue'
+import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
+import StatusBadge from './portalkit/StatusBadge.vue'
 import { MARKETPLACE_CATEGORIES, type MarketplaceApp } from './marketplace'
 
 const workloads = ref<Workload[]>([])
 const edges = ref<Edge[]>([])
 const loading = ref(true)
+const loaded = ref(false)
 const error = ref<string | null>(null)
+const workloadColumns = [
+  { key: 'expand', label: '' },
+  { key: 'name', label: 'Name' },
+  { key: 'image', label: 'Image' },
+  { key: 'placement', label: 'Placement' },
+  { key: 'status', label: 'Status' },
+  { key: 'ready', label: 'Ready' },
+  { key: 'actions', label: '' },
+]
+const workloadRows = computed<Array<Record<string, unknown>>>(() => workloads.value.map(workload => ({
+  ...workload,
+  expand: '',
+  image: workload.image || '—',
+  placement: `${workload.strategy || 'Spread'} · ${selectorText(workload.selector)}`,
+  status: workload.phase || 'Pending',
+  ready: `${workload.readyReplicas ?? 0}/${workload.replicas ?? 1}`,
+  actions: '',
+})))
 
 // Marketplace deploy state.
 const showMarket = ref(true)
@@ -74,6 +96,7 @@ async function refresh() {
   error.value = null
   try {
     ;[workloads.value, edges.value] = await Promise.all([listWorkloads(), listEdges()])
+    loaded.value = true
     if (!deployEdge.value && edges.value.length) deployEdge.value = edges.value[0].name
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load workloads'
@@ -128,12 +151,12 @@ onMounted(refresh)
 const timer = setInterval(refresh, 10000)
 onUnmounted(() => clearInterval(timer))
 
-function phaseClass(p?: string): string {
-  return p === 'Running' ? 'ok' : 'down'
-}
 function selectorText(s?: Record<string, string>): string {
   if (!s || !Object.keys(s).length) return 'all edges'
   return Object.entries(s).map(([k, v]) => `${k}=${v}`).join(', ')
+}
+function workloadEdges(row: Record<string, unknown>): NonNullable<Workload['edges']> {
+  return Array.isArray(row.edges) ? row.edges as NonNullable<Workload['edges']> : []
 }
 </script>
 
@@ -248,61 +271,46 @@ function selectorText(s?: Record<string, string>): string {
       </div>
     </div>
 
-    <div v-if="loading && workloads.length === 0" class="muted pad">Loading workloads…</div>
-
-    <div v-else-if="workloads.length === 0" class="empty">
-      <Boxes :size="28" />
-      <div class="empty-title">No workloads yet</div>
-      <div class="muted">Click <b>New workload</b> to deploy one across your Kubernetes edges.</div>
-    </div>
-
-    <div v-else class="edges-table-wrap">
-      <table class="edges-table">
-      <thead>
-        <tr>
-          <th></th>
-          <th>Name</th>
-          <th>Image</th>
-          <th>Placement</th>
-          <th>Status</th>
-          <th>Ready</th>
-          <th></th>
+    <ResourceTable
+      :columns="workloadColumns"
+      :rows="workloadRows"
+      row-key="name"
+      :loaded="loaded"
+      :loading="loading"
+      :error="error"
+      retryable
+      searchable
+      search-placeholder="Search workloads…"
+      :filters="[{ key: 'strategy', label: 'Strategy' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
+      empty-text="No workloads yet. Create one to deploy it across matching edges."
+      @retry="refresh"
+      @row-click="(row) => toggle(String(row.name))"
+    >
+      <template #expand="{ row }"><component :is="expanded === row.name ? ChevronDown : ChevronRight" :size="14" /></template>
+      <template #name="{ value }"><span class="name">{{ value }}</span></template>
+      <template #image="{ value }"><span class="mono muted">{{ value }}</span></template>
+      <template #placement="{ value }"><span class="muted">{{ value }}</span></template>
+      <template #status="{ value }"><StatusBadge :status="String(value)" /></template>
+      <template #ready="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #actions="{ row }"><div class="row-actions"><ResourceTableDeleteButton :label="`Delete workload ${String(row.name)}`" @click="onDelete(row as unknown as Workload)" /></div></template>
+      <template #after-row="{ row }">
+        <tr v-if="expanded === row.name" class="detail-row">
+          <td :colspan="workloadColumns.length">
+            <div class="es-head">Per-edge status</div>
+            <div v-if="workloadEdges(row).length === 0" class="muted">Not scheduled onto any edge yet (no edge matches the selector, or agents haven't reported).</div>
+            <div v-else class="es-list">
+              <div v-for="edge in workloadEdges(row)" :key="edge.edgeName" class="es-item">
+                <span class="es-name">{{ edge.edgeName }}</span>
+                <StatusBadge :status="edge.phase || 'Pending'" />
+                <span class="es-ready mono">{{ edge.readyReplicas ?? 0 }} ready</span>
+                <span v-if="edge.message" class="muted es-msg">{{ edge.message }}</span>
+              </div>
+            </div>
+          </td>
         </tr>
-      </thead>
-      <tbody>
-        <template v-for="w in workloads" :key="w.name">
-          <tr class="clickable" @click="toggle(w.name)">
-            <td><component :is="expanded === w.name ? ChevronDown : ChevronRight" :size="14" /></td>
-            <td class="name">{{ w.name }}</td>
-            <td class="mono muted">{{ w.image || '—' }}</td>
-            <td class="muted">{{ w.strategy || 'Spread' }} · {{ selectorText(w.selector) }}</td>
-            <td>
-              <span class="status" :class="phaseClass(w.phase)">{{ w.phase || 'Pending' }}</span>
-            </td>
-            <td class="mono">{{ w.readyReplicas ?? 0 }}/{{ w.replicas ?? 1 }}</td>
-            <td class="actions">
-              <button class="icon danger" title="Delete" @click.stop="onDelete(w)"><Trash2 :size="14" /></button>
-            </td>
-          </tr>
-          <tr v-if="expanded === w.name" class="detail-row">
-            <td colspan="7">
-              <div class="es-head">Per-edge status</div>
-              <div v-if="!w.edges || w.edges.length === 0" class="muted">
-                Not scheduled onto any edge yet (no edge matches the selector, or agents haven't reported).
-              </div>
-              <div v-else class="es-list">
-                <div v-for="e in w.edges" :key="e.edgeName" class="es-item">
-                  <span class="es-name">{{ e.edgeName }}</span>
-                  <span class="status" :class="phaseClass(e.phase)">{{ e.phase || 'Pending' }}</span>
-                  <span class="es-ready mono">{{ e.readyReplicas ?? 0 }} ready</span>
-                  <span v-if="e.message" class="muted es-msg">{{ e.message }}</span>
-                </div>
-              </div>
-            </td>
-          </tr>
-        </template>
-      </tbody>
-      </table>
-    </div>
+      </template>
+    </ResourceTable>
   </div>
 </template>

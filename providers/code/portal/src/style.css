@@ -501,7 +501,10 @@ faros-provider-code .resource-table {
   background: color-mix(in srgb, var(--color-surface-raised, #111320) 80%, transparent);
   border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.07));
   border-radius: 6px;
-  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
 }
 
 faros-provider-code .resource-table-error {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { RefreshCw, Trash2, Plus, Boxes, Pencil, Check } from 'lucide-vue-next'
+import { RefreshCw, Plus, Check } from 'lucide-vue-next'
 import {
   listServices, createKubeEdgeService, deleteEdgeService, listEdges,
   fetchServiceCatalog,
@@ -8,6 +8,10 @@ import {
 import type { CatalogEntry } from './api'
 import type { EdgeService, EdgeServiceDraft, Edge, ErrorResponse } from './types'
 import { confirmDialog } from './portalkit/confirm'
+import ResourceTable from './portalkit/ResourceTable.vue'
+import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
+import ResourceTableEditButton from './portalkit/ResourceTableEditButton.vue'
+import StatusBadge from './portalkit/StatusBadge.vue'
 import ServiceEdit from './ServiceEdit.vue'
 
 // Service type catalog — fetched from the backend (svccatalog.All()) so the form
@@ -55,7 +59,26 @@ function onTypeChange() {
 const services = ref<EdgeService[]>([])
 const edges = ref<Edge[]>([])
 const loading = ref(true)
+const loaded = ref(false)
 const error = ref<string | null>(null)
+const serviceColumns = [
+  { key: 'name', label: 'Name' },
+  { key: 'edgeName', label: 'Edge' },
+  { key: 'typeLabel', label: 'Type' },
+  { key: 'target', label: 'Target' },
+  { key: 'status', label: 'Status' },
+  { key: 'credentials', label: 'Creds' },
+  { key: 'actions', label: '' },
+]
+const serviceRows = computed<Array<Record<string, unknown>>>(() => services.value.map(service => ({
+  ...service,
+  edgeName: service.edgeName || '—',
+  typeLabel: catalogFor(service.serviceType)?.displayName || service.serviceType || '—',
+  target: `${service.host || `${service.targetNamespace ? `${service.targetNamespace}/` : ''}${service.targetName || '—'}`}:${service.port || ''}`,
+  status: service.phase || 'Pending',
+  credentials: service.hasCredentials ? 'Configured' : 'Missing',
+  actions: '',
+})))
 
 const showCreate = ref(false)
 const busy = ref(false)
@@ -132,6 +155,7 @@ async function refresh() {
   error.value = null
   try {
     ;[services.value, edges.value] = await Promise.all([listServices(), listEdges()])
+    loaded.value = true
     if (!draft.value.edgeName && edges.value.length) draft.value.edgeName = edges.value[0].name
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load services'
@@ -194,9 +218,6 @@ onMounted(() => {
 const timer = setInterval(refresh, 10000)
 onUnmounted(() => clearInterval(timer))
 
-function phaseClass(p?: string): string {
-  return p === 'Ready' ? 'ok' : p === 'Unreachable' ? 'down' : 'pending'
-}
 </script>
 
 <template>
@@ -223,8 +244,6 @@ function phaseClass(p?: string): string {
         </button>
       </div>
     </header>
-
-    <div v-if="error" class="banner error">{{ error }}</div>
 
     <!-- Create form -->
     <div v-if="showCreate" class="wiz-card" style="margin-bottom: 16px;">
@@ -303,42 +322,30 @@ function phaseClass(p?: string): string {
       </div>
     </div>
 
-    <div v-if="loading && services.length === 0" class="muted pad">Loading services…</div>
-
-    <div v-else-if="services.length === 0" class="empty">
-      <Boxes :size="28" />
-      <div class="empty-title">No services yet</div>
-      <div class="muted">Click <b>New service</b> to declare one (e.g. Home Assistant) on a Kubernetes edge.</div>
-    </div>
-
-    <div v-else class="edges-table-wrap">
-      <table class="edges-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Edge</th>
-            <th>Type</th>
-            <th>Target</th>
-            <th>Status</th>
-            <th>Creds</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="s in services" :key="s.name" class="clickable" @click="openEdit(s)">
-            <td class="name">{{ s.name }}</td>
-            <td class="muted">{{ s.edgeName || '—' }}</td>
-            <td class="mono muted">{{ catalogFor(s.serviceType)?.displayName || s.serviceType || '—' }}</td>
-            <td class="mono muted">{{ s.host || (s.targetNamespace ? s.targetNamespace + '/' : '') + (s.targetName || '—') }}:{{ s.port || '' }}</td>
-            <td><span class="status" :class="phaseClass(s.phase)">{{ s.phase || 'Pending' }}</span></td>
-            <td><Check v-if="s.hasCredentials" :size="16" class="ok-check" /><span v-else class="muted">—</span></td>
-            <td class="actions">
-              <button class="icon" title="Edit" @click.stop="openEdit(s)"><Pencil :size="14" /></button>
-              <button class="icon danger" title="Delete" @click.stop="onDelete(s)"><Trash2 :size="14" /></button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <ResourceTable
+      :columns="serviceColumns"
+      :rows="serviceRows"
+      row-key="name"
+      :loaded="loaded"
+      :loading="loading"
+      :error="error"
+      retryable
+      searchable
+      search-placeholder="Search services…"
+      :filters="[{ key: 'edgeName', label: 'Edge' }, { key: 'typeLabel', label: 'Type' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      paginated
+      :page-size="10"
+      empty-text="No services yet. Create one to expose its tools through MCP."
+      @retry="refresh"
+      @row-click="(row) => openEdit(row as unknown as EdgeService)"
+    >
+      <template #name="{ value }"><span class="name">{{ value }}</span></template>
+      <template #edgeName="{ value }"><span class="muted">{{ value }}</span></template>
+      <template #typeLabel="{ value }"><span class="mono muted">{{ value }}</span></template>
+      <template #target="{ value }"><span class="mono muted">{{ value }}</span></template>
+      <template #status="{ value }"><StatusBadge :status="String(value)" /></template>
+      <template #credentials="{ row }"><Check v-if="row.hasCredentials" :size="16" class="ok-check" /><span v-else class="muted">—</span></template>
+      <template #actions="{ row }"><div class="row-actions"><ResourceTableEditButton :label="`Edit service ${String(row.name)}`" @click="openEdit(row as unknown as EdgeService)" /><ResourceTableDeleteButton :label="`Delete service ${String(row.name)}`" @click="onDelete(row as unknown as EdgeService)" /></div></template>
+    </ResourceTable>
   </div>
 </template>

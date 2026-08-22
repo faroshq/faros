@@ -454,7 +454,7 @@ onUnmounted(() => {
             <p class="muted">A generated key's private half is written to a Secret in your workspace.</p>
           </form>
           <p v-if="keyDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ keyDeleteError }}</p>
-          <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :error="keysError" :stale="keysLoaded && !!keysError" retryable empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
+          <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :error="keysError" :stale="keysLoaded && !!keysError" retryable searchable search-placeholder="Search deploy keys…" :filters="[{ key: 'access', label: 'Access' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
             <template #title="{ row }"><strong>{{ row.title }}</strong><div v-if="row.generated && row.secretName" class="muted">secret: <code>{{ row.secretName }}</code></div></template>
             <template #access="{ value }"><span class="badge muted">{{ value }}</span></template>
             <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
@@ -470,7 +470,7 @@ onUnmounted(() => {
             <div class="actions"><button class="primary" type="submit" :disabled="repositoryDeleting || collabSubmitting || !collabsLoaded">{{ collabSubmitting ? 'Adding…' : 'Add collaborator' }}</button><span v-if="collabError" class="error" role="alert">{{ collabError }}</span></div>
           </form>
           <p v-if="collabDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ collabDeleteError }}</p>
-          <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
+          <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable searchable search-placeholder="Search collaborators…" :filters="[{ key: 'permission', label: 'Permission' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
             <template #username="{ value }"><strong>{{ value }}</strong></template>
             <template #permission="{ value }"><span class="badge muted">{{ value }}</span></template>
             <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
@@ -481,7 +481,7 @@ onUnmounted(() => {
 
       <div class="panel section-panel">
         <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded" class="muted">{{ packageRows.length }}</span></div>
-        <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages">
+        <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="[{ key: 'type', label: 'Type' }, { key: 'visibility', label: 'Visibility' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages">
           <template #name="{ row }"><strong><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
           <template #type="{ value }"><span class="badge muted">{{ value }}</span></template>
           <template #visibility="{ value }"><span class="muted">{{ value || '—' }}</span></template>
