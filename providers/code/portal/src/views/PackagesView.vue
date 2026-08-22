@@ -25,24 +25,18 @@ function controllerCaughtUp(resource: { generation?: number; observedGeneration?
   return resource.generation === undefined ||
     (resource.observedGeneration !== undefined && resource.observedGeneration >= resource.generation)
 }
-const rows = computed<Array<Record<string, unknown>>>(() => {
-  let previousRepository = ''
-  return [...packages.value]
-    .sort((a, b) => a.repositoryRef.localeCompare(b.repositoryRef) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
-    .map(item => {
-      const showRepository = item.repositoryRef !== previousRepository
-      previousRepository = item.repositoryRef
-      const deleting = !!item.deletionTimestamp
-      return {
-        ...item,
-        deleting,
-        rowKey: `${item.repositoryRef}:${item.uid || `${item.type}/${item.name}`}`,
-        showRepository,
-        status: deleting ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
-        url: item.htmlURL || '',
-      }
-    })
-})
+const rows = computed<Array<Record<string, unknown>>>(() => [...packages.value]
+  .sort((a, b) => a.repositoryRef.localeCompare(b.repositoryRef) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
+  .map(item => {
+    const deleting = !!item.deletionTimestamp
+    return {
+      ...item,
+      deleting,
+      rowKey: `${item.repositoryRef}:${item.uid || `${item.type}/${item.name}`}`,
+      status: deleting ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
+      url: item.htmlURL || '',
+    }
+  }))
 
 let timer: number | undefined
 let refresh!: LatestRefreshController
@@ -111,9 +105,8 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #repositoryRef="{ row }">
-        <button v-if="row.showRepository && !row.deleting" class="link" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
-        <span v-else-if="row.showRepository">{{ row.repositoryRef }}</span>
-        <span v-else class="muted">↳</span>
+        <button v-if="!row.deleting" class="link" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
+        <span v-else>{{ row.repositoryRef }}</span>
       </template>
       <template #name="{ row }"><strong><a v-if="row.htmlURL && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
       <template #type="{ value }"><span class="badge muted">{{ value }}</span></template>

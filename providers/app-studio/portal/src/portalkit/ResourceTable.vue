@@ -90,7 +90,9 @@ const visibleRows = computed(() => props.paginated
 )
 const visibleRange = computed(() => tableRange(filteredRows.value.length, page.value, selectedPageSize.value))
 const activeFilters = computed(() => !!query.value.trim() || Object.values(selectedFilters).some(Boolean))
-const showControls = computed(() => props.rows.length > 0 && (props.searchable || props.filters.length > 0))
+const showControls = computed(() =>
+  (props.searchable || props.filters.length > 0) && (props.rows.length > 0 || activeFilters.value),
+)
 const showPagination = computed(() => props.rows.length > 0 && props.paginated)
 const normalizedPageSizes = computed(() => [...new Set([...props.pageSizeOptions, props.pageSize])]
   .filter(value => Number.isFinite(value) && value > 0)
@@ -187,7 +189,7 @@ function nextPage() { page.value = Math.min(totalPages.value, page.value + 1) }
         <button v-if="activeFilters" class="resource-table-clear-filters" type="button" @click="clearFilters">Clear filters</button>
       </div>
 
-      <div class="resource-table-scroll">
+      <div class="resource-table-scroll" role="region" aria-label="Scrollable table" tabindex="0">
         <table class="resource-table-table">
           <thead><tr class="resource-table-head-row"><th v-for="col in columns" :key="col.key" class="resource-table-heading">{{ col.label }}</th></tr></thead>
           <tbody>

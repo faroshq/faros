@@ -73,6 +73,7 @@ const edgeColumns = [
 ]
 const edgeRows = computed<Array<Record<string, unknown>>>(() => edges.value.map(edge => ({
   ...edge,
+  rowKey: `${edge.type}/${edge.name}`,
   typeLabel: edge.type === 'server' ? 'Server' : 'Kubernetes',
   status: edge.connected ? 'Connected' : (edge.phase || 'Disconnected'),
   agentVersion: edge.agentVersion || '—',
@@ -191,7 +192,7 @@ function rel(ts?: string): string {
     <ResourceTable
       :columns="edgeColumns"
       :rows="edgeRows"
-      row-key="name"
+      row-key="rowKey"
       :loaded="firstLoadDone"
       :loading="loading"
       :error="error"

@@ -27,6 +27,7 @@ const workloadRows = computed<Array<Record<string, unknown>>>(() => workloads.va
   ...workload,
   expand: '',
   image: workload.image || '—',
+  strategy: workload.strategy || 'Spread',
   placement: `${workload.strategy || 'Spread'} · ${selectorText(workload.selector)}`,
   status: workload.phase || 'Pending',
   ready: `${workload.readyReplicas ?? 0}/${workload.replicas ?? 1}`,
@@ -157,6 +158,12 @@ function selectorText(s?: Record<string, string>): string {
 }
 function workloadEdges(row: Record<string, unknown>): NonNullable<Workload['edges']> {
   return Array.isArray(row.edges) ? row.edges as NonNullable<Workload['edges']> : []
+}
+function workloadTone(status: unknown): 'success' | 'danger' | null {
+  const phase = String(status).toLowerCase()
+  if (phase === 'running') return 'success'
+  if (phase === 'failed') return 'danger'
+  return null
 }
 </script>
 
@@ -292,7 +299,7 @@ function workloadEdges(row: Record<string, unknown>): NonNullable<Workload['edge
       <template #name="{ value }"><span class="name">{{ value }}</span></template>
       <template #image="{ value }"><span class="mono muted">{{ value }}</span></template>
       <template #placement="{ value }"><span class="muted">{{ value }}</span></template>
-      <template #status="{ value }"><StatusBadge :status="String(value)" /></template>
+      <template #status="{ value }"><StatusBadge :status="String(value)" :tone="workloadTone(value)" /></template>
       <template #ready="{ value }"><span class="mono">{{ value }}</span></template>
       <template #actions="{ row }"><div class="row-actions"><ResourceTableDeleteButton :label="`Delete workload ${String(row.name)}`" @click="onDelete(row as unknown as Workload)" /></div></template>
       <template #after-row="{ row }">
@@ -303,7 +310,7 @@ function workloadEdges(row: Record<string, unknown>): NonNullable<Workload['edge
             <div v-else class="es-list">
               <div v-for="edge in workloadEdges(row)" :key="edge.edgeName" class="es-item">
                 <span class="es-name">{{ edge.edgeName }}</span>
-                <StatusBadge :status="edge.phase || 'Pending'" />
+                <StatusBadge :status="edge.phase || 'Pending'" :tone="workloadTone(edge.phase || 'Pending')" />
                 <span class="es-ready mono">{{ edge.readyReplicas ?? 0 }} ready</span>
                 <span v-if="edge.message" class="muted es-msg">{{ edge.message }}</span>
               </div>

@@ -128,10 +128,12 @@ test('searchable paginated tables render one bounded page and shared controls', 
   assert.ok(controlsIndex < scrollIndex)
   assert.ok(scrollIndex < tableIndex)
   assert.ok(tableIndex < paginationIndex)
+  assert.match(html, /class="resource-table-scroll" role="region" aria-label="Scrollable table" tabindex="0"/)
 
   const tableStyle = await readFile(new URL('./portalkit/ResourceTable.css', import.meta.url), 'utf8')
   assert.match(tableStyle, /\.resource-table \{[\s\S]*?overflow: hidden;/)
   assert.match(tableStyle, /\.resource-table-scroll \{[\s\S]*?overflow-x: auto;/)
+  assert.match(tableStyle, /\.resource-table-scroll:focus-visible \{[\s\S]*?box-shadow: inset/)
 })
 
 test('table view helpers compose full-dataset search, facets, and paging', async () => {
