@@ -42,6 +42,32 @@ For a complete production setup (TLS, OIDC, ingress) see the [full docs](https:/
 | `hub.adminUsers` | `[]` | Platform-admin identities allowed at `/api/admin/*` + the portal `/bonkers` area. Match a User by name, email, or rbacIdentity. Empty disables the admin surface (the `/bonkers` menu item stays hidden). For a static token the identity is `static-<first8chars>@faros.local`. |
 | `hub.resources` | see values | CPU/memory requests and limits (includes embedded kcp overhead) |
 
+### Product telemetry
+
+Product telemetry defaults to `off`: the hub creates no telemetry worker and makes no receiver requests. `saas` mode accepts only catalog-declared events from registered first-party provider ServiceAccounts, pseudonymizes identifiers with keyed HMAC, and sends bounded CloudEvents batches. Create the referenced Secret separately so credentials never enter Helm values:
+
+```bash
+kubectl -n faros create secret generic faros-telemetry \
+  --from-literal=sink-token="$(openssl rand -hex 32)" \
+  --from-literal=hmac-secret="$(openssl rand -hex 32)"
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `telemetry.mode` | `off` | `off` or explicit `saas` opt-in |
+| `telemetry.endpoint` | `""` | HTTPS receiver CloudEvents batch endpoint, normally ending in `/v1/events`; credentials, query strings, and fragments are rejected |
+| `telemetry.installationID` | `""` | Stable opaque installation identifier; required in SaaS mode |
+| `telemetry.existingSecret` | `""` | Existing Secret containing the sink bearer and HMAC key; required in SaaS mode |
+| `telemetry.sinkTokenKey` | `sink-token` | Sink bearer assigned to this installation ID in the receiver's token map; minimum 16 characters |
+| `telemetry.hmacSecretKey` | `hmac-secret` | Identifier HMAC key in the existing Secret; minimum 32 characters |
+| `telemetry.caSecretName` | `""` | Optional existing Secret containing a private receiver CA bundle; mounted read-only only in SaaS mode |
+| `telemetry.caSecretKey` | `ca.crt` | Key in `telemetry.caSecretName` containing PEM-encoded CA certificates |
+| `telemetry.queueSize` | `1024` | Bounded in-memory event queue |
+| `telemetry.batchSize` | `100` | Maximum events per CloudEvents batch |
+| `telemetry.flushInterval` | `2s` | Maximum batch delay |
+| `telemetry.sendTimeout` | `5s` | Per-attempt receiver timeout |
+| `telemetry.shutdownTimeout` | `5s` | Bounded shutdown drain |
+
 ### TLS (Hub)
 
 | Key | Default | Description |

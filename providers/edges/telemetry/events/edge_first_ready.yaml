@@ -1,0 +1,32 @@
+version: 1
+internal_events: true
+action: edge_first_ready
+description: The first connected edge reached Ready for an opaque provider tenant scope.
+owner: edges
+product_group: edges
+product_categories:
+  - connectivity
+identifiers:
+  - scope
+  - resource
+tiers:
+  - free
+  - premium
+  - ultimate
+milestone: "0.1"
+status: active
+introduced_by_url: https://github.com/faroshq/faros
+retention_days: 90
+privacy:
+  class: pseudonymous
+  pseudonymize: [scope, resource]
+  no_raw_content: true
+additional_properties:
+  edge_type:
+    description: The bounded edge kind.
+    type: string
+    enum: [kubernetes_cluster, linux_server]
+  outcome:
+    description: Whether the first edge reached the ready state.
+    type: string
+    enum: [ready]

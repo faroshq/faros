@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "faros-telemetry.fullname" . }}
+  labels:
+    {{- include "faros-telemetry.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "faros-telemetry.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ if include "faros-telemetry.tlsEnabled" . }}https{{ else }}http{{ end }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ if include "faros-telemetry.tlsEnabled" . }}https{{ else }}http{{ end }}
+      protocol: TCP

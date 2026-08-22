@@ -47,10 +47,19 @@ store:
 
 hub:
   url: "http://faros-hub.faros.svc.cluster.local:8080"
+  # Skip TLS verification and explicitly allow HTTP telemetry transport. This
+  # is a local/development escape hatch; use an HTTPS hub URL in production.
   insecure: false
   tokenSecretRef:
     name: ""
     key: token
+
+# Product activation telemetry is opt-in. When disabled (the default), the
+# provider constructs no network telemetry client and makes no telemetry calls.
+# When enabled, providerKubeconfig must contain the provider ServiceAccount
+# bearer token. hub.tokenSecretRef remains the optional heartbeat credential.
+telemetry:
+  enabled: false
 
 # Optional Secret whose keys are injected wholesale as environment variables
 # (LLM/channel credentials) — the containerized equivalent of sourcing .env.
