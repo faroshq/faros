@@ -4,12 +4,17 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { AlertCircle, ChevronLeft, ChevronRight, Inbox, Search, X } from 'lucide-vue-next'
 import resourceTableStyles from './ResourceTable.css?raw'
 import {
+  cursorPageRange,
   deriveTableFilterOptions,
   filterTableRows,
   paginateTableRows,
   tablePageCount,
   tableRange,
+  type ResourceTableChange,
   type TableFilterDefinition,
+  type TableFilterState,
+  type TablePageInfo,
+  type TablePaginationMode,
 } from './table'
 
 const STYLE_ID = 'faros-portalkit-resource-table-css'
@@ -35,9 +40,22 @@ const props = withDefaults(defineProps<{
   searchPlaceholder?: string
   searchKeys?: string[]
   filters?: TableFilterDefinition[]
+  /** Legacy client-side pagination switch. Server mode uses paginationMode. */
   paginated?: boolean
   pageSize?: number
   pageSizeOptions?: number[]
+  /** `client` preserves the legacy local filtering/paging behavior. */
+  paginationMode?: TablePaginationMode
+  /** Controlled page for server mode (one-based). */
+  page?: number
+  /** Controlled query; server mode never applies it to supplied rows. */
+  query?: string
+  /** Controlled selected filter values. Server definitions must provide options. */
+  filterValues?: TableFilterState
+  /** Cursor used to fetch the controlled page. Values are opaque. */
+  cursor?: string | null
+  /** Metadata for the supplied server page; total is optional. */
+  pageInfo?: TablePageInfo | null
 }>(), {
   // Vue casts an omitted Boolean prop to false in child components. A null
   // sentinel preserves omission so legacy callers retain loading -> content
@@ -55,12 +73,37 @@ const props = withDefaults(defineProps<{
   paginated: false,
   pageSize: 10,
   pageSizeOptions: () => [10, 25, 50],
+  paginationMode: 'client',
 })
 
 const query = ref('')
 const page = ref(1)
-const selectedPageSize = ref(Math.max(1, props.pageSize))
+const selectedPageSize = ref(normalizePageSize(props.pageSize))
 const selectedFilters = reactive<Record<string, string>>({})
+
+// `undefined` means that no request cursor for that page has been saved yet;
+// null is a real, known first-page cursor. This distinction keeps Previous
+// disabled when a caller lands on a page without cursor history.
+const cursorHistory = ref<Array<string | null | undefined>>(
+  normalizePage(props.page) > 1
+    ? Array.from({ length: normalizePage(props.page) }, () => undefined)
+    : [props.cursor ?? null],
+)
+
+const isServerPagination = computed(() => props.paginationMode === 'server')
+const paginationEnabled = computed(() => props.paginated || isServerPagination.value)
+const currentPage = computed(() => normalizePage(props.page ?? page.value))
+const currentPageSize = computed(() => normalizePageSize(selectedPageSize.value))
+const currentQuery = computed(() => props.query === undefined ? query.value : props.query)
+const controlledFilterValues = computed(() => props.filterValues)
+const currentFilters = computed<TableFilterState>(() => {
+  const values = controlledFilterValues.value ?? selectedFilters
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value ?? '')]))
+})
+const filterSignature = computed(() => Object.entries(currentFilters.value)
+  .sort(([left], [right]) => left.localeCompare(right))
+  .map(([key, value]) => `${key}\u0000${value}`)
+  .join('\u0001'))
 
 const explicitReadState = computed(() => props.loaded !== null)
 const showInitialError = computed(() =>
@@ -75,40 +118,103 @@ const ariaBusy = computed(() =>
     : !!props.loading,
 )
 const filterOptions = computed(() => Object.fromEntries(
-  props.filters.map(definition => [definition.key, deriveTableFilterOptions(props.rows, definition)]),
+  props.filters.map(definition => [definition.key, isServerPagination.value
+    ? (definition.options ?? [])
+    : deriveTableFilterOptions(props.rows, definition)]),
 ))
-const filteredRows = computed(() => filterTableRows(
-  props.rows,
-  query.value,
-  props.searchKeys.length ? props.searchKeys : props.columns.map(column => column.key).filter(key => key !== 'actions'),
-  selectedFilters,
-))
-const totalPages = computed(() => tablePageCount(filteredRows.value.length, selectedPageSize.value))
-const visibleRows = computed(() => props.paginated
-  ? paginateTableRows(filteredRows.value, page.value, selectedPageSize.value)
-  : filteredRows.value,
+const filteredRows = computed(() => {
+  if (isServerPagination.value) return props.rows
+  return filterTableRows(
+    props.rows,
+    currentQuery.value,
+    props.searchKeys.length ? props.searchKeys : props.columns.map(column => column.key).filter(key => key !== 'actions'),
+    currentFilters.value,
+  )
+})
+const visibleRows = computed(() => isServerPagination.value
+  ? props.rows
+  : paginationEnabled.value
+    ? paginateTableRows(filteredRows.value, currentPage.value, currentPageSize.value)
+    : filteredRows.value,
 )
-const visibleRange = computed(() => tableRange(filteredRows.value.length, page.value, selectedPageSize.value))
-const activeFilters = computed(() => !!query.value.trim() || Object.values(selectedFilters).some(Boolean))
+const serverTotal = computed(() => {
+  if (!isServerPagination.value || props.pageInfo?.total === undefined) return null
+  return normalizeTotal(props.pageInfo.total)
+})
+const serverHasNext = computed(() => {
+  if (!isServerPagination.value || !props.pageInfo) return false
+  return props.pageInfo.hasNext ?? (props.pageInfo.nextCursor !== null && props.pageInfo.nextCursor !== undefined)
+})
+const serverNextCursor = computed(() =>
+  isServerPagination.value ? props.pageInfo?.nextCursor ?? null : null,
+)
+const totalPages = computed(() => {
+  if (isServerPagination.value) {
+    return serverTotal.value === null ? currentPage.value : tablePageCount(serverTotal.value, currentPageSize.value)
+  }
+  return tablePageCount(filteredRows.value.length, currentPageSize.value)
+})
+const visibleRange = computed(() => isServerPagination.value
+  ? cursorPageRange(currentPage.value, currentPageSize.value, visibleRows.value.length, serverTotal.value)
+  : tableRange(filteredRows.value.length, currentPage.value, currentPageSize.value))
+const activeFilters = computed(() => !!currentQuery.value.trim() || Object.values(currentFilters.value).some(Boolean))
 const showControls = computed(() =>
-  (props.searchable || props.filters.length > 0) && (props.rows.length > 0 || activeFilters.value),
+  (props.searchable || props.filters.length > 0)
+    && (isServerPagination.value || props.rows.length > 0 || activeFilters.value),
 )
-const showPagination = computed(() => props.rows.length > 0 && props.paginated)
+const showPagination = computed(() => {
+  if (!paginationEnabled.value) return false
+  if (!isServerPagination.value) return props.rows.length > 0
+  return props.rows.length > 0
+    || currentPage.value > 1
+    || (serverTotal.value !== null && serverTotal.value > 0)
+    || serverHasNext.value
+})
 const normalizedPageSizes = computed(() => [...new Set([...props.pageSizeOptions, props.pageSize])]
   .filter(value => Number.isFinite(value) && value > 0)
   .sort((left, right) => left - right))
+const canPrevious = computed(() => {
+  if (currentPage.value <= 1) return false
+  if (!isServerPagination.value) return true
+  return cursorHistory.value[currentPage.value - 2] !== undefined
+})
+const canNext = computed(() => {
+  if (!isServerPagination.value) return currentPage.value < totalPages.value && filteredRows.value.length > 0
+  return serverHasNext.value && serverNextCursor.value !== null
+})
 
 const emit = defineEmits<{
   rowClick: [row: Record<string, unknown>]
   retry: []
+  /** One typed state event covers page changes and query-shape resets. */
+  change: [change: ResourceTableChange]
+  'update:page': [page: number]
+  'update:pageSize': [pageSize: number]
+  'update:query': [query: string]
+  'update:filterValues': [filters: TableFilterState]
 }>()
 
-watch(() => props.pageSize, value => { selectedPageSize.value = Math.max(1, value); page.value = 1 })
-watch([query, selectedPageSize, () => props.filters.map(filter => selectedFilters[filter.key] ?? '').join('\u0000')], () => { page.value = 1 })
-watch(totalPages, value => { page.value = Math.min(page.value, value) })
+watch(() => props.pageSize, value => {
+  const next = normalizePageSize(value)
+  if (selectedPageSize.value !== next) selectedPageSize.value = next
+  if (props.page === undefined) page.value = 1
+  if (isServerPagination.value) resetCursorHistory()
+})
+watch([currentQuery, filterSignature, selectedPageSize], () => {
+  if (props.page === undefined) page.value = 1
+})
+watch([currentQuery, filterSignature], () => {
+  if (isServerPagination.value) resetCursorHistory()
+})
+watch(totalPages, value => {
+  if (!isServerPagination.value && props.page === undefined) page.value = Math.min(page.value, value)
+})
 watch(() => props.filters.map(filter => filter.key), keys => {
   keys.forEach(key => { if (!(key in selectedFilters)) selectedFilters[key] = '' })
   Object.keys(selectedFilters).forEach(key => { if (!keys.includes(key)) delete selectedFilters[key] })
+}, { immediate: true })
+watch([currentPage, () => props.cursor], ([nextPage, cursor]) => {
+  if (cursor !== undefined) rememberCursor(nextPage, cursor)
 }, { immediate: true })
 
 onMounted(() => {
@@ -118,6 +224,86 @@ onMounted(() => {
   style.textContent = resourceTableStyles
   document.head.appendChild(style)
 })
+
+function normalizePage(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? Math.floor(value as number) : 1
+}
+
+function normalizePageSize(value: number | undefined): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? Math.floor(value as number) : 1
+}
+
+function normalizeTotal(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : null
+}
+
+function rememberCursor(nextPage: number, cursor: string | null) {
+  const history = [...cursorHistory.value]
+  while (history.length < nextPage) history.push(undefined)
+  history[nextPage - 1] = cursor
+  cursorHistory.value = history
+}
+
+function resetCursorHistory() {
+  cursorHistory.value = [null]
+}
+
+function snapshotFilters(): TableFilterState {
+  return { ...currentFilters.value }
+}
+
+function emitChange(
+  reason: ResourceTableChange['reason'],
+  nextPage: number,
+  cursor: string | null,
+  overrides: Partial<Pick<ResourceTableChange, 'query' | 'filters'>> = {},
+) {
+  emit('change', {
+    reason,
+    page: nextPage,
+    pageSize: currentPageSize.value,
+    query: overrides.query ?? currentQuery.value,
+    filters: overrides.filters ?? snapshotFilters(),
+    cursor,
+  })
+}
+
+function setPage(nextPage: number, cursor: string | null) {
+  const target = Math.max(1, Math.floor(nextPage))
+  if (props.page === undefined) page.value = target
+  emit('update:page', target)
+  emitChange('page', target, cursor)
+}
+
+function setPageSize(value: number) {
+  const target = normalizePageSize(value)
+  selectedPageSize.value = target
+  resetCursorHistory()
+  if (props.page === undefined) page.value = 1
+  emit('update:pageSize', target)
+  emit('update:page', 1)
+  emitChange('page-size', 1, null)
+}
+
+function setQuery(value: string) {
+  if (props.query === undefined) query.value = value
+  resetCursorHistory()
+  if (props.page === undefined) page.value = 1
+  emit('update:query', value)
+  emit('update:page', 1)
+  emitChange('query', 1, null, { query: value })
+}
+
+function setFilter(key: string, value: string) {
+  const next = { ...snapshotFilters(), [key]: value }
+  if (controlledFilterValues.value === undefined) selectedFilters[key] = value
+  resetCursorHistory()
+  if (props.page === undefined) page.value = 1
+  emit('update:filterValues', next)
+  emit('update:page', 1)
+  emitChange('filter', 1, null, { filters: next })
+}
 
 function onRowClick(row: Record<string, unknown>) {
   if (props.interactive) emit('rowClick', row)
@@ -137,12 +323,35 @@ function rowIdentity(row: Record<string, unknown>, index: number): string | numb
 }
 
 function clearFilters() {
-  query.value = ''
-  Object.keys(selectedFilters).forEach(key => { selectedFilters[key] = '' })
+  const next = Object.fromEntries(props.filters.map(filter => [filter.key, '']))
+  if (props.query === undefined) query.value = ''
+  if (controlledFilterValues.value === undefined) {
+    Object.keys(selectedFilters).forEach(key => { selectedFilters[key] = '' })
+  }
+  resetCursorHistory()
+  if (props.page === undefined) page.value = 1
+  emit('update:query', '')
+  emit('update:filterValues', next)
+  emit('update:page', 1)
+  emitChange('filter', 1, null, { query: '', filters: next })
 }
 
-function previousPage() { page.value = Math.max(1, page.value - 1) }
-function nextPage() { page.value = Math.min(totalPages.value, page.value + 1) }
+function previousPage() {
+  if (!canPrevious.value) return
+  const target = currentPage.value - 1
+  const cursor = isServerPagination.value ? cursorHistory.value[target - 1] : null
+  if (cursor === undefined) return
+  setPage(target, cursor)
+}
+
+function nextPage() {
+  if (!canNext.value) return
+  const cursor = isServerPagination.value ? serverNextCursor.value : null
+  if (isServerPagination.value && cursor === null) return
+  const target = currentPage.value + 1
+  if (isServerPagination.value) rememberCursor(target, cursor)
+  setPage(target, cursor)
+}
 </script>
 
 <template>
@@ -176,12 +385,12 @@ function nextPage() { page.value = Math.min(totalPages.value, page.value + 1) }
         <label v-if="searchable" class="resource-table-search">
           <span class="sr-only" style="position:absolute;block-size:1px;inline-size:1px;overflow:hidden;clip:rect(0 0 0 0)">Search table</span>
           <Search class="resource-table-search-icon" :stroke-width="1.75" aria-hidden="true" />
-          <input v-model="query" class="resource-table-search-input" type="search" :placeholder="searchPlaceholder" autocomplete="off">
-          <button v-if="query" class="resource-table-search-clear" type="button" aria-label="Clear search" @click="query = ''"><X :stroke-width="1.75" /></button>
+          <input :value="currentQuery" class="resource-table-search-input" type="search" :placeholder="searchPlaceholder" autocomplete="off" @input="setQuery(($event.target as HTMLInputElement).value)">
+          <button v-if="currentQuery" class="resource-table-search-clear" type="button" aria-label="Clear search" @click="setQuery('')"><X :stroke-width="1.75" /></button>
         </label>
         <label v-for="filter in filters" :key="filter.key">
           <span class="sr-only" style="position:absolute;block-size:1px;inline-size:1px;overflow:hidden;clip:rect(0 0 0 0)">Filter by {{ filter.label }}</span>
-          <select v-model="selectedFilters[filter.key]" class="resource-table-filter-select" :aria-label="`Filter by ${filter.label}`">
+          <select :value="currentFilters[filter.key] || ''" class="resource-table-filter-select" :aria-label="`Filter by ${filter.label}`" @change="setFilter(filter.key, ($event.target as HTMLSelectElement).value)">
             <option value="">{{ filter.allLabel || `All ${filter.label.toLocaleLowerCase()}` }}</option>
             <option v-for="option in filterOptions[filter.key]" :key="option.value" :value="option.value">{{ option.label }}</option>
           </select>
@@ -211,18 +420,23 @@ function nextPage() { page.value = Math.min(totalPages.value, page.value + 1) }
 
       <footer v-if="showPagination" class="resource-table-pagination" aria-label="Table pagination">
         <div class="resource-table-range" aria-live="polite">
-          <template v-if="filteredRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong> of <strong>{{ filteredRows.length }}</strong></template>
+          <template v-if="isServerPagination && serverTotal !== null && visibleRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong> of <strong>{{ serverTotal }}</strong></template>
+          <template v-else-if="isServerPagination && visibleRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong></template>
+          <template v-else-if="filteredRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong> of <strong>{{ filteredRows.length }}</strong></template>
           <template v-else>Showing <strong>0</strong> results</template>
         </div>
         <label class="resource-table-page-size">Rows per page
-          <select v-model.number="selectedPageSize" class="resource-table-page-size-select" aria-label="Rows per page">
+          <select :value="currentPageSize" class="resource-table-page-size-select" aria-label="Rows per page" @change="setPageSize(Number(($event.target as HTMLSelectElement).value))">
             <option v-for="size in normalizedPageSizes" :key="size" :value="size">{{ size }}</option>
           </select>
         </label>
         <div class="resource-table-page-actions">
-          <button class="resource-table-page-button" type="button" aria-label="Previous page" :disabled="page <= 1" @click="previousPage"><ChevronLeft :stroke-width="1.75" /></button>
-          <span class="resource-table-page-indicator" aria-live="polite">{{ page }} / {{ totalPages }}</span>
-          <button class="resource-table-page-button" type="button" aria-label="Next page" :disabled="page >= totalPages || filteredRows.length === 0" @click="nextPage"><ChevronRight :stroke-width="1.75" /></button>
+          <button class="resource-table-page-button" type="button" aria-label="Previous page" :disabled="!canPrevious" @click="previousPage"><ChevronLeft :stroke-width="1.75" /></button>
+          <span class="resource-table-page-indicator" aria-live="polite">
+            <template v-if="isServerPagination && serverTotal === null">Page {{ currentPage }}</template>
+            <template v-else>{{ currentPage }} / {{ totalPages }}</template>
+          </span>
+          <button class="resource-table-page-button" type="button" aria-label="Next page" :disabled="!canNext" @click="nextPage"><ChevronRight :stroke-width="1.75" /></button>
         </div>
       </footer>
     </template>

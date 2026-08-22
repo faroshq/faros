@@ -9,6 +9,18 @@ import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vu
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import {
+  clonePackageFilters,
+  EMPTY_PACKAGE_FILTERS,
+  hasActivePackageFilters,
+  PACKAGE_FILTERS,
+  PACKAGE_PAGE_SIZE,
+  packagePageInfo as toPackagePageInfo,
+  packageVisibility,
+  type PackageFilterValues,
+  type PackagePageInfo,
+  type PackagePaginationMode,
+} from '../packagesPagination'
 
 const props = defineProps<{ name: string; deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -54,6 +66,13 @@ const packages = ref<Package[]>([])
 const packagesLoading = ref(true)
 const packagesLoaded = ref(false)
 const packagesError = ref<string | null>(null)
+const packageMode = ref<PackagePaginationMode>('server')
+const packagePage = ref(1)
+const packagePageSize = ref(PACKAGE_PAGE_SIZE)
+const packageQuery = ref('')
+const packageFilters = ref<PackageFilterValues>(clonePackageFilters(EMPTY_PACKAGE_FILTERS))
+const packageCursor = ref<string | null>(null)
+const packagePageInfo = ref<PackagePageInfo | null>(null)
 
 const operations = createOperationLocks()
 const keyColumns = [
@@ -101,6 +120,7 @@ const collabRows = computed<Array<Record<string, unknown>>>(() => collabs.value
   })))
 const packageRows = computed<Array<Record<string, unknown>>>(() => packages.value.map(item => ({
   ...item,
+  visibility: packageVisibility(item.visibility),
   deleting: isPackageDeleting(item),
   rowKey: item.uid || `${item.type}/${item.name}`,
   status: isPackageDeleting(item) ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
@@ -144,6 +164,76 @@ function loadAll() {
   loadConnections()
   loadKeys()
   loadCollaborators()
+  loadPackages()
+}
+
+interface PackageRequest {
+  mode: PackagePaginationMode
+  active: boolean
+  page: number
+  pageSize: number
+  query: string
+  filters: PackageFilterValues
+  cursor: string | null
+}
+
+function currentPackageRequest(): PackageRequest {
+  const filters = clonePackageFilters(packageFilters.value)
+  return {
+    mode: packageMode.value,
+    active: hasActivePackageFilters(packageQuery.value, filters),
+    page: packagePage.value,
+    pageSize: packagePageSize.value,
+    query: packageQuery.value,
+    filters,
+    cursor: packageCursor.value,
+  }
+}
+
+function packageRequestIsCurrent(requestID: number, request: PackageRequest): boolean {
+  const current = currentPackageRequest()
+  return packageRefresh.isCurrent(requestID) &&
+    current.mode === request.mode &&
+    current.active === request.active &&
+    current.page === request.page &&
+    current.pageSize === request.pageSize &&
+    current.query === request.query &&
+    current.cursor === request.cursor &&
+    current.filters.type === request.filters.type &&
+    current.filters.visibility === request.filters.visibility &&
+    current.filters.status === request.filters.status
+}
+
+function handlePackageChange(change: {
+  reason: 'page' | 'page-size' | 'query' | 'filter'
+  page: number
+  pageSize: number
+  query: string
+  filters: Record<string, string>
+  cursor: string | null
+}) {
+  const filters: PackageFilterValues = {
+    type: change.filters.type || '',
+    visibility: change.filters.visibility || '',
+    status: change.filters.status || '',
+  }
+  const active = hasActivePackageFilters(change.query, filters)
+  packagePage.value = change.page
+  packagePageSize.value = change.pageSize
+  packageQuery.value = change.query
+  packageFilters.value = filters
+  packageCursor.value = change.cursor
+  packagePageInfo.value = null
+
+  if (!active) {
+    packageMode.value = 'server'
+    packages.value = []
+    loadPackages()
+    return
+  }
+
+  if (packageMode.value === 'client') return
+  packages.value = []
   loadPackages()
 }
 
@@ -353,15 +443,40 @@ collabRefresh = createLatestRefreshController(async requestID => {
 })
 
 packageRefresh = createLatestRefreshController(async requestID => {
+  const request = currentPackageRequest()
   packagesLoading.value = true
+  // Do not render an unfiltered server page as the result of a newly entered
+  // query. Same-page polling keeps cached rows visible until the replacement
+  // arrives, preserving the existing stale-read behavior.
+  if (request.active && request.mode === 'server') {
+    packages.value = []
+    packagePageInfo.value = null
+  }
   try {
-    const next = await api.listPackages(props.name)
-    if (!packageRefresh.isCurrent(requestID)) return
-    packages.value = next
+    if (request.active || request.mode === 'client') {
+      const next = await api.listPackages(props.name)
+      if (!packageRequestIsCurrent(requestID, request)) return
+      packages.value = next
+      if (request.mode === 'server') {
+        packageMode.value = 'client'
+        packagePage.value = 1
+      }
+      packageCursor.value = null
+      packagePageInfo.value = null
+    } else {
+      const next = await api.listPackagesPage(props.name, {
+        limit: request.pageSize,
+        ...(request.cursor ? { continue: request.cursor } : {}),
+      })
+      if (!packageRequestIsCurrent(requestID, request)) return
+      packages.value = next.items
+      packageCursor.value = request.cursor
+      packagePageInfo.value = toPackagePageInfo(next.continue)
+    }
     packagesLoaded.value = true
     packagesError.value = null
   } catch (e) {
-    if (!packageRefresh.isCurrent(requestID)) return
+    if (!packageRequestIsCurrent(requestID, request)) return
     const err = e as ErrorResponse
     packagesError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
@@ -480,11 +595,11 @@ onUnmounted(() => {
       </div>
 
       <div class="panel section-panel">
-        <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded" class="muted">{{ packageRows.length }}</span></div>
-        <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="[{ key: 'type', label: 'Type' }, { key: 'visibility', label: 'Visibility' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages">
+        <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded && packageMode === 'client'" class="muted">{{ packageRows.length }}</span></div>
+        <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="PACKAGE_FILTERS" :pagination-mode="packageMode" :page="packagePage" :page-size="packagePageSize" :query="packageQuery" :filter-values="packageFilters" :cursor="packageCursor" :page-info="packagePageInfo" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages" @change="handlePackageChange">
           <template #name="{ row }"><strong><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
           <template #type="{ value }"><span class="badge muted">{{ value }}</span></template>
-          <template #visibility="{ value }"><span class="muted">{{ value || '—' }}</span></template>
+          <template #visibility="{ value }"><span class="muted">{{ value === 'unknown' ? '—' : value }}</span></template>
           <template #versionCount="{ value }"><span class="muted">{{ value || 0 }}</span></template>
           <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
           <template #url="{ row }"><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" class="link" :href="String(row.htmlURL)" target="_blank" rel="noopener">View ↗</a></template>

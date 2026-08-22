@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { RefreshCw, Plus, Check } from 'lucide-vue-next'
 import {
-  listServices, createKubeEdgeService, deleteEdgeService, listEdges,
+  listServices, listServicesPage, createKubeEdgeService, deleteEdgeService, listEdges,
   fetchServiceCatalog,
 } from './api'
 import type { CatalogEntry } from './api'
@@ -13,6 +13,8 @@ import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue
 import ResourceTableEditButton from './portalkit/ResourceTableEditButton.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import ServiceEdit from './ServiceEdit.vue'
+import type { ResourceTableChange, TableFilterDefinition, TablePageInfo } from './portalkit/table'
+import { hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
 
 // Service type catalog — fetched from the backend (svccatalog.All()) so the form
 // never drifts from the provider's auth/probe knowledge. Each entry seeds the
@@ -79,6 +81,52 @@ const serviceRows = computed<Array<Record<string, unknown>>>(() => services.valu
   credentials: service.hasCredentials ? 'Configured' : 'Missing',
   actions: '',
 })))
+
+const SERVICE_STATUS_OPTIONS = [
+  { value: 'Pending', label: 'Pending' },
+  { value: 'Detected', label: 'Detected' },
+  { value: 'Ready', label: 'Ready' },
+  { value: 'Unreachable', label: 'Unreachable' },
+]
+
+type ServiceFilterValues = {
+  edgeName: string
+  typeLabel: string
+  status: string
+}
+
+type ServicePaginationMode = PaginationMode
+
+const tableMode = ref<ServicePaginationMode>('server')
+const tablePage = ref(1)
+const tablePageSize = ref(10)
+const tableQuery = ref('')
+const filterValues = ref<ServiceFilterValues>({ edgeName: '', typeLabel: '', status: '' })
+const tableCursor = ref<string | null>(null)
+const tablePageInfo = ref<TablePageInfo | null>(null)
+
+const serviceFilters = computed<TableFilterDefinition[]>(() => {
+  const types = new Map<string, string>()
+  catalog.value.forEach(entry => types.set(entry.displayName, entry.displayName))
+  return [
+    {
+      key: 'edgeName',
+      label: 'Edge',
+      options: edges.value.map(edge => ({ value: edge.name, label: edge.name })),
+    },
+    {
+      key: 'typeLabel',
+      label: 'Type',
+      options: [...types].map(([value, label]) => ({ value, label })),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      allLabel: 'Any status',
+      options: SERVICE_STATUS_OPTIONS,
+    },
+  ]
+})
 
 const showCreate = ref(false)
 const busy = ref(false)
@@ -150,18 +198,106 @@ async function onEditSaved() {
   if (name) editing.value = services.value.find((s) => s.name === name) ?? null
 }
 
+type ServiceTableRequest = Omit<TableRequestState, 'filters'> & { filters: ServiceFilterValues }
+
+let latestRefreshID = 0
+let stopped = false
+
+function cloneServiceFilters(filters: ServiceFilterValues): ServiceFilterValues {
+  return { edgeName: filters.edgeName, typeLabel: filters.typeLabel, status: filters.status }
+}
+
+function currentServiceRequest(): ServiceTableRequest {
+  const filters = cloneServiceFilters(filterValues.value)
+  return {
+    mode: tableMode.value,
+    active: hasActiveTableFilters(tableQuery.value, filters),
+    page: tablePage.value,
+    pageSize: tablePageSize.value,
+    query: tableQuery.value,
+    filters,
+    cursor: tableCursor.value,
+  }
+}
+
+function serviceRequestIsCurrent(requestID: number, request: ServiceTableRequest): boolean {
+  const current = currentServiceRequest()
+  return !stopped && latestRefreshID === requestID && sameTableRequest(current, request)
+}
+
 async function refresh() {
+  const requestID = ++latestRefreshID
+  const request = currentServiceRequest()
   loading.value = true
   error.value = null
+  // Do not render an unfiltered page as though it matched a newly-entered
+  // query/filter. Same-page polling keeps cached rows visible until the
+  // replacement arrives.
+  if (request.active && request.mode === 'server') {
+    services.value = []
+    tablePageInfo.value = null
+  }
   try {
-    ;[services.value, edges.value] = await Promise.all([listServices(), listEdges()])
+    if (request.active || request.mode === 'client') {
+      const [nextServices, nextEdges] = await Promise.all([listServices(), listEdges()])
+      if (!serviceRequestIsCurrent(requestID, request)) return
+      services.value = nextServices
+      edges.value = nextEdges
+      if (request.mode === 'server') {
+        tableMode.value = 'client'
+        tablePage.value = 1
+      }
+      tableCursor.value = null
+      tablePageInfo.value = null
+    } else {
+      const [nextPage, nextEdges] = await Promise.all([
+        listServicesPage({
+          limit: request.pageSize,
+          ...(request.cursor ? { continue: request.cursor } : {}),
+        }),
+        listEdges(),
+      ])
+      if (!serviceRequestIsCurrent(requestID, request)) return
+      services.value = nextPage.items
+      edges.value = nextEdges
+      tableCursor.value = request.cursor
+      tablePageInfo.value = makeTablePageInfo(nextPage.continue)
+    }
     loaded.value = true
+    error.value = null
     if (!draft.value.edgeName && edges.value.length) draft.value.edgeName = edges.value[0].name
   } catch (e) {
+    if (!serviceRequestIsCurrent(requestID, request)) return
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load services'
   } finally {
-    loading.value = false
+    if (!stopped && latestRefreshID === requestID) loading.value = false
   }
+}
+
+function handleServiceTableChange(change: ResourceTableChange) {
+  filterValues.value = {
+    edgeName: change.filters.edgeName ?? '',
+    typeLabel: change.filters.typeLabel ?? '',
+    status: change.filters.status ?? '',
+  }
+  tablePage.value = change.page
+  tablePageSize.value = change.pageSize
+  tableQuery.value = change.query
+  tableCursor.value = change.cursor
+  tablePageInfo.value = null
+
+  const active = hasActiveTableFilters(tableQuery.value, filterValues.value)
+  if (!active) {
+    tableMode.value = 'server'
+    services.value = []
+    void refresh()
+    return
+  }
+  // Once a complete list has been fetched, query/filter/page changes are
+  // local and do not need another network read. Polling still refreshes it.
+  if (tableMode.value === 'client') return
+  services.value = []
+  void refresh()
 }
 
 const canCreate = computed(
@@ -216,7 +352,11 @@ onMounted(() => {
   refresh()
 })
 const timer = setInterval(refresh, 10000)
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  stopped = true
+  latestRefreshID += 1
+  clearInterval(timer)
+})
 
 </script>
 
@@ -329,14 +469,22 @@ onUnmounted(() => clearInterval(timer))
       :loaded="loaded"
       :loading="loading"
       :error="error"
+      :stale="loaded && !!error"
       retryable
       searchable
       search-placeholder="Search services…"
-      :filters="[{ key: 'edgeName', label: 'Edge' }, { key: 'typeLabel', label: 'Type' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      :filters="serviceFilters"
+      :pagination-mode="tableMode"
+      :page="tablePage"
+      :page-size="tablePageSize"
+      :query="tableQuery"
+      :filter-values="filterValues"
+      :cursor="tableCursor"
+      :page-info="tablePageInfo"
       paginated
-      :page-size="10"
       empty-text="No services yet. Create one to expose its tools through MCP."
       @retry="refresh"
+      @change="handleServiceTableChange"
       @row-click="(row) => openEdit(row as unknown as EdgeService)"
     >
       <template #name="{ value }"><span class="name">{{ value }}</span></template>

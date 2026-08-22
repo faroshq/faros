@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { RefreshCw, Plus, ChevronRight, ChevronDown, Store, Rocket } from 'lucide-vue-next'
-import { listWorkloads, createWorkload, deleteWorkload, deployMarketplaceApp, listEdges, type WorkloadDraft } from './api'
+import { listWorkloads, listWorkloadsPage, createWorkload, deleteWorkload, deployMarketplaceApp, listEdges, type WorkloadDraft } from './api'
 import type { Workload, Edge, ErrorResponse } from './types'
 import { confirmDialog } from './portalkit/confirm'
 import ResourceTable from './portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import { MARKETPLACE_CATEGORIES, type MarketplaceApp } from './marketplace'
+import type { ResourceTableChange, TableFilterDefinition, TablePageInfo } from './portalkit/table'
+import { hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
 
 const workloads = ref<Workload[]>([])
 const edges = ref<Edge[]>([])
@@ -33,6 +35,36 @@ const workloadRows = computed<Array<Record<string, unknown>>>(() => workloads.va
   ready: `${workload.readyReplicas ?? 0}/${workload.replicas ?? 1}`,
   actions: '',
 })))
+
+const WORKLOAD_STRATEGY_OPTIONS = [
+  { value: 'Spread', label: 'Spread' },
+  { value: 'Singleton', label: 'Singleton' },
+]
+const WORKLOAD_STATUS_OPTIONS = [
+  { value: 'Pending', label: 'Pending' },
+  { value: 'Running', label: 'Running' },
+  { value: 'Failed', label: 'Failed' },
+  { value: 'Unknown', label: 'Unknown' },
+]
+
+type WorkloadFilterValues = {
+  strategy: string
+  status: string
+}
+
+type WorkloadPaginationMode = PaginationMode
+
+const tableMode = ref<WorkloadPaginationMode>('server')
+const tablePage = ref(1)
+const tablePageSize = ref(10)
+const tableQuery = ref('')
+const filterValues = ref<WorkloadFilterValues>({ strategy: '', status: '' })
+const tableCursor = ref<string | null>(null)
+const tablePageInfo = ref<TablePageInfo | null>(null)
+const workloadFilters: TableFilterDefinition[] = [
+  { key: 'strategy', label: 'Strategy', options: WORKLOAD_STRATEGY_OPTIONS },
+  { key: 'status', label: 'Status', allLabel: 'Any status', options: WORKLOAD_STATUS_OPTIONS },
+]
 
 // Marketplace deploy state.
 const showMarket = ref(true)
@@ -92,18 +124,104 @@ function toggle(name: string) {
   expanded.value = expanded.value === name ? null : name
 }
 
+type WorkloadTableRequest = Omit<TableRequestState, 'filters'> & { filters: WorkloadFilterValues }
+
+let latestRefreshID = 0
+let stopped = false
+
+function cloneWorkloadFilters(filters: WorkloadFilterValues): WorkloadFilterValues {
+  return { strategy: filters.strategy, status: filters.status }
+}
+
+function currentWorkloadRequest(): WorkloadTableRequest {
+  const filters = cloneWorkloadFilters(filterValues.value)
+  return {
+    mode: tableMode.value,
+    active: hasActiveTableFilters(tableQuery.value, filters),
+    page: tablePage.value,
+    pageSize: tablePageSize.value,
+    query: tableQuery.value,
+    filters,
+    cursor: tableCursor.value,
+  }
+}
+
+function workloadRequestIsCurrent(requestID: number, request: WorkloadTableRequest): boolean {
+  const current = currentWorkloadRequest()
+  return !stopped && latestRefreshID === requestID && sameTableRequest(current, request)
+}
+
 async function refresh() {
+  const requestID = ++latestRefreshID
+  const request = currentWorkloadRequest()
   loading.value = true
   error.value = null
+  // Do not render an unfiltered page as though it matched a newly-entered
+  // query/filter. Same-page polling keeps cached rows visible until the
+  // replacement arrives.
+  if (request.active && request.mode === 'server') {
+    workloads.value = []
+    tablePageInfo.value = null
+  }
   try {
-    ;[workloads.value, edges.value] = await Promise.all([listWorkloads(), listEdges()])
+    if (request.active || request.mode === 'client') {
+      const [nextWorkloads, nextEdges] = await Promise.all([listWorkloads(), listEdges()])
+      if (!workloadRequestIsCurrent(requestID, request)) return
+      workloads.value = nextWorkloads
+      edges.value = nextEdges
+      if (request.mode === 'server') {
+        tableMode.value = 'client'
+        tablePage.value = 1
+      }
+      tableCursor.value = null
+      tablePageInfo.value = null
+    } else {
+      const [nextPage, nextEdges] = await Promise.all([
+        listWorkloadsPage({
+          limit: request.pageSize,
+          ...(request.cursor ? { continue: request.cursor } : {}),
+        }),
+        listEdges(),
+      ])
+      if (!workloadRequestIsCurrent(requestID, request)) return
+      workloads.value = nextPage.items
+      edges.value = nextEdges
+      tableCursor.value = request.cursor
+      tablePageInfo.value = makeTablePageInfo(nextPage.continue)
+    }
     loaded.value = true
     if (!deployEdge.value && edges.value.length) deployEdge.value = edges.value[0].name
   } catch (e) {
+    if (!workloadRequestIsCurrent(requestID, request)) return
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load workloads'
   } finally {
-    loading.value = false
+    if (!stopped && latestRefreshID === requestID) loading.value = false
   }
+}
+
+function handleWorkloadTableChange(change: ResourceTableChange) {
+  filterValues.value = {
+    strategy: change.filters.strategy ?? '',
+    status: change.filters.status ?? '',
+  }
+  tablePage.value = change.page
+  tablePageSize.value = change.pageSize
+  tableQuery.value = change.query
+  tableCursor.value = change.cursor
+  tablePageInfo.value = null
+
+  const active = hasActiveTableFilters(tableQuery.value, filterValues.value)
+  if (!active) {
+    tableMode.value = 'server'
+    workloads.value = []
+    void refresh()
+    return
+  }
+  // Once a complete list has been fetched, query/filter/page changes are
+  // local and do not need another network read. Polling still refreshes it.
+  if (tableMode.value === 'client') return
+  workloads.value = []
+  void refresh()
 }
 
 function parseSelector(s: string): Record<string, string> {
@@ -150,7 +268,11 @@ async function onDelete(w: Workload) {
 
 onMounted(refresh)
 const timer = setInterval(refresh, 10000)
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  stopped = true
+  latestRefreshID += 1
+  clearInterval(timer)
+})
 
 function selectorText(s?: Record<string, string>): string {
   if (!s || !Object.keys(s).length) return 'all edges'
@@ -285,14 +407,22 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       :loaded="loaded"
       :loading="loading"
       :error="error"
+      :stale="loaded && !!error"
       retryable
       searchable
       search-placeholder="Search workloads…"
-      :filters="[{ key: 'strategy', label: 'Strategy' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      :filters="workloadFilters"
+      :pagination-mode="tableMode"
+      :page="tablePage"
+      :page-size="tablePageSize"
+      :query="tableQuery"
+      :filter-values="filterValues"
+      :cursor="tableCursor"
+      :page-info="tablePageInfo"
       paginated
-      :page-size="10"
       empty-text="No workloads yet. Create one to deploy it across matching edges."
       @retry="refresh"
+      @change="handleWorkloadTableChange"
       @row-click="(row) => toggle(String(row.name))"
     >
       <template #expand="{ row }"><component :is="expanded === row.name ? ChevronDown : ChevronRight" :size="14" /></template>

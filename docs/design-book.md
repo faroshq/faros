@@ -362,6 +362,14 @@ retains the current page when it remains valid. The shared presentation is:
 - Prefer "Load more" (a `.k-btn--ghost`) or infinite scroll for streams such as
   activity/event feeds; do not force page navigation onto an append-only flow.
 
+For a cursor-backed resource list, set `pagination-mode="server"` and control
+the table with `page`, `page-size`, `query`, `filter-values`, `cursor`, and
+`page-info`. Handle the typed `change` event to fetch the supplied page. Server
+mode renders the supplied rows as-is; it does not apply local search, filters,
+or slicing. Cursor values are opaque, and `page-info` should expose only the
+next-page state the backend actually returned—never an exact total inferred
+from a remaining-item count.
+
 ### Date / time picker
 None exists — all dates are read-only mono output via `portal/src/utils/time.ts`
 (keep it that way; timestamps DISPLAY in mono `tabular-nums`, relative + title

@@ -5,9 +5,21 @@ import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vu
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
+import type { ResourceTableChange } from '../portalkit/table'
 import type { Connection, ErrorResponse } from '../types'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 import { resourceNameError } from '../resourceName'
+import {
+  cloneConnectionFilters,
+  CONNECTION_FILTERS,
+  DATABRICKS_PAGE_SIZE,
+  EMPTY_CONNECTION_FILTERS,
+  hasActiveFilters,
+  pageInfo as toPageInfo,
+  serverCursorChange,
+  type ConnectionFilterValues,
+  type DatabricksPaginationMode,
+} from '../databricksPagination'
 
 const emit = defineEmits<{ (e: 'open', name: string): void }>()
 
@@ -17,6 +29,13 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
+const connectionMode = ref<DatabricksPaginationMode>('server')
+const connectionPage = ref(1)
+const connectionPageSize = ref(DATABRICKS_PAGE_SIZE)
+const connectionQuery = ref('')
+const connectionFilters = ref<ConnectionFilterValues>(cloneConnectionFilters(EMPTY_CONNECTION_FILTERS))
+const connectionCursor = ref<string | null>(null)
+const connectionPageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
 const rows = computed<Array<Record<string, unknown>>>(() => connections.value
   .filter(conn => !operations.isTombstoned(operationKey('connection', conn.name), conn.uid))
   .map(conn => ({ ...conn })))
@@ -90,10 +109,6 @@ async function submit() {
     return
   }
   const desiredName = name.value.trim()
-  if (connections.value.some(connection => connection.name === desiredName)) {
-    await focusFormError(`Connection "${desiredName}" already exists.`)
-    return
-  }
   const lock = operationKey('connection', desiredName)
   if (operations.isTombstoned(lock)) {
     await focusFormError(`Connection "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
@@ -105,6 +120,13 @@ async function submit() {
   }
   submitting.value = true
   try {
+    // The visible rows may be one cursor page. Duplicate protection must use a
+    // complete authoritative read before allowing the mutation.
+    const existing = await api.listConnections()
+    if (existing.some(connection => connection.name === desiredName)) {
+      await focusFormError(`Connection "${desiredName}" already exists.`)
+      return
+    }
     await api.saveConnection({
       name: desiredName,
       host: host.value,
@@ -119,6 +141,71 @@ async function submit() {
     submitting.value = false
     operations.release(lock)
   }
+}
+
+interface ConnectionRequest {
+  mode: DatabricksPaginationMode
+  active: boolean
+  page: number
+  pageSize: number
+  query: string
+  filters: ConnectionFilterValues
+  cursor: string | null
+}
+
+function currentConnectionRequest(): ConnectionRequest {
+  return {
+    mode: connectionMode.value,
+    active: hasActiveFilters(connectionQuery.value, connectionFilters.value),
+    page: connectionPage.value,
+    pageSize: connectionPageSize.value,
+    query: connectionQuery.value,
+    filters: cloneConnectionFilters(connectionFilters.value),
+    cursor: connectionCursor.value,
+  }
+}
+
+function connectionRequestIsCurrent(requestID: number, request: ConnectionRequest): boolean {
+  const current = currentConnectionRequest()
+  return refresh.isCurrent(requestID) &&
+    current.mode === request.mode &&
+    current.active === request.active &&
+    current.page === request.page &&
+    current.pageSize === request.pageSize &&
+    current.query === request.query &&
+    current.cursor === request.cursor &&
+    current.filters.authType === request.filters.authType &&
+    current.filters.status === request.filters.status
+}
+
+function handleConnectionChange(change: ResourceTableChange): void {
+  const filters: ConnectionFilterValues = {
+    authType: change.filters.authType || '',
+    status: change.filters.status || '',
+  }
+  const active = hasActiveFilters(change.query, filters)
+  const serverChange = serverCursorChange(change)
+  connectionPage.value = change.page
+  connectionPageSize.value = change.pageSize
+  connectionQuery.value = change.query
+  connectionFilters.value = filters
+  connectionCursor.value = change.cursor
+  connectionPageInfo.value = null
+
+  if (!active) {
+    connectionMode.value = 'server'
+    connections.value = []
+    connectionPage.value = serverChange.page
+    connectionCursor.value = serverChange.cursor
+    load()
+    return
+  }
+
+  // Once a complete walk is loaded, ResourceTable handles query/filter/page
+  // changes locally. Only the server -> client transition needs another read.
+  if (connectionMode.value === 'client') return
+  connections.value = []
+  load()
 }
 
 async function remove(row: Record<string, unknown>) {
@@ -149,17 +236,40 @@ async function remove(row: Record<string, unknown>) {
 }
 
 refresh = createLatestRefreshController(async requestID => {
+  const request = currentConnectionRequest()
   loading.value = true
+  // Never render the unfiltered server page as the result of a newly entered
+  // query. Same-mode polling keeps its cached rows visible.
+  if (request.active && request.mode === 'server') {
+    connections.value = []
+    connectionPageInfo.value = null
+  }
   try {
-    const next = await api.listConnections()
-    if (refresh.isCurrent(requestID)) {
+    if (request.active || request.mode === 'client') {
+      const next = await api.listConnections()
+      if (!connectionRequestIsCurrent(requestID, request)) return
       connections.value = next
+      if (request.mode === 'server') {
+        connectionMode.value = 'client'
+        connectionPage.value = 1
+      }
+      connectionCursor.value = null
+      connectionPageInfo.value = null
       operations.reconcile('connection', next.map(({ name, uid }) => ({ name, uid })))
-      loaded.value = true
-      error.value = null
+    } else {
+      const next = await api.listConnectionsPage({
+        limit: request.pageSize,
+        ...(request.cursor ? { continue: request.cursor } : {}),
+      })
+      if (!connectionRequestIsCurrent(requestID, request)) return
+      connections.value = next.items
+      connectionCursor.value = request.cursor
+      connectionPageInfo.value = toPageInfo(next.continue)
     }
+    loaded.value = true
+    error.value = null
   } catch (e) {
-    if (!refresh.isCurrent(requestID)) return
+    if (!connectionRequestIsCurrent(requestID, request)) return
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
@@ -234,9 +344,15 @@ onUnmounted(() => {
       :rows="rows"
       searchable
       search-placeholder="Search connections…"
-      :filters="[{ key: 'authType', label: 'Auth' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      :filters="CONNECTION_FILTERS"
       paginated
-      :page-size="10"
+      :pagination-mode="connectionMode"
+      :page="connectionPage"
+      :page-size="connectionPageSize"
+      :query="connectionQuery"
+      :filter-values="connectionFilters"
+      :cursor="connectionCursor"
+      :page-info="connectionPageInfo"
       row-key="name"
       :loaded="loaded"
       :loading="loading"
@@ -245,6 +361,7 @@ onUnmounted(() => {
       retryable
       empty-text="No connections yet."
       @retry="load"
+      @change="handleConnectionChange"
       @row-click="(row) => openResource(String(row.name))"
     >
       <template #name="{ value }"><button class="link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>

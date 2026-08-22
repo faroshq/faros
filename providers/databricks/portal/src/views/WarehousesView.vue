@@ -6,9 +6,22 @@ import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vu
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
+import type { ResourceTableChange } from '../portalkit/table'
 import type { Connection, ErrorResponse, Warehouse } from '../types'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 import { resourceNameError } from '../resourceName'
+import {
+  cloneWarehouseFilters,
+  DATABRICKS_PAGE_SIZE,
+  DATABRICKS_SUPPORT_PAGE_SIZE,
+  EMPTY_WAREHOUSE_FILTERS,
+  hasActiveFilters,
+  pageInfo as toPageInfo,
+  serverCursorChange,
+  type DatabricksPaginationMode,
+  type WarehouseFilterValues,
+  warehouseFilters,
+} from '../databricksPagination'
 
 const emit = defineEmits<{ (e: 'open', name: string): void; (e: 'browse', trigger?: HTMLElement): void }>()
 
@@ -19,6 +32,13 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
+const warehouseMode = ref<DatabricksPaginationMode>('server')
+const warehousePage = ref(1)
+const warehousePageSize = ref(DATABRICKS_PAGE_SIZE)
+const warehouseQuery = ref('')
+const warehouseFiltersValue = ref<WarehouseFilterValues>(cloneWarehouseFilters(EMPTY_WAREHOUSE_FILTERS))
+const warehouseCursor = ref<string | null>(null)
+const warehousePageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
 
 const showForm = ref(false)
 const submitting = ref(false)
@@ -37,6 +57,8 @@ const form = reactive({
   connectionRef: '',
   warehouseID: '',
 })
+
+const filterDefinitions = computed(() => warehouseFilters(connections.value))
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
@@ -105,10 +127,6 @@ async function submit() {
     return
   }
   const desiredName = form.name.trim()
-  if (warehouses.value.some(warehouse => warehouse.name === desiredName)) {
-    await focusFormError(`Warehouse "${desiredName}" already exists.`)
-    return
-  }
   const lock = operationKey('warehouse', desiredName)
   if (operations.isTombstoned(lock)) {
     await focusFormError(`Warehouse "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
@@ -120,6 +138,20 @@ async function submit() {
   }
   submitting.value = true
   try {
+    // A server page is not a complete duplicate or foreign-key check. Read
+    // both authoritative collections before applying the new warehouse.
+    const [existing, availableConnections] = await Promise.all([
+      api.listWarehouses(),
+      api.listConnections(),
+    ])
+    if (existing.some(warehouse => warehouse.name === desiredName)) {
+      await focusFormError(`Warehouse "${desiredName}" already exists.`)
+      return
+    }
+    if (!availableConnections.some(connection => connection.name === form.connectionRef)) {
+      await focusFormError('Selected connection is no longer available in this workspace.')
+      return
+    }
     await api.saveWarehouse({
       name: desiredName,
       connectionRef: form.connectionRef,
@@ -134,6 +166,71 @@ async function submit() {
     submitting.value = false
     operations.release(lock)
   }
+}
+
+interface WarehouseRequest {
+  mode: DatabricksPaginationMode
+  active: boolean
+  page: number
+  pageSize: number
+  query: string
+  filters: WarehouseFilterValues
+  cursor: string | null
+}
+
+function currentWarehouseRequest(): WarehouseRequest {
+  return {
+    mode: warehouseMode.value,
+    active: hasActiveFilters(warehouseQuery.value, warehouseFiltersValue.value),
+    page: warehousePage.value,
+    pageSize: warehousePageSize.value,
+    query: warehouseQuery.value,
+    filters: cloneWarehouseFilters(warehouseFiltersValue.value),
+    cursor: warehouseCursor.value,
+  }
+}
+
+function warehouseRequestIsCurrent(requestID: number, request: WarehouseRequest): boolean {
+  const current = currentWarehouseRequest()
+  return refresh.isCurrent(requestID) &&
+    current.mode === request.mode &&
+    current.active === request.active &&
+    current.page === request.page &&
+    current.pageSize === request.pageSize &&
+    current.query === request.query &&
+    current.cursor === request.cursor &&
+    current.filters.connectionRef === request.filters.connectionRef &&
+    current.filters.state === request.filters.state &&
+    current.filters.status === request.filters.status
+}
+
+function handleWarehouseChange(change: ResourceTableChange): void {
+  const filters: WarehouseFilterValues = {
+    connectionRef: change.filters.connectionRef || '',
+    state: change.filters.state || '',
+    status: change.filters.status || '',
+  }
+  const active = hasActiveFilters(change.query, filters)
+  const serverChange = serverCursorChange(change)
+  warehousePage.value = change.page
+  warehousePageSize.value = change.pageSize
+  warehouseQuery.value = change.query
+  warehouseFiltersValue.value = filters
+  warehouseCursor.value = change.cursor
+  warehousePageInfo.value = null
+
+  if (!active) {
+    warehouseMode.value = 'server'
+    warehouses.value = []
+    warehousePage.value = serverChange.page
+    warehouseCursor.value = serverChange.cursor
+    load()
+    return
+  }
+
+  if (warehouseMode.value === 'client') return
+  warehouses.value = []
+  load()
 }
 
 async function remove(row: Record<string, unknown>) {
@@ -164,21 +261,45 @@ async function remove(row: Record<string, unknown>) {
 }
 
 refresh = createLatestRefreshController(async requestID => {
+  const request = currentWarehouseRequest()
   loading.value = true
+  if (request.active && request.mode === 'server') {
+    warehouses.value = []
+    warehousePageInfo.value = null
+  }
   try {
-    const [connList, warehouseList] = await Promise.all([api.listConnections(), api.listWarehouses()])
-    if (!refresh.isCurrent(requestID)) return
-    connections.value = connList
-    warehouses.value = warehouseList
-    operations.reconcile('connection', connList.map(({ name, uid }) => ({ name, uid })))
-    operations.reconcile('warehouse', warehouseList.map(({ name, uid }) => ({ name, uid })))
+    const connPage = await api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE })
+    if (!warehouseRequestIsCurrent(requestID, request)) return
+    connections.value = connPage.items
+
+    if (request.active || request.mode === 'client') {
+      const warehouseList = await api.listWarehouses()
+      if (!warehouseRequestIsCurrent(requestID, request)) return
+      warehouses.value = warehouseList
+      if (request.mode === 'server') {
+        warehouseMode.value = 'client'
+        warehousePage.value = 1
+      }
+      warehouseCursor.value = null
+      warehousePageInfo.value = null
+      operations.reconcile('warehouse', warehouseList.map(({ name, uid }) => ({ name, uid })))
+    } else {
+      const warehousePageResult = await api.listWarehousesPage({
+        limit: request.pageSize,
+        ...(request.cursor ? { continue: request.cursor } : {}),
+      })
+      if (!warehouseRequestIsCurrent(requestID, request)) return
+      warehouses.value = warehousePageResult.items
+      warehouseCursor.value = request.cursor
+      warehousePageInfo.value = toPageInfo(warehousePageResult.continue)
+    }
     loaded.value = true
     error.value = null
-    if (connList.length && !connList.some(c => c.name === form.connectionRef)) {
-      form.connectionRef = connList[0].name
+    if (connections.value.length && !connections.value.some(c => c.name === form.connectionRef)) {
+      form.connectionRef = connections.value[0].name
     }
   } catch (e) {
-    if (!refresh.isCurrent(requestID)) return
+    if (!warehouseRequestIsCurrent(requestID, request)) return
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
@@ -254,9 +375,15 @@ onUnmounted(() => {
       :rows="rows"
       searchable
       search-placeholder="Search warehouses…"
-      :filters="[{ key: 'connectionRef', label: 'Connection' }, { key: 'state', label: 'State' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      :filters="filterDefinitions"
       paginated
-      :page-size="10"
+      :pagination-mode="warehouseMode"
+      :page="warehousePage"
+      :page-size="warehousePageSize"
+      :query="warehouseQuery"
+      :filter-values="warehouseFiltersValue"
+      :cursor="warehouseCursor"
+      :page-info="warehousePageInfo"
       row-key="name"
       :loaded="loaded"
       :loading="loading"
@@ -265,6 +392,7 @@ onUnmounted(() => {
       retryable
       empty-text="No warehouses yet."
       @retry="load"
+      @change="handleWarehouseChange"
       @row-click="(row) => openResource(String(row.name))"
     >
       <template #name="{ value }">

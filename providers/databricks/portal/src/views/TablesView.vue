@@ -8,10 +8,23 @@ import ResourceTableEditButton from '../portalkit/ResourceTableEditButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
+import type { ResourceTableChange } from '../portalkit/table'
 import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
 import type { Connection, ErrorResponse, Table, Warehouse } from '../types'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 import { resourceNameError } from '../resourceName'
+import {
+  cloneTableFilters,
+  DATABRICKS_PAGE_SIZE,
+  DATABRICKS_SUPPORT_PAGE_SIZE,
+  EMPTY_TABLE_FILTERS,
+  hasActiveFilters,
+  pageInfo as toPageInfo,
+  serverCursorChange,
+  tableFilters,
+  type DatabricksPaginationMode,
+  type TableFilterValues,
+} from '../databricksPagination'
 
 const emit = defineEmits<{ (e: 'open', name: string): void; (e: 'browse', trigger?: HTMLElement): void }>()
 
@@ -23,6 +36,13 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
+const tableMode = ref<DatabricksPaginationMode>('server')
+const tablePage = ref(1)
+const tablePageSize = ref(DATABRICKS_PAGE_SIZE)
+const tableQuery = ref('')
+const tableFiltersValue = ref<TableFilterValues>(cloneTableFilters(EMPTY_TABLE_FILTERS))
+const tableCursor = ref<string | null>(null)
+const tablePageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
 const showForm = ref(false)
 const editing = ref<string | null>(null)
 const submitting = ref(false)
@@ -50,6 +70,7 @@ const rows = computed<Array<Record<string, unknown>>>(() =>
 
 const tableImportBlocker = computed(() => !loaded.value ? '' : importPrerequisiteMessage(connections.value, warehouses.value))
 const formWarehouses = computed(() => warehousesForConnection(warehouses.value, form.connectionRef))
+const filterDefinitions = computed(() => tableFilters(warehouses.value))
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
@@ -150,11 +171,6 @@ async function submit() {
     return
   }
   const desiredName = form.name.trim()
-  const duplicate = tables.value.find(table => table.name === desiredName)
-  if (duplicate && duplicate.name !== editing.value) {
-    await focusFormError(`Table "${desiredName}" already exists.`)
-    return
-  }
   const lock = operationKey('table', desiredName)
   if (operations.isTombstoned(lock)) {
     await focusFormError(`Table "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
@@ -164,13 +180,29 @@ async function submit() {
     await focusFormError(`Table "${desiredName}" already has an update in progress.`)
     return
   }
-  if (!formWarehouses.value.some(warehouse => warehouse.name === form.warehouseRef)) {
-    operations.release(lock)
-    await focusFormError('Selected warehouse must belong to the selected connection.')
-    return
-  }
   submitting.value = true
   try {
+    // The visible table/supporting rows may be partial cursor pages. Resolve
+    // every duplicate and foreign-key check against complete authoritative
+    // collections before saving.
+    const [existingTables, availableConnections, availableWarehouses] = await Promise.all([
+      api.listTables(),
+      api.listConnections(),
+      api.listWarehouses(),
+    ])
+    const duplicate = existingTables.find(table => table.name === desiredName)
+    if (duplicate && duplicate.name !== editing.value) {
+      await focusFormError(`Table "${desiredName}" already exists.`)
+      return
+    }
+    if (!availableConnections.some(connection => connection.name === form.connectionRef)) {
+      await focusFormError('Selected connection is no longer available in this workspace.')
+      return
+    }
+    if (!availableWarehouses.some(warehouse => warehouse.name === form.warehouseRef && warehouse.connectionRef === form.connectionRef)) {
+      await focusFormError('Selected warehouse must belong to the selected connection.')
+      return
+    }
     await api.saveTable({
       name: desiredName,
       connectionRef: form.connectionRef,
@@ -188,6 +220,69 @@ async function submit() {
     submitting.value = false
     operations.release(lock)
   }
+}
+
+interface TableRequest {
+  mode: DatabricksPaginationMode
+  active: boolean
+  page: number
+  pageSize: number
+  query: string
+  filters: TableFilterValues
+  cursor: string | null
+}
+
+function currentTableRequest(): TableRequest {
+  return {
+    mode: tableMode.value,
+    active: hasActiveFilters(tableQuery.value, tableFiltersValue.value),
+    page: tablePage.value,
+    pageSize: tablePageSize.value,
+    query: tableQuery.value,
+    filters: cloneTableFilters(tableFiltersValue.value),
+    cursor: tableCursor.value,
+  }
+}
+
+function tableRequestIsCurrent(requestID: number, request: TableRequest): boolean {
+  const current = currentTableRequest()
+  return refresh.isCurrent(requestID) &&
+    current.mode === request.mode &&
+    current.active === request.active &&
+    current.page === request.page &&
+    current.pageSize === request.pageSize &&
+    current.query === request.query &&
+    current.cursor === request.cursor &&
+    current.filters.warehouseRef === request.filters.warehouseRef &&
+    current.filters.status === request.filters.status
+}
+
+function handleTableChange(change: ResourceTableChange): void {
+  const filters: TableFilterValues = {
+    warehouseRef: change.filters.warehouseRef || '',
+    status: change.filters.status || '',
+  }
+  const active = hasActiveFilters(change.query, filters)
+  const serverChange = serverCursorChange(change)
+  tablePage.value = change.page
+  tablePageSize.value = change.pageSize
+  tableQuery.value = change.query
+  tableFiltersValue.value = filters
+  tableCursor.value = change.cursor
+  tablePageInfo.value = null
+
+  if (!active) {
+    tableMode.value = 'server'
+    tables.value = []
+    tablePage.value = serverChange.page
+    tableCursor.value = serverChange.cursor
+    load()
+    return
+  }
+
+  if (tableMode.value === 'client') return
+  tables.value = []
+  load()
 }
 
 async function remove(row: Record<string, unknown>) {
@@ -218,27 +313,49 @@ async function remove(row: Record<string, unknown>) {
 }
 
 refresh = createLatestRefreshController(async requestID => {
+  const request = currentTableRequest()
   loading.value = true
+  if (request.active && request.mode === 'server') {
+    tables.value = []
+    tablePageInfo.value = null
+  }
   try {
-    const [connList, warehouseList, tableList] = await Promise.all([
-      api.listConnections(),
-      api.listWarehouses(),
-      api.listTables(),
+    const [connPage, warehousePageResult] = await Promise.all([
+      api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
+      api.listWarehousesPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
     ])
-    if (!refresh.isCurrent(requestID)) return
-    connections.value = connList
-    warehouses.value = warehouseList
-    tables.value = tableList
-    operations.reconcile('connection', connList.map(({ name, uid }) => ({ name, uid })))
-    operations.reconcile('warehouse', warehouseList.map(({ name, uid }) => ({ name, uid })))
-    operations.reconcile('table', tableList.map(({ name, uid }) => ({ name, uid })))
+    if (!tableRequestIsCurrent(requestID, request)) return
+    connections.value = connPage.items
+    warehouses.value = warehousePageResult.items
+
+    if (request.active || request.mode === 'client') {
+      const tableList = await api.listTables()
+      if (!tableRequestIsCurrent(requestID, request)) return
+      tables.value = tableList
+      if (request.mode === 'server') {
+        tableMode.value = 'client'
+        tablePage.value = 1
+      }
+      tableCursor.value = null
+      tablePageInfo.value = null
+      operations.reconcile('table', tableList.map(({ name, uid }) => ({ name, uid })))
+    } else {
+      const tablePageResult = await api.listTablesPage({
+        limit: request.pageSize,
+        ...(request.cursor ? { continue: request.cursor } : {}),
+      })
+      if (!tableRequestIsCurrent(requestID, request)) return
+      tables.value = tablePageResult.items
+      tableCursor.value = request.cursor
+      tablePageInfo.value = toPageInfo(tablePageResult.continue)
+    }
     loaded.value = true
     error.value = null
-    if (!form.connectionRef) form.connectionRef = connList[0]?.name ?? ''
-    if (connList.length && !connList.some(c => c.name === form.connectionRef)) form.connectionRef = connList[0].name
-    form.warehouseRef = nextValidWarehouseRef(warehouseList, form.connectionRef, form.warehouseRef)
+    if (!form.connectionRef) form.connectionRef = connections.value[0]?.name ?? ''
+    if (connections.value.length && !connections.value.some(c => c.name === form.connectionRef)) form.connectionRef = connections.value[0].name
+    form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, form.warehouseRef)
   } catch (e) {
-    if (!refresh.isCurrent(requestID)) return
+    if (!tableRequestIsCurrent(requestID, request)) return
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
@@ -345,9 +462,15 @@ onUnmounted(() => {
       :rows="rows"
       searchable
       search-placeholder="Search tables…"
-      :filters="[{ key: 'warehouseRef', label: 'Warehouse' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
+      :filters="filterDefinitions"
       paginated
-      :page-size="10"
+      :pagination-mode="tableMode"
+      :page="tablePage"
+      :page-size="tablePageSize"
+      :query="tableQuery"
+      :filter-values="tableFiltersValue"
+      :cursor="tableCursor"
+      :page-info="tablePageInfo"
       row-key="name"
       :loaded="loaded"
       :loading="loading"
@@ -355,6 +478,7 @@ onUnmounted(() => {
       :stale="loaded && !!error"
       retryable
       @retry="load"
+      @change="handleTableChange"
       @row-click="(row) => openResource(String(row.name))"
     >
       <template #name="{ value }"><button class="link mono strong" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>

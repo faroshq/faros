@@ -6,7 +6,21 @@ import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
+import type { ResourceTableChange } from '../portalkit/table'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import {
+  cloneRepositoryFilters,
+  EMPTY_REPOSITORY_FILTERS,
+  hasActiveRepositoryFilters,
+  applyRepositoryPaginationChange,
+  REPOSITORY_PAGE_SIZE,
+  repositoryFilters,
+  repositoryPageInfo as toRepositoryPageInfo,
+  repositoryStatus,
+  type RepositoryFilterValues,
+  type RepositoryPaginationState,
+  type RepositoryPaginationMode,
+} from '../repositoriesPagination'
 
 const props = defineProps<{ deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'open', name: string): void }>()
@@ -18,6 +32,13 @@ const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const loading = ref(false)
 const loaded = ref(false)
+const repositoryMode = ref<RepositoryPaginationMode>('server')
+const repositoryPage = ref(1)
+const repositoryPageSize = ref(REPOSITORY_PAGE_SIZE)
+const repositoryQuery = ref('')
+const repositoryFiltersValue = ref<RepositoryFilterValues>(cloneRepositoryFilters(EMPTY_REPOSITORY_FILTERS))
+const repositoryCursor = ref<string | null>(null)
+const repositoryPageInfo = ref<ReturnType<typeof toRepositoryPageInfo> | null>(null)
 const connectionsError = ref<string | null>(null)
 const connectionsLoading = ref(false)
 const connectionsLoaded = ref(false)
@@ -33,7 +54,7 @@ const columns = [
 const rows = computed<Array<Record<string, unknown>>>(() => repos.value
   .map(repository => {
     const deleting = isDeleting(repository)
-    return { ...repository, deleting, url: repository.htmlURL || '', status: deleting ? 'Deleting' : repository.ready ? 'ready' : 'pending', actions: '' }
+    return { ...repository, deleting, url: repository.htmlURL || '', status: deleting ? 'Deleting' : repositoryStatus(repository), actions: '' }
   }))
 
 function isDeleting(repository: Pick<Repository, 'name' | 'uid' | 'deletionTimestamp'>): boolean {
@@ -42,6 +63,7 @@ function isDeleting(repository: Pick<Repository, 'name' | 'uid' | 'deletionTimes
 const connectionChoices = computed(() => connections.value.filter(connection => (
   !connection.deletionTimestamp && !props.deletions.has('connection', connection.name, connection.uid)
 )))
+const repositoryFilterDefinitions = computed(() => repositoryFilters(connections.value))
 
 const showForm = ref(false)
 const name = ref('')
@@ -81,6 +103,64 @@ function openRepository(row: Record<string, unknown>) {
   if (!row.deleting && !operations.isLocked(operationKey('repository', resourceName))) emit('open', resourceName)
 }
 
+interface RepositoryRequest {
+  mode: RepositoryPaginationMode
+  active: boolean
+  page: number
+  pageSize: number
+  query: string
+  filters: RepositoryFilterValues
+  cursor: string | null
+}
+
+function currentRepositoryRequest(): RepositoryRequest {
+  return {
+    mode: repositoryMode.value,
+    active: hasActiveRepositoryFilters(repositoryQuery.value, repositoryFiltersValue.value),
+    page: repositoryPage.value,
+    pageSize: repositoryPageSize.value,
+    query: repositoryQuery.value,
+    filters: cloneRepositoryFilters(repositoryFiltersValue.value),
+    cursor: repositoryCursor.value,
+  }
+}
+
+function repositoryRequestIsCurrent(requestID: number, request: RepositoryRequest): boolean {
+  const current = currentRepositoryRequest()
+  return repoRefresh.isCurrent(requestID) &&
+    current.mode === request.mode &&
+    current.active === request.active &&
+    current.page === request.page &&
+    current.pageSize === request.pageSize &&
+    current.query === request.query &&
+    current.cursor === request.cursor &&
+    current.filters.connectionRef === request.filters.connectionRef &&
+    current.filters.visibility === request.filters.visibility &&
+    current.filters.status === request.filters.status
+}
+
+function handleRepositoryChange(change: ResourceTableChange): void {
+  const transition = applyRepositoryPaginationChange({
+    mode: repositoryMode.value,
+    page: repositoryPage.value,
+    pageSize: repositoryPageSize.value,
+    query: repositoryQuery.value,
+    filters: cloneRepositoryFilters(repositoryFiltersValue.value),
+    cursor: repositoryCursor.value,
+  } satisfies RepositoryPaginationState, change)
+  const next = transition.state
+  repositoryMode.value = next.mode
+  repositoryPage.value = next.page
+  repositoryPageSize.value = next.pageSize
+  repositoryQuery.value = next.query
+  repositoryFiltersValue.value = next.filters
+  repositoryCursor.value = next.cursor
+  repositoryPageInfo.value = null
+
+  if (transition.clearRows) repos.value = []
+  if (transition.reload) loadRepositories()
+}
+
 async function submit() {
   formError.value = null
   if (!loaded.value || !connectionsLoaded.value) {
@@ -95,13 +175,37 @@ async function submit() {
     formError.value = 'Select an active connection before creating a repository.'
     return
   }
-  const existing = repos.value.find(repository => repository.name === normalizeResourceName(name.value))
-  if (existing && isDeleting(existing)) {
-    formError.value = `Repository "${existing.name}" is still deleting. Wait for it to disappear before recreating it.`
+  const desiredName = normalizeResourceName(name.value)
+  const lock = operationKey('repository', desiredName)
+  if (!operations.acquire(lock, 'creating')) {
+    formError.value = `Repository "${desiredName}" already has an operation in progress.`
     return
   }
   submitting.value = true
   try {
+    // The visible server page may not contain a duplicate or a repository
+    // still terminating. Resolve both decisions against a complete walk before
+    // allowing the create mutation, and only then reconcile the deletion
+    // ledger because this read is authoritative for the whole workspace.
+    const allRepositories = await api.listRepositories()
+    if (!mounted) return
+    allRepositories
+      .filter(item => item.deletionTimestamp)
+      .forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+    props.deletions.reconcile(deletionScope, allRepositories)
+    const existing = allRepositories.find(repository => repository.name === desiredName)
+    if (existing && isDeleting(existing)) {
+      formError.value = `Repository "${existing.name}" is still deleting. Wait for it to disappear before recreating it.`
+      return
+    }
+    if (existing) {
+      formError.value = `Repository "${existing.name}" already exists.`
+      return
+    }
+    if (props.deletions.has(deletionScope, desiredName)) {
+      formError.value = `Repository "${desiredName}" is still deleting. Wait for it to disappear before recreating it.`
+      return
+    }
     const created = await api.createRepository({
       name: name.value,
       connectionRef: connectionRef.value,
@@ -110,8 +214,13 @@ async function submit() {
       description: description.value || undefined,
       autoInit: autoInit.value,
     })
-    repos.value = [...repos.value.filter(item => item.name !== created.name), created]
-    loaded.value = true
+    if (!mounted) return
+    // Client mode has a complete source, so retain the returned UID and action
+    // row immediately. Server mode remains page-shaped and refreshes the
+    // current cursor page instead of appending an out-of-page item.
+    if (repositoryMode.value === 'client') {
+      repos.value = [...repos.value.filter(item => item.name !== created.name), created]
+    }
     name.value = repo.value = description.value = ''
     showForm.value = false
     loadRepositories()
@@ -119,6 +228,7 @@ async function submit() {
     formError.value = errMessage(e)
   } finally {
     submitting.value = false
+    operations.release(lock)
   }
 }
 
@@ -137,6 +247,7 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteRepository(repository.name)
+    if (!mounted) return
     props.deletions.acknowledge(deletionScope, repository.name, repository.uid)
     loadRepositories()
   } catch (e) {
@@ -147,13 +258,40 @@ async function remove(row: Record<string, unknown>) {
 }
 
 repoRefresh = createLatestRefreshController(async requestID => {
+  const request = currentRepositoryRequest()
   loading.value = true
+  // Never render an unfiltered server page as the result of a newly entered
+  // query. Same-mode polling keeps cached rows visible.
+  if (request.active && request.mode === 'server') {
+    repos.value = []
+    repositoryPageInfo.value = null
+  }
   try {
-    const next = await api.listRepositories()
-    if (!repoRefresh.isCurrent(requestID)) return
-    repos.value = next
-    next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
-    props.deletions.reconcile(deletionScope, next)
+    if (request.active || request.mode === 'client') {
+      const next = await api.listRepositories()
+      if (!repositoryRequestIsCurrent(requestID, request)) return
+      repos.value = next
+      if (request.mode === 'server') {
+        repositoryMode.value = 'client'
+        repositoryPage.value = 1
+      }
+      repositoryCursor.value = null
+      repositoryPageInfo.value = null
+      next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+      props.deletions.reconcile(deletionScope, next)
+    } else {
+      const next = await api.listRepositoriesPage({
+        limit: request.pageSize,
+        ...(request.cursor ? { continue: request.cursor } : {}),
+      })
+      if (!repositoryRequestIsCurrent(requestID, request)) return
+      repos.value = next.items
+      repositoryCursor.value = request.cursor
+      repositoryPageInfo.value = toRepositoryPageInfo(next.continue)
+      // This page can prove that a tombstone is present, but cannot prove that
+      // an acknowledged delete is absent from the workspace.
+      next.items.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+    }
     loaded.value = true
     error.value = null
   } catch (e) {
@@ -253,9 +391,14 @@ onUnmounted(() => {
       :rows="rows"
       searchable
       search-placeholder="Search repositories…"
-      :filters="[{ key: 'connectionRef', label: 'Connection' }, { key: 'visibility', label: 'Visibility' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]"
-      paginated
-      :page-size="10"
+      :filters="repositoryFilterDefinitions"
+      :pagination-mode="repositoryMode"
+      :page="repositoryPage"
+      :page-size="repositoryPageSize"
+      :query="repositoryQuery"
+      :filter-values="repositoryFiltersValue"
+      :cursor="repositoryCursor"
+      :page-info="repositoryPageInfo"
       row-key="name"
       :loaded="loaded"
       :loading="loading"
@@ -264,6 +407,7 @@ onUnmounted(() => {
       retryable
       empty-text="No repositories yet."
       @retry="loadRepositories"
+      @change="handleRepositoryChange"
       @row-click="openRepository"
     >
       <template #name="{ value, row }"><span v-if="row.deleting">{{ row.repo || value }}</span><button v-else class="link" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
