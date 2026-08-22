@@ -245,6 +245,7 @@ test('searchable paginated tables render one bounded page and shared controls', 
   assert.match(tableStyle, /\.resource-table \{[\s\S]*?overflow: hidden;/)
   assert.match(tableStyle, /\.resource-table-scroll \{[\s\S]*?overflow-x: auto;/)
   assert.match(tableStyle, /\.resource-table-scroll:focus-visible \{[\s\S]*?box-shadow: inset/)
+  assert.match(tableStyle, /\.resource-table-pending-cell \{[\s\S]*?text-align: center;/)
 })
 
 test('table view helpers compose full-dataset search, facets, and paging', async () => {
@@ -478,6 +479,39 @@ test('cursor helpers retain opaque page history and reset query-shape state', as
   assert.deepEqual(reset.filters, { status: 'pending' })
 })
 
+test('first cursor page helper requires explicit complete first-page metadata', async () => {
+  const table = await tableHelpers()
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 1,
+    cursor: null,
+    pageInfo: { hasNext: false, nextCursor: null },
+  }), true)
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 1,
+    pageInfo: { hasNext: false },
+  }), true)
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 2,
+    cursor: null,
+    pageInfo: { hasNext: false, nextCursor: null },
+  }), false)
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 1,
+    cursor: 'opaque-first-page',
+    pageInfo: { hasNext: false, nextCursor: null },
+  }), false)
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 1,
+    cursor: null,
+    pageInfo: {},
+  }), false)
+  assert.equal(table.isCompleteFirstCursorPage({
+    page: 1,
+    cursor: null,
+    pageInfo: { hasNext: false, nextCursor: 'unexpected-next' },
+  }), false)
+})
+
 test('polled resource rows cannot replay the global entrance animation', async () => {
   const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
   assert.match(style, /faros-provider-databricks \.resource-table-row \{[\s\S]*?animation: none;/)
@@ -507,6 +541,71 @@ test('successful empty reads are the only empty-state case before a retrying bac
   assert.match(staleHTML, /Showing the last successful result\./)
   assert.match(staleHTML, /orders/)
   assert.match(staleHTML, />Retry</)
+})
+
+test('empty table bodies stay pending while loading, then show empty or results', async () => {
+  const ResourceTable = await resourceTable()
+  const pendingSearchHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: true,
+    loading: true,
+    searchable: true,
+    query: 'orders',
+    emptyText: 'No resources yet.',
+  }))
+  assert.match(pendingSearchHTML, /aria-busy="true"/)
+  assert.match(pendingSearchHTML, /resource-table-controls/)
+  assert.match(pendingSearchHTML, /Searching resources/)
+  assert.doesNotMatch(pendingSearchHTML, /No resources yet\./)
+  assert.doesNotMatch(pendingSearchHTML, /No resources match these filters\./)
+
+  const pendingCachedHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [{ name: 'cached' }],
+    loaded: true,
+    loading: true,
+    searchable: true,
+    paginationMode: 'server',
+  }))
+  assert.match(pendingCachedHTML, /cached/)
+  assert.doesNotMatch(pendingCachedHTML, /Loading resources/)
+
+  const pendingPageHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: true,
+    loading: true,
+    searchable: true,
+    paginationMode: 'server',
+    emptyText: 'No resources yet.',
+  }))
+  assert.match(pendingPageHTML, /resource-table-controls/)
+  assert.match(pendingPageHTML, /Loading resources/)
+  assert.doesNotMatch(pendingPageHTML, /No resources yet\./)
+
+  const emptyHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: true,
+    loading: false,
+    searchable: true,
+    query: 'orders',
+    emptyText: 'No resources yet.',
+  }))
+  assert.match(emptyHTML, /No resources match these filters\./)
+  assert.doesNotMatch(emptyHTML, /Searching resources/)
+
+  const resultsHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [{ name: 'orders' }],
+    loaded: true,
+    loading: false,
+    searchable: true,
+    query: 'orders',
+  }))
+  assert.match(resultsHTML, /orders/)
+  assert.doesNotMatch(resultsHTML, /Searching resources/)
 })
 
 test('status tones distinguish retryable and actionable condition failures', async () => {

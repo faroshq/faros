@@ -37,4 +37,31 @@ describe('instance server pagination transitions', () => {
     const branch = inactiveChangeBranch(instanceListSource)
     expect(branch).toContain('if (wasClientMode || change.reason === \'query\' || change.reason === \'filter\') resetToFirstServerPage()')
   })
+
+  it('keeps query and filter edits local while a complete client walk is in flight', () => {
+    const clientBranchOffset = instanceListSource.indexOf("if (paginationMode.value === 'client')")
+    expect(clientBranchOffset).toBeGreaterThanOrEqual(0)
+    const clientBranch = instanceListSource.slice(clientBranchOffset, instanceListSource.indexOf('\n  // Entering a query/filter', clientBranchOffset))
+    expect(clientBranch).toContain('query-independent')
+    expect(clientBranch).not.toContain("change.reason === 'query' || change.reason === 'filter'")
+    expect(clientBranch).toContain("change.reason === 'page-size'")
+    expect(clientBranch).toContain('void load()')
+    expect(clientBranch).toContain('return')
+  })
+
+  it('re-enters client mode after a clear read without relying on polling', () => {
+    const clientBranchOffset = instanceListSource.indexOf("if (paginationMode.value === 'client')")
+    expect(clientBranchOffset).toBeGreaterThanOrEqual(0)
+    const clientBranch = instanceListSource.slice(clientBranchOffset, instanceListSource.indexOf('\n  // Entering a query/filter', clientBranchOffset))
+    expect(clientBranch).toContain("pendingReadMode === 'server'")
+    expect(clientBranch).toContain('void load()')
+    expect(instanceListSource).toContain('let pendingReadMode: InstanceListRequest[\'mode\'] | null = null')
+  })
+
+  it('reuses a complete first page and marks the client source ready', () => {
+    expect(instanceListSource).toContain('isCompleteFirstCursorPage')
+    expect(instanceListSource).toContain('if (canReuseCurrentServerPage) {')
+    expect(instanceListSource).toContain('clientAuthorityReady.value = true')
+    expect(instanceListSource).toContain('clientAuthorityReady.value = false')
+  })
 })

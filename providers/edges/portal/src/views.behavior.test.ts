@@ -201,20 +201,25 @@ describe('edge list views', () => {
     }
   })
 
-  it.each(views)('$label switches active query/filter reads to a complete client list and returns to server paging when cleared', async (view) => {
+  it.each(views)('$label keeps an inactive terminal page server-shaped and reuses it for the first active query', async (view) => {
     const mounted = await mount(view.component)
     try {
       await flush()
       view.pageMock.mockClear()
       view.allMock.mockClear()
-      view.allMock.mockResolvedValue([{ ...view.pageRows[0], name: `${view.label}-complete` }])
       const state = mounted.instance.setupState
+
+      // A terminal first page is still server mode until a query/filter
+      // transition; merely loading it must not switch the table globally.
+      expect(state.tableMode).toBe('server')
+      expect(state.clientAuthorityReady).toBe(false)
 
       state[view.change]({ reason: 'filter', page: 1, pageSize: 10, query: '', filters: { ...view.filters, [view.label === 'services' ? 'status' : 'strategy']: view.label === 'services' ? 'Ready' : 'Spread' }, cursor: null })
       await flush()
-      expect(view.allMock).toHaveBeenCalledTimes(1)
+      expect(view.allMock).not.toHaveBeenCalled()
       expect(view.pageMock).not.toHaveBeenCalled()
       expect(state.tableMode).toBe('client')
+      expect(state.clientAuthorityReady).toBe(true)
       expect(state.tablePage).toBe(1)
       expect(state.tableCursor).toBeNull()
 
@@ -222,7 +227,7 @@ describe('edge list views', () => {
       // trigger another network read.
       state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'needle', filters: view.filters, cursor: null })
       await flush()
-      expect(view.allMock).toHaveBeenCalledTimes(1)
+      expect(view.allMock).not.toHaveBeenCalled()
 
       // Clearing the query/facets returns to a bounded server page.
       view.pageMock.mockResolvedValueOnce({ items: view.pageRows, continue: undefined })
@@ -230,57 +235,189 @@ describe('edge list views', () => {
       await flush()
       expect(view.pageMock).toHaveBeenLastCalledWith({ limit: 10 })
       expect(state.tableMode).toBe('server')
+      expect(state.clientAuthorityReady).toBe(false)
+      expect(state.tablePage).toBe(1)
+      expect(state.tableCursor).toBeNull()
     } finally {
       mounted.unmount()
     }
   })
 
-  it.each(views)('$label ignores an older response after a newer request replaces its query', async (view) => {
+  it.each(views)('$label coalesces rapid active edits into one incomplete-page full walk and stays local after readiness', async (view) => {
+    view.pageMock.mockResolvedValue({ items: view.pageRows, continue: 'opaque-next' })
     const mounted = await mount(view.component)
     try {
       await flush()
-      const first = deferred<unknown[]>()
-      const second = deferred<unknown[]>()
+      const full = deferred<unknown[]>()
       view.allMock.mockReset()
-      view.allMock.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+      view.allMock.mockImplementation(() => full.promise)
+      api.listEdges.mockClear()
       const state = mounted.instance.setupState
 
+      expect(state.tableMode).toBe('server')
+      expect(state.clientAuthorityReady).toBe(false)
       state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'old', filters: view.filters, cursor: null })
-      state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'new', filters: view.filters, cursor: null })
-      first.resolve([{ ...view.pageRows[0], name: `${view.label}-old` }])
-      second.resolve([{ ...view.pageRows[0], name: `${view.label}-new` }])
+      const latestFilters = view.label === 'services'
+        ? { ...view.filters, status: 'Ready' }
+        : { ...view.filters, strategy: 'Spread' }
+      state[view.change]({ reason: 'filter', page: 1, pageSize: 10, query: 'new', filters: latestFilters, cursor: null })
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      expect(api.listEdges).toHaveBeenCalledTimes(1)
+
+      full.resolve([{ ...view.pageRows[0], name: `${view.label}-new` }])
+      await flush()
       await flush()
 
       const rows = view.label === 'services' ? state.services : state.workloads
       expect(rows).toMatchObject([{ name: `${view.label}-new` }])
+      expect(state.tableMode).toBe('client')
+      expect(state.clientAuthorityReady).toBe(true)
+      expect(state.tableQuery).toBe('new')
+      expect(state.filterValues).toMatchObject(latestFilters)
       expect(state.error).toBeNull()
+
+      // Once the complete source is ready, query/filter changes are fully
+      // local and do not refetch the query-independent list.
+      state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'again', filters: view.filters, cursor: null })
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+
+      // A polling/CRUD replacement keeps the last complete rows visible. A
+      // query edit during that replacement joins the same walk rather than
+      // queueing a second full read or waiting for the next timer tick.
+      const replacement = deferred<unknown[]>()
+      const joinedEdges = deferred<unknown[]>()
+      view.allMock.mockReset()
+      view.allMock.mockImplementation(() => replacement.promise)
+      api.listEdges.mockImplementationOnce(() => joinedEdges.promise)
+      const polling = state.refresh()
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'during-poll', filters: view.filters, cursor: null })
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      replacement.resolve([{ ...view.pageRows[0], name: `${view.label}-refreshed` }])
+      await flush()
+      await flush()
+      // The target list alone is not the complete transition authority; the
+      // supporting edge join remains pending, without restarting either read.
+      expect(state.clientAuthorityReady).toBe(false)
+      state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'while-join', filters: view.filters, cursor: null })
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      joinedEdges.resolve([edge])
+      await polling
+      expect(state.clientAuthorityReady).toBe(true)
+      expect(view.allMock).toHaveBeenCalledTimes(1)
     } finally {
       mounted.unmount()
     }
   })
 
-  it.each(views)('$label ignores an older failure after a newer request succeeds', async (view) => {
+  it.each(views)('$label serializes target and edge joins across clear and query re-entry', async (view) => {
+    view.pageMock.mockResolvedValue({ items: view.pageRows, continue: 'opaque-next' })
     const mounted = await mount(view.component)
     try {
       await flush()
-      const first = deferred<unknown[]>()
-      const second = deferred<unknown[]>()
+      const full = deferred<unknown[]>()
+      const fresh = deferred<unknown[]>()
+      const staleEdges = deferred<unknown[]>()
+      const firstServerPage = deferred<unknown>()
       view.allMock.mockReset()
-      view.allMock.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+      view.allMock.mockImplementationOnce(() => full.promise).mockImplementationOnce(() => fresh.promise)
+      view.pageMock.mockReset()
+      view.pageMock.mockImplementation(() => firstServerPage.promise)
       const state = mounted.instance.setupState
+      let edgeReads = 0
+      let maxConcurrentEdgeReads = 0
+      api.listEdges.mockClear()
+      api.listEdges.mockImplementationOnce(async () => {
+        edgeReads += 1
+        maxConcurrentEdgeReads = Math.max(maxConcurrentEdgeReads, edgeReads)
+        try {
+          return await staleEdges.promise
+        } finally {
+          edgeReads -= 1
+        }
+      })
 
       state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'old', filters: view.filters, cursor: null })
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      expect(api.listEdges).toHaveBeenCalledTimes(1)
+      expect(edgeReads).toBe(1)
+      state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: '', filters: view.filters, cursor: null })
+      expect(state.tableMode).toBe('server')
+      expect(state.clientAuthorityReady).toBe(false)
+      expect(state.tablePage).toBe(1)
+      expect(state.tableCursor).toBeNull()
+
+      // Re-entering an active query before the invalidated walk settles must
+      // wait behind that walk, rather than returning its stale promise or
+      // launching a concurrent target read.
       state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'new', filters: view.filters, cursor: null })
-      first.reject({ reason: 'ProtocolError', message: 'old request failed' })
-      second.resolve([{ ...view.pageRows[0], name: `${view.label}-new` }])
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(1)
+      expect(api.listEdges).toHaveBeenCalledTimes(1)
+      expect(edgeReads).toBe(1)
+      expect(state.clientAuthorityReady).toBe(false)
+
+      firstServerPage.resolve({ items: view.pageRows, continue: undefined })
       await flush()
 
+      full.resolve([{ ...view.pageRows[0], name: `${view.label}-stale` }])
+      await flush()
+      await flush()
+      expect(view.allMock).toHaveBeenCalledTimes(2)
+      expect(api.listEdges).toHaveBeenCalledTimes(1)
+      expect(maxConcurrentEdgeReads).toBe(1)
+      expect(state.tableMode).toBe('client')
+      expect(state.clientAuthorityReady).toBe(false)
+      const completeRead = view.label === 'services' ? state.completeServiceRead : state.completeWorkloadRead
+      expect(completeRead.peek()).toBeNull()
+      const rowsWhileFresh = view.label === 'services' ? state.services : state.workloads
+      expect(rowsWhileFresh).toEqual([])
+
+      // The stale support join is shared by the clear refresh and the fresh
+      // transition. Resolving it must not commit the stale target result.
+      staleEdges.resolve([edge])
+      await flush()
+      expect(api.listEdges).toHaveBeenCalledTimes(1)
+      expect(maxConcurrentEdgeReads).toBe(1)
+      expect(state.clientAuthorityReady).toBe(false)
+
+      fresh.resolve([{ ...view.pageRows[0], name: `${view.label}-fresh` }])
+      await flush()
+      await flush()
+      await flush()
       const rows = view.label === 'services' ? state.services : state.workloads
-      expect(rows).toMatchObject([{ name: `${view.label}-new` }])
-      expect(state.error).toBeNull()
+      expect(rows).toMatchObject([{ name: `${view.label}-fresh` }])
+      expect(rows).not.toMatchObject([{ name: `${view.label}-stale` }])
+      expect(completeRead.peek()).toMatchObject([{ name: `${view.label}-fresh` }])
+      expect(state.tableMode).toBe('client')
+      expect(state.clientAuthorityReady).toBe(true)
     } finally {
       mounted.unmount()
     }
+  })
+
+  it.each(views)('$label ignores a complete response after the view context is unmounted', async (view) => {
+    view.pageMock.mockResolvedValue({ items: view.pageRows, continue: 'opaque-next' })
+    const mounted = await mount(view.component)
+    await flush()
+    const full = deferred<unknown[]>()
+    view.allMock.mockReset()
+    view.allMock.mockImplementation(() => full.promise)
+    const state = mounted.instance.setupState
+
+    state[view.change]({ reason: 'query', page: 1, pageSize: 10, query: 'old', filters: view.filters, cursor: null })
+    mounted.unmount()
+    full.resolve([{ ...view.pageRows[0], name: `${view.label}-after-unmount` }])
+    await flush()
+
+    const rows = view.label === 'services' ? state.services : state.workloads
+    expect(rows).toEqual([])
   })
 
   it.each(views)('$label retains the last page while a replacement page is pending or fails', async (view) => {

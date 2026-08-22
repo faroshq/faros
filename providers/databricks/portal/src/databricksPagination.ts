@@ -1,5 +1,5 @@
 import type { Connection, Warehouse } from './types.js'
-import type { ResourceTableChange, TableFilterDefinition, TableFilterOption, TablePageInfo } from './portalkit/table.js'
+import { isCompleteFirstCursorPage, type ResourceTableChange, type TableFilterDefinition, type TableFilterOption, type TablePageInfo } from './portalkit/table.js'
 
 /** The default page shown by the resource lists before a query is entered. */
 export const DATABRICKS_PAGE_SIZE = 10
@@ -147,6 +147,78 @@ export function hasActiveFilters<T extends object>(query: string, filters: T): b
 export function serverCursorChange(change: Pick<ResourceTableChange, 'reason' | 'page' | 'cursor'>): { page: number; cursor: string | null } {
   const reset = change.reason === 'query' || change.reason === 'filter'
   return reset ? { page: 1, cursor: null } : { page: change.page, cursor: change.cursor }
+}
+
+export interface DatabricksHybridTransitionInput {
+  mode: DatabricksPaginationMode
+  active: boolean
+  /** The current server page has explicit terminal first-page metadata. */
+  completeFirstPage: boolean
+  /** A bounded complete walk is already in flight and will serve the latest query. */
+  fullWalkPending: boolean
+}
+
+export interface DatabricksHybridTransition {
+  mode: DatabricksPaginationMode
+  reload: boolean
+  clearRows: boolean
+  reuseRows: boolean
+}
+
+/**
+ * Decide the data-authority transition without interpreting query text or
+ * cursor values. A terminal server page is reusable only for an active query;
+ * an inactive terminal page remains server-owned until the next page read.
+ */
+export function databricksHybridTransition(input: DatabricksHybridTransitionInput): DatabricksHybridTransition {
+  if (!input.active) {
+    return { mode: 'server', reload: true, clearRows: true, reuseRows: false }
+  }
+  if (input.mode === 'client') {
+    return { mode: 'client', reload: false, clearRows: false, reuseRows: false }
+  }
+  if (input.completeFirstPage) {
+    return { mode: 'client', reload: false, clearRows: false, reuseRows: true }
+  }
+  return {
+    mode: 'server',
+    reload: !input.fullWalkPending,
+    clearRows: !input.fullWalkPending,
+    reuseRows: false,
+  }
+}
+
+export interface DatabricksServerPageTransitionInput {
+  active: boolean
+  page: number
+  cursor: string | null
+  pageInfo: TablePageInfo | null
+}
+
+export interface DatabricksServerPageTransition {
+  /** Assign rows only when the response is safe for the current authority. */
+  assignRows: boolean
+  /** A complete first page can become the client-side source for an active query. */
+  promoteToClient: boolean
+  /** An incomplete active response must be followed by the bounded full walk. */
+  startFullWalk: boolean
+}
+
+/**
+ * Resolve a server response against the current query mode. An old page may
+ * arrive after a query begins, but an incomplete page is not visible authority
+ * for that query and must never flash before the complete walk replaces it.
+ */
+export function databricksServerPageTransition(input: DatabricksServerPageTransitionInput): DatabricksServerPageTransition {
+  if (!input.active) return { assignRows: true, promoteToClient: false, startFullWalk: false }
+  const completeFirstPage = isCompleteFirstCursorPage({
+    page: input.page,
+    cursor: input.cursor,
+    pageInfo: input.pageInfo,
+  })
+  return completeFirstPage
+    ? { assignRows: true, promoteToClient: true, startFullWalk: false }
+    : { assignRows: false, promoteToClient: false, startFullWalk: true }
 }
 
 /** Cursor values are opaque; never manufacture a total from remainingItemCount. */

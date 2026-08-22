@@ -13,8 +13,8 @@ import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue
 import ResourceTableEditButton from './portalkit/ResourceTableEditButton.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import ServiceEdit from './ServiceEdit.vue'
-import type { ResourceTableChange, TableFilterDefinition, TablePageInfo } from './portalkit/table'
-import { hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
+import { isCompleteFirstCursorPage, type ResourceTableChange, type TableFilterDefinition, type TablePageInfo } from './portalkit/table'
+import { createFullListReadCoordinator, createInFlightReadCoordinator, hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
 
 // Service type catalog — fetched from the backend (svccatalog.All()) so the form
 // never drifts from the provider's auth/probe knowledge. Each entry seeds the
@@ -104,6 +104,17 @@ const tableQuery = ref('')
 const filterValues = ref<ServiceFilterValues>({ edgeName: '', typeLabel: '', status: '' })
 const tableCursor = ref<string | null>(null)
 const tablePageInfo = ref<TablePageInfo | null>(null)
+// Client-side filtering is authoritative only after a complete, query-
+// independent cursor walk has committed. During a pending walk, keep the
+// last complete rows visible and let newer query/filter edits join the same
+// in-flight read rather than starting another walk.
+const clientAuthorityReady = ref(false)
+const clientReadPending = ref(false)
+const completeServiceRead = createFullListReadCoordinator(() => listServices())
+// Edge joins are query-independent but must stay fresh for every server or
+// client refresh. Share an in-flight join across clear/re-entry without
+// retaining it as a long-lived cache.
+const edgeRead = createInFlightReadCoordinator(() => listEdges())
 
 const serviceFilters = computed<TableFilterDefinition[]>(() => {
   const types = new Map<string, string>()
@@ -194,7 +205,7 @@ function openEdit(s: EdgeService) {
 // the fresh object so status/conditions update in place.
 async function onEditSaved() {
   const name = editing.value?.name
-  await refresh()
+  await refresh(true)
   if (name) editing.value = services.value.find((s) => s.name === name) ?? null
 }
 
@@ -202,6 +213,7 @@ type ServiceTableRequest = Omit<TableRequestState, 'filters'> & { filters: Servi
 
 let latestRefreshID = 0
 let stopped = false
+let clientReadToken = 0
 
 function cloneServiceFilters(filters: ServiceFilterValues): ServiceFilterValues {
   return { edgeName: filters.edgeName, typeLabel: filters.typeLabel, status: filters.status }
@@ -225,9 +237,37 @@ function serviceRequestIsCurrent(requestID: number, request: ServiceTableRequest
   return !stopped && latestRefreshID === requestID && sameTableRequest(current, request)
 }
 
-async function refresh() {
+// A complete client read is query-independent. Query/filter-only changes are
+// allowed to update the controlled table state while its target + edge join is
+// pending; page, page-size, mode, mutation, and context changes still fail
+// this guard through the stable request dimensions below.
+function serviceClientReadIsCurrent(requestID: number, request: ServiceTableRequest, readGeneration: number): boolean {
+  const current = currentServiceRequest()
+  return !stopped && latestRefreshID === requestID && tableMode.value === 'client' &&
+    current.active && current.page === request.page &&
+    current.pageSize === request.pageSize && current.cursor === request.cursor &&
+    completeServiceRead.generation() === readGeneration && clientAuthorityReady.value === false
+}
+
+// The optional event union keeps direct template @click/@retry bindings
+// type-safe while mutation callers can request a forced client read.
+async function refresh(forceClientRead: boolean | Event = false) {
   const requestID = ++latestRefreshID
+  const readToken = ++clientReadToken
   const request = currentServiceRequest()
+  const wasClientAuthorityReady = clientAuthorityReady.value
+  const forceCompleteRead = request.mode === 'client' && (wasClientAuthorityReady || forceClientRead === true)
+  if (forceCompleteRead) {
+    clientAuthorityReady.value = false
+    // Keep the visible complete rows while a polling/CRUD replacement is in
+    // flight, but make the old cache non-authoritative. Query edits during
+    // this window therefore join the active walk instead of queueing another
+    // forced walk; a failed replacement also cannot be mistaken for ready
+    // data on the next edit.
+    completeServiceRead.clear()
+  }
+  clientReadPending.value = request.mode === 'client'
+  const readGeneration = completeServiceRead.generation()
   loading.value = true
   error.value = null
   // Do not render an unfiltered page as though it matched a newly-entered
@@ -239,23 +279,38 @@ async function refresh() {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const [nextServices, nextEdges] = await Promise.all([listServices(), listEdges()])
-      if (!serviceRequestIsCurrent(requestID, request)) return
+      // A query-independent full read is shared across rapid query/filter
+      // edits. Polling and CRUD refreshes force one fresh walk; query changes
+      // while that walk is pending join it and commit the newest request.
+      const shouldForceCompleteRead = forceCompleteRead || (
+        request.mode === 'client' && !wasClientAuthorityReady &&
+        completeServiceRead.peek() !== null && !completeServiceRead.pending()
+      )
+      // The full source and its supporting edge join form one query-
+      // independent transition. Query/filter edits leave this request alive;
+      // the stable client guard below commits the latest reactive state once
+      // both reads settle.
+      const [nextServices, nextEdges] = await Promise.all([
+        completeServiceRead.read(shouldForceCompleteRead),
+        edgeRead.read(),
+      ])
+      if (!serviceClientReadIsCurrent(requestID, request, readGeneration)) {
+        return
+      }
       services.value = nextServices
       edges.value = nextEdges
-      if (request.mode === 'server') {
-        tableMode.value = 'client'
-        tablePage.value = 1
-      }
+      tableMode.value = 'client'
+      tablePage.value = 1
       tableCursor.value = null
       tablePageInfo.value = null
+      clientAuthorityReady.value = true
     } else {
       const [nextPage, nextEdges] = await Promise.all([
         listServicesPage({
           limit: request.pageSize,
           ...(request.cursor ? { continue: request.cursor } : {}),
         }),
-        listEdges(),
+        edgeRead.read(),
       ])
       if (!serviceRequestIsCurrent(requestID, request)) return
       services.value = nextPage.items
@@ -267,14 +322,24 @@ async function refresh() {
     error.value = null
     if (!draft.value.edgeName && edges.value.length) draft.value.edgeName = edges.value[0].name
   } catch (e) {
-    if (!serviceRequestIsCurrent(requestID, request)) return
+    const current = request.mode === 'client' && request.active
+      ? serviceClientReadIsCurrent(requestID, request, readGeneration)
+      : serviceRequestIsCurrent(requestID, request)
+    if (!current) return
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load services'
   } finally {
+    if (clientReadToken === readToken) clientReadPending.value = false
     if (!stopped && latestRefreshID === requestID) loading.value = false
   }
 }
 
 function handleServiceTableChange(change: ResourceTableChange) {
+  const wasClientMode = tableMode.value === 'client'
+  const canReuseCurrentServerPage = !wasClientMode && isCompleteFirstCursorPage({
+    page: tablePage.value,
+    cursor: tableCursor.value,
+    pageInfo: tablePageInfo.value,
+  })
   filterValues.value = {
     edgeName: change.filters.edgeName ?? '',
     typeLabel: change.filters.typeLabel ?? '',
@@ -289,13 +354,49 @@ function handleServiceTableChange(change: ResourceTableChange) {
   const active = hasActiveTableFilters(tableQuery.value, filterValues.value)
   if (!active) {
     tableMode.value = 'server'
+    clientAuthorityReady.value = false
+    // Returning from local filtering always starts at the first bounded page;
+    // ordinary unfiltered page navigation preserves its incoming cursor.
+    if (wasClientMode || change.reason === 'query' || change.reason === 'filter') {
+      tablePage.value = 1
+      tableCursor.value = null
+    }
+    completeServiceRead.clear()
     services.value = []
     void refresh()
     return
   }
-  // Once a complete list has been fetched, query/filter/page changes are
-  // local and do not need another network read. Polling still refreshes it.
-  if (tableMode.value === 'client') return
+
+  // A terminal first server page is already a complete authority. Promote it
+  // synchronously so entering a query never causes an unnecessary full walk.
+  if (canReuseCurrentServerPage) {
+    completeServiceRead.seed(services.value)
+    tableMode.value = 'client'
+    clientAuthorityReady.value = true
+    tablePage.value = 1
+    tableCursor.value = null
+    tablePageInfo.value = null
+    return
+  }
+
+  // Once a complete source is resident, table changes are local. During the
+  // pending transition, query/filter-only changes are absorbed by the stable
+  // client guard; other dimensions invalidate and restart the read.
+  if (tableMode.value === 'client') {
+    if (!clientAuthorityReady.value) {
+      if (clientReadPending.value && (change.reason === 'query' || change.reason === 'filter')) return
+      void refresh()
+    }
+    return
+  }
+
+  // Entering a query/filter changes the authority from one server page to a
+  // complete source. Do not expose the partial page as a local result.
+  tableMode.value = 'client'
+  clientAuthorityReady.value = false
+  tablePage.value = 1
+  tableCursor.value = null
+  tablePageInfo.value = null
   services.value = []
   void refresh()
 }
@@ -329,7 +430,7 @@ async function onCreate() {
     })
     showCreate.value = false
     draft.value = { name: '', edgeName: edges.value[0]?.name ?? '', serviceType: 'home-assistant', targetNamespace: '', targetName: '', scheme: 'http', host: '', port: 8123, instructions: '' }
-    await refresh()
+    await refresh(true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Create failed'
   } finally {
@@ -341,7 +442,7 @@ async function onDelete(s: EdgeService) {
   if (!(await confirmDialog({ title: `Delete service "${s.name}"?`, message: 'Its MCP tools stop being exposed.', danger: true, confirmLabel: 'Delete' }))) return
   try {
     await deleteEdgeService(s.name)
-    await refresh()
+    await refresh(true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Delete failed'
   }

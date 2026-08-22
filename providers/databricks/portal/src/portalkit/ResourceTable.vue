@@ -158,9 +158,11 @@ const visibleRange = computed(() => isServerPagination.value
   ? cursorPageRange(currentPage.value, currentPageSize.value, visibleRows.value.length, serverTotal.value)
   : tableRange(filteredRows.value.length, currentPage.value, currentPageSize.value))
 const activeFilters = computed(() => !!currentQuery.value.trim() || Object.values(currentFilters.value).some(Boolean))
+const showPendingBody = computed(() => !!props.loading && visibleRows.value.length === 0)
+const pendingBodyText = computed(() => activeFilters.value ? 'Searching resources' : 'Loading resources')
 const showControls = computed(() =>
   (props.searchable || props.filters.length > 0)
-    && (isServerPagination.value || props.rows.length > 0 || activeFilters.value),
+    && (isServerPagination.value || props.rows.length > 0 || activeFilters.value || !!props.loading),
 )
 const showPagination = computed(() => {
   if (!paginationEnabled.value) return false
@@ -410,7 +412,10 @@ function nextPage() {
               </tr>
               <slot name="after-row" :row="row" />
             </template>
-            <tr v-if="visibleRows.length === 0"><td :colspan="columns.length" class="resource-table-empty-cell">
+            <tr v-if="showPendingBody"><td :colspan="columns.length" class="resource-table-pending-cell" role="status" aria-live="polite">
+              <p class="resource-table-pending-label">{{ pendingBodyText }}</p>
+            </td></tr>
+            <tr v-else-if="visibleRows.length === 0"><td :colspan="columns.length" class="resource-table-empty-cell">
               <Inbox class="resource-table-empty-icon" :stroke-width="1.25" />
               <p class="resource-table-empty-label">{{ activeFilters ? filterEmptyText : emptyText }}</p>
             </td></tr>

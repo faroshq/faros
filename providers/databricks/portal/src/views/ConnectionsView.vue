@@ -5,13 +5,15 @@ import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vu
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
-import type { ResourceTableChange } from '../portalkit/table'
+import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import type { Connection, ErrorResponse } from '../types'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import { createCoalescedRead, createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 import { resourceNameError } from '../resourceName'
 import {
   cloneConnectionFilters,
   CONNECTION_FILTERS,
+  databricksHybridTransition,
+  databricksServerPageTransition,
   DATABRICKS_PAGE_SIZE,
   EMPTY_CONNECTION_FILTERS,
   hasActiveFilters,
@@ -29,6 +31,14 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
+const completeRead = createCoalescedRead(() => api.listConnections())
+const serverPageRead = createCoalescedRead(() => {
+  const request = currentConnectionRequest()
+  return api.listConnectionsPage({
+    limit: request.pageSize,
+    ...(request.cursor ? { continue: request.cursor } : {}),
+  })
+})
 const connectionMode = ref<DatabricksPaginationMode>('server')
 const connectionPage = ref(1)
 const connectionPageSize = ref(DATABRICKS_PAGE_SIZE)
@@ -51,6 +61,18 @@ const nameInput = ref<HTMLInputElement | null>(null)
 const formErrorRef = ref<HTMLElement | null>(null)
 let timer: number | undefined
 let refresh!: LatestRefreshController
+let mounted = false
+let fullWalkPending = false
+let serverPageReadPending = false
+let forceNextLoad = false
+let authorityGeneration = 0
+
+function invalidateCompleteAuthority(): void {
+  authorityGeneration += 1
+  completeRead.invalidate()
+  serverPageRead.invalidate()
+  forceNextLoad = true
+}
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
@@ -70,7 +92,13 @@ function startCreate() {
   void nextTick(() => nameInput.value?.focus())
 }
 
-function load() {
+function load(): void
+function load(force: boolean): void
+function load(event: Event): void
+function load(forceOrEvent: boolean | Event = false): void {
+  const force = typeof forceOrEvent === 'boolean' ? forceOrEvent : forceNextLoad
+  forceNextLoad = false
+  if (!force && (fullWalkPending || serverPageReadPending)) return
   refresh.request()
 }
 
@@ -110,10 +138,6 @@ async function submit() {
   }
   const desiredName = name.value.trim()
   const lock = operationKey('connection', desiredName)
-  if (operations.isTombstoned(lock)) {
-    await focusFormError(`Connection "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
-    return
-  }
   if (!operations.acquire(lock, 'creating')) {
     await focusFormError(`Connection "${desiredName}" already has an update in progress.`)
     return
@@ -122,7 +146,12 @@ async function submit() {
   try {
     // The visible rows may be one cursor page. Duplicate protection must use a
     // complete authoritative read before allowing the mutation.
-    const existing = await api.listConnections()
+    const existing = await completeRead.request()
+    operations.reconcile('connection', existing.map(({ name, uid }) => ({ name, uid })))
+    if (operations.isTombstoned(lock)) {
+      await focusFormError(`Connection "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
+      return
+    }
     if (existing.some(connection => connection.name === desiredName)) {
       await focusFormError(`Connection "${desiredName}" already exists.`)
       return
@@ -132,6 +161,7 @@ async function submit() {
       host: host.value,
       token: token.value,
     })
+    invalidateCompleteAuthority()
     resetForm()
     showForm.value = false
     load()
@@ -179,6 +209,11 @@ function connectionRequestIsCurrent(requestID: number, request: ConnectionReques
 }
 
 function handleConnectionChange(change: ResourceTableChange): void {
+  const canReuseCurrentServerPage = connectionMode.value === 'server' && isCompleteFirstCursorPage({
+    page: connectionPage.value,
+    cursor: connectionCursor.value,
+    pageInfo: connectionPageInfo.value,
+  })
   const filters: ConnectionFilterValues = {
     authType: change.filters.authType || '',
     status: change.filters.status || '',
@@ -193,6 +228,8 @@ function handleConnectionChange(change: ResourceTableChange): void {
   connectionPageInfo.value = null
 
   if (!active) {
+    invalidateCompleteAuthority()
+    fullWalkPending = false
     connectionMode.value = 'server'
     connections.value = []
     connectionPage.value = serverChange.page
@@ -201,11 +238,29 @@ function handleConnectionChange(change: ResourceTableChange): void {
     return
   }
 
+  const transition = databricksHybridTransition({
+    mode: connectionMode.value,
+    active,
+    completeFirstPage: canReuseCurrentServerPage,
+    fullWalkPending: fullWalkPending || serverPageReadPending,
+  })
   // Once a complete walk is loaded, ResourceTable handles query/filter/page
   // changes locally. Only the server -> client transition needs another read.
-  if (connectionMode.value === 'client') return
-  connections.value = []
-  load()
+  if (transition.mode === 'client' && transition.reuseRows) {
+    connectionMode.value = 'client'
+    connectionPage.value = 1
+    connectionCursor.value = null
+    connectionPageInfo.value = null
+    operations.reconcile('connection', connections.value.map(({ name, uid }) => ({ name, uid })))
+    return
+  }
+  if (!transition.reload) {
+    if (transition.mode === 'server' && connectionMode.value === 'server') connections.value = []
+    return
+  }
+  if (transition.clearRows || connectionMode.value === 'server') connections.value = []
+  fullWalkPending = true
+  load(true)
 }
 
 async function remove(row: Record<string, unknown>) {
@@ -225,6 +280,7 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteConnection(conn)
+    invalidateCompleteAuthority()
     operations.tombstone(lock, conn.uid)
     connections.value = connections.value.filter(item => item.name !== conn.name)
     load()
@@ -237,6 +293,8 @@ async function remove(row: Record<string, unknown>) {
 
 refresh = createLatestRefreshController(async requestID => {
   const request = currentConnectionRequest()
+  let walkGeneration: number | undefined
+  let serverPageGeneration: number | undefined
   loading.value = true
   // Never render the unfiltered server page as the result of a newly entered
   // query. Same-mode polling keeps its cached rows visible.
@@ -246,44 +304,114 @@ refresh = createLatestRefreshController(async requestID => {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const next = await api.listConnections()
-      if (!connectionRequestIsCurrent(requestID, request)) return
+      fullWalkPending = true
+      walkGeneration = authorityGeneration
+      const next = await completeRead.request()
+      if (!mounted) return
+      if (walkGeneration !== authorityGeneration) return
+      const current = currentConnectionRequest()
+      if (!current.active && current.mode === 'server') return
       connections.value = next
-      if (request.mode === 'server') {
+      if (current.mode === 'server') {
         connectionMode.value = 'client'
         connectionPage.value = 1
       }
       connectionCursor.value = null
       connectionPageInfo.value = null
       operations.reconcile('connection', next.map(({ name, uid }) => ({ name, uid })))
+      loaded.value = true
+      error.value = null
+      fullWalkPending = false
     } else {
-      const next = await api.listConnectionsPage({
-        limit: request.pageSize,
-        ...(request.cursor ? { continue: request.cursor } : {}),
-      })
       if (!connectionRequestIsCurrent(requestID, request)) return
-      connections.value = next.items
-      connectionCursor.value = request.cursor
-      connectionPageInfo.value = toPageInfo(next.continue)
+      serverPageReadPending = true
+      serverPageGeneration = authorityGeneration
+      const next = await serverPageRead.request()
+      serverPageReadPending = false
+      if (!mounted || serverPageGeneration !== authorityGeneration) return
+      const currentAfterPage = currentConnectionRequest()
+      const currentIsActive = currentAfterPage.active || currentAfterPage.mode === 'client'
+      const nextPageInfo = toPageInfo(next.continue)
+      const pageTransition = databricksServerPageTransition({
+        active: currentIsActive,
+        page: request.page,
+        cursor: request.cursor,
+        pageInfo: nextPageInfo,
+      })
+      if (currentIsActive && pageTransition.startFullWalk) {
+        // A page captured before query entry is not visible authority unless
+        // it is an explicit complete first page. Do not flash its rows.
+        fullWalkPending = true
+        walkGeneration = authorityGeneration
+        const connectionList = await completeRead.request()
+        if (!mounted) return
+        if (walkGeneration !== authorityGeneration) return
+        const current = currentConnectionRequest()
+        if (!current.active && current.mode === 'server') return
+        connections.value = connectionList
+        if (current.mode === 'server') {
+          connectionMode.value = 'client'
+          connectionPage.value = 1
+        }
+        connectionCursor.value = null
+        connectionPageInfo.value = null
+        operations.reconcile('connection', connectionList.map(({ name, uid }) => ({ name, uid })))
+      } else if (currentIsActive) {
+        connections.value = next.items
+        connectionCursor.value = request.cursor
+        connectionPageInfo.value = nextPageInfo
+        if (pageTransition.promoteToClient) {
+          connectionMode.value = 'client'
+          connectionPage.value = 1
+          connectionCursor.value = null
+          connectionPageInfo.value = null
+          operations.reconcile('connection', next.items.map(({ name, uid }) => ({ name, uid })))
+        }
+      } else {
+        if (!connectionRequestIsCurrent(requestID, request)) return
+        connections.value = next.items
+        connectionCursor.value = request.cursor
+        connectionPageInfo.value = nextPageInfo
+        if (isCompleteFirstCursorPage({
+          page: request.page,
+          cursor: request.cursor,
+          pageInfo: connectionPageInfo.value,
+        })) {
+          operations.reconcile('connection', next.items.map(({ name, uid }) => ({ name, uid })))
+        }
+      }
     }
     loaded.value = true
     error.value = null
   } catch (e) {
-    if (!connectionRequestIsCurrent(requestID, request)) return
+    fullWalkPending = false
+    serverPageReadPending = false
+    const current = currentConnectionRequest()
+    const staleWalk = walkGeneration !== undefined && walkGeneration !== authorityGeneration
+    const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
+    const staleServerRequest = !(current.active || current.mode === 'client') && !connectionRequestIsCurrent(requestID, request)
+    if (!mounted || staleWalk || staleServerPage || staleServerRequest) return
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
+    fullWalkPending = false
+    serverPageReadPending = false
     if (refresh.isCurrent(requestID)) loading.value = false
   }
 })
 
 onMounted(() => {
+  mounted = true
   load()
   timer = window.setInterval(load, 5000)
 })
 onUnmounted(() => {
+  mounted = false
+  invalidateCompleteAuthority()
   window.clearInterval(timer)
   refresh.stop()
+  completeRead.stop()
+  serverPageRead.stop()
 })
 </script>
 

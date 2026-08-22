@@ -8,13 +8,15 @@ import ResourceTableEditButton from '../portalkit/ResourceTableEditButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
-import type { ResourceTableChange } from '../portalkit/table'
+import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
 import type { Connection, ErrorResponse, Table, Warehouse } from '../types'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import { createCoalescedRead, createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
 import { resourceNameError } from '../resourceName'
 import {
   cloneTableFilters,
+  databricksHybridTransition,
+  databricksServerPageTransition,
   DATABRICKS_PAGE_SIZE,
   DATABRICKS_SUPPORT_PAGE_SIZE,
   EMPTY_TABLE_FILTERS,
@@ -36,6 +38,18 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
+const completeRead = createCoalescedRead(() => api.listTables())
+const supportRead = createCoalescedRead(() => Promise.all([
+  api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
+  api.listWarehousesPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
+]))
+const serverPageRead = createCoalescedRead(() => {
+  const request = currentTableRequest()
+  return api.listTablesPage({
+    limit: request.pageSize,
+    ...(request.cursor ? { continue: request.cursor } : {}),
+  })
+})
 const tableMode = ref<DatabricksPaginationMode>('server')
 const tablePage = ref(1)
 const tablePageSize = ref(DATABRICKS_PAGE_SIZE)
@@ -50,6 +64,20 @@ const formError = ref<string | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const formErrorRef = ref<HTMLElement | null>(null)
 let refresh!: LatestRefreshController
+let mounted = false
+let fullWalkPending = false
+let supportReadPending = false
+let serverPageReadPending = false
+let forceNextLoad = false
+let authorityGeneration = 0
+
+function invalidateCompleteAuthority(): void {
+  authorityGeneration += 1
+  completeRead.invalidate()
+  supportRead.invalidate()
+  serverPageRead.invalidate()
+  forceNextLoad = true
+}
 
 const form = reactive({
   name: '',
@@ -128,7 +156,13 @@ function editTable(row: Record<string, unknown>) {
   showForm.value = true
 }
 
-function load() {
+function load(): void
+function load(force: boolean): void
+function load(event: Event): void
+function load(forceOrEvent: boolean | Event = false): void {
+  const force = typeof forceOrEvent === 'boolean' ? forceOrEvent : forceNextLoad
+  forceNextLoad = false
+  if (!force && (fullWalkPending || supportReadPending || serverPageReadPending)) return
   refresh.request()
 }
 
@@ -172,10 +206,6 @@ async function submit() {
   }
   const desiredName = form.name.trim()
   const lock = operationKey('table', desiredName)
-  if (operations.isTombstoned(lock)) {
-    await focusFormError(`Table "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
-    return
-  }
   if (!operations.acquire(lock, editing.value ? 'saving' : 'creating')) {
     await focusFormError(`Table "${desiredName}" already has an update in progress.`)
     return
@@ -186,10 +216,15 @@ async function submit() {
     // every duplicate and foreign-key check against complete authoritative
     // collections before saving.
     const [existingTables, availableConnections, availableWarehouses] = await Promise.all([
-      api.listTables(),
+      completeRead.request(),
       api.listConnections(),
       api.listWarehouses(),
     ])
+    operations.reconcile('table', existingTables.map(({ name, uid }) => ({ name, uid })))
+    if (operations.isTombstoned(lock)) {
+      await focusFormError(`Table "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
+      return
+    }
     const duplicate = existingTables.find(table => table.name === desiredName)
     if (duplicate && duplicate.name !== editing.value) {
       await focusFormError(`Table "${desiredName}" already exists.`)
@@ -211,6 +246,7 @@ async function submit() {
       schema: form.schema,
       table: form.table,
     })
+    invalidateCompleteAuthority()
     resetForm()
     showForm.value = false
     load()
@@ -258,6 +294,11 @@ function tableRequestIsCurrent(requestID: number, request: TableRequest): boolea
 }
 
 function handleTableChange(change: ResourceTableChange): void {
+  const canReuseCurrentServerPage = tableMode.value === 'server' && isCompleteFirstCursorPage({
+    page: tablePage.value,
+    cursor: tableCursor.value,
+    pageInfo: tablePageInfo.value,
+  })
   const filters: TableFilterValues = {
     warehouseRef: change.filters.warehouseRef || '',
     status: change.filters.status || '',
@@ -272,6 +313,8 @@ function handleTableChange(change: ResourceTableChange): void {
   tablePageInfo.value = null
 
   if (!active) {
+    invalidateCompleteAuthority()
+    fullWalkPending = false
     tableMode.value = 'server'
     tables.value = []
     tablePage.value = serverChange.page
@@ -280,9 +323,27 @@ function handleTableChange(change: ResourceTableChange): void {
     return
   }
 
-  if (tableMode.value === 'client') return
-  tables.value = []
-  load()
+  const transition = databricksHybridTransition({
+    mode: tableMode.value,
+    active,
+    completeFirstPage: canReuseCurrentServerPage,
+    fullWalkPending: fullWalkPending || supportReadPending || serverPageReadPending,
+  })
+  if (transition.mode === 'client' && transition.reuseRows) {
+    tableMode.value = 'client'
+    tablePage.value = 1
+    tableCursor.value = null
+    tablePageInfo.value = null
+    operations.reconcile('table', tables.value.map(({ name, uid }) => ({ name, uid })))
+    return
+  }
+  if (!transition.reload) {
+    if (transition.mode === 'server' && tableMode.value === 'server') tables.value = []
+    return
+  }
+  if (transition.clearRows || tableMode.value === 'server') tables.value = []
+  fullWalkPending = true
+  load(true)
 }
 
 async function remove(row: Record<string, unknown>) {
@@ -302,6 +363,7 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteTable(table.name)
+    invalidateCompleteAuthority()
     operations.tombstone(lock, table.uid)
     tables.value = tables.value.filter(item => item.name !== table.name)
     load()
@@ -314,40 +376,101 @@ async function remove(row: Record<string, unknown>) {
 
 refresh = createLatestRefreshController(async requestID => {
   const request = currentTableRequest()
+  let walkGeneration: number | undefined
+  let supportGeneration: number | undefined
+  let serverPageGeneration: number | undefined
   loading.value = true
   if (request.active && request.mode === 'server') {
     tables.value = []
     tablePageInfo.value = null
   }
   try {
-    const [connPage, warehousePageResult] = await Promise.all([
-      api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
-      api.listWarehousesPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
-    ])
-    if (!tableRequestIsCurrent(requestID, request)) return
+    supportReadPending = true
+    supportGeneration = authorityGeneration
+    const [connPage, warehousePageResult] = await supportRead.request()
+    supportReadPending = false
+    if (!mounted || supportGeneration !== authorityGeneration) return
     connections.value = connPage.items
     warehouses.value = warehousePageResult.items
 
-    if (request.active || request.mode === 'client') {
-      const tableList = await api.listTables()
-      if (!tableRequestIsCurrent(requestID, request)) return
+    const currentAfterSupport = currentTableRequest()
+    if (currentAfterSupport.active || currentAfterSupport.mode === 'client') {
+      fullWalkPending = true
+      walkGeneration = authorityGeneration
+      const tableList = await completeRead.request()
+      if (!mounted) return
+      if (walkGeneration !== authorityGeneration) return
+      const current = currentTableRequest()
+      if (!current.active && current.mode === 'server') return
       tables.value = tableList
-      if (request.mode === 'server') {
+      if (current.mode === 'server') {
         tableMode.value = 'client'
         tablePage.value = 1
       }
       tableCursor.value = null
       tablePageInfo.value = null
       operations.reconcile('table', tableList.map(({ name, uid }) => ({ name, uid })))
+      loaded.value = true
+      error.value = null
+      fullWalkPending = false
     } else {
-      const tablePageResult = await api.listTablesPage({
-        limit: request.pageSize,
-        ...(request.cursor ? { continue: request.cursor } : {}),
-      })
       if (!tableRequestIsCurrent(requestID, request)) return
-      tables.value = tablePageResult.items
-      tableCursor.value = request.cursor
-      tablePageInfo.value = toPageInfo(tablePageResult.continue)
+      serverPageReadPending = true
+      serverPageGeneration = authorityGeneration
+      const tablePageResult = await serverPageRead.request()
+      serverPageReadPending = false
+      if (!mounted || serverPageGeneration !== authorityGeneration) return
+      const currentAfterPage = currentTableRequest()
+      const currentIsActive = currentAfterPage.active || currentAfterPage.mode === 'client'
+      const nextPageInfo = toPageInfo(tablePageResult.continue)
+      const pageTransition = databricksServerPageTransition({
+        active: currentIsActive,
+        page: request.page,
+        cursor: request.cursor,
+        pageInfo: nextPageInfo,
+      })
+      if (currentIsActive && pageTransition.startFullWalk) {
+        // A page captured before query entry is not visible authority unless
+        // it is an explicit complete first page. Do not flash its rows.
+        fullWalkPending = true
+        walkGeneration = authorityGeneration
+        const tableList = await completeRead.request()
+        if (!mounted) return
+        if (walkGeneration !== authorityGeneration) return
+        const current = currentTableRequest()
+        if (!current.active && current.mode === 'server') return
+        tables.value = tableList
+        if (current.mode === 'server') {
+          tableMode.value = 'client'
+          tablePage.value = 1
+        }
+        tableCursor.value = null
+        tablePageInfo.value = null
+        operations.reconcile('table', tableList.map(({ name, uid }) => ({ name, uid })))
+      } else if (currentIsActive) {
+        tables.value = tablePageResult.items
+        tableCursor.value = request.cursor
+        tablePageInfo.value = nextPageInfo
+        if (pageTransition.promoteToClient) {
+          tableMode.value = 'client'
+          tablePage.value = 1
+          tableCursor.value = null
+          tablePageInfo.value = null
+          operations.reconcile('table', tablePageResult.items.map(({ name, uid }) => ({ name, uid })))
+        }
+      } else {
+        if (!tableRequestIsCurrent(requestID, request)) return
+        tables.value = tablePageResult.items
+        tableCursor.value = request.cursor
+        tablePageInfo.value = nextPageInfo
+        if (isCompleteFirstCursorPage({
+          page: request.page,
+          cursor: request.cursor,
+          pageInfo: tablePageInfo.value,
+        })) {
+          operations.reconcile('table', tablePageResult.items.map(({ name, uid }) => ({ name, uid })))
+        }
+      }
     }
     loaded.value = true
     error.value = null
@@ -355,10 +478,21 @@ refresh = createLatestRefreshController(async requestID => {
     if (connections.value.length && !connections.value.some(c => c.name === form.connectionRef)) form.connectionRef = connections.value[0].name
     form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, form.warehouseRef)
   } catch (e) {
-    if (!tableRequestIsCurrent(requestID, request)) return
+    fullWalkPending = false
+    supportReadPending = false
+    serverPageReadPending = false
+    const current = currentTableRequest()
+    const staleWalk = walkGeneration !== undefined && walkGeneration !== authorityGeneration
+    const staleSupport = supportGeneration !== undefined && supportGeneration !== authorityGeneration
+    const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
+    const staleServerRequest = !(current.active || current.mode === 'client') && !tableRequestIsCurrent(requestID, request)
+    if (!mounted || staleWalk || staleSupport || staleServerPage || staleServerRequest) return
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
+    fullWalkPending = false
+    supportReadPending = false
+    serverPageReadPending = false
     if (refresh.isCurrent(requestID)) loading.value = false
   }
 })
@@ -367,10 +501,16 @@ watch(() => form.connectionRef, connectionRef => {
   form.warehouseRef = nextValidWarehouseRef(warehouses.value, connectionRef, form.warehouseRef)
 })
 onMounted(() => {
+  mounted = true
   load()
 })
 onUnmounted(() => {
+  mounted = false
+  invalidateCompleteAuthority()
   refresh.stop()
+  completeRead.stop()
+  supportRead.stop()
+  serverPageRead.stop()
 })
 </script>
 

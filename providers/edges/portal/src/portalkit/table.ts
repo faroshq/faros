@@ -25,6 +25,24 @@ export interface TablePageInfo {
   total?: number | null
 }
 
+export interface FirstCursorPageInput {
+  page: number
+  cursor?: string | null
+  pageInfo?: TablePageInfo | null
+}
+
+/**
+ * Return true only for an authoritative, complete first cursor page.
+ * Missing cursor/next-cursor values are accepted only in their first-page
+ * positions; a missing `hasNext` is deliberately not treated as complete.
+ */
+export function isCompleteFirstCursorPage(input: FirstCursorPageInput): boolean {
+  return input.page === 1
+    && (input.cursor === null || input.cursor === undefined)
+    && input.pageInfo?.hasNext === false
+    && (input.pageInfo.nextCursor === null || input.pageInfo.nextCursor === undefined)
+}
+
 /** A typed page envelope for adapters that keep rows and metadata together. */
 export interface CursorPage<T> extends TablePageInfo {
   items: T[]

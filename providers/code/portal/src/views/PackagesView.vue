@@ -4,8 +4,11 @@ import { api } from '../api'
 import type { ErrorResponse, PackageRow } from '../types'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
+import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import { createLatestRefreshController, type LatestRefreshController } from '../refresh'
+import { createFullListReadCoordinator } from '../hybridPagination'
 import {
+  applyPackagePaginationChange,
   clonePackageFilters,
   EMPTY_PACKAGE_FILTERS,
   hasActivePackageFilters,
@@ -31,6 +34,7 @@ const packageQuery = ref('')
 const packageFilters = ref<PackageFilterValues>(clonePackageFilters(EMPTY_PACKAGE_FILTERS))
 const packageCursor = ref<string | null>(null)
 const pageInfo = ref<PackagePageInfo | null>(null)
+const packageFullRead = createFullListReadCoordinator(() => api.listAllPackages())
 const columns = [
   { key: 'repositoryRef', label: 'Repository' },
   { key: 'name', label: 'Package' },
@@ -60,13 +64,15 @@ const rows = computed<Array<Record<string, unknown>>>(() => [...packages.value]
 
 let timer: number | undefined
 let refresh!: LatestRefreshController
+let forcePackageFullRead = false
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
-function load() {
+function load(forceFullRead = packageMode.value === 'client') {
+  if (forceFullRead) forcePackageFullRead = true
   refresh.request()
 }
 
@@ -109,6 +115,8 @@ function packageRequestIsCurrent(requestID: number, request: PackageRequest): bo
 
 refresh = createLatestRefreshController(async requestID => {
   const request = currentPackageRequest()
+  const forceFullRead = forcePackageFullRead
+  forcePackageFullRead = false
   loading.value = true
   // A page from the inactive server query must never be rendered as though it
   // matched a newly-entered search/filter. Keep old rows for same-page polling,
@@ -119,13 +127,27 @@ refresh = createLatestRefreshController(async requestID => {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const next = await api.listAllPackages()
-      if (!packageRequestIsCurrent(requestID, request)) return
-      packages.value = next
-      if (request.mode === 'server') {
-        packageMode.value = 'client'
-        packagePage.value = 1
+      const next = await packageFullRead.read(forceFullRead)
+      if (!packageRequestIsCurrent(requestID, request)) {
+        // The complete read is independent of query/filter state. Promote the
+        // newest active state immediately when an older request was superseded,
+        // but never expose complete rows through a server-mode table.
+        const current = currentPackageRequest()
+        if (packageFullRead.peek() !== null && current.active && packageMode.value === 'server') {
+          packages.value = next
+          packageMode.value = 'client'
+          packagePage.value = 1
+          packageCursor.value = null
+          pageInfo.value = null
+          loaded.value = true
+          error.value = null
+        }
+        return
       }
+
+      packages.value = next
+      packageMode.value = 'client'
+      packagePage.value = 1
       packageCursor.value = null
       pageInfo.value = null
     } else {
@@ -136,7 +158,10 @@ refresh = createLatestRefreshController(async requestID => {
       if (!packageRequestIsCurrent(requestID, request)) return
       packages.value = next.items
       packageCursor.value = request.cursor
-      pageInfo.value = toPackagePageInfo(next.continue)
+      const nextPageInfo = toPackagePageInfo(next.continue)
+      pageInfo.value = nextPageInfo
+      // Keep server ownership until an active query/filter asks to reuse this
+      // terminal page. The metadata is retained for that transition.
     }
     loaded.value = true
     error.value = null
@@ -149,37 +174,66 @@ refresh = createLatestRefreshController(async requestID => {
   }
 })
 
-function handlePackageChange(change: {
-  reason: 'page' | 'page-size' | 'query' | 'filter'
-  page: number
-  pageSize: number
-  query: string
-  filters: Record<string, string>
-  cursor: string | null
-}) {
-  const filters: PackageFilterValues = {
-    type: change.filters.type || '',
-    visibility: change.filters.visibility || '',
-    status: change.filters.status || '',
-  }
-  const active = hasActivePackageFilters(change.query, filters)
-  packagePage.value = change.page
-  packagePageSize.value = change.pageSize
-  packageQuery.value = change.query
-  packageFilters.value = filters
-  packageCursor.value = change.cursor
+function handlePackageChange(change: ResourceTableChange) {
+  const wasClientMode = packageMode.value === 'client'
+  const canReuseCurrentServerPage = !wasClientMode &&
+    (change.reason === 'query' || change.reason === 'filter') &&
+    isCompleteFirstCursorPage({
+      page: packagePage.value,
+      cursor: packageCursor.value,
+      pageInfo: pageInfo.value,
+    })
+  const transition = applyPackagePaginationChange({
+    mode: packageMode.value,
+    page: packagePage.value,
+    pageSize: packagePageSize.value,
+    query: packageQuery.value,
+    filters: { ...packageFilters.value },
+    cursor: packageCursor.value,
+  }, change)
+  const next = transition.state
+  packageMode.value = next.mode
+  packagePage.value = next.page
+  packagePageSize.value = next.pageSize
+  packageQuery.value = next.query
+  packageFilters.value = next.filters
+  packageCursor.value = next.cursor
   pageInfo.value = null
 
-  if (!active) {
-    packageMode.value = 'server'
-    packages.value = []
-    load()
+  if (!hasActivePackageFilters(next.query, next.filters)) {
+    // A pending active-query walk can still exist while mode is server; clear
+    // invalidates it before the queued first server page is allowed to commit.
+    packageFullRead.clear()
+    if (transition.clearRows) packages.value = []
+    if (transition.reload) load(false)
     return
   }
 
-  if (packageMode.value === 'client') return
-  packages.value = []
-  load()
+  // A complete first page is a local source immediately; active filtering
+  // should not trigger an unnecessary workspace walk.
+  if (canReuseCurrentServerPage) {
+    packageFullRead.seed(packages.value)
+    packageMode.value = 'client'
+    packagePage.value = 1
+    packageCursor.value = null
+    pageInfo.value = null
+    return
+  }
+
+  // Preserve a prior complete result across rapid query/filter transitions,
+  // including while a server-page response is still in flight.
+  const cachedFullRows = packageFullRead.peek()
+  if (cachedFullRows) {
+    packages.value = cachedFullRows
+    packageMode.value = 'client'
+    packagePage.value = 1
+    packageCursor.value = null
+    pageInfo.value = null
+    return
+  }
+
+  if (transition.clearRows) packages.value = []
+  if (transition.reload) load()
 }
 
 onMounted(() => {

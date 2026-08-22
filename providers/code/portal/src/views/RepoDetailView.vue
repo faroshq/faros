@@ -8,8 +8,11 @@ import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
+import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import { createFullListReadCoordinator } from '../hybridPagination'
 import {
+  applyPackagePaginationChange,
   clonePackageFilters,
   EMPTY_PACKAGE_FILTERS,
   hasActivePackageFilters,
@@ -73,6 +76,7 @@ const packageQuery = ref('')
 const packageFilters = ref<PackageFilterValues>(clonePackageFilters(EMPTY_PACKAGE_FILTERS))
 const packageCursor = ref<string | null>(null)
 const packagePageInfo = ref<PackagePageInfo | null>(null)
+const packageFullRead = createFullListReadCoordinator(() => api.listPackages(props.name))
 
 const operations = createOperationLocks()
 const keyColumns = [
@@ -148,6 +152,7 @@ let connectionRefresh!: LatestRefreshController
 let keyRefresh!: LatestRefreshController
 let collabRefresh!: LatestRefreshController
 let packageRefresh!: LatestRefreshController
+let forcePackageFullRead = false
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
@@ -158,7 +163,10 @@ function loadRepository() { repoRefresh.request() }
 function loadConnections() { connectionRefresh.request() }
 function loadKeys() { keyRefresh.request() }
 function loadCollaborators() { collabRefresh.request() }
-function loadPackages() { packageRefresh.request() }
+function loadPackages(forceFullRead = packageMode.value === 'client') {
+  if (forceFullRead) forcePackageFullRead = true
+  packageRefresh.request()
+}
 function loadAll() {
   loadRepository()
   loadConnections()
@@ -204,37 +212,65 @@ function packageRequestIsCurrent(requestID: number, request: PackageRequest): bo
     current.filters.status === request.filters.status
 }
 
-function handlePackageChange(change: {
-  reason: 'page' | 'page-size' | 'query' | 'filter'
-  page: number
-  pageSize: number
-  query: string
-  filters: Record<string, string>
-  cursor: string | null
-}) {
-  const filters: PackageFilterValues = {
-    type: change.filters.type || '',
-    visibility: change.filters.visibility || '',
-    status: change.filters.status || '',
-  }
-  const active = hasActivePackageFilters(change.query, filters)
-  packagePage.value = change.page
-  packagePageSize.value = change.pageSize
-  packageQuery.value = change.query
-  packageFilters.value = filters
-  packageCursor.value = change.cursor
+function handlePackageChange(change: ResourceTableChange) {
+  const wasClientMode = packageMode.value === 'client'
+  const canReuseCurrentServerPage = !wasClientMode &&
+    (change.reason === 'query' || change.reason === 'filter') &&
+    isCompleteFirstCursorPage({
+      page: packagePage.value,
+      cursor: packageCursor.value,
+      pageInfo: packagePageInfo.value,
+    })
+  const transition = applyPackagePaginationChange({
+    mode: packageMode.value,
+    page: packagePage.value,
+    pageSize: packagePageSize.value,
+    query: packageQuery.value,
+    filters: { ...packageFilters.value },
+    cursor: packageCursor.value,
+  }, change)
+  const next = transition.state
+  packageMode.value = next.mode
+  packagePage.value = next.page
+  packagePageSize.value = next.pageSize
+  packageQuery.value = next.query
+  packageFilters.value = next.filters
+  packageCursor.value = next.cursor
   packagePageInfo.value = null
 
-  if (!active) {
-    packageMode.value = 'server'
-    packages.value = []
-    loadPackages()
+  if (!hasActivePackageFilters(next.query, next.filters)) {
+    // A pending active-query walk can still exist while mode is server; clear
+    // invalidates it before the queued first server page is allowed to commit.
+    packageFullRead.clear()
+    if (transition.clearRows) packages.value = []
+    if (transition.reload) loadPackages(false)
     return
   }
 
-  if (packageMode.value === 'client') return
-  packages.value = []
-  loadPackages()
+  // Reuse a terminal first page as the complete repository package source.
+  if (canReuseCurrentServerPage) {
+    packageFullRead.seed(packages.value)
+    packageMode.value = 'client'
+    packagePage.value = 1
+    packageCursor.value = null
+    packagePageInfo.value = null
+    return
+  }
+
+  // A complete package walk is independent of the current query. Keep it
+  // available across rapid edits and while an older server request settles.
+  const cachedFullRows = packageFullRead.peek()
+  if (cachedFullRows) {
+    packages.value = cachedFullRows
+    packageMode.value = 'client'
+    packagePage.value = 1
+    packageCursor.value = null
+    packagePageInfo.value = null
+    return
+  }
+
+  if (transition.clearRows) packages.value = []
+  if (transition.reload) loadPackages()
 }
 
 async function changeConnection() {
@@ -444,6 +480,8 @@ collabRefresh = createLatestRefreshController(async requestID => {
 
 packageRefresh = createLatestRefreshController(async requestID => {
   const request = currentPackageRequest()
+  const forceFullRead = forcePackageFullRead
+  forcePackageFullRead = false
   packagesLoading.value = true
   // Do not render an unfiltered server page as the result of a newly entered
   // query. Same-page polling keeps cached rows visible until the replacement
@@ -454,13 +492,27 @@ packageRefresh = createLatestRefreshController(async requestID => {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const next = await api.listPackages(props.name)
-      if (!packageRequestIsCurrent(requestID, request)) return
-      packages.value = next
-      if (request.mode === 'server') {
-        packageMode.value = 'client'
-        packagePage.value = 1
+      const next = await packageFullRead.read(forceFullRead)
+      if (!packageRequestIsCurrent(requestID, request)) {
+        // Keep the query-independent result for the newest request. Promote
+        // only an active current state; server mode must never locally filter
+        // a complete walk until the mode switch is explicit.
+        const current = currentPackageRequest()
+        if (packageFullRead.peek() !== null && current.active && packageMode.value === 'server') {
+          packages.value = next
+          packageMode.value = 'client'
+          packagePage.value = 1
+          packageCursor.value = null
+          packagePageInfo.value = null
+          packagesLoaded.value = true
+          packagesError.value = null
+        }
+        return
       }
+
+      packages.value = next
+      packageMode.value = 'client'
+      packagePage.value = 1
       packageCursor.value = null
       packagePageInfo.value = null
     } else {
@@ -471,7 +523,10 @@ packageRefresh = createLatestRefreshController(async requestID => {
       if (!packageRequestIsCurrent(requestID, request)) return
       packages.value = next.items
       packageCursor.value = request.cursor
-      packagePageInfo.value = toPackagePageInfo(next.continue)
+      const nextPageInfo = toPackagePageInfo(next.continue)
+      packagePageInfo.value = nextPageInfo
+      // Keep server ownership until an active query/filter asks to reuse this
+      // terminal page. The metadata is retained for that transition.
     }
     packagesLoaded.value = true
     packagesError.value = null

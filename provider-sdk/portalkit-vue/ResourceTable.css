@@ -157,6 +157,8 @@
 .resource-table-empty-cell { padding: 56px 16px; text-align: center; }
 .resource-table-empty-icon { color: var(--color-text-muted); height: 28px; margin: 0 auto; opacity: .24; width: 28px; }
 .resource-table-empty-label { color: var(--color-text-muted); font-size: 12px; margin: 8px 0 0; }
+.resource-table-pending-cell { padding: 56px 16px; text-align: center; }
+.resource-table-pending-label { color: var(--color-text-muted); font-size: 12px; margin: 0; }
 .resource-table .status-badge {
   align-items: center;
   border-radius: 3px;

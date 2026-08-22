@@ -8,8 +8,8 @@ import ResourceTable from './portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import { MARKETPLACE_CATEGORIES, type MarketplaceApp } from './marketplace'
-import type { ResourceTableChange, TableFilterDefinition, TablePageInfo } from './portalkit/table'
-import { hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
+import { isCompleteFirstCursorPage, type ResourceTableChange, type TableFilterDefinition, type TablePageInfo } from './portalkit/table'
+import { createFullListReadCoordinator, createInFlightReadCoordinator, hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
 
 const workloads = ref<Workload[]>([])
 const edges = ref<Edge[]>([])
@@ -61,6 +61,17 @@ const tableQuery = ref('')
 const filterValues = ref<WorkloadFilterValues>({ strategy: '', status: '' })
 const tableCursor = ref<string | null>(null)
 const tablePageInfo = ref<TablePageInfo | null>(null)
+// Client-side filtering is authoritative only after a complete, query-
+// independent cursor walk has committed. During a pending walk, keep the
+// last complete rows visible and let newer query/filter edits join the same
+// in-flight read rather than starting another walk.
+const clientAuthorityReady = ref(false)
+const clientReadPending = ref(false)
+const completeWorkloadRead = createFullListReadCoordinator(() => listWorkloads())
+// Edge joins are query-independent but must stay fresh for every server or
+// client refresh. Share an in-flight join across clear/re-entry without
+// retaining it as a long-lived cache.
+const edgeRead = createInFlightReadCoordinator(() => listEdges())
 const workloadFilters: TableFilterDefinition[] = [
   { key: 'strategy', label: 'Strategy', options: WORKLOAD_STRATEGY_OPTIONS },
   { key: 'status', label: 'Status', allLabel: 'Any status', options: WORKLOAD_STATUS_OPTIONS },
@@ -95,7 +106,7 @@ async function onDeploy() {
       port: app.port,
     })
     closeDeploy()
-    await refresh()
+    await refresh(true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Deploy failed'
   } finally {
@@ -128,6 +139,7 @@ type WorkloadTableRequest = Omit<TableRequestState, 'filters'> & { filters: Work
 
 let latestRefreshID = 0
 let stopped = false
+let clientReadToken = 0
 
 function cloneWorkloadFilters(filters: WorkloadFilterValues): WorkloadFilterValues {
   return { strategy: filters.strategy, status: filters.status }
@@ -151,9 +163,37 @@ function workloadRequestIsCurrent(requestID: number, request: WorkloadTableReque
   return !stopped && latestRefreshID === requestID && sameTableRequest(current, request)
 }
 
-async function refresh() {
+// A complete client read is query-independent. Query/filter-only changes are
+// allowed to update the controlled table state while its target + edge join is
+// pending; page, page-size, mode, mutation, and context changes still fail
+// this guard through the stable request dimensions below.
+function workloadClientReadIsCurrent(requestID: number, request: WorkloadTableRequest, readGeneration: number): boolean {
+  const current = currentWorkloadRequest()
+  return !stopped && latestRefreshID === requestID && tableMode.value === 'client' &&
+    current.active && current.page === request.page &&
+    current.pageSize === request.pageSize && current.cursor === request.cursor &&
+    completeWorkloadRead.generation() === readGeneration && clientAuthorityReady.value === false
+}
+
+// The optional event union keeps direct template @click/@retry bindings
+// type-safe while mutation callers can request a forced client read.
+async function refresh(forceClientRead: boolean | Event = false) {
   const requestID = ++latestRefreshID
+  const readToken = ++clientReadToken
   const request = currentWorkloadRequest()
+  const wasClientAuthorityReady = clientAuthorityReady.value
+  const forceCompleteRead = request.mode === 'client' && (wasClientAuthorityReady || forceClientRead === true)
+  if (forceCompleteRead) {
+    clientAuthorityReady.value = false
+    // Keep the visible complete rows while a polling/CRUD replacement is in
+    // flight, but make the old cache non-authoritative. Query edits during
+    // this window therefore join the active walk instead of queueing another
+    // forced walk; a failed replacement also cannot be mistaken for ready
+    // data on the next edit.
+    completeWorkloadRead.clear()
+  }
+  clientReadPending.value = request.mode === 'client'
+  const readGeneration = completeWorkloadRead.generation()
   loading.value = true
   error.value = null
   // Do not render an unfiltered page as though it matched a newly-entered
@@ -165,23 +205,38 @@ async function refresh() {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const [nextWorkloads, nextEdges] = await Promise.all([listWorkloads(), listEdges()])
-      if (!workloadRequestIsCurrent(requestID, request)) return
+      // A query-independent full read is shared across rapid query/filter
+      // edits. Polling and CRUD refreshes force one fresh walk; query changes
+      // while that walk is pending join it and commit the newest request.
+      const shouldForceCompleteRead = forceCompleteRead || (
+        request.mode === 'client' && !wasClientAuthorityReady &&
+        completeWorkloadRead.peek() !== null && !completeWorkloadRead.pending()
+      )
+      // The full source and its supporting edge join form one query-
+      // independent transition. Query/filter edits leave this request alive;
+      // the stable client guard below commits the latest reactive state once
+      // both reads settle.
+      const [nextWorkloads, nextEdges] = await Promise.all([
+        completeWorkloadRead.read(shouldForceCompleteRead),
+        edgeRead.read(),
+      ])
+      if (!workloadClientReadIsCurrent(requestID, request, readGeneration)) {
+        return
+      }
       workloads.value = nextWorkloads
       edges.value = nextEdges
-      if (request.mode === 'server') {
-        tableMode.value = 'client'
-        tablePage.value = 1
-      }
+      tableMode.value = 'client'
+      tablePage.value = 1
       tableCursor.value = null
       tablePageInfo.value = null
+      clientAuthorityReady.value = true
     } else {
       const [nextPage, nextEdges] = await Promise.all([
         listWorkloadsPage({
           limit: request.pageSize,
           ...(request.cursor ? { continue: request.cursor } : {}),
         }),
-        listEdges(),
+        edgeRead.read(),
       ])
       if (!workloadRequestIsCurrent(requestID, request)) return
       workloads.value = nextPage.items
@@ -192,14 +247,24 @@ async function refresh() {
     loaded.value = true
     if (!deployEdge.value && edges.value.length) deployEdge.value = edges.value[0].name
   } catch (e) {
-    if (!workloadRequestIsCurrent(requestID, request)) return
+    const current = request.mode === 'client' && request.active
+      ? workloadClientReadIsCurrent(requestID, request, readGeneration)
+      : workloadRequestIsCurrent(requestID, request)
+    if (!current) return
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load workloads'
   } finally {
+    if (clientReadToken === readToken) clientReadPending.value = false
     if (!stopped && latestRefreshID === requestID) loading.value = false
   }
 }
 
 function handleWorkloadTableChange(change: ResourceTableChange) {
+  const wasClientMode = tableMode.value === 'client'
+  const canReuseCurrentServerPage = !wasClientMode && isCompleteFirstCursorPage({
+    page: tablePage.value,
+    cursor: tableCursor.value,
+    pageInfo: tablePageInfo.value,
+  })
   filterValues.value = {
     strategy: change.filters.strategy ?? '',
     status: change.filters.status ?? '',
@@ -213,13 +278,49 @@ function handleWorkloadTableChange(change: ResourceTableChange) {
   const active = hasActiveTableFilters(tableQuery.value, filterValues.value)
   if (!active) {
     tableMode.value = 'server'
+    clientAuthorityReady.value = false
+    // Returning from local filtering always starts at the first bounded page;
+    // ordinary unfiltered page navigation preserves its incoming cursor.
+    if (wasClientMode || change.reason === 'query' || change.reason === 'filter') {
+      tablePage.value = 1
+      tableCursor.value = null
+    }
+    completeWorkloadRead.clear()
     workloads.value = []
     void refresh()
     return
   }
-  // Once a complete list has been fetched, query/filter/page changes are
-  // local and do not need another network read. Polling still refreshes it.
-  if (tableMode.value === 'client') return
+
+  // A terminal first server page is already a complete authority. Promote it
+  // synchronously so entering a query never causes an unnecessary full walk.
+  if (canReuseCurrentServerPage) {
+    completeWorkloadRead.seed(workloads.value)
+    tableMode.value = 'client'
+    clientAuthorityReady.value = true
+    tablePage.value = 1
+    tableCursor.value = null
+    tablePageInfo.value = null
+    return
+  }
+
+  // Once a complete source is resident, table changes are local. During the
+  // pending transition, query/filter-only changes are absorbed by the stable
+  // client guard; other dimensions invalidate and restart the read.
+  if (tableMode.value === 'client') {
+    if (!clientAuthorityReady.value) {
+      if (clientReadPending.value && (change.reason === 'query' || change.reason === 'filter')) return
+      void refresh()
+    }
+    return
+  }
+
+  // Entering a query/filter changes the authority from one server page to a
+  // complete source. Do not expose the partial page as a local result.
+  tableMode.value = 'client'
+  clientAuthorityReady.value = false
+  tablePage.value = 1
+  tableCursor.value = null
+  tablePageInfo.value = null
   workloads.value = []
   void refresh()
 }
@@ -248,7 +349,7 @@ async function onCreate() {
     await createWorkload(d)
     showCreate.value = false
     draft.value = { name: '', image: 'nginx:latest', replicas: 1, strategy: 'Spread', selector: 'env=dev' }
-    await refresh()
+    await refresh(true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Create failed'
   } finally {
@@ -260,7 +361,7 @@ async function onDelete(w: Workload) {
   if (!(await confirmDialog({ title: `Delete workload "${w.name}"?`, message: 'Its Deployments on every edge are removed.', danger: true, confirmLabel: 'Delete' }))) return
   try {
     await deleteWorkload(w.name)
-    await refresh()
+    await refresh(true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Delete failed'
   }

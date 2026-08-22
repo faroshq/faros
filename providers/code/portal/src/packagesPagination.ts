@@ -1,4 +1,4 @@
-import type { TableFilterDefinition } from './portalkit/table'
+import type { ResourceTableChange, TableFilterDefinition } from './portalkit/table'
 
 export const PACKAGE_PAGE_SIZE = 10
 
@@ -56,6 +56,21 @@ export const EMPTY_PACKAGE_FILTERS: PackageFilterValues = {
 
 export type PackagePaginationMode = 'server' | 'client'
 
+export interface PackagePaginationState {
+  mode: PackagePaginationMode
+  page: number
+  pageSize: number
+  query: string
+  filters: PackageFilterValues
+  cursor: string | null
+}
+
+export interface PackagePaginationChangeResult {
+  state: PackagePaginationState
+  reload: boolean
+  clearRows: boolean
+}
+
 export interface PackagePageInfo {
   hasNext: boolean
   nextCursor: string | null
@@ -67,6 +82,40 @@ export function clonePackageFilters(filters: PackageFilterValues): PackageFilter
 
 export function hasActivePackageFilters(query: string, filters: PackageFilterValues): boolean {
   return !!query.trim() || Object.values(filters).some(Boolean)
+}
+
+/**
+ * Apply one controlled ResourceTable transition. Server pages retain their
+ * opaque cursor; query/filter/page-size changes reset the cursor boundary.
+ * Clearing a client-side query always returns to server page one.
+ */
+export function applyPackagePaginationChange(
+  previous: PackagePaginationState,
+  change: ResourceTableChange,
+): PackagePaginationChangeResult {
+  const filters: PackageFilterValues = {
+    type: change.filters.type || '',
+    visibility: change.filters.visibility || '',
+    status: change.filters.status || '',
+  }
+  const active = hasActivePackageFilters(change.query, filters)
+  const preserveServerPage = !active && previous.mode === 'server' && change.reason === 'page'
+  const state: PackagePaginationState = {
+    mode: previous.mode,
+    page: preserveServerPage ? change.page : active ? change.page : 1,
+    pageSize: change.pageSize,
+    query: change.query,
+    filters,
+    cursor: preserveServerPage ? change.cursor : active ? change.cursor : null,
+  }
+
+  if (!active) {
+    state.mode = 'server'
+    return { state, reload: true, clearRows: true }
+  }
+
+  if (previous.mode === 'client') return { state, reload: false, clearRows: false }
+  return { state, reload: true, clearRows: true }
 }
 
 export function packagePageInfo(nextCursor?: string): PackagePageInfo {

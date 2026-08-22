@@ -6,8 +6,9 @@ import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import type { ResourceTableChange } from '../portalkit/table'
+import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import { createFullListReadCoordinator } from '../hybridPagination'
 import {
   cloneRepositoryFilters,
   EMPTY_REPOSITORY_FILTERS,
@@ -39,6 +40,7 @@ const repositoryQuery = ref('')
 const repositoryFiltersValue = ref<RepositoryFilterValues>(cloneRepositoryFilters(EMPTY_REPOSITORY_FILTERS))
 const repositoryCursor = ref<string | null>(null)
 const repositoryPageInfo = ref<ReturnType<typeof toRepositoryPageInfo> | null>(null)
+const repositoryFullRead = createFullListReadCoordinator(() => api.listRepositories())
 const connectionsError = ref<string | null>(null)
 const connectionsLoading = ref(false)
 const connectionsLoaded = ref(false)
@@ -79,13 +81,15 @@ let timer: number | undefined
 let mounted = false
 let repoRefresh!: LatestRefreshController
 let connectionRefresh!: LatestRefreshController
+let forceRepositoryFullRead = false
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
-function loadRepositories() {
+function loadRepositories(forceFullRead = repositoryMode.value === 'client') {
+  if (forceFullRead) forceRepositoryFullRead = true
   repoRefresh.request()
 }
 
@@ -140,6 +144,14 @@ function repositoryRequestIsCurrent(requestID: number, request: RepositoryReques
 }
 
 function handleRepositoryChange(change: ResourceTableChange): void {
+  const wasClientMode = repositoryMode.value === 'client'
+  const canReuseCurrentServerPage = !wasClientMode &&
+    (change.reason === 'query' || change.reason === 'filter') &&
+    isCompleteFirstCursorPage({
+      page: repositoryPage.value,
+      cursor: repositoryCursor.value,
+      pageInfo: repositoryPageInfo.value,
+    })
   const transition = applyRepositoryPaginationChange({
     mode: repositoryMode.value,
     page: repositoryPage.value,
@@ -156,6 +168,45 @@ function handleRepositoryChange(change: ResourceTableChange): void {
   repositoryFiltersValue.value = next.filters
   repositoryCursor.value = next.cursor
   repositoryPageInfo.value = null
+
+  if (!hasActiveRepositoryFilters(next.query, next.filters)) {
+    // The full walk may have started while mode was still server during an
+    // active-query transition. Clearing must invalidate that pending result
+    // even before client mode has been committed.
+    repositoryFullRead.clear()
+    if (transition.clearRows) repos.value = []
+    if (transition.reload) loadRepositories(false)
+    return
+  }
+
+  // A terminal first server page is already the complete authority. Promote it
+  // synchronously so entering a query never causes an unnecessary full walk.
+  if (canReuseCurrentServerPage) {
+    repositoryFullRead.seed(repos.value)
+    repos.value
+      .filter(item => item.deletionTimestamp)
+      .forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+    props.deletions.reconcile(deletionScope, repos.value)
+    repositoryMode.value = 'client'
+    repositoryPage.value = 1
+    repositoryCursor.value = null
+    repositoryPageInfo.value = null
+    return
+  }
+
+  // A prior complete walk remains query-independent. Reuse it immediately
+  // while a server page or an older request is still settling; this prevents a
+  // rapid query/filter change from presenting an empty table or waiting for the
+  // next polling interval.
+  const cachedFullRows = repositoryFullRead.peek()
+  if (cachedFullRows) {
+    repos.value = cachedFullRows
+    repositoryMode.value = 'client'
+    repositoryPage.value = 1
+    repositoryCursor.value = null
+    repositoryPageInfo.value = null
+    return
+  }
 
   if (transition.clearRows) repos.value = []
   if (transition.reload) loadRepositories()
@@ -187,7 +238,9 @@ async function submit() {
     // still terminating. Resolve both decisions against a complete walk before
     // allowing the create mutation, and only then reconcile the deletion
     // ledger because this read is authoritative for the whole workspace.
-    const allRepositories = await api.listRepositories()
+    // Reuse the same serialized complete-read authority as search/polling so a
+    // duplicate check cannot race another bounded walk or discard its result.
+    const allRepositories = await repositoryFullRead.read(true)
     if (!mounted) return
     allRepositories
       .filter(item => item.deletionTimestamp)
@@ -259,6 +312,8 @@ async function remove(row: Record<string, unknown>) {
 
 repoRefresh = createLatestRefreshController(async requestID => {
   const request = currentRepositoryRequest()
+  const forceFullRead = forceRepositoryFullRead
+  forceRepositoryFullRead = false
   loading.value = true
   // Never render an unfiltered server page as the result of a newly entered
   // query. Same-mode polling keeps cached rows visible.
@@ -268,17 +323,38 @@ repoRefresh = createLatestRefreshController(async requestID => {
   }
   try {
     if (request.active || request.mode === 'client') {
-      const next = await api.listRepositories()
-      if (!repositoryRequestIsCurrent(requestID, request)) return
-      repos.value = next
-      if (request.mode === 'server') {
-        repositoryMode.value = 'client'
-        repositoryPage.value = 1
+      const next = await repositoryFullRead.read(forceFullRead)
+      // The walk is query-independent. Retain its complete result even when
+      // this particular request was superseded, so the newest query can apply
+      // it without starting another walk.
+      const hasCurrentAuthority = repositoryFullRead.peek() !== null
+      if (mounted && hasCurrentAuthority) {
+        next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+        props.deletions.reconcile(deletionScope, next)
       }
+
+      if (!repositoryRequestIsCurrent(requestID, request)) {
+        // A rapid active-query edit can supersede the request while the walk
+        // is in flight. Promote only if the current state is still active;
+        // never expose the complete rows through server-mode filtering.
+        const current = currentRepositoryRequest()
+        if (mounted && hasCurrentAuthority && current.active && repositoryMode.value === 'server') {
+          repos.value = next
+          repositoryMode.value = 'client'
+          repositoryPage.value = 1
+          repositoryCursor.value = null
+          repositoryPageInfo.value = null
+          loaded.value = true
+          error.value = null
+        }
+        return
+      }
+
+      repos.value = next
+      repositoryMode.value = 'client'
+      repositoryPage.value = 1
       repositoryCursor.value = null
       repositoryPageInfo.value = null
-      next.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
-      props.deletions.reconcile(deletionScope, next)
     } else {
       const next = await api.listRepositoriesPage({
         limit: request.pageSize,
@@ -287,10 +363,18 @@ repoRefresh = createLatestRefreshController(async requestID => {
       if (!repositoryRequestIsCurrent(requestID, request)) return
       repos.value = next.items
       repositoryCursor.value = request.cursor
-      repositoryPageInfo.value = toRepositoryPageInfo(next.continue)
-      // This page can prove that a tombstone is present, but cannot prove that
-      // an acknowledged delete is absent from the workspace.
+      const nextPageInfo = toRepositoryPageInfo(next.continue)
+      repositoryPageInfo.value = nextPageInfo
+      // Even a terminal server page remains server-owned until a query/filter
+      // asks for local authority. A partial page can prove a tombstone is
+      // present but not absence; a terminal first page may reconcile safely
+      // without changing pagination mode.
       next.items.filter(item => item.deletionTimestamp).forEach(item => props.deletions.acknowledge(deletionScope, item.name, item.uid))
+      if (isCompleteFirstCursorPage({
+        page: request.page,
+        cursor: request.cursor,
+        pageInfo: nextPageInfo,
+      })) props.deletions.reconcile(deletionScope, next.items)
     }
     loaded.value = true
     error.value = null

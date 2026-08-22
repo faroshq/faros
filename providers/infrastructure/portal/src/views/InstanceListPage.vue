@@ -7,9 +7,10 @@ import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { createLatestRefreshController, sameResourceIdentity, type ResourceTombstones } from '../refresh'
+import { isCurrentInstanceListRequest, type InstanceListRequest } from '../instanceListRequest'
 import { resolve, type ResolvedValue } from '../view'
 import type { Instance, TemplateView, ViewColumn } from '../types'
-import type { TableFilterDefinition, TableFilterState } from '../portalkit/table'
+import { isCompleteFirstCursorPage, type TableFilterDefinition, type TableFilterState } from '../portalkit/table'
 
 const emit = defineEmits<{
   (e: 'navigate', view: string): void
@@ -33,7 +34,12 @@ const query = ref('')
 const filterValues = ref<TableFilterState>({ template: '', status: '' })
 const cursor = ref<string | null>(null)
 const pageInfo = ref<{ hasNext: boolean; nextCursor: string | null } | null>(null)
+// Client mode becomes a ready local authority after a complete cursor walk (or
+// an explicitly terminal first page) has committed. A pending walk is still
+// query-independent, so query/filter edits can wait for that same read.
+const clientAuthorityReady = ref(false)
 let reconcileAfterNextServerRead = false
+let pendingReadMode: InstanceListRequest['mode'] | null = null
 let pollHandle: number | null = null
 let active = true
 
@@ -131,16 +137,6 @@ function errorMessage(error: unknown, fallback: string): string {
   return value.reason ? `${value.reason}: ${value.message || fallback}` : value.message || fallback
 }
 
-interface InstanceListRequest {
-  mode: 'server' | 'client'
-  active: boolean
-  page: number
-  pageSize: number
-  query: string
-  filters: TableFilterState
-  cursor: string | null
-}
-
 function cloneFilters(values: TableFilterState): TableFilterState {
   return { template: values.template || '', status: values.status || '' }
 }
@@ -163,16 +159,7 @@ function currentRequest(): InstanceListRequest {
 }
 
 function requestIsCurrent(requestID: number, request: InstanceListRequest): boolean {
-  const current = currentRequest()
-  return refresh.isCurrent(requestID) &&
-    current.mode === request.mode &&
-    current.active === request.active &&
-    current.page === request.page &&
-    current.pageSize === request.pageSize &&
-    current.query === request.query &&
-    current.cursor === request.cursor &&
-    current.filters.template === request.filters.template &&
-    current.filters.status === request.filters.status
+  return isCurrentInstanceListRequest(request, currentRequest(), refresh.isCurrent(requestID))
 }
 
 function updateTemplateMetadata(templates: Array<{ name: string; displayName: string; view?: TemplateView }>) {
@@ -251,9 +238,11 @@ const refresh = createLatestRefreshController(async requestID => {
       // safe even while the ResourceTable is showing a client-side subset.
       tombstones.reconcile(nextIdentities)
       reconcileAfterNextServerRead = false
+      clientAuthorityReady.value = true
       cursor.value = null
       pageInfo.value = null
     } else {
+      clientAuthorityReady.value = false
       cursor.value = nextCursor
       pageInfo.value = nextPageInfo
     }
@@ -263,11 +252,13 @@ const refresh = createLatestRefreshController(async requestID => {
     if (!requestIsCurrent(requestID, request) || isContextChangedError(caught)) return
     error.value = errorMessage(caught, 'failed to list instances')
   } finally {
+    if (pendingReadMode === request.mode) pendingReadMode = null
     if (refresh.isCurrent(requestID)) loading.value = false
   }
 })
 
 function load(): Promise<void> {
+  pendingReadMode = paginationMode.value
   return refresh.request()
 }
 
@@ -285,6 +276,11 @@ function handleTableChange(change: {
   cursor: string | null
 }) {
   const wasClientMode = paginationMode.value === 'client'
+  const canReuseCurrentServerPage = paginationMode.value === 'server' && isCompleteFirstCursorPage({
+    page: page.value,
+    cursor: cursor.value,
+    pageInfo: pageInfo.value,
+  })
   const nextFilters = cloneFilters(change.filters)
   const activeQuery = hasActiveFilters(change.query, nextFilters)
   page.value = change.page
@@ -298,19 +294,37 @@ function handleTableChange(change: {
     // Returning to an empty query must switch back to the bounded page path;
     // ResourceTable also emits page one with a null cursor on clear.
     paginationMode.value = 'server'
+    clientAuthorityReady.value = false
     if (wasClientMode || change.reason === 'query' || change.reason === 'filter') resetToFirstServerPage()
     items.value = []
     void load()
     return
   }
 
-  if (paginationMode.value === 'client') return
+  if (paginationMode.value === 'client') {
+    // Both a pending and a ready client source are query-independent. The
+    // pending walk is allowed to commit against the latest reactive query;
+    // only an in-flight server read left by clear, or a page-size authority
+    // change, needs a replacement read. The refresh controller serializes it
+    // behind the rejected server response.
+    if (pendingReadMode === 'server' || change.reason === 'page-size') {
+      clientAuthorityReady.value = false
+      items.value = []
+      void load()
+    }
+    return
+  }
   // Entering a query/filter changes the data authority from one page to the
   // complete cursor walk. Clear the page immediately so old rows cannot be
   // mistaken for the new result while that walk is in flight.
   paginationMode.value = 'client'
   page.value = 1
   cursor.value = null
+  if (canReuseCurrentServerPage) {
+    clientAuthorityReady.value = true
+    return
+  }
+  clientAuthorityReady.value = false
   items.value = []
   void load()
 }
@@ -335,6 +349,11 @@ async function deleteInstance(instance: Instance) {
     if (active) {
       tombstones.add(instanceKey(currentInstance), currentInstance.uid)
       reconcileAfterNextServerRead = true
+      // The complete source is stale until the post-delete read proves the
+      // tombstone's absence/presence, so query edits during that read must
+      // wait for its refreshed source rather than filtering an acknowledged
+      // stale snapshot.
+      clientAuthorityReady.value = false
       await load()
     }
   } catch (caught) {
