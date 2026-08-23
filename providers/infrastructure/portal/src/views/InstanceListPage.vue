@@ -408,7 +408,7 @@ onUnmounted(() => {
 
     <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
       <span>{{ deleteError }}</span>
-      <button type="button" class="read-retry" @click="deleteError = null">Dismiss</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="deleteError = null">Dismiss</button>
     </div>
 
     <ResourceTable
@@ -440,7 +440,7 @@ onUnmounted(() => {
       <template #name="{ value, row }">
         <button
           type="button"
-          class="instance-name-link"
+          class="k-btn k-btn--ghost instance-name-link"
           :disabled="instanceIsDeleting(rowInstance(row)) || deletingInstanceKey === instanceKey(rowInstance(row))"
           :aria-label="`Open instance ${String(value)}`"
           @click.stop="selectInstance(row)"
@@ -475,7 +475,7 @@ onUnmounted(() => {
 
     <div v-if="loaded && !error && items.length === 0" class="empty-followup">
       <span>Each workspace has its own instances.</span>
-      <button type="button" class="link" @click="emit('navigate', 'catalog')">Browse templates</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="emit('navigate', 'catalog')">Browse templates</button>
     </div>
   </section>
 </template>

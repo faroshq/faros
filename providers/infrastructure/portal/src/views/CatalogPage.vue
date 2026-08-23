@@ -63,7 +63,7 @@ function clearFilters() {
         <h2 class="page-title">Templates</h2>
         <p class="page-meta">Pick a template to provision into your tenant scope.</p>
       </div>
-      <button type="button" class="link" @click="emit('navigate', 'instances')">My instances <ArrowRight :size="14" aria-hidden="true" /></button>
+      <button type="button" class="k-btn k-btn--ghost" @click="emit('navigate', 'instances')">My instances <ArrowRight :size="14" aria-hidden="true" /></button>
     </header>
 
     <div v-if="categories.length > 1 || clouds.length > 0" class="filters">
@@ -80,10 +80,10 @@ function clearFilters() {
     <span v-if="loaded && loading" class="sr-only" role="status" aria-live="polite">Updating template catalog…</span>
     <div v-if="loaded && error" class="stale-banner" role="alert" aria-live="assertive">
       <span>Showing the last successful result. {{ error }}</span>
-      <button type="button" class="read-retry" @click="load">Retry</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
     </div>
     <div v-if="!loaded && loading" class="catalog-loading-grid" role="status" aria-live="polite" aria-busy="true" aria-label="Loading templates">
-      <div v-for="i in 6" :key="i" class="catalog-loading-card" aria-hidden="true">
+      <div v-for="i in 6" :key="i" class="catalog-loading-card k-card" aria-hidden="true">
         <div class="shimmer page-loading-line page-loading-line-short" />
         <div class="shimmer page-loading-line" />
         <div class="shimmer page-loading-line page-loading-line-mid" />
@@ -91,15 +91,15 @@ function clearFilters() {
     </div>
     <div v-else-if="!loaded && error" class="read-error" role="alert" aria-live="assertive">
       <span>{{ error }}</span>
-      <button type="button" class="read-retry" @click="load">Retry</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
     </div>
     <div v-else-if="templates.length === 0" class="empty-state" role="status">
       <span>No infrastructure templates are available in this workspace.</span>
-      <button type="button" class="link" @click="load">Refresh catalog</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="load">Refresh catalog</button>
     </div>
     <div v-else-if="filtered.length === 0" class="empty-state" role="status">
       <span>No templates match the current filters.</span>
-      <button type="button" class="link" @click="clearFilters">Clear filters</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="clearFilters">Clear filters</button>
     </div>
     <div v-else class="grid">
       <TemplateCard
