@@ -29,6 +29,13 @@ test('keeps wizard progression styling and overlay route guards intact', () => {
   assert.match(styles, /\.wiz-steps\s*\{[\s\S]*\.wiz-step\s*\{[\s\S]*\.wiz-step\.active\s*\{[\s\S]*\.wiz-step\.done\s*\{/)
 })
 
+test('keeps header actions intrinsic while descriptive copy wraps', () => {
+  assert.match(styles, /\.edges-header\s*>\s*:first-child\s*\{[^}]*flex:\s*1 1 auto;[^}]*min-width:\s*0;/)
+  assert.match(styles, /\.header-actions\s*\{[^}]*flex:\s*0 0 auto;[^}]*flex-wrap:\s*wrap;/)
+  assert.match(styles, /\.header-actions button\s*\{[^}]*flex:\s*0 0 auto;[^}]*white-space:\s*nowrap;/)
+  assert.match(styles, /@media \(max-width:\s*720px\)[\s\S]*?\.edges-header\s*\{[^}]*align-items:\s*stretch;[^}]*flex-direction:\s*column;/)
+})
+
 test('gives native interactive rows keyboard and nested-control semantics', () => {
   const rows = [
     [app, 'onEdgeRowClick', 'onEdgeRowKeydown', 'Open .* edge'],

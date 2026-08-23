@@ -33,9 +33,18 @@ faros-provider-edges .edges-app { display: flex; flex-direction: column; gap: 16
 
 /* ── Header ── */
 faros-provider-edges .edges-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+faros-provider-edges .edges-header > :first-child { flex: 1 1 auto; min-width: 0; }
+faros-provider-edges .edges-header > :first-child > div { min-width: 0; }
 faros-provider-edges .edges-header h1 { font-size: 18px; font-weight: 600; margin: 0; color: var(--color-text-primary); }
 faros-provider-edges .edges-header p { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 12px; }
-faros-provider-edges .header-actions { display: flex; gap: 8px; }
+faros-provider-edges .edges-header h1, faros-provider-edges .edges-header p { overflow-wrap: anywhere; }
+faros-provider-edges .header-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+faros-provider-edges .header-actions button { flex: 0 0 auto; white-space: nowrap; }
+
+@media (max-width: 720px) {
+  faros-provider-edges .edges-header { align-items: stretch; flex-direction: column; }
+  faros-provider-edges .header-actions { justify-content: flex-start; width: 100%; }
+}
 
 /* ── Inputs & labels ── */
 faros-provider-edges .lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .15em; color: var(--color-text-muted); }
