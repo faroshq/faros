@@ -417,8 +417,6 @@ function workloadRowAriaLabel(row: Record<string, unknown>): string {
       </div>
     </header>
 
-    <div v-if="error" class="banner error">{{ error }}</div>
-
     <!-- Marketplace -->
     <div class="market k-card">
       <button

@@ -70,6 +70,10 @@ watch(view, (v) => {
 const edges = ref<Edge[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+// Nested list views keep their own cursor/cache authority. Remount them when
+// the shell changes tenant or token so a prior workspace's rows and cursors
+// cannot remain visible while the new context is loading.
+const contextGeneration = ref(0)
 const edgeColumns = [
   { key: 'name', label: 'Name' },
   { key: 'typeLabel', label: 'Type' },
@@ -124,6 +128,7 @@ async function onDelete(edge: Edge) {
 watch(
   () => [props.ctx?.token, props.ctx?.tenant] as const,
   ([token, tenant]) => {
+    contextGeneration.value += 1
     setToken(token ?? null)
     setTenant(tenant ?? null)
     if (tenant) refresh()
@@ -154,7 +159,7 @@ function edgeRowAriaLabel(row: Record<string, unknown>): string {
 </script>
 
 <template>
-  <div ref="rootRef" class="edges-app">
+  <div ref="rootRef" class="edges-app" :key="contextGeneration">
     <!-- Section nav: Edges | Workloads | Services. Mirrors the sidebar's sub-nav
          items and pushes the shell route via navigate(). Hidden while the wizard
          or a detail view is open so those flows stay focused. -->

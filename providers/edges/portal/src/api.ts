@@ -49,27 +49,82 @@ function validateListOptions(options: KubernetesListOptions, kind: string): Kube
 
 let bearerToken: string | null = null
 let clusterName: string | null = null
+let contextGeneration = 0
+
+// A cursor walk must stay bound to the caller and workspace that started it.
+// The singleton context changes when the shell switches tenant or rotates the
+// token; generation catches a change even if the values later change back.
+class ContextChangedError extends Error {
+  readonly reason = 'ContextChanged'
+
+  constructor() {
+    super('workspace or authentication context changed while the request was in flight')
+    this.name = 'ContextChangedError'
+  }
+}
+
+export function isContextChangedError(error: unknown): boolean {
+  return error instanceof ContextChangedError || (error as { reason?: string } | null)?.reason === 'ContextChanged'
+}
+
+interface RequestContext {
+  generation: number
+  token: string | null
+  tenant: string | null
+}
+
+function requestContext(): RequestContext {
+  return { generation: contextGeneration, token: bearerToken, tenant: clusterName }
+}
+
+function assertCurrentContext(expected: RequestContext): void {
+  if (expected.generation !== contextGeneration || expected.token !== bearerToken || expected.tenant !== clusterName) {
+    throw new ContextChangedError()
+  }
+}
 
 export function setToken(token?: string | null) {
-  bearerToken = token || null
+  const next = token || null
+  if (next !== bearerToken) contextGeneration += 1
+  bearerToken = next
 }
 export function setTenant(name?: string | null) {
-  clusterName = name || null
+  const next = name || null
+  if (next !== clusterName) contextGeneration += 1
+  clusterName = next
 }
 
-async function graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  if (!clusterName) {
+async function graphql<T>(
+  query: string,
+  variables: Record<string, unknown> = {},
+  context: RequestContext = requestContext(),
+): Promise<T> {
+  assertCurrentContext(context)
+  if (!context.tenant) {
     throw <ErrorResponse>{ reason: 'TenantMissing', message: 'no workspace selected' }
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' }
-  if (bearerToken) headers['Authorization'] = 'Bearer ' + bearerToken
-  const res = await fetch('/graphql/' + clusterName, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers,
-    body: JSON.stringify({ query, variables }),
-  })
-  const text = await res.text()
+  if (context.token) headers['Authorization'] = 'Bearer ' + context.token
+  let res: Response
+  try {
+    res = await fetch('/graphql/' + context.tenant, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({ query, variables }),
+    })
+  } catch (error) {
+    assertCurrentContext(context)
+    throw error
+  }
+  let text: string
+  try {
+    text = await res.text()
+  } catch (error) {
+    assertCurrentContext(context)
+    throw error
+  }
+  assertCurrentContext(context)
   if (!res.ok) {
     throw <ErrorResponse>{ reason: res.status === 404 ? 'NotFound' : 'HTTPError', message: text || res.statusText }
   }
@@ -93,6 +148,7 @@ async function graphql<T>(query: string, variables: Record<string, unknown> = {}
       throw <ErrorResponse>{ reason: 'GraphQLError', message: body.errors.map((entry) => String((entry as { message: string }).message)).join('; ') }
     }
   }
+  assertCurrentContext(context)
   return (body.data ?? {}) as T
 }
 
@@ -464,7 +520,10 @@ function parseRawEdgeService(item: unknown, index: number): RawEdgeService {
   return item as unknown as RawEdgeService
 }
 
-async function listServicesPageRaw(options: KubernetesListOptions = {}): Promise<RawListPage<RawEdgeService>> {
+async function listServicesPageRaw(
+  options: KubernetesListOptions = {},
+  context: RequestContext = requestContext(),
+): Promise<RawListPage<RawEdgeService>> {
   const request = validateListOptions(options, 'Services')
   const variables: Record<string, unknown> = {}
   if (request.limit !== undefined) variables.limit = request.limit
@@ -479,28 +538,36 @@ async function listServicesPageRaw(options: KubernetesListOptions = {}): Promise
        } }
      }`,
     variables,
+    context,
   )
   return parseListPage(data, 'Services', parseRawEdgeService)
 }
 
 export async function listServicesPage(options: KubernetesListOptions = {}): Promise<KubernetesListPage<EdgeService>> {
-  return mapListPage(await listServicesPageRaw(options), toEdgeService)
+  const context = requestContext()
+  return mapListPage(await listServicesPageRaw(options, context), toEdgeService)
 }
 
 async function listAllPages<T>(
   kind: 'Services' | 'Workloads',
-  fetchPage: (options: KubernetesListOptions) => Promise<RawListPage<T>>,
+  fetchPage: (options: KubernetesListOptions, context: RequestContext) => Promise<RawListPage<T>>,
 ): Promise<T[]> {
+  const context = requestContext()
   const items: T[] = []
   const seenContinueTokens = new Set<string>()
   let continueToken: string | undefined
   for (let pageNumber = 0; pageNumber < MAX_LIST_PAGES; pageNumber += 1) {
+    assertCurrentContext(context)
     const page = await fetchPage({
       limit: LIST_PAGE_SIZE,
       ...(continueToken === undefined ? {} : { continue: continueToken }),
-    })
+    }, context)
+    assertCurrentContext(context)
     items.push(...page.items)
-    if (!page.continue) return items
+    if (!page.continue) {
+      assertCurrentContext(context)
+      return items
+    }
     if (seenContinueTokens.has(page.continue)) {
       throw protocolError(`${kind} list response repeated a continue token`)
     }
@@ -721,7 +788,10 @@ function parseRawWorkload(item: unknown, index: number): RawWorkload {
   return item as unknown as RawWorkload
 }
 
-async function listWorkloadsPageRaw(options: KubernetesListOptions = {}): Promise<RawListPage<RawWorkload>> {
+async function listWorkloadsPageRaw(
+  options: KubernetesListOptions = {},
+  context: RequestContext = requestContext(),
+): Promise<RawListPage<RawWorkload>> {
   const request = validateListOptions(options, 'Workloads')
   const variables: Record<string, unknown> = {}
   if (request.limit !== undefined) variables.limit = request.limit
@@ -736,12 +806,14 @@ async function listWorkloadsPageRaw(options: KubernetesListOptions = {}): Promis
        } }
      }`,
     variables,
+    context,
   )
   return parseListPage(data, 'Workloads', parseRawWorkload)
 }
 
 export async function listWorkloadsPage(options: KubernetesListOptions = {}): Promise<KubernetesListPage<Workload>> {
-  return mapListPage(await listWorkloadsPageRaw(options), toWorkload)
+  const context = requestContext()
+  return mapListPage(await listWorkloadsPageRaw(options, context), toWorkload)
 }
 
 export async function listWorkloads(): Promise<Workload[]> {

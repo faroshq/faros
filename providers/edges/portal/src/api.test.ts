@@ -220,6 +220,32 @@ describe('legacy bounded list walkers', () => {
     expect(calls.map(call => call.variables)).toEqual([{ limit: 100 }, { limit: 100, continue: 'next' }])
   })
 
+  it.each([
+    ['Services', listServices, service],
+    ['Workloads', listWorkloads, workload],
+  ] as const)('aborts a %s cursor walk when the tenant changes between pages', async (kind, list, makeItem) => {
+    setTenant('old-workspace')
+    setToken('old-token')
+    const calls: Array<{ url: string; authorization: string | null }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      calls.push({ url: String(input), authorization: headers.get('Authorization') })
+      if (calls.length === 1) {
+        return page(kind, [makeItem('old-item')], { continue: 'next', remainingItemCount: 1 })
+      }
+      // Switch before page two responds. The walk must still have issued the
+      // request with the immutable old context and then reject the response.
+      setTenant('new-workspace')
+      setToken('new-token')
+      return page(kind, [makeItem('new-item')], { continue: null, remainingItemCount: 0 })
+    }))
+
+    await expect(list()).rejects.toMatchObject({ reason: 'ContextChanged' })
+    expect(calls).toHaveLength(2)
+    expect(calls.map(call => call.url)).toEqual(['/graphql/old-workspace', '/graphql/old-workspace'])
+    expect(calls.map(call => call.authorization)).toEqual(['Bearer old-token', 'Bearer old-token'])
+  })
+
   it('rejects repeated continuation tokens instead of returning a partial list', async () => {
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const call = request(init)
