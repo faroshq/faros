@@ -12,7 +12,8 @@ const admin = useAdminStore()
       <code>edges.faros.sh</code> for kuery) into that provider's Helm values
       (<code>apiExport.edgesIdentityHash</code>).
     </p>
-    <table class="w-full text-sm">
+    <div class="k-table">
+      <table class="w-full text-sm">
       <thead class="text-left text-[11px] uppercase text-text-muted">
         <tr>
           <th class="py-1 pr-4">Group / Resource</th>
@@ -30,6 +31,7 @@ const admin = useAdminStore()
           <td colspan="3" class="py-3 text-text-muted">No first-party identities found.</td>
         </tr>
       </tbody>
-    </table>
+      </table>
+    </div>
   </section>
 </template>

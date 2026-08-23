@@ -42,7 +42,7 @@ onMounted(() => admin.refresh())
           v-for="s in sections"
           :key="s.to"
           :to="s.to"
-          class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors"
+          class="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors"
           :class="$route.path === s.to
             ? 'bg-accent/15 text-accent'
             : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary'"
@@ -55,13 +55,14 @@ onMounted(() => admin.refresh())
       <div class="mt-auto space-y-1 border-t border-border-subtle/60 pt-3">
         <router-link
           to="/"
-          class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
+          class="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
         >
           <ArrowLeft class="h-4 w-4 flex-shrink-0" :stroke-width="1.75" />
           <span>Back to faros</span>
         </router-link>
         <button
-          class="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
+          type="button"
+          class="k-btn k-btn--ghost flex w-full items-center gap-2.5 px-3 py-2 text-sm text-text-muted transition-colors hover:text-text-secondary"
           @click="auth.logout()"
         >
           <LogOut class="h-4 w-4 flex-shrink-0" :stroke-width="1.75" />
@@ -79,7 +80,8 @@ onMounted(() => admin.refresh())
             Platform admin
           </h1>
           <button
-            class="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-sm text-text-primary hover:border-accent/40"
+            type="button"
+            class="k-btn k-btn--ghost inline-flex items-center gap-1.5 px-3 py-1.5 text-sm"
             :disabled="admin.loading"
             @click="admin.refresh()"
           >

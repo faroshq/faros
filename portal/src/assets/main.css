@@ -265,6 +265,20 @@ html.light .island {
   }
 }
 
+/* Motion is a state affordance, not a requirement for understanding the
+ * host. Keep focus/hover state changes available while removing entry,
+ * shimmer, spinner, and live-pulse motion for reduced-motion users. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

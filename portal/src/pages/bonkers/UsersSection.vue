@@ -8,7 +8,8 @@ const admin = useAdminStore()
   <section>
     <h2 class="mb-1 text-base font-semibold text-text-primary">Users</h2>
     <p class="mb-4 text-sm text-text-muted">All users registered on the hub.</p>
-    <table class="w-full text-sm">
+    <div class="k-table">
+      <table class="w-full text-sm">
       <thead class="text-left text-[11px] uppercase text-text-muted">
         <tr>
           <th class="py-1 pr-4">Email</th>
@@ -26,6 +27,7 @@ const admin = useAdminStore()
           <td colspan="3" class="py-3 text-text-muted">No users found.</td>
         </tr>
       </tbody>
-    </table>
+      </table>
+    </div>
   </section>
 </template>

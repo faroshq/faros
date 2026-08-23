@@ -31,7 +31,8 @@ const admin = useAdminStore()
         </div>
 
         <!-- Workspaces -->
-        <table class="w-full text-sm">
+        <div class="k-table">
+          <table class="w-full text-sm">
           <thead class="text-left text-[11px] uppercase text-text-muted">
             <tr>
               <th class="py-1 pr-4">Workspace</th>
@@ -76,7 +77,8 @@ const admin = useAdminStore()
               <td colspan="4" class="py-2 text-[11px] text-text-muted">No workspaces.</td>
             </tr>
           </tbody>
-        </table>
+          </table>
+        </div>
       </div>
     </div>
   </section>

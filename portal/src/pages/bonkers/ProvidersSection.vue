@@ -87,7 +87,7 @@ async function remove(name: string) {
         <input
           v-model="newName"
           placeholder="e.g. code"
-          class="mt-1 w-48 rounded-lg border border-border-subtle bg-surface-raised/60 px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:border-accent/40 focus:outline-none"
+          class="k-input mt-1 w-48 text-sm"
           @keyup.enter="create"
         />
       </div>
@@ -96,12 +96,13 @@ async function remove(name: string) {
         <input
           v-model="newDisplayName"
           placeholder="e.g. Code"
-          class="mt-1 w-56 rounded-lg border border-border-subtle bg-surface-raised/60 px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:border-accent/40 focus:outline-none"
+          class="k-input mt-1 w-56 text-sm"
           @keyup.enter="create"
         />
       </div>
       <button
-        class="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white shadow-[0_0_16px_var(--color-accent-glow)] hover:bg-accent-hover disabled:opacity-50"
+        type="button"
+        class="k-btn k-btn--primary px-3 py-1.5 text-sm disabled:opacity-50"
         :disabled="busy || !newName.trim()"
         @click="create"
       >
@@ -111,7 +112,8 @@ async function remove(name: string) {
     </div>
     <p v-if="actionError" class="mb-2 text-sm text-danger">{{ actionError }}</p>
 
-    <table class="w-full text-sm">
+    <div class="k-table">
+      <table class="w-full text-sm">
       <thead class="text-left text-[11px] uppercase text-text-muted">
         <tr>
           <th class="py-1 pr-4">Name</th>
@@ -152,7 +154,8 @@ async function remove(name: string) {
                   <template v-for="(s, i) in admin.kubeconfigServers" :key="s">
                     <span v-if="i > 0" class="text-text-muted">·</span>
                     <button
-                      class="text-accent disabled:opacity-50"
+                      type="button"
+                      class="k-btn k-btn--ghost px-1 py-0.5 text-[11px] text-accent disabled:opacity-50"
                       :disabled="busy"
                       :title="serverTitles[s]"
                       @click="downloadKubeconfig(p.name, s)"
@@ -163,7 +166,8 @@ async function remove(name: string) {
                 </template>
                 <button
                   v-else
-                  class="text-accent disabled:opacity-50"
+                  type="button"
+                  class="k-btn k-btn--ghost px-1 py-0.5 text-[11px] text-accent disabled:opacity-50"
                   :disabled="busy"
                   :title="
                     admin.kubeconfigServers.length
@@ -176,7 +180,8 @@ async function remove(name: string) {
                 </button>
               </span>
               <button
-                class="inline-flex items-center gap-1 text-xs text-danger disabled:opacity-50"
+                type="button"
+                class="k-btn k-btn--danger inline-flex items-center gap-1 px-2 py-1 text-xs disabled:opacity-50"
                 :disabled="busy"
                 @click="remove(p.name)"
               >
@@ -190,6 +195,7 @@ async function remove(name: string) {
           <td colspan="5" class="py-3 text-text-muted">No providers provisioned or registered.</td>
         </tr>
       </tbody>
-    </table>
+      </table>
+    </div>
   </section>
 </template>

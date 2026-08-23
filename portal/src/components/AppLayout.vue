@@ -436,7 +436,8 @@ watchEffect(() => {
           </div>
         </template>
         <button
-          class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
+          type="button"
+          class="k-btn k-btn--ghost flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
           :class="sidebarExpanded ? 'ml-auto' : ''"
           :title="sidebarExpanded ? 'Collapse sidebar' : 'Expand sidebar'"
           @click="toggleSidebar"
@@ -468,7 +469,7 @@ watchEffect(() => {
         v-for="item in staticNavItems"
         :key="item.to"
         :to="item.to"
-        class="flex items-center gap-2.5 rounded-xl px-3 py-2 text-[11px] font-medium transition-all duration-200"
+        class="flex items-center gap-2.5 rounded-md px-3 py-2 text-[11px] font-medium transition-all duration-200"
         :class="[isActive(item.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary', sidebarExpanded ? '' : 'justify-center']"
         :title="sidebarExpanded ? undefined : item.label"
       >
@@ -487,7 +488,8 @@ watchEffect(() => {
              forced open (isNavGroupOpen). -->
         <button
           v-if="sidebarExpanded"
-          class="mt-3 mb-1 flex w-full items-center gap-2 px-3 text-left"
+          type="button"
+          class="k-btn k-btn--ghost mt-3 mb-1 flex w-full items-center justify-start gap-2 border-0 bg-transparent px-3 py-0 text-left hover:bg-transparent"
           :title="isNavGroupOpen('cat:' + group.name, group.items) ? 'Collapse ' + group.name : 'Expand ' + group.name"
           @click="toggleNavGroup('cat:' + group.name)"
         >
@@ -505,7 +507,7 @@ watchEffect(() => {
           <template v-for="item in group.items" :key="item.to">
             <router-link
               :to="item.to"
-              class="group/nav flex items-center gap-2.5 rounded-xl px-3 py-1.5 text-[11px] font-medium transition-all duration-200"
+              class="group/nav flex items-center gap-2.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-all duration-200"
               :class="[isActive(item.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary', sidebarExpanded ? '' : 'justify-center']"
               :title="sidebarExpanded ? undefined : item.label"
             >
@@ -516,7 +518,8 @@ watchEffect(() => {
                    children. Hidden on the rail (children don't render there). -->
               <button
                 v-if="sidebarExpanded && item.children?.length"
-                class="-mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm text-text-muted/70 hover:text-text-secondary"
+                type="button"
+                class="k-btn k-btn--ghost -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-text-muted/70 hover:bg-transparent hover:text-text-secondary"
                 :title="isNavGroupOpen('item:' + item.to, item.children) ? 'Hide ' + item.label + ' pages' : 'Show ' + item.label + ' pages'"
                 @click.prevent.stop="toggleNavGroup('item:' + item.to)"
               >
@@ -532,7 +535,7 @@ watchEffect(() => {
                 v-for="child in item.children"
                 :key="'c-' + child.to"
                 :to="child.to"
-                class="flex items-center gap-2 rounded-xl py-1.5 pr-3 pl-8 text-[11px] font-medium transition-all duration-200"
+                class="flex items-center gap-2 rounded-md py-1.5 pr-3 pl-8 text-[11px] font-medium transition-all duration-200"
                 :class="isActive(child.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary'"
               >
                 <Dot class="h-3.5 w-3.5 flex-shrink-0 -ml-1" :stroke-width="3" />
@@ -549,7 +552,8 @@ watchEffect(() => {
       <template v-if="providersStore.categorizedNavItems.uncategorized.length">
         <button
           v-if="sidebarExpanded"
-          class="mt-3 mb-1 flex w-full items-center gap-2 px-3 text-left"
+          type="button"
+          class="k-btn k-btn--ghost mt-3 mb-1 flex w-full items-center justify-start gap-2 border-0 bg-transparent px-3 py-0 text-left hover:bg-transparent"
           :title="isNavGroupOpen('cat:Other', providersStore.categorizedNavItems.uncategorized) ? 'Collapse Other' : 'Expand Other'"
           @click="toggleNavGroup('cat:Other')"
         >
@@ -567,7 +571,7 @@ watchEffect(() => {
           <template v-for="item in providersStore.categorizedNavItems.uncategorized" :key="'u-' + item.to">
             <router-link
               :to="item.to"
-              class="flex items-center gap-2.5 rounded-xl px-3 py-1.5 text-[11px] font-medium transition-all duration-200"
+              class="flex items-center gap-2.5 rounded-md px-3 py-1.5 text-[11px] font-medium transition-all duration-200"
               :class="[isActive(item.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary', sidebarExpanded ? '' : 'justify-center']"
               :title="sidebarExpanded ? undefined : item.label"
             >
@@ -576,7 +580,8 @@ watchEffect(() => {
               <span v-if="sidebarExpanded" class="min-w-0 flex-1 truncate">{{ item.label }}</span>
               <button
                 v-if="sidebarExpanded && item.children?.length"
-                class="-mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm text-text-muted/70 hover:text-text-secondary"
+                type="button"
+                class="k-btn k-btn--ghost -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-text-muted/70 hover:bg-transparent hover:text-text-secondary"
                 :title="isNavGroupOpen('item:' + item.to, item.children) ? 'Hide ' + item.label + ' pages' : 'Show ' + item.label + ' pages'"
                 @click.prevent.stop="toggleNavGroup('item:' + item.to)"
               >
@@ -592,7 +597,7 @@ watchEffect(() => {
                 v-for="child in item.children"
                 :key="'uc-' + child.to"
                 :to="child.to"
-                class="flex items-center gap-2 rounded-xl py-1.5 pr-3 pl-8 text-[11px] font-medium transition-all duration-200"
+                class="flex items-center gap-2 rounded-md py-1.5 pr-3 pl-8 text-[11px] font-medium transition-all duration-200"
                 :class="isActive(child.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/50 hover:text-text-secondary'"
               >
                 <Dot class="h-3.5 w-3.5 flex-shrink-0 -ml-1" :stroke-width="3" />
@@ -610,7 +615,7 @@ watchEffect(() => {
       </div>
       <router-link
         :to="providersHeaderItem.to"
-        class="flex items-center gap-2.5 rounded-xl px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-all duration-200"
+        class="flex items-center gap-2.5 rounded-md px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider transition-all duration-200"
         :class="[isActive(providersHeaderItem.to, true) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted/80 hover:bg-surface-overlay/50 hover:text-text-secondary', sidebarExpanded ? '' : 'justify-center']"
         :title="sidebarExpanded ? undefined : providersHeaderItem.label"
       >
@@ -709,7 +714,7 @@ watchEffect(() => {
           v-for="item in section.items"
           :key="item.to"
           :to="item.to"
-          class="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1 text-[11px] font-medium transition-all duration-200"
+          class="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-medium transition-all duration-200"
           :class="isActive(item.to) ? 'bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:bg-surface-overlay/40 hover:text-text-secondary'"
           :title="item.label"
         >
@@ -826,7 +831,7 @@ watchEffect(() => {
             v-for="item in section.items"
             :key="item.to"
             :to="item.to"
-            class="island-nav flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1 text-[11px] font-medium transition-all duration-200"
+            class="island-nav flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-medium transition-all duration-200"
             :class="isActive(item.to) ? 'active bg-accent/15 text-accent shadow-[0_0_14px_var(--color-accent-glow)]' : 'text-text-muted hover:text-text-secondary'"
             :title="item.label"
           >
