@@ -7300,7 +7300,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <button
                   v-if="canImplementPlan(message)"
                   type="button"
-                  class="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent-subtle px-3 py-1.5 text-[12px] font-medium text-accent transition hover:bg-accent/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  class="mt-3 inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent-subtle px-3 py-1.5 text-[12px] font-medium text-accent transition hover:bg-accent/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   @click="implementPlan(message)"
                 >
                   Implement plan
@@ -7332,9 +7332,9 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                   :class="conversationWorkingLabel === 'Running' ? 'conversation-running-ripple' : undefined"
                 >{{ conversationWorkingLabel }}</span>
                 <span v-if="conversationWorkingLabel === 'Running'" class="flex items-center gap-0.5 text-text-muted" aria-hidden="true">
-                  <span class="h-1 w-1 animate-pulse rounded-full bg-current"></span>
-                  <span class="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:120ms]"></span>
-                  <span class="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:240ms]"></span>
+                  <span class="h-1 w-1 animate-pulse motion-reduce:animate-none rounded-full bg-current"></span>
+                  <span class="h-1 w-1 animate-pulse motion-reduce:animate-none rounded-full bg-current [animation-delay:120ms]"></span>
+                  <span class="h-1 w-1 animate-pulse motion-reduce:animate-none rounded-full bg-current [animation-delay:240ms]"></span>
                 </span>
               </div>
             </div>
@@ -7376,7 +7376,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                         v-for="option in question.options"
                         :key="option.label"
                         type="button"
-                        class="rounded-lg border px-3 py-2 text-left transition"
+                        class="rounded-md border px-3 py-2 text-left transition"
                         :class="followUpOptionSelected(pendingFollowUp.interrupt, question, option) ? 'border-accent bg-accent-subtle' : 'border-border-subtle bg-surface-raised hover:border-accent/40 hover:bg-surface-hover'"
                         :disabled="followUpBusyState(pendingFollowUp.interrupt)"
                         @click="updateFollowUpAnswer(pendingFollowUp.interrupt, question.id, option.label)"
@@ -7387,7 +7387,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     </div>
                     <input
                       v-if="question.isOther !== false"
-                      class="mt-2 h-9 w-full rounded-lg border border-border-subtle bg-surface-raised px-3 text-[12px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
+                      class="mt-2 h-9 w-full rounded-md border border-border-subtle bg-surface-raised px-3 text-[12px] text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
                       :aria-label="`${question.header || 'Clarification'} other answer`"
                       placeholder="Other..."
                       :value="followUpAnswer(pendingFollowUp.interrupt, question)"
@@ -7836,7 +7836,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 type="button"
                 class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
                 :class="developmentPreviewAnnotationMode
-                  ? 'border-accent/40 bg-accent-subtle text-accent shadow-[0_0_16px_var(--color-accent-glow)]'
+                  ? 'border-accent/40 bg-accent-subtle text-accent'
                   : 'border-border-subtle bg-surface text-text-secondary hover:bg-surface-hover hover:text-text-primary'"
                 :disabled="messageStreaming || !developmentPreviewCanAnnotate"
                 :aria-pressed="developmentPreviewAnnotationMode"
