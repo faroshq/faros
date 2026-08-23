@@ -110,7 +110,7 @@ export class Models extends StoreElement {
 
   render(): TemplateResult {
     const creds = this.store.credentials
-    return html`<div class="agents-panel k-card">
+    return html`<div class="agents-panel k-card agents-route-panel">
       <div class="agents-panel-head">
         <h3>Models</h3>
         ${this.creating ? nothing : html`<button class="k-btn k-btn--primary" @click=${() => (this.creating = true)}>${icon('plus')} New model</button>`}

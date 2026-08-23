@@ -149,23 +149,25 @@ export class Connections extends StoreElement {
 
   render(): TemplateResult {
     return html`
-      <div class="agents-panel k-card">
-        <h3>Connections</h3>
-        <p class="muted">
-          Shared credentials for external systems. Each is a ${icon('wrench')} <strong>Tool</strong> agents call, a
-          ${icon('megaphone')} <strong>Channel</strong> they message you on, or a ${icon('plug')} generic
-          <strong>Connection</strong>. Stored as Secrets in your workspace.
-        </p>
-        ${sliceView<Connection>({
-          slice: this.store.connections,
-          emptyIcon: 'plug',
-          emptyText: 'No connections yet — add one below.',
-          retry: () => void this.store.load('connections'),
-          content: (rows) => this.table(rows),
-        })}
-        ${this.editorArea()}
+      <div class="agents-menu">
+        <div class="agents-panel k-card agents-route-panel">
+          <h3>Connections</h3>
+          <p class="muted">
+            Shared credentials for external systems. Each is a ${icon('wrench')} <strong>Tool</strong> agents call, a
+            ${icon('megaphone')} <strong>Channel</strong> they message you on, or a ${icon('plug')} generic
+            <strong>Connection</strong>. Stored as Secrets in your workspace.
+          </p>
+          ${sliceView<Connection>({
+            slice: this.store.connections,
+            emptyIcon: 'plug',
+            emptyText: 'No connections yet — add one below.',
+            retry: () => void this.store.load('connections'),
+            content: (rows) => this.table(rows),
+          })}
+          ${this.editorArea()}
+        </div>
+        <agents-toolsets .store=${this.store} .api=${this.api}></agents-toolsets>
       </div>
-      <agents-toolsets .store=${this.store} .api=${this.api}></agents-toolsets>
     `
   }
 

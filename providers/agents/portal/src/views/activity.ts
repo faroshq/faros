@@ -143,7 +143,7 @@ export class Activity extends StoreElement {
   }
 
   render(): TemplateResult {
-    return html`<div class="agents-panel k-card agents-activity-panel">
+    return html`<div class="agents-panel k-card agents-route-panel agents-activity-panel">
       ${this.agent
         ? nothing
         : html`<div class="agents-panel-head agents-activity-head"><h3>Activity</h3></div>`}

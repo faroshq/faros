@@ -79,7 +79,7 @@ export class Toolsets extends StoreElement {
 
   render(): TemplateResult {
     const slice = this.store.toolsets
-    return html`<div class="agents-panel k-card">
+    return html`<div class="agents-panel k-card agents-route-panel">
       <div class="agents-panel-head">
         <h3>${icon('package')} Toolsets</h3>
         ${this.editing === null ? html`<button class="k-btn k-btn--ghost secondary" @click=${() => this.openCreate()}>${icon('plus')} New toolset</button>` : nothing}
