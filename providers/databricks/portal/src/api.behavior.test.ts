@@ -270,6 +270,50 @@ try {
   assert(complete.map(item => item.name).join(',') === 'alpha,zulu', 'cursor walk did not aggregate and sort all items')
   assert(pageRequests.length === 2 && Number(pageRequests[0]?.variables.limit) === 100 && pageRequests[1]?.variables.continue === 'page-2', 'cursor walk did not issue bounded first/next requests')
 
+  const supportRequests: Array<{ kind: string; variables: Record<string, unknown> }> = []
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { query?: string; variables?: Record<string, unknown> }
+    const variables = body.variables ?? {}
+    const kind = body.query?.includes('Connections') ? 'Connections' : body.query?.includes('Warehouses') ? 'Warehouses' : 'Tables'
+    if (variables.limit !== 100) {
+      const resource = kind === 'Connections' ? pageResources.Connections.first : kind === 'Warehouses' ? pageResources.Warehouses.first : pageResources.Tables.first
+      return new Response(JSON.stringify({
+        data: {
+          databricks_faros_sh: {
+            v1alpha1: {
+              [kind]: { items: [resource], continue: null, remainingItemCount: 0 },
+            },
+          },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    const nextToken = `${kind}-page-2`
+    const isNext = variables.continue === nextToken
+    const prefix = kind === 'Connections' ? 'connection' : 'warehouse'
+    const items = Array.from({ length: isNext ? 1 : 100 }, (_, offset) => {
+      const index = isNext ? 100 : offset
+      const name = `${prefix}-${String(index).padStart(3, '0')}`
+      return kind === 'Connections'
+        ? { metadata: { name }, spec: { host: `https://${name}.example.com`, authType: 'pat', secretRef: { name: `${name}-token` } }, status: { conditions: [] } }
+        : { metadata: { name }, spec: { connectionRef: 'connection-000', warehouseID: `${name}-id` }, status: { conditions: [] } }
+    })
+    supportRequests.push({ kind, variables })
+    return new Response(JSON.stringify({
+      data: {
+        databricks_faros_sh: {
+          v1alpha1: {
+            [kind]: { items, continue: isNext ? null : nextToken, remainingItemCount: isNext ? 0 : 1 },
+          },
+        },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  const supportConnections = await api.listConnections()
+  const supportWarehouses = await api.listWarehouses()
+  assert(supportConnections.length === 101 && supportConnections.some(item => item.name === 'connection-100'), 'complete connection support walk omitted the resource after item 100')
+  assert(supportWarehouses.length === 101 && supportWarehouses.some(item => item.name === 'warehouse-100'), 'complete warehouse support walk omitted the resource after item 100')
+  assert(supportRequests.length === 4 && supportRequests.filter(request => request.kind === 'Connections').length === 2 && supportRequests.filter(request => request.kind === 'Warehouses').length === 2, 'support walks did not fetch both bounded pages')
+
   pageRequests.length = 0
   const warehousePage = await api.listWarehousesPage({ limit: 2 })
   const tablePage = await api.listTablesPage({ limit: 2 })
@@ -330,6 +374,23 @@ try {
     inconsistentCountRejected = (error as { reason?: string }).reason === 'ProtocolError'
   }
   assert(inconsistentCountRejected, 'non-terminal remaining item count was accepted without a cursor')
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    data: {
+      databricks_faros_sh: {
+        v1alpha1: {
+          Tables: { items: [], continue: 'stale-page', remainingItemCount: 0 },
+        },
+      },
+    },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  let staleCursorRejected = false
+  try {
+    await api.listTablesPage({ limit: 1 })
+  } catch (error) {
+    staleCursorRejected = (error as { reason?: string }).reason === 'ProtocolError'
+  }
+  assert(staleCursorRejected, 'zero remaining item count was accepted with a continuation cursor')
 
   let repeatedCalls = 0
   globalThis.fetch = async () => {

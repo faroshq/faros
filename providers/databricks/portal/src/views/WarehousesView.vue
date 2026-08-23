@@ -15,7 +15,6 @@ import {
   databricksHybridTransition,
   databricksServerPageTransition,
   DATABRICKS_PAGE_SIZE,
-  DATABRICKS_SUPPORT_PAGE_SIZE,
   EMPTY_WAREHOUSE_FILTERS,
   hasActiveFilters,
   pageInfo as toPageInfo,
@@ -35,7 +34,7 @@ const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
 const completeRead = createCoalescedRead(() => api.listWarehouses())
-const supportRead = createCoalescedRead(() => api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }))
+const supportRead = createCoalescedRead(() => api.listConnections())
 const serverPageRead = createCoalescedRead(() => {
   const request = currentWarehouseRequest()
   return api.listWarehousesPage({
@@ -332,10 +331,10 @@ refresh = createLatestRefreshController(async requestID => {
   try {
     supportReadPending = true
     supportGeneration = authorityGeneration
-    const connPage = await supportRead.request()
+    const availableConnections = await supportRead.request()
     supportReadPending = false
     if (!mounted || supportGeneration !== authorityGeneration) return
-    connections.value = connPage.items
+    connections.value = availableConnections
 
     const currentAfterSupport = currentWarehouseRequest()
     if (currentAfterSupport.active || currentAfterSupport.mode === 'client') {

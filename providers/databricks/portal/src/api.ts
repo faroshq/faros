@@ -624,6 +624,9 @@ async function gqlListPage(kind: ResourceListKind, fields: string, options: Kube
   if (remainingItemCount !== undefined && remainingItemCount > 0 && !nextToken) {
     throw protocolError(`GraphQL returned ${kind} remainingItemCount without a continuation token; retry the read.`)
   }
+  if (remainingItemCount === 0 && nextToken) {
+    throw protocolError(`GraphQL returned ${kind} a continuation token with no remaining items; retry the read.`)
+  }
   return {
     items: parsedItems,
     continue: nextToken,

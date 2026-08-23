@@ -18,7 +18,6 @@ import {
   databricksHybridTransition,
   databricksServerPageTransition,
   DATABRICKS_PAGE_SIZE,
-  DATABRICKS_SUPPORT_PAGE_SIZE,
   EMPTY_TABLE_FILTERS,
   hasActiveFilters,
   pageInfo as toPageInfo,
@@ -40,8 +39,8 @@ const mutationError = ref<string | null>(null)
 const operations = createOperationLocks()
 const completeRead = createCoalescedRead(() => api.listTables())
 const supportRead = createCoalescedRead(() => Promise.all([
-  api.listConnectionsPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
-  api.listWarehousesPage({ limit: DATABRICKS_SUPPORT_PAGE_SIZE }),
+  api.listConnections(),
+  api.listWarehouses(),
 ]))
 const serverPageRead = createCoalescedRead(() => {
   const request = currentTableRequest()
@@ -387,11 +386,11 @@ refresh = createLatestRefreshController(async requestID => {
   try {
     supportReadPending = true
     supportGeneration = authorityGeneration
-    const [connPage, warehousePageResult] = await supportRead.request()
+    const [availableConnections, availableWarehouses] = await supportRead.request()
     supportReadPending = false
     if (!mounted || supportGeneration !== authorityGeneration) return
-    connections.value = connPage.items
-    warehouses.value = warehousePageResult.items
+    connections.value = availableConnections
+    warehouses.value = availableWarehouses
 
     const currentAfterSupport = currentTableRequest()
     if (currentAfterSupport.active || currentAfterSupport.mode === 'client') {

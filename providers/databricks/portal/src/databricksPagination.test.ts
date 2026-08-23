@@ -1,10 +1,26 @@
-import { databricksHybridTransition, databricksServerPageTransition, serverCursorChange } from './databricksPagination.js'
+import type { Connection, Warehouse } from './types.js'
+import {
+  databricksHybridTransition,
+  databricksServerPageTransition,
+  serverCursorChange,
+  tableFilters,
+  warehouseFilters,
+} from './databricksPagination.js'
 
 function equal(actual: unknown, expected: unknown, label: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
   }
 }
+
+const manyConnections = Array.from({ length: 101 }, (_, index) => ({ name: `connection-${index}` })) as unknown as Connection[]
+const manyWarehouses = Array.from({ length: 101 }, (_, index) => ({ name: `warehouse-${index}` })) as unknown as Warehouse[]
+const warehouseConnectionFilter = warehouseFilters(manyConnections).find(filter => filter.key === 'connectionRef')
+const tableWarehouseFilter = tableFilters(manyWarehouses).find(filter => filter.key === 'warehouseRef')
+equal(warehouseConnectionFilter?.options?.length, 101, 'warehouse filter retains every supporting connection choice')
+equal(warehouseConnectionFilter?.options?.some(option => option.value === 'connection-100'), true, 'warehouse filter includes a connection after item 100')
+equal(tableWarehouseFilter?.options?.length, 101, 'table filter retains every supporting warehouse choice')
+equal(tableWarehouseFilter?.options?.some(option => option.value === 'warehouse-100'), true, 'table filter includes a warehouse after item 100')
 
 equal(
   serverCursorChange({ reason: 'page', page: 3, cursor: 'opaque-page-3' }),

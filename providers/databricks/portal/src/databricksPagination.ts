@@ -4,9 +4,6 @@ import { isCompleteFirstCursorPage, type ResourceTableChange, type TableFilterDe
 /** The default page shown by the resource lists before a query is entered. */
 export const DATABRICKS_PAGE_SIZE = 10
 
-/** Supporting resources are loaded once for form/filter choices. */
-export const DATABRICKS_SUPPORT_PAGE_SIZE = 100
-
 export type DatabricksPaginationMode = 'server' | 'client'
 
 export interface ConnectionFilterValues {
