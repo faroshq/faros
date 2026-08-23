@@ -43,7 +43,7 @@ HOST_UI="$ROOT/portal/src/assets/faros-ui.css"
 # asset. Every other direct file in the canonical directories must be listed
 # above so adding a new source file cannot silently skip every portal.
 TS_CANONICAL_ONLY=(README.md)
-VUE_CANONICAL_ONLY=(layoutPreference.test.ts)
+VUE_CANONICAL_ONLY=()
 
 # These files were visual implementations before faros-ui.css became the sole
 # recipe. Remove only this known migration set; arbitrary unexpected files are

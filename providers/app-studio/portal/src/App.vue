@@ -6861,6 +6861,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <template #actions="{ row }">
             <ResourceTableDeleteButton
               :label="`Delete project ${String(row.displayName || row.name)}`"
+              :busy-label="`Deleting project ${String(row.displayName || row.name)}…`"
+              :busy="deletingProject"
               :disabled="busy"
               @click="requestDeleteProjectTableRow(row)"
             />

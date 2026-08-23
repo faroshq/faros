@@ -49,5 +49,5 @@ test('adapts filtered projects into an interactive canonical list with isolated 
   assert.match(list, /:row-aria-label="\(row\) => `Open project/)
   assert.match(list, /@row-click="enterProjectTableRow"/)
   assert.match(list, /<StatusBadge :status="String\(value\)"/)
-  assert.match(list, /<ResourceTableDeleteButton[\s\S]*:disabled="busy"[\s\S]*@click="requestDeleteProjectTableRow\(row\)"/)
+  assert.match(list, /<ResourceTableDeleteButton[\s\S]*:busy-label="`Deleting project[\s\S]*:busy="deletingProject"[\s\S]*:disabled="busy"[\s\S]*@click="requestDeleteProjectTableRow\(row\)"/)
 })
