@@ -522,7 +522,7 @@ onUnmounted(() => {
         <p class="page-meta">Imported table handles that App Studio can use by tableRef.</p>
       </div>
       <div class="actions">
-        <button class="secondary icon-text" type="button" @click="load">
+        <button class="k-btn k-btn--ghost icon-text" type="button" @click="load">
           <RefreshCw class="button-icon" :stroke-width="1.75" />
           Refresh
         </button>
@@ -535,7 +535,7 @@ onUnmounted(() => {
     <div v-if="showForm" class="databricks-resource-panel k-card">
       <div class="databricks-resource-panel-head">
         <h3 class="databricks-resource-panel-title">{{ editing ? 'Update table' : 'Import table' }}</h3>
-        <button v-if="!editing" class="link" type="button" :disabled="submitting" @click="fillDemo" title="Prefill samples.nyctaxi.trips — Databricks demo data available in every workspace">Fill with demo data</button>
+        <button v-if="!editing" class="k-btn k-btn--ghost databricks-inline-action" type="button" :disabled="submitting" @click="fillDemo" title="Prefill samples.nyctaxi.trips — Databricks demo data available in every workspace">Fill with demo data</button>
       </div>
       <div v-if="tableImportBlocker" class="warning" role="status">
         {{ tableImportBlocker }}
@@ -543,12 +543,12 @@ onUnmounted(() => {
       <form class="form-grid" @submit.prevent="submit">
         <label class="field" for="table-name">
           <span class="field-label">Name</span>
-          <input id="table-name" ref="nameInput" v-model="form.name" :disabled="!!editing || submitting" autocomplete="off" placeholder="order-history" required aria-required="true" aria-describedby="table-name-hint table-form-error" :aria-invalid="!!formError" />
+          <input id="table-name" class="k-input" ref="nameInput" v-model="form.name" :disabled="!!editing || submitting" autocomplete="off" placeholder="order-history" required aria-required="true" aria-describedby="table-name-hint table-form-error" :aria-invalid="!!formError" />
           <span id="table-name-hint" class="field-hint">The stable tableRef exposed to App Studio. Use lowercase letters, numbers, and hyphens; the name is preserved exactly.</span>
         </label>
         <label class="field" for="table-connection">
           <span class="field-label">Connection</span>
-          <select id="table-connection" v-model="form.connectionRef" :disabled="submitting" required aria-required="true" aria-describedby="table-connection-hint table-form-error" :aria-invalid="!!formError">
+          <select id="table-connection" class="k-input" v-model="form.connectionRef" :disabled="submitting" required aria-required="true" aria-describedby="table-connection-hint table-form-error" :aria-invalid="!!formError">
             <option value="" disabled>Select connection</option>
             <option v-for="conn in connections" :key="conn.name" :value="conn.name">{{ conn.name }}</option>
           </select>
@@ -556,7 +556,7 @@ onUnmounted(() => {
         </label>
         <label class="field" for="table-warehouse">
           <span class="field-label">Warehouse</span>
-          <select id="table-warehouse" v-model="form.warehouseRef" :disabled="submitting" required aria-required="true" aria-describedby="table-warehouse-hint table-form-error" :aria-invalid="!!formError">
+          <select id="table-warehouse" class="k-input" v-model="form.warehouseRef" :disabled="submitting" required aria-required="true" aria-describedby="table-warehouse-hint table-form-error" :aria-invalid="!!formError">
             <option value="" disabled>{{ formWarehouses.length ? 'Select warehouse' : 'No warehouses for this connection' }}</option>
             <option v-for="wh in formWarehouses" :key="wh.name" :value="wh.name">{{ wh.name }}</option>
           </select>
@@ -564,22 +564,22 @@ onUnmounted(() => {
         </label>
         <label class="field" for="table-catalog">
           <span class="field-label">Catalog</span>
-          <input id="table-catalog" v-model="form.catalog" :disabled="submitting" autocomplete="off" placeholder="sales" required aria-required="true" aria-describedby="table-catalog-hint table-form-error" :aria-invalid="!!formError" />
+          <input id="table-catalog" class="k-input" v-model="form.catalog" :disabled="submitting" autocomplete="off" placeholder="sales" required aria-required="true" aria-describedby="table-catalog-hint table-form-error" :aria-invalid="!!formError" />
           <span id="table-catalog-hint" class="field-hint">The Databricks catalog containing the table.</span>
         </label>
         <label class="field" for="table-schema">
           <span class="field-label">Schema</span>
-          <input id="table-schema" v-model="form.schema" :disabled="submitting" autocomplete="off" placeholder="gold" required aria-required="true" aria-describedby="table-schema-hint table-form-error" :aria-invalid="!!formError" />
+          <input id="table-schema" class="k-input" v-model="form.schema" :disabled="submitting" autocomplete="off" placeholder="gold" required aria-required="true" aria-describedby="table-schema-hint table-form-error" :aria-invalid="!!formError" />
           <span id="table-schema-hint" class="field-hint">The Databricks schema containing the table.</span>
         </label>
         <label class="field" for="table-table">
           <span class="field-label">Table</span>
-          <input id="table-table" v-model="form.table" :disabled="submitting" autocomplete="off" placeholder="order_history" required aria-required="true" aria-describedby="table-table-hint table-form-error" :aria-invalid="!!formError" />
+          <input id="table-table" class="k-input" v-model="form.table" :disabled="submitting" autocomplete="off" placeholder="order_history" required aria-required="true" aria-describedby="table-table-hint table-form-error" :aria-invalid="!!formError" />
           <span id="table-table-hint" class="field-hint">The exact table identifier in the selected catalog and schema.</span>
         </label>
         <div class="form-actions span-2">
-          <button class="primary" type="submit" :disabled="submitting">{{ submitting ? 'Saving...' : 'Save' }}</button>
-          <button class="secondary" type="button" :disabled="submitting" @click="closeForm">Cancel</button>
+          <button class="k-btn k-btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Saving...' : 'Save' }}</button>
+          <button class="k-btn k-btn--ghost" type="button" :disabled="submitting" @click="closeForm">Cancel</button>
           <span v-if="formError" id="table-form-error" ref="formErrorRef" class="error" role="alert" aria-live="assertive" tabindex="-1">{{ formError }}</span>
         </div>
       </form>
@@ -587,7 +587,7 @@ onUnmounted(() => {
 
     <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
       <span>{{ mutationError }}</span>
-      <button class="secondary" type="button" @click="mutationError = null">Dismiss</button>
+      <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
     <ResourceTable
@@ -622,7 +622,7 @@ onUnmounted(() => {
       @change="handleTableChange"
       @row-click="(row) => openResource(String(row.name))"
     >
-      <template #name="{ value }"><button class="link mono strong" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
+      <template #name="{ value }"><button class="k-btn k-btn--ghost databricks-inline-action mono strong" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
       <template #fullName="{ value }"><span class="mono">{{ value }}</span></template>
       <template #warehouseRef="{ value }"><span class="mono">{{ value }}</span></template>
       <template #columnCount="{ value }"><span>{{ value }}</span></template>

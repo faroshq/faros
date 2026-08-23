@@ -888,7 +888,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(split, /deferredCloseTimer = window\.setTimeout/)
   assert.match(split, /closeMenuAfterTab\(\)/)
   assert.match(tables, /tableImportBlocker = computed\(\(\) => !loaded\.value \? '' : importPrerequisiteMessage/)
-  assert.match(tables, /class="secondary icon-text" type="button" @click="load"/)
+  assert.match(tables, /class="k-btn k-btn--ghost icon-text" type="button" @click="load"/)
   assert.match(tables, /@row-click="\(row\) => openResource\(String\(row\.name\)\)"/)
   assert.doesNotMatch(tables, /selectedTable|schemaRows|schemaLoaded|schemaPending|schemaError|schemaCache|schemaCached/)
   assert.doesNotMatch(tables, /<h3 class="databricks-resource-panel-title">Schema<\/h3>/)

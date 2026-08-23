@@ -423,7 +423,7 @@ onUnmounted(() => {
         <p class="page-meta">Databricks workspaces available to tables in this faros workspace.</p>
       </div>
       <div class="actions">
-        <button class="primary" type="button" :disabled="submitting" @click="showForm ? (showForm = false) : startCreate()">
+        <button class="k-btn k-btn--primary" type="button" :disabled="submitting" @click="showForm ? (showForm = false) : startCreate()">
           {{ showForm ? 'Cancel' : 'Add connection' }}
         </button>
       </div>
@@ -434,22 +434,22 @@ onUnmounted(() => {
       <form class="form" @submit.prevent="submit">
         <div class="field">
           <label class="field-label" for="connection-name">Name</label>
-          <input id="connection-name" ref="nameInput" v-model="name" :disabled="submitting" autocomplete="off" placeholder="orders-prod" required aria-required="true" aria-describedby="connection-name-hint connection-form-error" :aria-invalid="!!formError" />
+          <input id="connection-name" class="k-input" ref="nameInput" v-model="name" :disabled="submitting" autocomplete="off" placeholder="orders-prod" required aria-required="true" aria-describedby="connection-name-hint connection-form-error" :aria-invalid="!!formError" />
           <span id="connection-name-hint" class="field-hint">How this workspace is referred to from faros. Use lowercase letters, numbers, and hyphens; the name is preserved exactly.</span>
         </div>
         <div class="field">
           <label class="field-label" for="connection-host">Workspace host</label>
-          <input id="connection-host" v-model="host" :disabled="submitting" autocomplete="url" placeholder="https://dbc-example.cloud.databricks.com" required aria-required="true" aria-describedby="connection-host-hint connection-form-error" :aria-invalid="!!formError" />
+          <input id="connection-host" class="k-input" v-model="host" :disabled="submitting" autocomplete="url" placeholder="https://dbc-example.cloud.databricks.com" required aria-required="true" aria-describedby="connection-host-hint connection-form-error" :aria-invalid="!!formError" />
           <span id="connection-host-hint" class="field-hint">Use the HTTPS root URL from the Databricks browser address bar (AWS, Azure, or GCP), with no path.</span>
         </div>
         <div class="field">
           <label class="field-label" for="connection-token">Token</label>
-          <input id="connection-token" v-model="token" :disabled="submitting" type="password" autocomplete="new-password" placeholder="Paste token" required aria-required="true" aria-describedby="connection-token-hint connection-form-error" :aria-invalid="!!formError" />
+          <input id="connection-token" class="k-input" v-model="token" :disabled="submitting" type="password" autocomplete="new-password" placeholder="Paste token" required aria-required="true" aria-describedby="connection-token-hint connection-form-error" :aria-invalid="!!formError" />
           <span id="connection-token-hint" class="field-hint">Create a personal access token in Databricks: avatar → Settings → Developer → Access tokens → Manage → Generate new token. Its identity needs SELECT on the catalogs and schemas you plan to import, plus access to a running SQL warehouse.</span>
         </div>
         <div class="actions">
-      <button class="primary" type="submit" :disabled="submitting">{{ submitting ? 'Connecting...' : 'Create' }}</button>
-          <button class="secondary" type="button" :disabled="submitting" @click="() => { resetForm(); showForm = false }">Cancel</button>
+      <button class="k-btn k-btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Connecting...' : 'Create' }}</button>
+          <button class="k-btn k-btn--ghost" type="button" :disabled="submitting" @click="() => { resetForm(); showForm = false }">Cancel</button>
           <span v-if="formError" id="connection-form-error" ref="formErrorRef" class="error" role="alert" aria-live="assertive" tabindex="-1">{{ formError }}</span>
         </div>
         <p class="muted">The token is stored as a Secret in your workspace; the provider validates it and shows the status below.</p>
@@ -458,7 +458,7 @@ onUnmounted(() => {
 
     <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
       <span>{{ mutationError }}</span>
-      <button class="secondary" type="button" @click="mutationError = null">Dismiss</button>
+      <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
     <ResourceTable
@@ -493,7 +493,7 @@ onUnmounted(() => {
       @change="handleConnectionChange"
       @row-click="(row) => openResource(String(row.name))"
     >
-      <template #name="{ value }"><button class="link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
+      <template #name="{ value }"><button class="k-btn k-btn--ghost databricks-inline-action" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
       <template #host="{ value }"><code>{{ value }}</code></template>
       <template #authType="{ value }">{{ value }}</template>
       <template #status="{ row }">

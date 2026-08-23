@@ -171,7 +171,7 @@ onUnmounted(() => {
 
 <template>
   <section class="page">
-    <button class="link back" type="button" :disabled="!!table && operationLocked(table.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Tables</button>
+    <button class="k-btn k-btn--ghost databricks-back-action" type="button" :disabled="!!table && operationLocked(table.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Tables</button>
 
     <header class="page-head">
       <div>
@@ -187,17 +187,17 @@ onUnmounted(() => {
 
     <div v-if="error && !table" class="error read-error" role="alert" aria-live="assertive">
       <span>{{ error }}</span>
-      <button class="secondary" type="button" @click="load">Retry</button>
+      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
     </div>
     <p v-else-if="loading && !table" class="muted" role="status" aria-live="polite">Loading…</p>
     <div v-if="error && table" class="error read-error" role="alert" aria-live="assertive">
       <span>Showing cached table data. {{ error }}</span>
-      <button class="secondary" type="button" @click="load">Retry</button>
+      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
     </div>
     <span v-else-if="loading && table" class="sr-only" role="status" aria-live="polite">Updating…</span>
     <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
       <span>{{ mutationError }}</span>
-      <button class="secondary" type="button" @click="mutationError = null">Dismiss</button>
+      <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
     <template v-if="table">
@@ -271,7 +271,7 @@ onUnmounted(() => {
       />
 
       <div class="actions">
-        <button class="danger resource-delete-button" type="button" :disabled="operationLocked(table.name)" @click="remove">{{ operationPhase(table.name) === 'deleting' ? 'Deleting table…' : 'Delete table' }}</button>
+        <button class="k-btn k-btn--danger resource-delete-button" type="button" :disabled="operationLocked(table.name)" @click="remove">{{ operationPhase(table.name) === 'deleting' ? 'Deleting table…' : 'Delete table' }}</button>
       </div>
     </template>
   </section>
