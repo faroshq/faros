@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { CornerDownRight, ExternalLink } from 'lucide-vue-next'
 import { api } from '../api'
 import type { ErrorResponse, PackageRow } from '../types'
 import ResourceTable from '../portalkit/ResourceTable.vue'
@@ -48,19 +49,25 @@ function controllerCaughtUp(resource: { generation?: number; observedGeneration?
   return resource.generation === undefined ||
     (resource.observedGeneration !== undefined && resource.observedGeneration >= resource.generation)
 }
-const rows = computed<Array<Record<string, unknown>>>(() => [...packages.value]
-  .sort((a, b) => a.repositoryRef.localeCompare(b.repositoryRef) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
-  .map(item => {
-    const deleting = !!item.deletionTimestamp
-    return {
-      ...item,
-      visibility: packageVisibility(item.visibility),
-      deleting,
-      rowKey: `${item.repositoryRef}:${item.uid || `${item.type}/${item.name}`}`,
-      status: deleting ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
-      url: item.htmlURL || '',
-    }
-  }))
+const rows = computed<Array<Record<string, unknown>>>(() => {
+  let previousRepository = ''
+  return [...packages.value]
+    .sort((a, b) => a.repositoryRef.localeCompare(b.repositoryRef) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name))
+    .map(item => {
+      const showRepository = item.repositoryRef !== previousRepository
+      previousRepository = item.repositoryRef
+      const deleting = !!item.deletionTimestamp
+      return {
+        ...item,
+        visibility: packageVisibility(item.visibility),
+        deleting,
+        rowKey: `${item.repositoryRef}:${item.uid || `${item.type}/${item.name}`}`,
+        showRepository,
+        status: deleting ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
+        url: item.htmlURL || '',
+      }
+    })
+})
 
 let timer: number | undefined
 let refresh!: LatestRefreshController
@@ -280,15 +287,16 @@ onUnmounted(() => {
       @change="handlePackageChange"
     >
       <template #repositoryRef="{ row }">
-        <button v-if="!row.deleting" class="link" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
-        <span v-else>{{ row.repositoryRef }}</span>
+        <button v-if="row.showRepository && !row.deleting" class="k-btn k-btn--ghost code-inline-action" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
+        <span v-else-if="row.showRepository">{{ row.repositoryRef }}</span>
+        <CornerDownRight v-else class="muted" :size="14" aria-label="Same repository as above" />
       </template>
       <template #name="{ row }"><strong><a v-if="row.htmlURL && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
-      <template #type="{ value }"><span class="badge muted">{{ value }}</span></template>
+      <template #type="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
       <template #visibility="{ value }"><span class="muted">{{ value === 'unknown' ? '—' : value }}</span></template>
       <template #versionCount="{ value }"><span class="muted">{{ value || 0 }}</span></template>
       <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
-      <template #url="{ row }"><a v-if="row.htmlURL && !row.deleting" class="link" :href="String(row.htmlURL)" target="_blank" rel="noopener">View ↗</a></template>
+      <template #url="{ row }"><a v-if="row.htmlURL && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">View <ExternalLink :size="12" aria-hidden="true" /></a></template>
     </ResourceTable>
     <p class="muted">Packages appear automatically when artifacts are pushed (e.g. <code>docker push</code>, <code>npm publish</code>); the provider crawls each repository periodically.</p>
   </section>

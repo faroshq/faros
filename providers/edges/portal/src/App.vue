@@ -147,6 +147,10 @@ function rel(ts?: string): string {
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
   return `${Math.floor(secs / 86400)}d ago`
 }
+
+function edgeRowAriaLabel(row: Record<string, unknown>): string {
+  return `Open ${row.type === 'server' ? 'server' : 'Kubernetes'} edge ${String(row.name)}`
+}
 </script>
 
 <template>
@@ -189,10 +193,10 @@ function rel(ts?: string): string {
         <p>Kubernetes clusters and Linux/SSH servers connected to this workspace.</p>
       </div>
       <div class="header-actions">
-        <button class="btn" :disabled="loading" @click="refresh">
+        <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="btn primary" @click="wizardOpen = true">
+        <button class="k-btn k-btn--primary" @click="wizardOpen = true">
           <Plus :size="14" /> Connect edge
         </button>
       </div>
@@ -202,6 +206,7 @@ function rel(ts?: string): string {
       :columns="edgeColumns"
       :rows="edgeRows"
       row-key="rowKey"
+      :row-aria-label="edgeRowAriaLabel"
       :loaded="firstLoadDone"
       :loading="loading"
       :error="error"
@@ -216,7 +221,7 @@ function rel(ts?: string): string {
       @row-click="(row) => openDetail(row as unknown as Edge)"
     >
       <template #name="{ value }"><span class="name">{{ value }}</span></template>
-      <template #typeLabel="{ value, row }"><span class="pill"><component :is="row.type === 'server' ? Server : Boxes" :size="12" />{{ value }}</span></template>
+      <template #typeLabel="{ value, row }"><span class="k-badge k-badge--muted"><component :is="row.type === 'server' ? Server : Boxes" :size="12" />{{ value }}</span></template>
       <template #status="{ value }"><StatusBadge :status="String(value)" /></template>
       <template #agentVersion="{ value }"><span class="mono muted">{{ value }}</span></template>
       <template #lastHeartbeat="{ value }"><span class="muted">{{ value }}</span></template>

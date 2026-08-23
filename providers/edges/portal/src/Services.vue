@@ -459,6 +459,9 @@ onUnmounted(() => {
   clearInterval(timer)
 })
 
+function serviceRowAriaLabel(row: Record<string, unknown>): string {
+  return `Open service ${String(row.name)}`
+}
 </script>
 
 <template>
@@ -477,10 +480,10 @@ onUnmounted(() => {
         <p>Services running next to your edges (e.g. Home Assistant). Attach a token to make one Ready, and give it AI guidance — its tools appear in the MCP endpoint.</p>
       </div>
       <div class="header-actions">
-        <button class="btn" :disabled="loading" @click="refresh">
+        <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="btn primary" @click="toggleCreate">
+        <button class="k-btn k-btn--primary" @click="toggleCreate">
           <Plus :size="14" /> New service
         </button>
       </div>
@@ -492,11 +495,11 @@ onUnmounted(() => {
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Name</span>
-          <input v-model="draft.name" class="input" placeholder="ha" />
+          <input v-model="draft.name" class="k-input" placeholder="ha" />
         </label>
         <label class="fld" style="flex: 1;">
           <span class="lbl">Edge</span>
-          <select v-model="draft.edgeName" class="input" @change="resetTargetMode">
+          <select v-model="draft.edgeName" class="k-input" @change="resetTargetMode">
             <option v-for="e in edges" :key="e.name" :value="e.name">{{ e.name }} ({{ e.type === 'server' ? 'LinuxServer' : 'KubernetesCluster' }})</option>
           </select>
         </label>
@@ -504,7 +507,7 @@ onUnmounted(() => {
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Type</span>
-          <select v-model="draft.serviceType" class="input" @change="onTypeChange">
+          <select v-model="draft.serviceType" class="k-input" @change="onTypeChange">
             <optgroup v-for="g in CATALOG_GROUPS" :key="g.category" :label="g.category">
               <option v-for="c in g.items" :key="c.type" :value="c.type">{{ c.displayName }}</option>
             </optgroup>
@@ -512,14 +515,14 @@ onUnmounted(() => {
         </label>
         <label class="fld" style="flex: 0 0 120px;">
           <span class="lbl">Scheme</span>
-          <select v-model="draft.scheme" class="input" :disabled="createSchemeLocked" :title="createSchemeLocked ? 'Fixed by the service type' : ''">
+          <select v-model="draft.scheme" class="k-input" :disabled="createSchemeLocked" :title="createSchemeLocked ? 'Fixed by the service type' : ''">
             <option value="http">http</option>
             <option value="https">https</option>
           </select>
         </label>
         <label class="fld" style="flex: 0 0 120px;">
           <span class="lbl">Port</span>
-          <input v-model="draft.port" type="number" min="1" max="65535" class="input" />
+          <input v-model="draft.port" type="number" min="1" max="65535" class="k-input" />
         </label>
       </div>
       <!-- Target: an explicit choice, independent of the edge kind. -->
@@ -538,7 +541,7 @@ onUnmounted(() => {
       <div v-if="targetMode === 'host'" class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Host {{ catalogFor(draft.serviceType)?.hostRequired ? '(required)' : '(blank = agent loopback)' }}</span>
-          <input v-model="draft.host" class="input" @blur="applyHostUrl" placeholder="192.168.1.1, myui.example.com, or paste https://myui.example.com — blank = 127.0.0.1" />
+          <input v-model="draft.host" class="k-input" @blur="applyHostUrl" placeholder="192.168.1.1, myui.example.com, or paste https://myui.example.com — blank = 127.0.0.1" />
           <span v-if="catalogFor(draft.serviceType)?.hostHelp" class="muted" style="font-size: 12px; margin-top: 4px;">{{ catalogFor(draft.serviceType)?.hostHelp }}</span>
         </label>
       </div>
@@ -546,20 +549,20 @@ onUnmounted(() => {
       <div v-else class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Target namespace</span>
-          <input v-model="draft.targetNamespace" class="input" placeholder="home" />
+          <input v-model="draft.targetNamespace" class="k-input" placeholder="home" />
         </label>
         <label class="fld" style="flex: 1;">
           <span class="lbl">Target service name</span>
-          <input v-model="draft.targetName" class="input" placeholder="home-assistant" />
+          <input v-model="draft.targetName" class="k-input" placeholder="home-assistant" />
         </label>
       </div>
       <label class="fld">
         <span class="lbl">AI instructions (optional)</span>
-        <textarea v-model="draft.instructions" class="input" rows="3" placeholder="Gates are cover.gate_main. Living room light is light.living_room."></textarea>
+        <textarea v-model="draft.instructions" class="k-input" rows="3" placeholder="Gates are cover.gate_main. Living room light is light.living_room."></textarea>
       </label>
       <div class="wiz-actions">
-        <button class="btn" @click="showCreate = false">Cancel</button>
-        <button class="btn primary" :disabled="busy || !canCreate" @click="onCreate">Create</button>
+        <button class="k-btn k-btn--ghost" @click="showCreate = false">Cancel</button>
+        <button class="k-btn k-btn--primary" :disabled="busy || !canCreate" @click="onCreate">Create</button>
       </div>
     </div>
 
@@ -567,6 +570,7 @@ onUnmounted(() => {
       :columns="serviceColumns"
       :rows="serviceRows"
       row-key="name"
+      :row-aria-label="serviceRowAriaLabel"
       :loaded="loaded"
       :loading="loading"
       :error="error"

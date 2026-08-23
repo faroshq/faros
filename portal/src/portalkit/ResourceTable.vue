@@ -1,8 +1,7 @@
 <!-- CANONICAL SOURCE — provider-sdk/portalkit-vue. Do not edit vendored copies under providers/*/portal/src/portalkit/; edit here and run `make sync-portalkit`. -->
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { AlertCircle, ChevronLeft, ChevronRight, Inbox, Search, X } from 'lucide-vue-next'
-import resourceTableStyles from './ResourceTable.css?raw'
 import {
   cursorPageRange,
   deriveTableFilterOptions,
@@ -16,8 +15,6 @@ import {
   type TablePageInfo,
   type TablePaginationMode,
 } from './table'
-
-const STYLE_ID = 'faros-portalkit-resource-table-css'
 
 const props = withDefaults(defineProps<{
   columns: Array<{ key: string; label: string }>
@@ -56,6 +53,8 @@ const props = withDefaults(defineProps<{
   cursor?: string | null
   /** Metadata for the supplied server page; total is optional. */
   pageInfo?: TablePageInfo | null
+  /** Accessible name for an interactive row. A function can derive it from the row. */
+  rowAriaLabel?: string | ((row: Record<string, unknown>, index: number) => string)
 }>(), {
   // Vue casts an omitted Boolean prop to false in child components. A null
   // sentinel preserves omission so legacy callers retain loading -> content
@@ -219,14 +218,6 @@ watch([currentPage, () => props.cursor], ([nextPage, cursor]) => {
   if (cursor !== undefined) rememberCursor(nextPage, cursor)
 }, { immediate: true })
 
-onMounted(() => {
-  if (document.getElementById(STYLE_ID)) return
-  const style = document.createElement('style')
-  style.id = STYLE_ID
-  style.textContent = resourceTableStyles
-  document.head.appendChild(style)
-})
-
 function normalizePage(value: number | undefined): number {
   return Number.isFinite(value) && (value ?? 0) > 0 ? Math.floor(value as number) : 1
 }
@@ -307,10 +298,6 @@ function setFilter(key: string, value: string) {
   emitChange('filter', 1, null, { filters: next })
 }
 
-function onRowClick(row: Record<string, unknown>) {
-  if (props.interactive) emit('rowClick', row)
-}
-
 function rowIdentity(row: Record<string, unknown>, index: number): string | number {
   if (typeof props.rowKey === 'function') return props.rowKey(row, index)
   if (typeof props.rowKey === 'string') {
@@ -354,94 +341,146 @@ function nextPage() {
   if (isServerPagination.value) rememberCursor(target, cursor)
   setPage(target, cursor)
 }
+
+function rowAriaLabel(row: Record<string, unknown>, index: number): string | undefined {
+  const label = typeof props.rowAriaLabel === 'function'
+    ? props.rowAriaLabel(row, index)
+    : props.rowAriaLabel
+  return label || undefined
+}
+
+function isExplicitControlTarget(event: Event): boolean {
+  const currentTarget = event.currentTarget as Element | null
+  const target = event.target as Element | null
+  if (!target || target === currentTarget) return false
+  const element = target as Element | null
+  const control = element?.closest?.(
+    'a, button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])',
+  )
+  return Boolean(control && control !== currentTarget)
+}
+
+function onRowClick(row: Record<string, unknown>, event?: MouseEvent | KeyboardEvent) {
+  if (!props.interactive || (event && isExplicitControlTarget(event))) return
+  emit('rowClick', row)
+}
+
+function onRowKeydown(row: Record<string, unknown>, event: KeyboardEvent) {
+  if (!props.interactive || event.repeat || isExplicitControlTarget(event)) return
+  if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+  event.preventDefault()
+  onRowClick(row, event)
+}
 </script>
 
 <template>
-  <div class="resource-table" :aria-busy="ariaBusy">
-    <span class="resource-table-live" role="status" aria-live="polite" aria-atomic="true" style="block-size: 1px; clip: rect(0 0 0 0); clip-path: inset(50%); inline-size: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; white-space: nowrap;">
+  <div
+    class="k-table k-table--resource"
+    :aria-busy="ariaBusy"
+  >
+    <!-- Keep the live region outside layout so background reads cannot move the table. -->
+    <span
+      class="k-table__live"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      style="block-size: 1px; clip: rect(0 0 0 0); clip-path: inset(50%); inline-size: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; white-space: nowrap;"
+    >
       {{ explicitReadState && loading && loaded ? 'Updating…' : '' }}
     </span>
-    <div v-if="showInitialError" class="resource-table-error" role="alert" aria-live="assertive">
-      <AlertCircle class="resource-table-error-icon" :stroke-width="1.75" />
-      <span class="resource-table-error-message">{{ error }}</span>
-      <button v-if="retryable" class="resource-table-retry" type="button" @click="emit('retry')">Retry</button>
+    <div v-if="showInitialError" class="k-table__error" role="alert" aria-live="assertive">
+      <AlertCircle class="k-table__error-icon" :stroke-width="1.75" />
+      <span class="k-table__error-message">{{ error }}</span>
+      <button v-if="retryable" class="k-table__retry" type="button" @click="emit('retry')">Retry</button>
     </div>
 
-    <div v-else-if="showInitialLoading" class="resource-table-loading" role="status" aria-live="polite" aria-label="Loading resources">
-      <div class="resource-table-loading-head"><div class="shimmer resource-table-skeleton resource-table-skeleton-short" /></div>
-      <div v-for="i in 5" :key="i" class="resource-table-loading-row">
-        <div class="shimmer resource-table-skeleton resource-table-skeleton-wide" />
-        <div class="shimmer resource-table-skeleton resource-table-skeleton-mid" />
-        <div class="shimmer resource-table-skeleton resource-table-skeleton-small" />
+    <div v-else-if="showInitialLoading" class="k-table__loading" role="status" aria-live="polite" aria-label="Loading resources">
+      <div class="k-table__loading-head">
+        <div class="shimmer k-table__skeleton k-table__skeleton--short" />
+      </div>
+      <div v-for="i in 5" :key="i" class="k-table__loading-row">
+        <div class="shimmer k-table__skeleton k-table__skeleton--wide" />
+        <div class="shimmer k-table__skeleton k-table__skeleton--mid" />
+        <div class="shimmer k-table__skeleton k-table__skeleton--small" />
       </div>
     </div>
 
     <template v-else>
-      <div v-if="explicitReadState && error" class="resource-table-stale" role="alert" aria-live="assertive">
-        <AlertCircle class="resource-table-error-icon" :stroke-width="1.75" />
-        <span class="resource-table-error-message">{{ stale ? 'Showing the last successful result. ' : '' }}{{ error }}</span>
-        <button v-if="retryable" class="resource-table-retry" type="button" @click="emit('retry')">Retry</button>
+      <div v-if="explicitReadState && error" class="k-table__stale" role="alert" aria-live="assertive">
+        <AlertCircle class="k-table__error-icon" :stroke-width="1.75" />
+        <span class="k-table__error-message">
+          {{ stale ? 'Showing the last successful result. ' : '' }}{{ error }}
+        </span>
+        <button v-if="retryable" class="k-table__retry" type="button" @click="emit('retry')">Retry</button>
       </div>
 
-      <div v-if="showControls" class="resource-table-controls" role="search" aria-label="Filter table">
-        <label v-if="searchable" class="resource-table-search">
+      <div v-if="showControls" class="k-table__controls" role="search" aria-label="Filter table">
+        <label v-if="searchable" class="k-table__search">
           <span class="sr-only" style="position:absolute;block-size:1px;inline-size:1px;overflow:hidden;clip:rect(0 0 0 0)">Search table</span>
-          <Search class="resource-table-search-icon" :stroke-width="1.75" aria-hidden="true" />
-          <input :value="currentQuery" class="resource-table-search-input" type="search" :placeholder="searchPlaceholder" autocomplete="off" @input="setQuery(($event.target as HTMLInputElement).value)">
-          <button v-if="currentQuery" class="resource-table-search-clear" type="button" aria-label="Clear search" @click="setQuery('')"><X :stroke-width="1.75" /></button>
+          <Search class="k-table__search-icon" :stroke-width="1.75" aria-hidden="true" />
+          <input :value="currentQuery" class="k-table__search-input" type="search" :placeholder="searchPlaceholder" autocomplete="off" @input="setQuery(($event.target as HTMLInputElement).value)">
+          <button v-if="currentQuery" class="k-table__search-clear" type="button" aria-label="Clear search" @click="setQuery('')"><X :stroke-width="1.75" /></button>
         </label>
         <label v-for="filter in filters" :key="filter.key">
           <span class="sr-only" style="position:absolute;block-size:1px;inline-size:1px;overflow:hidden;clip:rect(0 0 0 0)">Filter by {{ filter.label }}</span>
-          <select :value="currentFilters[filter.key] || ''" class="resource-table-filter-select" :aria-label="`Filter by ${filter.label}`" @change="setFilter(filter.key, ($event.target as HTMLSelectElement).value)">
+          <select :value="currentFilters[filter.key] || ''" class="k-table__filter-select" :aria-label="`Filter by ${filter.label}`" @change="setFilter(filter.key, ($event.target as HTMLSelectElement).value)">
             <option value="">{{ filter.allLabel || `All ${filter.label.toLocaleLowerCase()}` }}</option>
             <option v-for="option in filterOptions[filter.key]" :key="option.value" :value="option.value">{{ option.label }}</option>
           </select>
         </label>
-        <button v-if="activeFilters" class="resource-table-clear-filters" type="button" @click="clearFilters">Clear filters</button>
+        <button v-if="activeFilters" class="k-table__clear-filters" type="button" @click="clearFilters">Clear filters</button>
       </div>
 
-      <div class="resource-table-scroll" role="region" aria-label="Scrollable table" tabindex="0">
-        <table class="resource-table-table">
-          <thead><tr class="resource-table-head-row"><th v-for="col in columns" :key="col.key" class="resource-table-heading">{{ col.label }}</th></tr></thead>
+      <div class="k-table__scroll" role="region" aria-label="Scrollable table" tabindex="0">
+        <table class="k-table__table">
+          <thead><tr class="k-table__head-row"><th v-for="col in columns" :key="col.key" class="k-table__heading">{{ col.label }}</th></tr></thead>
           <tbody>
             <template v-for="(row, i) in visibleRows" :key="rowIdentity(row, i)">
-              <tr class="stagger-item resource-table-row" :class="{ 'is-interactive': interactive }" :style="{ animationDelay: `${i * 35}ms` }" @click="onRowClick(row)">
-                <td v-for="col in columns" :key="col.key" class="resource-table-cell">
+              <tr
+                class="stagger-item k-table__row"
+                :class="{ 'k-table__row--interactive': interactive }"
+                :tabindex="interactive ? 0 : undefined"
+                :aria-label="interactive ? rowAriaLabel(row, i) : undefined"
+                :style="{ animationDelay: `${i * 35}ms` }"
+                @click="onRowClick(row, $event)"
+                @keydown="onRowKeydown(row, $event)"
+              >
+                <td v-for="col in columns" :key="col.key" class="k-table__cell">
                   <slot :name="col.key" :value="row[col.key]" :row="row">{{ row[col.key] }}</slot>
                 </td>
               </tr>
               <slot name="after-row" :row="row" />
             </template>
-            <tr v-if="showPendingBody"><td :colspan="columns.length" class="resource-table-pending-cell" role="status" aria-live="polite">
-              <p class="resource-table-pending-label">{{ pendingBodyText }}</p>
+            <tr v-if="showPendingBody"><td :colspan="columns.length" class="k-table__pending-cell" role="status" aria-live="polite">
+              <p class="k-table__pending-label">{{ pendingBodyText }}</p>
             </td></tr>
-            <tr v-else-if="visibleRows.length === 0"><td :colspan="columns.length" class="resource-table-empty-cell">
-              <Inbox class="resource-table-empty-icon" :stroke-width="1.25" />
-              <p class="resource-table-empty-label">{{ activeFilters ? filterEmptyText : emptyText }}</p>
+            <tr v-else-if="visibleRows.length === 0"><td :colspan="columns.length" class="k-table__empty-cell">
+              <Inbox class="k-table__empty-icon" :stroke-width="1.25" />
+              <p class="k-table__empty-label">{{ activeFilters ? filterEmptyText : emptyText }}</p>
             </td></tr>
           </tbody>
         </table>
       </div>
 
-      <footer v-if="showPagination" class="resource-table-pagination" aria-label="Table pagination">
-        <div class="resource-table-range" aria-live="polite">
+      <footer v-if="showPagination" class="k-table__pagination" aria-label="Table pagination">
+        <div class="k-table__range" aria-live="polite">
           <template v-if="isServerPagination && serverTotal !== null && visibleRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong> of <strong>{{ serverTotal }}</strong></template>
           <template v-else-if="isServerPagination && visibleRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong></template>
           <template v-else-if="filteredRows.length">Showing <strong>{{ visibleRange.start }}–{{ visibleRange.end }}</strong> of <strong>{{ filteredRows.length }}</strong></template>
           <template v-else>Showing <strong>0</strong> results</template>
         </div>
-        <label class="resource-table-page-size">Rows per page
-          <select :value="currentPageSize" class="resource-table-page-size-select" aria-label="Rows per page" @change="setPageSize(Number(($event.target as HTMLSelectElement).value))">
+        <label class="k-table__page-size">Rows per page
+          <select :value="currentPageSize" class="k-table__page-size-select" aria-label="Rows per page" @change="setPageSize(Number(($event.target as HTMLSelectElement).value))">
             <option v-for="size in normalizedPageSizes" :key="size" :value="size">{{ size }}</option>
           </select>
         </label>
-        <div class="resource-table-page-actions">
-          <button class="resource-table-page-button" type="button" aria-label="Previous page" :disabled="!canPrevious" @click="previousPage"><ChevronLeft :stroke-width="1.75" /></button>
-          <span class="resource-table-page-indicator" aria-live="polite">
+        <div class="k-table__page-actions">
+          <button class="k-table__page-button" type="button" aria-label="Previous page" :disabled="!canPrevious" @click="previousPage"><ChevronLeft :stroke-width="1.75" /></button>
+          <span class="k-table__page-indicator" aria-live="polite">
             <template v-if="isServerPagination && serverTotal === null">Page {{ currentPage }}</template>
             <template v-else>{{ currentPage }} / {{ totalPages }}</template>
           </span>
-          <button class="resource-table-page-button" type="button" aria-label="Next page" :disabled="!canNext" @click="nextPage"><ChevronRight :stroke-width="1.75" /></button>
+          <button class="k-table__page-button" type="button" aria-label="Next page" :disabled="!canNext" @click="nextPage"><ChevronRight :stroke-width="1.75" /></button>
         </div>
       </footer>
     </template>

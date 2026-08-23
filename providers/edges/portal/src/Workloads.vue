@@ -388,6 +388,10 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
   if (phase === 'failed') return 'danger'
   return null
 }
+
+function workloadRowAriaLabel(row: Record<string, unknown>): string {
+  return `Toggle workload ${String(row.name)}`
+}
 </script>
 
 <template>
@@ -398,10 +402,10 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
         <p>Deploy a workload across matching Kubernetes edges. Each edge's agent runs it locally.</p>
       </div>
       <div class="header-actions">
-        <button class="btn" :disabled="loading" @click="refresh">
+        <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="btn primary" @click="showCreate = !showCreate">
+        <button class="k-btn k-btn--primary" @click="showCreate = !showCreate">
           <Plus :size="14" /> New workload
         </button>
       </div>
@@ -427,11 +431,11 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
             <div v-for="app in grp.apps" :key="app.type" class="market-card">
               <div class="market-card-top">
                 <span class="market-name">{{ app.label }}</span>
-                <span class="chip">{{ app.category }}</span>
+                <span class="k-badge k-badge--muted">{{ app.category }}</span>
               </div>
               <p class="market-desc">{{ app.description }}</p>
               <div class="market-meta muted mono">{{ app.chart.chart }}@{{ app.chart.version }} · :{{ app.port }}</div>
-              <button class="btn primary sm" :disabled="edges.length === 0" @click="openDeploy(app)">
+              <button class="k-btn k-btn--primary compact-control" :disabled="edges.length === 0" @click="openDeploy(app)">
                 <Rocket :size="13" /> Deploy
               </button>
             </div>
@@ -446,11 +450,11 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Name</span>
-          <input v-model="deployName" class="input" :placeholder="deployApp.type" />
+          <input v-model="deployName" class="k-input" :placeholder="deployApp.type" />
         </label>
         <label class="fld" style="flex: 1;">
           <span class="lbl">Edge</span>
-          <select v-model="deployEdge" class="input">
+          <select v-model="deployEdge" class="k-input">
             <option v-for="e in edges" :key="e.name" :value="e.name">{{ e.name }}</option>
           </select>
         </label>
@@ -460,8 +464,8 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
         Auth: {{ credentialHint[deployApp.credential] }}.
       </div>
       <div class="wiz-actions">
-        <button class="btn" @click="closeDeploy">Cancel</button>
-        <button class="btn primary" :disabled="busy || !deployName.trim() || !deployEdge" @click="onDeploy">
+        <button class="k-btn k-btn--ghost" @click="closeDeploy">Cancel</button>
+        <button class="k-btn k-btn--primary" :disabled="busy || !deployName.trim() || !deployEdge" @click="onDeploy">
           <Rocket :size="14" /> Deploy
         </button>
       </div>
@@ -472,20 +476,20 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       <h3>New workload</h3>
       <label class="fld">
         <span class="lbl">Name</span>
-        <input v-model="draft.name" class="input" placeholder="nginx-demo" />
+        <input v-model="draft.name" class="k-input" placeholder="nginx-demo" />
       </label>
       <label class="fld">
         <span class="lbl">Image</span>
-        <input v-model="draft.image" class="input" placeholder="nginx:latest" />
+        <input v-model="draft.image" class="k-input" placeholder="nginx:latest" />
       </label>
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
           <span class="lbl">Replicas</span>
-          <input v-model="draft.replicas" type="number" min="1" class="input" />
+          <input v-model="draft.replicas" type="number" min="1" class="k-input" />
         </label>
         <label class="fld" style="flex: 1;">
           <span class="lbl">Strategy</span>
-          <select v-model="draft.strategy" class="input">
+          <select v-model="draft.strategy" class="k-input">
             <option value="Spread">Spread (all matching edges)</option>
             <option value="Singleton">Singleton (one edge)</option>
           </select>
@@ -493,11 +497,11 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       </div>
       <label class="fld">
         <span class="lbl">Edge selector (key=value, comma-separated)</span>
-        <input v-model="draft.selector" class="input" placeholder="env=dev" />
+        <input v-model="draft.selector" class="k-input" placeholder="env=dev" />
       </label>
       <div class="wiz-actions">
-        <button class="btn" @click="showCreate = false">Cancel</button>
-        <button class="btn primary" :disabled="busy || !draft.name.trim() || !draft.image.trim()" @click="onCreate">Create</button>
+        <button class="k-btn k-btn--ghost" @click="showCreate = false">Cancel</button>
+        <button class="k-btn k-btn--primary" :disabled="busy || !draft.name.trim() || !draft.image.trim()" @click="onCreate">Create</button>
       </div>
     </div>
 
@@ -505,6 +509,7 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       :columns="workloadColumns"
       :rows="workloadRows"
       row-key="name"
+      :row-aria-label="workloadRowAriaLabel"
       :loaded="loaded"
       :loading="loading"
       :error="error"
@@ -526,7 +531,17 @@ function workloadTone(status: unknown): 'success' | 'danger' | null {
       @change="handleWorkloadTableChange"
       @row-click="(row) => toggle(String(row.name))"
     >
-      <template #expand="{ row }"><component :is="expanded === row.name ? ChevronDown : ChevronRight" :size="14" /></template>
+      <template #expand="{ row }">
+        <button
+          type="button"
+          class="k-table-action"
+          :aria-label="`Toggle workload ${String(row.name)}`"
+          :aria-expanded="expanded === row.name"
+          @click="toggle(String(row.name))"
+        >
+          <component :is="expanded === row.name ? ChevronDown : ChevronRight" :size="14" />
+        </button>
+      </template>
       <template #name="{ value }"><span class="name">{{ value }}</span></template>
       <template #image="{ value }"><span class="mono muted">{{ value }}</span></template>
       <template #placement="{ value }"><span class="muted">{{ value }}</span></template>
