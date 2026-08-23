@@ -150,6 +150,32 @@ test('status badges render exactly one dot and only ready pulses', async () => {
   assert.doesNotMatch(pendingDots[0], /live-dot/)
 })
 
+test('lazy checkbox tree renders selected leaves as natively checked', async () => {
+  const LazyCheckboxTree = (await vite.ssrLoadModule('/src/LazyCheckboxTree.vue')).default
+  const tree = {
+    roots: ['table:main:sales:orders'],
+    selectedLeafIds: ['table:main:sales:orders'],
+    nodes: {
+      'table:main:sales:orders': {
+        id: 'table:main:sales:orders',
+        kind: 'table',
+        label: 'orders',
+        detail: 'MANAGED',
+        depth: 1,
+        disabled: false,
+        expanded: false,
+        childrenLoaded: true,
+        loading: false,
+        childIds: [],
+      },
+    },
+  }
+  const html = await renderToString(createSSRApp(LazyCheckboxTree, { tree }))
+
+  assert.match(html, /role="treeitem"[^>]*aria-checked="true"/)
+  assert.match(html, /class="k-checkbox"[^>]*checked/)
+})
+
 test('canonical table recipe keeps wide columns reachable inside its card frame', async () => {
   const canonical = await readFile(new URL('../../../../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
   const vendored = await readFile(new URL('./portalkit/faros-ui.css', import.meta.url), 'utf8')
