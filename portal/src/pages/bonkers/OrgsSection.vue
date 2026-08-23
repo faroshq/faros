@@ -19,7 +19,7 @@ const admin = useAdminStore()
       <div
         v-for="o in admin.orgs"
         :key="o.name"
-        class="rounded-lg border border-border-subtle/60 p-4"
+        class="k-card p-4"
       >
         <!-- Org header -->
         <div class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -52,7 +52,7 @@ const admin = useAdminStore()
                 {{ ws.displayName || '—' }}
                 <span
                   v-if="ws.deletionRequestedAt"
-                  class="ml-1 text-[10px] uppercase text-danger"
+                  class="k-badge k-badge--danger ml-1"
                   >deleting</span
                 >
               </td>
@@ -65,7 +65,7 @@ const admin = useAdminStore()
                   <span
                     v-for="p in ws.providers"
                     :key="p"
-                    class="rounded border border-border-subtle bg-surface-overlay px-1.5 py-0.5 text-[11px] text-text-secondary"
+                    class="k-badge k-badge--muted normal-case"
                   >
                     {{ p }}
                   </span>

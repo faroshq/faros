@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useTerminalSessionsStore } from '@/stores/terminalSessions'
 import { useTenantStore } from '@/stores/tenant'
 import { setLayoutInsets } from '@/composables/useLayoutInsets'
+import { useSidebarExpansion } from '@/composables/useSidebarExpansion'
 import CliQuickstartModal from '@/components/CliQuickstartModal.vue'
 import UserProfileModal from '@/components/UserProfileModal.vue'
 import TenantContextChip from '@/components/TenantContextChip.vue'
@@ -177,12 +178,7 @@ const showProfileModal = ref(false)
 // a permanent 192px label column; labels expand on click and the choice
 // persists per browser. Collapsed rows are icon-only with a native title
 // tooltip (design-book §6 "Sidebar rail").
-const SIDEBAR_EXPANDED_KEY = 'faros-sidebar-expanded'
-const sidebarExpanded = ref(localStorage.getItem(SIDEBAR_EXPANDED_KEY) === '1')
-function toggleSidebar() {
-  sidebarExpanded.value = !sidebarExpanded.value
-  localStorage.setItem(SIDEBAR_EXPANDED_KEY, sidebarExpanded.value ? '1' : '0')
-}
+const { sidebarExpanded, toggleSidebar } = useSidebarExpansion()
 
 // --- Collapsible nav groups (expanded sidebar only) ---
 // Category groups and provider sub-nav toggle on click and persist per

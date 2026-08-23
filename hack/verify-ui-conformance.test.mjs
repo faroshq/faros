@@ -177,9 +177,34 @@ test('keeps resource-table controls and wide-table scrolling in the canonical re
   assert.match(css, /\.k-table__pending-cell\s*\{[^}]*text-align:\s*center;/s)
   assert.match(css, /\.k-table__page-size\s*\{[^}]*margin-inline-start:\s*auto;/s)
   assert.match(css, /\.k-table__search-input::\-webkit-search-cancel-button\s*\{[^}]*appearance:\s*none;/s)
+  assert.match(css, /\.k-table th\s*\{[^}]*font-family:\s*var\(--font-mono/s)
+  assert.match(css, /\.k-table__heading\s*\{[^}]*font-family:\s*var\(--font-mono/s)
 
   assert.match(sync, /VUE_FILES=\([^\n]*ResourceTable\.vue table\.ts/)
   assert.match(sync, /OBSOLETE_FILES=\([^\n]*ResourceTable\.css/)
+})
+
+test('keeps platform-admin flat lists and navigation on shared host patterns', () => {
+  const root = new URL('../portal/src/pages/bonkers/', import.meta.url)
+  for (const file of ['ProvidersSection.vue', 'IdentitiesSection.vue', 'UsersSection.vue']) {
+    const source = fs.readFileSync(new URL(file, root), 'utf8')
+    assert.match(source, /import ResourceTable from '@\/portalkit\/ResourceTable\.vue'/)
+    assert.match(source, /<ResourceTable/)
+    assert.match(source, /:interactive="false"/)
+    assert.match(source, /:loaded="admin\.loaded"/)
+    assert.doesNotMatch(source, /<table\b/)
+  }
+
+  const store = fs.readFileSync(new URL('../portal/src/stores/admin.ts', import.meta.url), 'utf8')
+  const shell = fs.readFileSync(new URL('../portal/src/pages/BonkersPage.vue', import.meta.url), 'utf8')
+  const appLayout = fs.readFileSync(new URL('../portal/src/components/AppLayout.vue', import.meta.url), 'utf8')
+  assert.match(store, /const loaded = ref\(false\)/)
+  assert.match(store, /identities\.value = i\s+loaded\.value = true/)
+  assert.match(shell, /import \{ useSidebarExpansion \} from '@\/composables\/useSidebarExpansion'/)
+  assert.match(shell, /:class="sidebarExpanded \? 'w-48' : 'w-14'"/)
+  assert.match(appLayout, /const \{ sidebarExpanded, toggleSidebar \} = useSidebarExpansion\(\)/)
+  assert.match(shell, /shadow-\[0_0_14px_var\(--color-accent-glow\)\]/)
+  assert.match(shell, /:aria-current="\$route\.path === s\.to \? 'page' : undefined"/)
 })
 
 test('keeps dense checkboxes compact without decorative focus glow', () => {

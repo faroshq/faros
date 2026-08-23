@@ -86,6 +86,7 @@ html.light .k-card {
 .k-table th {
   padding: 12px 20px;
   text-align: left;
+  font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace);
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
@@ -901,6 +902,7 @@ html.light [data-k-tip]::after {
 .k-table__heading {
   padding: 12px 20px;
   text-align: left;
+  font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace);
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
