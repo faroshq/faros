@@ -27,7 +27,8 @@ export const PHASE_META: Record<RunPhase, { label: string; cls: string; glyph: I
 
 export function phaseChip(phase: RunPhase): TemplateResult {
   const m = PHASE_META[phase] || { label: phase, cls: 'pending', glyph: 'circle' as IconName }
-  return html`<span class="agents-phase agents-phase-${m.cls}">${icon(m.glyph)} ${m.label}</span>`
+  const tone = m.cls === 'ok' || m.cls === 'running' ? 'k-badge--success' : m.cls === 'failed' || m.cls === 'aborted' ? 'k-badge--danger' : 'k-badge--warning'
+  return html`<span class="k-badge ${tone} agents-phase agents-phase-${m.cls}">${icon(m.glyph)} ${m.label}</span>`
 }
 
 const PHASES: RunPhase[] = ['Pending', 'Running', 'PendingApproval', 'Succeeded', 'Failed', 'Aborted']
@@ -142,7 +143,7 @@ export class Activity extends StoreElement {
   }
 
   render(): TemplateResult {
-    return html`<div class="agents-panel">
+    return html`<div class="agents-panel k-card">
       ${this.agent ? nothing : html`<h3>Activity</h3>`}
       ${this.approvals()} ${this.filters()} ${this.table()}
     </div>`
@@ -164,11 +165,11 @@ export class Activity extends StoreElement {
           <div class="agents-approval-body">
             <div class="agents-approval-prompt">${i.prompt}</div>
             <div class="agents-approval-meta">
-              <span class="agents-badge">${i.agentName}</span>
-              ${i.payload?.tool ? html`<span class="agents-badge mono">${i.payload.tool}</span>` : nothing}
+              <span class="k-badge agents-badge">${i.agentName}</span>
+              ${i.payload?.tool ? html`<span class="k-badge agents-badge mono">${i.payload.tool}</span>` : nothing}
               <span class="muted">${fmtTime(i.createdAt)}</span>
               ${i.runID
-                ? html`<button class="agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: i.runID as string })}>
+                ? html`<button class="k-btn k-btn--ghost agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: i.runID as string })}>
                     view run
                   </button>`
                 : nothing}
@@ -176,8 +177,8 @@ export class Activity extends StoreElement {
           </div>
           <div class="agents-approval-actions">
             ${i.kind === 'approval'
-              ? html`<button @click=${() => void this.resolve(i, 'approve')}>${icon('check')} Approve</button>
-                  <button class="secondary" @click=${() => void this.resolve(i, 'deny')}>${icon('x')} Deny</button>`
+              ? html`<button class="k-btn k-btn--primary" @click=${() => void this.resolve(i, 'approve')}>${icon('check')} Approve</button>
+                  <button class="k-btn k-btn--ghost secondary" @click=${() => void this.resolve(i, 'deny')}>${icon('x')} Deny</button>`
               : html`<span class="agents-hint">Answer from the agent's channel or chat.</span>`}
           </div>
         </div>`,
@@ -193,7 +194,7 @@ export class Activity extends StoreElement {
         ? nothing
         : html`<label class="agents-filter">
             Agent
-            <select @change=${(e: Event) => {
+            <select class="k-input" @change=${(e: Event) => {
               this.filterAgent = (e.target as HTMLSelectElement).value
               void this.reload()
             }}>
@@ -203,7 +204,7 @@ export class Activity extends StoreElement {
           </label>`}
       <label class="agents-filter">
         Class
-        <select @change=${(e: Event) => {
+        <select class="k-input" @change=${(e: Event) => {
           this.filterClass = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -214,7 +215,7 @@ export class Activity extends StoreElement {
       </label>
       <label class="agents-filter">
         Phase
-        <select @change=${(e: Event) => {
+        <select class="k-input" @change=${(e: Event) => {
           this.filterPhase = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -226,8 +227,7 @@ export class Activity extends StoreElement {
         <span id="agents-range-label">Range</span>
         <div class="agents-seg" role="group" aria-labelledby="agents-range-label">
           ${RANGES.map(
-            (r) => html`<button
-              class=${r.id === this.range ? 'on' : ''}
+            (r) => html`<button class="k-btn k-btn--primary ${r.id === this.range ? 'on' : ''}"
               aria-pressed=${r.id === this.range ? 'true' : 'false'}
               @click=${() => {
                 if (r.id === this.range) return
@@ -240,7 +240,7 @@ export class Activity extends StoreElement {
           )}
         </div>
       </div>
-      <button class="secondary agents-filter-refresh" aria-label="Refresh runs" @click=${() => void this.reload()}>
+      <button class="k-btn k-btn--ghost secondary agents-filter-refresh" aria-label="Refresh runs" @click=${() => void this.reload()}>
         ${icon('refresh')} Refresh
       </button>
     </div>`
@@ -251,7 +251,7 @@ export class Activity extends StoreElement {
     if (this.loading && !this.runs.length) return loadingState('Loading runs…')
     if (!this.runs.length) return emptyState('gauge', 'No runs yet. Chat with an agent or fire a schedule to see one here.')
     return html`
-      <div class="agents-tablewrap">
+      <div class="agents-tablewrap k-table">
         <table class="agents-table agents-runs">
           <thead>
             <tr>
@@ -275,7 +275,7 @@ export class Activity extends StoreElement {
       </div>
       ${this.nextCursor
         ? html`<div class="agents-form-actions">
-            <button class="secondary" ?disabled=${this.loading} @click=${() => void this.more()}>
+            <button class="k-btn k-btn--ghost secondary" ?disabled=${this.loading} @click=${() => void this.more()}>
               ${this.loading ? 'Loading…' : 'Load more'}
             </button>
           </div>`
@@ -300,13 +300,13 @@ export class Activity extends StoreElement {
     >
       ${this.agent ? nothing : html`<td><strong>${r.agent}</strong></td>`}
       <td>
-        <span class="agents-badge ${r.class === 'interactive' ? 'agents-cat-tool' : ''}"
+        <span class="k-badge agents-badge ${r.class === 'interactive' ? 'agents-cat-tool' : ''}"
           >${icon(r.class === 'interactive' ? 'message' : 'clock')} ${r.trigger}</span
         >
-        ${r.parentRunID ? html`<span class="agents-badge agents-badge-muted">delegated</span>` : nothing}
+        ${r.parentRunID ? html`<span class="k-badge agents-badge k-badge--muted agents-badge-muted">delegated</span>` : nothing}
       </td>
       <td class="agents-cell-task muted">${r.inputPreview || '—'}</td>
-      <td>${phaseChip(r.phase)}${r.attempt && r.attempt > 1 ? html` <span class="agents-badge">try ${r.attempt}</span>` : nothing}</td>
+      <td>${phaseChip(r.phase)}${r.attempt && r.attempt > 1 ? html` <span class="k-badge agents-badge">try ${r.attempt}</span>` : nothing}</td>
       <td class="muted">${r.durationMS ? fmtDuration(r.durationMS) : '—'}</td>
       <td class="muted mono">
         ${fmtTokens(r.inputTokens + r.outputTokens)}${r.usdMicros ? ` · ${fmtUSD(r.usdMicros)}` : ''}

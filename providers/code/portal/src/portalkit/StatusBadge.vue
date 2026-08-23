@@ -16,10 +16,10 @@ const props = withDefaults(
 )
 
 const toneConfig: Record<Tone, ToneConfig> = {
-  success: { toneClass: 'tone-success', dotClass: 'dot-success', pulseClass: 'pulse-success' },
-  warning: { toneClass: 'tone-warning', dotClass: 'dot-warning', pulseClass: 'pulse-warning' },
-  danger: { toneClass: 'tone-danger', dotClass: 'dot-danger', pulseClass: 'pulse-danger' },
-  muted: { toneClass: 'tone-muted', dotClass: 'dot-muted', pulseClass: 'pulse-muted' },
+  success: { toneClass: 'k-badge--success', dotClass: 'k-badge__dot--success', pulseClass: 'k-badge__pulse--success' },
+  warning: { toneClass: 'k-badge--warning', dotClass: 'k-badge__dot--warning', pulseClass: 'k-badge__pulse--warning' },
+  danger: { toneClass: 'k-badge--danger', dotClass: 'k-badge__dot--danger', pulseClass: 'k-badge__pulse--danger' },
+  muted: { toneClass: 'k-badge--muted', dotClass: 'k-badge__dot--muted', pulseClass: 'k-badge__pulse--muted' },
 }
 
 const config = computed(() => {
@@ -63,16 +63,16 @@ const config = computed(() => {
 
 <template>
   <span
-    class="status-badge"
+    class="k-badge"
     :class="config.toneClass"
   >
-    <span class="status-badge-dot-wrap">
+    <span class="k-badge__dot-wrap">
       <span
         v-if="status?.toLowerCase() === 'ready' && connected !== false"
-        class="live-dot status-badge-pulse"
+        class="live-dot k-badge__pulse"
         :class="config.pulseClass"
       />
-      <span class="status-badge-dot" :class="config.dotClass" />
+      <span class="k-badge__dot" :class="config.dotClass" />
     </span>
     {{ status }}
   </span>

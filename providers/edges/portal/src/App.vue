@@ -169,10 +169,10 @@ function rel(ts?: string): string {
         <p>Kubernetes clusters and Linux/SSH servers connected to this workspace.</p>
       </div>
       <div class="header-actions">
-        <button class="btn" :disabled="loading" @click="refresh">
+        <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="btn primary" @click="wizardOpen = true">
+        <button class="k-btn k-btn--primary" @click="wizardOpen = true">
           <Plus :size="14" /> Connect edge
         </button>
       </div>
@@ -188,8 +188,8 @@ function rel(ts?: string): string {
       <div class="muted">Click <b>Connect edge</b> to onboard one, or run <code>faros edge create</code>.</div>
     </div>
 
-    <div v-else class="edges-table-wrap">
-      <table class="edges-table">
+    <div v-else class="edges-table-wrap k-table">
+      <table class="k-table__table">
         <thead>
           <tr>
             <th>Name</th>
@@ -201,23 +201,23 @@ function rel(ts?: string): string {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="e in edges" :key="e.type + '/' + e.name" class="clickable" @click="openDetail(e)">
+          <tr v-for="e in edges" :key="e.type + '/' + e.name" class="is-interactive" @click="openDetail(e)">
             <td class="name">{{ e.name }}</td>
             <td>
-              <span class="pill">
+              <span class="k-badge k-badge--muted">
                 <component :is="e.type === 'server' ? Server : Boxes" :size="12" />
                 {{ e.type === 'server' ? 'Server' : 'Kubernetes' }}
               </span>
             </td>
             <td>
-              <span class="status" :class="e.connected ? 'ok' : 'down'">
+              <span class="k-badge" :class="e.connected ? 'k-badge--success' : 'k-badge--warning'">
                 <CircleDot :size="11" /> {{ e.connected ? 'Connected' : (e.phase || 'Disconnected') }}
               </span>
             </td>
             <td class="mono muted">{{ e.agentVersion || '—' }}</td>
             <td class="muted">{{ rel(e.lastHeartbeatTime) }}</td>
             <td class="actions">
-              <button class="icon danger" title="Delete" @click.stop="onDelete(e)"><Trash2 :size="14" /></button>
+              <button class="k-table-action k-table-action--delete" title="Delete" @click.stop="onDelete(e)"><Trash2 :size="14" /></button>
             </td>
           </tr>
         </tbody>

@@ -204,7 +204,7 @@ onUnmounted(() => {
       </div>
       <div class="instance-list-actions">
         <span class="refresh-cadence">auto-refresh 10s</span>
-        <button type="button" class="primary" @click="emit('navigate', 'catalog')">Browse templates</button>
+        <button type="button" class="k-btn k-btn--primary" @click="emit('navigate', 'catalog')">Browse templates</button>
       </div>
     </header>
 

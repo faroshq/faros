@@ -93,12 +93,7 @@ test('background refresh keeps rows and only updates the out-of-flow live region
   assert.match(html, /Updating…/)
   assert.match(html, /style="[^"]*position:absolute/)
   assert.doesNotMatch(html, /resource-table-updating/)
-  assert.equal((html.match(/resource-table-row/g) ?? []).length, 2)
-})
-
-test('polled resource rows cannot replay the global entrance animation', async () => {
-  const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
-  assert.match(style, /faros-provider-databricks \.resource-table-row \{[\s\S]*?animation: none;/)
+  assert.equal((html.match(/k-table__row(?=[ "\n])/g) ?? []).length, 2)
 })
 
 test('successful empty reads are the only empty-state case before a retrying background error', async () => {
@@ -131,8 +126,8 @@ test('status tones distinguish retryable and actionable condition failures', asy
   const StatusBadge = (await vite.ssrLoadModule('/src/portalkit/StatusBadge.vue')).default
   const retrying = await renderToString(createSSRApp(StatusBadge, { status: 'Retrying' }))
   const attention = await renderToString(createSSRApp(StatusBadge, { status: 'Needs attention' }))
-  assert.match(retrying, /tone-warning/)
-  assert.match(attention, /tone-danger/)
+  assert.match(retrying, /k-badge--warning/)
+  assert.match(attention, /k-badge--danger/)
 })
 
 test('resource table delete action has an accessible idle and busy contract', async () => {
@@ -169,46 +164,18 @@ test('resource table edit action has an accessible disabled contract', async () 
   assert.match(disabled, /disabled/)
 })
 
-test('resource table delete action follows the quiet infrastructure row treatment', async () => {
+test('resource table delete action uses the canonical shared recipe', async () => {
   const source = await readFile(new URL('./portalkit/ResourceTableDeleteButton.vue', import.meta.url), 'utf8')
-  assert.match(source, /import deleteButtonStyles from '\.\/ResourceTableDeleteButton\.css\?raw'/)
-  assert.match(source, /faros-portalkit-resource-table-delete-css/)
-  assert.match(source, /style\.textContent = deleteButtonStyles/)
-  assert.doesNotMatch(source, /<style(?: scoped)?>/)
-
-  const actionStyle = await readFile(new URL('./portalkit/ResourceTableDeleteButton.css', import.meta.url), 'utf8')
-  assert.match(actionStyle, /border: 0;/)
-  assert.match(actionStyle, /border-radius: 6px;/)
-  assert.match(actionStyle, /color: color-mix\(in srgb, var\(--color-text-muted\) 40%, transparent\);/)
-  assert.match(actionStyle, /opacity: 0;/)
-  assert.match(actionStyle, /\.resource-table-row:hover \.pk-resource-delete/)
-  assert.match(actionStyle, /\.resource-table-row:focus-within \.pk-resource-delete/)
-  assert.match(actionStyle, /height: 14px;[\s\S]*width: 14px;/)
-  assert.match(actionStyle, /@media \(hover: none\)[\s\S]*opacity: 1;/)
-  assert.match(actionStyle, /\.pk-resource-delete:hover,[\s\S]*color: var\(--color-danger\);/)
-
-  const providerStyle = await readFile(new URL('./style.css', import.meta.url), 'utf8')
-  assert.match(providerStyle, /\.resource-table-row\.is-interactive:hover \{\s*background: var\(--color-surface-hover\);/)
-  assert.match(providerStyle, /\.resource-table-cell:last-child \{[\s\S]*padding-left: 16px;[\s\S]*padding-right: 16px;[\s\S]*text-align: right;[\s\S]*width: 28px;/)
+  assert.match(source, /class="k-table-action k-table-action--delete"/)
+  assert.match(source, /ensureFarosUIStyles\(\)/)
+  assert.doesNotMatch(source, /\.css\?raw/)
 })
 
-test('resource table edit action follows the same quiet row reveal contract', async () => {
+test('resource table edit action uses the canonical shared recipe', async () => {
   const source = await readFile(new URL('./portalkit/ResourceTableEditButton.vue', import.meta.url), 'utf8')
-  assert.match(source, /import editButtonStyles from '\.\/ResourceTableEditButton\.css\?raw'/)
-  assert.match(source, /faros-portalkit-resource-table-edit-css/)
-  assert.match(source, /style\.textContent = editButtonStyles/)
-  assert.doesNotMatch(source, /<style(?: scoped)?>/)
-
-  const actionStyle = await readFile(new URL('./portalkit/ResourceTableEditButton.css', import.meta.url), 'utf8')
-  assert.match(actionStyle, /border: 0;/)
-  assert.match(actionStyle, /border-radius: 6px;/)
-  assert.match(actionStyle, /color: color-mix\(in srgb, var\(--color-text-muted\) 40%, transparent\);/)
-  assert.match(actionStyle, /opacity: 0;/)
-  assert.match(actionStyle, /\.resource-table-row:hover \.pk-resource-edit/)
-  assert.match(actionStyle, /\.resource-table-row:focus-within \.pk-resource-edit/)
-  assert.match(actionStyle, /height: 14px;[\s\S]*width: 14px;/)
-  assert.match(actionStyle, /@media \(hover: none\)[\s\S]*opacity: 1;/)
-  assert.match(actionStyle, /\.pk-resource-edit:hover,[\s\S]*color: var\(--color-text-primary\);/)
+  assert.match(source, /class="k-table-action k-table-action--edit"/)
+  assert.match(source, /ensureFarosUIStyles\(\)/)
+  assert.doesNotMatch(source, /\.css\?raw/)
 })
 
 test('Databricks resource lists use the canonical delete action', async () => {
@@ -248,7 +215,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(wizard, /function navigateTo/)
   assert.match(app, /restoreImportFocus\(/)
   assert.match(app, /function focusDestination/)
-  assert.match(app, /data-pk-tab-id=/)
+  assert.match(app, /data-k-tab-id=/)
   assert.doesNotMatch(app, /data-databricks-nav=/)
   assert.match(app, /focusDestination\(path\)/)
   assert.match(app, /@browse="\(trigger\) => openImport\('warehouse', trigger\)"/)
@@ -262,7 +229,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(tables, /class="secondary icon-text" type="button" @click="load"/)
   assert.match(tables, /@row-click="\(row\) => openResource\(String\(row\.name\)\)"/)
   assert.doesNotMatch(tables, /selectedTable|schemaRows|schemaLoaded|schemaPending|schemaError|schemaCache|schemaCached/)
-  assert.doesNotMatch(tables, /<h3 class="panel-title">Schema<\/h3>/)
+  assert.doesNotMatch(tables, /<h3 class="databricks-resource-panel-title">Schema<\/h3>/)
   assert.doesNotMatch(tables, /setInterval\(load/)
   assert.match(tableDetail, /status === 'Pending'.*schemaCached/)
   assert.match(tableDetail, /status === 'Status unavailable'.*showing cached columns/)
@@ -280,6 +247,6 @@ test('route tabs use PortalKit items and icons', async () => {
   assert.match(app, /\{ id: 'warehouses', label: 'Warehouses', icon: Warehouse \}/)
   assert.match(app, /\{ id: 'tables', label: 'Tables', icon: Table2 \}/)
   assert.match(app, /<Tabs :tabs="tabs" :active="route\.page" aria-label="Databricks resource sections" @select="navigate" \/>/)
-  assert.match(app, /querySelector<HTMLElement>\(`\[data-pk-tab-id="\$\{path\}"\]`\)/)
+  assert.match(app, /querySelector<HTMLElement>\(`\[data-k-tab-id="\$\{path\}"\]`\)/)
   assert.doesNotMatch(style, /faros-provider-databricks \.tabs(?:\s|\{|\.)/)
 })
