@@ -836,6 +836,11 @@ html.light [data-k-tip]::after {
   width: 100%;
 }
 .k-table__search-input::placeholder { color: var(--color-text-muted, #5d5f78); }
+.k-table__search-input::-webkit-search-decoration,
+.k-table__search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
 .k-table__search-input:focus,
 .k-table__filter-select:focus,
 .k-table__page-size-select:focus {

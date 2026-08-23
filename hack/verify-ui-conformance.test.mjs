@@ -163,6 +163,7 @@ test('keeps resource-table controls and wide-table scrolling in the canonical re
   assert.match(css, /\.k-table__scroll:focus-visible\s*\{[^}]*box-shadow:\s*inset/s)
   assert.match(css, /\.k-table__pending-cell\s*\{[^}]*text-align:\s*center;/s)
   assert.match(css, /\.k-table__page-size\s*\{[^}]*margin-inline-start:\s*auto;/s)
+  assert.match(css, /\.k-table__search-input::\-webkit-search-cancel-button\s*\{[^}]*appearance:\s*none;/s)
 
   assert.match(sync, /VUE_FILES=\([^\n]*ResourceTable\.vue table\.ts/)
   assert.match(sync, /OBSOLETE_FILES=\([^\n]*ResourceTable\.css/)
