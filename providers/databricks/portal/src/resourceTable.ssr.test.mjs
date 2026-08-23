@@ -168,6 +168,38 @@ test('nested legacy consumers do not have an omitted loaded prop cast to false',
   assert.doesNotMatch(html, /resource-table-loading/)
 })
 
+test('initial loading mirrors configured search and filter controls without mounting inputs', async () => {
+  const ResourceTable = await resourceTable()
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: false,
+    loading: true,
+    searchable: true,
+    query: 'orders',
+    filters: [
+      { key: 'status', label: 'Status', options: [{ value: 'ready', label: 'Ready' }] },
+      { key: 'connection', label: 'Connection', options: [{ value: 'github', label: 'GitHub' }] },
+    ],
+    filterValues: { status: 'ready', connection: '' },
+  }))
+
+  assert.match(html, /aria-busy="true"/)
+  assert.match(html, /k-table__loading-controls[^>]*aria-hidden="true"/)
+  assert.equal((html.match(/k-table__loading-control--search/g) ?? []).length, 1)
+  assert.equal((html.match(/k-table__loading-control--filter/g) ?? []).length, 2)
+  assert.equal((html.match(/k-table__loading-control--clear/g) ?? []).length, 1)
+  assert.doesNotMatch(html, /<input|<select|<table|>Ready<|>GitHub</)
+
+  const plainHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: false,
+    loading: true,
+  }))
+  assert.doesNotMatch(plainHTML, /k-table__loading-controls/)
+})
+
 test('initial read errors suppress skeleton and empty state and clear aria-busy', async () => {
   const ResourceTable = await resourceTable()
   const html = await renderToString(createSSRApp(ResourceTable, {

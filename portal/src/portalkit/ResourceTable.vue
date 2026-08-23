@@ -159,8 +159,9 @@ const visibleRange = computed(() => isServerPagination.value
 const activeFilters = computed(() => !!currentQuery.value.trim() || Object.values(currentFilters.value).some(Boolean))
 const showPendingBody = computed(() => !!props.loading && visibleRows.value.length === 0)
 const pendingBodyText = computed(() => activeFilters.value ? 'Searching resources' : 'Loading resources')
+const hasConfiguredControls = computed(() => props.searchable || props.filters.length > 0)
 const showControls = computed(() =>
-  (props.searchable || props.filters.length > 0)
+  hasConfiguredControls.value
     && (isServerPagination.value || props.rows.length > 0 || activeFilters.value || !!props.loading),
 )
 const showPagination = computed(() => {
@@ -395,6 +396,11 @@ function onRowKeydown(row: Record<string, unknown>, event: KeyboardEvent) {
     </div>
 
     <div v-else-if="showInitialLoading" class="k-table__loading" role="status" aria-live="polite" aria-label="Loading resources">
+      <div v-if="hasConfiguredControls" class="k-table__loading-controls" aria-hidden="true">
+        <div v-if="searchable" class="shimmer k-table__loading-control k-table__loading-control--search" />
+        <div v-for="filter in filters" :key="filter.key" class="shimmer k-table__loading-control k-table__loading-control--filter" />
+        <div v-if="activeFilters" class="shimmer k-table__loading-control k-table__loading-control--clear" />
+      </div>
       <div class="k-table__loading-head">
         <div class="shimmer k-table__skeleton k-table__skeleton--short" />
       </div>

@@ -182,6 +182,8 @@ test('keeps resource-table controls and wide-table scrolling in the canonical re
   assert.match(css, /\.k-table\.k-table--resource\s*\{[^}]*overflow:\s*hidden;/s)
   assert.match(css, /\.k-table__scroll\s*\{[^}]*overflow-x:\s*auto;/s)
   assert.match(css, /\.k-table__cell svg\s*\{[^}]*display:\s*inline-block;[^}]*vertical-align:\s*middle;/s)
+  assert.match(table, /v-if="hasConfiguredControls" class="k-table__loading-controls" aria-hidden="true"/)
+  assert.match(table, /v-for="filter in filters"[^>]*k-table__loading-control--filter/)
   assert.match(css, /\.k-table__scroll:focus-visible\s*\{[^}]*box-shadow:\s*inset/s)
   assert.match(css, /\.k-table__pending-cell\s*\{[^}]*text-align:\s*center;/s)
   assert.match(css, /\.k-table__page-size\s*\{[^}]*margin-inline-start:\s*auto;/s)
