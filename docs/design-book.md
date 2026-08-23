@@ -102,8 +102,10 @@ qualifies.
 
 ## 4. Typography
 
-Self-hosted via `@fontsource`, imported in `portal/src/main.ts`. No other
-faces, no CDN fonts.
+Self-hosted via `@fontsource`, imported in `portal/src/main.ts`. Dex renders as
+a standalone document, so `hack/dex/web/static/fonts/` embeds the matching
+`@fontsource` WOFF2 files and `main.css` declares them locally. No other faces,
+no CDN fonts.
 
 | Role | Face | Usage |
 |---|---|---|
