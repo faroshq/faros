@@ -1,0 +1,21 @@
+version: 1
+key_path: activation_funnel
+description: Independently workspace-deduplicated 28-day workspace creation and provider enablement volumes; not a cohort-conversion funnel.
+owner: platform
+product_group: platform
+product_categories: [activation]
+value_type: number
+metric_kind: funnel
+status: active
+time_frame: 28d
+data_source: internal_events
+events:
+  - name: workspace_created
+    unique: workspace
+    filter:
+      outcome: success
+  - name: provider_enabled
+    unique: workspace
+    filter:
+      outcome: success
+labels: {}
