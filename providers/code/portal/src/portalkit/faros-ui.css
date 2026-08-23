@@ -933,6 +933,12 @@ html.light [data-k-tip]::after {
   color: var(--color-text-secondary, #8a8ca6);
   transition: color 0.1s ease;
 }
+/* Tailwind preflight makes SVGs block-level. Table-cell icons are inline
+ * content, so restore their intrinsic inline flow and keep link labels intact. */
+.k-table__cell svg {
+  display: inline-block;
+  vertical-align: middle;
+}
 .k-table__row.k-table__row--interactive { cursor: pointer; }
 .k-table__row.k-table__row--interactive:hover { background: color-mix(in srgb, var(--color-accent, #8b6bff) 4%, transparent); }
 .k-table__row.k-table__row--interactive:hover .k-table__cell { color: var(--color-text-primary, #e9e9f2); }
