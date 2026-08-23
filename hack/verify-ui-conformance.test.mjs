@@ -11,6 +11,8 @@ const BASE_CONFIG = {
   canonicalRoots: ['provider-sdk/portalkit'],
   providerRoots: ['providers/fixture/portal/src'],
   vendoredSegments: ['portalkit', 'portalkit-vue'],
+  canonicalConsumerPaths: [],
+  tokenAuthorityPaths: [],
   includeTests: false,
   exceptions: { version: 1, exceptions: [] },
 }
@@ -271,4 +273,33 @@ test('canonical roots are replaceable without weakening provider scanning', () =
   })
   const result = fixture.run({ canonicalRoots: ['custom'] })
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.rule === RULES.LEGACY_PK && diagnostic.path === 'custom/canonical.ts'))
+})
+
+test('scans host and standalone surfaces while recognizing exact authorities', () => {
+  const fixture = fixtureRepo({
+    'portal/src/assets/faros-ui.css': '.k-card { color: var(--color-text-primary); }\n',
+    'portal/src/assets/main.css': ':root { --color-surface: #0a0b12; }\n.bad { color: #abc; }\n',
+    'providers/fixture/portal/public/index.html': '<style>:root { --color-surface: #0a0b12; } body { color: #abc; }</style>\n',
+  }, {
+    providerRoots: ['portal', 'providers/*/portal'],
+    canonicalConsumerPaths: ['portal/src/assets/faros-ui.css'],
+    tokenAuthorityPaths: ['portal/src/assets/main.css', 'providers/fixture/portal/public/index.html'],
+  })
+  const result = fixture.run()
+  assert.ok(result.files.includes('portal/src/assets/faros-ui.css'))
+  assert.ok(result.files.includes('providers/fixture/portal/public/index.html'))
+  assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.rule === RULES.PROVIDER_K_SELECTOR))
+  assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.rule === RULES.RAW_COLOR).length, 2)
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.path === 'portal/src/assets/main.css' && diagnostic.match === '#abc'))
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.path.endsWith('/public/index.html') && diagnostic.match === '#abc'))
+})
+
+test('rejects unknown color token declarations in authority stylesheets', () => {
+  const fixture = fixtureRepo({
+    'providers/fixture/portal/src/style.css': ':root { --color-surafce: #0a0b12; }\n',
+  }, {
+    tokenAuthorityPaths: ['providers/fixture/portal/src/style.css'],
+  })
+  const result = fixture.run()
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.rule === RULES.UNKNOWN_COLOR_TOKEN && diagnostic.match === '--color-surafce'))
 })

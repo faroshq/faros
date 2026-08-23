@@ -897,6 +897,6 @@ watchEffect(() => {
 }
 .faros-nav-scroll::-webkit-scrollbar-thumb {
   background-color: var(--color-text-muted);
-  border-radius: 9999px;
+  border-radius: 2px;
 }
 </style>

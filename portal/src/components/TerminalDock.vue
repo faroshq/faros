@@ -392,7 +392,7 @@ onUnmounted(() => {
     <!-- Content area -->
     <div
       v-if="!store.panelState.isMinimized"
-      class="panel-content relative min-h-0 flex-1 overflow-hidden bg-[#0b0c11]"
+      class="panel-content relative min-h-0 flex-1 overflow-hidden bg-surface"
       :class="`layout-${store.panelState.splitLayout}`"
     >
       <template v-for="session in store.sessions" :key="session.id">
@@ -483,7 +483,7 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 1px;
-  background: rgb(var(--border) / 1);
+  background: var(--color-border-subtle);
 }
 .panel-content.layout-grid .terminal-pane {
   min-height: 180px;
@@ -491,7 +491,7 @@ onUnmounted(() => {
 }
 
 .terminal-pane.active-pane {
-  outline: 1px solid rgb(var(--accent) / 0.5);
+  outline: 1px solid color-mix(in srgb, var(--color-accent) 50%, transparent);
   outline-offset: -1px;
 }
 
@@ -502,7 +502,7 @@ onUnmounted(() => {
   transition: background 0.15s;
 }
 .pane-resize-handle:hover {
-  background: rgb(var(--accent) / 0.4);
+  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 .pane-resize-handle.vertical {
   width: 4px;
