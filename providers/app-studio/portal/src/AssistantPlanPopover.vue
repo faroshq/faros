@@ -217,7 +217,7 @@ onBeforeUnmount(() => {
     </button>
   </Teleport>
 
-  <Teleport v-if="mounted && mobileOpen" to="body">
+  <Teleport v-if="mounted && mobileOpen" to="#app-studio-overlay-root">
     <div class="fixed inset-0 z-[100] flex items-end bg-surface/70 backdrop-blur-sm md:hidden" @pointerdown.self="closeMobile()">
       <section
         :id="mobilePanelID"

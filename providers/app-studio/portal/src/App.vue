@@ -619,7 +619,7 @@ const projectSettingsDescription = ref('')
 const projectSettingsSaving = ref(false)
 const projectSettingsStatus = ref<string | null>(null)
 const projectSettingsError = ref<string | null>(null)
-const deletingProject = ref(false)
+const deletingProjectName = ref('')
 const prompt = ref('')
 const selectedTurnSkills = ref<ProjectAssistantSkill[]>([])
 const selectedTurnResources = ref<ProjectAssistantContextResource[]>([])
@@ -916,7 +916,7 @@ function invalidateProjectContextState() {
   approvalModeLoading.value = false
   approvalModeSaving.value = false
   approvalModeError.value = null
-  deletingProject.value = false
+  deletingProjectName.value = ''
   showSettings.value = false
   shareDialogOpen.value = false
   projectSettingsSaving.value = false
@@ -5406,7 +5406,7 @@ function onWorkbenchTabKeydown(event: KeyboardEvent, tabID: string): void {
 }
 
 async function requestDeleteProject(project: Project) {
-  if (deletingProject.value) return
+  if (deletingProjectName.value) return
   const confirmed = await confirmDialog({
     title: 'Delete project?',
     message: deleteProjectMessage(project),
@@ -5422,7 +5422,7 @@ async function requestDeleteProject(project: Project) {
     requestSerial === deleteProjectRequestSerial &&
     deletionContextKey === workbenchPersistenceContextKey(workbenchPersistenceContext())
   busy.value = true
-  deletingProject.value = true
+  deletingProjectName.value = name
   error.value = null
   try {
     await api.deleteProject(props.ctx, name)
@@ -5444,7 +5444,7 @@ async function requestDeleteProject(project: Project) {
     if (deleteRequestIsCurrent()) error.value = e instanceof Error ? e.message : String(e)
   } finally {
     if (requestSerial === deleteProjectRequestSerial) {
-      deletingProject.value = false
+      deletingProjectName.value = ''
       busy.value = false
     }
   }
@@ -6862,7 +6862,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             <ResourceTableDeleteButton
               :label="`Delete project ${String(row.displayName || row.name)}`"
               :busy-label="`Deleting project ${String(row.displayName || row.name)}…`"
-              :busy="deletingProject"
+              :busy="deletingProjectName === String(row.name)"
               :disabled="busy"
               @click="requestDeleteProjectTableRow(row)"
             />
