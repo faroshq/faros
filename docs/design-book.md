@@ -184,6 +184,18 @@ texture (login, empty states — sparingly), `.island` floating dock card,
   Enter/Space activates the row, and nested links, buttons, inputs, selects,
   summaries, and other explicit controls do not activate the row. Do not turn a
   row into `role="button"`. Labeled actions remain appropriate on detail pages.
+  `ResourceTable` has exactly two blessed configurations:
+  - **Queryable** (default): the current resource-list contract. Search, filters,
+    and client/server pagination remain independently configured; configured
+    controls have matching initial-loading skeletons, filters apply to the
+    authoritative result set, and query/filter/page changes reset to page one.
+    Every existing `ResourceTable` remains Queryable until it is explicitly
+    reviewed for conversion; never infer Simple from omitted control props.
+  - **Simple** (`variant="simple"`): explicit opt-in for a short, bounded,
+    contextual list. It has no search, filters, pagination, controlled query,
+    filter values, page, cursor, or page metadata. Loading begins directly with
+    the table skeleton. Empty/error, native row semantics, nested-control
+    isolation, and row-action accessibility are identical to Queryable.
 - **Modals / dialogs.** 6px, surface-raised, hairline, heavy elevation shadow
   allowed. The scrim derives from **surface** (`color-mix(surface 60%)`), never
   from text (a text-derived scrim inverts to white in dark). Use the portalkit

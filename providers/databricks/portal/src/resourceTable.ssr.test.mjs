@@ -143,9 +143,47 @@ test('omitting loaded preserves the legacy content state', async () => {
   }))
 
   assert.match(html, /aria-busy="false"/)
+  assert.match(html, /k-table--queryable/)
   assert.match(html, /Ready/)
   assert.match(html, /<table/)
   assert.doesNotMatch(html, /resource-table-loading/)
+})
+
+test('simple tables are an explicit bounded-list variant without query or pagination controls', async () => {
+  const ResourceTable = await resourceTable()
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [{ name: 'orders' }, { name: 'events' }],
+    variant: 'simple',
+    searchable: true,
+    query: 'missing',
+    filters: [{ key: 'name', label: 'Name' }],
+    filterValues: { name: 'missing' },
+    paginated: true,
+    paginationMode: 'server',
+    page: 2,
+    pageSize: 1,
+    cursor: 'opaque-page-2',
+    pageInfo: { hasNext: true, nextCursor: 'opaque-page-3' },
+  }))
+
+  assert.match(html, /k-table--simple/)
+  assert.match(html, /orders/)
+  assert.match(html, /events/)
+  assert.doesNotMatch(html, /k-table__controls|k-table__pagination|<input|<select/)
+
+  const loadingHTML = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    variant: 'simple',
+    loaded: false,
+    loading: true,
+    searchable: true,
+    filters: [{ key: 'name', label: 'Name' }],
+  }))
+  assert.match(loadingHTML, /k-table--simple/)
+  assert.match(loadingHTML, /k-table__loading/)
+  assert.doesNotMatch(loadingHTML, /k-table__loading-controls/)
 })
 
 test('nested legacy consumers do not have an omitted loaded prop cast to false', async () => {

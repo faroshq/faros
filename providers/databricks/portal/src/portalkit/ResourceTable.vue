@@ -19,6 +19,8 @@ import {
 const props = withDefaults(defineProps<{
   columns: Array<{ key: string; label: string }>
   rows: Array<Record<string, unknown>>
+  /** Queryable is the default/current resource-list contract. Simple is an explicit bounded-list opt-in. */
+  variant?: 'queryable' | 'simple'
   /** Stable row identity. Resource names/ids are used when omitted. */
   rowKey?: string | ((row: Record<string, unknown>, index: number) => string | number)
   /** True after the first authoritative read has completed successfully. */
@@ -60,6 +62,7 @@ const props = withDefaults(defineProps<{
   // sentinel preserves omission so legacy callers retain loading -> content
   // behavior while explicit false still means the first read is incomplete.
   loaded: null,
+  variant: 'queryable',
   stale: false,
   retryable: false,
   emptyText: 'No data',
@@ -90,12 +93,15 @@ const cursorHistory = ref<Array<string | null | undefined>>(
 )
 
 const isServerPagination = computed(() => props.paginationMode === 'server')
-const paginationEnabled = computed(() => props.paginated || isServerPagination.value)
+const paginationEnabled = computed(() => props.variant === 'queryable' && (props.paginated || isServerPagination.value))
 const currentPage = computed(() => normalizePage(props.page ?? page.value))
 const currentPageSize = computed(() => normalizePageSize(selectedPageSize.value))
-const currentQuery = computed(() => props.query === undefined ? query.value : props.query)
+const currentQuery = computed(() => props.variant === 'simple'
+  ? ''
+  : props.query === undefined ? query.value : props.query)
 const controlledFilterValues = computed(() => props.filterValues)
 const currentFilters = computed<TableFilterState>(() => {
+  if (props.variant === 'simple') return {}
   const values = controlledFilterValues.value ?? selectedFilters
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, String(value ?? '')]))
 })
@@ -159,7 +165,9 @@ const visibleRange = computed(() => isServerPagination.value
 const activeFilters = computed(() => !!currentQuery.value.trim() || Object.values(currentFilters.value).some(Boolean))
 const showPendingBody = computed(() => !!props.loading && visibleRows.value.length === 0)
 const pendingBodyText = computed(() => activeFilters.value ? 'Searching resources' : 'Loading resources')
-const hasConfiguredControls = computed(() => props.searchable || props.filters.length > 0)
+const hasConfiguredControls = computed(() =>
+  props.variant === 'queryable' && (props.searchable || props.filters.length > 0),
+)
 const showControls = computed(() =>
   hasConfiguredControls.value
     && (isServerPagination.value || props.rows.length > 0 || activeFilters.value || !!props.loading),
@@ -377,6 +385,7 @@ function onRowKeydown(row: Record<string, unknown>, event: KeyboardEvent) {
 <template>
   <div
     class="k-table k-table--resource"
+    :class="`k-table--${variant}`"
     :aria-busy="ariaBusy"
   >
     <!-- Keep the live region outside layout so background reads cannot move the table. -->
