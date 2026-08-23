@@ -25,6 +25,7 @@ const providerRows = computed<Record<string, unknown>[]>(() =>
       provider.builtin ? 'core' : '',
       provider.onboarded ? 'provisioned' : '',
       provider.registered ? 'registered' : '',
+      provider.registered ? (provider.ready ? 'ready' : 'not ready') : '',
     ].filter(Boolean).join(' '),
   })),
 )
@@ -44,7 +45,7 @@ function providerDisplayName(row: Record<string, unknown>): string {
   return displayName || providerName(row)
 }
 
-function providerFlag(row: Record<string, unknown>, key: 'builtin' | 'onboarded' | 'registered'): boolean {
+function providerFlag(row: Record<string, unknown>, key: 'builtin' | 'onboarded' | 'registered' | 'ready'): boolean {
   return row[key] === true
 }
 
@@ -185,6 +186,11 @@ async function remove(name: string) {
           <StatusBadge v-if="providerFlag(row, 'builtin')" status="core" tone="muted" />
           <StatusBadge v-if="providerFlag(row, 'onboarded')" status="provisioned" tone="success" />
           <StatusBadge v-if="providerFlag(row, 'registered')" status="registered" tone="success" />
+          <StatusBadge
+            v-if="providerFlag(row, 'registered')"
+            :status="providerFlag(row, 'ready') ? 'ready' : 'not ready'"
+            :tone="providerFlag(row, 'ready') ? 'success' : 'danger'"
+          />
           <span v-if="!providerFlag(row, 'builtin') && !providerFlag(row, 'onboarded') && !providerFlag(row, 'registered')" class="text-[11px] text-text-muted">—</span>
         </div>
       </template>

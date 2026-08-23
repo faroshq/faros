@@ -195,6 +195,12 @@ test('keeps platform-admin flat lists and navigation on shared host patterns', (
     assert.doesNotMatch(source, /<table\b/)
   }
 
+  const providers = fs.readFileSync(new URL('ProvidersSection.vue', root), 'utf8')
+  const identities = fs.readFileSync(new URL('IdentitiesSection.vue', root), 'utf8')
+  assert.match(providers, /provider\.registered \? \(provider\.ready \? 'ready' : 'not ready'\) : ''/)
+  assert.match(providers, /:status="providerFlag\(row, 'ready'\) \? 'ready' : 'not ready'"/)
+  assert.match(identities, /\[row\.path, row\.group, row\.resource, row\.export\]/)
+
   const store = fs.readFileSync(new URL('../portal/src/stores/admin.ts', import.meta.url), 'utf8')
   const shell = fs.readFileSync(new URL('../portal/src/pages/BonkersPage.vue', import.meta.url), 'utf8')
   const appLayout = fs.readFileSync(new URL('../portal/src/components/AppLayout.vue', import.meta.url), 'utf8')

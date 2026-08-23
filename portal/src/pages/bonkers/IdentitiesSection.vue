@@ -20,8 +20,7 @@ const identityRows = computed<Record<string, unknown>[]>(() =>
 )
 
 function identityRowKey(row: Record<string, unknown>): string {
-  const path = String(row.path ?? '').trim()
-  return path || `${String(row.group ?? '')}/${String(row.resource ?? '')}/${String(row.export ?? '')}`
+  return [row.path, row.group, row.resource, row.export].map(value => String(value ?? '')).join('/')
 }
 
 async function refresh() {
