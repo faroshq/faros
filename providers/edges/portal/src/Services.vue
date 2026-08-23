@@ -197,6 +197,28 @@ onUnmounted(() => clearInterval(timer))
 function phaseClass(p?: string): string {
   return p === 'Ready' ? 'k-badge--success' : p === 'Unreachable' ? 'k-badge--danger' : 'k-badge--warning'
 }
+
+function isExplicitControlTarget(event: Event): boolean {
+  const currentTarget = event.currentTarget as Element | null
+  const target = event.target as Element | null
+  if (!target || target === currentTarget) return false
+  const control = target.closest?.(
+    'a, button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])',
+  )
+  return Boolean(control && control !== currentTarget)
+}
+
+function onServiceRowClick(service: EdgeService, event: MouseEvent): void {
+  if (isExplicitControlTarget(event)) return
+  openEdit(service)
+}
+
+function onServiceRowKeydown(service: EdgeService, event: KeyboardEvent): void {
+  if (event.repeat || isExplicitControlTarget(event)) return
+  if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+  event.preventDefault()
+  openEdit(service)
+}
 </script>
 
 <template>
@@ -325,7 +347,15 @@ function phaseClass(p?: string): string {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in services" :key="s.name" class="is-interactive" @click="openEdit(s)">
+          <tr
+            v-for="s in services"
+            :key="s.name"
+            class="is-interactive"
+            tabindex="0"
+            :aria-label="`Open service ${s.name}`"
+            @click="onServiceRowClick(s, $event)"
+            @keydown="onServiceRowKeydown(s, $event)"
+          >
             <td class="name">{{ s.name }}</td>
             <td class="muted">{{ s.edgeName || '—' }}</td>
             <td class="mono muted">{{ catalogFor(s.serviceType)?.displayName || s.serviceType || '—' }}</td>

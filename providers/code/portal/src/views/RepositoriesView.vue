@@ -259,6 +259,7 @@ onUnmounted(() => {
       :stale="loaded && !!error"
       retryable
       empty-text="No repositories yet."
+      :row-aria-label="(row) => `Open repository ${String(row.repo || row.name)}`"
       @retry="loadRepositories"
       @row-click="openRepository"
     >

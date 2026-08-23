@@ -52,7 +52,20 @@ function host(): HTMLElement {
   return el
 }
 
-let seq = 0
+// Each standalone provider bundle gets its own module instance, but all of
+// them render into the document-level toast host. Keep numeric IDs in a
+// shared global sequence so one bundle cannot dismiss another bundle's card
+// or timer after both start at sequence 1.
+const TOAST_SEQUENCE_KEY = Symbol.for('faros.portalkit.toast.sequence')
+type ToastGlobal = typeof globalThis & { [key: symbol]: unknown }
+const toastGlobal = globalThis as ToastGlobal
+
+function nextToastID(): number {
+  const next = Number(toastGlobal[TOAST_SEQUENCE_KEY] ?? 0) + 1
+  toastGlobal[TOAST_SEQUENCE_KEY] = next
+  return next
+}
+
 const timers = new Map<number, ReturnType<typeof setTimeout>>()
 
 export function dismissToast(id: number): void {
@@ -70,7 +83,7 @@ export function clearToasts(): void {
 
 export function toast(kind: ToastKind, message: string, action?: ToastAction): number {
   const h = host()
-  const id = ++seq
+  const id = nextToastID()
 
   const card = document.createElement('div')
   card.id = `k-toast-${id}`

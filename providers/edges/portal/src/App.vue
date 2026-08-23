@@ -100,6 +100,28 @@ async function onDelete(edge: Edge) {
   }
 }
 
+function isExplicitControlTarget(event: Event): boolean {
+  const currentTarget = event.currentTarget as Element | null
+  const target = event.target as Element | null
+  if (!target || target === currentTarget) return false
+  const control = target.closest?.(
+    'a, button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])',
+  )
+  return Boolean(control && control !== currentTarget)
+}
+
+function onEdgeRowClick(edge: Edge, event: MouseEvent): void {
+  if (isExplicitControlTarget(event)) return
+  openDetail(edge)
+}
+
+function onEdgeRowKeydown(edge: Edge, event: KeyboardEvent): void {
+  if (event.repeat || isExplicitControlTarget(event)) return
+  if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+  event.preventDefault()
+  openDetail(edge)
+}
+
 // Re-auth + reload whenever the shell pushes a new context (token/workspace).
 watch(
   () => [props.ctx?.token, props.ctx?.tenant] as const,
@@ -201,7 +223,15 @@ function rel(ts?: string): string {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="e in edges" :key="e.type + '/' + e.name" class="is-interactive" @click="openDetail(e)">
+          <tr
+            v-for="e in edges"
+            :key="e.type + '/' + e.name"
+            class="is-interactive"
+            tabindex="0"
+            :aria-label="`Open ${e.type === 'server' ? 'server' : 'Kubernetes'} edge ${e.name}`"
+            @click="onEdgeRowClick(e, $event)"
+            @keydown="onEdgeRowKeydown(e, $event)"
+          >
             <td class="name">{{ e.name }}</td>
             <td>
               <span class="k-badge k-badge--muted">

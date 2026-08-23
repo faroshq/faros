@@ -25,4 +25,10 @@ describe('Code portal conformance', () => {
   expect(source).toMatch(/code-form-actions/)
   expect(source).toMatch(/code-row-actions/)
   })
+
+  it('names every interactive resource-table row', () => {
+    const source = sources.map(([, content]) => content).join('\n')
+    expect(source).toMatch(/:row-aria-label="\(row\) => `Open repository/)
+    expect(source).toMatch(/:row-aria-label="\(row\) => `Open connection/)
+  })
 })

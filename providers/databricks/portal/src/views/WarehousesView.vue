@@ -259,6 +259,7 @@ onUnmounted(() => {
       :stale="loaded && !!error"
       retryable
       empty-text="No warehouses yet."
+      :row-aria-label="(row) => `Open warehouse ${String(row.name)}`"
       @retry="load"
       @row-click="(row) => openResource(String(row.name))"
     >

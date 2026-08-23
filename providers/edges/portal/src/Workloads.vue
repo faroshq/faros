@@ -135,6 +135,28 @@ function selectorText(s?: Record<string, string>): string {
   if (!s || !Object.keys(s).length) return 'all edges'
   return Object.entries(s).map(([k, v]) => `${k}=${v}`).join(', ')
 }
+
+function isExplicitControlTarget(event: Event): boolean {
+  const currentTarget = event.currentTarget as Element | null
+  const target = event.target as Element | null
+  if (!target || target === currentTarget) return false
+  const control = target.closest?.(
+    'a, button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])',
+  )
+  return Boolean(control && control !== currentTarget)
+}
+
+function onWorkloadRowClick(name: string, event: MouseEvent): void {
+  if (isExplicitControlTarget(event)) return
+  toggle(name)
+}
+
+function onWorkloadRowKeydown(name: string, event: KeyboardEvent): void {
+  if (event.repeat || isExplicitControlTarget(event)) return
+  if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+  event.preventDefault()
+  toggle(name)
+}
 </script>
 
 <template>
@@ -271,7 +293,14 @@ function selectorText(s?: Record<string, string>): string {
       </thead>
       <tbody>
         <template v-for="w in workloads" :key="w.name">
-          <tr class="is-interactive" @click="toggle(w.name)">
+          <tr
+            class="is-interactive"
+            tabindex="0"
+            :aria-label="`Toggle workload ${w.name}`"
+            :aria-expanded="expanded === w.name"
+            @click="onWorkloadRowClick(w.name, $event)"
+            @keydown="onWorkloadRowKeydown(w.name, $event)"
+          >
             <td><component :is="expanded === w.name ? ChevronDown : ChevronRight" :size="14" /></td>
             <td class="name">{{ w.name }}</td>
             <td class="mono muted">{{ w.image || '—' }}</td>

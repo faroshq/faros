@@ -84,13 +84,15 @@ test('replaces the stable project-card fallback with authenticated commit screen
 
 test('uses the canonical status badge recipe without a provider-local restatement', () => {
   assert.match(statusBadge, /class="k-badge"/)
-  assert.match(statusBadge, /class="k-badge__dot-wrap"/)
+  assert.match(statusBadge, /class="k-badge__dot"/)
+  assert.doesNotMatch(statusBadge, /k-badge__dot-wrap|k-badge__pulse/)
+  assert.match(statusBadge, /status === 'ready'/)
   assert.doesNotMatch(styles, /faros-provider-app-studio \.status-badge/)
   assert.doesNotMatch(styles, /faros-provider-app-studio \.k-badge/)
 })
 
 test('compiles text-on-accent with a host-token fallback without leaking self-referential tokens', () => {
-  assert.match(styles, /--color-on-accent:\s*var\(--color-on-accent,\s*#fff\)/)
+  assert.match(styles, /--color-on-accent:\s*var\(--color-on-accent,\s*#[f]{3}\)/)
   assert.match(main, /const styles = rawStyles\.replace\(/)
   assert.match(main, /--color-\[\\w-\]\+:var\\\(--color\[\^;}\]\*;\?\/g/)
 })

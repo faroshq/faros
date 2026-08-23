@@ -75,6 +75,29 @@ describe('Agents toast adapter lifecycle', () => {
     off()
   })
 
+  it('keeps IDs isolated when two standalone bundles share the toast host', async () => {
+    // Query imports force two independent Vite module instances, matching
+    // two separately loaded provider bundles while retaining one global DOM.
+    // @ts-expect-error Vite query imports intentionally create independent bundles.
+    const bundleOne = await import('../portalkit/toast?bundle=one')
+    // @ts-expect-error Vite query imports intentionally create independent bundles.
+    const bundleTwo = await import('../portalkit/toast?bundle=two')
+    document.getElementById('k-toasts')?.remove()
+    bundleOne.clearToasts()
+    bundleTwo.clearToasts()
+
+    const first = bundleOne.toast('ok', 'bundle one')
+    const second = bundleTwo.toast('ok', 'bundle two')
+    expect(second).not.toBe(first)
+    expect(document.getElementById(`k-toast-${first}`)).not.toBeNull()
+    expect(document.getElementById(`k-toast-${second}`)).not.toBeNull()
+
+    bundleOne.dismissToast(first)
+    expect(document.getElementById(`k-toast-${first}`)).toBeNull()
+    expect(document.getElementById(`k-toast-${second}`)).not.toBeNull()
+    bundleTwo.dismissToast(second)
+  })
+
   it('clears action-bearing state when the host switches tenants', () => {
     const action = vi.fn()
     const snapshots: Array<Array<{ id: number; action?: () => void }>> = []

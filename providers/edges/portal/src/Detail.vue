@@ -199,7 +199,7 @@ function rel(ts?: string): string {
   <div class="edges-app">
     <header class="edges-header">
       <div class="row">
-        <button class="k-table-action k-table-action--edit" title="Back" @click="emit('back')"><ArrowLeft :size="16" /></button>
+        <button class="k-btn k-btn--ghost" type="button" aria-label="Back to edges" title="Back to edges" @click="emit('back')"><ArrowLeft :size="16" aria-hidden="true" /> Back</button>
         <div>
           <h1 class="row">
             <component :is="type === 'server' ? Server : Boxes" :size="16" />

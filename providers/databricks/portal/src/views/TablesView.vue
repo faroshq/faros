@@ -349,6 +349,7 @@ onUnmounted(() => {
       :error="error"
       :stale="loaded && !!error"
       retryable
+      :row-aria-label="(row) => `Open table ${String(row.name)}`"
       @retry="load"
       @row-click="(row) => openResource(String(row.name))"
     >

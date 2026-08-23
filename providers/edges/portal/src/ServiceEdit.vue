@@ -125,7 +125,7 @@ function phaseClass(p?: string): string {
   <div class="edges-app">
     <header class="edges-header">
       <div style="display: flex; align-items: center; gap: 10px;">
-        <button class="k-table-action k-table-action--edit" title="Back to services" @click="emit('back')"><ArrowLeft :size="16" /></button>
+        <button class="k-btn k-btn--ghost" type="button" aria-label="Back to services" title="Back to services" @click="emit('back')"><ArrowLeft :size="16" aria-hidden="true" /> Back</button>
         <div>
           <h1>{{ service.name }} <span class="k-badge" :class="phaseClass(service.phase)">{{ service.phase || 'Pending' }}</span></h1>
           <p>{{ entry?.displayName ?? service.serviceType }}<span v-if="entry?.description"> — {{ entry.description }}</span></p>

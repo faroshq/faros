@@ -143,8 +143,10 @@ export class Activity extends StoreElement {
   }
 
   render(): TemplateResult {
-    return html`<div class="agents-panel k-card">
-      ${this.agent ? nothing : html`<h3>Activity</h3>`}
+    return html`<div class="agents-panel k-card agents-activity-panel">
+      ${this.agent
+        ? nothing
+        : html`<div class="agents-panel-head agents-activity-head"><h3>Activity</h3></div>`}
       ${this.approvals()} ${this.filters()} ${this.table()}
     </div>`
   }
@@ -193,8 +195,8 @@ export class Activity extends StoreElement {
       ${this.agent
         ? nothing
         : html`<label class="agents-filter">
-            Agent
-            <select class="k-input" @change=${(e: Event) => {
+            <span class="agents-filter-label">Agent</span>
+            <select class="k-input agents-filter-control" @change=${(e: Event) => {
               this.filterAgent = (e.target as HTMLSelectElement).value
               void this.reload()
             }}>
@@ -203,8 +205,8 @@ export class Activity extends StoreElement {
             </select>
           </label>`}
       <label class="agents-filter">
-        Class
-        <select class="k-input" @change=${(e: Event) => {
+        <span class="agents-filter-label">Class</span>
+        <select class="k-input agents-filter-control" @change=${(e: Event) => {
           this.filterClass = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -214,8 +216,8 @@ export class Activity extends StoreElement {
         </select>
       </label>
       <label class="agents-filter">
-        Phase
-        <select class="k-input" @change=${(e: Event) => {
+        <span class="agents-filter-label">Phase</span>
+        <select class="k-input agents-filter-control" @change=${(e: Event) => {
           this.filterPhase = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -224,10 +226,10 @@ export class Activity extends StoreElement {
         </select>
       </label>
       <div class="agents-filter">
-        <span id="agents-range-label">Range</span>
-        <div class="agents-seg" role="group" aria-labelledby="agents-range-label">
+        <span class="agents-filter-label">Range</span>
+        <div class="agents-seg" role="group" aria-label="Run range">
           ${RANGES.map(
-            (r) => html`<button class="k-btn k-btn--primary ${r.id === this.range ? 'on' : ''}"
+            (r) => html`<button class="k-btn k-btn--primary agents-range-button ${r.id === this.range ? 'on' : ''}"
               aria-pressed=${r.id === this.range ? 'true' : 'false'}
               @click=${() => {
                 if (r.id === this.range) return

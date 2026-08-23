@@ -286,6 +286,7 @@ onUnmounted(() => {
       :stale="loaded && !!error"
       retryable
       empty-text="No connections yet."
+      :row-aria-label="(row) => `Open connection ${String(row.name)}`"
       @retry="load"
       @row-click="openConnection"
     >

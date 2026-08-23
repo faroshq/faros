@@ -24,6 +24,18 @@ const run = (over: Partial<RunSummary> = {}): RunSummary => ({
 })
 
 describe('activity list', () => {
+  it('groups the activity heading and filters inside the card layout', async () => {
+    const api = stubApi({ listRuns: vi.fn().mockResolvedValue({ items: [run()], nextCursor: '' }) })
+    const el = await mount<Activity>('agents-activity', { store: makeStore(api), api })
+
+    expect(el.querySelector('.agents-activity-panel')).not.toBeNull()
+    expect(el.querySelector('.agents-activity-head h3')?.textContent).toBe('Activity')
+    expect(el.querySelector('.agents-filters')?.getAttribute('aria-label')).toBe('Run filters')
+    expect(el.querySelectorAll('.agents-filter-label')).toHaveLength(4)
+    expect(el.querySelectorAll('.agents-filters .k-input')).toHaveLength(3)
+    expect(el.querySelector('.agents-filters .agents-seg')?.getAttribute('aria-label')).toBe('Run range')
+  })
+
   it('renders a run row with phase, duration and usage', async () => {
     const listRuns = vi.fn().mockResolvedValue({ items: [run()], nextCursor: '' })
     const api = stubApi({ listRuns })

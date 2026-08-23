@@ -3,7 +3,8 @@
      `make sync-portalkit`.
 
      Mount ONE instance at the app root; it renders whenever confirmDialog()
-     sets confirmState.open. Enter confirms, Escape/backdrop cancels. Styles are
+     sets confirmState.open. Enter activates the focused action (or confirms by
+     default), Escape/backdrop cancels. Styles are
      self-injected + token-based, so the component drops into any Vue provider
      portal (Tailwind or plain-CSS) without an extracted CSS asset. -->
 <script setup lang="ts">
@@ -15,6 +16,7 @@ import { ensureFarosUIStyles } from '../portalkit/styles'
 // shared helper; the host portal already imports the same faros-ui.css file.
 ensureFarosUIStyles()
 
+const cancelBtn = ref<HTMLButtonElement | null>(null)
 const confirmBtn = ref<HTMLButtonElement | null>(null)
 const modalRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
@@ -55,7 +57,8 @@ function onKeydown(e: KeyboardEvent) {
     onCancel()
   } else if (e.key === 'Enter') {
     e.preventDefault()
-    onConfirm()
+    if (document.activeElement === cancelBtn.value) onCancel()
+    else onConfirm()
   }
 }
 
@@ -84,7 +87,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       <h3 id="k-modal-title" class="k-modal__title">{{ confirmState.title }}</h3>
       <p v-for="(line, i) in paragraphs" :key="i" class="k-modal__message">{{ line }}</p>
       <div class="k-modal__actions">
-        <button type="button" class="k-modal-btn k-modal-btn--cancel" @click="onCancel">{{ confirmState.cancelLabel }}</button>
+        <button ref="cancelBtn" type="button" class="k-modal-btn k-modal-btn--cancel" @click="onCancel">{{ confirmState.cancelLabel }}</button>
         <button
           ref="confirmBtn"
           type="button"

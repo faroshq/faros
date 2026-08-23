@@ -224,6 +224,7 @@ onUnmounted(() => {
       interactive
       retryable
       empty-text="No instances in this workspace yet."
+      :row-aria-label="(row) => `Open instance ${String(rowInstance(row).name)}`"
       @retry="load"
       @row-click="selectInstance"
     >

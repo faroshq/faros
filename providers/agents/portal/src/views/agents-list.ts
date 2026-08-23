@@ -88,6 +88,14 @@ export class AgentsList extends StoreElement {
     const primary = chans.find((ch) => ch.primary) || chans[0]
     const chan = primary ? primary.connectionRef + (chans.length > 1 ? ` +${chans.length - 1}` : '') : ''
     const open = (): void => this.navigate({ kind: 'agent', name, tab: 'config' })
+    const isNestedControl = (event: KeyboardEvent): boolean => {
+      const currentTarget = event.currentTarget as Element | null
+      const target = event.target as Element | null
+      const control = target?.closest?.(
+        'a, button, input, select, textarea, summary, [contenteditable="true"], [role="button"], [role="link"]',
+      )
+      return Boolean(control && control !== currentTarget)
+    }
     return html`
       <article
         class="agents-card k-card"
@@ -96,6 +104,7 @@ export class AgentsList extends StoreElement {
         aria-label="Open agent ${a.spec?.displayName || name}"
         @click=${open}
         @keydown=${(e: KeyboardEvent) => {
+          if (isNestedControl(e)) return
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
             open()
