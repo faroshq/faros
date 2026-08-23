@@ -39,7 +39,11 @@ import {
 import { api, isProjectAPIInitializingError, ProjectAPIRequestError } from './api'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
 import Tabs from './portalkit/Tabs.vue'
+import LayoutSelector from './portalkit/LayoutSelector.vue'
+import ResourceTable from './portalkit/ResourceTable.vue'
+import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
 import { confirmDialog, confirmState } from './portalkit/confirm'
+import { readLayoutPreference, writeLayoutPreference, type LayoutMode } from './portalkit/layoutPreference'
 import {
   canSubmitCreatePrompt,
   createSetupItems,
@@ -528,6 +532,9 @@ const assistantMarkdownClass = [
 ].join(' ')
 
 const projects = ref<Project[]>([])
+const PROJECTS_LAYOUT_PREFERENCE_KEY = 'faros:portal:app-studio:projects-layout'
+const projectLayout = ref<LayoutMode>(readLayoutPreference(PROJECTS_LAYOUT_PREFERENCE_KEY))
+watch(projectLayout, mode => writeLayoutPreference(PROJECTS_LAYOUT_PREFERENCE_KEY, mode))
 const projectThumbnailURLs = ref<Record<string, string>>({})
 const projectThumbnailRevisions = new Map<string, string>()
 let projectThumbnailRefreshTimer: number | undefined
@@ -1448,6 +1455,41 @@ const filteredProjects = computed(() => {
     `${project.displayName} ${project.description ?? ''} ${project.name} ${project.phase ?? ''}`.toLowerCase().includes(q),
   )
 })
+
+const projectTableColumns = [
+  { key: 'name', label: 'Project' },
+  { key: 'phase', label: 'Phase' },
+  { key: 'updated', label: 'Updated' },
+  { key: 'actions', label: 'Actions' },
+]
+
+const projectTableRows = computed<Array<Record<string, unknown>>>(() => filteredProjects.value.map(project => ({
+  name: project.name,
+  displayName: project.displayName,
+  description: project.description || project.name,
+  phase: project.phase || 'Pending',
+  updated: projectTimestamp(project),
+  actions: '',
+  _project: project,
+})))
+
+function projectFromTableRow(row: Record<string, unknown>): Project | null {
+  const project = row._project
+  if (!project || typeof project !== 'object') return null
+  const candidate = project as Partial<Project>
+  if (typeof candidate.name !== 'string' || typeof candidate.displayName !== 'string' || typeof candidate.createdAt !== 'string') return null
+  return project as Project
+}
+
+function enterProjectTableRow(row: Record<string, unknown>) {
+  const project = projectFromTableRow(row)
+  if (project) enterProject(project)
+}
+
+function requestDeleteProjectTableRow(row: Record<string, unknown>) {
+  const project = projectFromTableRow(row)
+  if (project) void requestDeleteProject(project)
+}
 
 function clearProjectThumbnailRefreshTimer() {
   if (projectThumbnailRefreshTimer === undefined) return
@@ -6701,6 +6743,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             </template>
             <span v-else>Loading…</span>
           </div>
+          <LayoutSelector v-model="projectLayout" class="ml-auto" aria-label="Project layout" />
         </div>
 
         <div v-if="error" class="mb-4 flex max-w-[720px] flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
@@ -6715,83 +6758,114 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <button type="button" class="font-medium underline underline-offset-2" :disabled="loading" @click="load">Retry</button>
         </div>
 
-        <div v-if="(loading || !projectsLoaded) && projects.length === 0" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8" role="status" aria-live="polite" aria-busy="true">
-          <article v-for="skeleton in 6" :key="skeleton" class="overflow-hidden rounded-lg border border-border-subtle bg-surface-raised" aria-hidden="true">
-            <div class="shimmer aspect-[16/9] border-b border-border-subtle bg-surface" />
-            <div class="grid gap-2 p-3">
-              <div class="shimmer h-4 w-2/3 rounded bg-surface-overlay" />
-              <div class="shimmer h-3 w-full rounded bg-surface-overlay" />
-              <div class="shimmer h-3 w-4/5 rounded bg-surface-overlay" />
-              <div class="shimmer mt-2 h-3 w-1/3 rounded bg-surface-overlay" />
-            </div>
-          </article>
-        </div>
+        <template v-if="projectLayout === 'grid'">
+          <div v-if="(loading || !projectsLoaded) && projects.length === 0" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8" role="status" aria-live="polite" aria-busy="true">
+            <article v-for="skeleton in 6" :key="skeleton" class="overflow-hidden rounded-lg border border-border-subtle bg-surface-raised" aria-hidden="true">
+              <div class="shimmer aspect-[16/9] border-b border-border-subtle bg-surface" />
+              <div class="grid gap-2 p-3">
+                <div class="shimmer h-4 w-2/3 rounded bg-surface-overlay" />
+                <div class="shimmer h-3 w-full rounded bg-surface-overlay" />
+                <div class="shimmer h-3 w-4/5 rounded bg-surface-overlay" />
+                <div class="shimmer mt-2 h-3 w-1/3 rounded bg-surface-overlay" />
+              </div>
+            </article>
+          </div>
 
-        <div v-else-if="filteredProjects.length" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8">
-          <article
-            v-for="project in filteredProjects"
-            :key="project.name"
-            class="group relative overflow-hidden rounded-lg border border-border-subtle bg-surface-raised transition hover:border-accent/40 hover:bg-surface-overlay"
-          >
-            <button class="block w-full text-left" @click="enterProject(project)">
-              <div class="relative aspect-[16/9] overflow-hidden border-b border-border-subtle bg-surface">
-                <img
-                  v-if="projectThumbnailURLs[project.name]"
-                  :src="projectThumbnailURLs[project.name]"
-                  :alt="`${project.displayName} app preview`"
-                  class="absolute inset-0 z-10 h-full w-full object-cover object-top"
-                />
-                <template v-else>
-                  <div class="absolute inset-0 grid grid-cols-4 gap-px bg-border-subtle/70 p-px">
-                    <div class="col-span-1 bg-surface-raised" />
-                    <div class="col-span-3 bg-surface" />
-                    <div class="col-span-4 bg-surface" />
-                  </div>
-                  <div class="absolute inset-x-3 top-3 flex items-center gap-1.5">
-                    <span class="h-1.5 w-1.5 rounded-full bg-danger/70" />
-                    <span class="h-1.5 w-1.5 rounded-full bg-warning/70" />
-                    <span class="h-1.5 w-1.5 rounded-full bg-success/70" />
-                  </div>
-                  <div class="absolute left-4 right-4 top-9 grid gap-2">
-                    <div class="h-3 w-2/3 rounded bg-text-muted/15" />
-                    <div class="grid grid-cols-3 gap-2">
-                      <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
-                      <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
-                      <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
-                    </div>
-                    <div class="grid gap-1.5">
-                      <div class="h-2 rounded bg-text-muted/15" />
-                      <div class="h-2 w-4/5 rounded bg-text-muted/10" />
-                      <div class="h-2 w-3/5 rounded bg-text-muted/10" />
-                    </div>
-                  </div>
-                  <div class="absolute bottom-3 left-3 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-raised shadow-sm">
-                    <MessageSquare class="h-4 w-4 text-accent" :stroke-width="1.75" />
-                  </div>
-                </template>
-              </div>
-              <div class="p-3">
-                <div class="truncate text-[14px] font-semibold text-text-primary">{{ project.displayName }}</div>
-                <div class="mt-1 line-clamp-2 min-h-[34px] text-[12px] leading-[17px] text-text-muted">
-                  {{ project.description || project.name }}
-                </div>
-                <div class="mt-3 text-[12px] text-text-muted">{{ projectTimestamp(project) }}</div>
-              </div>
-            </button>
-            <button
-              class="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-raised/90 text-text-muted opacity-0 transition hover:bg-danger-subtle hover:text-danger focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:opacity-50"
-              title="Delete project"
-              :disabled="busy"
-              @click.stop="requestDeleteProject(project)"
+          <div v-else-if="filteredProjects.length" class="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-5 pb-8">
+            <article
+              v-for="project in filteredProjects"
+              :key="project.name"
+              class="group relative overflow-hidden rounded-lg border border-border-subtle bg-surface-raised transition hover:border-accent/40 hover:bg-surface-overlay"
             >
-              <Trash2 class="h-4 w-4" :stroke-width="1.75" />
-            </button>
-          </article>
-        </div>
+              <button class="block w-full text-left" @click="enterProject(project)">
+                <div class="relative aspect-[16/9] overflow-hidden border-b border-border-subtle bg-surface">
+                  <img
+                    v-if="projectThumbnailURLs[project.name]"
+                    :src="projectThumbnailURLs[project.name]"
+                    :alt="`${project.displayName} app preview`"
+                    class="absolute inset-0 z-10 h-full w-full object-cover object-top"
+                  />
+                  <template v-else>
+                    <div class="absolute inset-0 grid grid-cols-4 gap-px bg-border-subtle/70 p-px">
+                      <div class="col-span-1 bg-surface-raised" />
+                      <div class="col-span-3 bg-surface" />
+                      <div class="col-span-4 bg-surface" />
+                    </div>
+                    <div class="absolute inset-x-3 top-3 flex items-center gap-1.5">
+                      <span class="h-1.5 w-1.5 rounded-full bg-danger/70" />
+                      <span class="h-1.5 w-1.5 rounded-full bg-warning/70" />
+                      <span class="h-1.5 w-1.5 rounded-full bg-success/70" />
+                    </div>
+                    <div class="absolute left-4 right-4 top-9 grid gap-2">
+                      <div class="h-3 w-2/3 rounded bg-text-muted/15" />
+                      <div class="grid grid-cols-3 gap-2">
+                        <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
+                        <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
+                        <div class="h-10 rounded border border-border-subtle bg-surface-overlay/70" />
+                      </div>
+                      <div class="grid gap-1.5">
+                        <div class="h-2 rounded bg-text-muted/15" />
+                        <div class="h-2 w-4/5 rounded bg-text-muted/10" />
+                        <div class="h-2 w-3/5 rounded bg-text-muted/10" />
+                      </div>
+                    </div>
+                    <div class="absolute bottom-3 left-3 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-raised shadow-sm">
+                      <MessageSquare class="h-4 w-4 text-accent" :stroke-width="1.75" />
+                    </div>
+                  </template>
+                </div>
+                <div class="p-3">
+                  <div class="truncate text-[14px] font-semibold text-text-primary">{{ project.displayName }}</div>
+                  <div class="mt-1 line-clamp-2 min-h-[34px] text-[12px] leading-[17px] text-text-muted">
+                    {{ project.description || project.name }}
+                  </div>
+                  <div class="mt-3 text-[12px] text-text-muted">{{ projectTimestamp(project) }}</div>
+                </div>
+              </button>
+              <button
+                class="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-md border border-border-subtle bg-surface-raised/90 text-text-muted opacity-0 transition hover:bg-danger-subtle hover:text-danger focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Delete project"
+                :disabled="busy"
+                @click.stop="requestDeleteProject(project)"
+              >
+                <Trash2 class="h-4 w-4" :stroke-width="1.75" />
+              </button>
+            </article>
+          </div>
 
-        <div v-else class="flex min-h-[260px] max-w-[520px] items-center justify-center rounded-lg border border-dashed border-border-subtle bg-surface-raised/50 p-8 text-center text-[13px] text-text-muted">
-          {{ error ? 'No projects available.' : projects.length === 0 ? 'Preparing new project...' : 'No projects match this search.' }}
-        </div>
+          <div v-else class="flex min-h-[260px] max-w-[520px] items-center justify-center rounded-lg border border-dashed border-border-subtle bg-surface-raised/50 p-8 text-center text-[13px] text-text-muted">
+            {{ error ? 'No projects available.' : projects.length === 0 ? 'Preparing new project...' : 'No projects match this search.' }}
+          </div>
+        </template>
+
+        <ResourceTable
+          v-else
+          :columns="projectTableColumns"
+          :rows="projectTableRows"
+          row-key="name"
+          :loaded="projectsLoaded"
+          :loading="loading"
+          :interactive="true"
+          :row-aria-label="(row) => `Open project ${String(row.displayName || row.name)}`"
+          :empty-text="error ? 'No projects available.' : projects.length === 0 ? 'Preparing new project...' : 'No projects match this search.'"
+          @row-click="enterProjectTableRow"
+        >
+          <template #name="{ row }">
+            <div class="min-w-[220px]">
+              <div class="truncate font-semibold text-text-primary">{{ String(row.displayName || row.name) }}</div>
+              <div class="mt-1 line-clamp-2 text-[12px] leading-[17px] text-text-muted">{{ String(row.description || row.name) }}</div>
+            </div>
+          </template>
+          <template #phase="{ value }"><StatusBadge :status="String(value)" /></template>
+          <template #updated="{ value }"><span class="whitespace-nowrap text-text-muted">{{ String(value) }}</span></template>
+          <template #actions="{ row }">
+            <ResourceTableDeleteButton
+              :label="`Delete project ${String(row.displayName || row.name)}`"
+              :disabled="busy"
+              @click="requestDeleteProjectTableRow(row)"
+            />
+          </template>
+        </ResourceTable>
       </section>
 
       <div v-else-if="showNewProjectComposer">
