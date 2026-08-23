@@ -137,7 +137,7 @@ writing any CSS**:
 | `.k-table` | 6px table wrapper; mono 9–10px uppercase headers, 13px rows, accent-tint hover via `.is-interactive` |
 | `.k-cell-mono` | Data-like cells (names, ids, timestamps) |
 | `.k-badge` (+ `--success/--warning/--danger/--muted`, `__dot`) | **Square 3px mono tag**: 10px/600 uppercase, `0.06em`, `*-subtle` bg, `color-mix(currentColor 35%)` hairline |
-| `.k-btn` (+ `--primary/--ghost/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; danger = danger-subtle tint, **no glow** |
+| `.k-btn` (+ `--primary/--ghost/--text/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; text = transparent, borderless inline action; danger = danger-subtle tint, **no glow** |
 | `.k-input` | 4px overlay-bg input; focus = accent border + 3px subtle ring + glow |
 | `.k-eyebrow` / `.k-kpi` | Tracked uppercase label over an expanded tabular numeral |
 | `.k-menu` / `.k-menu-item` (+ `--danger`, `.is-selected`, `.k-menu-sep`) | Dropdown/context menu panel + items; selection = accent-subtle, no glow |

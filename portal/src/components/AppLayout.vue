@@ -489,7 +489,7 @@ watchEffect(() => {
         <button
           v-if="sidebarExpanded"
           type="button"
-          class="k-btn k-btn--ghost mt-3 mb-1 flex w-full items-center justify-start gap-2 border-0 bg-transparent px-3 py-0 text-left hover:bg-transparent"
+          class="k-btn k-btn--text mt-3 mb-1 flex w-full items-center justify-start gap-2 px-3 py-0 text-left"
           :title="isNavGroupOpen('cat:' + group.name, group.items) ? 'Collapse ' + group.name : 'Expand ' + group.name"
           @click="toggleNavGroup('cat:' + group.name)"
         >
@@ -519,7 +519,7 @@ watchEffect(() => {
               <button
                 v-if="sidebarExpanded && item.children?.length"
                 type="button"
-                class="k-btn k-btn--ghost -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-text-muted/70 hover:bg-transparent hover:text-text-secondary"
+                class="k-btn k-btn--text -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm p-0 text-text-muted/70 hover:text-text-secondary"
                 :title="isNavGroupOpen('item:' + item.to, item.children) ? 'Hide ' + item.label + ' pages' : 'Show ' + item.label + ' pages'"
                 @click.prevent.stop="toggleNavGroup('item:' + item.to)"
               >
@@ -553,7 +553,7 @@ watchEffect(() => {
         <button
           v-if="sidebarExpanded"
           type="button"
-          class="k-btn k-btn--ghost mt-3 mb-1 flex w-full items-center justify-start gap-2 border-0 bg-transparent px-3 py-0 text-left hover:bg-transparent"
+          class="k-btn k-btn--text mt-3 mb-1 flex w-full items-center justify-start gap-2 px-3 py-0 text-left"
           :title="isNavGroupOpen('cat:Other', providersStore.categorizedNavItems.uncategorized) ? 'Collapse Other' : 'Expand Other'"
           @click="toggleNavGroup('cat:Other')"
         >
@@ -581,7 +581,7 @@ watchEffect(() => {
               <button
                 v-if="sidebarExpanded && item.children?.length"
                 type="button"
-                class="k-btn k-btn--ghost -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0 text-text-muted/70 hover:bg-transparent hover:text-text-secondary"
+                class="k-btn k-btn--text -mr-1 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-sm p-0 text-text-muted/70 hover:text-text-secondary"
                 :title="isNavGroupOpen('item:' + item.to, item.children) ? 'Hide ' + item.label + ' pages' : 'Show ' + item.label + ' pages'"
                 @click.prevent.stop="toggleNavGroup('item:' + item.to)"
               >

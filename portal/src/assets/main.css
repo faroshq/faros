@@ -1,6 +1,6 @@
 @import "tailwindcss";
 /* The host imports this generated copy; provider-sdk/portalkit is canonical. */
-@import "./faros-ui.css";
+@import "./faros-ui.css" layer(components);
 
 /*
  * Some built-in providers ship their UI as separate Vite bundles under

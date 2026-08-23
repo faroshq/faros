@@ -137,16 +137,27 @@ test('scans canonical CSS and multiline control glyph context', () => {
 test('keeps the canonical stylesheet handoff and native table-row contract', () => {
   const styles = fs.readFileSync(new URL('../provider-sdk/portalkit/styles.ts', import.meta.url), 'utf8')
   const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const hostCss = fs.readFileSync(new URL('../portal/src/assets/main.css', import.meta.url), 'utf8')
   const table = fs.readFileSync(new URL('../provider-sdk/portalkit-vue/ResourceTable.vue', import.meta.url), 'utf8')
 
   assert.match(styles, /import farosUIStyles from '\.\/faros-ui\.css\?raw'/)
   assert.match(css, /--faros-ui-canonical:\s*1/)
+  assert.match(hostCss, /@import "\.\/faros-ui\.css" layer\(components\);/)
   assert.match(styles, /Never mutate an existing style element/)
   assert.doesNotMatch(styles, /style\.textContent !== farosUIStyles/)
   assert.match(table, /:tabindex="interactive \? 0 : undefined"/)
   assert.match(table, /@keydown="onRowKeydown\(row, \$event\)"/)
   assert.match(table, /isExplicitControlTarget/)
   assert.doesNotMatch(table, /:role="interactive \? 'button' : undefined"/)
+})
+
+test('keeps sidebar divider and child toggles on the borderless text-button recipe', () => {
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const layout = fs.readFileSync(new URL('../portal/src/components/AppLayout.vue', import.meta.url), 'utf8')
+
+  assert.match(css, /\.k-btn--text\s*\{[^}]*background:\s*transparent;[^}]*border-color:\s*transparent;/s)
+  assert.equal((layout.match(/k-btn k-btn--text mt-3 mb-1/g) ?? []).length, 2)
+  assert.equal((layout.match(/k-btn k-btn--text -mr-1 flex h-4 w-4/g) ?? []).length, 2)
 })
 
 test('keeps resource-table controls and wide-table scrolling in the canonical recipe', () => {

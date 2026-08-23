@@ -185,6 +185,16 @@ html.light .k-card {
   background: var(--color-surface-hover, #1e2033);
   border-color: color-mix(in srgb, var(--color-accent, #8b6bff) 30%, transparent);
 }
+.k-btn--text {
+  background: transparent;
+  border-color: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+.k-btn--text:hover {
+  background: transparent;
+  border-color: transparent;
+}
 .k-btn--danger {
   background: var(--color-danger-subtle, rgba(255, 93, 93, 0.12));
   color: var(--color-danger, #ff5d5d);
