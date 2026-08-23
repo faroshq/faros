@@ -483,14 +483,20 @@ function serviceRowAriaLabel(row: Record<string, unknown>): string {
         <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="k-btn k-btn--primary" @click="toggleCreate">
-          <Plus :size="14" /> New service
+        <button
+          type="button"
+          class="k-btn k-btn--primary"
+          :aria-expanded="showCreate"
+          aria-controls="edges-service-create"
+          @click="toggleCreate"
+        >
+          <Plus :size="14" aria-hidden="true" /> New service
         </button>
       </div>
     </header>
 
     <!-- Create form -->
-    <div v-if="showCreate" class="wiz-card" style="margin-bottom: 16px;">
+    <div v-if="showCreate" id="edges-service-create" class="wiz-card k-card">
       <h3>New service</h3>
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">

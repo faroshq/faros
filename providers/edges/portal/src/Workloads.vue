@@ -405,8 +405,14 @@ function workloadRowAriaLabel(row: Record<string, unknown>): string {
         <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
           <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
         </button>
-        <button class="k-btn k-btn--primary" @click="showCreate = !showCreate">
-          <Plus :size="14" /> New workload
+        <button
+          type="button"
+          class="k-btn k-btn--primary"
+          :aria-expanded="showCreate"
+          aria-controls="edges-workload-create"
+          @click="showCreate = !showCreate"
+        >
+          <Plus :size="14" aria-hidden="true" /> New workload
         </button>
       </div>
     </header>
@@ -414,21 +420,27 @@ function workloadRowAriaLabel(row: Record<string, unknown>): string {
     <div v-if="error" class="banner error">{{ error }}</div>
 
     <!-- Marketplace -->
-    <div class="market">
-      <div class="market-head clickable" @click="showMarket = !showMarket">
-        <component :is="showMarket ? ChevronDown : ChevronRight" :size="16" />
-        <Store :size="16" />
-        <h3>Marketplace</h3>
+    <div class="market k-card">
+      <button
+        type="button"
+        class="market-head"
+        :aria-expanded="showMarket"
+        aria-controls="edges-marketplace-body"
+        @click="showMarket = !showMarket"
+      >
+        <component :is="showMarket ? ChevronDown : ChevronRight" :size="16" aria-hidden="true" />
+        <Store :size="16" aria-hidden="true" />
+        <span class="market-head-title">Marketplace</span>
         <span class="muted">one-click self-hosted apps, deployed as Helm workloads onto an edge</span>
-      </div>
-      <div v-if="showMarket" class="market-body">
+      </button>
+      <div v-if="showMarket" id="edges-marketplace-body" class="market-body">
         <div v-if="edges.length === 0" class="muted pad">
           Connect a KubernetesCluster edge first — marketplace apps deploy onto one.
         </div>
         <div v-for="grp in MARKETPLACE_CATEGORIES" :key="grp.category" class="market-cat">
           <div class="market-cat-label">{{ grp.category }}</div>
           <div class="market-grid">
-            <div v-for="app in grp.apps" :key="app.type" class="market-card">
+            <div v-for="app in grp.apps" :key="app.type" class="market-card k-card">
               <div class="market-card-top">
                 <span class="market-name">{{ app.label }}</span>
                 <span class="k-badge k-badge--muted">{{ app.category }}</span>
@@ -445,7 +457,7 @@ function workloadRowAriaLabel(row: Record<string, unknown>): string {
     </div>
 
     <!-- Deploy dialog -->
-    <div v-if="deployApp" class="wiz-card" style="margin-bottom: 16px;">
+    <div v-if="deployApp" class="wiz-card k-card">
       <h3>Deploy {{ deployApp.label }}</h3>
       <div class="row" style="gap: 12px; align-items: flex-start;">
         <label class="fld" style="flex: 1;">
@@ -472,7 +484,7 @@ function workloadRowAriaLabel(row: Record<string, unknown>): string {
     </div>
 
     <!-- Create form -->
-    <div v-if="showCreate" class="wiz-card" style="margin-bottom: 16px;">
+    <div v-if="showCreate" id="edges-workload-create" class="wiz-card k-card">
       <h3>New workload</h3>
       <label class="fld">
         <span class="lbl">Name</span>
