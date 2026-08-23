@@ -311,6 +311,97 @@ html.light .k-menu {
   background: var(--color-border-subtle, rgba(255, 255, 255, 0.07));
 }
 
+/* ── Layout selector ──────────────────────────────────────────────────────
+ * Compact controlled grid/list menu. It uses the menu selection language but
+ * never glows: layout is a presentation preference, not a primary action. */
+.k-layout-selector {
+  position: relative;
+  display: inline-flex;
+}
+.k-layout-selector__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 34px;
+  height: 32px;
+  padding: 5px 7px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.11));
+  border-radius: 4px;
+  background: var(--color-surface-overlay, #171927);
+  color: var(--color-text-secondary, #8a8ca6);
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.k-layout-selector__trigger:hover,
+.k-layout-selector__trigger[aria-expanded="true"] {
+  border-color: var(--color-border-default, rgba(255, 255, 255, 0.11));
+  background: var(--color-surface-hover, var(--color-surface-overlay, #171927));
+  color: var(--color-text-primary, #e9e9f2);
+  box-shadow: none;
+}
+.k-layout-selector__trigger:focus {
+  outline: none;
+  box-shadow: none;
+}
+.k-layout-selector__trigger:focus-visible {
+  outline: 2px solid var(--color-accent, #8b6bff);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+.k-layout-selector__menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 5px);
+  right: 0;
+  width: 154px;
+}
+.k-layout-selector__label {
+  padding: 5px 8px 4px;
+  color: var(--color-text-muted, #5d5f78);
+  font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.k-layout-selector__item {
+  display: grid;
+  grid-template-columns: 16px 1fr 14px;
+  min-height: 30px;
+  box-shadow: none;
+}
+.k-layout-selector__item:hover,
+.k-layout-selector__item:focus,
+.k-layout-selector__item:focus-visible,
+.k-layout-selector__item.is-selected {
+  box-shadow: none;
+}
+.k-layout-selector__item:focus {
+  outline: none;
+}
+.k-layout-selector__item:focus-visible {
+  outline: 1px solid var(--color-accent, #8b6bff);
+  outline-offset: -1px;
+}
+.k-layout-selector__icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+.k-layout-selector__chevron {
+  width: 11px;
+  height: 11px;
+  color: var(--color-text-muted, #5d5f78);
+}
+.k-layout-selector__check {
+  width: 13px;
+  height: 13px;
+  color: var(--color-accent, #8b6bff);
+}
+
 /* ── Kbd (shortcut key-cap) ───────────────────────────────────────────────*/
 .k-kbd {
   font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace);

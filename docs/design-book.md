@@ -142,6 +142,7 @@ writing any CSS**:
 | `.k-input` | 4px overlay-bg input; focus = accent border + 3px subtle ring + glow |
 | `.k-eyebrow` / `.k-kpi` | Tracked uppercase label over an expanded tabular numeral |
 | `.k-menu` / `.k-menu-item` (+ `--danger`, `.is-selected`, `.k-menu-sep`) | Dropdown/context menu panel + items; selection = accent-subtle, no glow |
+| `.k-layout-selector` (+ `__trigger`, `__menu`, `__item`) | Controlled grid/list presentation menu; compact icon trigger, radio semantics, no glow |
 | `.k-kbd` | Shortcut key-cap: mono 9px uppercase, 3px, darker bottom edge |
 | `[data-k-tip="…"]` | CSS-only tooltip: 300ms delay, shows on hover AND focus, 260px max |
 | `.k-progress` / `.k-progress__bar` (+ `--accent/--warning/--danger`) | 2px-radius track, semantic fill |
@@ -336,6 +337,25 @@ App-studio's `PreviewActionsMenu` / `ResponseModePicker` /
 - Destructive items: `danger` text, `danger-subtle` hover bg, separated by a
   hairline `border-subtle` divider.
 - Keyboard: arrows + Home/End, Escape closes, focus returns to the trigger.
+
+### Layout selector — ✅ implemented as `portalkit-vue/LayoutSelector.vue`
+
+Use the shared selector when the same resource collection has grid and list
+presentations. It is a controlled component (`modelValue` plus
+`update:modelValue`) with exactly two stable values: `grid` and `list`. The
+optional persistence helper validates stored values, defaults to `grid`, and
+treats unavailable or failing browser storage as a non-fatal preference miss.
+
+- Trigger: compact current-layout icon plus chevron, with `aria-haspopup`,
+  `aria-expanded`, `aria-controls`, and an accessible name that includes the
+  current mode. Focus uses a crisp accent outline; it never glows.
+- Menu: visible mono-uppercase Layout label and `role="menu"`; Grid and List
+  are `role="menuitemradio"` with `aria-checked`. Selection uses the standard
+  `accent-subtle` menu state and no glow.
+- Keyboard: click, Enter, and Space select; closed ArrowDown/ArrowUp opens on
+  the first/last item; open arrows wrap; Home/End jump; Escape closes and
+  restores trigger focus. Tab closes after normal focus movement without a
+  focus trap. Pointer or focus movement outside closes the menu.
 
 ### Provider route tabs — ✅ implemented as PortalKit `Tabs`
 
