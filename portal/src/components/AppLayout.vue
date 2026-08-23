@@ -341,6 +341,9 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragEnd)
+  // TerminalDock outlives routed layouts. Never carry this page's dock
+  // clearance into standalone shells such as platform admin or login.
+  setLayoutInsets({ left: '0px', right: '0px', bottom: '0px' })
 })
 
 const isDefaultFloat = computed(() => !isDragging.value && dockState.value.mode === 'float' && dockState.value.x < 0)

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   ShieldAlert, AlertCircle, RefreshCw, Puzzle, KeyRound, Building2, Users,
   Hexagon, ArrowLeft, LogOut, PanelLeftClose, PanelLeftOpen,
@@ -11,6 +12,7 @@ import { useAuthStore } from '@/stores/auth'
 
 const admin = useAdminStore()
 const auth = useAuthStore()
+const router = useRouter()
 const { sidebarExpanded, toggleSidebar } = useSidebarExpansion()
 
 const sections = [
@@ -21,6 +23,11 @@ const sections = [
 ]
 
 onMounted(() => admin.refresh())
+
+function handleLogout() {
+  auth.logout()
+  void router.replace('/login')
+}
 </script>
 
 <template>
@@ -87,7 +94,7 @@ onMounted(() => admin.refresh())
           class="k-btn k-btn--text flex w-full justify-start gap-2.5 rounded-md px-3 py-2 text-[11px] text-text-muted transition-colors hover:bg-surface-overlay/50 hover:text-text-secondary"
           :class="sidebarExpanded ? '' : 'justify-center'"
           :title="sidebarExpanded ? undefined : 'Log out'"
-          @click="auth.logout()"
+          @click="handleLogout"
         >
           <LogOut class="h-4 w-4 flex-shrink-0" :stroke-width="1.75" />
           <span v-if="sidebarExpanded">Log out</span>

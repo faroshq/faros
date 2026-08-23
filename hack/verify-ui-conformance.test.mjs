@@ -211,6 +211,8 @@ test('keeps platform-admin flat lists and navigation on shared host patterns', (
   assert.match(appLayout, /const \{ sidebarExpanded, toggleSidebar \} = useSidebarExpansion\(\)/)
   assert.match(shell, /shadow-\[0_0_14px_var\(--color-accent-glow\)\]/)
   assert.match(shell, /:aria-current="\$route\.path === s\.to \? 'page' : undefined"/)
+  assert.match(shell, /auth\.logout\(\)\s+void router\.replace\('\/login'\)/)
+  assert.match(appLayout, /setLayoutInsets\(\{ left: '0px', right: '0px', bottom: '0px' \}\)/)
 })
 
 test('keeps dense checkboxes compact without decorative focus glow', () => {
