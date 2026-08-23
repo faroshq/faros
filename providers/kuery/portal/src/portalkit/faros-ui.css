@@ -215,6 +215,35 @@ html.light .k-card {
     0 0 14px var(--color-accent-glow, rgba(139, 107, 255, 0.3));
 }
 
+/* Native checkbox reset for dense controls. Keep the browser's native glyph
+ * and checked/indeterminate behavior; only normalize the box geometry and
+ * focus treatment so provider-wide text-input rules cannot stretch it. */
+.k-checkbox {
+  appearance: auto;
+  inline-size: 14px;
+  block-size: 14px;
+  width: 14px;
+  height: 14px;
+  min-inline-size: 0;
+  min-block-size: 0;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  accent-color: var(--color-accent, #8b6bff);
+  box-shadow: none;
+}
+.k-checkbox:focus {
+  outline: none;
+  box-shadow: none;
+}
+.k-checkbox:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-subtle, rgba(139, 107, 255, 0.14));
+}
+
 /* ── Menu (dropdown / context) ────────────────────────────────────────────
  * 6px panel, 4px items. Selection is accent-subtle WITHOUT glow — menus are
  * not navigation. Destructive items sit below a .k-menu-sep hairline. */

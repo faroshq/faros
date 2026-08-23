@@ -330,7 +330,7 @@ faros-provider-databricks .field-hint {
   line-height: 1.5;
 }
 
-faros-provider-databricks input,
+faros-provider-databricks input:not([type="checkbox"]):not([type="radio"]),
 faros-provider-databricks select {
   background: var(--color-surface-overlay);
   border: 1px solid var(--color-border-default);
@@ -344,7 +344,7 @@ faros-provider-databricks select {
   width: 100%;
 }
 
-faros-provider-databricks .form input,
+faros-provider-databricks .form input:not([type="checkbox"]):not([type="radio"]),
 faros-provider-databricks .form select {
   border-radius: 4px;
   font-size: 12px;
@@ -352,13 +352,13 @@ faros-provider-databricks .form select {
   padding: 6px 10px;
 }
 
-faros-provider-databricks input:focus,
+faros-provider-databricks input:not([type="checkbox"]):not([type="radio"]):focus,
 faros-provider-databricks select:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px var(--color-accent-subtle), 0 0 14px var(--color-accent-glow);
 }
 
-faros-provider-databricks input:disabled {
+faros-provider-databricks input:not([type="checkbox"]):not([type="radio"]):disabled {
   color: var(--color-text-muted);
   cursor: not-allowed;
   opacity: 0.75;
@@ -534,7 +534,6 @@ faros-provider-databricks .lazy-tree-expander { align-items: center; background:
 faros-provider-databricks .lazy-tree-expander svg { height: 14px; transition: transform 140ms ease; width: 14px; }
 faros-provider-databricks .lazy-tree-expander svg.expanded { transform: rotate(90deg); }
 faros-provider-databricks .lazy-tree-expander-spacer { height: 16px; width: 16px; }
-faros-provider-databricks .lazy-tree-row input { accent-color: var(--color-accent); height: 14px; margin: 0; width: 14px; }
 faros-provider-databricks .lazy-tree-copy { display: grid; gap: 2px; min-width: 0; }
 faros-provider-databricks .lazy-tree-copy strong { color: var(--color-text-primary); font-family: var(--font-mono); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 faros-provider-databricks .lazy-tree-copy small { color: var(--color-text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

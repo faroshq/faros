@@ -147,6 +147,23 @@ test('keeps the canonical stylesheet handoff and native table-row contract', () 
   assert.doesNotMatch(table, /:role="interactive \? 'button' : undefined"/)
 })
 
+test('keeps dense checkboxes compact without decorative focus glow', () => {
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const checkbox = css.match(/\.k-checkbox\s*\{([^}]*)\}/)?.[1] ?? ''
+  const focus = css.match(/\.k-checkbox:focus\s*\{([^}]*)\}/)?.[1] ?? ''
+  const focusVisible = css.match(/\.k-checkbox:focus-visible\s*\{([^}]*)\}/)?.[1] ?? ''
+
+  assert.match(checkbox, /width:\s*14px/)
+  assert.match(checkbox, /height:\s*14px/)
+  assert.match(checkbox, /min-width:\s*0/)
+  assert.match(checkbox, /min-height:\s*0/)
+  assert.match(checkbox, /padding:\s*0/)
+  assert.match(checkbox, /accent-color:\s*var\(--color-accent/)
+  assert.match(focus, /box-shadow:\s*none/)
+  assert.match(focusVisible, /0 0 0 3px var\(--color-accent-subtle/)
+  assert.doesNotMatch(`${checkbox}\n${focus}\n${focusVisible}`, /accent-glow/)
+})
+
 test('supports an exact, design-book-referenced exception and rejects stale locators', () => {
   const source = 'faros-provider-fixture .bubble {\n  border-radius: 14px;\n}\n'
   const valid = fixtureRepo({ 'providers/fixture/portal/src/style.css': source })

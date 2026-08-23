@@ -358,10 +358,14 @@ spec when the tabset is the provider-level route/section bar.
 ### Checkbox / radio
 Native inputs + `accent-color: var(--color-accent)` (inherited from `body`) is
 the system default — keep it; don't hand-draw controls for standard forms.
-If a custom one is ever justified (indeterminate states, dense tables):
-14×14px, 3px radius (radio: circle), `border-default` 1px, checked =
-`accent` fill + white 10px check, focus = the standard 3px `accent-subtle`
-ring. Label: 12px `text-secondary`, gap 8px.
+For a dense native checkbox that sits inside a composite control, use the
+canonical `.k-checkbox` reset in `provider-sdk/portalkit/faros-ui.css`: 14×14px,
+zero min dimensions, padding, and margin, native accent color, and no ordinary
+focus shadow. Its `:focus-visible` treatment is only the compact 3px
+`accent-subtle` ring — never `accent-glow`. Keep the composite row (for example
+the `treeitem`) as the keyboard focus owner; a visually present checkbox may be
+`tabindex="-1"`/`aria-hidden="true"` and route pointer activation back to that
+row. Label: 12px `text-secondary`, gap 8px.
 
 ### Toggle switch — ✅ implemented as `.k-toggle` (faros-ui.css)
 Sharp: 3px track (`bg-accent` when `aria-checked="true"`, `border-default`
