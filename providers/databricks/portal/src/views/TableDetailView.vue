@@ -171,7 +171,7 @@ onUnmounted(() => {
 
 <template>
   <section class="page">
-    <button class="k-btn k-btn--ghost databricks-back-action" type="button" :disabled="!!table && operationLocked(table.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Tables</button>
+    <button class="k-btn k-btn--ghost k-back-action" type="button" :disabled="!!table && operationLocked(table.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Tables</button>
 
     <header class="page-head">
       <div>

@@ -102,7 +102,7 @@ async function submit() {
 
 <template>
   <section class="page">
-    <button type="button" class="k-btn k-btn--ghost" :disabled="submitting" @click="emit('navigate', 'catalog')"><ArrowLeft :size="14" aria-hidden="true" /> Back to templates</button>
+    <button type="button" class="k-btn k-btn--ghost k-back-action" :disabled="submitting" @click="emit('navigate', 'catalog')"><ArrowLeft :size="14" aria-hidden="true" /> Back to templates</button>
     <div v-if="loading && !loaded" class="page-loading-shell" role="status" aria-live="polite" aria-busy="true">
       <span>Loading template…</span>
       <div class="shimmer page-loading-line page-loading-line-short" aria-hidden="true" />

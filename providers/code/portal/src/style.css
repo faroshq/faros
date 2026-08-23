@@ -92,10 +92,6 @@ faros-provider-code .code-row-actions {
   display: flex;
   justify-content: flex-end;
 }
-faros-provider-code .code-back-action {
-  align-self: flex-start;
-  margin-bottom: 4px;
-}
 faros-provider-code .code-inline-action {
   background: transparent;
   border-color: transparent;

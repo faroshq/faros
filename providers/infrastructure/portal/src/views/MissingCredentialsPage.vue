@@ -20,7 +20,7 @@ const cmd = computed(() => {
 
 <template>
   <section class="page">
-    <button type="button" class="k-btn k-btn--ghost" @click="emit('navigate', 'catalog')"><ArrowLeft :size="14" aria-hidden="true" /> Back to templates</button>
+    <button type="button" class="k-btn k-btn--ghost k-back-action" @click="emit('navigate', 'catalog')"><ArrowLeft :size="14" aria-hidden="true" /> Back to templates</button>
     <header class="page-head">
       <div>
         <h2 class="page-title">Cloud credentials missing</h2>

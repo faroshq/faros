@@ -138,6 +138,7 @@ writing any CSS**:
 | `.k-cell-mono` | Data-like cells (names, ids, timestamps) |
 | `.k-badge` (+ `--success/--warning/--danger/--muted`, `__dot`) | **Square 3px mono tag**: 10px/600 uppercase, `0.06em`, `*-subtle` bg, `color-mix(currentColor 35%)` hairline |
 | `.k-btn` (+ `--primary/--ghost/--text/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; text = transparent, borderless inline action; danger = danger-subtle tint, **no glow** |
+| `.k-back-action` | Intrinsic-width back-navigation modifier for `.k-btn`; start-aligned in flex/grid page flows, muted → accent on hover |
 | `.k-input` | 4px overlay-bg input; focus = accent border + 3px subtle ring + glow |
 | `.k-eyebrow` / `.k-kpi` | Tracked uppercase label over an expanded tabular numeral |
 | `.k-menu` / `.k-menu-item` (+ `--danger`, `.is-selected`, `.k-menu-sep`) | Dropdown/context menu panel + items; selection = accent-subtle, no glow |

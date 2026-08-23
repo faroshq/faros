@@ -160,6 +160,14 @@ test('keeps sidebar divider and child toggles on the borderless text-button reci
   assert.equal((layout.match(/k-btn k-btn--text -mr-1 flex h-4 w-4/g) ?? []).length, 2)
 })
 
+test('keeps page-level back navigation intrinsic-width on the shared recipe', () => {
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const provision = fs.readFileSync(new URL('../providers/infrastructure/portal/src/views/ProvisionPage.vue', import.meta.url), 'utf8')
+
+  assert.match(css, /\.k-back-action\s*\{[^}]*align-self:\s*flex-start;[^}]*inline-size:\s*fit-content;/s)
+  assert.match(provision, /class="k-btn k-btn--ghost k-back-action"/)
+})
+
 test('keeps resource-table controls and wide-table scrolling in the canonical recipe', () => {
   const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
   const table = fs.readFileSync(new URL('../provider-sdk/portalkit-vue/ResourceTable.vue', import.meta.url), 'utf8')

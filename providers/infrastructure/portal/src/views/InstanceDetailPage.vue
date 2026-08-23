@@ -175,7 +175,7 @@ onUnmounted(() => {
   <section class="page instance-detail" :aria-busy="loading">
     <button
       type="button"
-      class="k-btn k-btn--ghost"
+      class="k-btn k-btn--ghost k-back-action"
       :disabled="deleting"
       @click="emit('navigate', 'instances')"
     >

@@ -105,16 +105,6 @@ faros-provider-databricks .databricks-inline-action:hover {
   border-color: transparent;
 }
 
-faros-provider-databricks .databricks-back-action {
-  align-self: flex-start;
-  color: var(--color-text-muted, #5d5f78);
-  margin-bottom: 4px;
-}
-
-faros-provider-databricks .databricks-back-action:hover {
-  color: var(--color-accent, #8b6bff);
-}
-
 faros-provider-databricks .databricks-dialog-close {
   flex: none;
   min-height: 30px;

@@ -557,7 +557,7 @@ onUnmounted(() => {
 
 <template>
   <section class="page" :aria-busy="repoLoading">
-    <button class="k-btn k-btn--ghost code-back-action" type="button" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Repositories</button>
+    <button class="k-btn k-btn--ghost k-back-action" type="button" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Repositories</button>
 
     <header class="page-head">
       <div>
