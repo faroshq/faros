@@ -97,14 +97,11 @@ function selectTemplateRow(row: Record<string, unknown>) {
         <h2 class="page-title">Templates</h2>
         <p class="page-meta">Pick a template to provision into your tenant scope.</p>
       </div>
-      <div class="filters">
-        <LayoutSelector v-model="layout" aria-label="Template layout" />
-        <button type="button" class="k-btn k-btn--ghost" @click="emit('navigate', 'instances')">My instances <ArrowRight :size="14" aria-hidden="true" /></button>
-      </div>
+      <button type="button" class="k-btn k-btn--ghost" @click="emit('navigate', 'instances')">My instances <ArrowRight :size="14" aria-hidden="true" /></button>
     </header>
 
-    <div v-if="categories.length > 1 || clouds.length > 0" class="filters">
-      <select v-model="category" class="k-input" aria-label="Filter templates by category">
+    <div class="filters">
+      <select v-if="categories.length > 1" v-model="category" class="k-input" aria-label="Filter templates by category">
         <option value="">All categories</option>
         <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
       </select>
@@ -112,6 +109,7 @@ function selectTemplateRow(row: Record<string, unknown>) {
         <option value="">All clouds</option>
         <option v-for="c in clouds" :key="c" :value="c">{{ c }}</option>
       </select>
+      <LayoutSelector v-model="layout" aria-label="Template layout" />
     </div>
 
     <template v-if="layout === 'grid'">

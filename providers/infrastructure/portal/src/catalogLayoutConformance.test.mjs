@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
-const source = import.meta.glob('./views/CatalogPage.vue', { query: '?raw', import: 'default', eager: true })['./views/CatalogPage.vue'] as string
+const source = readFileSync(new URL('./views/CatalogPage.vue', import.meta.url), 'utf8')
+const styles = readFileSync(new URL('./style.css', import.meta.url), 'utf8')
 
 describe('Infrastructure template catalog layouts', () => {
   it('persists a grid-default layout through the shared preference contract', () => {
@@ -9,7 +11,18 @@ describe('Infrastructure template catalog layouts', () => {
     expect(source).toContain("'faros:portal:infrastructure:templates-layout'")
     expect(source).toContain('ref<LayoutMode>(readLayoutPreference(layoutPreferenceKey))')
     expect(source).toContain('watch(layout, mode => writeLayoutPreference(layoutPreferenceKey, mode))')
-    expect(source).toMatch(/<LayoutSelector v-model="layout" aria-label="Template layout"/)
+    expect(source).toMatch(/<div class="filters">[\s\S]*All categories[\s\S]*<LayoutSelector v-model="layout" aria-label="Template layout"[\s\S]*<\/div>/)
+    const header = source.match(/<header class="page-head">([\s\S]*?)<\/header>/)?.[1] ?? ''
+    expect(header).not.toContain('LayoutSelector')
+  })
+
+  it('keeps catalog controls aligned and allows safe wrapping at narrow widths', () => {
+    expect(styles).toContain(`faros-provider-infrastructure .filters {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}`)
   })
 
   it('keeps card geometry for grid mode and uses ResourceTable for list mode', () => {

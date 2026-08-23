@@ -58,7 +58,9 @@ faros-provider-infrastructure .grid {
 }
 
 faros-provider-infrastructure .filters {
+  align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
