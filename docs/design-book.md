@@ -382,6 +382,37 @@ and Quickstart have no equivalent provider-level bar.
 Detail/workbench tabsets are not automatically provider-route tabs; apply this
 spec when the tabset is the provider-level route/section bar.
 
+### Resource instance pages — ✅ implemented with PortalKit
+
+`ResourcePage`, `ResourceStatCards`, and `ResourceSectionCard` form the shared
+composition for provider resource instance screens. The caller owns navigation
+and resource-specific content:
+
+- Keep the backlink as a caller-owned hyperlink before and outside the
+  `ResourcePage` shell. Instance pages do not add resource or provider tabs.
+- `ResourcePage` owns the title/read-state shell. Callers provide the resource
+  title, meta, status, and actions. Header actions use one stable order:
+  provider-specific primary action, `Refresh`, then an overflow menu containing
+  `Delete`.
+- Use `ResourceStatCards` for provider-defined, meaningful facts with
+  provider-chosen icons. The responsive grid is three columns, then two, then
+  one at narrower widths. These facts are not a universal resource field
+  schema.
+- Put product-facing content first in vertically stacked `ResourceSectionCard`
+  cards. Providers own each card's content and optional actions. The final card
+  is technical details, closed by default, and contains only sanitized
+  configuration, health, metadata, or a read-only object snapshot; credentials,
+  tokens, and other secrets do not belong there.
+- The read contract distinguishes first-load loading and error states from a
+  later refresh failure. A successful snapshot remains visible when a later
+  read fails, with a stale/error notice and `Retry`; `ResourcePage` emits retry
+  and the caller owns the fetch. Initial failures expose the same retry path.
+
+Repository and Edge are pilot consumers of this composition, not definitions of
+universal fields. The canonical Vue sources live under
+`provider-sdk/portalkit-vue`; edit them there and run `make sync-portalkit` to
+update provider copies.
+
 ### Select / combobox
 - Closed control: exactly `.k-input` (4px, overlay bg, focus ring + glow) with
   a 3.5px chevron in `text-muted`. Native `<select>` popups cannot be styled —
