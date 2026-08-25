@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle, ArrowLeft, ExternalLink } from 'lucide-vue-next'
+import { AlertTriangle, ArrowLeft, Ellipsis, ExternalLink, Eye, GitBranch, Github, Package as PackageIcon, Plug, RefreshCw, User } from 'lucide-vue-next'
 import { api } from '../api'
 import type { Collaborator, Connection, DeployKey, ErrorResponse, Package, RepositoryDetail } from '../types'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
+import ResourcePage from '../portalkit/ResourcePage.vue'
+import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
+import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
@@ -35,6 +38,12 @@ const repo = ref<RepositoryDetail | null>(null)
 const repoLoading = ref(true)
 const repoLoaded = ref(false)
 const repoError = ref<string | null>(null)
+const repositoryMutationError = ref<string | null>(null)
+const actionsMenu = ref<HTMLDetailsElement | null>(null)
+const connectionExpanded = ref(false)
+const accessExpanded = ref(false)
+const packagesExpanded = ref(false)
+const technicalExpanded = ref(false)
 
 const connections = ref<Connection[]>([])
 const connectionsLoading = ref(true)
@@ -110,6 +119,10 @@ function isPackageDeleting(resource: Package): boolean {
   return !!resource.deletionTimestamp
 }
 const repositoryDeleting = computed(() => !!repo.value && isDeleting(repositoryScope, repo.value))
+const repositoryActionBusy = computed(() => repositoryDeleting.value || operations.isLocked(operationKey('repository', props.name)))
+const detailRefreshing = computed(() =>
+  repoLoading.value || connectionsLoading.value || keysLoading.value || collabsLoading.value || packagesLoading.value,
+)
 const keyRows = computed<Array<Record<string, unknown>>>(() => keys.value
   .map(key => {
     const deleting = isDeleting(keyScope, key)
@@ -130,12 +143,28 @@ const packageRows = computed<Array<Record<string, unknown>>>(() => packages.valu
   status: isPackageDeleting(item) ? 'Deleting' : !controllerCaughtUp(item) ? 'pending' : item.ready ? 'ready' : item.message ? 'failed' : 'pending',
   url: item.htmlURL || '',
 })))
+const packagesSummaryStatus = computed(() => {
+  if (!packagesLoaded.value) return packagesLoading.value ? 'Loading' : 'Unavailable'
+  if (packagesError.value) return 'Stale'
+  return packages.value.length ? 'Published' : 'No packages'
+})
 
 const connectionChoices = computed(() => connections.value.filter(connection => !isDeleting('connection', connection)))
 const currentConn = computed(() => connections.value.find(c => c.name === repo.value?.connectionRef))
 const newConn = computed(() => connections.value.find(c => c.name === selectedConn.value))
 const currentOwner = computed(() => repo.value?.owner || currentConn.value?.owner || '')
 const newOwner = computed(() => repo.value?.owner || newConn.value?.owner || '')
+const integrationHealth = computed(() => {
+  if (connectionsLoading.value && !connectionsLoaded.value) return 'Loading'
+  if (!currentConn.value) return connectionsLoaded.value ? 'Unavailable' : 'Loading'
+  if (currentConn.value.validated) return 'Connected'
+  return currentConn.value.message ? 'Needs attention' : 'Pending'
+})
+const integrationHealthTone = computed(() => {
+  if (integrationHealth.value === 'Connected') return null
+  if (integrationHealth.value === 'Needs attention' || integrationHealth.value === 'Unavailable') return 'danger'
+  return 'warning'
+})
 const ownerWillChange = computed(() =>
   !!repo.value &&
   selectedConn.value !== repo.value.connectionRef &&
@@ -144,6 +173,149 @@ const ownerWillChange = computed(() =>
   !!currentConn.value &&
   newConn.value.owner !== currentConn.value.owner,
 )
+
+const repositoryStatus = computed(() => {
+  if (repositoryDeleting.value) return 'Deleting'
+  if (!repo.value) return repoLoading.value ? 'Loading' : 'Unavailable'
+  return repo.value.ready ? 'ready' : 'pending'
+})
+const repositoryStatusTone = computed(() => {
+  if (repositoryDeleting.value || repositoryStatus.value === 'Loading') return 'warning'
+  if (repositoryStatus.value === 'Unavailable') return 'danger'
+  return null
+})
+function providerLabel(provider: string | undefined): string {
+  if (!provider) return ''
+  if (provider.toLowerCase() === 'github') return 'GitHub'
+  if (provider.toLowerCase() === 'gitlab') return 'GitLab'
+  return provider
+}
+const repositoryOwner = computed(() => repo.value?.owner || currentConn.value?.owner || '')
+const repositoryTitle = computed(() => {
+  const repositoryName = repo.value?.repo || props.name
+  return repositoryOwner.value ? `${repositoryOwner.value}/${repositoryName}` : repositoryName
+})
+const isGitHubProvider = computed(() => currentConn.value?.provider?.toLowerCase() === 'github')
+const integrationSummary = computed(() => {
+  const value = repo.value
+  if (!value) return '—'
+  const provider = providerLabel(currentConn.value?.provider)
+  return provider ? `${provider} · ${value.connectionRef}` : value.connectionRef || '—'
+})
+// TenantMissing is an expected no-context state while the host is switching
+// workspaces. ResourcePage's explicit `loaded=false` contract intentionally
+// shows a first-read skeleton, so use its legacy null sentinel once that
+// expected no-context read has settled without an error or snapshot.
+const repositoryReadState = computed<boolean | null>(() => {
+  if (repoLoaded.value) return true
+  if (repoError.value) return false
+  return repoLoading.value ? false : null
+})
+
+const configurationRows = computed(() => {
+  const value = repo.value
+  if (!value) return []
+  return [
+    { label: 'Repository', value: value.repo || '—', mono: true },
+    { label: 'Connection', value: value.connectionRef || '—', mono: true },
+    { label: 'Owner', value: value.owner || currentConn.value?.owner || 'Inherited from connection', mono: false },
+    { label: 'Visibility', value: value.visibility || '—', mono: false },
+    { label: 'Default branch', value: value.defaultBranch || 'Provider default', mono: true },
+    { label: 'Initialize README', value: value.autoInit === undefined ? 'Provider default' : value.autoInit ? 'Enabled' : 'Disabled', mono: false },
+    { label: 'Clone URL', value: value.cloneURL || '—', mono: true },
+    { label: 'SSH URL', value: value.sshURL || '—', mono: true },
+  ]
+})
+
+const metadataRows = computed(() => {
+  const value = repo.value
+  return [
+    { label: 'API version', value: value?.apiVersion || '—', mono: true },
+    { label: 'Kind', value: value?.kind || '—', mono: true },
+    { label: 'Resource name', value: value?.name || props.name, mono: true },
+    { label: 'UID', value: value?.uid || '—', mono: true },
+    { label: 'Resource version', value: value?.resourceVersion || '—', mono: true },
+    { label: 'Generation', value: value?.generation ?? '—', mono: true },
+    { label: 'Created', value: value?.creationTimestamp ? formatTimestamp(value.creationTimestamp) : '—', mono: false },
+  ]
+})
+
+function formatTimestamp(value: string): string {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
+}
+
+function yamlScalar(value: unknown): string {
+  if (value === null) return 'null'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return JSON.stringify(value)
+}
+
+function toYaml(value: unknown, indent = 0): string {
+  const padding = ' '.repeat(indent)
+  if (Array.isArray(value)) {
+    return value.map(item => {
+      if (item && typeof item === 'object') return `${padding}-\n${toYaml(item, indent + 2)}`
+      return `${padding}- ${yamlScalar(item)}`
+    }).join('\n')
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .map(([key, child]) => {
+        if (child && typeof child === 'object' && Object.keys(child as object).length > 0) {
+          return `${padding}${key}:\n${toYaml(child, indent + 2)}`
+        }
+        return `${padding}${key}: ${yamlScalar(child)}`
+      }).join('\n')
+  }
+  return `${padding}${yamlScalar(value)}`
+}
+
+const repositoryYaml = computed(() => repo.value ? toYaml(repo.value.rawObject) : '')
+const repositoryStatCards = computed<ResourceStatCard[]>(() => [
+  {
+    id: 'integration',
+    label: 'Integration',
+    value: integrationSummary.value,
+    detail: integrationHealth.value,
+    icon: Plug,
+    tone: integrationHealthTone.value || 'default',
+  },
+  {
+    id: 'provider',
+    label: 'Provider',
+    value: providerLabel(currentConn.value?.provider) || '—',
+    icon: isGitHubProvider.value ? Github : GitBranch,
+  },
+  {
+    id: 'type',
+    label: 'Type',
+    value: repo.value?.kind || 'Repository',
+    icon: PackageIcon,
+  },
+  {
+    id: 'owner',
+    label: 'Owner',
+    value: repositoryOwner.value || '—',
+    icon: User,
+    mono: true,
+  },
+  {
+    id: 'default-branch',
+    label: 'Default branch',
+    value: repo.value?.defaultBranch || 'Provider default',
+    icon: GitBranch,
+    mono: true,
+  },
+  {
+    id: 'visibility',
+    label: 'Visibility',
+    value: repo.value?.visibility || '—',
+    icon: Eye,
+  },
+])
 
 let timer: number | undefined
 let mounted = false
@@ -173,6 +345,40 @@ function loadAll() {
   loadKeys()
   loadCollaborators()
   loadPackages()
+}
+
+async function deleteRepository() {
+  const current = repo.value
+  if (!current || repositoryDeleting.value) return
+  const ok = await confirmDialog({
+    title: `Delete repository "${current.repo}"?`,
+    message: 'This removes the repository on the git host. This cannot be undone.',
+    confirmLabel: 'Delete',
+    danger: true,
+  })
+  if (!ok || !mounted) return
+  const lock = operationKey('repository', current.name)
+  if (!operations.acquire(lock, 'deleting')) return
+  repositoryMutationError.value = null
+  try {
+    await api.deleteRepository(current.name)
+    if (!mounted) return
+    props.deletions.acknowledge(repositoryScope, current.name, current.uid)
+    loadRepository()
+  } catch (e) {
+    repositoryMutationError.value = errMessage(e)
+  } finally {
+    operations.release(lock)
+  }
+}
+
+function deleteFromMenu() {
+  actionsMenu.value?.removeAttribute('open')
+  void deleteRepository()
+}
+
+function toggleConnectionEditor() {
+  connectionExpanded.value = !connectionExpanded.value
 }
 
 interface PackageRequest {
@@ -295,6 +501,7 @@ async function changeConnection() {
   try {
     const updated = await api.updateRepositoryConnection(current.name, selectedConn.value)
     repo.value = { ...current, ...updated, conditions: current.conditions }
+    connectionExpanded.value = false
     loadRepository()
   } catch (e) {
     connError.value = errMessage(e)
@@ -556,111 +763,247 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page" :aria-busy="repoLoading">
-    <button class="k-btn k-btn--ghost k-back-action" type="button" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Repositories</button>
-
-    <header class="page-head">
-      <div>
-        <h2 class="page-title">{{ repo?.repo || name }}</h2>
-        <p class="page-meta">
-          <a v-if="repo?.htmlURL && !repositoryDeleting" :href="repo.htmlURL" target="_blank" rel="noopener">{{ repo.htmlURL }}</a>
-          <span v-else-if="repo?.htmlURL" class="muted">{{ repo.htmlURL }}</span>
-          <span v-else-if="repo" class="muted">not created yet</span>
-          <span v-else-if="repoLoading" class="muted">Loading repository details…</span>
-          <span v-else class="muted">Repository details unavailable</span>
-        </p>
+  <div class="repo-detail">
+    <a class="k-btn k-btn--ghost repo-detail__back" href="/providers/code/repositories" @click.prevent="emit('back')">
+      <ArrowLeft :size="14" aria-hidden="true" /> Repositories
+    </a>
+    <div class="repo-detail__resource">
+      <div class="repo-detail__provider-mark" role="img" :aria-label="`${providerLabel(currentConn?.provider) || 'Provider unavailable'} mark`">
+        <Github v-if="isGitHubProvider" :size="20" :stroke-width="1.75" aria-hidden="true" />
+        <GitBranch v-else :size="20" :stroke-width="1.75" aria-hidden="true" />
       </div>
-      <StatusBadge v-if="repo" :status="repositoryDeleting ? 'Deleting' : repo.ready ? 'ready' : 'pending'" :tone="repositoryDeleting ? 'warning' : null" :title="repo.message" />
-    </header>
-
-    <div v-if="repoError && !repo" class="error read-error" role="alert" aria-live="assertive">
-      <span>{{ repoError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadRepository">Retry</button>
-    </div>
-    <div v-else-if="repoLoading && !repo" class="detail-loading" role="status" aria-live="polite" aria-label="Loading repository details" aria-busy="true">
-      <div v-for="i in 5" :key="i" class="shimmer detail-loading-line" />
-    </div>
-    <div v-if="repoError && repo" class="error read-error" role="alert" aria-live="assertive">
-      <span>Showing cached repository data. {{ repoError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadRepository">Retry</button>
-    </div>
-    <span v-else-if="repoLoading && repoLoaded" class="sr-only" role="status" aria-live="polite">Updating repository…</span>
-
-    <template v-if="repo">
-      <div class="panel k-card">
-        <h3 class="panel-title">Overview</h3>
-        <dl class="props">
-          <dt>Connection</dt>
-          <dd>
-            <div class="conn-edit" :aria-busy="connectionsLoading">
-              <select v-model="selectedConn" class="k-input" :disabled="repositoryDeleting || changingConn || !connectionsLoaded">
-                <option v-for="c in connectionChoices" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
-              </select>
-              <button class="k-btn k-btn--primary" type="button" :disabled="repositoryDeleting || changingConn || !connectionsLoaded || selectedConn === repo.connectionRef" @click="changeConnection">{{ changingConn ? 'Changing…' : 'Change' }}</button>
-            </div>
-            <span v-if="connectionsLoading && !connectionsLoaded" class="muted" role="status" aria-live="polite">Loading connections…</span>
-            <div v-if="connectionsError" class="error read-error" role="alert" aria-live="assertive">
-              <span>{{ connectionsLoaded ? 'Showing cached connection choices. ' : '' }}{{ connectionsError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadConnections">Retry</button>
-            </div>
-            <span v-else-if="connectionsLoading && connectionsLoaded" class="sr-only" role="status" aria-live="polite">Updating connections…</span>
-            <p v-if="ownerWillChange" class="conn-warn"><AlertTriangle :size="15" class="warn-ic" /> Owner <code>{{ newOwner }}</code> differs from current <code>{{ currentOwner }}</code> — this re-targets the repo to a different account and may create a new repo there.</p>
-            <p v-else-if="selectedConn !== repo.connectionRef" class="muted">Same owner — only the managing credential changes.</p>
-            <span v-if="connError" class="error" role="alert">{{ connError }}</span>
-          </dd>
-          <dt>Visibility</dt><dd>{{ repo.visibility }}</dd>
-          <dt v-if="repo.cloneURL">Clone URL</dt><dd v-if="repo.cloneURL"><code>{{ repo.cloneURL }}</code></dd>
-          <dt v-if="repo.sshURL">SSH URL</dt><dd v-if="repo.sshURL"><code>{{ repo.sshURL }}</code></dd>
-        </dl>
-      </div>
-
-      <ConditionsPanel :conditions="repo.conditions" :generation="repo.generation" :observed-generation="repo.observedGeneration" empty-text="No conditions yet — the controller has not reconciled this repository." />
-
-      <div class="grid-2">
-        <div class="panel section-panel k-card">
-          <div class="panel-head"><h3 class="panel-title">Deploy keys</h3><span v-if="keysLoaded" class="muted">{{ keyRows.length }}</span></div>
-          <form class="form" @submit.prevent="addKey">
-            <label class="field"><span class="field-label">Title</span><input v-model="keyTitle" class="k-input" :disabled="repositoryDeleting" placeholder="ci-deploy" autocomplete="off" /></label>
-            <label class="field"><span class="field-label">Public key (leave empty to generate)</span><textarea v-model="keyPublic" class="k-input" :disabled="repositoryDeleting" rows="2" placeholder="ssh-ed25519 AAAA…" /></label>
-            <label class="field field-check"><input v-model="keyReadOnly" type="checkbox" :disabled="repositoryDeleting" /> read-only</label>
-            <div class="code-form-actions"><button class="k-btn k-btn--primary" type="submit" :disabled="repositoryDeleting || keySubmitting || !keysLoaded">{{ keySubmitting ? 'Adding…' : 'Add deploy key' }}</button><span v-if="keyError" class="error" role="alert">{{ keyError }}</span></div>
-            <p class="muted">A generated key's private half is written to a Secret in your workspace.</p>
-          </form>
-          <p v-if="keyDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ keyDeleteError }}</p>
-          <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :error="keysError" :stale="keysLoaded && !!keysError" retryable searchable search-placeholder="Search deploy keys…" :filters="[{ key: 'access', label: 'Access' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
-            <template #title="{ row }"><strong>{{ row.title }}</strong><div v-if="row.generated && row.secretName" class="muted">secret: <code>{{ row.secretName }}</code></div></template>
-            <template #access="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
-            <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
-            <template #actions="{ row }"><div class="code-row-actions"><ResourceTableDeleteButton :label="`Delete deploy key ${String(row.title)}`" :busy-label="`Deleting deploy key ${String(row.title)}…`" :busy="Boolean(row.deleting) || operations.phase(operationKey('deploy-key', String(row.name))) === 'deleting'" :disabled="repositoryDeleting || Boolean(row.deleting) || operations.isLocked(operationKey('deploy-key', String(row.name)))" @click="removeKey(row)" /></div></template>
-          </ResourceTable>
-        </div>
-
-        <div class="panel section-panel k-card">
-          <div class="panel-head"><h3 class="panel-title">Collaborators</h3><span v-if="collabsLoaded" class="muted">{{ collabRows.length }}</span></div>
-          <form class="form" @submit.prevent="addCollab">
-            <label class="field"><span class="field-label">Username</span><input v-model="collabUser" class="k-input" :disabled="repositoryDeleting" placeholder="octocat" autocomplete="off" /></label>
-            <label class="field"><span class="field-label">Permission</span><select v-model="collabPerm" class="k-input" :disabled="repositoryDeleting"><option value="pull">pull</option><option value="push">push</option><option value="admin">admin</option></select></label>
-            <div class="code-form-actions"><button class="k-btn k-btn--primary" type="submit" :disabled="repositoryDeleting || collabSubmitting || !collabsLoaded">{{ collabSubmitting ? 'Adding…' : 'Add collaborator' }}</button><span v-if="collabError" class="error" role="alert">{{ collabError }}</span></div>
-          </form>
-          <p v-if="collabDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ collabDeleteError }}</p>
-          <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable searchable search-placeholder="Search collaborators…" :filters="[{ key: 'permission', label: 'Permission' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
-            <template #username="{ value }"><strong>{{ value }}</strong></template>
-            <template #permission="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
-            <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
-            <template #actions="{ row }"><div class="code-row-actions"><ResourceTableDeleteButton :label="`Remove collaborator ${String(row.username)}`" :busy-label="`Removing collaborator ${String(row.username)}…`" :busy="Boolean(row.deleting) || operations.phase(operationKey('collaborator', String(row.name))) === 'deleting'" :disabled="repositoryDeleting || Boolean(row.deleting) || operations.isLocked(operationKey('collaborator', String(row.name)))" @click="removeCollab(row)" /></div></template>
-          </ResourceTable>
-        </div>
-      </div>
-
-      <div class="panel section-panel k-card">
-        <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded && packageMode === 'client'" class="muted">{{ packageRows.length }}</span></div>
-        <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="PACKAGE_FILTERS" :pagination-mode="packageMode" :page="packagePage" :page-size="packagePageSize" :query="packageQuery" :filter-values="packageFilters" :cursor="packageCursor" :page-info="packagePageInfo" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages" @change="handlePackageChange">
-          <template #name="{ row }"><strong><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
-          <template #type="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
-          <template #visibility="{ value }"><span class="muted">{{ value === 'unknown' ? '—' : value }}</span></template>
-          <template #versionCount="{ value }"><span class="muted">{{ value || 0 }}</span></template>
-          <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
-          <template #url="{ row }"><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">View <ExternalLink :size="12" aria-hidden="true" /></a></template>
-        </ResourceTable>
-        <p class="muted">Packages appear automatically when artifacts are pushed (e.g. <code>docker push</code>, <code>npm publish</code>).</p>
+      <ResourcePage
+        :title="repositoryTitle"
+        :loaded="repositoryReadState"
+        :loading="repoLoading"
+        :error="repoError"
+        :stale="repoLoaded && !!repoError"
+        retryable
+        @retry="loadRepository"
+      >
+    <template #meta>
+      <span>Repository</span>
+      <span class="repo-header__separator" aria-hidden="true">·</span>
+      <span>{{ providerLabel(currentConn?.provider) || 'Provider unavailable' }}</span>
+      <span class="repo-header__separator" aria-hidden="true">·</span>
+      <StatusBadge :status="repositoryStatus" :tone="repositoryStatusTone" :title="repo?.message" />
+    </template>
+    <template #actions>
+      <div class="repo-detail__actions" role="group" aria-label="Repository actions">
+        <a v-if="repo?.htmlURL && !repositoryDeleting" class="k-btn k-btn--primary" :href="repo.htmlURL" target="_blank" rel="noopener">
+          Open repository <ExternalLink :size="13" aria-hidden="true" />
+        </a>
+        <button
+          type="button"
+          class="k-btn k-btn--ghost"
+          :disabled="detailRefreshing || repositoryActionBusy"
+          :aria-busy="detailRefreshing || undefined"
+          @click="loadAll"
+        >
+          <RefreshCw :size="14" :class="{ spin: detailRefreshing }" aria-hidden="true" />
+          {{ detailRefreshing ? 'Refreshing…' : 'Refresh' }}
+        </button>
+        <details ref="actionsMenu" class="repo-detail__menu">
+          <summary class="k-btn k-btn--ghost" aria-label="More repository actions">
+            <Ellipsis :size="16" aria-hidden="true" />
+            <span class="sr-only">More actions</span>
+          </summary>
+          <div class="repo-detail__menu-popover">
+            <button type="button" class="repo-detail__menu-item" :disabled="!repo || repositoryActionBusy || detailRefreshing" @click="deleteFromMenu">
+              Delete repository
+            </button>
+          </div>
+        </details>
       </div>
     </template>
-  </section>
+
+    <template #summary>
+      <ResourceStatCards :cards="repositoryStatCards" aria-label="Repository summary" />
+    </template>
+
+    <template #body>
+      <p v-if="repositoryMutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ repositoryMutationError }}</p>
+      <div class="repo-detail__sections">
+        <ResourceSectionCard
+          id="repository-integration"
+          eyebrow="Repository"
+          title="Integration"
+          description="Repository description and the managing provider connection."
+        >
+            <p class="repo-integration-card__description">{{ repo?.description || 'No description provided.' }}</p>
+
+            <div v-if="repo" class="repo-integration-card__connection">
+              <h3 class="repo-integration-card__connection-title">Managing connection</h3>
+              <div class="repo-integration-row">
+                <div class="repo-integration-row__content">
+                  <span class="repo-integration-row__provider">{{ providerLabel(currentConn?.provider) || 'Provider unavailable' }}</span>
+                  <span class="repo-integration-row__connection mono">{{ repo.connectionRef || '—' }}</span>
+                  <StatusBadge :status="integrationHealth" :tone="integrationHealthTone" :title="currentConn?.message" />
+                </div>
+                <button class="k-btn k-btn--ghost" type="button" :disabled="repositoryDeleting || changingConn" :aria-expanded="connectionExpanded" aria-controls="repository-integration-editor" @click="toggleConnectionEditor">
+                  {{ connectionExpanded ? 'Cancel' : 'Change' }}
+                </button>
+              </div>
+              <div v-if="connectionExpanded" id="repository-integration-editor" class="repo-integration-editor">
+              <div class="conn-edit" :aria-busy="connectionsLoading">
+                <select v-model="selectedConn" class="k-input" :disabled="repositoryDeleting || changingConn || !connectionsLoaded">
+                  <option v-for="c in connectionChoices" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
+                </select>
+                <button class="k-btn k-btn--primary" type="button" :disabled="repositoryDeleting || changingConn || !connectionsLoaded || selectedConn === repo.connectionRef" @click="changeConnection">{{ changingConn ? 'Changing…' : 'Change' }}</button>
+              </div>
+              <span v-if="connectionsLoading && !connectionsLoaded" class="muted" role="status" aria-live="polite">Loading connections…</span>
+              <div v-if="connectionsError" class="error read-error" role="alert" aria-live="assertive">
+                <span>{{ connectionsLoaded ? 'Showing cached connection choices. ' : '' }}{{ connectionsError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadConnections">Retry</button>
+              </div>
+              <span v-else-if="connectionsLoading && connectionsLoaded" class="sr-only" role="status" aria-live="polite">Updating connections…</span>
+              <p v-if="ownerWillChange" class="conn-warn"><AlertTriangle :size="15" class="warn-ic" /> Owner <code>{{ newOwner }}</code> differs from current <code>{{ currentOwner }}</code> — this re-targets the repo to a different account and may create a new repo there.</p>
+              <p v-else-if="selectedConn !== repo.connectionRef" class="muted">Same owner — only the managing credential changes.</p>
+              <span v-if="connError" class="error" role="alert">{{ connError }}</span>
+              </div>
+            </div>
+        </ResourceSectionCard>
+
+        <ResourceSectionCard id="repository-access" eyebrow="Permissions" title="Access" description="Manage deploy credentials and collaborators.">
+          <template #actions>
+            <div class="repo-section-card__facts" aria-label="Access counts">
+              <span><strong>{{ keysLoaded ? keyRows.length : '—' }}</strong> deploy keys</span>
+              <span><strong>{{ collabsLoaded ? collabRows.length : '—' }}</strong> collaborators</span>
+            </div>
+            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="accessExpanded" aria-controls="repository-access-content" @click="accessExpanded = !accessExpanded">
+              {{ accessExpanded ? 'Hide access' : 'Manage access' }}
+            </button>
+          </template>
+          <div v-if="accessExpanded" id="repository-access-content" class="grid-2">
+          <div v-if="repo" class="repo-domain-block">
+            <div class="panel-head"><h3 class="panel-title">Deploy keys</h3><span v-if="keysLoaded" class="muted">{{ keyRows.length }}</span></div>
+            <form class="form" @submit.prevent="addKey">
+              <label class="field"><span class="field-label">Title</span><input v-model="keyTitle" class="k-input" :disabled="repositoryDeleting" placeholder="ci-deploy" autocomplete="off" /></label>
+              <label class="field"><span class="field-label">Public key (leave empty to generate)</span><textarea v-model="keyPublic" class="k-input" :disabled="repositoryDeleting" rows="2" placeholder="ssh-ed25519 AAAA…" /></label>
+              <label class="field field-check"><input v-model="keyReadOnly" type="checkbox" :disabled="repositoryDeleting" /> read-only</label>
+              <div class="code-form-actions"><button class="k-btn k-btn--primary" type="submit" :disabled="repositoryDeleting || keySubmitting || !keysLoaded">{{ keySubmitting ? 'Adding…' : 'Add deploy key' }}</button><span v-if="keyError" class="error" role="alert">{{ keyError }}</span></div>
+              <p class="muted">A generated key's private half is written to a Secret in your workspace.</p>
+            </form>
+            <p v-if="keyDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ keyDeleteError }}</p>
+            <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :error="keysError" :stale="keysLoaded && !!keysError" retryable searchable search-placeholder="Search deploy keys…" :filters="[{ key: 'access', label: 'Access' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
+              <template #title="{ row }"><strong>{{ row.title }}</strong><div v-if="row.generated && row.secretName" class="muted">secret: <code>{{ row.secretName }}</code></div></template>
+              <template #access="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
+              <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
+              <template #actions="{ row }"><div class="code-row-actions"><ResourceTableDeleteButton :label="`Delete deploy key ${String(row.title)}`" :busy-label="`Deleting deploy key ${String(row.title)}…`" :busy="Boolean(row.deleting) || operations.phase(operationKey('deploy-key', String(row.name))) === 'deleting'" :disabled="repositoryDeleting || Boolean(row.deleting) || operations.isLocked(operationKey('deploy-key', String(row.name)))" @click="removeKey(row)" /></div></template>
+            </ResourceTable>
+          </div>
+          <div v-if="repo" class="repo-domain-block">
+            <div class="panel-head"><h3 class="panel-title">Collaborators</h3><span v-if="collabsLoaded" class="muted">{{ collabRows.length }}</span></div>
+            <form class="form" @submit.prevent="addCollab">
+              <label class="field"><span class="field-label">Username</span><input v-model="collabUser" class="k-input" :disabled="repositoryDeleting" placeholder="octocat" autocomplete="off" /></label>
+              <label class="field"><span class="field-label">Permission</span><select v-model="collabPerm" class="k-input" :disabled="repositoryDeleting"><option value="pull">pull</option><option value="push">push</option><option value="admin">admin</option></select></label>
+              <div class="code-form-actions"><button class="k-btn k-btn--primary" type="submit" :disabled="repositoryDeleting || collabSubmitting || !collabsLoaded">{{ collabSubmitting ? 'Adding…' : 'Add collaborator' }}</button><span v-if="collabError" class="error" role="alert">{{ collabError }}</span></div>
+            </form>
+            <p v-if="collabDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ collabDeleteError }}</p>
+            <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable searchable search-placeholder="Search collaborators…" :filters="[{ key: 'permission', label: 'Permission' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
+              <template #username="{ value }"><strong>{{ value }}</strong></template>
+              <template #permission="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
+              <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
+              <template #actions="{ row }"><div class="code-row-actions"><ResourceTableDeleteButton :label="`Remove collaborator ${String(row.username)}`" :busy-label="`Removing collaborator ${String(row.username)}…`" :busy="Boolean(row.deleting) || operations.phase(operationKey('collaborator', String(row.name))) === 'deleting'" :disabled="repositoryDeleting || Boolean(row.deleting) || operations.isLocked(operationKey('collaborator', String(row.name)))" @click="removeCollab(row)" /></div></template>
+            </ResourceTable>
+          </div>
+          </div>
+        </ResourceSectionCard>
+
+        <ResourceSectionCard id="repository-packages" eyebrow="Artifacts" title="Packages" description="Published artifacts observed for this repository.">
+          <template #actions>
+            <div class="repo-section-card__facts" aria-label="Package summary">
+              <span><strong>{{ packagesLoaded ? packages.length : '—' }}</strong> visible</span>
+              <span>{{ packagesSummaryStatus }}</span>
+            </div>
+            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="packagesExpanded" aria-controls="repository-packages-content" @click="packagesExpanded = !packagesExpanded">
+              {{ packagesExpanded ? 'Hide packages' : 'View packages' }}
+            </button>
+          </template>
+          <div v-if="repo && packagesExpanded" id="repository-packages-content" class="repo-domain-block">
+            <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded && packageMode === 'client'" class="muted">{{ packageRows.length }}</span></div>
+            <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="PACKAGE_FILTERS" :pagination-mode="packageMode" :page="packagePage" :page-size="packagePageSize" :query="packageQuery" :filter-values="packageFilters" :cursor="packageCursor" :page-info="packagePageInfo" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages" @change="handlePackageChange">
+              <template #name="{ row }"><strong><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
+              <template #type="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
+              <template #visibility="{ value }"><span class="muted">{{ value === 'unknown' ? '—' : value }}</span></template>
+              <template #versionCount="{ value }"><span class="muted">{{ value || 0 }}</span></template>
+              <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
+              <template #url="{ row }"><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">View <ExternalLink :size="12" aria-hidden="true" /></a></template>
+            </ResourceTable>
+            <p class="muted">Packages appear automatically when artifacts are pushed (e.g. <code>docker push</code>, <code>npm publish</code>).</p>
+          </div>
+        </ResourceSectionCard>
+
+        <ResourceSectionCard id="repository-technical" eyebrow="Diagnostics" title="Technical details" description="Configuration, health, metadata, and the read-only object snapshot.">
+          <template #actions>
+            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="technicalExpanded" aria-controls="repository-technical-content" @click="technicalExpanded = !technicalExpanded">
+              {{ technicalExpanded ? 'Hide technical details' : 'Show technical details' }}
+            </button>
+          </template>
+          <div v-if="repo && technicalExpanded" id="repository-technical-content" class="repo-technical">
+            <div class="k-resource-technical__body">
+              <section class="k-resource-technical__section">
+                <h3 class="k-resource-technical__section-title">Configuration</h3>
+                <div class="k-resource-technical__content">
+                  <dl class="k-resource-technical__definition">
+                    <div v-for="row in configurationRows" :key="row.label">
+                      <dt>{{ row.label }}</dt>
+                      <dd :class="{ mono: row.mono }">{{ row.value }}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </section>
+
+              <section class="k-resource-technical__section">
+                <h3 class="k-resource-technical__section-title">Health data</h3>
+                <div class="k-resource-technical__content">
+                  <ConditionsPanel
+                    :conditions="repo.conditions"
+                    :generation="repo.generation"
+                    :observed-generation="repo.observedGeneration"
+                    empty-text="No health conditions reported yet."
+                  />
+                  <dl class="k-resource-technical__definition" style="margin-top: 12px;">
+                    <div><dt>Provider status</dt><dd>{{ repo.ready ? 'Ready' : 'Waiting for reconciliation' }}</dd></div>
+                    <div><dt>Repository ID</dt><dd class="mono">{{ repo.repoID || '—' }}</dd></div>
+                    <div><dt>Browser URL</dt><dd class="mono">{{ repo.htmlURL || '—' }}</dd></div>
+                  </dl>
+                </div>
+              </section>
+
+              <section class="k-resource-technical__section">
+                <h3 class="k-resource-technical__section-title">Metadata</h3>
+                <div class="k-resource-technical__content">
+                  <dl class="k-resource-technical__definition">
+                    <div v-for="row in metadataRows" :key="row.label">
+                      <dt>{{ row.label }}</dt>
+                      <dd :class="{ mono: row.mono }">{{ row.value }}</dd>
+                    </div>
+                  </dl>
+                  <template v-if="repo.labels && Object.keys(repo.labels).length">
+                    <p class="k-resource-technical__section-title" style="margin-top: 14px;">Labels</p>
+                    <dl class="k-resource-technical__definition k-resource-technical__labels">
+                      <template v-for="([key, value]) in Object.entries(repo.labels)" :key="key">
+                        <dt>{{ key }}</dt>
+                        <dd class="mono">{{ value }}</dd>
+                      </template>
+                    </dl>
+                  </template>
+                </div>
+              </section>
+
+              <section class="k-resource-technical__section">
+                <h3 class="k-resource-technical__section-title">YAML / read-only object</h3>
+                <div class="k-resource-technical__content">
+                  <p class="muted" style="margin: 0 0 8px; font-size: 11px;">Read-only snapshot from the latest successful repository read.</p>
+                  <pre class="k-resource-technical__pre">{{ repositoryYaml || 'No object snapshot available.' }}</pre>
+                </div>
+              </section>
+            </div>
+          </div>
+        </ResourceSectionCard>
+      </div>
+    </template>
+      </ResourcePage>
+    </div>
+  </div>
 </template>

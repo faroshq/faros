@@ -128,6 +128,79 @@ describe.each([
   })
 })
 
+describe('getRepository technical snapshot', () => {
+  it('retains metadata, health, and the read-only object from one successful read', async () => {
+    setAPIContext({ tenant: 'repository-snapshot', token: 'repository-snapshot-token' })
+    let call: FetchCall | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      call = request(init)
+      return response({
+        data: {
+          code_faros_sh: {
+            v1alpha1: {
+              Repository: {
+                metadata: {
+                  name: 'orders',
+                  uid: 'orders-uid',
+                  resourceVersion: '17',
+                  generation: 3,
+                  creationTimestamp: '2026-08-24T00:00:00Z',
+                  labels: { team: 'platform' },
+                  annotations: { note: 'managed' },
+                },
+                spec: {
+                  connectionRef: 'github',
+                  name: 'orders',
+                  owner: 'faros',
+                  visibility: 'private',
+                  defaultBranch: 'main',
+                  autoInit: true,
+                },
+                status: {
+                  repoID: 'repo-42',
+                  htmlURL: 'https://github.example/orders',
+                  cloneURL: 'https://github.example/orders.git',
+                  sshURL: 'git@github.example:orders.git',
+                  observedGeneration: 3,
+                  conditions: [{ type: 'Ready', status: 'True', reason: 'Synced', message: 'Repository is ready', lastTransitionTime: '2026-08-24T00:01:00Z' }],
+                },
+              },
+            },
+          },
+        },
+      })
+    }))
+
+    const repository = await api.getRepository('orders')
+
+    expect(repository).toMatchObject({
+      apiVersion: 'code.faros.sh/v1alpha1',
+      kind: 'Repository',
+      resourceVersion: '17',
+      defaultBranch: 'main',
+      autoInit: true,
+      labels: { team: 'platform' },
+      annotations: { note: 'managed' },
+      conditions: [{ type: 'Ready', status: 'True', reason: 'Synced' }],
+      rawObject: {
+        apiVersion: 'code.faros.sh/v1alpha1',
+        kind: 'Repository',
+        metadata: {
+          name: 'orders',
+          uid: 'orders-uid',
+          resourceVersion: '17',
+          generation: 3,
+          labels: { team: 'platform' },
+          annotations: { note: 'managed' },
+        },
+        spec: { connectionRef: 'github', name: 'orders', defaultBranch: 'main', autoInit: true },
+        status: { repoID: 'repo-42', observedGeneration: 3 },
+      },
+    })
+    expect(call?.query).toContain('labels annotations')
+  })
+})
+
 describe('Kubernetes deletion state', () => {
   const deletionTimestamp = '2026-08-17T12:34:56Z'
   const resources = [

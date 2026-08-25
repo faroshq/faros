@@ -78,6 +78,7 @@ export interface Repository {
   name: string
   uid?: string
   deletionTimestamp?: string
+  resourceVersion?: string
   generation?: number
   observedGeneration?: number
   connectionRef: string
@@ -85,6 +86,8 @@ export interface Repository {
   owner?: string
   visibility: string
   description?: string
+  defaultBranch?: string
+  autoInit?: boolean
   htmlURL?: string
   sshURL?: string
   cloneURL?: string
@@ -98,6 +101,11 @@ export interface Repository {
 export interface RepositoryDetail extends Repository {
   repoID?: string
   creationTimestamp?: string
+  apiVersion: string
+  kind: 'Repository'
+  labels?: Record<string, string>
+  annotations?: Record<string, string>
+  rawObject: Record<string, unknown>
   conditions: ConditionInfo[]
 }
 
