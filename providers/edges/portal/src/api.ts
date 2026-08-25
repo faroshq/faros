@@ -210,27 +210,56 @@ export async function listEdges(): Promise<Edge[]> {
   return [...kube, ...server].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// getEdge fetches one edge with full status for the detail view.
+// getEdge fetches one edge with the product-facing status plus a read-only
+// object snapshot for the detail view's opt-in technical disclosure. The
+// default view never renders the API group/version or raw object shape.
 export async function getEdge(name: string, type: EdgeType): Promise<EdgeDetail> {
   const kind = type === 'server' ? 'LinuxServer' : 'KubernetesCluster'
+  const apiVersion = 'edges.faros.sh/v1alpha1'
+  const specSelection = type === 'server'
+    ? `labels sshPort sshUserMapping sshKeySecretRef { name namespace } sshCredentialsRef { name namespace }`
+    : 'labels'
   const data = await graphql<{
     edges_faros_sh?: {
       v1alpha1?: Record<string, {
-        metadata: { name: string; creationTimestamp?: string; labels?: Record<string, string> }
+        metadata: {
+          name: string
+          namespace?: string
+          uid?: string
+          resourceVersion?: string
+          generation?: number
+          creationTimestamp?: string
+          labels?: Record<string, string>
+          annotations?: Record<string, string>
+        }
+        spec?: {
+          labels?: Record<string, string>
+          sshPort?: number
+          sshUserMapping?: string
+          sshKeySecretRef?: { name?: string; namespace?: string }
+          sshCredentialsRef?: { name?: string; namespace?: string }
+        }
         status?: {
-          phase?: string; connected?: boolean; hostname?: string; agentVersion?: string
-          lastHeartbeatTime?: string; joinToken?: string; workspacePath?: string
-          conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>
+          URL?: string
+          phase?: string
+          connected?: boolean
+          hostname?: string
+          agentVersion?: string
+          lastHeartbeatTime?: string
+          joinToken?: string
+          workspacePath?: string
+          conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string; observedGeneration?: number }>
         }
       } | null>
     }
   }>(
     `query GetEdge($name: String!) {
        edges_faros_sh { v1alpha1 { ${kind}(name: $name) {
-         metadata { name creationTimestamp labels }
+         metadata { name namespace uid resourceVersion generation creationTimestamp labels annotations }
+         spec { ${specSelection} }
          status {
-           phase connected hostname agentVersion lastHeartbeatTime joinToken workspacePath
-           conditions { type status reason message lastTransitionTime }
+           URL phase connected hostname agentVersion lastHeartbeatTime joinToken workspacePath
+           conditions { type status reason message lastTransitionTime observedGeneration }
          }
        } } }
      }`,
@@ -239,19 +268,54 @@ export async function getEdge(name: string, type: EdgeType): Promise<EdgeDetail>
   const cr = data.edges_faros_sh?.v1alpha1?.[kind]
   if (!cr) throw <ErrorResponse>{ reason: 'NotFound', message: `${kind} ${name} not found` }
   const s = cr.status ?? {}
+  // The bootstrap token is an onboarding credential, not part of the
+  // read-only technical object snapshot. Keep it on EdgeDetail for the join
+  // instructions, but remove it before the snapshot reaches YAML rendering.
+  const technicalStatus = Object.fromEntries(
+    Object.entries(s).filter(([key]) => key !== 'joinToken'),
+  )
+  const metadata = cr.metadata
+  const spec = cr.spec ?? {}
+  const rawObject: Record<string, unknown> = {
+    apiVersion,
+    kind,
+    metadata: {
+      name: metadata.name,
+      ...(metadata.namespace ? { namespace: metadata.namespace } : {}),
+      ...(metadata.uid ? { uid: metadata.uid } : {}),
+      ...(metadata.resourceVersion ? { resourceVersion: metadata.resourceVersion } : {}),
+      ...(metadata.generation !== undefined ? { generation: metadata.generation } : {}),
+      ...(metadata.creationTimestamp ? { creationTimestamp: metadata.creationTimestamp } : {}),
+      ...(metadata.labels ? { labels: metadata.labels } : {}),
+      ...(metadata.annotations ? { annotations: metadata.annotations } : {}),
+    },
+    spec,
+    status: technicalStatus,
+  }
   return {
-    name: cr.metadata.name,
+    name: metadata.name,
     type,
-    creationTimestamp: cr.metadata.creationTimestamp,
-    labels: cr.metadata.labels,
+    creationTimestamp: metadata.creationTimestamp,
+    labels: metadata.labels,
     phase: s.phase,
     connected: !!s.connected,
     hostname: s.hostname,
     agentVersion: s.agentVersion,
     lastHeartbeatTime: s.lastHeartbeatTime,
+    apiVersion,
+    kind: kind as EdgeDetail['kind'],
+    namespace: metadata.namespace,
+    uid: metadata.uid,
+    resourceVersion: metadata.resourceVersion,
+    generation: metadata.generation,
+    annotations: metadata.annotations,
+    spec,
+    observedGeneration: s.conditions?.reduce((max, condition) => Math.max(max, condition.observedGeneration ?? 0), 0) || undefined,
+    statusURL: s.URL,
     joinToken: s.joinToken,
     workspacePath: s.workspacePath,
     conditions: s.conditions ?? [],
+    rawObject,
   }
 }
 
