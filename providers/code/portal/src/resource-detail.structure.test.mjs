@@ -76,4 +76,14 @@ describe('Code repository resource detail cards', () => {
     expect(detail).toMatch(/<Users[\s\S]*Manage access/)
     expect(detail).toMatch(/<PackageOpen[\s\S]*View packages/)
   })
+
+  it('keeps repository resource tables wide inside their scroll regions', () => {
+    const tableRule = farosUI.match(/\.k-table\.k-table--resource \.k-table__scroll > \.k-table__table\s*\{([\s\S]*?)\}/)?.[1] ?? ''
+    expect(tableRule).toMatch(/max-width:\s*none/)
+    expect(tableRule).toMatch(/min-width:\s*100%/)
+    expect(tableRule).toMatch(/width:\s*max-content/)
+    expect(farosUI).toMatch(/\.k-table__scroll\s*\{[\s\S]*overflow-x:\s*auto/)
+    expect(farosUI).not.toMatch(/table-layout:\s*fixed/)
+    expect(style).not.toMatch(/\.k-table(?:-[A-Za-z0-9_-]+)?\b/)
+  })
 })
