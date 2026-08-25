@@ -982,3 +982,63 @@ test('route tabs use PortalKit items and icons', async () => {
   assert.match(app, /querySelector<HTMLElement>\(`\[data-k-tab-id="\$\{path\}"\]`\)/)
   assert.doesNotMatch(style, /faros-provider-databricks \.tabs(?:\s|\{|\.)/)
 })
+
+test('resource detail views use the shared shell without dropping resource behavior', async () => {
+  const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
+  const details = {
+    connection: await readFile(new URL('./views/ConnectionDetailView.vue', import.meta.url), 'utf8'),
+    warehouse: await readFile(new URL('./views/WarehouseDetailView.vue', import.meta.url), 'utf8'),
+    table: await readFile(new URL('./views/TableDetailView.vue', import.meta.url), 'utf8'),
+  }
+
+  assert.match(app, /<template v-if="!route\.connection && !route\.warehouse && !route\.table">[\s\S]*<Tabs :tabs=/)
+  assert.match(app, /ConnectionDetailView v-if="route\.page === 'connections' && route\.connection"/)
+  assert.match(app, /WarehouseDetailView v-else-if="route\.page === 'warehouses' && route\.warehouse"/)
+  assert.match(app, /TableDetailView v-else-if="route\.page === 'tables' && route\.table"/)
+
+  for (const [kind, source] of Object.entries(details)) {
+    assert.match(source, /import ResourcePage from '\.\.\/portalkit\/ResourcePage\.vue'/, `${kind} imports ResourcePage`)
+    assert.match(source, /import ResourceSectionCard from '\.\.\/portalkit\/ResourceSectionCard\.vue'/, `${kind} imports ResourceSectionCard`)
+    assert.match(source, /import ResourceStatCards, \{ type ResourceStatCard \}/, `${kind} imports ResourceStatCards`)
+    assert.match(source, /<a class="k-btn k-btn--ghost databricks-resource-back"[^>]*@click\.prevent="goBack"/, `${kind} keeps the backlink outside ResourcePage`)
+    assert.match(source, /<ResourcePage[\s\S]*:loaded="readState"[\s\S]*:loading="loading"[\s\S]*:error="error"[\s\S]*:stale="loaded && !!error"[\s\S]*retryable[\s\S]*@retry="load"/, `${kind} keeps the read contract`)
+    assert.match(source, /<template #summary><ResourceStatCards :cards="statCards" density="compact"/, `${kind} has compact stat cards`)
+    assert.match(source, /<template #actions>[\s\S]*Refresh[\s\S]*<details ref="actionsMenu" class="databricks-resource-menu">[\s\S]*Delete /, `${kind} orders Refresh before overflow Delete`)
+    assert.match(source, /<div v-if="[^\n]+" class="databricks-resource-sections">/, `${kind} stacks resource sections`)
+    assert.match(source, /<ResourceSectionCard id="[^\"]+-conditions"[\s\S]*<ConditionsPanel/, `${kind} keeps Conditions in a section card`)
+    assert.match(source, /createLatestRefreshController/, `${kind} keeps serialized refresh`)
+    assert.match(source, /setInterval\(load, 5000\)/, `${kind} keeps the five-second refresh cadence`)
+    assert.match(source, /Updating…/, `${kind} keeps the in-place updating announcement`)
+    assert.match(source, /:stale="[^\"]*!!error/, `${kind} keeps stale snapshot signaling`)
+    assert.match(source, /operations\.tombstone\(/, `${kind} keeps deletion tombstones`)
+    assert.match(source, /confirmDialog\(\{[\s\S]*danger: true/, `${kind} keeps destructive confirmation`)
+  }
+
+  const connection = details.connection
+  assert.match(connection, /id="connection-status"/)
+  assert.match(connection, /Waiting for the connection controller to validate the credential\./)
+  assert.match(connection, /Workspace host[\s\S]*conn\.authType[\s\S]*conn\.secretName[\s\S]*conn\.secretNamespace[\s\S]*conn\.secretKey[\s\S]*conn\.workspaceID/)
+  assert.match(connection, /conn\.observedGeneration[\s\S]*conn\.generation[\s\S]*controller has not caught up/)
+  assert.match(connection, /id="connection-edit"[\s\S]*connection-edit-host[\s\S]*connection-edit-token[\s\S]*type="password"/)
+  assert.match(connection, /token: editToken\.value \|\| undefined/)
+  assert.match(connection, /Leave the token blank to keep the current Secret./)
+
+  const warehouse = details.warehouse
+  assert.match(warehouse, /id="warehouse-overview"[\s\S]*warehouse\.connectionRef[\s\S]*warehouse\.warehouseID[\s\S]*warehouse\.state/)
+  assert.match(warehouse, /warehouse\.observedGeneration[\s\S]*warehouse\.generation[\s\S]*controller has not caught up/)
+  assert.match(warehouse, /id="warehouse-edit"[\s\S]*warehouse-edit-id[\s\S]*Use the 16-character ID/)
+  assert.match(warehouse, /Tables that reference this warehouse will stop refreshing schema metadata\./)
+
+  const table = details.table
+  assert.match(table, /id="table-overview"[\s\S]*table\.connectionRef[\s\S]*table\.warehouseRef[\s\S]*table\.catalog[\s\S]*table\.schema[\s\S]*table\.table[\s\S]*table\.fullName/)
+  assert.match(table, /table\.columns\.length[\s\S]*table\.refreshedAt[\s\S]*table\.creationTimestamp[\s\S]*table\.observedGeneration[\s\S]*table\.generation/)
+  assert.match(table, /id="table-schema"[\s\S]*schemaTruncated[\s\S]*schemaNotice[\s\S]*schemaRows[\s\S]*Search columns…/)
+  assert.match(table, /status === 'Pending'.*schemaCached/)
+  assert.match(table, /status === 'Status unavailable'.*showing cached columns/)
+  assert.match(table, /App Studio guidance and Databricks MCP tools will no longer be able to inspect this tableRef\./)
+
+  assert.match(style, /\.databricks-resource-actions\s*\{[\s\S]*gap: 8px/)
+  assert.match(style, /\.databricks-resource-menu-popover\s*\{[\s\S]*position: absolute/)
+  assert.match(style, /\.databricks-resource-sections\s*\{[\s\S]*flex-direction: column[\s\S]*gap: 14px/)
+})

@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowLeft } from 'lucide-vue-next'
+import { Activity, ArrowLeft, Database, Ellipsis, KeyRound, RefreshCw, Settings2 } from 'lucide-vue-next'
 import { api } from '../api'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
+import ResourcePage from '../portalkit/ResourcePage.vue'
+import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
+import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import type { Connection, ErrorResponse } from '../types'
@@ -23,6 +26,7 @@ const saveError = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const editHostInput = ref<HTMLInputElement | null>(null)
 const saveErrorRef = ref<HTMLElement | null>(null)
+const actionsMenu = ref<HTMLDetailsElement | null>(null)
 let timer: number | undefined
 let refresh!: LatestRefreshController
 const operations = createOperationLocks()
@@ -52,6 +56,46 @@ const hint = computed(() => {
   }
 })
 
+type StatTone = 'default' | 'success' | 'warning' | 'danger'
+
+function statTone(status: string | undefined): StatTone {
+  if (!status) return 'default'
+  if (status === 'Ready' || status === 'Validated') return 'success'
+  if (/fail|error|attention|unavailable/i.test(status)) return 'danger'
+  return 'warning'
+}
+
+const readState = computed<boolean | null>(() => {
+  if (loaded.value) return true
+  if (error.value) return false
+  return loading.value ? false : null
+})
+
+const statCards = computed<ResourceStatCard[]>(() => [
+  {
+    id: 'status',
+    label: 'Status',
+    value: conn.value?.status || '—',
+    detail: hint.value || 'Credential validation',
+    icon: Activity,
+    tone: statTone(conn.value?.status),
+  },
+  {
+    id: 'auth',
+    label: 'Authentication',
+    value: conn.value?.authType || '—',
+    icon: KeyRound,
+    mono: true,
+  },
+  {
+    id: 'workspace',
+    label: 'Workspace ID',
+    value: conn.value?.workspaceID || '—',
+    icon: Database,
+    mono: true,
+  },
+])
+
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
@@ -67,6 +111,11 @@ function operationLocked(name: string): boolean {
 
 function operationPhase(name: string) {
   return operations.phase(operationKey('connection', name))
+}
+
+function goBack() {
+  if (conn.value && operationLocked(conn.value.name)) return
+  emit('back')
 }
 
 function startEdit() {
@@ -148,6 +197,11 @@ async function remove() {
   }
 }
 
+function deleteFromMenu() {
+  actionsMenu.value?.removeAttribute('open')
+  void remove()
+}
+
 refresh = createLatestRefreshController(async requestID => {
   loading.value = true
   try {
@@ -187,45 +241,64 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page">
-    <button class="k-btn k-btn--ghost k-back-action" type="button" :disabled="!!conn && operationLocked(conn.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Connections</button>
+  <section class="databricks-resource-detail">
+    <a class="k-btn k-btn--ghost databricks-resource-back" href="/providers/databricks/connections" :aria-disabled="!!conn && operationLocked(conn.name)" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Connections</a>
 
-    <header class="page-head">
-      <div>
-        <h2 class="page-title">{{ conn?.name || name }}</h2>
-        <p class="page-meta">
+    <ResourcePage
+      :title="conn?.name || name"
+      eyebrow="Connection"
+      :loaded="readState"
+      :loading="loading"
+      :error="error"
+      :stale="loaded && !!error"
+      retryable
+      @retry="load"
+    >
+      <template #meta>
           <span v-if="conn?.status === 'Ready'">validated against <code>{{ conn.host }}</code></span>
           <span v-else-if="conn"><code>{{ conn.host }}</code></span>
           <span v-else class="muted">not validated yet</span>
+      </template>
+      <template #status><StatusBadge v-if="conn" :status="conn.status" :title="conn.message" /></template>
+      <template #actions>
+        <div class="databricks-resource-actions" role="group" aria-label="Connection actions">
+          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || (!!conn && operationLocked(conn.name))" :aria-busy="loading || undefined" @click="load">
+            <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
+            {{ loading ? 'Refreshing…' : 'Refresh' }}
+          </button>
+          <details ref="actionsMenu" class="databricks-resource-menu">
+            <summary class="k-btn k-btn--ghost" aria-label="More connection actions">
+              <Ellipsis :size="16" aria-hidden="true" />
+              <span class="sr-only">More actions</span>
+            </summary>
+            <div class="databricks-resource-menu-popover">
+              <button type="button" class="databricks-resource-menu-item" :disabled="!conn || loading || operationLocked(conn?.name || name)" @click="deleteFromMenu">
+                {{ operationPhase(conn?.name || name) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
+              </button>
+            </div>
+          </details>
+        </div>
+      </template>
+      <template #summary><ResourceStatCards :cards="statCards" density="compact" aria-label="Connection summary" /></template>
+      <template #body>
+        <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating…</span>
+        <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
+          <span>{{ mutationError }}</span>
+          <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
         </p>
-      </div>
-      <StatusBadge v-if="conn" :status="conn.status" :title="conn.message" />
-    </header>
 
-    <div v-if="error && !conn" class="error read-error" role="alert" aria-live="assertive">
-      <span>{{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
-    </div>
-    <p v-else-if="loading && !conn" class="muted" role="status" aria-live="polite">Loading…</p>
-    <div v-if="error && conn" class="error read-error" role="alert" aria-live="assertive">
-      <span>Showing cached connection data. {{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
-    </div>
-    <span v-else-if="loading && conn" class="sr-only" role="status" aria-live="polite">Updating…</span>
-    <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
-      <span>{{ mutationError }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
-    </div>
+        <div v-if="conn" class="databricks-resource-sections">
+          <ResourceSectionCard id="connection-status" eyebrow="Validation" title="Status" description="Credential validation and provider feedback for this connection.">
+            <p v-if="hint" class="muted">{{ hint }}</p>
+            <p v-else class="muted">The connection is validated and ready for dependent resources.</p>
+            <p v-if="conn.message" class="muted">{{ conn.message }}</p>
+          </ResourceSectionCard>
 
-    <template v-if="conn">
-      <div v-if="hint" class="databricks-resource-panel k-card">
-        <h3 class="databricks-resource-panel-title">Status</h3>
-        <p class="muted">{{ hint }}</p>
-      </div>
-
-      <div class="databricks-resource-panel k-card">
-        <h3 class="databricks-resource-panel-title">Overview</h3>
-        <dl class="props">
+          <ResourceSectionCard id="connection-overview" eyebrow="Connection" title="Overview" description="Workspace endpoint, authentication, and reconciliation details.">
+            <template #actions>
+              <button v-if="!editing" class="k-btn k-btn--ghost icon-text" type="button" :disabled="operationLocked(conn.name)" @click="startEdit"><Settings2 :size="14" aria-hidden="true" /> Edit connection</button>
+            </template>
+            <dl class="props">
           <dt>Workspace host</dt><dd><code>{{ conn.host }}</code></dd>
           <dt>Type</dt><dd>{{ conn.authType }}</dd>
           <dt>Secret</dt>
@@ -241,11 +314,10 @@ onUnmounted(() => {
             <span v-if="reconciled" class="muted">up to date (generation {{ conn.generation }})</span>
             <span v-else class="warning">controller has not caught up (spec {{ conn.generation }}, observed {{ conn.observedGeneration }})</span>
           </dd>
-        </dl>
-      </div>
+            </dl>
+          </ResourceSectionCard>
 
-      <div v-if="editing" class="databricks-resource-panel k-card">
-        <h3 class="databricks-resource-panel-title">Update connection</h3>
+          <ResourceSectionCard v-if="editing" id="connection-edit" eyebrow="Configuration" title="Update connection" description="Change the workspace host or rotate the token without exposing the existing credential.">
         <p class="field-hint">Change the workspace host or rotate the token. Leave the token blank to keep the current Secret.</p>
         <form class="form" @submit.prevent="saveEdit">
           <div class="field">
@@ -264,19 +336,18 @@ onUnmounted(() => {
             <span v-if="saveError" id="connection-edit-error" ref="saveErrorRef" class="error" role="alert" aria-live="assertive" tabindex="-1">{{ saveError }}</span>
           </div>
         </form>
-      </div>
+          </ResourceSectionCard>
 
-      <ConditionsPanel
-        :conditions="conn.conditions"
-        :generation="conn.generation"
-        :observed-generation="conn.observedGeneration"
-        empty-text="No conditions yet. Connection validation has not reported status for this resource."
-      />
-
-      <div class="actions">
-        <button class="k-btn k-btn--ghost" type="button" :disabled="operationLocked(conn.name)" @click="startEdit">Edit connection</button>
-        <button class="k-btn k-btn--danger resource-delete-button" type="button" :disabled="operationLocked(conn.name)" @click="remove">{{ operationPhase(conn.name) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}</button>
-      </div>
-    </template>
+          <ResourceSectionCard id="connection-conditions" eyebrow="Diagnostics" title="Conditions" description="Controller conditions and observed generation for this connection.">
+            <ConditionsPanel
+              :conditions="conn.conditions"
+              :generation="conn.generation"
+              :observed-generation="conn.observedGeneration"
+              empty-text="No conditions yet. Connection validation has not reported status for this resource."
+            />
+          </ResourceSectionCard>
+        </div>
+      </template>
+    </ResourcePage>
   </section>
 </template>

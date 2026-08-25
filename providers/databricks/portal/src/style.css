@@ -57,6 +57,94 @@ faros-provider-databricks .page-meta {
   max-width: 70ch;
 }
 
+/* Resource instance pages keep navigation outside the shared ResourcePage
+ * shell. The detail-specific action/menu geometry mirrors the Code pilot while
+ * leaving resource content and state presentation to PortalKit. */
+faros-provider-databricks .databricks-resource-detail {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+faros-provider-databricks .databricks-resource-back {
+  align-self: flex-start;
+  min-height: 0;
+  border-color: transparent;
+  padding: 0;
+}
+
+faros-provider-databricks .databricks-resource-back:hover {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-accent-hover, #a18aff);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+faros-provider-databricks .databricks-resource-back:active { transform: none; }
+faros-provider-databricks .databricks-resource-back svg { flex: none; }
+
+faros-provider-databricks .databricks-resource-actions {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+faros-provider-databricks .databricks-resource-menu { position: relative; }
+faros-provider-databricks .databricks-resource-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  list-style: none;
+  padding: 7px 8px;
+}
+faros-provider-databricks .databricks-resource-menu summary::-webkit-details-marker,
+faros-provider-databricks .databricks-resource-menu summary::marker { display: none; }
+faros-provider-databricks .databricks-resource-menu-popover {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 170px;
+  border: 1px solid var(--color-border-default, rgba(255, 255, 255, 0.11));
+  border-radius: 6px;
+  background: var(--color-surface-overlay, #171927);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-surface, #0a0b12) 65%, transparent);
+  padding: 4px;
+}
+faros-provider-databricks .databricks-resource-menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-danger, #ff5d5d);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  text-align: left;
+}
+faros-provider-databricks .databricks-resource-menu-item:hover:not(:disabled) {
+  background: var(--color-danger-subtle, rgba(255, 93, 93, 0.12));
+}
+faros-provider-databricks .databricks-resource-menu-item:disabled {
+  cursor: default;
+  opacity: .5;
+}
+faros-provider-databricks .databricks-resource-sections {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
 faros-provider-databricks .databricks-resource-panel {
   display: flex;
   flex-direction: column;

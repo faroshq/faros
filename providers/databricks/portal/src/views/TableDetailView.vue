@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowLeft } from 'lucide-vue-next'
+import { Activity, ArrowLeft, Database, Ellipsis, RefreshCw, Table2, Warehouse } from 'lucide-vue-next'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
+import ResourcePage from '../portalkit/ResourcePage.vue'
+import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
+import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import type { ErrorResponse, Table, TableColumn } from '../types'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
@@ -18,6 +21,7 @@ const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const schemaCache = ref<{ uid?: string; generation?: number; refreshedAt?: string; columns: TableColumn[] } | null>(null)
+const actionsMenu = ref<HTMLDetailsElement | null>(null)
 let timer: number | undefined
 let refresh!: LatestRefreshController
 const operations = createOperationLocks()
@@ -71,6 +75,53 @@ const hint = computed(() => {
   }
 })
 
+type StatTone = 'default' | 'success' | 'warning' | 'danger'
+
+function statTone(status: string | undefined): StatTone {
+  if (!status) return 'default'
+  if (status === 'Ready') return 'success'
+  if (/fail|error|attention|unavailable/i.test(status)) return 'danger'
+  return 'warning'
+}
+
+const readState = computed<boolean | null>(() => {
+  if (loaded.value) return true
+  if (error.value) return false
+  return loading.value ? false : null
+})
+
+const statCards = computed<ResourceStatCard[]>(() => [
+  {
+    id: 'status',
+    label: 'Status',
+    value: table.value?.status || '—',
+    detail: hint.value || 'Schema validation',
+    icon: Activity,
+    tone: statTone(table.value?.status),
+  },
+  {
+    id: 'columns',
+    label: 'Columns',
+    value: table.value?.columns.length ?? '—',
+    detail: schemaTruncated.value ? 'Schema cache truncated' : undefined,
+    icon: Table2,
+  },
+  {
+    id: 'warehouse',
+    label: 'Warehouse',
+    value: table.value?.warehouseRef || '—',
+    icon: Warehouse,
+    mono: true,
+  },
+  {
+    id: 'full-name',
+    label: 'Databricks table',
+    value: table.value?.fullName || '—',
+    icon: Database,
+    mono: true,
+  },
+])
+
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
@@ -105,6 +156,11 @@ function operationPhase(name: string) {
   return operations.phase(operationKey('table', name))
 }
 
+function goBack() {
+  if (table.value && operationLocked(table.value.name)) return
+  emit('back')
+}
+
 async function remove() {
   if (!table.value) return
   const ok = await confirmDialog({
@@ -129,6 +185,11 @@ async function remove() {
   } finally {
     operations.release(lock)
   }
+}
+
+function deleteFromMenu() {
+  actionsMenu.value?.removeAttribute('open')
+  void remove()
 }
 
 refresh = createLatestRefreshController(async requestID => {
@@ -170,50 +231,67 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page">
-    <button class="k-btn k-btn--ghost k-back-action" type="button" :disabled="!!table && operationLocked(table.name)" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Tables</button>
+  <section class="databricks-resource-detail">
+    <a class="k-btn k-btn--ghost databricks-resource-back" href="/providers/databricks/tables" :aria-disabled="!!table && operationLocked(table.name)" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Tables</a>
 
-    <header class="page-head">
-      <div>
-        <h2 class="page-title">{{ table?.name || name }}</h2>
-        <p class="page-meta">
+    <ResourcePage
+      :title="table?.name || name"
+      eyebrow="Table"
+      :loaded="readState"
+      :loading="loading"
+      :error="error"
+      :stale="loaded && !!error"
+      retryable
+      @retry="load"
+    >
+      <template #meta>
           <span v-if="table?.status === 'Ready'">validated against <code>{{ table.fullName }}</code></span>
           <span v-else-if="table"><code>{{ table.fullName }}</code></span>
           <span v-else class="muted">not validated yet</span>
+      </template>
+      <template #status><StatusBadge v-if="table" :status="table.status" :title="table.message" /></template>
+      <template #actions>
+        <div class="databricks-resource-actions" role="group" aria-label="Table actions">
+          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || (!!table && operationLocked(table.name))" :aria-busy="loading || undefined" @click="load">
+            <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
+            {{ loading ? 'Refreshing…' : 'Refresh' }}
+          </button>
+          <details ref="actionsMenu" class="databricks-resource-menu">
+            <summary class="k-btn k-btn--ghost" aria-label="More table actions">
+              <Ellipsis :size="16" aria-hidden="true" />
+              <span class="sr-only">More actions</span>
+            </summary>
+            <div class="databricks-resource-menu-popover">
+              <button type="button" class="databricks-resource-menu-item" :disabled="!table || loading || operationLocked(table?.name || name)" @click="deleteFromMenu">
+                {{ operationPhase(table?.name || name) === 'deleting' ? 'Deleting table…' : 'Delete table' }}
+              </button>
+            </div>
+          </details>
+        </div>
+      </template>
+      <template #summary><ResourceStatCards :cards="statCards" density="compact" aria-label="Table summary" /></template>
+      <template #body>
+        <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating…</span>
+        <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
+          <span>{{ mutationError }}</span>
+          <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
         </p>
-      </div>
-      <StatusBadge v-if="table" :status="table.status" :title="table.message" />
-    </header>
 
-    <div v-if="error && !table" class="error read-error" role="alert" aria-live="assertive">
-      <span>{{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
-    </div>
-    <p v-else-if="loading && !table" class="muted" role="status" aria-live="polite">Loading…</p>
-    <div v-if="error && table" class="error read-error" role="alert" aria-live="assertive">
-      <span>Showing cached table data. {{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
-    </div>
-    <span v-else-if="loading && table" class="sr-only" role="status" aria-live="polite">Updating…</span>
-    <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
-      <span>{{ mutationError }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
-    </div>
+        <div v-if="table" class="databricks-resource-sections">
+          <ResourceSectionCard id="table-status" eyebrow="Validation" title="Status" description="Schema validation, readiness reasons, and provider feedback for this table.">
+            <p v-if="hint" class="muted">{{ hint }}</p>
+            <p v-else class="muted">The table schema is validated and ready for consumers.</p>
+            <p v-if="table.message" class="muted">{{ table.message }}</p>
+          </ResourceSectionCard>
 
-    <template v-if="table">
-      <div v-if="hint" class="databricks-resource-panel k-card">
-        <h3 class="databricks-resource-panel-title">Status</h3>
-        <p class="muted">{{ hint }}</p>
-      </div>
-
-      <div class="databricks-resource-panel k-card">
-        <h3 class="databricks-resource-panel-title">Overview</h3>
-        <dl class="props">
+          <ResourceSectionCard id="table-overview" eyebrow="Table" title="Overview" description="References, fully qualified name, timestamps, and reconciliation details.">
+            <dl class="props">
           <dt>Connection</dt><dd><code>{{ table.connectionRef }}</code></dd>
           <dt>Warehouse</dt><dd><code>{{ table.warehouseRef }}</code></dd>
           <dt>Catalog</dt><dd><code>{{ table.catalog }}</code></dd>
           <dt>Schema</dt><dd><code>{{ table.schema }}</code></dd>
           <dt>Table</dt><dd><code>{{ table.table }}</code></dd>
+          <dt>Full name</dt><dd><code>{{ table.fullName }}</code></dd>
           <dt>Columns</dt>
           <dd>
             <span v-if="schemaTruncated">{{ table.columns.length }} (schema cache truncated)</span>
@@ -226,16 +304,13 @@ onUnmounted(() => {
             <span v-if="reconciled" class="muted">up to date (generation {{ table.generation }})</span>
             <span v-else class="warning">controller has not caught up (spec {{ table.generation }}, observed {{ table.observedGeneration }})</span>
           </dd>
-        </dl>
-      </div>
+            </dl>
+          </ResourceSectionCard>
 
-      <div class="databricks-resource-panel k-card">
-        <div class="databricks-resource-panel-head">
-          <h3 class="databricks-resource-panel-title">Schema</h3>
-          <span class="muted">{{ schemaTruncated ? `${table.columns.length} cached columns` : `${table.columns.length} columns` }}</span>
-        </div>
-        <p v-if="schemaTruncated" class="warning" role="status">{{ schemaNotice }}</p>
-        <ResourceTable
+          <ResourceSectionCard id="table-schema" eyebrow="Schema" title="Columns" description="The latest bounded schema snapshot reported by Databricks." >
+            <template #actions><span class="muted">{{ schemaTruncated ? `${table.columns.length} cached columns` : `${table.columns.length} columns` }}</span></template>
+            <p v-if="schemaTruncated" class="warning" role="status">{{ schemaNotice }}</p>
+            <ResourceTable
           :columns="[
             { key: 'name', label: 'Column' },
             { key: 'type', label: 'Type' },
@@ -257,22 +332,22 @@ onUnmounted(() => {
           :interactive="false"
           empty-text="No columns have been reported yet."
           @retry="load"
-        >
-          <template #name="{ value }"><span class="mono strong">{{ value }}</span></template>
-          <template #type="{ value }"><span class="mono">{{ value }}</span></template>
-        </ResourceTable>
-      </div>
+            >
+              <template #name="{ value }"><span class="mono strong">{{ value }}</span></template>
+              <template #type="{ value }"><span class="mono">{{ value }}</span></template>
+            </ResourceTable>
+          </ResourceSectionCard>
 
-      <ConditionsPanel
-        :conditions="table.conditions"
-        :generation="table.generation"
-        :observed-generation="table.observedGeneration"
-        empty-text="No conditions yet. Table validation has not reported status for this resource."
-      />
-
-      <div class="actions">
-        <button class="k-btn k-btn--danger resource-delete-button" type="button" :disabled="operationLocked(table.name)" @click="remove">{{ operationPhase(table.name) === 'deleting' ? 'Deleting table…' : 'Delete table' }}</button>
-      </div>
-    </template>
+          <ResourceSectionCard id="table-conditions" eyebrow="Diagnostics" title="Conditions" description="Controller conditions and observed generation for this table.">
+            <ConditionsPanel
+              :conditions="table.conditions"
+              :generation="table.generation"
+              :observed-generation="table.observedGeneration"
+              empty-text="No conditions yet. Table validation has not reported status for this resource."
+            />
+          </ResourceSectionCard>
+        </div>
+      </template>
+    </ResourcePage>
   </section>
 </template>
