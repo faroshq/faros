@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowLeft } from 'lucide-vue-next'
+import { Activity, ArrowLeft, Boxes, CalendarClock, Ellipsis, FileCode2, RefreshCw } from 'lucide-vue-next'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import ViewValue from '../components/ViewValue.vue'
 import { api, isContextChangedError } from '../api'
 import ConditionsPanel, { type ConditionInfo } from '../portalkit/ConditionsPanel.vue'
+import ResourcePage from '../portalkit/ResourcePage.vue'
+import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
+import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { createLatestRefreshController, sameResourceIdentity, type ResourceTombstones } from '../refresh'
@@ -25,6 +28,7 @@ let pollHandle: number | null = null
 let active = true
 let navigatingAway = false
 let acceptedDeletingIdentity: { name: string; uid?: string } | null = null
+const actionsMenu = ref<HTMLDetailsElement | null>(null)
 
 const DELETING_MESSAGE = 'Deletion is in progress while provisioned resources are cleaned up.'
 
@@ -62,6 +66,54 @@ const childRows = computed<Array<Record<string, unknown>>>(() => (inst.value?.ch
   namespaceLabel: child.namespace || '—',
   phaseLabel: child.phase || '—',
 })))
+
+const readState = computed<boolean | null>(() => {
+  if (loaded.value) return true
+  if (error.value) return false
+  return loading.value ? false : null
+})
+
+type StatTone = 'default' | 'success' | 'warning' | 'danger'
+
+function statTone(phase: string): StatTone {
+  if (phase === 'Ready') return 'success'
+  if (phase === 'Deleting' || phase === 'Pending') return 'warning'
+  if (/fail|error|unavailable/i.test(phase)) return 'danger'
+  return 'default'
+}
+
+const statCards = computed<ResourceStatCard[]>(() => [
+  {
+    id: 'status',
+    label: 'Status',
+    value: displayedPhase.value || '—',
+    detail: displayedMessage.value || 'Controller phase',
+    icon: Activity,
+    tone: statTone(displayedPhase.value),
+  },
+  {
+    id: 'template',
+    label: 'Template',
+    value: inst.value?.template || '—',
+    icon: FileCode2,
+    mono: true,
+  },
+  {
+    id: 'children',
+    label: 'Child resources',
+    value: inst.value?.children?.length ?? 0,
+    detail: 'Reported by controller',
+    icon: Boxes,
+  },
+  {
+    id: 'created',
+    label: 'Created',
+    value: inst.value?.createdAt || '—',
+    detail: 'Instance creation time',
+    icon: CalendarClock,
+    mono: true,
+  },
+])
 
 function errorMessage(error: unknown, fallback: string): string {
   const value = error as { reason?: string; message?: string }
@@ -159,6 +211,16 @@ async function executeDelete() {
   }
 }
 
+function deleteFromMenu() {
+  actionsMenu.value?.removeAttribute('open')
+  void executeDelete()
+}
+
+function goBack() {
+  if (deleting.value || deletionInProgress.value) return
+  emit('navigate', 'instances')
+}
+
 onMounted(() => {
   pollHandle = window.setInterval(() => {
     if (!navigatingAway) void load()
@@ -172,97 +234,135 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page instance-detail" :aria-busy="loading">
-    <button
-      type="button"
-      class="k-btn k-btn--ghost k-back-action"
-      :disabled="deleting"
-      @click="emit('navigate', 'instances')"
+  <section class="instance-detail">
+    <a
+      class="k-btn k-btn--ghost k-back-action instance-detail__back"
+      href="/providers/infrastructure/instances"
+      :aria-disabled="deleting || deletionInProgress || undefined"
+      @click.prevent="goBack"
     >
       <ArrowLeft :size="14" aria-hidden="true" />
-      <span>Back to instances</span>
-    </button>
+      Instances
+    </a>
 
-    <div v-if="!loaded && loading" class="page-loading-shell" role="status" aria-live="polite" aria-busy="true">
-      <span>Loading instance…</span>
-      <div class="shimmer page-loading-line page-loading-line-short" aria-hidden="true" />
-      <div class="shimmer page-loading-panel" aria-hidden="true" />
-      <div class="shimmer page-loading-panel" aria-hidden="true" />
-    </div>
-    <div v-else-if="!loaded && error" class="read-error" role="alert" aria-live="assertive">
-      <span>{{ error }}</span>
-      <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
-    </div>
-
-    <template v-else-if="inst">
-      <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating instance…</span>
-      <div v-if="error" class="stale-banner" role="alert" aria-live="assertive">
-        <span>Showing the last successful result. {{ error }}</span>
-        <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
-      </div>
-      <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
-        <span>{{ deleteError }}</span>
-        <button type="button" class="k-btn k-btn--ghost" @click="deleteError = null">Dismiss</button>
-      </div>
-
-      <header class="instance-detail-head">
-        <div>
-          <div class="instance-detail-title">
-            <h2 class="page-title">{{ inst.name }}</h2>
-            <StatusBadge :status="displayedPhase" :tone="displayedPhase === 'Deleting' ? 'warning' : null" />
-          </div>
-          <p class="page-meta">{{ inst.template }}</p>
-        </div>
-        <button type="button" class="k-btn k-btn--danger" :disabled="deleting || deletionInProgress" @click="executeDelete">
-          {{ deleting || deletionInProgress ? 'Deleting…' : 'Delete' }}
-        </button>
-      </header>
-
-      <div v-if="displayedMessage" class="instance-message">{{ displayedMessage }}</div>
-
-      <template v-if="view?.detail?.length">
-        <div v-for="(group, groupIndex) in view.detail" :key="group.title || groupIndex" class="detail-group k-card">
-          <div v-if="group.title" class="detail-group-title">{{ group.title }}</div>
-          <dl class="detail-fields">
-            <div v-for="field in group.fields" :key="field.label" class="detail-field">
-              <dt>{{ field.label }}</dt>
-              <dd><ViewValue :value="resolve(field, inst)" :interactive="!deletionInProgress" /></dd>
+    <ResourcePage
+      :title="inst?.name || instanceName"
+      eyebrow="Infrastructure instance"
+      :subtitle="inst?.template || 'Template instance'"
+      :loaded="readState"
+      :loading="loading"
+      :error="error"
+      :stale="loaded && !!error"
+      retryable
+      @retry="load"
+    >
+      <template #meta>
+        <span v-if="inst">Template <code>{{ inst.template }}</code></span>
+        <span v-else class="muted">Template metadata unavailable</span>
+      </template>
+      <template #status>
+        <StatusBadge
+          v-if="inst"
+          :status="displayedPhase"
+          :tone="displayedPhase === 'Deleting' ? 'warning' : null"
+          :title="displayedMessage"
+        />
+      </template>
+      <template #actions>
+        <div class="instance-detail__actions" role="group" aria-label="Instance actions">
+          <button
+            class="k-btn k-btn--ghost icon-text"
+            type="button"
+            :disabled="loading || deleting || deletionInProgress"
+            :aria-busy="loading || undefined"
+            @click="load"
+          >
+            <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
+            {{ loading ? 'Refreshing…' : 'Refresh' }}
+          </button>
+          <details ref="actionsMenu" class="instance-detail__menu">
+            <summary class="k-btn k-btn--ghost" aria-label="More instance actions">
+              <Ellipsis :size="16" aria-hidden="true" />
+              <span class="sr-only">More actions</span>
+            </summary>
+            <div class="instance-detail__menu-popover">
+              <button
+                type="button"
+                class="instance-detail__menu-item"
+                :disabled="!inst || loading || deleting || deletionInProgress"
+                @click="deleteFromMenu"
+              >
+                {{ deleting || deletionInProgress ? 'Deleting instance…' : 'Delete instance' }}
+              </button>
             </div>
-          </dl>
+          </details>
         </div>
       </template>
+      <template #summary>
+        <ResourceStatCards :cards="statCards" density="compact" aria-label="Instance summary" />
+      </template>
+      <template #body>
+        <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating instance…</span>
+        <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
+          <span>{{ deleteError }}</span>
+          <button type="button" class="k-btn k-btn--ghost" @click="deleteError = null">Dismiss</button>
+        </div>
 
-      <div v-else class="detail-group k-card">
-        <div class="detail-group-title">Values</div>
-        <pre>{{ JSON.stringify(inst.values, null, 2) }}</pre>
-      </div>
+        <div v-if="inst" class="instance-detail__sections">
+          <ResourceSectionCard id="instance-status" eyebrow="Reconciliation" title="Status" description="Controller phase and the latest message for this instance.">
+            <div v-if="displayedMessage" class="instance-message">{{ displayedMessage }}</div>
+            <p v-else class="muted">The infrastructure controller has not reported a status message.</p>
+          </ResourceSectionCard>
 
-      <ConditionsPanel
-        :conditions="conditions"
-        :generation="inst.generation"
-        :observed-generation="conditionObservedGeneration"
-        empty-text="No conditions yet. The infrastructure controller has not reconciled this instance."
-      />
+          <template v-if="view?.detail?.length">
+            <ResourceSectionCard
+              v-for="(group, groupIndex) in view.detail"
+              :id="`instance-detail-group-${groupIndex}`"
+              :key="group.title || groupIndex"
+              :title="group.title || ''"
+            >
+              <dl class="detail-fields">
+                <div v-for="field in group.fields" :key="field.label" class="detail-field">
+                  <dt>{{ field.label }}</dt>
+                  <dd><ViewValue :value="resolve(field, inst)" :interactive="!deletionInProgress" /></dd>
+                </div>
+              </dl>
+            </ResourceSectionCard>
+          </template>
 
-      <div class="detail-group k-card">
-        <div class="detail-group-title">Child resources</div>
-        <ResourceTable
-          :columns="[
-            { key: 'kind', label: 'Kind' },
-            { key: 'name', label: 'Name' },
-            { key: 'namespaceLabel', label: 'Namespace' },
-            { key: 'phaseLabel', label: 'Phase' },
-          ]"
-          :rows="childRows"
-          row-key="rowID"
-          :interactive="false"
-          empty-text="No child resources have been reported yet."
-        >
-          <template #kind="{ value }"><span class="k-cell-mono">{{ value }}</span></template>
-          <template #name="{ value }"><span class="k-cell-mono">{{ value }}</span></template>
-          <template #phaseLabel="{ value }"><StatusBadge :status="String(value)" /></template>
-        </ResourceTable>
-      </div>
-    </template>
+          <ResourceSectionCard v-else id="instance-values" title="Values">
+            <pre>{{ JSON.stringify(inst.values, null, 2) }}</pre>
+          </ResourceSectionCard>
+
+          <ResourceSectionCard id="instance-conditions" eyebrow="Diagnostics" title="Conditions" description="Controller conditions and generation freshness for this instance.">
+            <ConditionsPanel
+              :conditions="conditions"
+              :generation="inst.generation"
+              :observed-generation="conditionObservedGeneration"
+              empty-text="No conditions yet. The infrastructure controller has not reconciled this instance."
+            />
+          </ResourceSectionCard>
+
+          <ResourceSectionCard id="instance-children" eyebrow="Provisioned resources" title="Child resources" description="Resources reported by the infrastructure controller for this instance.">
+            <ResourceTable
+              :columns="[
+                { key: 'kind', label: 'Kind' },
+                { key: 'name', label: 'Name' },
+                { key: 'namespaceLabel', label: 'Namespace' },
+                { key: 'phaseLabel', label: 'Phase' },
+              ]"
+              :rows="childRows"
+              row-key="rowID"
+              :interactive="false"
+              empty-text="No child resources have been reported yet."
+            >
+              <template #kind="{ value }"><span class="k-cell-mono">{{ value }}</span></template>
+              <template #name="{ value }"><span class="k-cell-mono">{{ value }}</span></template>
+              <template #phaseLabel="{ value }"><StatusBadge :status="String(value)" /></template>
+            </ResourceTable>
+          </ResourceSectionCard>
+        </div>
+      </template>
+    </ResourcePage>
   </section>
 </template>
