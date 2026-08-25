@@ -87,6 +87,8 @@ export interface Repository {
   description?: string
   defaultBranch?: string
   htmlURL?: string
+  cloneURL?: string
+  sshURL?: string
   ready: boolean
   message?: string
 }

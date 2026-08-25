@@ -15,10 +15,27 @@ describe('Service detail narrow-screen regressions', () => {
     expect(styles).toMatch(/@media\s*\(max-width:\s*420px\)[\s\S]*\.service-detail__facts\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/)
   })
 
-  it('keeps no-auth services out of the missing-credential path with human-facing copy', () => {
-    expect(serviceEdit).toMatch(/const credentialsRequired = computed\(\(\) => \(entry\.value\?\.auth \?\? ''\)\.toLowerCase\(\) !== 'none'\)/)
+  it('separates unsupported, optional, and required credential states', () => {
+    expect(serviceEdit).toMatch(/const credentialsSupported = computed\(\(\) => \{[\s\S]*auth !== '' && auth !== 'none'/)
+    expect(serviceEdit).toMatch(/const credentialsOptional = computed\(\(\) => credentialsSupported\.value && !!entry\.value\?\.credential\.optional\)/)
+    expect(serviceEdit).toMatch(/const credentialsRequired = computed\(\(\) => credentialsSupported\.value && !credentialsOptional\.value\)/)
+    expect(serviceEdit).toMatch(/value: 'Not configured \(optional\)'[\s\S]*tone: 'default'/)
+    expect(serviceEdit).toMatch(/value: 'Missing'[\s\S]*tone: 'warning'/)
     expect(serviceEdit).toMatch(/No credentials required for this service\./)
-    expect(serviceEdit).toMatch(/value: !credentialsRequired\.value \? 'Not required'/)
-    expect(serviceEdit).toMatch(/tone: !credentialsRequired\.value \? 'default'/)
+    expect(serviceEdit).toMatch(/<template v-if="credentialsSupported">/)
+    expect(serviceEdit).toMatch(/credentialsOptional \? ' \(optional\)'/)
+  })
+
+  it('keeps deletion status visible and politely announced after the menu closes', () => {
+    expect(serviceEdit).toMatch(/const deleting = ref\(false\)/)
+    expect(serviceEdit).toMatch(/if \(deleting\.value\) return 'Deleting'/)
+    expect(serviceEdit).toMatch(/<p v-if="deleting" class="waiting" role="status" aria-live="polite">Deleting this service\./)
+    expect(serviceEdit).toMatch(/actionsMenu\.value\?\.removeAttribute\('open'\)/)
+    expect(serviceEdit).toMatch(/deleting\.value = true[\s\S]*await deleteEdgeService\(name\)[\s\S]*emit\('deleted'\)/)
+    expect(serviceEdit).toMatch(/mutationError\.value = errorMessage\(error, 'Delete failed'\)[\s\S]*deleting\.value = false/)
+  })
+
+  it('uses the provider UI route as the service backlink fallback', () => {
+    expect(serviceEdit).toMatch(/<a class="k-btn k-btn--ghost service-detail__back" href="\/ui\/providers\/edges\/services" @click\.prevent="emit\('back'\)"/)
   })
 })

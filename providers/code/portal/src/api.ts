@@ -270,6 +270,8 @@ function validateRepositoryResource(
   if (status) {
     validateOptionalString(status.repoID, `${label} status.repoID`)
     validateOptionalString(status.htmlURL, `${label} status.htmlURL`)
+    validateOptionalString(status.cloneURL, `${label} status.cloneURL`)
+    validateOptionalString(status.sshURL, `${label} status.sshURL`)
   }
   return resource
 }
@@ -425,6 +427,8 @@ function repoFromCR(cr: RawCR): Repository {
     description: spec.description ? String(spec.description) : undefined,
     defaultBranch: spec.defaultBranch ? String(spec.defaultBranch) : undefined,
     htmlURL: status.htmlURL ? String(status.htmlURL) : undefined,
+    cloneURL: status.cloneURL ? String(status.cloneURL) : undefined,
+    sshURL: status.sshURL ? String(status.sshURL) : undefined,
     ready: reconciliation.reconciled && condTrue(cr, 'Ready'),
     message: reconciliation.waitingMessage ?? condMsg(cr, 'Ready'),
   }
@@ -593,9 +597,9 @@ const F_CONNECTION = `${GQL_META} spec { provider type owner secretRef { name na
 // Detail fragment: adds generation/observedGeneration and per-condition
 // lastTransitionTime so the detail view can explain why a connection is pending.
 const F_CONNECTION_DETAIL = `${GQL_META} spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration conditions { type status reason message lastTransitionTime } }`
-const F_REPOSITORY = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { htmlURL observedGeneration ${GQL_COND} }`
+const F_REPOSITORY = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { htmlURL cloneURL sshURL observedGeneration ${GQL_COND} }`
 // Detail fragment adds per-condition lastTransitionTime for the conditions card.
-const F_REPOSITORY_DETAIL = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { repoID htmlURL observedGeneration conditions { type status reason message lastTransitionTime } }`
+const F_REPOSITORY_DETAIL = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { repoID htmlURL cloneURL sshURL observedGeneration conditions { type status reason message lastTransitionTime } }`
 const F_DEPLOYKEY = `${GQL_META} spec { repositoryRef title publicKey readOnly } status { keyID secretRef { name } observedGeneration ${GQL_COND} }`
 const F_COLLABORATOR = `${GQL_META} spec { repositoryRef username permission } status { invitationID observedGeneration ${GQL_COND} }`
 const F_PACKAGE = `${GQL_META} spec { repositoryRef } status { packageName type visibility htmlURL versionCount updatedAt observedGeneration ${GQL_COND} }`

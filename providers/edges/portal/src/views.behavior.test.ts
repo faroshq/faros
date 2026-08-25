@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createRenderer, nextTick, type Component } from 'vue'
+import { createRenderer, createSSRApp, nextTick, type Component } from 'vue'
+import { renderToString } from '@vue/server-renderer'
 
 const api = vi.hoisted(() => ({
   listServices: vi.fn(),
@@ -17,8 +18,12 @@ const api = vi.hoisted(() => ({
   deleteWorkload: vi.fn(),
   deployMarketplaceApp: vi.fn(),
 }))
+const confirm = vi.hoisted(() => ({
+  confirmDialog: vi.fn(),
+}))
 
 vi.mock('./api', () => api)
+vi.mock('./portalkit/confirm', () => confirm)
 
 import Services from './Services.vue'
 import ServiceEdit from './ServiceEdit.vue'
@@ -93,7 +98,7 @@ async function mount(component: Component, props: Record<string, unknown> = {}) 
   const previousDocument = globalThis.document
   globalThis.document = {
     getElementById: () => null,
-    createElement: () => ({ id: '', textContent: '' }),
+    createElement: () => ({ id: '', textContent: '', setAttribute() {} }),
     head: { appendChild() {} },
   } as unknown as Document
   const { renderer, root } = createHostRenderer()
@@ -109,6 +114,27 @@ async function mount(component: Component, props: Record<string, unknown> = {}) 
       globalThis.document = previousDocument
     },
   }
+}
+
+async function renderServiceMarkup(props: Record<string, unknown>): Promise<string> {
+  const source = ServiceEdit as unknown as {
+    setup: (props: Record<string, unknown>, context: Record<string, unknown>) => Record<string, any>
+    ssrRender: (...args: any[]) => unknown
+  }
+  const Wrapper = {
+    props: ['service', 'serviceName', 'catalog', 'edges'],
+    async setup(wrapperProps: Record<string, unknown>, context: Record<string, unknown>) {
+      const state = source.setup(wrapperProps, context)
+      const request = api.getService.mock.results.at(-1)?.value as Promise<unknown> | undefined
+      if (request && typeof request.then === 'function') await request
+      await Promise.resolve()
+      state.readLoaded.value = true
+      state.readLoading.value = false
+      return state
+    },
+    ssrRender: source.ssrRender,
+  }
+  return renderToString(createSSRApp(Wrapper, props))
 }
 
 async function flush() {
@@ -136,6 +162,7 @@ const workload = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  confirm.confirmDialog.mockResolvedValue(false)
   api.fetchServiceCatalog.mockResolvedValue([])
   api.listEdges.mockResolvedValue([edge])
   api.listServices.mockResolvedValue([service])
@@ -512,6 +539,139 @@ describe('edge list views', () => {
       expect(state.serviceStatCards).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'credentials', value: 'Not required', detail: 'No credentials required', tone: 'default' }),
       ]))
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('keeps optional credentials neutral while retaining the credential form', async () => {
+    const detail = {
+      ...service,
+      serviceType: 'grafana-loki',
+      host: '',
+      targetNamespace: '',
+      targetName: '',
+      port: 3100,
+      hasCredentials: false,
+      conditions: [],
+    }
+    api.getService.mockResolvedValue(detail)
+    const mounted = await mount(ServiceEdit, {
+      service: detail,
+      serviceName: detail.name,
+      catalog: [{
+        type: 'grafana-loki', displayName: 'Grafana Loki', category: 'Monitoring', auth: 'bearer',
+        credential: { optional: true, packing: 'single', fields: [{ key: 'token', label: 'Bearer token', secret: true }] },
+      }],
+      edges: [edge],
+    })
+    try {
+      await flush()
+      await flush()
+      const state = mounted.instance.setupState
+      expect(state.readLoaded).toBe(true)
+      expect(state.credentialsSupported).toBe(true)
+      expect(state.credentialsOptional).toBe(true)
+      expect(state.credentialsRequired).toBe(false)
+      expect(state.credentialState).toEqual({
+        value: 'Not configured (optional)', detail: 'Optional credential', tone: 'default',
+      })
+      expect(state.serviceStatCards).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'credentials', value: 'Not configured (optional)', tone: 'default' }),
+      ]))
+      const markup = await renderServiceMarkup({
+        service: detail,
+        serviceName: detail.name,
+        catalog: [{
+          type: 'grafana-loki', displayName: 'Grafana Loki', category: 'Monitoring', auth: 'bearer',
+          credential: { optional: true, packing: 'single', fields: [{ key: 'token', label: 'Bearer token', secret: true }] },
+        }],
+        edges: [edge],
+      })
+      expect(markup).toContain('autocomplete="new-password"')
+      expect(markup).toContain('Set credentials')
+      expect(markup).toContain('Not configured (optional)')
+      expect(markup).toContain('k-resource-stat-card--default')
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('keeps required absent credentials visible and warning-toned', async () => {
+    const detail = {
+      ...service,
+      serviceType: 'grafana',
+      hasCredentials: false,
+      conditions: [],
+    }
+    api.getService.mockResolvedValue(detail)
+    const mounted = await mount(ServiceEdit, {
+      service: detail,
+      serviceName: detail.name,
+      catalog: [{
+        type: 'grafana', displayName: 'Grafana', category: 'Monitoring', auth: 'bearer',
+        credential: { packing: 'single', fields: [{ key: 'token', label: 'Service account token', secret: true }] },
+      }],
+      edges: [edge],
+    })
+    try {
+      await flush()
+      await flush()
+      const state = mounted.instance.setupState
+      expect(state.readLoaded).toBe(true)
+      expect(state.credentialsSupported).toBe(true)
+      expect(state.credentialsOptional).toBe(false)
+      expect(state.credentialsRequired).toBe(true)
+      expect(state.credentialState).toEqual({
+        value: 'Missing', detail: 'Credentials missing', tone: 'warning',
+      })
+      const markup = await renderServiceMarkup({
+        service: detail,
+        serviceName: detail.name,
+        catalog: [{
+          type: 'grafana', displayName: 'Grafana', category: 'Monitoring', auth: 'bearer',
+          credential: { packing: 'single', fields: [{ key: 'token', label: 'Service account token', secret: true }] },
+        }],
+        edges: [edge],
+      })
+      expect(markup).toContain('autocomplete="new-password"')
+      expect(markup).toContain('Set credentials')
+      expect(markup).toContain('>Missing</strong>')
+      expect(markup).toContain('k-resource-stat-card--warning')
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('shows a distinct deleting phase while the service delete is pending and recovers on failure', async () => {
+    const detail = { ...service, hasCredentials: false, conditions: [] }
+    const pendingDelete = deferred<void>()
+    api.getService.mockResolvedValue(detail)
+    api.deleteEdgeService.mockImplementation(() => pendingDelete.promise)
+    confirm.confirmDialog.mockResolvedValue(true)
+    const mounted = await mount(ServiceEdit, {
+      service: detail,
+      serviceName: detail.name,
+      catalog: [{ type: 'generic', displayName: 'Generic HTTP', category: 'Other', auth: 'none', credential: {} }],
+      edges: [edge],
+    })
+    try {
+      await flush()
+      const state = mounted.instance.setupState
+      const deletePromise = state.onDelete()
+      await flush()
+      expect(state.deleting).toBe(true)
+      expect(state.busy).toBe(true)
+      expect(state.serviceStatus).toBe('Deleting')
+      expect(state.serviceStatCards).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'status', value: 'Deleting', tone: 'warning' }),
+      ]))
+
+      pendingDelete.reject({ reason: 'HTTPError', message: 'delete failed' })
+      await deletePromise
+      expect(state.deleting).toBe(false)
+      expect(state.busy).toBe(false)
+      expect(state.mutationError).toBe('delete failed')
     } finally {
       mounted.unmount()
     }

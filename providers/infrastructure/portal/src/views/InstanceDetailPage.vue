@@ -36,7 +36,7 @@ function instanceIsDeleting(instance: Instance): boolean {
   return Boolean(instance.deletionTimestamp) || props.tombstones.has(instance.name, instance.uid)
 }
 
-const deletionInProgress = computed(() => Boolean(inst.value && instanceIsDeleting(inst.value)))
+const deletionInProgress = computed(() => deleting.value || Boolean(inst.value && instanceIsDeleting(inst.value)))
 const displayedPhase = computed(() => deletionInProgress.value ? 'Deleting' : inst.value?.phase ?? '')
 const displayedMessage = computed(() => {
   if (!inst.value) return undefined
@@ -237,7 +237,7 @@ onUnmounted(() => {
   <section class="instance-detail">
     <a
       class="k-btn k-btn--ghost k-back-action instance-detail__back"
-      href="/providers/infrastructure/instances"
+      href="/ui/providers/infrastructure/instances"
       :aria-disabled="deleting || deletionInProgress || undefined"
       @click.prevent="goBack"
     >
@@ -303,6 +303,7 @@ onUnmounted(() => {
       </template>
       <template #body>
         <span v-if="loading" class="instance-detail__sr-only" role="status" aria-live="polite">Updating instance…</span>
+        <p v-if="deleting" class="instance-message" role="status" aria-live="polite">Deleting this instance. The last successful snapshot remains visible until the hub confirms removal.</p>
         <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
           <span>{{ deleteError }}</span>
           <button type="button" class="k-btn k-btn--ghost" @click="deleteError = null">Dismiss</button>

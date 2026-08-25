@@ -27,15 +27,18 @@ let mounted = false
 let refresh!: LatestRefreshController
 
 const validated = computed(() => conn.value?.conditions.find(c => c.type === 'Validated'))
-const deleting = computed(() => !!conn.value && (
-  !!conn.value.deletionTimestamp || props.deletions.has(deletionScope, conn.value.name, conn.value.uid)
-))
 const reconciled = computed(() =>
   !!conn.value &&
   conn.value.observedGeneration !== undefined &&
   conn.value.generation !== undefined &&
   conn.value.observedGeneration >= conn.value.generation,
 )
+const connectionDeleteInFlight = computed(() => operations.phase(operationKey('connection', conn.value?.name || props.name)) === 'deleting')
+const deleting = computed(() => !!conn.value && (
+  connectionDeleteInFlight.value ||
+  !!conn.value.deletionTimestamp ||
+  props.deletions.has(deletionScope, conn.value.name, conn.value.uid)
+))
 const hint = computed(() => {
   const c = conn.value
   if (!c || c.validated) return ''
@@ -215,7 +218,7 @@ onUnmounted(() => {
 
 <template>
   <div class="connection-detail">
-    <a class="k-btn k-btn--ghost connection-detail__back" href="/providers/code/connections" @click.prevent="emit('back')">
+    <a class="k-btn k-btn--ghost connection-detail__back" href="/ui/providers/code/connections" @click.prevent="emit('back')">
       <ArrowLeft :size="14" aria-hidden="true" /> Connections
     </a>
 

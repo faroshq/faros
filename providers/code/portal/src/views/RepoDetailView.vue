@@ -117,11 +117,10 @@ function isDeleting(scope: string, resource: { name: string; uid?: string; delet
 function isPackageDeleting(resource: Package): boolean {
   return !!resource.deletionTimestamp
 }
-const repositoryDeleting = computed(() => !!repo.value && isDeleting(repositoryScope, repo.value))
-const repositoryActionBusy = computed(() => repositoryDeleting.value || operations.isLocked(operationKey('repository', props.name)))
-const detailRefreshing = computed(() =>
-  repoLoading.value || connectionsLoading.value || keysLoading.value || collabsLoading.value || packagesLoading.value,
-)
+const repositoryDeleteInFlight = computed(() => operations.phase(operationKey('repository', props.name)) === 'deleting')
+const repositoryDeleting = computed(() => repositoryDeleteInFlight.value || (!!repo.value && isDeleting(repositoryScope, repo.value)))
+const repositoryRefreshing = computed(() => repoLoading.value)
+const repositoryActionBusy = computed(() => repositoryRefreshing.value || repositoryDeleting.value || operations.isLocked(operationKey('repository', props.name)))
 const keyRows = computed<Array<Record<string, unknown>>>(() => keys.value
   .map(key => {
     const deleting = isDeleting(keyScope, key)
@@ -701,7 +700,7 @@ onUnmounted(() => {
 
 <template>
   <div class="repo-detail">
-    <a class="k-btn k-btn--ghost repo-detail__back" href="/providers/code/repositories" @click.prevent="emit('back')">
+    <a class="k-btn k-btn--ghost repo-detail__back" href="/ui/providers/code/repositories" @click.prevent="emit('back')">
       <ArrowLeft :size="14" aria-hidden="true" /> Repositories
     </a>
     <div class="repo-detail__resource">
@@ -733,12 +732,12 @@ onUnmounted(() => {
         <button
           type="button"
           class="k-btn k-btn--ghost"
-          :disabled="detailRefreshing || repositoryActionBusy"
-          :aria-busy="detailRefreshing || undefined"
+          :disabled="repositoryActionBusy"
+          :aria-busy="repositoryRefreshing || undefined"
           @click="loadAll"
         >
-          <RefreshCw :size="14" :class="{ spin: detailRefreshing }" aria-hidden="true" />
-          {{ detailRefreshing ? 'Refreshing…' : 'Refresh' }}
+          <RefreshCw :size="14" :class="{ spin: repositoryRefreshing }" aria-hidden="true" />
+          {{ repositoryRefreshing ? 'Refreshing…' : 'Refresh' }}
         </button>
         <details ref="actionsMenu" class="repo-detail__menu">
           <summary class="k-btn k-btn--ghost" aria-label="More repository actions">
@@ -746,7 +745,7 @@ onUnmounted(() => {
             <span class="sr-only">More actions</span>
           </summary>
           <div class="repo-detail__menu-popover">
-            <button type="button" class="repo-detail__menu-item" :disabled="!repo || repositoryActionBusy || detailRefreshing" @click="deleteFromMenu">
+            <button type="button" class="repo-detail__menu-item" :disabled="!repo || repositoryActionBusy" @click="deleteFromMenu">
               Delete repository
             </button>
           </div>
@@ -760,6 +759,9 @@ onUnmounted(() => {
 
     <template #body>
       <p v-if="repositoryMutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ repositoryMutationError }}</p>
+      <p v-if="repositoryDeleting" class="repo-detail__deleting" role="status" aria-live="polite">
+        Deleting this repository. The last successful snapshot remains visible until the hub confirms removal.
+      </p>
       <div class="repo-detail__sections">
         <ResourceSectionCard
           id="repository-integration"
@@ -885,6 +887,8 @@ onUnmounted(() => {
             <div><dt>Provider status</dt><dd>{{ repo?.ready ? 'Ready' : 'Waiting for reconciliation' }}</dd></div>
             <div><dt>Repository ID</dt><dd class="mono">{{ repo?.repoID || '—' }}</dd></div>
             <div><dt>Browser URL</dt><dd class="mono">{{ repo?.htmlURL || '—' }}</dd></div>
+            <div><dt>Clone URL</dt><dd class="mono">{{ repo?.cloneURL || '—' }}</dd></div>
+            <div><dt>SSH URL</dt><dd class="mono">{{ repo?.sshURL || '—' }}</dd></div>
           </dl>
         </ResourceSectionCard>
       </div>

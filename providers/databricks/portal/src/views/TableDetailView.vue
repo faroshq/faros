@@ -20,6 +20,7 @@ const loading = ref(false)
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
+const deleting = ref(false)
 const schemaCache = ref<{ uid?: string; generation?: number; refreshedAt?: string; columns: TableColumn[] } | null>(null)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
 let timer: number | undefined
@@ -94,10 +95,10 @@ const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
     label: 'Status',
-    value: table.value?.status || '—',
-    detail: hint.value || 'Schema validation',
+    value: deleting.value ? 'Deleting' : table.value?.status || '—',
+    detail: deleting.value ? 'Deletion in progress' : hint.value || 'Schema validation',
     icon: Activity,
-    tone: statTone(table.value?.status),
+    tone: statTone(deleting.value ? 'Deleting' : table.value?.status),
   },
   {
     id: 'columns',
@@ -157,32 +158,35 @@ function operationPhase(name: string) {
 }
 
 function goBack() {
-  if (table.value && operationLocked(table.value.name)) return
+  if (deleting.value || (table.value && operationLocked(table.value.name))) return
   emit('back')
 }
 
 async function remove() {
-  if (!table.value) return
+  const current = table.value
+  if (!current || deleting.value) return
   const ok = await confirmDialog({
-    title: `Delete table "${table.value.name}"?`,
+    title: `Delete table "${current.name}"?`,
     message: 'App Studio guidance and Databricks MCP tools will no longer be able to inspect this tableRef.',
     confirmLabel: 'Delete',
     danger: true,
   })
   if (!ok) return
-  const lock = operationKey('table', table.value.name)
+  const lock = operationKey('table', current.name)
   if (!operations.acquire(lock, 'deleting')) {
-    mutationError.value = `Table "${table.value.name}" already has an operation in progress.`
+    mutationError.value = `Table "${current.name}" already has an operation in progress.`
     return
   }
+  deleting.value = true
   mutationError.value = null
   try {
-    await api.deleteTable(table.value.name)
-    operations.tombstone(lock, table.value.uid)
+    await api.deleteTable(current.name)
+    operations.tombstone(lock, current.uid)
     emit('back')
   } catch (e) {
     mutationError.value = errMessage(e)
   } finally {
+    deleting.value = false
     operations.release(lock)
   }
 }
@@ -214,6 +218,7 @@ watch(() => props.name, () => {
   table.value = null
   schemaCache.value = null
   loaded.value = false
+  deleting.value = false
   error.value = null
   mutationError.value = null
   refresh.invalidate()
@@ -232,7 +237,7 @@ onUnmounted(() => {
 
 <template>
   <section class="databricks-resource-detail">
-    <a class="k-btn k-btn--ghost databricks-resource-back" href="/providers/databricks/tables" :aria-disabled="!!table && operationLocked(table.name)" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Tables</a>
+    <a class="k-btn k-btn--ghost databricks-resource-back" href="/ui/providers/databricks/tables" :aria-disabled="deleting || (!!table && operationLocked(table.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Tables</a>
 
     <ResourcePage
       :title="table?.name || name"
@@ -245,14 +250,15 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
-          <span v-if="table?.status === 'Ready'">validated against <code>{{ table.fullName }}</code></span>
+          <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
+          <span v-else-if="table?.status === 'Ready'">validated against <code>{{ table.fullName }}</code></span>
           <span v-else-if="table"><code>{{ table.fullName }}</code></span>
           <span v-else class="muted">not validated yet</span>
       </template>
-      <template #status><StatusBadge v-if="table" :status="table.status" :title="table.message" /></template>
+      <template #status><StatusBadge v-if="table" :status="deleting ? 'Deleting' : table.status" :tone="deleting ? 'warning' : null" :title="table.message" /></template>
       <template #actions>
         <div class="databricks-resource-actions" role="group" aria-label="Table actions">
-          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || (!!table && operationLocked(table.name))" :aria-busy="loading || undefined" @click="load">
+          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || deleting || (!!table && operationLocked(table.name))" :aria-busy="loading || undefined" @click="load">
             <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
             {{ loading ? 'Refreshing…' : 'Refresh' }}
           </button>
@@ -262,7 +268,7 @@ onUnmounted(() => {
               <span class="sr-only">More actions</span>
             </summary>
             <div class="databricks-resource-menu-popover">
-              <button type="button" class="databricks-resource-menu-item" :disabled="!table || loading || operationLocked(table?.name || name)" @click="deleteFromMenu">
+              <button type="button" class="databricks-resource-menu-item" :disabled="!table || loading || deleting || operationLocked(table?.name || name)" @click="deleteFromMenu">
                 {{ operationPhase(table?.name || name) === 'deleting' ? 'Deleting table…' : 'Delete table' }}
               </button>
             </div>
@@ -272,6 +278,7 @@ onUnmounted(() => {
       <template #summary><ResourceStatCards :cards="statCards" density="compact" aria-label="Table summary" /></template>
       <template #body>
         <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating…</span>
+        <p v-if="deleting" class="warning deletion-progress" role="status" aria-live="polite">Deleting this table. The last successful snapshot remains visible until the hub confirms removal.</p>
         <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
           <span>{{ mutationError }}</span>
           <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
@@ -279,7 +286,8 @@ onUnmounted(() => {
 
         <div v-if="table" class="databricks-resource-sections">
           <ResourceSectionCard id="table-status" eyebrow="Validation" title="Status" description="Schema validation, readiness reasons, and provider feedback for this table.">
-            <p v-if="hint" class="muted">{{ hint }}</p>
+            <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
+            <p v-else-if="hint" class="muted">{{ hint }}</p>
             <p v-else class="muted">The table schema is validated and ready for consumers.</p>
             <p v-if="table.message" class="muted">{{ table.message }}</p>
           </ResourceSectionCard>

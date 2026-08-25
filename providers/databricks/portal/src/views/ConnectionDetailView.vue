@@ -22,6 +22,7 @@ const editing = ref(false)
 const editHost = ref('')
 const editToken = ref('')
 const saving = ref(false)
+const deleting = ref(false)
 const saveError = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const editHostInput = ref<HTMLInputElement | null>(null)
@@ -75,10 +76,10 @@ const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
     label: 'Status',
-    value: conn.value?.status || '—',
-    detail: hint.value || 'Credential validation',
+    value: deleting.value ? 'Deleting' : conn.value?.status || '—',
+    detail: deleting.value ? 'Deletion in progress' : hint.value || 'Credential validation',
     icon: Activity,
-    tone: statTone(conn.value?.status),
+    tone: statTone(deleting.value ? 'Deleting' : conn.value?.status),
   },
   {
     id: 'auth',
@@ -114,7 +115,7 @@ function operationPhase(name: string) {
 }
 
 function goBack() {
-  if (conn.value && operationLocked(conn.value.name)) return
+  if (deleting.value || (conn.value && operationLocked(conn.value.name))) return
   emit('back')
 }
 
@@ -172,27 +173,30 @@ async function saveEdit() {
 }
 
 async function remove() {
-  if (!conn.value) return
+  const current = conn.value
+  if (!current || deleting.value) return
   const ok = await confirmDialog({
-    title: `Delete connection "${conn.value.name}"?`,
+    title: `Delete connection "${current.name}"?`,
     message: 'Warehouses and tables that reference this connection will stop working.',
     confirmLabel: 'Delete',
     danger: true,
   })
   if (!ok) return
-  const lock = operationKey('connection', conn.value.name)
+  const lock = operationKey('connection', current.name)
   if (!operations.acquire(lock, 'deleting')) {
-    mutationError.value = `Connection "${conn.value.name}" already has an operation in progress.`
+    mutationError.value = `Connection "${current.name}" already has an operation in progress.`
     return
   }
+  deleting.value = true
   mutationError.value = null
   try {
-    await api.deleteConnection(conn.value)
-    operations.tombstone(lock, conn.value.uid)
+    await api.deleteConnection(current)
+    operations.tombstone(lock, current.uid)
     emit('back')
   } catch (e) {
     mutationError.value = errMessage(e)
   } finally {
+    deleting.value = false
     operations.release(lock)
   }
 }
@@ -223,6 +227,7 @@ refresh = createLatestRefreshController(async requestID => {
 watch(() => props.name, () => {
   conn.value = null
   loaded.value = false
+  deleting.value = false
   editing.value = false
   error.value = null
   mutationError.value = null
@@ -242,7 +247,7 @@ onUnmounted(() => {
 
 <template>
   <section class="databricks-resource-detail">
-    <a class="k-btn k-btn--ghost databricks-resource-back" href="/providers/databricks/connections" :aria-disabled="!!conn && operationLocked(conn.name)" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Connections</a>
+    <a class="k-btn k-btn--ghost databricks-resource-back" href="/ui/providers/databricks/connections" :aria-disabled="deleting || (!!conn && operationLocked(conn.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Connections</a>
 
     <ResourcePage
       :title="conn?.name || name"
@@ -255,14 +260,15 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
-          <span v-if="conn?.status === 'Ready'">validated against <code>{{ conn.host }}</code></span>
+          <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
+          <span v-else-if="conn?.status === 'Ready'">validated against <code>{{ conn.host }}</code></span>
           <span v-else-if="conn"><code>{{ conn.host }}</code></span>
           <span v-else class="muted">not validated yet</span>
       </template>
-      <template #status><StatusBadge v-if="conn" :status="conn.status" :title="conn.message" /></template>
+      <template #status><StatusBadge v-if="conn" :status="deleting ? 'Deleting' : conn.status" :tone="deleting ? 'warning' : null" :title="conn.message" /></template>
       <template #actions>
         <div class="databricks-resource-actions" role="group" aria-label="Connection actions">
-          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || (!!conn && operationLocked(conn.name))" :aria-busy="loading || undefined" @click="load">
+          <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || deleting || (!!conn && operationLocked(conn.name))" :aria-busy="loading || undefined" @click="load">
             <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
             {{ loading ? 'Refreshing…' : 'Refresh' }}
           </button>
@@ -272,7 +278,7 @@ onUnmounted(() => {
               <span class="sr-only">More actions</span>
             </summary>
             <div class="databricks-resource-menu-popover">
-              <button type="button" class="databricks-resource-menu-item" :disabled="!conn || loading || operationLocked(conn?.name || name)" @click="deleteFromMenu">
+              <button type="button" class="databricks-resource-menu-item" :disabled="!conn || loading || deleting || operationLocked(conn?.name || name)" @click="deleteFromMenu">
                 {{ operationPhase(conn?.name || name) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
               </button>
             </div>
@@ -282,6 +288,7 @@ onUnmounted(() => {
       <template #summary><ResourceStatCards :cards="statCards" density="compact" aria-label="Connection summary" /></template>
       <template #body>
         <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating…</span>
+        <p v-if="deleting" class="warning deletion-progress" role="status" aria-live="polite">Deleting this connection. The last successful snapshot remains visible until the hub confirms removal.</p>
         <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
           <span>{{ mutationError }}</span>
           <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
@@ -289,7 +296,8 @@ onUnmounted(() => {
 
         <div v-if="conn" class="databricks-resource-sections">
           <ResourceSectionCard id="connection-status" eyebrow="Validation" title="Status" description="Credential validation and provider feedback for this connection.">
-            <p v-if="hint" class="muted">{{ hint }}</p>
+            <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
+            <p v-else-if="hint" class="muted">{{ hint }}</p>
             <p v-else class="muted">The connection is validated and ready for dependent resources.</p>
             <p v-if="conn.message" class="muted">{{ conn.message }}</p>
           </ResourceSectionCard>

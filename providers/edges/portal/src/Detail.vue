@@ -372,7 +372,7 @@ onUnmounted(() => clearInterval(timer))
 
 <template>
   <div class="edge-detail">
-    <a class="k-btn k-btn--ghost edge-detail__back" href="/providers/edges" @click.prevent="emit('back')">
+    <a class="k-btn k-btn--ghost edge-detail__back" href="/ui/providers/edges" @click.prevent="emit('back')">
       <ArrowLeft :size="14" aria-hidden="true" /> Edges
     </a>
 

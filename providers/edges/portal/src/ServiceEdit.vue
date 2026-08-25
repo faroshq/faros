@@ -28,6 +28,10 @@ const readLoaded = ref(false)
 const readError = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const busy = ref(false)
+// Delete has a distinct lifecycle from ordinary save/connect mutations. Keep
+// this state after the actions menu closes so the resource status and the
+// announcement remain truthful until the parent navigates away on success.
+const deleting = ref(false)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
 let selectionGeneration = 0
 let selectedName = ''
@@ -144,12 +148,14 @@ watch(
     readError.value = null
     mutationError.value = null
     busy.value = false
+    deleting.value = false
     void load()
   },
   { immediate: true },
 )
 
 const serviceStatus = computed(() => {
+  if (deleting.value) return 'Deleting'
   if (!readLoaded.value) {
     if (readLoading.value) return 'Loading'
     if (readError.value) return 'Unavailable'
@@ -167,7 +173,8 @@ function statusTone(status: string): 'success' | 'warning' | 'danger' | 'muted' 
     case 'error': return 'danger'
     case 'loading':
     case 'detected':
-    case 'pending': return 'warning'
+    case 'pending':
+    case 'deleting': return 'warning'
     default: return 'muted'
   }
 }
@@ -187,16 +194,47 @@ const targetSummary = computed(() => {
   return value.port ? `${target}:${value.port}` : target
 })
 
-const credentialsRequired = computed(() => (entry.value?.auth ?? '').toLowerCase() !== 'none')
+// The catalog distinguishes a service that has no credential mechanism from a
+// service that supports an optional credential. Keep those separate from a
+// required credential so an optional, unconfigured service is not presented as
+// unhealthy while its credential form remains available.
+const credentialsSupported = computed(() => {
+  const auth = (entry.value?.auth ?? '').toLowerCase()
+  return !!entry.value && auth !== '' && auth !== 'none'
+})
+const credentialsOptional = computed(() => credentialsSupported.value && !!entry.value?.credential.optional)
+const credentialsRequired = computed(() => credentialsSupported.value && !credentialsOptional.value)
+
+const credentialState = computed(() => {
+  if (!credentialsSupported.value) {
+    return { value: 'Not required', detail: 'No credentials required', tone: 'default' as const }
+  }
+  if (service.value?.hasCredentials) {
+    return { value: 'Configured', detail: 'Credentials configured', tone: 'success' as const }
+  }
+  if (credentialsOptional.value) {
+    return { value: 'Not configured (optional)', detail: 'Optional credential', tone: 'default' as const }
+  }
+  if (credentialsRequired.value) {
+    return { value: 'Missing', detail: 'Credentials missing', tone: 'warning' as const }
+  }
+  return { value: 'Not required', detail: 'No credentials required', tone: 'default' as const }
+})
+
+const credentialDescription = computed(() => {
+  if (!credentialsSupported.value) return 'This service does not require credentials.'
+  if (credentialsOptional.value) {
+    return 'Credentials are optional. Set one when this service requires authentication; the value is written to a workspace Secret and is never displayed after submission.'
+  }
+  return 'Set or update the credential used to authenticate this service. The value is written to a workspace Secret and is never displayed after submission.'
+})
 
 const serviceStatCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
     label: 'Status',
     value: serviceStatus.value,
-    detail: !credentialsRequired.value
-      ? 'No credentials required'
-      : service.value?.hasCredentials ? 'Credentials configured' : 'Credentials missing',
+    detail: credentialState.value.detail,
     icon: Plug,
     tone: serviceStatTone.value,
   },
@@ -205,10 +243,10 @@ const serviceStatCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'credentials',
     label: 'Credentials',
-    value: !credentialsRequired.value ? 'Not required' : service.value?.hasCredentials ? 'Configured' : 'Missing',
+    value: credentialState.value.value,
     icon: KeyRound,
-    detail: !credentialsRequired.value ? 'No credentials required' : undefined,
-    tone: !credentialsRequired.value ? 'default' : service.value?.hasCredentials ? 'success' : 'warning',
+    detail: credentialState.value.detail,
+    tone: credentialState.value.tone,
   },
 ])
 
@@ -269,7 +307,7 @@ const credFilled = computed(() => {
 async function onSaveCreds(): Promise<void> {
   const name = currentName.value
   const token = packedCredential()
-  if (!credentialsRequired.value || !name || !service.value || !token) return
+  if (!credentialsSupported.value || !name || !service.value || !token) return
   busy.value = true
   mutationError.value = null
   try {
@@ -286,7 +324,7 @@ async function onSaveCreds(): Promise<void> {
 
 async function onDelete(): Promise<void> {
   const name = currentName.value
-  if (!name || !service.value || busy.value) return
+  if (!name || !service.value || busy.value || deleting.value) return
   actionsMenu.value?.removeAttribute('open')
   if (!(await confirmDialog({
     title: `Delete service "${name}"?`,
@@ -294,6 +332,7 @@ async function onDelete(): Promise<void> {
     danger: true,
     confirmLabel: 'Delete',
   }))) return
+  deleting.value = true
   busy.value = true
   mutationError.value = null
   try {
@@ -301,6 +340,7 @@ async function onDelete(): Promise<void> {
     emit('deleted')
   } catch (error) {
     mutationError.value = errorMessage(error, 'Delete failed')
+    deleting.value = false
   } finally {
     busy.value = false
   }
@@ -309,7 +349,7 @@ async function onDelete(): Promise<void> {
 
 <template>
   <div class="service-detail">
-    <a class="k-btn k-btn--ghost service-detail__back" href="/providers/edges/services" @click.prevent="emit('back')">
+    <a class="k-btn k-btn--ghost service-detail__back" href="/ui/providers/edges/services" @click.prevent="emit('back')">
       <ArrowLeft :size="14" aria-hidden="true" /> Services
     </a>
     <div class="service-detail__resource">
@@ -357,6 +397,7 @@ async function onDelete(): Promise<void> {
 
         <template #body>
           <p v-if="mutationError" class="banner error service-detail__mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
+          <p v-if="deleting" class="waiting" role="status" aria-live="polite">Deleting this service. The last successful snapshot remains visible until the hub confirms removal.</p>
           <div class="service-detail__sections">
             <ResourceSectionCard class="service-detail__card" id="service-provider" eyebrow="Provider" title="Provider info" description="The catalog definition determines authentication, reachability, and exposed AI tools.">
               <div class="service-detail__facts">
@@ -405,9 +446,9 @@ async function onDelete(): Promise<void> {
               <div class="service-detail__form-actions"><button class="k-btn k-btn--primary" type="button" :disabled="busy || !service" @click="onSaveConfig"><Save :size="14" aria-hidden="true" /> Save configuration</button></div>
             </ResourceSectionCard>
 
-            <ResourceSectionCard class="service-detail__card" id="service-credentials" eyebrow="Access" title="Credentials" :description="credentialsRequired ? 'Set or update the credential used to authenticate this service. The value is written to a workspace Secret and is never displayed after submission.' : 'This service does not require credentials.'">
-              <template v-if="credentialsRequired">
-                <p class="muted service-detail__credential-hint">{{ entry?.credential.hint || 'Credential' }} — makes the service Ready.</p>
+            <ResourceSectionCard class="service-detail__card" id="service-credentials" eyebrow="Access" title="Credentials" :description="credentialDescription">
+              <template v-if="credentialsSupported">
+                <p class="muted service-detail__credential-hint">{{ entry?.credential.hint || 'Credential' }}{{ credentialsOptional ? ' (optional)' : '' }} — makes the service Ready when authentication is required.</p>
                 <div class="service-detail__credential-row">
                   <label v-for="field in credFields" :key="field.key" class="fld"><span class="lbl">{{ field.label }}</span><input v-model="credInputs[field.key]" :type="field.secret ? 'password' : 'text'" class="k-input" :disabled="busy || !service" :placeholder="field.label" autocomplete="new-password" /><span v-if="field.help" class="muted service-detail__field-help">{{ field.help }}</span></label>
                   <button class="k-btn k-btn--ghost" type="button" :disabled="busy || !service || !credFilled" @click="onSaveCreds"><KeyRound :size="14" aria-hidden="true" /> {{ service?.hasCredentials ? 'Update' : 'Set' }} credentials</button>

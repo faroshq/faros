@@ -26,7 +26,7 @@ describe('resource detail cards', () => {
 
   it('preserves the backlink, title, and fixed Edge action order', () => {
     expect(detail).toMatch(/<div class="edge-detail">/)
-    expect(detail).toMatch(/<a class="k-btn k-btn--ghost edge-detail__back" href="\/providers\/edges" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft[\s\S]*\/> Edges/)
+    expect(detail).toMatch(/<a class="k-btn k-btn--ghost edge-detail__back" href="\/ui\/providers\/edges" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft[\s\S]*\/> Edges/)
     expect(detail).toMatch(/class="edge-detail__provider-mark"/)
     expect(detail).toMatch(/:title="name"[\s\S]*<template #meta>[\s\S]*edgeTypeLabel[\s\S]*Edges[\s\S]*<StatusBadge/)
     expect(detail).toMatch(/<template #actions>[\s\S]*Open terminal[\s\S]*Refresh[\s\S]*More edge actions[\s\S]*Delete/)

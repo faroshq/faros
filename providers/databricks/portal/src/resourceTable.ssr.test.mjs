@@ -64,7 +64,11 @@ function createHostRenderer() {
       node.parent = null
     },
     createElement(type) {
-      return { type, props: {}, children: [], parent: null }
+      const node = { type, props: {}, children: [], parent: null }
+      node.removeAttribute = name => { delete node.props[name] }
+      node.setAttribute = (name, value) => { node.props[name] = String(value) }
+      node.focus = () => {}
+      return node
     },
     createText(text) {
       return textNode(text)
@@ -132,6 +136,96 @@ async function mountInteractiveTable(ResourceTable, props) {
       app.unmount()
       globalThis.document = previousDocument
     },
+  }
+}
+
+function hostText(node) {
+  if (!node) return ''
+  if (node.type === '#text') return String(node.text ?? '')
+  return (node.children ?? []).map(hostText).join('')
+}
+
+function className(node) {
+  return String(node?.props?.class ?? '')
+}
+
+async function loadMountedSFC(path) {
+  const module = await vite.ssrLoadModule(path)
+  const source = await readFile(resolve(portalRoot, path.replace(/^\//, '')), 'utf8')
+  const template = source.match(/<template(?:\s[^>]*)?>([\s\S]*)<\/template>/)?.[1]
+  assert.ok(template, `${path} has a template for mounted behavior coverage`)
+  const [{ compile }, vueRuntime] = await Promise.all([
+    import('@vue/compiler-dom'),
+    import('vue'),
+  ])
+  // The runtime compiler intentionally receives templates only; the
+  // TypeScript casts in ResourceTable's event handlers are already checked by
+  // vue-tsc and are removed here solely to make this custom renderer harness
+  // executable without a second SFC transform.
+  const runtimeTemplate = template.replace(/\s+as HTML(?:Input|Select)Element/g, '')
+  const compiled = compile(runtimeTemplate, {
+    mode: 'function',
+    prefixIdentifiers: true,
+    expressionPlugins: ['typescript'],
+  })
+  assert.equal((compiled.errors ?? []).length, 0, `${path} template compiles for mounted behavior coverage`)
+  const compiledRender = new Function('Vue', compiled.code)(vueRuntime)
+  // `ssrLoadModule` gives script-setup components an SSR render function and
+  // marks their setup bindings as private to the generated render closure.
+  // The test-only runtime compiler needs those bindings through `_ctx`, so
+  // bridge the public proxy to the unwrapped setup state for this mounted
+  // harness without changing the production component.
+  module.default.render = (ctx, cache, _props, setupState) => compiledRender(new Proxy(ctx, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver)
+      return value === undefined ? setupState?.[key] : value
+    },
+  }), cache)
+  return module.default
+}
+
+function mountDetailView(Component, props, components) {
+  const previousDocument = globalThis.document
+  const previousWindow = globalThis.window
+  const styleNode = {
+    id: '',
+    textContent: '',
+    setAttribute() {},
+  }
+  globalThis.document = {
+    documentElement: { style: { getPropertyValue: () => '' } },
+    getElementById: () => null,
+    createElement: () => styleNode,
+    head: { appendChild() {} },
+  }
+  globalThis.window = {
+    setInterval: () => 1,
+    clearInterval() {},
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  }
+  const { renderer, root } = createHostRenderer()
+  const app = renderer.createApp(Component, props)
+  for (const [name, component] of Object.entries(components ?? {})) app.component(name, component)
+  app._context.provides[Symbol.for('v-scx')] = { modules: new Set() }
+  app.mount(root)
+  return {
+    root,
+    instance: app._instance,
+    find: predicate => findHostNode(root, predicate),
+    unmount() {
+      app.unmount()
+      if (previousDocument === undefined) delete globalThis.document
+      else globalThis.document = previousDocument
+      if (previousWindow === undefined) delete globalThis.window
+      else globalThis.window = previousWindow
+    },
+  }
+}
+
+async function flushVue() {
+  for (let i = 0; i < 6; i += 1) {
+    await Promise.resolve()
+    await nextTick()
   }
 }
 
@@ -1041,4 +1135,155 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(style, /\.databricks-resource-actions\s*\{[\s\S]*gap: 8px/)
   assert.match(style, /\.databricks-resource-menu-popover\s*\{[\s\S]*position: absolute/)
   assert.match(style, /\.databricks-resource-sections\s*\{[\s\S]*flex-direction: column[\s\S]*gap: 14px/)
+})
+
+test('resource detail deletes expose pending state, truthful status, and real browser backlinks', async () => {
+  const details = {
+    connection: await readFile(new URL('./views/ConnectionDetailView.vue', import.meta.url), 'utf8'),
+    warehouse: await readFile(new URL('./views/WarehouseDetailView.vue', import.meta.url), 'utf8'),
+    table: await readFile(new URL('./views/TableDetailView.vue', import.meta.url), 'utf8'),
+  }
+  const collections = {
+    connection: 'connections',
+    warehouse: 'warehouses',
+    table: 'tables',
+  }
+
+  for (const [kind, source] of Object.entries(details)) {
+    const collection = collections[kind]
+    assert.match(source, /const deleting = ref\(false\)/, `${kind} owns an immediate reactive delete state`)
+    assert.match(source, /if \(!current \|\| deleting\.value\) return/, `${kind} rejects duplicate delete starts`)
+    assert.match(source, /operations\.acquire\(lock, 'deleting'\)/, `${kind} keeps the serialized delete lock`)
+    assert.match(source, /deleting\.value = true/, `${kind} marks delete pending before the network call`)
+    assert.match(source, /operations\.tombstone\(lock, current\.uid\)/, `${kind} preserves the acknowledged-delete tombstone`)
+    assert.match(source, /deleting\.value = false/, `${kind} restores actions after delete completion or failure`)
+    assert.match(source, /:status="deleting \? 'Deleting' : [^"]+"/, `${kind} renders the pending status`)
+    assert.match(source, /:tone="deleting \? 'warning' : null"/, `${kind} gives pending status a warning tone`)
+    assert.match(source, /<p v-if="deleting"[^>]*role="status"[^>]*aria-live="polite">[\s\S]*Deleting this/, `${kind} announces deletion outside the closed menu`)
+    assert.match(source, new RegExp(`href="/ui/providers/databricks/${collection}"[^>]*:aria-disabled="deleting`), `${kind} has the real browser fallback backlink`)
+    assert.match(source, /:disabled="loading \|\| deleting \|\|/, `${kind} disables refresh while deleting`)
+    assert.match(source, /:disabled="![^"]+ \|\| loading \|\| deleting \|\| operationLocked/, `${kind} disables delete while deleting`)
+    assert.match(source, /if \(deleting\.value \|\| \(/, `${kind} guards back navigation while deleting`)
+  }
+})
+
+test('mounted resource detail deletes stay truthful through pending rejection and recovery', async () => {
+  const loadedModules = await Promise.all([
+      loadMountedSFC('/src/views/ConnectionDetailView.vue'),
+      loadMountedSFC('/src/views/WarehouseDetailView.vue'),
+      loadMountedSFC('/src/views/TableDetailView.vue'),
+      loadMountedSFC('/src/portalkit/ConditionsPanel.vue'),
+      loadMountedSFC('/src/portalkit/ResourcePage.vue'),
+      loadMountedSFC('/src/portalkit/ResourceSectionCard.vue'),
+      loadMountedSFC('/src/portalkit/ResourceStatCards.vue'),
+      loadMountedSFC('/src/portalkit/StatusBadge.vue'),
+      loadMountedSFC('/src/portalkit/ResourceTable.vue'),
+      vite.ssrLoadModule('/src/api.ts'),
+      vite.ssrLoadModule('/src/portalkit/confirm.ts'),
+      vite.ssrLoadModule('/src/refresh.ts'),
+  ])
+  const [ConnectionDetailView, WarehouseDetailView, TableDetailView, ConditionsPanel, ResourcePage, ResourceSectionCard, ResourceStatCards, StatusBadge, ResourceTable, apiModule, confirmModule, refreshModule] = loadedModules
+  const components = { ConditionsPanel, ResourcePage, ResourceSectionCard, ResourceStatCards, StatusBadge, ResourceTable }
+
+  const cases = [
+    {
+      kind: 'connection',
+      Component: ConnectionDetailView,
+      getMethod: 'getConnection',
+      deleteMethod: 'deleteConnection',
+      resource: {
+        name: 'orders', uid: 'connection-uid', host: 'https://dbc.example.com', authType: 'pat',
+        secretName: 'orders-token', secretNamespace: 'default', secretKey: 'token', status: 'Ready', conditions: [],
+      },
+      deleteError: { reason: 'HTTPError', message: 'connection delete failed' },
+    },
+    {
+      kind: 'warehouse',
+      Component: WarehouseDetailView,
+      getMethod: 'getWarehouse',
+      deleteMethod: 'deleteWarehouse',
+      resource: {
+        name: 'orders-sql', uid: 'warehouse-uid', connectionRef: 'orders', warehouseID: 'warehouse-123', status: 'Ready', conditions: [],
+      },
+      deleteError: { reason: 'HTTPError', message: 'warehouse delete failed' },
+    },
+    {
+      kind: 'table',
+      Component: TableDetailView,
+      getMethod: 'getTable',
+      deleteMethod: 'deleteTable',
+      resource: {
+        name: 'orders', uid: 'table-uid', connectionRef: 'orders', warehouseRef: 'orders-sql',
+        catalog: 'main', schema: 'sales', table: 'orders', fullName: 'main.sales.orders',
+        status: 'Ready', columns: [], conditions: [],
+      },
+      deleteError: { reason: 'HTTPError', message: 'table delete failed' },
+    },
+  ]
+
+  for (const testCase of cases) {
+    const originalGet = apiModule.api[testCase.getMethod]
+    const originalDelete = apiModule.api[testCase.deleteMethod]
+    const context = `mounted-detail-delete-${testCase.kind}`
+    let deleteCalls = 0
+    let rejectDelete
+    const deletePending = new Promise((_, reject) => { rejectDelete = reject })
+    apiModule.api[testCase.getMethod] = async () => testCase.resource
+    apiModule.api[testCase.deleteMethod] = async () => {
+      deleteCalls += 1
+      return deletePending
+    }
+    refreshModule.setOperationContext(context)
+    const mounted = mountDetailView(testCase.Component, { name: testCase.resource.name }, components)
+
+    try {
+      await flushVue()
+      assert.equal(typeof mounted.instance.setupState.deleteFromMenu, 'function', `${testCase.kind} exposes the overflow delete action`)
+      const menu = mounted.find(node => node.type === 'details' && className(node).includes('databricks-resource-menu'))
+      assert.ok(menu, `${testCase.kind} renders an overflow menu`)
+      menu.props.open = true
+
+      mounted.instance.setupState.deleteFromMenu()
+      assert.equal('open' in menu.props, false, `${testCase.kind} closes the overflow menu before deletion work`)
+      confirmModule.resolveConfirm(true)
+      await flushVue()
+
+      assert.equal(deleteCalls, 1, `${testCase.kind} starts exactly one delete request`)
+      assert.equal(mounted.instance.setupState.deleting, true, `${testCase.kind} keeps local deleting state true while the request is pending`)
+      const status = mounted.find(node => node.type === 'span' && className(node).includes('k-badge'))
+      assert.ok(status, `${testCase.kind} renders a status badge while deletion is pending`)
+      assert.match(hostText(status), /Deleting/)
+      assert.match(className(status), /k-badge--warning/)
+      assert.ok(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), `${testCase.kind} exposes visible polite deletion progress outside the menu`)
+
+      const back = mounted.find(node => node.type === 'a' && className(node).includes('databricks-resource-back'))
+      const refresh = mounted.find(node => node.type === 'button' && className(node).includes('icon-text') && hostText(node).includes('Refresh'))
+      const deleteButton = mounted.find(node => node.type === 'button' && className(node).includes('databricks-resource-menu-item'))
+      assert.equal(back?.props?.['aria-disabled'], true, `${testCase.kind} guards back navigation while deleting`)
+      assert.equal(refresh?.props?.disabled, true, `${testCase.kind} guards refresh while deleting`)
+      assert.equal(deleteButton?.props?.disabled, true, `${testCase.kind} guards duplicate delete while deleting`)
+
+      rejectDelete(testCase.deleteError)
+      await flushVue()
+
+      assert.equal(mounted.instance.setupState.deleting, false, `${testCase.kind} clears local deleting state after rejection`)
+      const recoveredStatus = mounted.find(node => node.type === 'span' && className(node).includes('k-badge'))
+      assert.ok(recoveredStatus, `${testCase.kind} retains a status badge after delete rejection`)
+      assert.match(hostText(recoveredStatus), /Ready/)
+      assert.doesNotMatch(hostText(recoveredStatus), /Deleting/)
+      assert.equal(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), null, `${testCase.kind} clears pending progress after rejection`)
+      const mutationError = mounted.find(node => node.props?.role === 'alert' && className(node).includes('mutation-error'))
+      assert.ok(mutationError, `${testCase.kind} renders the delete error`)
+      assert.ok(hostText(mutationError).includes(testCase.deleteError.message), `${testCase.kind} includes the delete error message`)
+      assert.notEqual(back?.props?.['aria-disabled'], true, `${testCase.kind} restores back navigation after rejection`)
+      assert.equal(refresh?.props?.disabled, false, `${testCase.kind} restores refresh after rejection`)
+      assert.equal(deleteButton?.props?.disabled, false, `${testCase.kind} restores delete after rejection`)
+    } finally {
+      mounted.unmount()
+      confirmModule.resolveConfirm(false)
+      apiModule.api[testCase.getMethod] = originalGet
+      apiModule.api[testCase.deleteMethod] = originalDelete
+      refreshModule.setOperationContext('default')
+    }
+  }
 })

@@ -547,6 +547,16 @@ faros-provider-code .connection-detail__deleting {
   line-height: 1.45;
   padding: 8px 10px;
 }
+faros-provider-code .repo-detail__deleting {
+  margin: 0;
+  border: 1px solid var(--color-warning-subtle);
+  border-radius: 6px;
+  background: var(--color-warning-subtle);
+  color: var(--color-text-secondary, #8a8ca6);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
 faros-provider-code .connection-detail__health-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

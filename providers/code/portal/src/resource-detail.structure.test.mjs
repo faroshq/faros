@@ -14,12 +14,14 @@ const farosUI = readSource('portalkit/faros-ui.css')
 describe('Code repository resource detail cards', () => {
   it('hides provider tabs for repository detail and preserves the backlink', () => {
     expect(app).toMatch(/<template v-if="!route\.repo && !route\.connection">[\s\S]*<Tabs :tabs=/)
-    expect(detail).toMatch(/<a class="k-btn k-btn--ghost repo-detail__back" href="\/providers\/code\/repositories" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft/)
+    expect(detail).toMatch(/<a class="k-btn k-btn--ghost repo-detail__back" href="\/ui\/providers\/code\/repositories" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft/)
     expect(detail).not.toMatch(/:breadcrumbs=|@navigate=|<Tabs\b/)
   })
 
   it('keeps the fixed header action order and current read/delete behavior', () => {
-    expect(detail).toMatch(/const detailRefreshing = computed\(\(\) =>[\s\S]*packagesLoading\.value/)
+    expect(detail).toMatch(/const repositoryRefreshing = computed\(\(\) => repoLoading\.value\)/)
+    const repositoryActionBusy = detail.match(/const repositoryActionBusy = computed\([^\n]+/)?.[0] ?? ''
+    expect(repositoryActionBusy).not.toMatch(/connectionsLoading|keysLoading|collabsLoading|packagesLoading/)
     expect(detail).toMatch(/<template #meta>[\s\S]*Repository[\s\S]*StatusBadge/)
     expect(detail).toMatch(/const repositoryTitle = computed\([\s\S]*repositoryOwner\.value \? `\$\{repositoryOwner\.value\}\/\$\{repositoryName\}`/)
     expect(detail).toMatch(/:title="repositoryTitle"/)
@@ -33,6 +35,8 @@ describe('Code repository resource detail cards', () => {
     expect(detail).toMatch(/confirmDialog\(\{[\s\S]*danger: true/)
     expect(detail).toMatch(/api\.deleteRepository\(current\.name\)/)
     expect(detail).toMatch(/props\.deletions\.acknowledge\(repositoryScope, current\.name, current\.uid\)/)
+    expect(detail).toMatch(/const repositoryDeleteInFlight = computed\(\(\) => operations\.phase\(operationKey\('repository', props\.name\)\) === 'deleting'\)/)
+    expect(detail).toMatch(/<p v-if="repositoryDeleting" class="repo-detail__deleting" role="status" aria-live="polite">[\s\S]*Deleting this repository\./)
   })
 
   it('uses compact provider-owned stat cards and canonical section cards', () => {
@@ -68,7 +72,8 @@ describe('Code repository resource detail cards', () => {
     expect(integration).toMatch(/:aria-expanded="connectionExpanded" aria-controls="repository-integration-editor"[\s\S]*Change/)
     expect(integration).not.toMatch(/API version|Generation|Labels|Clone URL|SSH URL|Faros ID/)
     expect(conditions).toMatch(/<ConditionsPanel[\s\S]*:conditions="repo\?\.conditions \|\| \[\]"/)
-    expect(conditions).toMatch(/Provider status[\s\S]*Repository ID[\s\S]*Browser URL/)
+    expect(conditions).toMatch(/Provider status[\s\S]*Repository ID[\s\S]*Browser URL[\s\S]*Clone URL[\s\S]*SSH URL/)
+    expect(detail).toMatch(/repo\?\.htmlURL \|\| '—'[\s\S]*repo\?\.cloneURL \|\| '—'[\s\S]*repo\?\.sshURL \|\| '—'/)
     expect(detail).not.toMatch(/configurationRows|metadataRows|repositoryYaml|toYaml|YAML \/ read-only object|Technical details|technicalExpanded/)
     expect(detail).not.toMatch(/secretRef|privateKey|token/i)
     expect(detail).toMatch(/<div class="repo-section-card__facts" aria-label="Access counts">[\s\S]*deploy keys[\s\S]*collaborators/)
@@ -93,7 +98,7 @@ describe('Code connection resource detail cards', () => {
   it('preserves the connection route backlink outside ResourcePage', () => {
     expect(app).toMatch(/connections<.*ConnectionDetailView|ConnectionDetailView.*connections/)
     expect(app).toMatch(/<template v-if="!route\.repo && !route\.connection">[\s\S]*<Tabs :tabs=/)
-    expect(connectionDetail).toMatch(/<a class="k-btn k-btn--ghost connection-detail__back" href="\/providers\/code\/connections" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft[\s\S]*Connections/)
+    expect(connectionDetail).toMatch(/<a class="k-btn k-btn--ghost connection-detail__back" href="\/ui\/providers\/code\/connections" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft[\s\S]*Connections/)
     expect(connectionDetail).not.toMatch(/:breadcrumbs=|@navigate=|<Tabs\b/)
   })
 
@@ -106,6 +111,8 @@ describe('Code connection resource detail cards', () => {
     expect(connectionDetail).toContain('@retry="load"')
     expect(connectionDetail).toMatch(/const connectionReadState = computed<boolean \| null>/)
     expect(connectionDetail).toMatch(/const detailRefreshing = computed\(\(\) => loading\.value\)/)
+    expect(connectionDetail).toMatch(/const connectionDeleteInFlight = computed\(\(\) => operations\.phase\(operationKey\('connection', conn\.value\?\.name \|\| props\.name\)\) === 'deleting'\)/)
+    expect(connectionDetail).toMatch(/const deleting = computed\(\(\) => !!conn\.value && \([\s\S]*connectionDeleteInFlight\.value/)
     expect(connectionDetail).toMatch(/setInterval\(load, 5000\)/)
     expect(connectionDetail).toMatch(/createLatestRefreshController/)
     expect(connectionDetail).toContain(':stale="loaded && !!error"')
