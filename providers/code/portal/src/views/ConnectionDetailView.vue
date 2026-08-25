@@ -9,7 +9,17 @@ import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
 import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  createOperationLocks,
+  operationKey,
+  type LatestRefreshController,
+  type ResourceDeletions,
+  type ResourceRefreshMode,
+} from '../refresh'
 
 const props = defineProps<{ name: string; deletions: ResourceDeletions }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
@@ -22,9 +32,9 @@ const loading = ref(true)
 const loaded = ref(false)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
 const operations = createOperationLocks()
-let timer: number | undefined
 let mounted = false
 let refresh!: LatestRefreshController
+const refreshMode = ref<ResourceRefreshMode>('foreground')
 
 const validated = computed(() => conn.value?.conditions.find(c => c.type === 'Validated'))
 const reconciled = computed(() =>
@@ -71,9 +81,10 @@ const connectionStatusTone = computed<'success' | 'warning' | 'danger' | 'muted'
   return 'muted'
 })
 const detailRefreshing = computed(() => loading.value)
+const foregroundRefreshing = computed(() => loading.value && refreshMode.value === 'foreground')
 const connectionActionBusy = computed(() =>
   !conn.value ||
-  detailRefreshing.value ||
+  foregroundRefreshing.value ||
   deleting.value ||
   operations.isLocked(operationKey('connection', conn.value?.name || props.name)),
 )
@@ -85,6 +96,11 @@ const connectionReadState = computed<boolean | null>(() => {
   if (loaded.value) return true
   if (error.value) return false
   return loading.value ? false : null
+})
+const poller = createAdaptiveRefreshTimer(() => load('background'), () => {
+  if (!loaded.value || !conn.value || error.value) return FAST_REFRESH_MS
+  if (deleting.value || !conn.value.validated || !reconciled.value) return FAST_REFRESH_MS
+  return STABLE_REFRESH_MS
 })
 
 const connectionStatCards = computed<ResourceStatCard[]>(() => [
@@ -136,8 +152,12 @@ function errMessage(e: unknown): string {
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
-function load() {
-  refresh.request()
+function load(mode: ResourceRefreshMode = 'foreground') {
+  if (mode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  refresh.request(mode)
 }
 
 async function deleteConnection() {
@@ -169,7 +189,8 @@ function deleteFromMenu() {
   void deleteConnection()
 }
 
-refresh = createLatestRefreshController(async requestID => {
+refresh = createLatestRefreshController(async (requestID, mode) => {
+  refreshMode.value = mode
   loading.value = true
   try {
     const next = await api.getConnection(props.name)
@@ -190,7 +211,10 @@ refresh = createLatestRefreshController(async requestID => {
     }
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      loading.value = false
+      poller.schedule()
+    }
   }
 })
 
@@ -200,6 +224,7 @@ watch(() => props.name, () => {
   mutationError.value = null
   loaded.value = false
   loading.value = true
+  refreshMode.value = 'foreground'
   refresh.invalidate()
   load()
 })
@@ -207,11 +232,11 @@ watch(() => props.name, () => {
 onMounted(() => {
   mounted = true
   load()
-  timer = window.setInterval(load, 5000)
+  poller.schedule()
 })
 onUnmounted(() => {
   mounted = false
-  window.clearInterval(timer)
+  poller.stop()
   refresh.stop()
 })
 </script>
@@ -232,6 +257,7 @@ onUnmounted(() => {
         eyebrow="Connection"
         :loaded="connectionReadState"
         :loading="loading"
+        :refresh-mode="refreshMode"
         :error="error"
         :stale="loaded && !!error"
         retryable
@@ -258,10 +284,10 @@ onUnmounted(() => {
               class="k-btn k-btn--ghost"
               :disabled="connectionActionBusy"
               :aria-busy="detailRefreshing || undefined"
-              @click="load"
+              @click="load()"
             >
-              <RefreshCw :size="14" :class="{ spin: detailRefreshing }" aria-hidden="true" />
-              {{ detailRefreshing ? 'Refreshing…' : 'Refresh' }}
+              <RefreshCw :size="14" :class="{ spin: foregroundRefreshing }" aria-hidden="true" />
+              {{ foregroundRefreshing ? 'Refreshing…' : 'Refresh' }}
             </button>
             <details ref="actionsMenu" class="connection-detail__menu">
               <summary class="k-btn k-btn--ghost" aria-label="More connection actions">
@@ -288,7 +314,7 @@ onUnmounted(() => {
 
         <template #body>
           <template v-if="conn">
-            <span v-if="loading && loaded && !error" class="sr-only" role="status" aria-live="polite">Updating connection…</span>
+            <span v-if="foregroundRefreshing && loaded && !error" class="sr-only" role="status" aria-live="polite">Updating connection…</span>
             <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
             <p v-if="deleting" class="connection-detail__deleting" role="status" aria-live="polite">
               Deleting this connection. The last successful snapshot remains visible until the hub confirms removal.

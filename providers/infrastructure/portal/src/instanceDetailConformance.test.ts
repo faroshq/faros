@@ -38,4 +38,12 @@ describe('Infrastructure instance detail conformance', () => {
     expect(source).toContain("actionsMenu.value?.removeAttribute('open')")
     expect(source).toContain('href="/ui/providers/infrastructure/instances"')
   })
+
+  it('keeps automatic refresh quiet while manual refresh remains foreground', () => {
+    expect(source).toContain("load('background')")
+    expect(source).toContain(':refresh-mode="refreshMode"')
+    expect(source).toContain('const foregroundLoading = computed')
+    expect(source).toContain("@click=\"load('foreground')\"")
+    expect(source).not.toContain('window.setInterval')
+  })
 })

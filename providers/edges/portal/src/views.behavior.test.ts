@@ -224,8 +224,7 @@ describe('edge list views', () => {
 
       view.pageMock.mockResolvedValueOnce({ items: view.pageRows, continue: undefined })
       state[view.change]({ reason: 'page-size', page: 1, pageSize: 50, query: '', filters: view.filters, cursor: null })
-      await flush()
-      expect(view.pageMock).toHaveBeenLastCalledWith({ limit: 50 })
+      await vi.waitFor(() => expect(view.pageMock).toHaveBeenLastCalledWith({ limit: 50 }))
     } finally {
       mounted.unmount()
     }
@@ -399,7 +398,10 @@ describe('edge list views', () => {
       full.resolve([{ ...view.pageRows[0], name: `${view.label}-stale` }])
       await flush()
       await flush()
-      expect(view.allMock).toHaveBeenCalledTimes(2)
+      // The complete target and supporting edge join are one refresh. The
+      // replacement remains queued until both parts settle, so no timer or
+      // query edit can overlap the active snapshot read.
+      expect(view.allMock).toHaveBeenCalledTimes(1)
       expect(api.listEdges).toHaveBeenCalledTimes(1)
       expect(maxConcurrentEdgeReads).toBe(1)
       expect(state.tableMode).toBe('client')
@@ -412,8 +414,8 @@ describe('edge list views', () => {
       // The stale support join is shared by the clear refresh and the fresh
       // transition. Resolving it must not commit the stale target result.
       staleEdges.resolve([edge])
-      await flush()
-      expect(api.listEdges).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(view.allMock).toHaveBeenCalledTimes(2))
+      expect(api.listEdges).toHaveBeenCalledTimes(2)
       expect(maxConcurrentEdgeReads).toBe(1)
       expect(state.clientAuthorityReady).toBe(false)
 
@@ -467,6 +469,41 @@ describe('edge list views', () => {
       await read
       expect(view.label === 'services' ? state.services : state.workloads).toEqual(previous)
       expect(state.error).toBe('page failed')
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it.each(views)('$label keeps an authoritative empty view quiet in background and exposes foreground feedback', async (view) => {
+    view.pageMock.mockResolvedValueOnce({ items: [], continue: undefined })
+    const mounted = await mount(view.component)
+    try {
+      await flush()
+      const state = mounted.instance.setupState
+      const background = deferred<unknown>()
+      view.pageMock.mockImplementationOnce(() => background.promise)
+      const backgroundRead = state.refresh('background')
+      await flush()
+
+      expect(state.loaded).toBe(true)
+      expect(state.loading).toBe(true)
+      expect(state.refreshMode).toBe('background')
+      expect(state.foregroundLoading).toBe(false)
+      expect(view.label === 'services' ? state.services : state.workloads).toEqual([])
+
+      const foreground = deferred<unknown>()
+      view.pageMock.mockImplementationOnce(() => foreground.promise)
+      const foregroundRead = state.refresh('foreground')
+      // Manual intent must be visible immediately even though the controller
+      // will serialize it behind the active background read.
+      expect(state.loading).toBe(true)
+      expect(state.refreshMode).toBe('foreground')
+      expect(state.foregroundLoading).toBe(true)
+
+      background.resolve({ items: [], continue: undefined })
+      await flush()
+      foreground.resolve({ items: [], continue: undefined })
+      await Promise.all([backgroundRead, foregroundRead])
     } finally {
       mounted.unmount()
     }

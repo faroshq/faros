@@ -12,7 +12,17 @@ import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceS
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  createOperationLocks,
+  operationKey,
+  type LatestRefreshController,
+  type ResourceDeletions,
+  type ResourceRefreshMode,
+} from '../refresh'
 import { createFullListReadCoordinator } from '../hybridPagination'
 import {
   applyPackagePaginationChange,
@@ -119,8 +129,14 @@ function isPackageDeleting(resource: Package): boolean {
 }
 const repositoryDeleteInFlight = computed(() => operations.phase(operationKey('repository', props.name)) === 'deleting')
 const repositoryDeleting = computed(() => repositoryDeleteInFlight.value || (!!repo.value && isDeleting(repositoryScope, repo.value)))
+const repositoryRefreshMode = ref<ResourceRefreshMode>('foreground')
+const connectionRefreshMode = ref<ResourceRefreshMode>('foreground')
+const keyRefreshMode = ref<ResourceRefreshMode>('foreground')
+const collabRefreshMode = ref<ResourceRefreshMode>('foreground')
+const packageRefreshMode = ref<ResourceRefreshMode>('foreground')
 const repositoryRefreshing = computed(() => repoLoading.value)
-const repositoryActionBusy = computed(() => repositoryRefreshing.value || repositoryDeleting.value || operations.isLocked(operationKey('repository', props.name)))
+const repositoryForegroundRefreshing = computed(() => repoLoading.value && repositoryRefreshMode.value === 'foreground')
+const repositoryActionBusy = computed(() => repositoryForegroundRefreshing.value || repositoryDeleting.value || operations.isLocked(operationKey('repository', props.name)))
 const keyRows = computed<Array<Record<string, unknown>>>(() => keys.value
   .map(key => {
     const deleting = isDeleting(keyScope, key)
@@ -253,7 +269,6 @@ const repositoryStatCards = computed<ResourceStatCard[]>(() => [
   },
 ])
 
-let timer: number | undefined
 let mounted = false
 let repoRefresh!: LatestRefreshController
 let connectionRefresh!: LatestRefreshController
@@ -267,21 +282,87 @@ function errMessage(e: unknown): string {
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
-function loadRepository() { repoRefresh.request() }
-function loadConnections() { connectionRefresh.request() }
-function loadKeys() { keyRefresh.request() }
-function loadCollaborators() { collabRefresh.request() }
-function loadPackages(forceFullRead = packageMode.value === 'client') {
+function loadRepository(mode: ResourceRefreshMode = 'foreground') {
+  if (mode === 'foreground') {
+    repositoryRefreshMode.value = 'foreground'
+    repoLoading.value = true
+  }
+  repoRefresh.request(mode)
+}
+function loadConnections(mode: ResourceRefreshMode = 'foreground') {
+  if (mode === 'foreground') {
+    connectionRefreshMode.value = 'foreground'
+    connectionsLoading.value = true
+  }
+  connectionRefresh.request(mode)
+}
+function loadKeys(mode: ResourceRefreshMode = 'foreground') {
+  if (mode === 'foreground') {
+    keyRefreshMode.value = 'foreground'
+    keysLoading.value = true
+  }
+  keyRefresh.request(mode)
+}
+function loadCollaborators(mode: ResourceRefreshMode = 'foreground') {
+  if (mode === 'foreground') {
+    collabRefreshMode.value = 'foreground'
+    collabsLoading.value = true
+  }
+  collabRefresh.request(mode)
+}
+function loadPackages(mode: ResourceRefreshMode = 'foreground', forceFullRead = packageMode.value === 'client') {
   if (forceFullRead) forcePackageFullRead = true
-  packageRefresh.request()
+  if (mode === 'foreground') {
+    packageRefreshMode.value = 'foreground'
+    packagesLoading.value = true
+  }
+  packageRefresh.request(mode)
 }
+function loadAllMode(mode: ResourceRefreshMode = 'foreground') {
+  loadRepository(mode)
+  loadConnections(mode)
+  if (mode === 'foreground' || accessExpanded.value || keyRows.value.some(row => row.deleting) || collabRows.value.some(row => row.deleting) || keySubmitting.value || collabSubmitting.value) {
+    loadKeys(mode)
+    loadCollaborators(mode)
+  }
+  if (mode === 'foreground' || packagesExpanded.value || repositoryDeleting.value) loadPackages(mode)
+}
+
 function loadAll() {
-  loadRepository()
-  loadConnections()
-  loadKeys()
-  loadCollaborators()
-  loadPackages()
+  loadAllMode()
 }
+
+function toggleAccess() {
+  accessExpanded.value = !accessExpanded.value
+  if (accessExpanded.value) {
+    loadKeys()
+    loadCollaborators()
+  }
+}
+
+function togglePackages() {
+  packagesExpanded.value = !packagesExpanded.value
+  if (packagesExpanded.value) loadPackages()
+}
+
+const poller = createAdaptiveRefreshTimer(() => loadAllMode('background'), () => {
+  if (!repoLoaded.value || !connectionsLoaded.value || repoError.value || connectionsError.value) return FAST_REFRESH_MS
+  const repositoryPending = repositoryStatus.value === 'pending' || repositoryStatus.value === 'Deleting'
+  const connectionPending = connections.value.some(connection => (
+    !!connection.deletionTimestamp || !connection.validated || (
+      connection.generation !== undefined &&
+      (connection.observedGeneration === undefined || connection.observedGeneration < connection.generation)
+    )
+  ))
+  const accessPending = (accessExpanded.value || keysLoaded.value) && (
+    !keysLoaded.value || !!keysError.value || keyRows.value.some(row => row.status === 'pending' || row.status === 'Deleting') ||
+    !collabsLoaded.value || !!collabsError.value || collabRows.value.some(row => row.status === 'pending' || row.status === 'Deleting')
+  )
+  const packagesPending = (packagesExpanded.value || packagesLoaded.value) && (
+    !packagesLoaded.value || !!packagesError.value || packageRows.value.some(row => row.status === 'pending' || row.status === 'Deleting')
+  )
+  return repositoryPending || connectionPending || accessPending || packagesPending ? FAST_REFRESH_MS : STABLE_REFRESH_MS
+})
 
 async function deleteRepository() {
   const current = repo.value
@@ -385,7 +466,7 @@ function handlePackageChange(change: ResourceTableChange) {
     // invalidates it before the queued first server page is allowed to commit.
     packageFullRead.clear()
     if (transition.clearRows) packages.value = []
-    if (transition.reload) loadPackages(false)
+    if (transition.reload) loadPackages('foreground', false)
     return
   }
 
@@ -536,7 +617,8 @@ async function removeCollab(row: Record<string, unknown>) {
   }
 }
 
-repoRefresh = createLatestRefreshController(async requestID => {
+repoRefresh = createLatestRefreshController(async (requestID, mode) => {
+  repositoryRefreshMode.value = mode
   repoLoading.value = true
   try {
     const next = await api.getRepository(props.name)
@@ -556,11 +638,15 @@ repoRefresh = createLatestRefreshController(async requestID => {
     }
     repoError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (repoRefresh.isCurrent(requestID)) repoLoading.value = false
+    if (repoRefresh.isCurrent(requestID)) {
+      repoLoading.value = false
+      poller.schedule()
+    }
   }
 })
 
-connectionRefresh = createLatestRefreshController(async requestID => {
+connectionRefresh = createLatestRefreshController(async (requestID, mode) => {
+  connectionRefreshMode.value = mode
   connectionsLoading.value = true
   try {
     const next = await api.listConnections()
@@ -579,11 +665,15 @@ connectionRefresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     connectionsError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (connectionRefresh.isCurrent(requestID)) connectionsLoading.value = false
+    if (connectionRefresh.isCurrent(requestID)) {
+      connectionsLoading.value = false
+      poller.schedule()
+    }
   }
 })
 
-keyRefresh = createLatestRefreshController(async requestID => {
+keyRefresh = createLatestRefreshController(async (requestID, mode) => {
+  keyRefreshMode.value = mode
   keysLoading.value = true
   try {
     const next = await api.listDeployKeys(props.name)
@@ -598,11 +688,15 @@ keyRefresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     keysError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (keyRefresh.isCurrent(requestID)) keysLoading.value = false
+    if (keyRefresh.isCurrent(requestID)) {
+      keysLoading.value = false
+      poller.schedule()
+    }
   }
 })
 
-collabRefresh = createLatestRefreshController(async requestID => {
+collabRefresh = createLatestRefreshController(async (requestID, mode) => {
+  collabRefreshMode.value = mode
   collabsLoading.value = true
   try {
     const next = await api.listCollaborators(props.name)
@@ -617,11 +711,15 @@ collabRefresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     collabsError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (collabRefresh.isCurrent(requestID)) collabsLoading.value = false
+    if (collabRefresh.isCurrent(requestID)) {
+      collabsLoading.value = false
+      poller.schedule()
+    }
   }
 })
 
-packageRefresh = createLatestRefreshController(async requestID => {
+packageRefresh = createLatestRefreshController(async (requestID, mode) => {
+  packageRefreshMode.value = mode
   const request = currentPackageRequest()
   const forceFullRead = forcePackageFullRead
   forcePackageFullRead = false
@@ -678,18 +776,21 @@ packageRefresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     packagesError.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (packageRefresh.isCurrent(requestID)) packagesLoading.value = false
+    if (packageRefresh.isCurrent(requestID)) {
+      packagesLoading.value = false
+      poller.schedule()
+    }
   }
 })
 
 onMounted(() => {
   mounted = true
   loadAll()
-  timer = window.setInterval(loadAll, 5000)
+  poller.schedule()
 })
 onUnmounted(() => {
   mounted = false
-  window.clearInterval(timer)
+  poller.stop()
   repoRefresh.stop()
   connectionRefresh.stop()
   keyRefresh.stop()
@@ -712,6 +813,7 @@ onUnmounted(() => {
         :title="repositoryTitle"
         :loaded="repositoryReadState"
         :loading="repoLoading"
+        :refresh-mode="repositoryRefreshMode"
         :error="repoError"
         :stale="repoLoaded && !!repoError"
         retryable
@@ -736,8 +838,8 @@ onUnmounted(() => {
           :aria-busy="repositoryRefreshing || undefined"
           @click="loadAll"
         >
-          <RefreshCw :size="14" :class="{ spin: repositoryRefreshing }" aria-hidden="true" />
-          {{ repositoryRefreshing ? 'Refreshing…' : 'Refresh' }}
+            <RefreshCw :size="14" :class="{ spin: repositoryForegroundRefreshing }" aria-hidden="true" />
+          {{ repositoryForegroundRefreshing ? 'Refreshing…' : 'Refresh' }}
         </button>
         <details ref="actionsMenu" class="repo-detail__menu">
           <summary class="k-btn k-btn--ghost" aria-label="More repository actions">
@@ -794,7 +896,7 @@ onUnmounted(() => {
               </div>
               <span v-if="connectionsLoading && !connectionsLoaded" class="muted" role="status" aria-live="polite">Loading connections…</span>
               <div v-if="connectionsError" class="error read-error" role="alert" aria-live="assertive">
-                <span>{{ connectionsLoaded ? 'Showing cached connection choices. ' : '' }}{{ connectionsError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadConnections">Retry</button>
+                <span>{{ connectionsLoaded ? 'Showing cached connection choices. ' : '' }}{{ connectionsError }}</span><button class="k-btn k-btn--ghost" type="button" @click="loadConnections()">Retry</button>
               </div>
               <span v-else-if="connectionsLoading && connectionsLoaded" class="sr-only" role="status" aria-live="polite">Updating connections…</span>
               <p v-if="ownerWillChange" class="conn-warn"><AlertTriangle :size="15" class="warn-ic" /> Owner <code>{{ newOwner }}</code> differs from current <code>{{ currentOwner }}</code> — this re-targets the repo to a different account and may create a new repo there.</p>
@@ -810,7 +912,7 @@ onUnmounted(() => {
               <span><strong>{{ keysLoaded ? keyRows.length : '—' }}</strong> deploy keys</span>
               <span><strong>{{ collabsLoaded ? collabRows.length : '—' }}</strong> collaborators</span>
             </div>
-            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="accessExpanded" aria-controls="repository-access-content" @click="accessExpanded = !accessExpanded">
+            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="accessExpanded" aria-controls="repository-access-content" @click="toggleAccess">
               <Users :size="14" aria-hidden="true" />
               {{ accessExpanded ? 'Hide access' : 'Manage access' }}
             </button>
@@ -826,7 +928,7 @@ onUnmounted(() => {
               <p class="muted">A generated key's private half is written to a Secret in your workspace.</p>
             </form>
             <p v-if="keyDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ keyDeleteError }}</p>
-            <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :error="keysError" :stale="keysLoaded && !!keysError" retryable searchable search-placeholder="Search deploy keys…" :filters="[{ key: 'access', label: 'Access' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
+            <ResourceTable :columns="keyColumns" :rows="keyRows" row-key="name" :loaded="keysLoaded" :loading="keysLoading" :refresh-mode="keyRefreshMode" :error="keysError" :stale="keysLoaded && !!keysError" retryable searchable search-placeholder="Search deploy keys…" :filters="[{ key: 'access', label: 'Access' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No deploy keys." :interactive="false" @retry="loadKeys">
               <template #title="{ row }"><strong>{{ row.title }}</strong><div v-if="row.generated && row.secretName" class="muted">secret: <code>{{ row.secretName }}</code></div></template>
               <template #access="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
               <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
@@ -841,7 +943,7 @@ onUnmounted(() => {
               <div class="code-form-actions"><button class="k-btn k-btn--primary" type="submit" :disabled="repositoryDeleting || collabSubmitting || !collabsLoaded">{{ collabSubmitting ? 'Adding…' : 'Add collaborator' }}</button><span v-if="collabError" class="error" role="alert">{{ collabError }}</span></div>
             </form>
             <p v-if="collabDeleteError" class="error mutation-error" role="alert" aria-live="assertive">{{ collabDeleteError }}</p>
-            <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable searchable search-placeholder="Search collaborators…" :filters="[{ key: 'permission', label: 'Permission' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
+            <ResourceTable :columns="collabColumns" :rows="collabRows" row-key="name" :loaded="collabsLoaded" :loading="collabsLoading" :refresh-mode="collabRefreshMode" :error="collabsError" :stale="collabsLoaded && !!collabsError" retryable searchable search-placeholder="Search collaborators…" :filters="[{ key: 'permission', label: 'Permission' }, { key: 'status', label: 'Status', allLabel: 'Any status' }]" paginated :page-size="10" empty-text="No collaborators." :interactive="false" @retry="loadCollaborators">
               <template #username="{ value }"><strong>{{ value }}</strong></template>
               <template #permission="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
               <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>
@@ -857,14 +959,14 @@ onUnmounted(() => {
               <span><strong>{{ packagesLoaded ? packages.length : '—' }}</strong> visible</span>
               <span>{{ packagesSummaryStatus }}</span>
             </div>
-            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="packagesExpanded" aria-controls="repository-packages-content" @click="packagesExpanded = !packagesExpanded">
+            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="packagesExpanded" aria-controls="repository-packages-content" @click="togglePackages">
               <PackageOpen :size="14" aria-hidden="true" />
               {{ packagesExpanded ? 'Hide packages' : 'View packages' }}
             </button>
           </template>
           <div v-if="repo && packagesExpanded" id="repository-packages-content" class="repo-domain-block">
             <div class="panel-head"><h3 class="panel-title">Packages</h3><span v-if="packagesLoaded && packageMode === 'client'" class="muted">{{ packageRows.length }}</span></div>
-            <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="PACKAGE_FILTERS" :pagination-mode="packageMode" :page="packagePage" :page-size="packagePageSize" :query="packageQuery" :filter-values="packageFilters" :cursor="packageCursor" :page-info="packagePageInfo" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages" @change="handlePackageChange">
+            <ResourceTable :columns="packageColumns" :rows="packageRows" row-key="rowKey" :loaded="packagesLoaded" :loading="packagesLoading" :refresh-mode="packageRefreshMode" :error="packagesError" :stale="packagesLoaded && !!packagesError" retryable searchable search-placeholder="Search packages…" :filters="PACKAGE_FILTERS" :pagination-mode="packageMode" :page="packagePage" :page-size="packagePageSize" :query="packageQuery" :filter-values="packageFilters" :cursor="packageCursor" :page-info="packagePageInfo" empty-text="No packages published to this repository yet." :interactive="false" @retry="loadPackages" @change="handlePackageChange">
               <template #name="{ row }"><strong><a v-if="row.htmlURL && !repositoryDeleting && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener">{{ row.name }}</a><template v-else>{{ row.name }}</template></strong></template>
               <template #type="{ value }"><span class="k-badge k-badge--muted">{{ value }}</span></template>
               <template #visibility="{ value }"><span class="muted">{{ value === 'unknown' ? '—' : value }}</span></template>

@@ -52,6 +52,13 @@ async function flush(): Promise<void> {
   await nextTick()
 }
 
+async function flushTicks(): Promise<void> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
 function text(selector: string): string {
   return document.querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim() || ''
 }
@@ -73,6 +80,46 @@ describe('mounted Infrastructure instance detail deletion behavior', () => {
     app = null
     host.remove()
     vi.clearAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('keeps the successful snapshot and header actions stable during a background poll', async () => {
+    vi.useFakeTimers()
+    const backgroundRequest = deferred<Instance>()
+    vi.mocked(api.getInstance)
+      .mockResolvedValueOnce({ ...instance })
+      .mockReturnValueOnce(backgroundRequest.promise)
+    app = createApp(InstanceDetailPage, {
+      instanceName: instance.name,
+      tombstones: createResourceTombstones(),
+    })
+    app.mount(host)
+    await flushTicks()
+
+    const refresh = host.querySelector<HTMLButtonElement>('.instance-detail__actions > button')
+    expect(refresh?.textContent).toContain('Refresh')
+    expect(refresh?.disabled).toBe(false)
+    expect(host.textContent).toContain('retained-value')
+
+    vi.advanceTimersByTime(30_000)
+    await flushTicks()
+
+    expect(api.getInstance).toHaveBeenCalledTimes(2)
+    expect(refresh?.textContent).toContain('Refresh')
+    expect(refresh?.textContent).not.toContain('Refreshing')
+    expect(refresh?.disabled).toBe(false)
+    expect(host.textContent).toContain('retained-value')
+
+    refresh?.click()
+    await nextTick()
+    expect(refresh?.textContent).toContain('Refreshing')
+    expect(refresh?.disabled).toBe(true)
+
+    backgroundRequest.resolve({ ...instance, message: 'Updated snapshot' })
+    await flushTicks()
+    expect(refresh?.textContent).toContain('Refresh')
+    expect(refresh?.disabled).toBe(false)
+    expect(host.textContent).toContain('retained-value')
   })
 
   it('retains the snapshot and recovers every action after a deferred delete fails', async () => {

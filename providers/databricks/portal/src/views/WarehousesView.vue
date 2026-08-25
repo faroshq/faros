@@ -8,7 +8,18 @@ import { api } from '../api'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import type { Connection, ErrorResponse, Warehouse } from '../types'
-import { createCoalescedRead, createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import {
+  createAdaptiveRefreshTimer,
+  createCoalescedRead,
+  createLatestRefreshController,
+  createOperationLocks,
+  FAST_REFRESH_MS,
+  operationKey,
+  STABLE_REFRESH_MS,
+  type AdaptiveRefreshTimer,
+  type LatestRefreshController,
+  type ResourceRefreshMode,
+} from '../refresh'
 import { resourceNameError } from '../resourceName'
 import {
   cloneWarehouseFilters,
@@ -55,13 +66,12 @@ const submitting = ref(false)
 const formError = ref<string | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const formErrorRef = ref<HTMLElement | null>(null)
-let timer: number | undefined
+let poll!: AdaptiveRefreshTimer
 let refresh!: LatestRefreshController
 let mounted = false
 let fullWalkPending = false
 let supportReadPending = false
 let serverPageReadPending = false
-let forceNextLoad = false
 let authorityGeneration = 0
 
 function invalidateCompleteAuthority(): void {
@@ -69,7 +79,6 @@ function invalidateCompleteAuthority(): void {
   completeRead.invalidate()
   supportRead.invalidate()
   serverPageRead.invalidate()
-  forceNextLoad = true
 }
 
 const rows = computed<Array<Record<string, unknown>>>(() => warehouses.value
@@ -96,15 +105,31 @@ function resetForm() {
   formError.value = null
 }
 
+const refreshMode = ref<ResourceRefreshMode>('foreground')
+
+function requestRefresh(mode: ResourceRefreshMode): void {
+  if (mode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  refresh.request(mode)
+}
+
 function load(): void
 function load(force: boolean): void
-function load(event: Event): void
-function load(forceOrEvent: boolean | Event = false): void {
-  const force = typeof forceOrEvent === 'boolean' ? forceOrEvent : forceNextLoad
-  forceNextLoad = false
-  if (!force && (fullWalkPending || supportReadPending || serverPageReadPending)) return
-  refresh.request()
+function load(mode: ResourceRefreshMode): void
+function load(forceOrMode: boolean | ResourceRefreshMode = false): void {
+  const mode = typeof forceOrMode === 'string' ? forceOrMode : 'foreground'
+  requestRefresh(mode)
 }
+
+function pollCadence(): number {
+  const stable = loaded.value && !error.value && warehouses.value.every(warehouse =>
+    warehouse.status === 'Ready' && operationPhase(warehouse.name) !== 'deleting')
+  return stable ? STABLE_REFRESH_MS : FAST_REFRESH_MS
+}
+
+poll = createAdaptiveRefreshTimer(() => requestRefresh('background'), pollCadence)
 
 function operationLocked(name: string): boolean {
   return operations.isLocked(operationKey('warehouse', name))
@@ -318,12 +343,13 @@ async function remove(row: Record<string, unknown>) {
   }
 }
 
-refresh = createLatestRefreshController(async requestID => {
+refresh = createLatestRefreshController(async (requestID, mode) => {
   const request = currentWarehouseRequest()
   let walkGeneration: number | undefined
   let supportGeneration: number | undefined
   let serverPageGeneration: number | undefined
-  loading.value = true
+  refreshMode.value = mode
+  if (mode === 'foreground') loading.value = true
   if (request.active && request.mode === 'server') {
     warehouses.value = []
     warehousePageInfo.value = null
@@ -436,19 +462,21 @@ refresh = createLatestRefreshController(async requestID => {
     fullWalkPending = false
     supportReadPending = false
     serverPageReadPending = false
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      if (mode === 'foreground') loading.value = false
+      poll.schedule()
+    }
   }
 })
 
 onMounted(() => {
   mounted = true
   load()
-  timer = window.setInterval(load, 5000)
 })
 onUnmounted(() => {
   mounted = false
   invalidateCompleteAuthority()
-  window.clearInterval(timer)
+  poll.stop()
   refresh.stop()
   completeRead.stop()
   supportRead.stop()
@@ -526,6 +554,7 @@ onUnmounted(() => {
       row-key="name"
       :loaded="loaded"
       :loading="loading"
+      :refresh-mode="refreshMode"
       :error="error"
       :stale="loaded && !!error"
       retryable

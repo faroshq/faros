@@ -12,7 +12,7 @@
 import { computed } from 'vue'
 import { AlertCircle } from 'lucide-vue-next'
 import { ensureFarosUIStyles } from '../portalkit/styles'
-import type { ResourceReadState } from '../portalkit/page-state'
+import type { ResourceReadState, ResourceRefreshMode } from '../portalkit/page-state'
 
 ensureFarosUIStyles()
 
@@ -22,6 +22,7 @@ const props = withDefaults(defineProps<{
   subtitle?: string
   loaded?: ResourceReadState['loaded']
   loading?: ResourceReadState['loading']
+  refreshMode?: ResourceRefreshMode
   error?: ResourceReadState['error']
   stale?: ResourceReadState['stale']
   retryable?: ResourceReadState['retryable']
@@ -32,6 +33,7 @@ const props = withDefaults(defineProps<{
   // contract and an explicit first read that has not completed.
   loaded: null,
   loading: false,
+  refreshMode: 'foreground',
   error: null,
   stale: false,
   retryable: false,
@@ -55,6 +57,16 @@ const ariaBusy = computed(() =>
 
 <template>
   <section class="k-resource-page" :aria-busy="ariaBusy">
+    <!-- Keep refresh announcements out of layout while preserving the caller-owned body. -->
+    <span
+      class="k-resource-page__live"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      style="block-size: 1px; clip: rect(0 0 0 0); clip-path: inset(50%); inline-size: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; white-space: nowrap;"
+    >
+      {{ explicitReadState && loading && loaded ? 'Updating…' : '' }}
+    </span>
     <header class="k-resource-page__header">
       <div class="k-resource-page__heading">
         <p v-if="eyebrow" class="k-resource-page__eyebrow">{{ eyebrow }}</p>

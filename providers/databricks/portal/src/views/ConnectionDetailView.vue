@@ -9,13 +9,24 @@ import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceS
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import type { Connection, ErrorResponse } from '../types'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import {
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  createOperationLocks,
+  FAST_REFRESH_MS,
+  operationKey,
+  STABLE_REFRESH_MS,
+  type AdaptiveRefreshTimer,
+  type LatestRefreshController,
+  type ResourceRefreshMode,
+} from '../refresh'
 
 const props = defineProps<{ name: string }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const conn = ref<Connection | null>(null)
 const loading = ref(false)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const editing = ref(false)
@@ -28,7 +39,7 @@ const mutationError = ref<string | null>(null)
 const editHostInput = ref<HTMLInputElement | null>(null)
 const saveErrorRef = ref<HTMLElement | null>(null)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
-let timer: number | undefined
+let poll!: AdaptiveRefreshTimer
 let refresh!: LatestRefreshController
 const operations = createOperationLocks()
 
@@ -102,9 +113,25 @@ function errMessage(e: unknown): string {
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
-function load() {
-  refresh.request()
+function requestRefresh(mode: ResourceRefreshMode): void {
+  if (mode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  refresh.request(mode)
 }
+
+function load(): void {
+  requestRefresh('foreground')
+}
+
+function pollCadence(): number {
+  const stable = loaded.value && !error.value && !deleting.value && !!conn.value &&
+    conn.value.status === 'Ready' && operationPhase(conn.value.name) !== 'deleting'
+  return stable ? STABLE_REFRESH_MS : FAST_REFRESH_MS
+}
+
+poll = createAdaptiveRefreshTimer(() => requestRefresh('background'), pollCadence)
 
 function operationLocked(name: string): boolean {
   return operations.isLocked(operationKey('connection', name))
@@ -206,8 +233,9 @@ function deleteFromMenu() {
   void remove()
 }
 
-refresh = createLatestRefreshController(async requestID => {
-  loading.value = true
+refresh = createLatestRefreshController(async (requestID, mode) => {
+  refreshMode.value = mode
+  if (mode === 'foreground') loading.value = true
   try {
     const next = await api.getConnection(props.name)
     if (refresh.isCurrent(requestID)) {
@@ -220,7 +248,10 @@ refresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      if (mode === 'foreground') loading.value = false
+      poll.schedule()
+    }
   }
 })
 
@@ -237,10 +268,9 @@ watch(() => props.name, () => {
 
 onMounted(() => {
   load()
-  timer = window.setInterval(load, 5000)
 })
 onUnmounted(() => {
-  window.clearInterval(timer)
+  poll.stop()
   refresh.stop()
 })
 </script>
@@ -254,6 +284,7 @@ onUnmounted(() => {
       eyebrow="Connection"
       :loaded="readState"
       :loading="loading"
+      :refresh-mode="refreshMode"
       :error="error"
       :stale="loaded && !!error"
       retryable

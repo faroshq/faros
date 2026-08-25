@@ -10,7 +10,15 @@ import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
 import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import { confirmDialog } from '../portalkit/confirm'
-import { createLatestRefreshController, sameResourceIdentity, type ResourceTombstones } from '../refresh'
+import {
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  FAST_REFRESH_MS,
+  sameResourceIdentity,
+  STABLE_REFRESH_MS,
+  type ResourceRefreshMode,
+  type ResourceTombstones,
+} from '../refresh'
 import { resolve } from '../view'
 import { REASON_INSTANCE_NOT_FOUND, type Instance, type TemplateView } from '../types'
 
@@ -20,12 +28,13 @@ const emit = defineEmits<{ (e: 'navigate', view: string): void }>()
 const inst = ref<Instance | null>(null)
 const view = ref<TemplateView | null>(null)
 const loading = ref(false)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const deleting = ref(false)
 const deleteError = ref<string | null>(null)
-let pollHandle: number | null = null
 let active = true
+let mounted = false
 let navigatingAway = false
 let acceptedDeletingIdentity: { name: string; uid?: string } | null = null
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
@@ -37,6 +46,7 @@ function instanceIsDeleting(instance: Instance): boolean {
 }
 
 const deletionInProgress = computed(() => deleting.value || Boolean(inst.value && instanceIsDeleting(inst.value)))
+const foregroundLoading = computed(() => loading.value && refreshMode.value === 'foreground')
 const displayedPhase = computed(() => deletionInProgress.value ? 'Deleting' : inst.value?.phase ?? '')
 const displayedMessage = computed(() => {
   if (!inst.value) return undefined
@@ -120,7 +130,20 @@ function errorMessage(error: unknown, fallback: string): string {
   return value.reason ? `${value.reason}: ${value.message || fallback}` : value.message || fallback
 }
 
-const refresh = createLatestRefreshController(async requestID => {
+function refreshCadence(): number {
+  if (!loaded.value || error.value || deletionInProgress.value || inst.value?.phase !== 'Ready') {
+    return FAST_REFRESH_MS
+  }
+  return STABLE_REFRESH_MS
+}
+
+const pollTimer = createAdaptiveRefreshTimer(
+  () => { if (!navigatingAway) void load('background') },
+  refreshCadence,
+)
+
+const refresh = createLatestRefreshController(async (requestID, mode) => {
+  refreshMode.value = mode
   loading.value = true
   try {
     const instance = await api.getInstance(props.instanceName)
@@ -160,12 +183,16 @@ const refresh = createLatestRefreshController(async requestID => {
     }
     error.value = errorMessage(caught, 'failed to get instance')
   } finally {
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      loading.value = false
+      if (mounted && active && !navigatingAway) pollTimer.schedule()
+    }
   }
 })
 
-function load(): Promise<void> {
-  return refresh.request()
+function load(mode: ResourceRefreshMode = 'foreground'): Promise<void> {
+  if (mode === 'foreground' && loading.value) refreshMode.value = 'foreground'
+  return refresh.request(mode)
 }
 
 watch(
@@ -222,13 +249,13 @@ function goBack() {
 }
 
 onMounted(() => {
-  pollHandle = window.setInterval(() => {
-    if (!navigatingAway) void load()
-  }, 10000)
+  mounted = true
+  if (!loading.value) pollTimer.schedule()
 })
 onUnmounted(() => {
   active = false
-  if (pollHandle !== null) window.clearInterval(pollHandle)
+  mounted = false
+  pollTimer.stop()
   refresh.stop()
 })
 </script>
@@ -251,10 +278,11 @@ onUnmounted(() => {
       :subtitle="inst?.template || 'Template instance'"
       :loaded="readState"
       :loading="loading"
+      :refresh-mode="refreshMode"
       :error="error"
       :stale="loaded && !!error"
       retryable
-      @retry="load"
+      @retry="load('foreground')"
     >
       <template #meta>
         <span v-if="inst">Template <code>{{ inst.template }}</code></span>
@@ -273,12 +301,12 @@ onUnmounted(() => {
           <button
             class="k-btn k-btn--ghost icon-text"
             type="button"
-            :disabled="loading || deleting || deletionInProgress"
-            :aria-busy="loading || undefined"
-            @click="load"
+            :disabled="foregroundLoading || deleting || deletionInProgress"
+            :aria-busy="foregroundLoading || undefined"
+            @click="load('foreground')"
           >
-            <RefreshCw :size="14" :class="{ spin: loading }" aria-hidden="true" />
-            {{ loading ? 'Refreshing…' : 'Refresh' }}
+            <RefreshCw :size="14" :class="{ spin: foregroundLoading }" aria-hidden="true" />
+            {{ foregroundLoading ? 'Refreshing…' : 'Refresh' }}
           </button>
           <details ref="actionsMenu" class="instance-detail__menu">
             <summary class="k-btn k-btn--ghost" aria-label="More instance actions">
@@ -289,7 +317,7 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="instance-detail__menu-item"
-                :disabled="!inst || loading || deleting || deletionInProgress"
+                :disabled="!inst || foregroundLoading || deleting || deletionInProgress"
                 @click="deleteFromMenu"
               >
                 {{ deleting || deletionInProgress ? 'Deleting instance…' : 'Delete instance' }}
@@ -302,7 +330,6 @@ onUnmounted(() => {
         <ResourceStatCards :cards="statCards" density="compact" aria-label="Instance summary" />
       </template>
       <template #body>
-        <span v-if="loading" class="instance-detail__sr-only" role="status" aria-live="polite">Updating instance…</span>
         <p v-if="deleting" class="instance-message" role="status" aria-live="polite">Deleting this instance. The last successful snapshot remains visible until the hub confirms removal.</p>
         <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
           <span>{{ deleteError }}</span>

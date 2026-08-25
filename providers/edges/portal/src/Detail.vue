@@ -8,6 +8,14 @@ import ResourcePage from './portalkit/ResourcePage.vue'
 import ResourceSectionCard from './portalkit/ResourceSectionCard.vue'
 import ResourceStatCards, { type ResourceStatCard } from './portalkit/ResourceStatCards.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  type LatestRefreshController,
+  type ResourceRefreshMode,
+} from './refresh'
 import type { EdgeDetail, EdgeService, EdgeType, ErrorResponse } from './types'
 
 const props = defineProps<{ name: string; type: EdgeType; cluster: string | null; token: string | null }>()
@@ -32,22 +40,26 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const readComplete = ref(false)
 const deleting = ref(false)
-const detailRefreshing = ref(false)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
+const detailRefreshing = computed(() => loading.value && refreshMode.value === 'foreground')
 const mutationError = ref<string | null>(null)
 const copied = ref<string | null>(null)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
 const servicesExpanded = ref(false)
 const technicalExpanded = ref(false)
 
-async function load() {
-  if (deleting.value) return
+let detailRefresh!: LatestRefreshController
+
+async function loadEdgeSnapshot(requestID: number) {
   const hadSnapshot = edge.value !== null
-  loading.value = true
-  error.value = null
   try {
-    edge.value = await getEdge(props.name, props.type)
+    const nextEdge = await getEdge(props.name, props.type)
+    if (!detailRefresh.isCurrent(requestID)) return
+    edge.value = nextEdge
     readComplete.value = true
+    error.value = null
   } catch (e) {
+    if (!detailRefresh.isCurrent(requestID)) return
     const response = e as ErrorResponse
     if (response?.reason === 'NotFound') {
       // A confirmed not-found must not leave an old snapshot looking current.
@@ -59,22 +71,25 @@ async function load() {
       readComplete.value = hadSnapshot
       error.value = response?.message ?? 'Failed to load edge'
     }
-  } finally {
-    loading.value = false
   }
+}
+
+function load(mode: ResourceRefreshMode | Event = 'foreground') {
+  const requestedMode = typeof mode === 'string' ? mode : 'foreground'
+  if (requestedMode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  return detailRefresh.request(requestedMode)
 }
 
 // The header Refresh represents the complete Edge detail snapshot: refresh
 // the authoritative edge and its provider-owned service catalog together.
-// Retry remains primary-read-only and continues to call load() directly.
+// Retry uses the same complete snapshot so the summary and service section do
+// not disagree after an explicit recovery.
 async function refreshDetail() {
   if (deleting.value || detailRefreshing.value || saving.value || connecting.value) return
-  detailRefreshing.value = true
-  try {
-    await Promise.all([load(), loadServices()])
-  } finally {
-    detailRefreshing.value = false
-  }
+  await load('foreground')
 }
 
 async function onDelete() {
@@ -279,14 +294,21 @@ const edgeStatCards = computed<ResourceStatCard[]>(() => [
   },
 ])
 
-async function loadServices() {
+async function loadServicesSnapshot(requestID: number) {
   try {
-    services.value = await listEdgeServices(props.name)
+    const nextServices = await listEdgeServices(props.name)
+    if (!detailRefresh.isCurrent(requestID)) return
+    services.value = nextServices
     servicesLoaded.value = true
     svcError.value = null
   } catch (e) {
+    if (!detailRefresh.isCurrent(requestID)) return
     svcError.value = (e as ErrorResponse)?.message ?? 'Failed to load services'
   }
+}
+
+function loadServices() {
+  return load('foreground')
 }
 
 // Declare-service form (kube edges only).
@@ -361,12 +383,46 @@ async function submitConnect() {
   }
 }
 
-watch(() => [props.name, props.type], () => { load(); loadServices() }, { immediate: true })
-const timer = setInterval(() => {
-  load()
-  loadServices()
-}, 10000)
-onUnmounted(() => clearInterval(timer))
+const poller = createAdaptiveRefreshTimer(() => {
+  void load('background')
+}, () => {
+  if (!readComplete.value || error.value || svcError.value || !edge.value) return FAST_REFRESH_MS
+  const phase = (edge.value.phase || '').toLowerCase()
+  const unsettledEdge = !edge.value.connected || ['pending', 'provisioning', 'deleting'].includes(phase)
+  const unsettledService = services.value.some(service => (service.phase || 'Pending').toLowerCase() !== 'ready')
+  return unsettledEdge || unsettledService ? FAST_REFRESH_MS : STABLE_REFRESH_MS
+})
+
+detailRefresh = createLatestRefreshController(async (requestID, mode) => {
+  if (deleting.value) return
+  refreshMode.value = mode
+  loading.value = true
+  if (mode === 'foreground') {
+    error.value = null
+    svcError.value = null
+  }
+  try {
+    await Promise.all([loadEdgeSnapshot(requestID), loadServicesSnapshot(requestID)])
+  } finally {
+    if (detailRefresh.isCurrent(requestID)) loading.value = false
+    poller.schedule()
+  }
+})
+
+watch(() => [props.name, props.type], () => {
+  detailRefresh.invalidate()
+  edge.value = null
+  services.value = []
+  readComplete.value = false
+  servicesLoaded.value = false
+  error.value = null
+  svcError.value = null
+  void load('foreground')
+}, { immediate: true })
+onUnmounted(() => {
+  detailRefresh.stop()
+  poller.stop()
+})
 
 </script>
 
@@ -386,6 +442,7 @@ onUnmounted(() => clearInterval(timer))
         :title="name"
         :loaded="readComplete"
         :loading="loading"
+        :refresh-mode="refreshMode"
         :error="error"
         :stale="Boolean(edge && error)"
         retryable
@@ -417,12 +474,12 @@ onUnmounted(() => clearInterval(timer))
             <button
               type="button"
               class="k-btn k-btn--ghost"
-              :disabled="detailRefreshing || loading || deleting || saving || connecting"
+              :disabled="detailRefreshing || deleting || saving || connecting"
               :aria-busy="detailRefreshing || undefined"
               @click="refreshDetail"
             >
-              <RefreshCw :size="14" :class="{ spin: detailRefreshing || loading }" aria-hidden="true" />
-              {{ detailRefreshing || loading ? 'Refreshing…' : 'Refresh' }}
+              <RefreshCw :size="14" :class="{ spin: detailRefreshing }" aria-hidden="true" />
+              {{ detailRefreshing ? 'Refreshing…' : 'Refresh' }}
             </button>
             <details ref="actionsMenu" class="edge-detail__menu">
               <summary class="k-btn k-btn--ghost" aria-label="More edge actions">

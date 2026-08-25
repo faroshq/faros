@@ -8,6 +8,9 @@ const sectionCard = readSource('portalkit/ResourceSectionCard.vue')
 const statCards = readSource('portalkit/ResourceStatCards.vue')
 const farosUI = readSource('portalkit/faros-ui.css')
 const detail = readSource('Detail.vue')
+const app = readSource('App.vue')
+const services = readSource('Services.vue')
+const workloads = readSource('Workloads.vue')
 const style = readSource('style.css')
 
 describe('resource detail cards', () => {
@@ -70,5 +73,19 @@ describe('resource detail cards', () => {
     expect(detail).not.toMatch(/joinToken.*k-resource-technical|k-resource-technical[\s\S]*joinToken/)
     expect(style).toMatch(/\.edge-disclosure\s*\{[\s\S]*border:/)
     expect(style).toMatch(/@media \(max-width: 520px\)/)
+  })
+
+  it('uses quiet adaptive refresh across edge resource views', () => {
+    for (const source of [app, detail, services, workloads]) {
+      expect(source).toMatch(/createAdaptiveRefreshTimer/)
+      expect(source).toMatch(/createLatestRefreshController/)
+      expect(source).toMatch(/'background'/)
+      expect(source).toMatch(/:refresh-mode="refreshMode"/)
+      expect(source).not.toMatch(/setInterval\(/)
+    }
+    expect(detail).toMatch(/detailRefreshing = computed\(\(\) => loading\.value && refreshMode\.value === 'foreground'\)/)
+    expect(app).toMatch(/foregroundLoading = computed\(\(\) => loading\.value && refreshMode\.value === 'foreground'\)/)
+    expect(app).toMatch(/authorityChanged = !previous \|\| tenant !== previous\[1\] \|\| userSub !== previous\[2\]/)
+    expect(app).toMatch(/Token rotation within the same user\/workspace[\s\S]*refresh\('background'\)/)
   })
 })

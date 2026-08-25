@@ -15,6 +15,13 @@ import StatusBadge from './portalkit/StatusBadge.vue'
 import ServiceEdit from './ServiceEdit.vue'
 import { isCompleteFirstCursorPage, type ResourceTableChange, type TableFilterDefinition, type TablePageInfo } from './portalkit/table'
 import { createFullListReadCoordinator, createInFlightReadCoordinator, hasActiveTableFilters, sameTableRequest, tablePageInfo as makeTablePageInfo, type PaginationMode, type TableRequestState } from './pagination'
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  type ResourceRefreshMode,
+} from './refresh'
 
 const props = defineProps<{ selectedName?: string | null }>()
 const emit = defineEmits<{ navigate: [name: string | null] }>()
@@ -66,6 +73,8 @@ const edges = ref<Edge[]>([])
 const loading = ref(true)
 const loaded = ref(false)
 const error = ref<string | null>(null)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
+const foregroundLoading = computed(() => loading.value && refreshMode.value === 'foreground')
 const serviceColumns = [
   { key: 'name', label: 'Name' },
   { key: 'edgeName', label: 'Edge' },
@@ -223,21 +232,21 @@ watch(() => props.selectedName, syncRouteSelection, { immediate: true })
 // refreshes its exact snapshot, so this does not depend on the visible cursor.
 async function onEditSaved() {
   const name = props.selectedName ?? editing.value?.name
-  await refresh(true)
+  await refresh('foreground', true)
   if (name) editing.value = services.value.find((s) => s.name === name) ?? editing.value
 }
 
 async function onEditDeleted() {
   const name = props.selectedName ?? editing.value?.name
-  await refresh(true)
+  await refresh('foreground', true)
   if (name && props.selectedName === name) closeEdit()
 }
 
 type ServiceTableRequest = Omit<TableRequestState, 'filters'> & { filters: ServiceFilterValues }
 
-let latestRefreshID = 0
 let stopped = false
 let clientReadToken = 0
+let forceNextCompleteRead = false
 
 function cloneServiceFilters(filters: ServiceFilterValues): ServiceFilterValues {
   return { edgeName: filters.edgeName, typeLabel: filters.typeLabel, status: filters.status }
@@ -258,7 +267,7 @@ function currentServiceRequest(): ServiceTableRequest {
 
 function serviceRequestIsCurrent(requestID: number, request: ServiceTableRequest): boolean {
   const current = currentServiceRequest()
-  return !stopped && latestRefreshID === requestID && sameTableRequest(current, request)
+  return !stopped && serviceRefresh.isCurrent(requestID) && sameTableRequest(current, request)
 }
 
 // A complete client read is query-independent. Query/filter-only changes are
@@ -267,20 +276,27 @@ function serviceRequestIsCurrent(requestID: number, request: ServiceTableRequest
 // this guard through the stable request dimensions below.
 function serviceClientReadIsCurrent(requestID: number, request: ServiceTableRequest, readGeneration: number): boolean {
   const current = currentServiceRequest()
-  return !stopped && latestRefreshID === requestID && tableMode.value === 'client' &&
+  return !stopped && serviceRefresh.isCurrent(requestID) && tableMode.value === 'client' &&
     current.active && current.page === request.page &&
     current.pageSize === request.pageSize && current.cursor === request.cursor &&
     completeServiceRead.generation() === readGeneration && clientAuthorityReady.value === false
 }
 
-// The optional event union keeps direct template @click/@retry bindings
-// type-safe while mutation callers can request a forced client read.
-async function refresh(forceClientRead: boolean | Event = false) {
-  const requestID = ++latestRefreshID
+const poller = createAdaptiveRefreshTimer(() => {
+  void refresh('background')
+}, () => {
+  if (!loaded.value || error.value) return FAST_REFRESH_MS
+  const unsettledService = services.value.some(service => (service.phase || 'Pending').toLowerCase() !== 'ready')
+  const unsettledEdge = edges.value.some(edge => !edge.connected || ['pending', 'provisioning', 'deleting'].includes((edge.phase || '').toLowerCase()))
+  return unsettledService || unsettledEdge ? FAST_REFRESH_MS : STABLE_REFRESH_MS
+})
+
+const serviceRefresh = createLatestRefreshController(async (requestID, mode) => {
   const readToken = ++clientReadToken
   const request = currentServiceRequest()
   const wasClientAuthorityReady = clientAuthorityReady.value
-  const forceCompleteRead = request.mode === 'client' && (wasClientAuthorityReady || forceClientRead === true)
+  const forceCompleteRead = request.mode === 'client' && (wasClientAuthorityReady || forceNextCompleteRead)
+  forceNextCompleteRead = false
   if (forceCompleteRead) {
     clientAuthorityReady.value = false
     // Keep the visible complete rows while a polling/CRUD replacement is in
@@ -292,12 +308,13 @@ async function refresh(forceClientRead: boolean | Event = false) {
   }
   clientReadPending.value = request.mode === 'client'
   const readGeneration = completeServiceRead.generation()
+  refreshMode.value = mode
   loading.value = true
-  error.value = null
+  if (mode === 'foreground') error.value = null
   // Do not render an unfiltered page as though it matched a newly-entered
   // query/filter. Same-page polling keeps cached rows visible until the
   // replacement arrives.
-  if (request.active && request.mode === 'server') {
+  if (mode === 'foreground' && request.active && request.mode === 'server') {
     services.value = []
     tablePageInfo.value = null
   }
@@ -353,8 +370,19 @@ async function refresh(forceClientRead: boolean | Event = false) {
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load services'
   } finally {
     if (clientReadToken === readToken) clientReadPending.value = false
-    if (!stopped && latestRefreshID === requestID) loading.value = false
+    if (!stopped && serviceRefresh.isCurrent(requestID)) loading.value = false
+    poller.schedule()
   }
+})
+
+function refresh(mode: ResourceRefreshMode | Event = 'foreground', forceClientRead = false) {
+  if (forceClientRead) forceNextCompleteRead = true
+  const requestedMode = typeof mode === 'string' ? mode : 'foreground'
+  if (requestedMode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  return serviceRefresh.request(requestedMode)
 }
 
 function handleServiceTableChange(change: ResourceTableChange) {
@@ -454,7 +482,7 @@ async function onCreate() {
     })
     showCreate.value = false
     draft.value = { name: '', edgeName: edges.value[0]?.name ?? '', serviceType: 'home-assistant', targetNamespace: '', targetName: '', scheme: 'http', host: '', port: 8123, instructions: '' }
-    await refresh(true)
+    await refresh('foreground', true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Create failed'
   } finally {
@@ -466,7 +494,7 @@ async function onDelete(s: EdgeService) {
   if (!(await confirmDialog({ title: `Delete service "${s.name}"?`, message: 'Its MCP tools stop being exposed.', danger: true, confirmLabel: 'Delete' }))) return
   try {
     await deleteEdgeService(s.name)
-    await refresh(true)
+    await refresh('foreground', true)
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Delete failed'
   }
@@ -476,11 +504,10 @@ onMounted(() => {
   loadCatalog()
   refresh()
 })
-const timer = setInterval(refresh, 10000)
 onUnmounted(() => {
   stopped = true
-  latestRefreshID += 1
-  clearInterval(timer)
+  serviceRefresh.stop()
+  poller.stop()
 })
 
 function serviceRowAriaLabel(row: Record<string, unknown>): string {
@@ -506,8 +533,8 @@ function serviceRowAriaLabel(row: Record<string, unknown>): string {
         <p>Services running next to your edges (e.g. Home Assistant). Attach a token to make one Ready, and give it AI guidance — its tools appear in the MCP endpoint.</p>
       </div>
       <div class="header-actions">
-        <button class="k-btn k-btn--ghost" :disabled="loading" @click="refresh">
-          <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
+        <button class="k-btn k-btn--ghost" :disabled="foregroundLoading" @click="refresh">
+          <RefreshCw :size="14" :class="{ spin: foregroundLoading }" /> {{ foregroundLoading ? 'Refreshing…' : 'Refresh' }}
         </button>
         <button
           type="button"
@@ -605,6 +632,7 @@ function serviceRowAriaLabel(row: Record<string, unknown>): string {
       :row-aria-label="serviceRowAriaLabel"
       :loaded="loaded"
       :loading="loading"
+      :refresh-mode="refreshMode"
       :error="error"
       :stale="loaded && !!error"
       retryable

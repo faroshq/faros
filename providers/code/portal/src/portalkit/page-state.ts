@@ -5,6 +5,9 @@
 // consumes this contract directly; the plain-TS adapter can use it without
 // importing Vue.
 
+/** A resource read may either replace an empty body with visible progress or keep it stable while refreshing. */
+export type ResourceRefreshMode = 'foreground' | 'background'
+
 /**
  * The state of an authoritative resource read.
  *
@@ -15,6 +18,7 @@
 export interface ResourceReadState {
   loaded?: boolean | null
   loading?: boolean
+  refreshMode?: ResourceRefreshMode
   error?: string | null
   stale?: boolean
   retryable?: boolean

@@ -424,6 +424,33 @@ and resource-specific content:
   read fails, with a stale/error notice and `Retry`; `ResourcePage` emits retry
   and the caller owns the fetch. Initial failures expose the same retry path.
 
+#### Resource reads and background refresh
+
+Resource pages, resource tables, and dashboard resource summaries share the
+`ResourceReadState` contract from PortalKit. `refreshMode` is either
+`foreground` or `background`. A first read may use a skeleton or pending state,
+but once a populated snapshot—or an authoritative empty snapshot—exists, keep
+it visible through every later background read and transient failure. A
+background read must not replace an empty or no-match body, spin or disable
+header actions, or otherwise disturb the useful surface. An out-of-flow
+`aria-busy` indicator or live status is appropriate when it helps communicate
+that a refresh is running.
+
+User `Refresh`, `Retry`, query, filter, and page actions are foreground reads:
+show immediate feedback even when the request is queued behind another read.
+Reads serialize. A timer request does not invalidate a useful active read; at
+most one follow-up is coalesced, with foreground priority. Explicit authority
+or resource/tenant/user identity invalidation fences stale results. Token
+rotation alone is not an identity change. Reset snapshots only when the
+tenant, user, or resource identity changes. Stop or unmount must cancel the
+timer and queued work.
+
+Use a slower cadence for stable resources (current providers use about 30s) and
+a faster, provider-appropriate cadence for unsettled or error states. Keep
+read-state ownership in the canonical PortalKit `ResourcePage`,
+`ResourceTable`, and `page-state.ts` surfaces; edit canonical sources first,
+then run `make sync-portalkit` so vendored portal copies stay synchronized.
+
 Adoption is intentionally lossless. Before moving a resource to this
 composition, inventory every legacy field, custom workflow/action/editor/table,
 read or mutation state (including stale and deleting states), and sensitive-data

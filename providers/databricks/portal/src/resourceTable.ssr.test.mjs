@@ -5,7 +5,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { createRenderer, createSSRApp, nextTick } from 'vue'
+import { createRenderer, createSSRApp, h, nextTick } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
 let vite
@@ -13,6 +13,8 @@ const testDirectory = dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = resolve(testDirectory, '../../../..')
 const portalRoot = resolve(testDirectory, '..')
 const canonicalResourceTable = resolve(repositoryRoot, 'provider-sdk/portalkit-vue/ResourceTable.vue')
+const canonicalResourcePage = resolve(repositoryRoot, 'provider-sdk/portalkit-vue/ResourcePage.vue')
+const canonicalPageState = resolve(repositoryRoot, 'provider-sdk/portalkit/page-state.ts')
 const canonicalFarosUIStyle = resolve(repositoryRoot, 'provider-sdk/portalkit/faros-ui.css')
 const canonicalTableHelpers = resolve(repositoryRoot, 'provider-sdk/portalkit-vue/table.ts')
 test.before(async () => {
@@ -35,6 +37,10 @@ test.after(async () => vite?.close())
 
 async function resourceTable() {
   return (await vite.ssrLoadModule(canonicalResourceTable)).default
+}
+
+async function resourcePage() {
+  return (await vite.ssrLoadModule(canonicalResourcePage)).default
 }
 
 async function tableHelpers() {
@@ -332,6 +338,21 @@ test('initial loading mirrors configured search and filter controls without moun
   assert.doesNotMatch(plainHTML, /k-table__loading-controls/)
 })
 
+test('background mode keeps first-read skeletons and aria-busy unchanged', async () => {
+  const ResourceTable = await resourceTable()
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [],
+    loaded: false,
+    loading: true,
+    refreshMode: 'background',
+  }))
+
+  assert.match(html, /aria-busy="true"/)
+  assert.match(html, /k-table__loading/)
+  assert.doesNotMatch(html, /<table|No data|k-table__pending-cell/)
+})
+
 test('initial read errors suppress skeleton and empty state and clear aria-busy', async () => {
   const ResourceTable = await resourceTable()
   const html = await renderToString(createSSRApp(ResourceTable, {
@@ -369,6 +390,57 @@ test('background refresh keeps rows and only updates the out-of-flow live region
   assert.match(html, /style="[^"]*position:absolute/)
   assert.doesNotMatch(html, /resource-table-updating/)
   assert.equal((html.match(/k-table__row(?=[ "\n])/g) ?? []).length, 2)
+})
+
+test('background refresh keeps authoritative empty and no-match bodies stable', async () => {
+  const ResourceTable = await resourceTable()
+  const cases = [
+    {
+      query: '',
+      expected: 'No resources yet.',
+      emptyText: 'No resources yet.',
+    },
+    {
+      query: 'orders',
+      expected: 'No resources match these filters.',
+      emptyText: 'No resources yet.',
+    },
+  ]
+
+  for (const testCase of cases) {
+    const html = await renderToString(createSSRApp(ResourceTable, {
+      columns,
+      rows: [],
+      loaded: true,
+      loading: true,
+      refreshMode: 'background',
+      searchable: true,
+      query: testCase.query,
+      emptyText: testCase.emptyText,
+    }))
+
+    assert.match(html, /aria-busy="true"/)
+    assert.match(html, new RegExp(testCase.expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.doesNotMatch(html, /k-table__pending-cell|Loading resources|Searching resources/)
+    assert.match(html, /class="k-table__live"[^>]*role="status"[^>]*aria-live="polite"/)
+    assert.match(html, /class="k-table__live"[^>]*style="[^\"]*position:absolute/)
+    assert.match(html, /Updating…/)
+  }
+})
+
+test('background refresh keeps cached populated rows without an in-flow pending body', async () => {
+  const ResourceTable = await resourceTable()
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [{ name: 'cached' }],
+    loaded: true,
+    loading: true,
+    refreshMode: 'background',
+  }))
+
+  assert.match(html, /cached/)
+  assert.doesNotMatch(html, /k-table__pending-cell|Loading resources|Searching resources/)
+  assert.match(html, /Updating…/)
 })
 
 test('searchable paginated tables render one bounded page and shared controls', async () => {
@@ -707,6 +779,27 @@ test('successful empty reads are the only empty-state case before a retrying bac
   assert.match(staleHTML, />Retry</)
 })
 
+test('background stale refreshes keep cached rows and retryable errors visible', async () => {
+  const ResourceTable = await resourceTable()
+  const html = await renderToString(createSSRApp(ResourceTable, {
+    columns,
+    rows: [{ name: 'orders' }],
+    loaded: true,
+    loading: true,
+    refreshMode: 'background',
+    error: 'read failed',
+    stale: true,
+    retryable: true,
+  }))
+
+  assert.match(html, /aria-busy="true"/)
+  assert.match(html, /Showing the last successful result\./)
+  assert.match(html, /read failed/)
+  assert.match(html, /orders/)
+  assert.match(html, />Retry</)
+  assert.doesNotMatch(html, /k-table__pending-cell|Loading resources|Searching resources/)
+})
+
 test('empty table bodies stay pending while loading, then show empty or results', async () => {
   const ResourceTable = await resourceTable()
   const pendingSearchHTML = await renderToString(createSSRApp(ResourceTable, {
@@ -770,6 +863,41 @@ test('empty table bodies stay pending while loading, then show empty or results'
   }))
   assert.match(resultsHTML, /orders/)
   assert.doesNotMatch(resultsHTML, /Searching resources/)
+})
+
+test('resource page announces loaded refreshes out of flow and preserves the body', async () => {
+  const ResourcePage = await resourcePage()
+  const html = await renderToString(createSSRApp({
+    render: () => h(ResourcePage, {
+      title: 'Orders',
+      loaded: true,
+      loading: true,
+      refreshMode: 'background',
+    }, {
+      default: () => h('p', 'Loaded body'),
+    }),
+  }))
+
+  assert.match(html, /aria-busy="true"/)
+  assert.match(html, /Loaded body/)
+  assert.doesNotMatch(html, /k-resource-page__loading/)
+  assert.match(html, /class="k-resource-page__live"[^>]*role="status"[^>]*aria-live="polite"/)
+  assert.match(html, /class="k-resource-page__live"[^>]*style="[^\"]*position:absolute/)
+  assert.match(html, /Updating…/)
+})
+
+test('resource page keeps first-read skeletons for background mode', async () => {
+  const ResourcePage = await resourcePage()
+  const html = await renderToString(createSSRApp(ResourcePage, {
+    title: 'Orders',
+    loaded: false,
+    loading: true,
+    refreshMode: 'background',
+  }))
+
+  assert.match(html, /aria-busy="true"/)
+  assert.match(html, /k-resource-page__loading/)
+  assert.doesNotMatch(html, /Loaded body|k-resource-page__stale/)
 })
 
 test('status tones distinguish retryable and actionable condition failures', async () => {
@@ -1016,6 +1144,23 @@ test('canonical source exposes the row-key contract', async () => {
   assert.doesNotMatch(source, /resource-table-updating/)
 })
 
+test('canonical resource reads expose an additive refresh-mode contract', async () => {
+  const [pageState, table, page] = await Promise.all([
+    readFile(canonicalPageState, 'utf8'),
+    readFile(canonicalResourceTable, 'utf8'),
+    readFile(canonicalResourcePage, 'utf8'),
+  ])
+
+  assert.match(pageState, /export type ResourceRefreshMode = 'foreground' \| 'background'/)
+  assert.match(pageState, /refreshMode\?: ResourceRefreshMode/)
+  assert.match(table, /refreshMode\?: ResourceRefreshMode/)
+  assert.match(table, /refreshMode: 'foreground'/)
+  assert.match(table, /props\.refreshMode === 'foreground'/)
+  assert.match(page, /refreshMode\?: ResourceRefreshMode/)
+  assert.match(page, /refreshMode: 'foreground'/)
+  assert.match(page, /class="k-resource-page__live"/)
+})
+
 test('canonical server pagination surface has no mode or filter aliases', async () => {
   const source = await readFile(canonicalResourceTable, 'utf8')
   assert.match(source, /paginationMode\?: TablePaginationMode/)
@@ -1052,7 +1197,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(split, /deferredCloseTimer = window\.setTimeout/)
   assert.match(split, /closeMenuAfterTab\(\)/)
   assert.match(tables, /tableImportBlocker = computed\(\(\) => !loaded\.value \? '' : importPrerequisiteMessage/)
-  assert.match(tables, /class="k-btn k-btn--ghost icon-text" type="button" @click="load"/)
+  assert.match(tables, /class="k-btn k-btn--ghost icon-text"[\s\S]{0,200}@click="load"/)
   assert.match(tables, /@row-click="\(row\) => openResource\(String\(row\.name\)\)"/)
   assert.doesNotMatch(tables, /selectedTable|schemaRows|schemaLoaded|schemaPending|schemaError|schemaCache|schemaCached/)
   assert.doesNotMatch(tables, /<h3 class="databricks-resource-panel-title">Schema<\/h3>/)
@@ -1102,7 +1247,11 @@ test('resource detail views use the shared shell without dropping resource behav
     assert.match(source, /<div v-if="[^\n]+" class="databricks-resource-sections">/, `${kind} stacks resource sections`)
     assert.match(source, /<ResourceSectionCard id="[^\"]+-conditions"[\s\S]*<ConditionsPanel/, `${kind} keeps Conditions in a section card`)
     assert.match(source, /createLatestRefreshController/, `${kind} keeps serialized refresh`)
-    assert.match(source, /setInterval\(load, 5000\)/, `${kind} keeps the five-second refresh cadence`)
+    assert.match(source, /createAdaptiveRefreshTimer/, `${kind} uses serialized adaptive polling`)
+    assert.match(source, /FAST_REFRESH_MS/, `${kind} keeps the fast reconciliation cadence`)
+    assert.match(source, /STABLE_REFRESH_MS/, `${kind} keeps the quiet ready cadence`)
+    assert.match(source, /poll\.schedule\(\)/, `${kind} schedules the next poll after each settled read`)
+    assert.doesNotMatch(source, /setInterval\(load, 5000\)/, `${kind} avoids overlapping fixed intervals`)
     assert.match(source, /Updating…/, `${kind} keeps the in-place updating announcement`)
     assert.match(source, /:stale="[^\"]*!!error/, `${kind} keeps stale snapshot signaling`)
     assert.match(source, /operations\.tombstone\(/, `${kind} keeps deletion tombstones`)

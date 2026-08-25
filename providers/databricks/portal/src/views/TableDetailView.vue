@@ -10,20 +10,31 @@ import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
 import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import type { ErrorResponse, Table, TableColumn } from '../types'
-import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController } from '../refresh'
+import {
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  createOperationLocks,
+  FAST_REFRESH_MS,
+  operationKey,
+  STABLE_REFRESH_MS,
+  type AdaptiveRefreshTimer,
+  type LatestRefreshController,
+  type ResourceRefreshMode,
+} from '../refresh'
 
 const props = defineProps<{ name: string }>()
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const table = ref<Table | null>(null)
 const loading = ref(false)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const deleting = ref(false)
 const schemaCache = ref<{ uid?: string; generation?: number; refreshedAt?: string; columns: TableColumn[] } | null>(null)
 const actionsMenu = ref<HTMLDetailsElement | null>(null)
-let timer: number | undefined
+let poll!: AdaptiveRefreshTimer
 let refresh!: LatestRefreshController
 const operations = createOperationLocks()
 
@@ -145,9 +156,25 @@ function applySchemaCache(next: Table): Table {
   return next
 }
 
-function load() {
-  refresh.request()
+function requestRefresh(mode: ResourceRefreshMode): void {
+  if (mode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  refresh.request(mode)
 }
+
+function load(): void {
+  requestRefresh('foreground')
+}
+
+function pollCadence(): number {
+  const stable = loaded.value && !error.value && !deleting.value && !!table.value &&
+    table.value.status === 'Ready' && operationPhase(table.value.name) !== 'deleting'
+  return stable ? STABLE_REFRESH_MS : FAST_REFRESH_MS
+}
+
+poll = createAdaptiveRefreshTimer(() => requestRefresh('background'), pollCadence)
 
 function operationLocked(name: string): boolean {
   return operations.isLocked(operationKey('table', name))
@@ -196,8 +223,9 @@ function deleteFromMenu() {
   void remove()
 }
 
-refresh = createLatestRefreshController(async requestID => {
-  loading.value = true
+refresh = createLatestRefreshController(async (requestID, mode) => {
+  refreshMode.value = mode
+  if (mode === 'foreground') loading.value = true
   try {
     const next = await api.getTable(props.name)
     if (refresh.isCurrent(requestID)) {
@@ -210,7 +238,10 @@ refresh = createLatestRefreshController(async requestID => {
     const err = e as ErrorResponse
     error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
   } finally {
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      if (mode === 'foreground') loading.value = false
+      poll.schedule()
+    }
   }
 })
 
@@ -227,10 +258,9 @@ watch(() => props.name, () => {
 
 onMounted(() => {
   load()
-  timer = window.setInterval(load, 5000)
 })
 onUnmounted(() => {
-  window.clearInterval(timer)
+  poll.stop()
   refresh.stop()
 })
 </script>
@@ -244,6 +274,7 @@ onUnmounted(() => {
       eyebrow="Table"
       :loaded="readState"
       :loading="loading"
+      :refresh-mode="refreshMode"
       :error="error"
       :stale="loaded && !!error"
       retryable
@@ -334,6 +365,7 @@ onUnmounted(() => {
           row-key="name"
           :loaded="schemaLoaded"
           :loading="schemaPending"
+          :refresh-mode="refreshMode"
           :error="schemaError"
           :stale="schemaPending && schemaCached"
           retryable
