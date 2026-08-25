@@ -395,14 +395,24 @@ and resource-specific content:
   provider-specific primary action, `Refresh`, then an overflow menu containing
   `Delete`.
 - Use `ResourceStatCards` for provider-defined, meaningful facts with
-  provider-chosen icons. The responsive grid is three columns, then two, then
+  provider-chosen icons. Default density keeps the existing card geometry
+  unchanged. The `density="compact"` option is opt-in for fact-heavy summaries.
+  Both densities use the same responsive grid: three columns, then two, then
   one at narrower widths. These facts are not a universal resource field
   schema.
 - Put product-facing content first in vertically stacked `ResourceSectionCard`
-  cards. Providers own each card's content and optional actions. The final card
-  is technical details, closed by default, and contains only sanitized
-  configuration, health, metadata, or a read-only object snapshot; credentials,
-  tokens, and other secrets do not belong there.
+  cards. Providers own each card's content and optional actions. Section action
+  buttons may use a leading Lucide icon with a visible label; icon-only actions
+  are not the default. Technical details are optional rather than a mandatory
+  final card. Providers may promote Conditions or health into an always-visible
+  product-facing section and omit raw configuration, metadata, or YAML when it
+  adds end-user noise. When technical details are shown, keep them closed by
+  default and limited to sanitized configuration, health, metadata, or a
+  read-only object snapshot; credentials, tokens, and other secrets do not
+  belong there.
+- Primary header anchors that use an accent background retain the
+  `text-on-accent` contrast token in both normal and hover states; changing the
+  background to `accent-hover` must not reduce readable contrast.
 - The read contract distinguishes first-load loading and error states from a
   later refresh failure. A successful snapshot remains visible when a later
   read fails, with a stale/error notice and `Retry`; `ResourcePage` emits retry

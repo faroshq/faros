@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle, ArrowLeft, Ellipsis, ExternalLink, Eye, GitBranch, Github, Package as PackageIcon, Plug, RefreshCw, User } from 'lucide-vue-next'
+import { AlertTriangle, ArrowLeft, ArrowLeftRight, Ellipsis, ExternalLink, Eye, GitBranch, Github, Package as PackageIcon, PackageOpen, Plug, RefreshCw, User, Users, X } from 'lucide-vue-next'
 import { api } from '../api'
 import type { Collaborator, Connection, DeployKey, ErrorResponse, Package, RepositoryDetail } from '../types'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
@@ -43,7 +43,6 @@ const actionsMenu = ref<HTMLDetailsElement | null>(null)
 const connectionExpanded = ref(false)
 const accessExpanded = ref(false)
 const packagesExpanded = ref(false)
-const technicalExpanded = ref(false)
 
 const connections = ref<Connection[]>([])
 const connectionsLoading = ref(true)
@@ -212,68 +211,6 @@ const repositoryReadState = computed<boolean | null>(() => {
   return repoLoading.value ? false : null
 })
 
-const configurationRows = computed(() => {
-  const value = repo.value
-  if (!value) return []
-  return [
-    { label: 'Repository', value: value.repo || '—', mono: true },
-    { label: 'Connection', value: value.connectionRef || '—', mono: true },
-    { label: 'Owner', value: value.owner || currentConn.value?.owner || 'Inherited from connection', mono: false },
-    { label: 'Visibility', value: value.visibility || '—', mono: false },
-    { label: 'Default branch', value: value.defaultBranch || 'Provider default', mono: true },
-    { label: 'Initialize README', value: value.autoInit === undefined ? 'Provider default' : value.autoInit ? 'Enabled' : 'Disabled', mono: false },
-    { label: 'Clone URL', value: value.cloneURL || '—', mono: true },
-    { label: 'SSH URL', value: value.sshURL || '—', mono: true },
-  ]
-})
-
-const metadataRows = computed(() => {
-  const value = repo.value
-  return [
-    { label: 'API version', value: value?.apiVersion || '—', mono: true },
-    { label: 'Kind', value: value?.kind || '—', mono: true },
-    { label: 'Resource name', value: value?.name || props.name, mono: true },
-    { label: 'UID', value: value?.uid || '—', mono: true },
-    { label: 'Resource version', value: value?.resourceVersion || '—', mono: true },
-    { label: 'Generation', value: value?.generation ?? '—', mono: true },
-    { label: 'Created', value: value?.creationTimestamp ? formatTimestamp(value.creationTimestamp) : '—', mono: false },
-  ]
-})
-
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
-}
-
-function yamlScalar(value: unknown): string {
-  if (value === null) return 'null'
-  if (typeof value === 'string') return JSON.stringify(value)
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return JSON.stringify(value)
-}
-
-function toYaml(value: unknown, indent = 0): string {
-  const padding = ' '.repeat(indent)
-  if (Array.isArray(value)) {
-    return value.map(item => {
-      if (item && typeof item === 'object') return `${padding}-\n${toYaml(item, indent + 2)}`
-      return `${padding}- ${yamlScalar(item)}`
-    }).join('\n')
-  }
-  if (value && typeof value === 'object') {
-    return Object.entries(value as Record<string, unknown>)
-      .filter(([, child]) => child !== undefined)
-      .map(([key, child]) => {
-        if (child && typeof child === 'object' && Object.keys(child as object).length > 0) {
-          return `${padding}${key}:\n${toYaml(child, indent + 2)}`
-        }
-        return `${padding}${key}: ${yamlScalar(child)}`
-      }).join('\n')
-  }
-  return `${padding}${yamlScalar(value)}`
-}
-
-const repositoryYaml = computed(() => repo.value ? toYaml(repo.value.rawObject) : '')
 const repositoryStatCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'integration',
@@ -292,7 +229,7 @@ const repositoryStatCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'type',
     label: 'Type',
-    value: repo.value?.kind || 'Repository',
+    value: 'Repository',
     icon: PackageIcon,
   },
   {
@@ -818,7 +755,7 @@ onUnmounted(() => {
     </template>
 
     <template #summary>
-      <ResourceStatCards :cards="repositoryStatCards" aria-label="Repository summary" />
+      <ResourceStatCards :cards="repositoryStatCards" density="compact" aria-label="Repository summary" />
     </template>
 
     <template #body>
@@ -841,6 +778,8 @@ onUnmounted(() => {
                   <StatusBadge :status="integrationHealth" :tone="integrationHealthTone" :title="currentConn?.message" />
                 </div>
                 <button class="k-btn k-btn--ghost" type="button" :disabled="repositoryDeleting || changingConn" :aria-expanded="connectionExpanded" aria-controls="repository-integration-editor" @click="toggleConnectionEditor">
+                  <ArrowLeftRight v-if="!connectionExpanded" :size="14" aria-hidden="true" />
+                  <X v-else :size="14" aria-hidden="true" />
                   {{ connectionExpanded ? 'Cancel' : 'Change' }}
                 </button>
               </div>
@@ -849,7 +788,7 @@ onUnmounted(() => {
                 <select v-model="selectedConn" class="k-input" :disabled="repositoryDeleting || changingConn || !connectionsLoaded">
                   <option v-for="c in connectionChoices" :key="c.name" :value="c.name">{{ c.name }} ({{ c.owner }})</option>
                 </select>
-                <button class="k-btn k-btn--primary" type="button" :disabled="repositoryDeleting || changingConn || !connectionsLoaded || selectedConn === repo.connectionRef" @click="changeConnection">{{ changingConn ? 'Changing…' : 'Change' }}</button>
+                <button class="k-btn k-btn--primary" type="button" :disabled="repositoryDeleting || changingConn || !connectionsLoaded || selectedConn === repo.connectionRef" @click="changeConnection"><ArrowLeftRight :size="14" aria-hidden="true" />{{ changingConn ? 'Changing…' : 'Change' }}</button>
               </div>
               <span v-if="connectionsLoading && !connectionsLoaded" class="muted" role="status" aria-live="polite">Loading connections…</span>
               <div v-if="connectionsError" class="error read-error" role="alert" aria-live="assertive">
@@ -870,6 +809,7 @@ onUnmounted(() => {
               <span><strong>{{ collabsLoaded ? collabRows.length : '—' }}</strong> collaborators</span>
             </div>
             <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="accessExpanded" aria-controls="repository-access-content" @click="accessExpanded = !accessExpanded">
+              <Users :size="14" aria-hidden="true" />
               {{ accessExpanded ? 'Hide access' : 'Manage access' }}
             </button>
           </template>
@@ -916,6 +856,7 @@ onUnmounted(() => {
               <span>{{ packagesSummaryStatus }}</span>
             </div>
             <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="packagesExpanded" aria-controls="repository-packages-content" @click="packagesExpanded = !packagesExpanded">
+              <PackageOpen :size="14" aria-hidden="true" />
               {{ packagesExpanded ? 'Hide packages' : 'View packages' }}
             </button>
           </template>
@@ -933,73 +874,18 @@ onUnmounted(() => {
           </div>
         </ResourceSectionCard>
 
-        <ResourceSectionCard id="repository-technical" eyebrow="Diagnostics" title="Technical details" description="Configuration, health, metadata, and the read-only object snapshot.">
-          <template #actions>
-            <button class="k-btn k-btn--ghost" type="button" :disabled="!repo" :aria-expanded="technicalExpanded" aria-controls="repository-technical-content" @click="technicalExpanded = !technicalExpanded">
-              {{ technicalExpanded ? 'Hide technical details' : 'Show technical details' }}
-            </button>
-          </template>
-          <div v-if="repo && technicalExpanded" id="repository-technical-content" class="repo-technical">
-            <div class="k-resource-technical__body">
-              <section class="k-resource-technical__section">
-                <h3 class="k-resource-technical__section-title">Configuration</h3>
-                <div class="k-resource-technical__content">
-                  <dl class="k-resource-technical__definition">
-                    <div v-for="row in configurationRows" :key="row.label">
-                      <dt>{{ row.label }}</dt>
-                      <dd :class="{ mono: row.mono }">{{ row.value }}</dd>
-                    </div>
-                  </dl>
-                </div>
-              </section>
-
-              <section class="k-resource-technical__section">
-                <h3 class="k-resource-technical__section-title">Health data</h3>
-                <div class="k-resource-technical__content">
-                  <ConditionsPanel
-                    :conditions="repo.conditions"
-                    :generation="repo.generation"
-                    :observed-generation="repo.observedGeneration"
-                    empty-text="No health conditions reported yet."
-                  />
-                  <dl class="k-resource-technical__definition" style="margin-top: 12px;">
-                    <div><dt>Provider status</dt><dd>{{ repo.ready ? 'Ready' : 'Waiting for reconciliation' }}</dd></div>
-                    <div><dt>Repository ID</dt><dd class="mono">{{ repo.repoID || '—' }}</dd></div>
-                    <div><dt>Browser URL</dt><dd class="mono">{{ repo.htmlURL || '—' }}</dd></div>
-                  </dl>
-                </div>
-              </section>
-
-              <section class="k-resource-technical__section">
-                <h3 class="k-resource-technical__section-title">Metadata</h3>
-                <div class="k-resource-technical__content">
-                  <dl class="k-resource-technical__definition">
-                    <div v-for="row in metadataRows" :key="row.label">
-                      <dt>{{ row.label }}</dt>
-                      <dd :class="{ mono: row.mono }">{{ row.value }}</dd>
-                    </div>
-                  </dl>
-                  <template v-if="repo.labels && Object.keys(repo.labels).length">
-                    <p class="k-resource-technical__section-title" style="margin-top: 14px;">Labels</p>
-                    <dl class="k-resource-technical__definition k-resource-technical__labels">
-                      <template v-for="([key, value]) in Object.entries(repo.labels)" :key="key">
-                        <dt>{{ key }}</dt>
-                        <dd class="mono">{{ value }}</dd>
-                      </template>
-                    </dl>
-                  </template>
-                </div>
-              </section>
-
-              <section class="k-resource-technical__section">
-                <h3 class="k-resource-technical__section-title">YAML / read-only object</h3>
-                <div class="k-resource-technical__content">
-                  <p class="muted" style="margin: 0 0 8px; font-size: 11px;">Read-only snapshot from the latest successful repository read.</p>
-                  <pre class="k-resource-technical__pre">{{ repositoryYaml || 'No object snapshot available.' }}</pre>
-                </div>
-              </section>
-            </div>
-          </div>
+        <ResourceSectionCard id="repository-conditions" eyebrow="Diagnostics" title="Health" description="Controller health and provider details for this repository.">
+          <ConditionsPanel
+            :conditions="repo?.conditions || []"
+            :generation="repo?.generation"
+            :observed-generation="repo?.observedGeneration"
+            empty-text="No health conditions reported yet."
+          />
+          <dl class="repo-conditions__facts" aria-label="Repository health facts">
+            <div><dt>Provider status</dt><dd>{{ repo?.ready ? 'Ready' : 'Waiting for reconciliation' }}</dd></div>
+            <div><dt>Repository ID</dt><dd class="mono">{{ repo?.repoID || '—' }}</dd></div>
+            <div><dt>Browser URL</dt><dd class="mono">{{ repo?.htmlURL || '—' }}</dd></div>
+          </dl>
         </ResourceSectionCard>
       </div>
     </template>

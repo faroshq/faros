@@ -14,6 +14,7 @@ import { ensureFarosUIStyles } from '../portalkit/styles'
 ensureFarosUIStyles()
 
 export type ResourceStatTone = 'default' | 'success' | 'warning' | 'danger'
+export type ResourceStatDensity = 'default' | 'compact'
 
 export interface ResourceStatCard {
   id: string
@@ -28,13 +29,21 @@ export interface ResourceStatCard {
 const props = withDefaults(defineProps<{
   cards: readonly ResourceStatCard[]
   ariaLabel?: string
+  density?: ResourceStatDensity
 }>(), {
   ariaLabel: 'Resource summary',
+  density: 'default',
 })
 </script>
 
 <template>
-  <div class="k-resource-stat-cards" :aria-label="props.ariaLabel" data-k-resource-stat-cards>
+  <div
+    class="k-resource-stat-cards"
+    :class="{ 'k-resource-stat-cards--compact': props.density === 'compact' }"
+    :aria-label="props.ariaLabel"
+    :data-density="props.density"
+    data-k-resource-stat-cards
+  >
     <article
       v-for="card in props.cards"
       :key="card.id"

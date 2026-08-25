@@ -78,7 +78,6 @@ export interface Repository {
   name: string
   uid?: string
   deletionTimestamp?: string
-  resourceVersion?: string
   generation?: number
   observedGeneration?: number
   connectionRef: string
@@ -87,25 +86,16 @@ export interface Repository {
   visibility: string
   description?: string
   defaultBranch?: string
-  autoInit?: boolean
   htmlURL?: string
-  sshURL?: string
-  cloneURL?: string
   ready: boolean
   message?: string
 }
 
-// RepositoryDetail is a Repository plus the full status needed to debug one that
-// is stuck "pending": every condition verbatim and observed-vs-current
-// generation (a lag means the controller has not reconciled the latest spec).
+// RepositoryDetail is a Repository plus the provider health facts needed by the
+// conditions section: the provider-side repository ID and every condition
+// verbatim, with observed-vs-current generation for reconciliation context.
 export interface RepositoryDetail extends Repository {
   repoID?: string
-  creationTimestamp?: string
-  apiVersion: string
-  kind: 'Repository'
-  labels?: Record<string, string>
-  annotations?: Record<string, string>
-  rawObject: Record<string, unknown>
   conditions: ConditionInfo[]
 }
 

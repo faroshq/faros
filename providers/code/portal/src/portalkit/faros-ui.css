@@ -1300,6 +1300,21 @@ html.light [data-k-tip]::after {
 .k-resource-stat-card--success .k-resource-stat-card__icon { border-color: color-mix(in srgb, var(--color-success, #2fd6a0) 35%, transparent); background: var(--color-success-subtle, rgba(47, 214, 160, 0.12)); color: var(--color-success, #2fd6a0); }
 .k-resource-stat-card--warning .k-resource-stat-card__icon { border-color: color-mix(in srgb, var(--color-warning, #f0a63a) 35%, transparent); background: var(--color-warning-subtle, rgba(240, 166, 58, 0.12)); color: var(--color-warning, #f0a63a); }
 .k-resource-stat-card--danger .k-resource-stat-card__icon { border-color: color-mix(in srgb, var(--color-danger, #ff5d5d) 35%, transparent); background: var(--color-danger-subtle, rgba(255, 93, 93, 0.12)); color: var(--color-danger, #ff5d5d); }
+/* Compact density is opt-in for detail views with several summary facts. The
+ * default recipe above remains the shared Edge geometry. */
+.k-resource-stat-cards--compact .k-resource-stat-card {
+  min-height: 64px;
+  gap: 8px;
+  padding: 10px;
+}
+.k-resource-stat-cards--compact .k-resource-stat-card__icon {
+  width: 26px;
+  height: 26px;
+}
+.k-resource-stat-cards--compact .k-resource-stat-card__content { gap: 2px; }
+.k-resource-stat-cards--compact .k-resource-stat-card__value { font-size: 12px; }
+.k-resource-stat-cards--compact .k-resource-stat-card__value.mono { font-size: 11px; }
+.k-resource-stat-cards--compact .k-resource-stat-card__detail { font-size: 9px; }
 .k-resource-section-card {
   display: flex;
   width: 100%;
