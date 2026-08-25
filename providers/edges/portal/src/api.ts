@@ -612,6 +612,28 @@ export async function listServicesPage(options: KubernetesListOptions = {}): Pro
   return mapListPage(await listServicesPageRaw(options, context), toEdgeService)
 }
 
+// getService reads one exact Service resource for URL-owned instance pages.
+// This deliberately does not search the bounded list cache: a deep link may
+// target a resource beyond the table's current cursor page, and the instance
+// view must distinguish an authoritative not-found from an incomplete list.
+export async function getService(name: string): Promise<EdgeService> {
+  const data = await graphql<{
+    edges_faros_sh?: {
+      v1alpha1?: {
+        Service?: RawEdgeService | null
+      }
+    }
+  }>(
+    `query GetService($name: String!) {
+       edges_faros_sh { v1alpha1 { Service(name: $name) { ${EDGE_SVC_SEL} } } }
+     }`,
+    { name },
+  )
+  const resource = data.edges_faros_sh?.v1alpha1?.Service
+  if (!resource) throw <ErrorResponse>{ reason: 'NotFound', message: `Service ${name} not found` }
+  return toEdgeService(resource)
+}
+
 async function listAllPages<T>(
   kind: 'Services' | 'Workloads',
   fetchPage: (options: KubernetesListOptions, context: RequestContext) => Promise<RawListPage<T>>,
@@ -676,19 +698,22 @@ export interface EdgeServiceEdit {
   targetNamespace?: string
   targetName?: string
   instructions?: string
+  // Explicit target mode is needed for the valid "host with blank host" case:
+  // blank host means agent loopback, not a request to retain a stale targetRef.
+  targetMode?: 'host' | 'kube'
 }
 
 // updateEdgeService merge-patches the editable spec fields. host and targetRef
 // are mutually exclusive — the unused one is cleared (null/empty) so switching
 // target mode takes effect.
 export async function updateEdgeService(name: string, e: EdgeServiceEdit): Promise<void> {
-  const byHost = !!e.host?.trim()
+  const byHost = e.targetMode ? e.targetMode === 'host' : !!e.host?.trim()
   const spec: Record<string, unknown> = {
     type: e.serviceType,
     scheme: e.scheme,
     port: e.port,
     instructions: e.instructions ?? '',
-    host: byHost ? e.host!.trim() : '',
+    host: byHost ? (e.host ?? '').trim() : '',
     targetRef: byHost
       ? null
       : e.targetName?.trim()

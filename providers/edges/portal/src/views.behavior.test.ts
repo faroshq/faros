@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   listServicesPage: vi.fn(),
   listEdges: vi.fn(),
   fetchServiceCatalog: vi.fn(),
+  getService: vi.fn(),
   createKubeEdgeService: vi.fn(),
   deleteEdgeService: vi.fn(),
   updateEdgeService: vi.fn(),
@@ -20,6 +21,7 @@ const api = vi.hoisted(() => ({
 vi.mock('./api', () => api)
 
 import Services from './Services.vue'
+import ServiceEdit from './ServiceEdit.vue'
 import Workloads from './Workloads.vue'
 
 type HostNode = {
@@ -137,6 +139,7 @@ beforeEach(() => {
   api.fetchServiceCatalog.mockResolvedValue([])
   api.listEdges.mockResolvedValue([edge])
   api.listServices.mockResolvedValue([service])
+  api.getService.mockResolvedValue(service)
   api.listWorkloads.mockResolvedValue([workload])
   api.listServicesPage.mockResolvedValue({ items: [service], continue: undefined })
   api.listWorkloadsPage.mockResolvedValue({ items: [workload], continue: undefined })
@@ -477,6 +480,38 @@ describe('edge list views', () => {
           { value: 'Failed', label: 'Failed' }, { value: 'Unknown', label: 'Unknown' },
         ] },
       ])
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('labels blank-host services as agent loopback and treats no-auth credentials as not required', async () => {
+    const detail = {
+      ...service,
+      host: '',
+      targetNamespace: '',
+      targetName: '',
+      port: 8123,
+      hasCredentials: false,
+      conditions: [],
+    }
+    api.getService.mockResolvedValue(detail)
+    const mounted = await mount(ServiceEdit, {
+      service: detail,
+      serviceName: detail.name,
+      catalog: [{ type: 'generic', displayName: 'Generic HTTP', category: 'Other', auth: 'none', credential: {} }],
+      edges: [edge],
+    })
+    try {
+      await flush()
+      const state = mounted.instance.setupState
+      expect(api.getService).toHaveBeenCalledWith('svc-a')
+      expect(state.targetSummary).toBe('Agent loopback:8123')
+      expect(state.targetSummary).not.toContain('—:')
+      expect(state.credentialsRequired).toBe(false)
+      expect(state.serviceStatCards).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'credentials', value: 'Not required', detail: 'No credentials required', tone: 'default' }),
+      ]))
     } finally {
       mounted.unmount()
     }

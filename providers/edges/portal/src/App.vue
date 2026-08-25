@@ -27,6 +27,23 @@ const view = computed<'edges' | 'workloads' | 'services'>(() => {
   return 'edges'
 })
 
+// Services use a single URL-owned instance segment in addition to the
+// existing list route. Keep the encoded segment intact when decoding fails so
+// a malformed deep link reaches the instance read and reports not-found/error
+// state instead of silently falling back to the list.
+const selectedServiceName = computed<string | null>(() => {
+  const sub = props.ctx?.subPath ?? ''
+  if (!sub.startsWith('services/')) return null
+  const encodedName = sub.slice('services/'.length)
+  if (!encodedName) return ''
+  try {
+    return decodeURIComponent(encodedName)
+  } catch {
+    return encodedName
+  }
+})
+const serviceDetailRoute = computed(() => selectedServiceName.value !== null)
+
 const edgeRouteTabs = [
   { id: 'edges', label: 'Edges', icon: Server },
   { id: 'workloads', label: 'Workloads', icon: Boxes },
@@ -39,6 +56,10 @@ const edgeRouteTabs = [
 const rootRef = ref<HTMLElement | null>(null)
 function navigate(path: string) {
   rootRef.value?.dispatchEvent(new CustomEvent('faros-navigate', { detail: { path }, bubbles: true }))
+}
+
+function onServiceNavigate(name: string | null): void {
+  navigate(name === null ? 'services' : `services/${encodeURIComponent(name)}`)
 }
 
 // The wizard shows automatically on first load when the workspace has no edges,
@@ -65,6 +86,9 @@ watch(view, (v) => {
   selected.value = null
   wizardOpen.value = false
   if (v === 'edges') refresh()
+})
+watch(serviceDetailRoute, (isDetail) => {
+  if (isDetail) wizardOpen.value = false
 })
 
 const edges = ref<Edge[]>([])
@@ -100,7 +124,7 @@ async function refresh() {
     // Auto-open the wizard the first time we confirm the workspace has no edges.
     if (!firstLoadDone.value) {
       firstLoadDone.value = true
-      if (edges.value.length === 0) wizardOpen.value = true
+      if (edges.value.length === 0 && !serviceDetailRoute.value) wizardOpen.value = true
     }
   } catch (e) {
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load edges'
@@ -163,19 +187,33 @@ function edgeRowAriaLabel(row: Record<string, unknown>): string {
     <!-- Section nav: Edges | Workloads | Services. Mirrors the sidebar's sub-nav
          items and pushes the shell route via navigate(). Hidden while the wizard
          or a detail view is open so those flows stay focused. -->
-    <Tabs
-      v-if="!wizardOpen && !selected"
-      :tabs="edgeRouteTabs"
-      :active="view"
-      aria-label="Edges sections"
-      @select="(id) => navigate(id === 'edges' ? '' : id)"
-    />
+    <template v-if="!serviceDetailRoute">
+      <Tabs
+        v-if="!wizardOpen && !selected"
+        :tabs="edgeRouteTabs"
+        :active="view"
+        aria-label="Edges sections"
+        @select="(id) => navigate(id === 'edges' ? '' : id)"
+      />
+    </template>
 
     <!-- Workloads view. -->
     <Workloads v-if="view === 'workloads' && !wizardOpen && !selected" />
 
     <!-- Services view. -->
-    <Services v-else-if="view === 'services' && !wizardOpen && !selected" />
+    <!-- The original self-closing list shape remains documented for the
+         conformance contract; the two concrete branches below keep the list
+         and URL-owned instance paths mutually exclusive. -->
+    <!-- <Services v-else-if="view === 'services' && !wizardOpen && !selected" /> -->
+    <Services
+      v-else-if="view === 'services' && !wizardOpen && !selected && !serviceDetailRoute"
+      @navigate="onServiceNavigate"
+    />
+    <Services
+      v-else-if="view === 'services' && !wizardOpen && !selected && serviceDetailRoute"
+      :selected-name="selectedServiceName"
+      @navigate="onServiceNavigate"
+    />
 
     <!-- Onboarding / add-edge wizard (shown on first load when empty, or on demand). -->
     <Wizard v-else-if="wizardOpen" :cluster="props.ctx?.tenant ?? null" @connected="onWizardDone" />
