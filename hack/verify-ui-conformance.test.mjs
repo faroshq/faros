@@ -198,6 +198,18 @@ test('keeps resource-table controls and wide-table scrolling in the canonical re
   assert.match(sync, /OBSOLETE_FILES=\([^\n]*ResourceTable\.css/)
 })
 
+test('keeps resource section cards bounded and supports headerless sections', () => {
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const sectionCard = fs.readFileSync(new URL('../provider-sdk/portalkit-vue/ResourceSectionCard.vue', import.meta.url), 'utf8')
+  const card = css.match(/\.k-resource-section-card\s*\{([^}]*)\}/s)?.[1] ?? ''
+
+  assert.match(card, /box-sizing:\s*border-box/)
+  assert.match(sectionCard, /title\?:\s*string/)
+  assert.match(sectionCard, /v-if="props\.title"[\s\S]*class="k-resource-section-card__title"/)
+  assert.match(sectionCard, /v-if="props\.eyebrow \|\| props\.title \|\| props\.description \|\| \$slots\.actions"/)
+  assert.match(sectionCard, /:aria-labelledby="props\.title && headingId \? headingId : undefined"/)
+})
+
 test('keeps platform-admin flat lists and navigation on shared host patterns', () => {
   const root = new URL('../portal/src/pages/bonkers/', import.meta.url)
   for (const file of ['ProvidersSection.vue', 'IdentitiesSection.vue', 'UsersSection.vue']) {

@@ -16,12 +16,13 @@ const props = withDefaults(defineProps<{
   id?: string
   headingId?: string
   eyebrow?: string
-  title: string
+  title?: string
   description?: string
 }>(), {
   id: '',
   headingId: '',
   eyebrow: '',
+  title: '',
   description: '',
 })
 
@@ -32,13 +33,16 @@ const headingId = computed(() => props.headingId || (props.id ? `${props.id}-hea
   <section
     :id="props.id || undefined"
     class="k-resource-section-card"
-    :aria-labelledby="headingId || undefined"
+    :aria-labelledby="props.title && headingId ? headingId : undefined"
     data-k-resource-section-card
   >
-    <header class="k-resource-section-card__header">
-      <div class="k-resource-section-card__heading">
+    <header
+      v-if="props.eyebrow || props.title || props.description || $slots.actions"
+      class="k-resource-section-card__header"
+    >
+      <div v-if="props.eyebrow || props.title || props.description" class="k-resource-section-card__heading">
         <p v-if="props.eyebrow" class="k-resource-section-card__eyebrow">{{ props.eyebrow }}</p>
-        <h2 :id="headingId || undefined" class="k-resource-section-card__title">{{ props.title }}</h2>
+        <h2 v-if="props.title" :id="headingId || undefined" class="k-resource-section-card__title">{{ props.title }}</h2>
         <p v-if="props.description" class="k-resource-section-card__description">{{ props.description }}</p>
       </div>
       <div v-if="$slots.actions" class="k-resource-section-card__actions">

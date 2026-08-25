@@ -1326,6 +1326,7 @@ html.light [data-k-tip]::after {
 .k-resource-section-card {
   display: flex;
   width: 100%;
+  box-sizing: border-box;
   min-width: 0;
   flex-direction: column;
   gap: 18px;
