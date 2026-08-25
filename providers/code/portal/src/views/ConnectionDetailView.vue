@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowLeft } from 'lucide-vue-next'
+import { ArrowLeft, Ellipsis, GitBranch, KeyRound, Link2, Plug, RefreshCw, User } from 'lucide-vue-next'
 import { api } from '../api'
 import type { ConnectionDetail, ErrorResponse } from '../types'
 import ConditionsPanel from '../portalkit/ConditionsPanel.vue'
+import ResourcePage from '../portalkit/ResourcePage.vue'
+import ResourceSectionCard from '../portalkit/ResourceSectionCard.vue'
+import ResourceStatCards, { type ResourceStatCard } from '../portalkit/ResourceStatCards.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { confirmDialog } from '../portalkit/confirm'
 import { createLatestRefreshController, createOperationLocks, operationKey, type LatestRefreshController, type ResourceDeletions } from '../refresh'
@@ -17,6 +20,7 @@ const error = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const loading = ref(true)
 const loaded = ref(false)
+const actionsMenu = ref<HTMLDetailsElement | null>(null)
 const operations = createOperationLocks()
 let timer: number | undefined
 let mounted = false
@@ -52,6 +56,78 @@ const hint = computed(() => {
   }
 })
 
+const connectionStatus = computed(() => {
+  if (deleting.value) return 'Deleting'
+  if (!conn.value) return loading.value ? 'Loading' : 'Unavailable'
+  return conn.value.validated ? 'ready' : 'pending'
+})
+const connectionStatusTone = computed<'success' | 'warning' | 'danger' | 'muted' | null>(() => {
+  if (connectionStatus.value === 'ready') return 'success'
+  if (connectionStatus.value === 'Unavailable') return 'danger'
+  if (connectionStatus.value === 'Deleting' || connectionStatus.value === 'Loading' || connectionStatus.value === 'pending') return 'warning'
+  return 'muted'
+})
+const detailRefreshing = computed(() => loading.value)
+const connectionActionBusy = computed(() =>
+  !conn.value ||
+  detailRefreshing.value ||
+  deleting.value ||
+  operations.isLocked(operationKey('connection', conn.value?.name || props.name)),
+)
+// ResourcePage distinguishes an explicit first read from the expected
+// TenantMissing/no-context state while the host changes workspaces. Keep the
+// null sentinel for that no-context state so the body is not replaced by a
+// misleading error or skeleton.
+const connectionReadState = computed<boolean | null>(() => {
+  if (loaded.value) return true
+  if (error.value) return false
+  return loading.value ? false : null
+})
+
+const connectionStatCards = computed<ResourceStatCard[]>(() => [
+  {
+    id: 'connection',
+    label: 'Connection',
+    value: connectionStatus.value,
+    detail: conn.value?.message || undefined,
+    icon: Plug,
+    tone: connectionStatusTone.value === 'muted' ? 'default' : connectionStatusTone.value || 'default',
+  },
+  {
+    id: 'provider',
+    label: 'Provider',
+    value: conn.value?.provider || '—',
+    icon: GitBranch,
+  },
+  {
+    id: 'type',
+    label: 'Type',
+    value: conn.value?.type || '—',
+    icon: Link2,
+  },
+  {
+    id: 'owner',
+    label: 'Owner',
+    value: conn.value?.owner || '—',
+    icon: User,
+    mono: true,
+  },
+  {
+    id: 'login',
+    label: 'Login',
+    value: conn.value?.login || '—',
+    icon: User,
+    mono: true,
+  },
+  {
+    id: 'scopes',
+    label: 'Scopes',
+    value: conn.value?.scopes.length ? String(conn.value.scopes.length) : '—',
+    detail: conn.value?.scopes.length ? 'granted' : 'No scopes reported',
+    icon: KeyRound,
+  },
+])
+
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
   return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
@@ -61,28 +137,33 @@ function load() {
   refresh.request()
 }
 
-async function remove() {
-  const connection = conn.value
-  if (!connection || deleting.value) return
+async function deleteConnection() {
+  const current = conn.value
+  if (!current || deleting.value) return
   const ok = await confirmDialog({
-    title: `Delete connection "${connection.name}"?`,
+    title: `Delete connection "${current.name}"?`,
     message: 'Repositories using it will stop reconciling.',
     confirmLabel: 'Delete',
     danger: true,
   })
   if (!ok || !mounted) return
-  const lock = operationKey('connection', connection.name)
+  const lock = operationKey('connection', current.name)
   if (!operations.acquire(lock, 'deleting')) return
   mutationError.value = null
   try {
-    await api.deleteConnection(connection.name)
-    props.deletions.acknowledge(deletionScope, connection.name, connection.uid)
+    await api.deleteConnection(current.name)
+    props.deletions.acknowledge(deletionScope, current.name, current.uid)
     emit('back')
   } catch (e) {
     mutationError.value = errMessage(e)
   } finally {
     operations.release(lock)
   }
+}
+
+function deleteFromMenu() {
+  actionsMenu.value?.removeAttribute('open')
+  void deleteConnection()
 }
 
 refresh = createLatestRefreshController(async requestID => {
@@ -98,6 +179,8 @@ refresh = createLatestRefreshController(async requestID => {
     if (!refresh.isCurrent(requestID)) return
     const err = e as ErrorResponse
     if (err.reason === 'NotFound' && (deleting.value || props.deletions.has(deletionScope, props.name))) {
+      // A confirmed not-found must not leave a tombstoned snapshot looking
+      // current. The collection owns the next route after deletion.
       conn.value = null
       emit('back')
       return
@@ -131,88 +214,139 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page" :aria-busy="loading">
-    <button class="k-btn k-btn--ghost k-back-action" type="button" @click="emit('back')"><ArrowLeft :size="14" aria-hidden="true" /> Connections</button>
+  <div class="connection-detail">
+    <a class="k-btn k-btn--ghost connection-detail__back" href="/providers/code/connections" @click.prevent="emit('back')">
+      <ArrowLeft :size="14" aria-hidden="true" /> Connections
+    </a>
 
-    <header class="page-head">
-      <div>
-        <h2 class="page-title">{{ conn?.name || name }}</h2>
-        <p class="page-meta">
-          <span v-if="conn?.login">authenticated as <code>{{ conn.login }}</code></span>
-          <span v-else-if="conn" class="muted">not validated yet</span>
-          <span v-else-if="loading" class="muted">Loading connection details…</span>
-          <span v-else class="muted">Connection details unavailable</span>
-        </p>
+    <div class="connection-detail__resource">
+      <div class="connection-detail__provider-mark" role="img" :aria-label="`${conn?.provider || 'Provider unavailable'} mark`">
+        <Plug :size="20" :stroke-width="1.75" aria-hidden="true" />
       </div>
-      <StatusBadge
-        v-if="conn"
-        :status="deleting ? 'Deleting' : conn.validated ? 'ready' : 'pending'"
-        :tone="deleting ? 'warning' : null"
-        :title="conn.message"
-      />
-    </header>
 
-    <div v-if="error && !conn" class="error read-error" role="alert" aria-live="assertive">
-      <span>{{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
+      <ResourcePage
+        :title="conn?.name || name"
+        eyebrow="Connection"
+        :loaded="connectionReadState"
+        :loading="loading"
+        :error="error"
+        :stale="loaded && !!error"
+        retryable
+        @retry="load"
+      >
+        <template #meta>
+          <span>Connection</span>
+          <span class="connection-header__separator" aria-hidden="true">·</span>
+          <span>{{ conn?.provider || 'Provider unavailable' }}</span>
+          <span class="connection-header__separator" aria-hidden="true">·</span>
+          <span>{{ conn?.type || 'Type unavailable' }}</span>
+          <template v-if="conn?.login">
+            <span class="connection-header__separator" aria-hidden="true">·</span>
+            <span>authenticated as <code>{{ conn.login }}</code></span>
+          </template>
+          <span class="connection-header__separator" aria-hidden="true">·</span>
+          <StatusBadge :status="connectionStatus" :tone="connectionStatusTone" :title="conn?.message" />
+        </template>
+
+        <template #actions>
+          <div class="connection-detail__actions" role="group" aria-label="Connection actions">
+            <button
+              type="button"
+              class="k-btn k-btn--ghost"
+              :disabled="connectionActionBusy"
+              :aria-busy="detailRefreshing || undefined"
+              @click="load"
+            >
+              <RefreshCw :size="14" :class="{ spin: detailRefreshing }" aria-hidden="true" />
+              {{ detailRefreshing ? 'Refreshing…' : 'Refresh' }}
+            </button>
+            <details ref="actionsMenu" class="connection-detail__menu">
+              <summary class="k-btn k-btn--ghost" aria-label="More connection actions">
+                <Ellipsis :size="16" aria-hidden="true" />
+                <span class="sr-only">More actions</span>
+              </summary>
+              <div class="connection-detail__menu-popover">
+                <button
+                  type="button"
+                  class="connection-detail__menu-item"
+                  :disabled="connectionActionBusy"
+                  @click="deleteFromMenu"
+                >
+                  Delete connection
+                </button>
+              </div>
+            </details>
+          </div>
+        </template>
+
+        <template #summary>
+          <ResourceStatCards :cards="connectionStatCards" density="compact" aria-label="Connection summary" />
+        </template>
+
+        <template #body>
+          <template v-if="conn">
+            <span v-if="loading && loaded && !error" class="sr-only" role="status" aria-live="polite">Updating connection…</span>
+            <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
+            <p v-if="deleting" class="connection-detail__deleting" role="status" aria-live="polite">
+              Deleting this connection. The last successful snapshot remains visible until the hub confirms removal.
+            </p>
+
+            <div class="connection-detail__sections">
+              <ResourceSectionCard id="connection-overview" eyebrow="Configuration" title="Overview" description="Connection identity and the provider account it represents.">
+                <div v-if="!deleting && !conn.validated && hint" class="connection-detail__hint" role="status" aria-live="polite">
+                  <h3 class="connection-detail__hint-title">Status</h3>
+                  <p>{{ hint }}</p>
+                </div>
+
+                <dl class="props connection-detail__facts">
+                  <dt>Provider</dt><dd>{{ conn.provider }}</dd>
+                  <dt>Type</dt><dd>{{ conn.type }}</dd>
+                  <dt>Owner</dt><dd>{{ conn.owner }}</dd>
+                  <dt>Login</dt><dd>{{ conn.login || '—' }}</dd>
+                  <dt>Scopes</dt>
+                  <dd>
+                    <span v-if="conn.scopes.length"><code v-for="scope in conn.scopes" :key="scope" class="chip">{{ scope }}</code></span>
+                    <span v-else class="muted">—</span>
+                  </dd>
+                  <dt v-if="conn.baseURL">Base URL</dt><dd v-if="conn.baseURL"><code>{{ conn.baseURL }}</code></dd>
+                  <dt v-if="conn.observedGeneration !== undefined">Reconciled</dt>
+                  <dd v-if="conn.observedGeneration !== undefined">
+                    <span v-if="reconciled" class="muted">up to date (generation {{ conn.generation }})</span>
+                    <span v-else class="warn">controller has not caught up (spec {{ conn.generation }}, observed {{ conn.observedGeneration }})</span>
+                  </dd>
+                </dl>
+              </ResourceSectionCard>
+
+              <ResourceSectionCard id="connection-credentials" eyebrow="Credentials" title="Credential reference" description="The connection points to a workspace Secret; the credential value is never shown here.">
+                <dl class="props connection-detail__facts">
+                  <dt>Secret name</dt>
+                  <dd><code>{{ conn.secretName }}</code></dd>
+                  <dt v-if="conn.secretNamespace">Namespace</dt>
+                  <dd v-if="conn.secretNamespace"><code>{{ conn.secretNamespace }}</code></dd>
+                  <dt v-if="conn.secretKey">Key</dt>
+                  <dd v-if="conn.secretKey"><code>{{ conn.secretKey }}</code></dd>
+                </dl>
+              </ResourceSectionCard>
+
+              <ResourceSectionCard id="connection-conditions" eyebrow="Diagnostics" title="Health" description="Controller validation and reconciliation evidence for this connection.">
+                <ConditionsPanel
+                  :conditions="conn.conditions"
+                  :generation="conn.generation"
+                  :observed-generation="conn.observedGeneration"
+                  empty-text="No conditions yet — the controller has not reconciled this connection."
+                />
+                <dl class="connection-detail__health-facts" aria-label="Connection health facts">
+                  <div><dt>Validation</dt><dd>{{ conn.validated ? 'Validated' : 'Waiting for validation' }}</dd></div>
+                  <div><dt>Validation reason</dt><dd class="mono">{{ validated?.reason || '—' }}</dd></div>
+                  <div><dt>Reconciliation</dt><dd>{{ reconciled ? 'Current' : 'Pending' }}</dd></div>
+                </dl>
+              </ResourceSectionCard>
+            </div>
+          </template>
+        </template>
+      </ResourcePage>
     </div>
-    <div v-else-if="loading && !conn" class="detail-loading" role="status" aria-live="polite" aria-label="Loading connection details" aria-busy="true">
-      <div v-for="i in 4" :key="i" class="shimmer detail-loading-line" />
-    </div>
-    <div v-if="error && conn" class="error read-error" role="alert" aria-live="assertive">
-      <span>Showing cached connection data. {{ error }}</span>
-      <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
-    </div>
-    <span v-else-if="loading && loaded" class="sr-only" role="status" aria-live="polite">Updating connection…</span>
-    <p v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">{{ mutationError }}</p>
-
-    <template v-if="conn">
-      <div v-if="!deleting && !conn.validated && hint" class="panel k-card">
-        <h3 class="panel-title">Status</h3>
-        <p class="muted">{{ hint }}</p>
-      </div>
-
-      <div class="panel k-card">
-        <h3 class="panel-title">Overview</h3>
-        <dl class="props">
-          <dt>Provider</dt><dd>{{ conn.provider }}</dd>
-          <dt>Type</dt><dd>{{ conn.type }}</dd>
-          <dt>Owner</dt><dd>{{ conn.owner }}</dd>
-          <dt>Login</dt><dd>{{ conn.login || '—' }}</dd>
-          <dt>Scopes</dt>
-          <dd>
-            <span v-if="conn.scopes.length"><code v-for="s in conn.scopes" :key="s" class="chip">{{ s }}</code></span>
-            <span v-else class="muted">—</span>
-          </dd>
-          <dt>Secret</dt>
-          <dd>
-            <code>{{ conn.secretName }}</code>
-            <span v-if="conn.secretNamespace" class="muted"> · ns <code>{{ conn.secretNamespace }}</code></span>
-            <span v-if="conn.secretKey" class="muted"> · key <code>{{ conn.secretKey }}</code></span>
-          </dd>
-          <dt v-if="conn.baseURL">Base URL</dt><dd v-if="conn.baseURL"><code>{{ conn.baseURL }}</code></dd>
-          <dt v-if="conn.observedGeneration !== undefined">Reconciled</dt>
-          <dd v-if="conn.observedGeneration !== undefined">
-            <span v-if="reconciled" class="muted">up to date (generation {{ conn.generation }})</span>
-            <span v-else class="warn">controller has not caught up (spec {{ conn.generation }}, observed {{ conn.observedGeneration }})</span>
-          </dd>
-        </dl>
-      </div>
-
-      <ConditionsPanel
-        :conditions="conn.conditions"
-        :generation="conn.generation"
-        :observed-generation="conn.observedGeneration"
-        empty-text="No conditions yet — the controller has not reconciled this connection."
-      />
-
-      <div class="code-form-actions">
-        <button class="k-btn k-btn--danger" type="button" :disabled="deleting || operations.isLocked(operationKey('connection', conn.name))" @click="remove">
-          {{ deleting || operations.phase(operationKey('connection', conn.name)) === 'deleting' ? 'Deleting connection…' : 'Delete connection' }}
-        </button>
-      </div>
-    </template>
-  </section>
+  </div>
 </template>
 
 <style scoped>

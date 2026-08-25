@@ -103,7 +103,7 @@ function navigate(path: string) {
     </template>
 
     <template v-else>
-      <template v-if="!route.repo">
+      <template v-if="!route.repo && !route.connection">
         <Tabs :tabs="tabs" :active="route.page" aria-label="Code provider sections" @select="navigate" />
       </template>
 
