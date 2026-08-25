@@ -14,6 +14,21 @@ faros-provider-infrastructure {
   color: var(--color-text-primary, #e9e9f2);
 }
 
+/* The standalone IIFE does not receive the host Tailwind `.sr-only` utility.
+ * Keep the detail page's live/status announcements and menu label accessible
+ * without allowing either to occupy layout space. */
+faros-provider-infrastructure .instance-detail__sr-only {
+  block-size: 1px;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  inline-size: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+}
+
 faros-provider-infrastructure .page {
   display: flex;
   flex-direction: column;

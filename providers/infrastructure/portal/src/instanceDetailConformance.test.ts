@@ -26,4 +26,9 @@ describe('Infrastructure instance detail conformance', () => {
     expect(source).toContain("{ key: 'namespaceLabel', label: 'Namespace' }")
     expect(source).toContain("{ key: 'phaseLabel', label: 'Phase' }")
   })
+
+  it('owns visually-hidden detail announcements in the standalone stylesheet', () => {
+    expect(source).toContain('instance-detail__sr-only')
+    expect(source).not.toContain('class="sr-only"')
+  })
 })

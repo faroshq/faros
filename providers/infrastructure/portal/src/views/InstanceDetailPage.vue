@@ -283,7 +283,7 @@ onUnmounted(() => {
           <details ref="actionsMenu" class="instance-detail__menu">
             <summary class="k-btn k-btn--ghost" aria-label="More instance actions">
               <Ellipsis :size="16" aria-hidden="true" />
-              <span class="sr-only">More actions</span>
+              <span class="instance-detail__sr-only">More actions</span>
             </summary>
             <div class="instance-detail__menu-popover">
               <button
@@ -302,7 +302,7 @@ onUnmounted(() => {
         <ResourceStatCards :cards="statCards" density="compact" aria-label="Instance summary" />
       </template>
       <template #body>
-        <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating instance…</span>
+        <span v-if="loading" class="instance-detail__sr-only" role="status" aria-live="polite">Updating instance…</span>
         <div v-if="deleteError" class="mutation-error" role="alert" aria-live="assertive">
           <span>{{ deleteError }}</span>
           <button type="button" class="k-btn k-btn--ghost" @click="deleteError = null">Dismiss</button>
