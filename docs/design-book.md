@@ -389,7 +389,8 @@ composition for provider resource instance screens. The caller owns navigation
 and resource-specific content:
 
 - Keep the backlink as a caller-owned hyperlink before and outside the
-  `ResourcePage` shell. Instance pages do not add resource or provider tabs.
+  `ResourcePage` shell. Detail routes hide the provider-level collection tabs;
+  the backlink is the single return affordance for the resource list.
 - `ResourcePage` owns the title/read-state shell. Callers provide the resource
   title, meta, status, and actions. Header actions use one stable order:
   provider-specific primary action, `Refresh`, then an overflow menu containing
@@ -410,6 +411,11 @@ and resource-specific content:
   default and limited to sanitized configuration, health, metadata, or a
   read-only object snapshot; credentials, tokens, and other secrets do not
   belong there.
+- `ResourceSectionCard` also supports a headerless body, which lets legacy or
+  template-driven groups keep their existing content without inventing a
+  second container. The shared card owns border-box containment (`width: 100%`,
+  `min-width: 0`); wide tables keep their controls and card width stable while
+  the table canvas scrolls internally.
 - Primary header anchors that use an accent background retain the
   `text-on-accent` contrast token in both normal and hover states; changing the
   background to `accent-hover` must not reduce readable contrast.
@@ -418,10 +424,19 @@ and resource-specific content:
   read fails, with a stale/error notice and `Retry`; `ResourcePage` emits retry
   and the caller owns the fetch. Initial failures expose the same retry path.
 
-Repository and Edge are pilot consumers of this composition, not definitions of
-universal fields. The canonical Vue sources live under
-`provider-sdk/portalkit-vue`; edit them there and run `make sync-portalkit` to
-update provider copies.
+Adoption is intentionally lossless. Before moving a resource to this
+composition, inventory every legacy field, custom workflow/action/editor/table,
+read or mutation state (including stale and deleting states), and sensitive-data
+boundary. The shared layout must not flatten or discard provider-specific
+content; providers remain responsible for choosing meaningful stat cards,
+sections, editors, tables, and actions. Secrets and credential values are never
+rendered, even when a provider exposes a credential reference or edit workflow.
+
+Current consumers cover Code Repository and Connection; Edge and Edge Service;
+Databricks Connection, Warehouse, and Table; and Infrastructure Application
+Template Instance. These are adoption examples, not a universal field schema.
+The canonical Vue sources live under `provider-sdk/portalkit-vue`; edit them
+there and run `make sync-portalkit` to update provider copies.
 
 ### Select / combobox
 - Closed control: exactly `.k-input` (4px, overlay bg, focus ring + glow) with
