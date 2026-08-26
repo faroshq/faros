@@ -1259,8 +1259,7 @@ test('resource detail views use the shared shell without dropping resource behav
   }
 
   const connection = details.connection
-  assert.match(connection, /const showValidationCard = computed\(\(\) =>[\s\S]*conn\.value\.status !== 'Ready'/)
-  assert.match(connection, /<ResourceSectionCard v-if="showValidationCard" id="connection-status"/)
+  assert.doesNotMatch(connection, /id="connection-status"/)
   assert.doesNotMatch(connection, /The connection is validated and ready for dependent resources\./)
   assert.match(connection, /Waiting for the connection controller to validate the credential\./)
   assert.match(connection, /Workspace host[\s\S]*conn\.authType[\s\S]*conn\.secretName[\s\S]*conn\.secretNamespace[\s\S]*conn\.secretKey[\s\S]*conn\.workspaceID/)
@@ -1270,8 +1269,7 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(connection, /Leave the token blank to keep the current Secret./)
 
   const warehouse = details.warehouse
-  assert.match(warehouse, /const showValidationCard = computed\(\(\) =>[\s\S]*warehouse\.value\.status !== 'Ready'/)
-  assert.match(warehouse, /<ResourceSectionCard v-if="showValidationCard" id="warehouse-status"/)
+  assert.doesNotMatch(warehouse, /id="warehouse-status"/)
   assert.doesNotMatch(warehouse, /The warehouse is validated and ready for table metadata refreshes\./)
   assert.match(warehouse, /id="warehouse-overview"[\s\S]*warehouse\.connectionRef[\s\S]*warehouse\.warehouseID[\s\S]*warehouse\.state/)
   assert.match(warehouse, /warehouse\.observedGeneration[\s\S]*warehouse\.generation[\s\S]*controller has not caught up/)
@@ -1279,6 +1277,8 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(warehouse, /Tables that reference this warehouse will stop refreshing schema metadata\./)
 
   const table = details.table
+  assert.doesNotMatch(table, /id="table-status"/)
+  assert.doesNotMatch(table, /The table schema is validated and ready for consumers\./)
   assert.match(table, /id="table-overview"[\s\S]*table\.connectionRef[\s\S]*table\.warehouseRef[\s\S]*table\.catalog[\s\S]*table\.schema[\s\S]*table\.table[\s\S]*table\.fullName/)
   assert.match(table, /table\.columns\.length[\s\S]*table\.refreshedAt[\s\S]*table\.creationTimestamp[\s\S]*table\.observedGeneration[\s\S]*table\.generation/)
   assert.match(table, /id="table-schema"[\s\S]*schemaTruncated[\s\S]*schemaNotice[\s\S]*schemaRows[\s\S]*Search columns…/)
@@ -1399,6 +1399,9 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       if (testCase.kind === 'warehouse') {
         assert.equal(mounted.find(node => node.props?.id === 'warehouse-status'), null, 'warehouse omits redundant validation card when Ready')
       }
+      if (testCase.kind === 'table') {
+        assert.equal(mounted.find(node => node.props?.id === 'table-status'), null, 'table omits redundant validation card')
+      }
       const menu = mounted.find(node => node.type === 'details' && className(node).includes('databricks-resource-menu'))
       assert.ok(menu, `${testCase.kind} renders an overflow menu`)
       menu.props.open = true
@@ -1414,12 +1417,7 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       assert.ok(status, `${testCase.kind} renders a status badge while deletion is pending`)
       assert.match(hostText(status), /Deleting/)
       assert.match(className(status), /k-badge--warning/)
-      if (testCase.kind === 'connection') {
-        assert.ok(mounted.find(node => node.props?.id === 'connection-status'), 'connection restores validation card for actionable deleting state')
-      }
-      if (testCase.kind === 'warehouse') {
-        assert.ok(mounted.find(node => node.props?.id === 'warehouse-status'), 'warehouse restores validation card for actionable deleting state')
-      }
+      assert.equal(mounted.find(node => node.props?.id === `${testCase.kind}-status`), null, `${testCase.kind} keeps validation detail in the summary instead of a duplicate card`)
       assert.ok(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), `${testCase.kind} exposes visible polite deletion progress outside the menu`)
 
       const back = mounted.find(node => node.type === 'a' && className(node).includes('databricks-resource-back'))

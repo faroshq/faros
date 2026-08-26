@@ -107,7 +107,7 @@ const statCards = computed<ResourceStatCard[]>(() => [
     id: 'status',
     label: 'Status',
     value: deleting.value ? 'Deleting' : table.value?.status || '—',
-    detail: deleting.value ? 'Deletion in progress' : hint.value || 'Schema validation',
+    detail: deleting.value ? 'Deletion in progress' : hint.value || undefined,
     icon: Activity,
     tone: statTone(deleting.value ? 'Deleting' : table.value?.status),
   },
@@ -316,13 +316,6 @@ onUnmounted(() => {
         </p>
 
         <div v-if="table" class="databricks-resource-sections">
-          <ResourceSectionCard id="table-status" eyebrow="Validation" title="Status" description="Schema validation, readiness reasons, and provider feedback for this table.">
-            <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
-            <p v-else-if="hint" class="muted">{{ hint }}</p>
-            <p v-else class="muted">The table schema is validated and ready for consumers.</p>
-            <p v-if="table.message" class="muted">{{ table.message }}</p>
-          </ResourceSectionCard>
-
           <ResourceSectionCard id="table-overview" eyebrow="Table" title="Overview" description="References, fully qualified name, timestamps, and reconciliation details.">
             <dl class="props">
           <dt>Connection</dt><dd><code>{{ table.connectionRef }}</code></dd>

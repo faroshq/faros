@@ -84,10 +84,6 @@ const readState = computed<boolean | null>(() => {
   return loading.value ? false : null
 })
 
-const showValidationCard = computed(() =>
-  deleting.value || (!!warehouse.value && warehouse.value.status !== 'Ready'),
-)
-
 const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
@@ -331,11 +327,6 @@ onUnmounted(() => {
         </p>
 
         <div v-if="warehouse" class="databricks-resource-sections">
-          <ResourceSectionCard v-if="showValidationCard" id="warehouse-status" eyebrow="Validation" title="Needs attention" description="Warehouse validation and dependent-resource guidance.">
-            <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
-            <p v-else class="muted">{{ hint }}</p>
-          </ResourceSectionCard>
-
           <ResourceSectionCard id="warehouse-overview" eyebrow="Warehouse" title="Overview" description="Connection reference, Databricks state, and reconciliation details.">
             <template #actions>
               <button v-if="!editing" class="k-btn k-btn--ghost icon-text" type="button" :disabled="operationLocked(warehouse.name)" @click="startEdit"><Settings2 :size="14" aria-hidden="true" /> Edit warehouse</button>

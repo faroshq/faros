@@ -83,10 +83,6 @@ const readState = computed<boolean | null>(() => {
   return loading.value ? false : null
 })
 
-const showValidationCard = computed(() =>
-  deleting.value || (!!conn.value && conn.value.status !== 'Ready'),
-)
-
 const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
@@ -330,11 +326,6 @@ onUnmounted(() => {
         </p>
 
         <div v-if="conn" class="databricks-resource-sections">
-          <ResourceSectionCard v-if="showValidationCard" id="connection-status" eyebrow="Validation" title="Needs attention" description="Credential validation and provider feedback for this connection.">
-            <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
-            <p v-else class="muted">{{ hint }}</p>
-          </ResourceSectionCard>
-
           <ResourceSectionCard id="connection-overview" eyebrow="Connection" title="Overview" description="Workspace endpoint, authentication, and reconciliation details.">
             <template #actions>
               <button v-if="!editing" class="k-btn k-btn--ghost icon-text" type="button" :disabled="operationLocked(conn.name)" @click="startEdit"><Settings2 :size="14" aria-hidden="true" /> Edit connection</button>
