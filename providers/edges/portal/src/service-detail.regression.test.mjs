@@ -26,6 +26,12 @@ describe('Service detail narrow-screen regressions', () => {
     expect(serviceEdit).toMatch(/credentialsOptional \? ' \(optional\)'/)
   })
 
+  it('summarizes credential health once while retaining the detailed credentials section', () => {
+    expect(serviceEdit).not.toMatch(/id: 'credentials'/)
+    expect(serviceEdit).toMatch(/id: 'status'[\s\S]*detail: credentialState\.value\.detail/)
+    expect(serviceEdit).toMatch(/<ResourceSectionCard[^>]*id="service-credentials"[^>]*eyebrow="Access"[^>]*title="Credentials"/)
+  })
+
   it('keeps deletion status visible and politely announced after the menu closes', () => {
     expect(serviceEdit).toMatch(/const deleting = ref\(false\)/)
     expect(serviceEdit).toMatch(/if \(deleting\.value\) return 'Deleting'/)

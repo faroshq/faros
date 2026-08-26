@@ -573,9 +573,10 @@ describe('edge list views', () => {
       expect(state.targetSummary).toBe('Agent loopback:8123')
       expect(state.targetSummary).not.toContain('—:')
       expect(state.credentialsRequired).toBe(false)
-      expect(state.serviceStatCards).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: 'credentials', value: 'Not required', detail: 'No credentials required', tone: 'default' }),
-      ]))
+      expect(state.serviceStatCards.map((card: { id: string }) => card.id)).toEqual(['status', 'edge', 'target'])
+      expect(state.serviceStatCards[0]).toEqual(expect.objectContaining({
+        id: 'status', detail: 'No credentials required',
+      }))
     } finally {
       mounted.unmount()
     }
@@ -613,9 +614,10 @@ describe('edge list views', () => {
       expect(state.credentialState).toEqual({
         value: 'Not configured (optional)', detail: 'Optional credential', tone: 'default',
       })
-      expect(state.serviceStatCards).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: 'credentials', value: 'Not configured (optional)', tone: 'default' }),
-      ]))
+      expect(state.serviceStatCards.map((card: { id: string }) => card.id)).toEqual(['status', 'edge', 'target'])
+      expect(state.serviceStatCards[0]).toEqual(expect.objectContaining({
+        id: 'status', detail: 'Optional credential',
+      }))
       const markup = await renderServiceMarkup({
         service: detail,
         serviceName: detail.name,
@@ -627,7 +629,7 @@ describe('edge list views', () => {
       })
       expect(markup).toContain('autocomplete="new-password"')
       expect(markup).toContain('Set credentials')
-      expect(markup).toContain('Not configured (optional)')
+      expect(markup).toContain('Optional credential')
       expect(markup).toContain('k-resource-stat-card--default')
     } finally {
       mounted.unmount()
@@ -662,6 +664,11 @@ describe('edge list views', () => {
       expect(state.credentialState).toEqual({
         value: 'Missing', detail: 'Credentials missing', tone: 'warning',
       })
+      expect(state.serviceStatCards.map((card: { id: string }) => card.id)).toEqual(['status', 'edge', 'target'])
+      expect(state.serviceStatCards.filter((card: { detail?: string }) => card.detail === 'Credentials missing')).toHaveLength(1)
+      expect(state.serviceStatCards[0]).toEqual(expect.objectContaining({
+        id: 'status', detail: 'Credentials missing', tone: 'warning',
+      }))
       const markup = await renderServiceMarkup({
         service: detail,
         serviceName: detail.name,
@@ -673,7 +680,7 @@ describe('edge list views', () => {
       })
       expect(markup).toContain('autocomplete="new-password"')
       expect(markup).toContain('Set credentials')
-      expect(markup).toContain('>Missing</strong>')
+      expect(markup.match(/Credentials missing/g)).toHaveLength(1)
       expect(markup).toContain('k-resource-stat-card--warning')
     } finally {
       mounted.unmount()

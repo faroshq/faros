@@ -178,11 +178,6 @@ function statusTone(status: string): 'success' | 'warning' | 'danger' | 'muted' 
     default: return 'muted'
   }
 }
-const serviceStatTone = computed<ResourceStatTone>(() => {
-  const tone = statusTone(serviceStatus.value)
-  return tone === 'muted' ? 'default' : tone
-})
-
 const targetSummary = computed(() => {
   const value = service.value
   if (!value) return '—'
@@ -221,6 +216,13 @@ const credentialState = computed(() => {
   return { value: 'Not required', detail: 'No credentials required', tone: 'default' as const }
 })
 
+const serviceStatTone = computed<ResourceStatTone>(() => {
+  const tone = statusTone(serviceStatus.value)
+  if (tone === 'danger') return tone
+  if (credentialState.value.tone === 'warning') return 'warning'
+  return tone === 'muted' ? 'default' : tone
+})
+
 const credentialDescription = computed(() => {
   if (!credentialsSupported.value) return 'This service does not require credentials.'
   if (credentialsOptional.value) {
@@ -240,14 +242,6 @@ const serviceStatCards = computed<ResourceStatCard[]>(() => [
   },
   { id: 'edge', label: 'Edge', value: service.value?.edgeName || '—', icon: Server, mono: true },
   { id: 'target', label: 'Target', value: targetSummary.value, icon: Globe2, mono: true },
-  {
-    id: 'credentials',
-    label: 'Credentials',
-    value: credentialState.value.value,
-    icon: KeyRound,
-    detail: credentialState.value.detail,
-    tone: credentialState.value.tone,
-  },
 ])
 
 async function refreshDetail(): Promise<void> {
