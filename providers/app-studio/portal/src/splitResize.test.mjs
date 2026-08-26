@@ -49,4 +49,17 @@ test('keeps the title bar and thread rail inside the resizable left group', () =
   assert.ok(workbenchStart > dividerStart)
   assert.ok(workbenchHeaderStart > workbenchStart)
   assert.match(app.slice(leftGroupStart, dividerStart), /:style="conversationPaneStyle"/)
+
+  const conversationPaneStart = app.indexOf('<section data-app-studio-conversation-pane', leftGroupStart)
+  const conversationPaneEnd = app.indexOf('>', conversationPaneStart)
+  const conversationPane = app.slice(conversationPaneStart, conversationPaneEnd + 1)
+  assert.match(conversationPane, /class="flex min-h-0 min-w-0 shrink-0 flex-col md:min-w-\[432px\]"/)
+  assert.match(conversationPane, /md:min-w-\[432px\]/)
+  assert.doesNotMatch(conversationPane, /(?:^| )min-w-\[432px\]/)
+
+  const chatSectionStart = app.indexOf('<section class="flex min-h-[360px]', railStart)
+  const chatSectionEnd = app.indexOf('>', chatSectionStart)
+  const chatSection = app.slice(chatSectionStart, chatSectionEnd + 1)
+  assert.match(chatSection, /md:min-w-\[240px\]/)
+  assert.doesNotMatch(chatSection, /(?:^| )min-w-\[240px\]/)
 })

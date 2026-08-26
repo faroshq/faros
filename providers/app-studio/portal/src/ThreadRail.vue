@@ -47,6 +47,7 @@ const DEFAULT_WIDTH = 224
 const MIN_WIDTH = 192
 const MAX_WIDTH = 384
 const CHAT_MIN_WIDTH = 240
+const THREAD_RAIL_PANEL_ID = 'app-studio-thread-rail'
 const ACTIVE_THREAD_FADE = [
   'linear-gradient(to left, var(--color-accent-subtle) 0%, var(--color-accent-subtle) 58%, transparent 100%)',
   'linear-gradient(to left, var(--color-surface-raised) 0%, var(--color-surface-raised) 58%, transparent 100%)',
@@ -60,16 +61,20 @@ const actionMenu = ref<HTMLElement | null>(null)
 const anchored = ref(true)
 const interactionExpanded = ref(false)
 const mobileOpen = ref(false)
+const mobileViewport = ref(false)
+const mobileReturnFocus = ref<HTMLElement | null>(null)
 const railWidth = ref(DEFAULT_WIDTH)
 const availableWidthCap = ref(MAX_WIDTH)
 const resizing = ref(false)
 const query = ref('')
 const contextMenu = ref<{ threadID: string; left: number; top: number } | null>(null)
+const contextMenuReturnFocus = ref<HTMLElement | null>(null)
 let hoverOpenTimer: ReturnType<typeof setTimeout> | undefined
 let closeTimer: ReturnType<typeof setTimeout> | undefined
 let railResizeObserver: ResizeObserver | undefined
 
 const expanded = computed(() => anchored.value || interactionExpanded.value)
+const visibleExpanded = computed(() => expanded.value && (!mobileViewport.value || mobileOpen.value))
 const effectiveWidth = computed(() => Math.min(railWidth.value, availableWidthCap.value))
 const railStyle = computed(() => ({ '--thread-rail-width': `${effectiveWidth.value}px` }))
 const unreadThreadIDSet = computed(() => new Set(props.unreadThreadIDs))
@@ -150,20 +155,39 @@ function clearCloseTimer() {
   closeTimer = undefined
 }
 
-function open(focusSearch = false) {
+function currentFocusedElement(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  return document.activeElement instanceof HTMLElement ? document.activeElement : null
+}
+
+function restoreFocus(target: HTMLElement | null) {
+  if (!target) return
+  void nextTick(() => {
+    if (target.isConnected && !target.hasAttribute('disabled')) target.focus()
+  })
+}
+
+function open(focusSearch = false, returnFocus?: HTMLElement | null) {
   clearTimers()
-  if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
+  syncMobileViewport()
+  if (mobileViewport.value) {
+    if (!mobileOpen.value) mobileReturnFocus.value = returnFocus ?? currentFocusedElement()
     mobileOpen.value = true
   }
   interactionExpanded.value = true
   if (focusSearch) void nextTick(() => searchInput.value?.focus())
 }
 
-function close() {
+function close(options: { restoreFocus?: boolean } = {}) {
+  const shouldRestoreFocus = options.restoreFocus ?? true
+  syncMobileViewport()
   if (mobileOpen.value) {
     mobileOpen.value = false
     interactionExpanded.value = false
     query.value = ''
+    const returnFocus = mobileReturnFocus.value
+    mobileReturnFocus.value = null
+    if (shouldRestoreFocus) restoreFocus(returnFocus)
     return
   }
   if (anchored.value) return
@@ -193,6 +217,19 @@ function scheduleClose() {
 
 function isMobileViewport() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches
+}
+
+function syncMobileViewport() {
+  mobileViewport.value = isMobileViewport()
+}
+
+function focusThread(threadID: string) {
+  if (!threadID || !visibleExpanded.value) return
+  void nextTick(() => {
+    const target = Array.from(root.value?.querySelectorAll<HTMLButtonElement>('button[data-thread-id]') ?? [])
+      .find((button) => button.dataset.threadId === threadID)
+    if (target && !target.disabled) target.focus()
+  })
 }
 
 function previewEnter() {
@@ -262,11 +299,12 @@ function toggleAnchored() {
   }
 }
 
-function togglePanel() {
+function togglePanel(returnFocus?: HTMLElement | null) {
   clearTimers()
-  if (typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches) {
+  syncMobileViewport()
+  if (mobileViewport.value) {
     if (mobileOpen.value) close()
-    else open(false)
+    else open(false, returnFocus)
     return
   }
   toggleAnchored()
@@ -286,35 +324,42 @@ function createThread() {
 
 function togglePin(threadID: string) {
   emit('togglePin', threadID)
-  closeContextMenu()
+  closeContextMenu(true)
 }
 
 function toggleUnread(threadID: string) {
   emit('setUnread', threadID, !unreadThreadIDSet.value.has(threadID))
-  closeContextMenu()
+  closeContextMenu(true)
 }
 
 function archiveThread(threadID: string) {
   if (props.disabled || props.busy || props.actioningThreadID) return
   emit('archive', threadID)
-  closeContextMenu()
+  closeContextMenu(true)
 }
 
-function showContextMenu(threadID: string, left: number, top: number) {
+function showContextMenu(threadID: string, left: number, top: number, returnFocus: HTMLElement | null = null) {
   const menuWidth = 192
   const menuHeight = 124
   const viewportWidth = typeof window === 'undefined' ? left + menuWidth : window.innerWidth
   const viewportHeight = typeof window === 'undefined' ? top + menuHeight : window.innerHeight
+  contextMenuReturnFocus.value = returnFocus
   contextMenu.value = {
     threadID,
     left: Math.max(8, Math.min(left, viewportWidth - menuWidth - 8)),
     top: Math.max(8, Math.min(top, viewportHeight - menuHeight - 8)),
   }
-  void nextTick(() => actionMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus())
+  void nextTick(() => actionMenu.value?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus())
 }
 
 function openContextMenu(event: MouseEvent, threadID: string) {
-  showContextMenu(threadID, event.clientX, event.clientY)
+  const currentTarget = event.currentTarget
+  const returnFocus = currentTarget instanceof HTMLButtonElement
+    ? currentTarget
+    : currentTarget instanceof HTMLElement
+      ? currentTarget.querySelector<HTMLButtonElement>('button')
+      : currentFocusedElement()
+  showContextMenu(threadID, event.clientX, event.clientY, returnFocus)
 }
 
 function handleThreadKeydown(event: KeyboardEvent, threadID: string) {
@@ -323,11 +368,35 @@ function handleThreadKeydown(event: KeyboardEvent, threadID: string) {
   const target = event.currentTarget
   if (!(target instanceof HTMLElement)) return
   const rect = target.getBoundingClientRect()
-  showContextMenu(threadID, rect.right - 8, rect.top + 8)
+  showContextMenu(threadID, rect.right - 8, rect.top + 8, target)
 }
 
-function closeContextMenu() {
+function closeContextMenu(restoreReturnFocus = false) {
+  const returnFocus = contextMenuReturnFocus.value
   contextMenu.value = null
+  contextMenuReturnFocus.value = null
+  if (restoreReturnFocus === true) restoreFocus(returnFocus)
+}
+
+function dismissContextMenu() {
+  closeContextMenu()
+}
+
+function handleContextMenuKeydown(event: KeyboardEvent) {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  const menu = actionMenu.value
+  if (!menu) return
+  const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
+  if (!items.length) return
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
+  let nextIndex = currentIndex
+  if (event.key === 'Home') nextIndex = 0
+  else if (event.key === 'End') nextIndex = items.length - 1
+  else if (currentIndex < 0) nextIndex = event.key === 'ArrowUp' ? items.length - 1 : 0
+  else nextIndex = (currentIndex + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length
+  event.preventDefault()
+  event.stopPropagation()
+  items[nextIndex]?.focus()
 }
 
 function handleDocumentPointerDown(event: PointerEvent) {
@@ -338,6 +407,7 @@ function handleDocumentPointerDown(event: PointerEvent) {
 }
 
 function handleWindowResize() {
+  syncMobileViewport()
   updateAvailableWidthCap()
   closeContextMenu()
 }
@@ -347,6 +417,7 @@ function handleEscape() {
 }
 
 onMounted(() => {
+  syncMobileViewport()
   try {
     const stored = localStorage.getItem(ANCHORED_STORAGE_KEY)
     anchored.value = stored === null ? true : stored === '1'
@@ -360,9 +431,9 @@ onMounted(() => {
     railResizeObserver.observe(root.value.parentElement)
   }
   document.addEventListener('pointerdown', handleDocumentPointerDown, true)
-  window.addEventListener('blur', closeContextMenu)
+  window.addEventListener('blur', dismissContextMenu)
   window.addEventListener('resize', handleWindowResize)
-  window.addEventListener('scroll', closeContextMenu, true)
+  window.addEventListener('scroll', dismissContextMenu, true)
 })
 
 onBeforeUnmount(() => {
@@ -370,15 +441,18 @@ onBeforeUnmount(() => {
   clearTimers()
   railResizeObserver?.disconnect()
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
-  window.removeEventListener('blur', closeContextMenu)
+  window.removeEventListener('blur', dismissContextMenu)
   window.removeEventListener('resize', handleWindowResize)
-  window.removeEventListener('scroll', closeContextMenu, true)
+  window.removeEventListener('scroll', dismissContextMenu, true)
 })
 
 defineExpose({
   open: () => open(false),
   openAndFocus: () => open(true),
+  expanded: visibleExpanded,
+  panelID: THREAD_RAIL_PANEL_ID,
   toggle: togglePanel,
+  focusThread,
   previewEnter,
   previewLeave,
 })
@@ -387,6 +461,7 @@ defineExpose({
 <template>
   <aside
     ref="root"
+    :id="THREAD_RAIL_PANEL_ID"
     class="z-40 h-full shrink-0"
     :style="railStyle"
     :class="[
@@ -470,6 +545,7 @@ defineExpose({
                   >
                     <button
                       type="button"
+                      :data-thread-id="thread.id"
                       class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md bg-transparent py-1 pl-2 pr-1 text-left transition hover:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
                       :disabled="disabled || busy || Boolean(selectingThreadID)"
                       :aria-current="activeThreadID === thread.id ? 'page' : undefined"
@@ -555,7 +631,8 @@ defineExpose({
       data-thread-context-menu
       class="fixed z-[200] w-48 rounded-md border border-border-default bg-surface-overlay p-1 shadow-2xl"
       :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
-      @keydown.esc.stop.prevent="closeContextMenu"
+      @keydown="handleContextMenuKeydown"
+      @keydown.esc.stop.prevent="closeContextMenu(true)"
     >
       <button
         type="button"

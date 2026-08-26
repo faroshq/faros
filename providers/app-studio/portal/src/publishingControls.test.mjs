@@ -458,7 +458,8 @@ test('commits a thread selection only after history succeeds and clears the pend
   const commitIndex = select.indexOf('activeAssistantThreadID.value = threadID')
   assert.ok(requestIndex >= 0 && commitIndex > requestIndex)
   assert.ok(select.includes('const previousThreadID = activeAssistantThreadID.value'))
-  assert.ok(select.includes("selectingThreadID.value = ''"))
+  assert.ok(select.includes('const threadHistoryLatchOwner = beginThreadHistoryLatch()'))
+  assert.ok(select.includes('releaseThreadHistoryLatch(threadHistoryLatchOwner, threadID)'))
 })
 
 test('restores the opening Share mode on every unsaved exit while reflecting successful saves', () => {
