@@ -77,6 +77,34 @@ test('MCP connect snippets stay masked and selectors expose state', () => {
   assert.doesNotMatch(page, /v-html=/)
 })
 
+test('MCP connect snippets contain long commands without widening the resource page', () => {
+  const bodyStart = page.indexOf('<template #body>')
+  const connectStart = page.indexOf('<ResourceSectionCard id="mcp-connect"', bodyStart)
+  const connectEnd = page.indexOf('</ResourceSectionCard>', connectStart)
+  assert.notEqual(bodyStart, -1)
+  assert.notEqual(connectStart, -1)
+  assert.notEqual(connectEnd, -1)
+
+  const body = page.slice(bodyStart, connectStart)
+  const connect = page.slice(connectStart, connectEnd)
+  assert.match(body, /<div class="grid min-w-0 gap-4">/)
+  assert.match(connect, /<div class="grid min-w-0 gap-2">/)
+  assert.match(connect, /<div class="relative min-w-0 max-w-full" role="tabpanel"/)
+  assert.match(connect, /<pre class="block w-full min-w-0 max-w-full overflow-x-auto whitespace-pre /)
+
+  const tabpanelStart = connect.indexOf('<div class="relative min-w-0 max-w-full" role="tabpanel"')
+  const tabpanelEnd = connect.indexOf('</div>', tabpanelStart)
+  assert.notEqual(tabpanelStart, -1)
+  assert.notEqual(tabpanelEnd, -1)
+  const tabpanel = connect.slice(tabpanelStart, tabpanelEnd)
+  assert.match(tabpanel, /<pre[\s\S]*<\/pre>/)
+  assert.match(tabpanel, /<button[\s\S]*class="k-btn k-btn--ghost absolute right-2 top-2 /)
+
+  const endpointRow = connect.slice(connect.indexOf('<div class="flex min-w-0 items-center gap-2">'))
+  assert.match(endpointRow, /<code class="min-w-0 flex-1 truncate /)
+  assert.match(endpointRow, /Copy endpoint/)
+})
+
 test('MCP reads preserve snapshots and expose recoverable failures', () => {
   assert.match(page, /const selectedResourceMissing = computed/)
   assert.match(page, /was not found in this workspace/)

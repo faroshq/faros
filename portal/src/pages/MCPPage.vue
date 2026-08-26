@@ -635,7 +635,7 @@ function rel(ts?: string): string {
                 {{ mutationError }}
               </p>
 
-              <div class="grid gap-4">
+              <div class="grid min-w-0 gap-4">
                 <ResourceSectionCard id="mcp-connect" eyebrow="Connection" title="Connect an AI client" description="Use a client-specific setup snippet to connect to this workspace endpoint.">
                   <template v-if="selectedConnect">
                     <div class="flex min-w-0 items-center gap-2">
@@ -659,7 +659,7 @@ function rel(ts?: string): string {
                     </div>
                     <div v-if="connectLoading" class="text-[11px] text-text-muted" role="status" aria-live="polite">Updating connect details…</div>
 
-                    <div class="grid gap-2">
+                    <div class="grid min-w-0 gap-2">
                       <div class="flex gap-1.5" role="tablist" aria-label="AI client setup">
                         <button
                           v-for="c in clients"
@@ -676,8 +676,8 @@ function rel(ts?: string): string {
                           {{ c.label }}
                         </button>
                       </div>
-                      <div class="relative" role="tabpanel" :id="clientPanelID(selectedClient)" :aria-labelledby="`${clientPanelID(selectedClient)}-tab`" tabindex="0">
-                        <pre class="overflow-x-auto rounded-md bg-surface-overlay p-3 font-mono text-[12px] leading-relaxed text-text-secondary"><code>{{ displaySnippet }}</code></pre>
+                      <div class="relative min-w-0 max-w-full" role="tabpanel" :id="clientPanelID(selectedClient)" :aria-labelledby="`${clientPanelID(selectedClient)}-tab`" tabindex="0">
+                        <pre class="block w-full min-w-0 max-w-full overflow-x-auto whitespace-pre rounded-md bg-surface-overlay p-3 font-mono text-[12px] leading-relaxed text-text-secondary"><code>{{ displaySnippet }}</code></pre>
                         <button
                           type="button"
                           class="k-btn k-btn--ghost absolute right-2 top-2 h-7 px-2.5 text-[11px] disabled:opacity-40"
