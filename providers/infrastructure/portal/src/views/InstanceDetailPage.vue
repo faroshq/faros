@@ -109,7 +109,7 @@ const statCards = computed<ResourceStatCard[]>(() => [
     id: 'status',
     label: 'Status',
     value: displayedPhase.value || '—',
-    detail: displayedMessage.value || 'Controller phase',
+    detail: displayedMessage.value || undefined,
     icon: Activity,
     tone: statTone(displayedPhase.value),
   },
@@ -349,11 +349,6 @@ onUnmounted(() => {
         </div>
 
         <div v-if="inst" class="instance-detail__sections">
-          <ResourceSectionCard id="instance-status" eyebrow="Reconciliation" title="Status" description="Controller phase and the latest message for this instance.">
-            <div v-if="displayedMessage" class="instance-message">{{ displayedMessage }}</div>
-            <p v-else class="muted">The infrastructure controller has not reported a status message.</p>
-          </ResourceSectionCard>
-
           <template v-if="detailGroups.length">
             <ResourceSectionCard
               v-for="(group, groupIndex) in detailGroups"

@@ -20,6 +20,8 @@ describe('Infrastructure instance detail conformance', () => {
     expect(source).toContain('.filter(({ value }) => !value.empty)')
     expect(source).toContain('.filter(group => group.fields.length > 0)')
     expect(source).toContain('<ViewValue :value="entry.value"')
+    expect(source).not.toContain('id="instance-status"')
+    expect(source).not.toContain('The infrastructure controller has not reported a status message.')
     expect(source).toContain(':title="group.title || \'\'"')
     expect(source).toContain('JSON.stringify(inst.values, null, 2)')
     expect(source).toContain("{ key: 'kind', label: 'Kind' }")

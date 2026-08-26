@@ -59,7 +59,15 @@ vi.mock('./portalkit/ResourceSectionCard.vue', async () => {
 })
 vi.mock('./portalkit/ResourceStatCards.vue', async () => {
   const { h } = await import('vue')
-  return { default: { setup: () => () => h('div', { class: 'stat-cards-stub' }) } }
+  return {
+    default: {
+      props: ['cards'],
+      setup: (props: { cards: Array<{ id: string; label: string; value: string | number }> }) => () =>
+        h('div', { class: 'stat-cards-stub' }, props.cards.map(card =>
+          h('div', { 'data-k-resource-stat-card': card.id }, `${card.label} ${card.value}`),
+        )),
+    },
+  }
 })
 vi.mock('./portalkit/StatusBadge.vue', async () => {
   const { h } = await import('vue')
@@ -368,6 +376,22 @@ describe('mounted resource deletion state', () => {
     expect(textContent(root)).toContain('github')
     expect(back).not.toHaveBeenCalled()
     expect(findNode(root, node => node.type === 'button' && textContent(node).trim() === 'Delete connection')?.props.disabled).toBe(false)
+    app.unmount()
+  })
+
+  it('omits unresolved login and scopes from the connection summary', async () => {
+    mocks.api.getConnection.mockResolvedValue({ ...connection, login: undefined, scopes: [] })
+    const { app, root } = mount(ConnectionDetailView, {
+      name: connection.name,
+      deletions: createResourceDeletions(),
+    })
+    await settle()
+
+    expect(findNode(root, node => node.props['data-k-resource-stat-card'] === 'owner')).toBeDefined()
+    expect(findNode(root, node => node.props['data-k-resource-stat-card'] === 'login')).toBeUndefined()
+    expect(findNode(root, node => node.props['data-k-resource-stat-card'] === 'scopes')).toBeUndefined()
+    expect(textContent(root)).not.toContain('Login')
+    expect(textContent(root)).not.toContain('Scopes')
     app.unmount()
   })
 })

@@ -103,49 +103,49 @@ const poller = createAdaptiveRefreshTimer(() => load('background'), () => {
   return STABLE_REFRESH_MS
 })
 
-const connectionStatCards = computed<ResourceStatCard[]>(() => [
-  {
-    id: 'connection',
-    label: 'Connection',
-    value: connectionStatus.value,
-    detail: conn.value?.message || undefined,
-    icon: Plug,
-    tone: connectionStatusTone.value === 'muted' ? 'default' : connectionStatusTone.value || 'default',
-  },
-  {
-    id: 'provider',
-    label: 'Provider',
-    value: conn.value?.provider || '—',
-    icon: GitBranch,
-  },
-  {
-    id: 'type',
-    label: 'Type',
-    value: conn.value?.type || '—',
-    icon: Link2,
-  },
-  {
-    id: 'owner',
-    label: 'Owner',
-    value: conn.value?.owner || '—',
-    icon: User,
-    mono: true,
-  },
-  {
-    id: 'login',
-    label: 'Login',
-    value: conn.value?.login || '—',
-    icon: User,
-    mono: true,
-  },
-  {
-    id: 'scopes',
-    label: 'Scopes',
-    value: conn.value?.scopes.length ? String(conn.value.scopes.length) : '—',
-    detail: conn.value?.scopes.length ? 'granted' : 'No scopes reported',
-    icon: KeyRound,
-  },
-])
+const connectionStatCards = computed<ResourceStatCard[]>(() => {
+  const cards: ResourceStatCard[] = [
+    {
+      id: 'connection',
+      label: 'Connection',
+      value: connectionStatus.value,
+      detail: conn.value?.message || undefined,
+      icon: Plug,
+      tone: connectionStatusTone.value === 'muted' ? 'default' : connectionStatusTone.value || 'default',
+    },
+    {
+      id: 'provider',
+      label: 'Provider',
+      value: conn.value?.provider || '—',
+      icon: GitBranch,
+    },
+    {
+      id: 'type',
+      label: 'Type',
+      value: conn.value?.type || '—',
+      icon: Link2,
+    },
+    {
+      id: 'owner',
+      label: 'Owner',
+      value: conn.value?.owner || '—',
+      icon: User,
+      mono: true,
+    },
+  ]
+  const login = conn.value?.login?.trim()
+  if (login) cards.push({ id: 'login', label: 'Login', value: login, icon: User, mono: true })
+  if (conn.value?.scopes.length) {
+    cards.push({
+      id: 'scopes',
+      label: 'Scopes',
+      value: String(conn.value.scopes.length),
+      detail: 'granted',
+      icon: KeyRound,
+    })
+  }
+  return cards
+})
 
 function errMessage(e: unknown): string {
   const err = e as ErrorResponse
@@ -331,11 +331,10 @@ onUnmounted(() => {
                   <dt>Provider</dt><dd>{{ conn.provider }}</dd>
                   <dt>Type</dt><dd>{{ conn.type }}</dd>
                   <dt>Owner</dt><dd>{{ conn.owner }}</dd>
-                  <dt>Login</dt><dd>{{ conn.login || '—' }}</dd>
-                  <dt>Scopes</dt>
-                  <dd>
-                    <span v-if="conn.scopes.length"><code v-for="scope in conn.scopes" :key="scope" class="chip">{{ scope }}</code></span>
-                    <span v-else class="muted">—</span>
+                  <dt v-if="conn.login">Login</dt><dd v-if="conn.login">{{ conn.login }}</dd>
+                  <dt v-if="conn.scopes.length">Scopes</dt>
+                  <dd v-if="conn.scopes.length">
+                    <code v-for="scope in conn.scopes" :key="scope" class="chip">{{ scope }}</code>
                   </dd>
                   <dt v-if="conn.baseURL">Base URL</dt><dd v-if="conn.baseURL"><code>{{ conn.baseURL }}</code></dd>
                   <dt v-if="conn.observedGeneration !== undefined">Reconciled</dt>
