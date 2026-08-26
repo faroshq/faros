@@ -308,7 +308,7 @@ onUnmounted(() => {
       @change="handlePackageChange"
     >
       <template #repositoryRef="{ row }">
-        <button v-if="row.showRepository && !row.deleting" class="k-btn k-btn--ghost code-inline-action" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
+        <button v-if="row.showRepository && !row.deleting" class="k-btn k-btn--ghost k-table-resource-link" type="button" @click="emit('open', String(row.repositoryRef))">{{ row.repositoryRef }}</button>
         <span v-else-if="row.showRepository">{{ row.repositoryRef }}</span>
         <CornerDownRight v-else class="muted" :size="14" aria-label="Same repository as above" />
       </template>

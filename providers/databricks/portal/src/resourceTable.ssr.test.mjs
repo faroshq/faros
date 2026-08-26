@@ -1291,6 +1291,23 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(style, /\.databricks-resource-sections\s*\{[\s\S]*flex-direction: column[\s\S]*gap: 14px/)
 })
 
+test('Databricks resource lists use the canonical table property hierarchy', async () => {
+  const [connections, warehouses, tables, farosUI] = await Promise.all([
+    readFile(new URL('./views/ConnectionsView.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./views/WarehousesView.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./views/TablesView.vue', import.meta.url), 'utf8'),
+    readFile(canonicalFarosUIStyle, 'utf8'),
+  ])
+
+  for (const source of [connections, warehouses, tables]) {
+    assert.match(source, /#name="\{ value \}"[\s\S]*k-table-resource-link/)
+  }
+  assert.doesNotMatch(tables, /k-table-resource-link mono strong/)
+  assert.match(tables, /#fullName="\{ value \}"><span class="mono">/)
+  assert.match(tables, /#warehouseRef="\{ value \}">\{\{ value \}\}<\/template>/)
+  assert.match(farosUI, /\.k-table-resource-link\s*\{[\s\S]*color: var\(--color-accent[\s\S]*font-weight: 400[\s\S]*padding: 0;/)
+})
+
 test('resource detail deletes expose pending state, truthful status, and real browser backlinks', async () => {
   const details = {
     connection: await readFile(new URL('./views/ConnectionDetailView.vue', import.meta.url), 'utf8'),

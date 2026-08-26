@@ -633,9 +633,9 @@ onUnmounted(() => {
       @change="handleTableChange"
       @row-click="(row) => openResource(String(row.name))"
     >
-      <template #name="{ value }"><button class="k-btn k-btn--ghost databricks-inline-action mono strong" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
+      <template #name="{ value }"><button class="k-btn k-btn--ghost k-table-resource-link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
       <template #fullName="{ value }"><span class="mono">{{ value }}</span></template>
-      <template #warehouseRef="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #warehouseRef="{ value }">{{ value }}</template>
       <template #columnCount="{ value }"><span>{{ value }}</span></template>
       <template #status="{ row }">
         <StatusBadge :status="String(row.status)" />

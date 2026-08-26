@@ -324,7 +324,7 @@ onUnmounted(() => {
       @retry="load"
       @row-click="openConnection"
     >
-      <template #name="{ value, row }"><span v-if="row.deleting">{{ value }}</span><button v-else class="k-btn k-btn--ghost code-inline-action" type="button" @click.stop="openConnection(row)">{{ value }}</button></template>
+      <template #name="{ value, row }"><span v-if="row.deleting">{{ value }}</span><button v-else class="k-btn k-btn--ghost k-table-resource-link" type="button" @click.stop="openConnection(row)">{{ value }}</button></template>
       <template #owner="{ value }">{{ value }}</template>
       <template #login="{ value }">{{ value || '—' }}</template>
       <template #status="{ row }"><StatusBadge :status="String(row.status)" :tone="row.deleting ? 'warning' : null" :title="String(row.message || '')" /></template>

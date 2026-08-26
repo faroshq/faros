@@ -182,7 +182,11 @@ texture (login, empty states — sparingly), `.island` floating dock card,
   `portalkit/ResourceTableDeleteButton.vue` for compact row actions that reveal
   on row hover or keyboard focus (and remain visible on touch). Give every action
   a resource-specific accessible label, and keep destructive actions inside
-  `confirmDialog({ danger: true })`. `ResourceTable` keeps native table-row
+  `confirmDialog({ danger: true })`. The primary resource name uses a text-level
+  `.k-table-resource-link` action (accent, regular weight, transparent at rest
+  and hover), cross-resource references use ordinary cell text, opaque external
+  IDs use mono, and lifecycle state uses `StatusBadge`; providers must not
+  restyle these properties locally. `ResourceTable` keeps native table-row
   semantics: interactive `<tr>` elements are focusable with `tabindex="0"`,
   Enter/Space activates the row, and nested links, buttons, inputs, selects,
   summaries, and other explicit controls do not activate the row. Do not turn a

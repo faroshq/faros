@@ -538,7 +538,7 @@ onUnmounted(() => {
       @change="handleRepositoryChange"
       @row-click="openRepository"
     >
-      <template #name="{ value, row }"><span v-if="row.deleting">{{ row.repo || value }}</span><button v-else class="k-btn k-btn--ghost code-inline-action" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
+      <template #name="{ value, row }"><span v-if="row.deleting">{{ row.repo || value }}</span><button v-else class="k-btn k-btn--ghost k-table-resource-link" type="button" @click.stop="openRepository(row)">{{ row.repo || value }}</button></template>
       <template #connectionRef="{ value }">{{ value }}</template>
       <template #visibility="{ value }">{{ value }}</template>
       <template #url="{ row }"><a v-if="row.htmlURL && !row.deleting" :href="String(row.htmlURL)" target="_blank" rel="noopener" @click.stop>open <ExternalLink :size="12" aria-hidden="true" /></a><span v-else class="muted">—</span></template>

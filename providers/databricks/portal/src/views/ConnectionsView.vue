@@ -522,7 +522,7 @@ onUnmounted(() => {
       @change="handleConnectionChange"
       @row-click="(row) => openResource(String(row.name))"
     >
-      <template #name="{ value }"><button class="k-btn k-btn--ghost databricks-inline-action" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
+      <template #name="{ value }"><button class="k-btn k-btn--ghost k-table-resource-link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
       <template #host="{ value }"><code>{{ value }}</code></template>
       <template #authType="{ value }">{{ value }}</template>
       <template #status="{ row }">

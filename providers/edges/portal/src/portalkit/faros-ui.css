@@ -1046,6 +1046,24 @@ html.light [data-k-tip]::after {
   color: var(--color-text-secondary, #8a8ca6);
   transition: color 0.1s ease;
 }
+/* Primary resource identity inside a table is a text-level navigation action,
+ * not a miniature ghost button. Keep this shared so provider list views do
+ * not drift in weight, color, or hover treatment. */
+.k-table-resource-link {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-accent, #8b6bff);
+  font-size: 12px;
+  font-weight: 400;
+  min-height: 0;
+  padding: 0;
+}
+.k-table-resource-link:hover {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--color-accent-hover, #a18aff);
+}
 /* Tailwind preflight makes SVGs block-level. Table-cell icons are inline
  * content, so restore their intrinsic inline flow and keep link labels intact. */
 .k-table__cell svg {
