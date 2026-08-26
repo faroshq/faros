@@ -494,12 +494,12 @@ defineExpose({
                       :style="{ backgroundImage: activeThreadID === thread.id ? ACTIVE_THREAD_FADE : RESTING_THREAD_FADE }"
                     />
                     <div
-                      class="pointer-events-none absolute inset-y-0 right-0 z-20 flex items-center gap-0.5 pl-8 pr-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+                      class="pointer-events-none absolute inset-y-0 right-1.5 z-20 flex w-24 items-center gap-0.5 pl-8 pr-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
                       :style="{ backgroundImage: activeThreadID === thread.id ? ACTIVE_THREAD_FADE : HOVER_THREAD_FADE }"
                     >
                       <button
                         type="button"
-                        class="flex h-7 w-7 items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition hover:bg-transparent hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition hover:bg-transparent hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         :disabled="Boolean(selectingThreadID) || Boolean(actioningThreadID)"
                         :title="pinnedThreadIDSet.has(thread.id) ? 'Unpin thread' : 'Pin thread'"
                         :aria-label="pinnedThreadIDSet.has(thread.id) ? 'Unpin thread' : 'Pin thread'"
@@ -510,7 +510,7 @@ defineExpose({
                       </button>
                       <button
                         type="button"
-                        class="flex h-7 w-7 items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition hover:bg-transparent hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 disabled:cursor-not-allowed disabled:opacity-40"
+                        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition hover:bg-transparent hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 disabled:cursor-not-allowed disabled:opacity-40"
                         title="Archive thread"
                         aria-label="Archive thread"
                         :disabled="disabled || busy || Boolean(actioningThreadID)"
