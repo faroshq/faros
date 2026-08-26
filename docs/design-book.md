@@ -184,9 +184,15 @@ texture (login, empty states — sparingly), `.island` floating dock card,
   a resource-specific accessible label, and keep destructive actions inside
   `confirmDialog({ danger: true })`. The primary resource name uses a text-level
   `.k-table-resource-link` action (accent, regular weight, transparent at rest
-  and hover), cross-resource references use ordinary cell text, opaque external
-  IDs use mono, and lifecycle state uses `StatusBadge`; providers must not
-  restyle these properties locally. `ResourceTable` keeps native table-row
+  and hover), cross-resource references use ordinary cell text, external URLs
+  use a concise linked action plus `ExternalLink` icon, resource IDs and fully
+  qualified names use ordinary cell text, finite non-status enum values use a
+  muted square `.k-badge`, and secondary counts use muted text. Operational and
+  lifecycle state use `StatusBadge` with semantic tone; keep verbose provider
+  feedback in its title and accessible name rather than as a second visible
+  status line. Reserve mono for genuinely technical table content such as schema
+  column names and types; providers must not restyle these properties locally.
+  `ResourceTable` keeps native table-row
   semantics: interactive `<tr>` elements are focusable with `tabindex="0"`,
   Enter/Space activates the row, and nested links, buttons, inputs, selects,
   summaries, and other explicit controls do not activate the row. Do not turn a

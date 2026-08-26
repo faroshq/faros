@@ -176,6 +176,8 @@ faros-provider-databricks .row-actions {
   gap: 8px;
 }
 
+faros-provider-databricks .row-actions { justify-content: flex-end; }
+
 faros-provider-databricks button.resource-delete-button {
   inline-size: 10rem;
   white-space: nowrap;
@@ -326,16 +328,6 @@ faros-provider-databricks .props dd {
   margin: 0;
   min-width: 0;
   word-break: break-word;
-}
-
-faros-provider-databricks .row-message {
-  color: var(--color-text-muted, #5d5f78);
-  display: block;
-  font-size: 11px;
-  margin-top: 4px;
-  max-width: 32rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 faros-provider-databricks .error,

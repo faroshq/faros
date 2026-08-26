@@ -634,12 +634,11 @@ onUnmounted(() => {
       @row-click="(row) => openResource(String(row.name))"
     >
       <template #name="{ value }"><button class="k-btn k-btn--ghost k-table-resource-link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button></template>
-      <template #fullName="{ value }"><span class="mono">{{ value }}</span></template>
+      <template #fullName="{ value }">{{ value }}</template>
       <template #warehouseRef="{ value }">{{ value }}</template>
-      <template #columnCount="{ value }"><span>{{ value }}</span></template>
+      <template #columnCount="{ value }"><span class="muted">{{ value }}</span></template>
       <template #status="{ row }">
-        <StatusBadge :status="String(row.status)" />
-        <span v-if="row.message" class="row-message">{{ row.message }}</span>
+        <StatusBadge :status="String(row.status)" :title="String(row.message || '')" :aria-label="row.message ? `${String(row.status)}: ${String(row.message)}` : String(row.status)" />
       </template>
       <template #actions="{ row }">
         <div class="row-actions">

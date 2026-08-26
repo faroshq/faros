@@ -85,6 +85,18 @@ const rows = computed<Array<Record<string, unknown>>>(() => warehouses.value
   .filter(wh => !operations.isTombstoned(operationKey('warehouse', wh.name), wh.uid))
   .map(wh => ({ ...wh })))
 
+function warehouseStateTone(state: unknown): 'success' | 'warning' | 'danger' | 'muted' {
+  switch (String(state || '').toUpperCase()) {
+    case 'RUNNING': return 'success'
+    case 'PENDING':
+    case 'STARTING':
+    case 'STOPPING':
+    case 'DELETING': return 'warning'
+    case 'FAILED': return 'danger'
+    default: return 'muted'
+  }
+}
+
 const form = reactive({
   name: '',
   connectionRef: '',
@@ -568,11 +580,10 @@ onUnmounted(() => {
         <button class="k-btn k-btn--ghost k-table-resource-link" type="button" :disabled="operationLocked(String(value))" @click.stop="openResource(String(value))">{{ value }}</button>
       </template>
       <template #connectionRef="{ value }">{{ value }}</template>
-      <template #warehouseID="{ value }"><code>{{ value }}</code></template>
-      <template #state="{ row }">{{ row.state || '—' }}</template>
+      <template #warehouseID="{ value }">{{ value }}</template>
+      <template #state="{ row }"><StatusBadge v-if="row.state" :status="String(row.state)" :tone="warehouseStateTone(row.state)" /><span v-else class="muted">—</span></template>
       <template #status="{ row }">
-        <StatusBadge :status="String(row.status)" />
-        <span v-if="row.message" class="row-message">{{ row.message }}</span>
+        <StatusBadge :status="String(row.status)" :title="String(row.message || '')" :aria-label="row.message ? `${String(row.status)}: ${String(row.message)}` : String(row.status)" />
       </template>
       <template #actions="{ row }">
         <div class="row-actions">

@@ -1292,20 +1292,35 @@ test('resource detail views use the shared shell without dropping resource behav
 })
 
 test('Databricks resource lists use the canonical table property hierarchy', async () => {
-  const [connections, warehouses, tables, farosUI] = await Promise.all([
+  const [connections, warehouses, tables, farosUI, localStyle] = await Promise.all([
     readFile(new URL('./views/ConnectionsView.vue', import.meta.url), 'utf8'),
     readFile(new URL('./views/WarehousesView.vue', import.meta.url), 'utf8'),
     readFile(new URL('./views/TablesView.vue', import.meta.url), 'utf8'),
     readFile(canonicalFarosUIStyle, 'utf8'),
+    readFile(new URL('./style.css', import.meta.url), 'utf8'),
   ])
 
   for (const source of [connections, warehouses, tables]) {
     assert.match(source, /#name="\{ value \}"[\s\S]*k-table-resource-link/)
   }
   assert.doesNotMatch(tables, /k-table-resource-link mono strong/)
-  assert.match(tables, /#fullName="\{ value \}"><span class="mono">/)
+  assert.doesNotMatch(connections, /#host="\{ value \}"><code>/)
+  assert.match(connections, /#host="\{ value \}"[\s\S]*Open Databricks workspace[\s\S]*<ExternalLink/)
+  assert.match(connections, /#authType="\{ value \}"><span class="k-badge k-badge--muted">/)
+  for (const source of [connections, warehouses, tables]) {
+    assert.match(source, /<StatusBadge :status="String\(row\.status\)" :title="String\(row\.message \|\| ''\)" :aria-label="row\.message/)
+    assert.doesNotMatch(source, /<span v-if="row\.message" class="row-message">/)
+  }
+  assert.match(warehouses, /#warehouseID="\{ value \}">\{\{ value \}\}<\/template>/)
+  assert.doesNotMatch(warehouses, /#warehouseID="\{ value \}"[\s\S]{0,80}class="mono"/)
+  assert.match(warehouses, /function warehouseStateTone[\s\S]*'RUNNING': return 'success'[\s\S]*'FAILED': return 'danger'/)
+  assert.match(warehouses, /#state="\{ row \}"><StatusBadge v-if="row\.state"[\s\S]*warehouseStateTone/)
+  assert.match(tables, /#fullName="\{ value \}">\{\{ value \}\}<\/template>/)
+  assert.doesNotMatch(tables, /#fullName="\{ value \}"[\s\S]{0,80}class="mono"/)
   assert.match(tables, /#warehouseRef="\{ value \}">\{\{ value \}\}<\/template>/)
+  assert.match(tables, /#columnCount="\{ value \}"><span class="muted">/)
   assert.match(farosUI, /\.k-table-resource-link\s*\{[\s\S]*color: var\(--color-accent[\s\S]*font-weight: 400[\s\S]*padding: 0;/)
+  assert.match(localStyle, /\.row-actions\s*\{\s*justify-content: flex-end;/)
 })
 
 test('resource detail deletes expose pending state, truthful status, and real browser backlinks', async () => {
