@@ -65,7 +65,9 @@ test('defaults anchored, exposes toggle and hover preview controls, and retains 
   assert.match(source, /expanded: visibleExpanded/)
   assert.match(source, /const THREAD_RAIL_PANEL_ID = 'app-studio-thread-rail'/)
   assert.match(source, /:id="THREAD_RAIL_PANEL_ID"/)
-  assert.match(source, /function syncMobileViewport\(\)[\s\S]*mobileViewport\.value = isMobileViewport\(\)/)
+  assert.match(source, /function syncMobileViewport\(\)[\s\S]*const next = isMobileViewport\(\)[\s\S]*mobileViewport\.value = next/)
+  assert.match(source, /const crossedToDesktop = mobileViewport\.value && !next/)
+  assert.match(source, /mobileOpen\.value = false[\s\S]*interactionExpanded\.value = false[\s\S]*mobileReturnFocus\.value = null[\s\S]*query\.value = ''/)
   assert.match(source, /if \(mobileViewport\.value\) \{[\s\S]*mobileOpen\.value = true/)
   assert.match(source, /mobileOpen \? 'absolute inset-y-0 left-0 block w-64'/)
   assert.match(source, /Finish or stop the current run before starting another thread/)
@@ -76,7 +78,10 @@ test('keeps preview timers stable across rail re-entry and cancels them on toggl
 
   assert.match(source, /function scheduleHoverOpen\(\) \{\n  clearCloseTimer\(\)\n  if \(anchored\.value \|\| expanded\.value \|\| hoverOpenTimer\) return/)
   assert.match(source, /function scheduleClose\(\) \{\n  clearHoverOpenTimer\(\)\n  clearCloseTimer\(\)/)
+  assert.match(source, /function scheduleClose\(\) \{[\s\S]*if \(contextMenu\.value\) return/)
+  assert.match(source, /function close\(options: \{ restoreFocus\?: boolean \} = \{\}[\s\S]*if \(contextMenu\.value\) closeContextMenu\(\)/)
   assert.match(source, /function togglePanel\(returnFocus\?: HTMLElement \| null\) \{\n  clearTimers\(\)/)
+  assert.match(source, /function togglePanel\(returnFocus\?: HTMLElement \| null\) \{[\s\S]*if \(contextMenu\.value\) closeContextMenu\(\)/)
   assert.match(source, /function previewEnter\(\) \{[\s\S]*scheduleHoverOpen\(\)/)
   assert.match(source, /function previewLeave\(\) \{[\s\S]*scheduleClose\(\)/)
   assert.match(source, /function isMobileViewport\(\) \{[\s\S]*max-width: 767px/)
@@ -156,6 +161,11 @@ test('provides row hover actions and an accessible right-click action menu', asy
   assert.match(source, /emit\('archive', threadID\)/)
   assert.match(source, /emit\('togglePin', threadID\)/)
   assert.match(source, /emit\('setUnread', threadID, !unreadThreadIDSet\.value\.has\(threadID\)\)/)
+  assert.match(source, /const unreadThreadIDSet = computed\(\(\) => new Set\([\s\S]*props\.unreadThreadIDs\.filter\(\(threadID\) => threadID !== props\.activeThreadID\)/)
+  assert.match(source, /function toggleUnread\(threadID: string\) \{[\s\S]*if \(threadID === props\.activeThreadID\) \{[\s\S]*closeContextMenu\(true\)[\s\S]*return/)
+  assert.match(source, /:disabled="contextMenuThread\.id === activeThreadID"/)
+  assert.match(source, /<Teleport to="#app-studio-overlay-root">/)
+  assert.doesNotMatch(source, /<Teleport to="body">/)
   assert.match(source, /data-thread-context-menu[\s\S]*class="fixed z-\[200\] w-48 rounded-md border border-border-default bg-surface-overlay p-1 shadow-2xl"/)
   assert.match(source, /const contextMenuReturnFocus = ref<HTMLElement \| null>\(null\)/)
   assert.match(source, /function focusThread\(threadID: string\)[\s\S]*button\[data-thread-id\][\s\S]*target\.focus\(\)/)
@@ -169,6 +179,23 @@ test('provides row hover actions and an accessible right-click action menu', asy
   assert.match(source, /function togglePin\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
   assert.match(source, /function toggleUnread\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
   assert.match(source, /function archiveThread\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
+  assert.match(source, /function dismissContextMenu\(\) \{[\s\S]*const wasOpen = Boolean\(contextMenu\.value\)[\s\S]*closeContextMenu\(\)[\s\S]*if \(wasOpen\) scheduleClose\(\)/)
+  assert.match(source, /if \(target instanceof Node && actionMenu\.value\?\.contains\(target\)\) return\n  dismissContextMenu\(\)/)
+  assert.match(source, /window\.addEventListener\('blur', dismissContextMenu\)/)
+  assert.match(source, /window\.addEventListener\('scroll', dismissContextMenu, true\)/)
+})
+
+test('never presents the active thread as unread', async () => {
+  const { default: ThreadRail } = await vite.ssrLoadModule('/src/ThreadRail.vue')
+  const html = await renderToString(createSSRApp(ThreadRail, {
+    threads: [
+      { id: 'active', title: 'Current work', status: 'idle', createdAt: '2026-08-26T00:00:00Z', updatedAt: '2026-08-26T00:00:00Z' },
+    ],
+    activeThreadID: 'active',
+    unreadThreadIDs: ['active'],
+  }))
+
+  assert.doesNotMatch(html, /aria-label="Unread thread"/)
 })
 
 test('groups pinned threads above the regular thread section', async () => {

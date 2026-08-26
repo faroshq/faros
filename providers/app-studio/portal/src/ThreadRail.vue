@@ -77,7 +77,9 @@ const expanded = computed(() => anchored.value || interactionExpanded.value)
 const visibleExpanded = computed(() => expanded.value && (!mobileViewport.value || mobileOpen.value))
 const effectiveWidth = computed(() => Math.min(railWidth.value, availableWidthCap.value))
 const railStyle = computed(() => ({ '--thread-rail-width': `${effectiveWidth.value}px` }))
-const unreadThreadIDSet = computed(() => new Set(props.unreadThreadIDs))
+const unreadThreadIDSet = computed(() => new Set(
+  props.unreadThreadIDs.filter((threadID) => threadID !== props.activeThreadID),
+))
 const pinnedThreadIDSet = computed(() => new Set(props.pinnedThreadIDs))
 const filteredThreads = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase()
@@ -180,6 +182,10 @@ function open(focusSearch = false, returnFocus?: HTMLElement | null) {
 
 function close(options: { restoreFocus?: boolean } = {}) {
   const shouldRestoreFocus = options.restoreFocus ?? true
+  // The context menu belongs to the rail. If the rail is explicitly closed,
+  // retire its teleported menu in the same transition instead of leaving a
+  // floating action surface behind.
+  if (contextMenu.value) closeContextMenu()
   syncMobileViewport()
   if (mobileOpen.value) {
     mobileOpen.value = false
@@ -207,6 +213,7 @@ function scheduleHoverOpen() {
 function scheduleClose() {
   clearHoverOpenTimer()
   clearCloseTimer()
+  if (contextMenu.value) return
   if (resizing.value) return
   if (anchored.value && !mobileOpen.value) return
   closeTimer = setTimeout(() => {
@@ -220,7 +227,16 @@ function isMobileViewport() {
 }
 
 function syncMobileViewport() {
-  mobileViewport.value = isMobileViewport()
+  const next = isMobileViewport()
+  const crossedToDesktop = mobileViewport.value && !next
+  mobileViewport.value = next
+  if (!crossedToDesktop) return
+  clearHoverOpenTimer()
+  clearCloseTimer()
+  mobileOpen.value = false
+  interactionExpanded.value = false
+  mobileReturnFocus.value = null
+  query.value = ''
 }
 
 function focusThread(threadID: string) {
@@ -301,6 +317,7 @@ function toggleAnchored() {
 
 function togglePanel(returnFocus?: HTMLElement | null) {
   clearTimers()
+  if (contextMenu.value) closeContextMenu()
   syncMobileViewport()
   if (mobileViewport.value) {
     if (mobileOpen.value) close()
@@ -328,6 +345,10 @@ function togglePin(threadID: string) {
 }
 
 function toggleUnread(threadID: string) {
+  if (threadID === props.activeThreadID) {
+    closeContextMenu(true)
+    return
+  }
   emit('setUnread', threadID, !unreadThreadIDSet.value.has(threadID))
   closeContextMenu(true)
 }
@@ -379,7 +400,9 @@ function closeContextMenu(restoreReturnFocus = false) {
 }
 
 function dismissContextMenu() {
+  const wasOpen = Boolean(contextMenu.value)
   closeContextMenu()
+  if (wasOpen) scheduleClose()
 }
 
 function handleContextMenuKeydown(event: KeyboardEvent) {
@@ -403,7 +426,7 @@ function handleDocumentPointerDown(event: PointerEvent) {
   if (!contextMenu.value) return
   const target = event.target
   if (target instanceof Node && actionMenu.value?.contains(target)) return
-  closeContextMenu()
+  dismissContextMenu()
 }
 
 function handleWindowResize() {
@@ -622,7 +645,7 @@ defineExpose({
     </div>
   </aside>
 
-  <Teleport to="body">
+  <Teleport to="#app-studio-overlay-root">
     <div
       v-if="contextMenu && contextMenuThread"
       ref="actionMenu"
@@ -648,11 +671,12 @@ defineExpose({
         type="button"
         role="menuitem"
         class="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-[12px] text-text-secondary transition hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:outline-none"
+        :disabled="contextMenuThread.id === activeThreadID"
         @click="toggleUnread(contextMenuThread.id)"
       >
-        <MailOpen v-if="unreadThreadIDSet.has(contextMenuThread.id)" class="h-3.5 w-3.5" :stroke-width="1.75" />
+        <MailOpen v-if="contextMenuThread.id === activeThreadID || unreadThreadIDSet.has(contextMenuThread.id)" class="h-3.5 w-3.5" :stroke-width="1.75" />
         <Mail v-else class="h-3.5 w-3.5" :stroke-width="1.75" />
-        {{ unreadThreadIDSet.has(contextMenuThread.id) ? 'Mark read' : 'Mark unread' }}
+        {{ contextMenuThread.id === activeThreadID || unreadThreadIDSet.has(contextMenuThread.id) ? 'Mark read' : 'Mark unread' }}
       </button>
       <div class="my-1 h-px bg-border-subtle" />
       <button

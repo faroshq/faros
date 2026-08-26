@@ -73,6 +73,41 @@ test('releases stale thread operation latches and restores the active row focus'
   assert.match(renameSource, /if \(renameIsCurrent\(\)\) threadError\.value = e instanceof Error \? e\.message : String\(e\)/)
 })
 
+test('keeps active threads read and invalidates project requests after unmount', () => {
+  assert.match(app, /let appComponentMounted = true/)
+  assert.match(app, /function projectRequestIsCurrent\(guard: ProjectRequestGuard, projectName = ''\): boolean \{[\s\S]*return appComponentMounted &&[\s\S]*guard\.serial === projectLoadSerial/)
+  assert.match(app, /onMounted\(\(\) => \{\n  appComponentMounted = true/)
+  assert.match(app, /onBeforeUnmount\(\(\) => \{\n  appComponentMounted = false/)
+
+  const unreadSource = app.slice(app.indexOf('function setThreadUnread'), app.indexOf('\n\nasync function archiveAssistantThread'))
+  assert.match(unreadSource, /if \(threadID === activeAssistantThreadID\.value\) \{[\s\S]*markAssistantThreadRead\(scopeKey, thread\)[\s\S]*unreadAssistantThreadIDs\.value = unreadAssistantThreadIDs\.value\.filter[\s\S]*return/)
+
+  const archiveSource = app.slice(app.indexOf('async function archiveAssistantThread'), app.indexOf('\nfunction assistantRunForMessage'))
+  const replacementStart = archiveSource.indexOf('if \(nextThreadID\)')
+  assert.ok(replacementStart >= 0)
+  assert.match(archiveSource, /if \(!requestIsCurrent\(\) \|\| !contextIsCurrent\(\)\) return/)
+  assert.match(archiveSource.slice(replacementStart), /await selectAssistantThread\(nextThreadID\)/)
+})
+
+test('does not apply or present create-thread responses after unmount', () => {
+  const createSource = app.slice(app.indexOf('async function createAssistantThread'), app.indexOf('\nfunction beginAssistantThreadTitleRename'))
+  assert.match(createSource, /const createIsCurrent = \(\) =>[\s\S]*appComponentMounted &&[\s\S]*assistantThreadLoadSerial === assistantThreadRequestSerial[\s\S]*selected\.value\?\.name === projectName/)
+  assert.match(createSource, /const thread = await api\.createAssistantThread\(props\.ctx, projectName\)[\s\S]*if \(!createIsCurrent\(\)\) return/)
+  assert.match(createSource, /catch \(e\) \{[\s\S]*if \(createIsCurrent\(\)\) \{[\s\S]*threadError\.value = e instanceof Error \? e\.message : String\(e\)/)
+
+  const firstProjectSource = app.slice(app.indexOf('async function createProjectAndStartConversation'), app.indexOf('\nasync function openSettings'))
+  assert.match(firstProjectSource, /const current = \(\) => appComponentMounted && pendingFirstProjectSubmission === submission[\s\S]*firstProjectSubmissionIsCurrent\(/)
+
+  const sendSource = app.slice(app.indexOf('async function sendMessage'), app.indexOf('function cancelMessageStream'))
+  assert.match(sendSource, /const sendRequestSerial = assistantThreadRequestSerial/)
+  assert.match(sendSource, /const sendContextFingerprint = projectContextFingerprint\(props\.ctx\)/)
+  assert.match(sendSource, /const firstSendIsCurrent = \(\) =>[\s\S]*appComponentMounted &&[\s\S]*sendRequestSerial === assistantThreadRequestSerial[\s\S]*sendContextFingerprint === projectContextFingerprint\(props\.ctx\)[\s\S]*pendingMessageSubmission\?\.fingerprint === submissionFingerprint/)
+  const firstThreadStart = sendSource.indexOf('let thread = assistantThreads.value.find')
+  const firstThreadEnd = sendSource.indexOf('\n      const canonical', firstThreadStart)
+  assert.ok(firstThreadStart >= 0 && firstThreadEnd > firstThreadStart)
+  assert.match(sendSource.slice(firstThreadStart, firstThreadEnd), /thread = await api\.createAssistantThread\(props\.ctx, projectName\)[\s\S]*if \(!firstSendIsCurrent\(\)\) return false[\s\S]*assistantThreads\.value = \[thread, \.\.\.assistantThreads\.value\]/)
+})
+
 test('derives unread dots from persisted project-scoped update markers', () => {
   assert.match(app, /from '\.\/assistantThreadReadState'/)
   assert.match(app, /reconcileAssistantThreadReadState\([\s\S]*assistantThreadFocusStorageKey\(assistantThreadFocusScope\(projectName\)\)/)

@@ -133,6 +133,16 @@ test('annotation content remains in the accepted turn payload until the POST bou
   assert.ok(sendMessage.indexOf("prompt.value = ''") < accepted, 'plain text may clear optimistically without consuming annotation parts')
 })
 
+test('first-send thread creation cannot mutate state after an App unmount or request switch', async () => {
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const sendMessage = appSource.slice(appSource.indexOf('async function sendMessage'), appSource.indexOf('function cancelMessageStream'))
+  const firstThreadStart = sendMessage.indexOf('let thread = assistantThreads.value.find')
+  const firstThreadEnd = sendMessage.indexOf('\n      const canonical', firstThreadStart)
+  assert.ok(firstThreadStart >= 0 && firstThreadEnd > firstThreadStart)
+  assert.match(sendMessage, /const firstSendIsCurrent = \(\) =>[\s\S]*appComponentMounted &&[\s\S]*sendRequestSerial === assistantThreadRequestSerial[\s\S]*sendContextFingerprint === projectContextFingerprint\(props\.ctx\)[\s\S]*selected\.value\?\.name === projectName[\s\S]*pendingMessageSubmission\?\.clientRequestID === clientRequestID/)
+  assert.match(sendMessage.slice(firstThreadStart, firstThreadEnd), /await api\.createAssistantThread\(props\.ctx, projectName\)[\s\S]*if \(!firstSendIsCurrent\(\)\) return false[\s\S]*persistAssistantThreadFocus[\s\S]*writeAssistantAnnotationDraft/)
+})
+
 test('App keeps central loading surfaces honest while project state hydrates', async () => {
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   const productionLoadingSource = await readFile(new URL('./ProductionSettingsLoadingShell.vue', import.meta.url), 'utf8')

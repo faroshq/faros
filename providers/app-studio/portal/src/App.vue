@@ -322,7 +322,8 @@ function currentProjectRequestGuard(): ProjectRequestGuard {
 }
 
 function projectRequestIsCurrent(guard: ProjectRequestGuard, projectName = ''): boolean {
-  return guard.serial === projectLoadSerial &&
+  return appComponentMounted &&
+    guard.serial === projectLoadSerial &&
     guard.contextFingerprint === projectContextFingerprint(props.ctx) &&
     (!projectName || selected.value?.name === projectName)
 }
@@ -855,6 +856,7 @@ const mountedToolEl = ref<HTMLElement | null>(null)
 const splitWidth = ref(readSplitWidth())
 let toolLoadSerial = 0
 let projectLoadSerial = 0
+let appComponentMounted = true
 let activeProjectContextFingerprint = ''
 let initializationRetryTimer: number | undefined
 let landingPlaceholderDelayTimer: number | undefined
@@ -2065,6 +2067,7 @@ const developmentPreviewUnavailableMessage = computed(() => {
 })
 
 onMounted(() => {
+  appComponentMounted = true
   void load()
   void loadProviders()
   void loadCreateReadiness()
@@ -2327,6 +2330,7 @@ useEscapeKey(() => {
 })
 
 onBeforeUnmount(() => {
+  appComponentMounted = false
   developmentPreviewComponentMounted = false
   developmentPreviewRefreshController.dispose()
   developmentPreviewAuthorizationSerial += 1
@@ -3850,7 +3854,7 @@ async function createProjectAndStartConversation(
     messages.value = [{ id: `temp-${Date.now()}-user`, projectID: draftName, role: 'user', content, createdAt: now }]
   }
 
-  const current = () => pendingFirstProjectSubmission === submission && firstProjectSubmissionIsCurrent(
+  const current = () => appComponentMounted && pendingFirstProjectSubmission === submission && firstProjectSubmissionIsCurrent(
     submission,
     generation,
     projectCreateGeneration,
@@ -4472,11 +4476,15 @@ async function createAssistantThread() {
   const projectName = selected.value?.name
   if (!projectName || threadActionsDisabled.value) return
   const assistantThreadLoadSerial = ++assistantThreadRequestSerial
+  const createIsCurrent = () =>
+    appComponentMounted &&
+    assistantThreadLoadSerial === assistantThreadRequestSerial &&
+    selected.value?.name === projectName
   const threadMutationLatchOwner = beginThreadMutationLatch()
   threadError.value = null
   try {
     const thread = await api.createAssistantThread(props.ctx, projectName)
-    if (assistantThreadLoadSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName) return
+    if (!createIsCurrent()) return
     assistantThreads.value = [thread, ...assistantThreads.value]
     activeAssistantThreadID.value = thread.id
     persistAssistantThreadFocus(assistantThreadFocusScope(projectName), thread.id)
@@ -4486,7 +4494,7 @@ async function createAssistantThread() {
     activeAssistantProject = ''
     assistantRunController.disconnect()
   } catch (e) {
-    if (assistantThreadLoadSerial === assistantThreadRequestSerial && selected.value?.name === projectName) {
+    if (createIsCurrent()) {
       threadError.value = e instanceof Error ? e.message : String(e)
     }
   } finally {
@@ -4560,6 +4568,11 @@ function setThreadUnread(threadID: string, unread: boolean) {
   const thread = assistantThreads.value.find((candidate) => candidate.id === threadID)
   if (!projectName || !thread) return
   const scopeKey = assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName))
+  if (threadID === activeAssistantThreadID.value) {
+    markAssistantThreadRead(scopeKey, thread)
+    unreadAssistantThreadIDs.value = unreadAssistantThreadIDs.value.filter((candidate) => candidate !== threadID)
+    return
+  }
   if (unread) {
     markAssistantThreadUnread(scopeKey, thread)
     if (!unreadAssistantThreadIDs.value.includes(threadID)) {
@@ -5699,6 +5712,8 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
   const hasStructuredContent = !steeringActiveRun && assistantComposerParts.value.some((part) => part.type !== 'text')
   if ((!content && !hasStructuredContent) || !selected.value || !llmConfigured.value || conversationInteractionBusy.value || llmSettingsLoading.value || (messageStreaming.value && !steeringActiveRun) || assistantResumeBusy.value || approvalModeLoading.value || approvalModeSaving.value) return false
   const projectName = selected.value.name
+  const sendRequestSerial = assistantThreadRequestSerial
+  const sendContextFingerprint = projectContextFingerprint(props.ctx)
   const turnSkills = steeringActiveRun ? [] : [...selectedTurnSkills.value]
   const turnResources = steeringActiveRun ? [] : [...selectedTurnResources.value]
   const turnContentParts = steeringActiveRun ? [] : [...assistantComposerParts.value]
@@ -5726,6 +5741,13 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
     : crypto.randomUUID()
   const payload = { ...startOperation, clientRequestID }
   pendingMessageSubmission = { fingerprint: submissionFingerprint, clientRequestID }
+  const firstSendIsCurrent = () =>
+    appComponentMounted &&
+    sendRequestSerial === assistantThreadRequestSerial &&
+    sendContextFingerprint === projectContextFingerprint(props.ctx) &&
+    selected.value?.name === projectName &&
+    pendingMessageSubmission?.fingerprint === submissionFingerprint &&
+    pendingMessageSubmission?.clientRequestID === clientRequestID
   const optimisticID = firstProjectPending
     ? messages.value.find((message) => message.projectID === projectName && message.role === 'user' && message.content === content)?.id ?? `optimistic-${clientRequestID}`
     : `optimistic-${clientRequestID}`
@@ -5772,6 +5794,7 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
       let thread = assistantThreads.value.find((candidate) => candidate.id === activeAssistantThreadID.value)
       if (!thread) {
         thread = await api.createAssistantThread(props.ctx, projectName)
+        if (!firstSendIsCurrent()) return false
         assistantThreads.value = [thread, ...assistantThreads.value]
         activeAssistantThreadID.value = thread.id
         persistAssistantThreadFocus(assistantThreadFocusScope(projectName), thread.id)
