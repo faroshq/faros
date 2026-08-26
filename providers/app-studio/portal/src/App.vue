@@ -22,6 +22,7 @@ import {
   Loader2,
   Lock,
   MessageSquare,
+  PanelLeft,
   PanelRight,
   Plus,
   RefreshCw,
@@ -88,9 +89,19 @@ import {
   projectAssistantContextResources,
 } from './assistantThreadProjection'
 import {
+  assistantThreadFocusStorageKey,
   persistAssistantThreadFocus,
   restoreAssistantThreadFocus,
 } from './assistantThreadFocus'
+import {
+  markAssistantThreadRead,
+  markAssistantThreadUnread,
+  reconcileAssistantThreadReadState,
+} from './assistantThreadReadState'
+import {
+  readAssistantThreadPins,
+  toggleAssistantThreadPin,
+} from './assistantThreadPinState'
 import {
   assistantAnnotationDraftStorageKey,
   clearAssistantAnnotationDraft,
@@ -102,7 +113,7 @@ import AssistantPlanPopover from './AssistantPlanPopover.vue'
 import AssistantPlanDisclosure from './AssistantPlanDisclosure.vue'
 import SkillsWorkbench from './SkillsWorkbench.vue'
 import CodeExplorer from './CodeExplorer.vue'
-import ThreadsWorkbench from './ThreadsWorkbench.vue'
+import ThreadRail from './ThreadRail.vue'
 import ProjectShareDialog from './ProjectShareDialog.vue'
 import ApprovalModePicker from './ApprovalModePicker.vue'
 import ResponseModePicker, { type AssistantResponseMode } from './ResponseModePicker.vue'
@@ -532,6 +543,7 @@ const assistantMarkdownClass = [
 ].join(' ')
 
 const projects = ref<Project[]>([])
+const APP_STUDIO_ICON_URL = '/ui/providers/app-studio/icon.svg'
 const PROJECTS_LAYOUT_PREFERENCE_KEY = 'faros:portal:app-studio:projects-layout'
 const projectLayout = ref<LayoutMode>(readLayoutPreference(PROJECTS_LAYOUT_PREFERENCE_KEY))
 watch(projectLayout, mode => writeLayoutPreference(PROJECTS_LAYOUT_PREFERENCE_KEY, mode))
@@ -544,7 +556,15 @@ const selected = ref<Project | null>(null)
 const messages = ref<ProjectMessageView[]>([])
 const assistantThreads = ref<ProjectAssistantThread[]>([])
 const activeAssistantThreadID = ref('')
+const activeAssistantThread = computed(() => assistantThreads.value.find((thread) => thread.id === activeAssistantThreadID.value))
+const activeAssistantThreadTitle = computed(() => activeAssistantThread.value?.title?.trim() || 'New thread')
+const editingAssistantThreadTitle = ref(false)
+const assistantThreadTitleDraft = ref('')
+const assistantThreadTitleInput = ref<HTMLInputElement | null>(null)
+const unreadAssistantThreadIDs = ref<string[]>([])
+const pinnedAssistantThreadIDs = ref<string[]>([])
 const threadMutationBusy = ref(false)
+const threadActioningID = ref('')
 const threadError = ref<string | null>(null)
 const assistantSkills = ref<ProjectAssistantSkill[]>([])
 const assistantSkillsLoading = ref(false)
@@ -553,6 +573,38 @@ const assistantSkillsWarnings = ref<string[]>([])
 let assistantSkillsLoadSerial = 0
 
 const conversationMessages = computed(() => projectMessagesForConversation(messages.value))
+watch(
+  () => [
+    selected.value?.name ?? '',
+    activeAssistantThreadID.value,
+    assistantThreads.value.map((thread) => `${thread.id}:${thread.updatedAt}`).join('|'),
+  ] as const,
+  ([projectName]) => {
+    unreadAssistantThreadIDs.value = projectName
+      ? reconcileAssistantThreadReadState(
+          assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName)),
+          assistantThreads.value,
+          activeAssistantThreadID.value,
+        )
+      : []
+  },
+  { flush: 'sync' },
+)
+watch(
+  () => [
+    selected.value?.name ?? '',
+    assistantThreads.value.map((thread) => thread.id).join('|'),
+  ] as const,
+  ([projectName]) => {
+    pinnedAssistantThreadIDs.value = projectName
+      ? readAssistantThreadPins(
+          assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName)),
+          assistantThreads.value.map((thread) => thread.id),
+        )
+      : []
+  },
+  { flush: 'sync' },
+)
 function heldReviewPanel(kind: 'approval' | 'follow_up'): PendingApprovalView | PendingFollowUpView | null {
   const hold = reviewPanelHold.value
   const run = activeAssistantRun
@@ -625,7 +677,13 @@ const selectedTurnSkills = ref<ProjectAssistantSkill[]>([])
 const selectedTurnResources = ref<ProjectAssistantContextResource[]>([])
 const assistantComposerParts = ref<ProjectAssistantContentPart[]>([])
 const assistantComposerRef = ref<{ focus: () => void; openPalette: () => void; closePalette: (restoreFocus?: boolean) => void } | null>(null)
-const threadsWorkbenchRef = ref<{ focusActiveThread?: () => void } | null>(null)
+const threadRailRef = ref<{
+  open?: () => void
+  openAndFocus?: () => void
+  toggle?: () => void
+  previewEnter?: () => void
+  previewLeave?: () => void
+} | null>(null)
 const assistantIntent = ref<AssistantResponseMode>('default')
 const approvalMode = ref<ProjectAssistantApprovalMode>('on_request')
 const approvalModeLoading = ref(false)
@@ -786,6 +844,7 @@ const assistantWorkedDurationClock = new AssistantWorkedDurationClock({ namespac
 const assistantPlanAnnouncement = ref('')
 const promptRef = ref<HTMLTextAreaElement | null>(null)
 const workspaceRef = ref<HTMLDivElement | null>(null)
+const splitRegionRef = ref<HTMLDivElement | null>(null)
 const toolHostRef = ref<HTMLDivElement | null>(null)
 const mountedToolEl = ref<HTMLElement | null>(null)
 const splitWidth = ref(readSplitWidth())
@@ -912,6 +971,8 @@ function invalidateProjectContextState() {
   busy.value = false
   threadMutationBusy.value = false
   threadError.value = null
+  editingAssistantThreadTitle.value = false
+  assistantThreadTitleDraft.value = ''
   prompt.value = ''
   approvalModeLoading.value = false
   approvalModeSaving.value = false
@@ -1227,7 +1288,7 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 const showNewProjectComposer = computed(() => isCreateRoute.value)
-const chatPaneStyle = computed(() => ({ flexBasis: `${splitWidth.value}%` }))
+const conversationPaneStyle = computed(() => ({ flexBasis: `${splitWidth.value}%` }))
 const assistantResumeBusy = computed(() => Object.keys(permissionBusy.value).length > 0 || Object.keys(followUpBusy.value).length > 0)
 // This latch deliberately does not depend on activeAssistantRun. Durable
 // reconciliation may replace or clear that object while an interrupt request
@@ -1704,13 +1765,6 @@ const launcherBuiltInItems = computed<WorkbenchLauncherItem[]>(() => [
     subtitle: hasPendingReview.value ? 'Resolve pending approvals and follow-up questions' : 'Inspect approvals and follow-up requests',
     icon: ClipboardList,
     builtInTab: 'review',
-  },
-  {
-    id: 'builtin:threads',
-    title: 'Threads',
-    subtitle: 'Switch conversations, rename threads, or start a new one',
-    icon: MessageSquare,
-    builtInTab: 'threads',
   },
   {
     id: 'builtin:skills',
@@ -4271,6 +4325,7 @@ async function selectAssistantThread(threadID: string) {
   if (!projectName || !threadID || messageStreaming.value || busy.value || conversationInteractionBusy.value) return
   if (threadID === activeAssistantThreadID.value) {
     persistAssistantThreadFocus(assistantThreadFocusScope(projectName), threadID)
+    setThreadUnread(threadID, false)
     return
   }
   const previousThreadID = activeAssistantThreadID.value
@@ -4279,7 +4334,6 @@ async function selectAssistantThread(threadID: string) {
   selectingThreadID.value = threadID
   threadHistoryLoading.value = true
   threadError.value = null
-  let restorePriorThreadFocus = false
   try {
     const items = await api.listAssistantThreadItems(props.ctx, projectName, threadID)
     if (
@@ -4307,7 +4361,6 @@ async function selectAssistantThread(threadID: string) {
       (activeAssistantThreadID.value === threadID || activeAssistantThreadID.value === previousThreadID)
     ) {
       threadError.value = e instanceof Error ? e.message : String(e)
-      restorePriorThreadFocus = true
     }
   } finally {
     if (
@@ -4317,10 +4370,6 @@ async function selectAssistantThread(threadID: string) {
     ) {
       selectingThreadID.value = ''
       threadHistoryLoading.value = false
-      if (restorePriorThreadFocus) {
-        await nextTick()
-        threadsWorkbenchRef.value?.focusActiveThread?.()
-      }
     }
   }
 }
@@ -4351,6 +4400,22 @@ async function createAssistantThread() {
   }
 }
 
+function beginAssistantThreadTitleRename() {
+  const thread = activeAssistantThread.value
+  if (!thread || threadActionsDisabled.value) return
+  assistantThreadTitleDraft.value = thread.title?.trim() || ''
+  editingAssistantThreadTitle.value = true
+  void nextTick(() => {
+    assistantThreadTitleInput.value?.focus()
+    assistantThreadTitleInput.value?.select()
+  })
+}
+
+function cancelAssistantThreadTitleRename() {
+  editingAssistantThreadTitle.value = false
+  assistantThreadTitleDraft.value = ''
+}
+
 async function renameAssistantThread(threadID: string, title: string) {
   const projectName = selected.value?.name
   const normalizedTitle = title.trim()
@@ -4368,53 +4433,71 @@ async function renameAssistantThread(threadID: string, title: string) {
   }
 }
 
-async function deleteAssistantThread(threadID: string) {
+async function commitAssistantThreadTitleRename() {
+  if (!editingAssistantThreadTitle.value) return
+  const thread = activeAssistantThread.value
+  const currentTitle = thread?.title?.trim() || ''
+  const normalizedTitle = assistantThreadTitleDraft.value.trim()
+  cancelAssistantThreadTitleRename()
+  if (!thread || !normalizedTitle || normalizedTitle === currentTitle) return
+  await renameAssistantThread(thread.id, normalizedTitle)
+}
+
+function toggleThreadPin(threadID: string) {
   const projectName = selected.value?.name
-  if (!projectName || !threadID || threadActionsDisabled.value) return
-  const deletedIndex = assistantThreads.value.findIndex((thread) => thread.id === threadID)
-  if (deletedIndex < 0) return
+  if (!projectName || !assistantThreads.value.some((thread) => thread.id === threadID)) return
+  pinnedAssistantThreadIDs.value = toggleAssistantThreadPin(
+    assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName)),
+    threadID,
+    pinnedAssistantThreadIDs.value,
+  )
+}
+
+function setThreadUnread(threadID: string, unread: boolean) {
+  const projectName = selected.value?.name
+  const thread = assistantThreads.value.find((candidate) => candidate.id === threadID)
+  if (!projectName || !thread) return
+  const scopeKey = assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName))
+  if (unread) {
+    markAssistantThreadUnread(scopeKey, thread)
+    if (!unreadAssistantThreadIDs.value.includes(threadID)) {
+      unreadAssistantThreadIDs.value = [...unreadAssistantThreadIDs.value, threadID]
+    }
+    return
+  }
+  markAssistantThreadRead(scopeKey, thread)
+  unreadAssistantThreadIDs.value = unreadAssistantThreadIDs.value.filter((candidate) => candidate !== threadID)
+}
+
+async function archiveAssistantThread(threadID: string) {
+  const projectName = selected.value?.name
+  if (!projectName || !threadID || threadActionsDisabled.value || threadActioningID.value) return
   const wasActive = activeAssistantThreadID.value === threadID
-  const remaining = assistantThreads.value.filter((thread) => thread.id !== threadID)
-  const nextThread = remaining[Math.min(deletedIndex, Math.max(remaining.length - 1, 0))]
-  const requestSerial = ++assistantThreadRequestSerial
+  let nextThreadID = ''
+  let createReplacement = false
+  threadActioningID.value = threadID
   threadMutationBusy.value = true
   threadError.value = null
   try {
-    await api.deleteAssistantThread(props.ctx, projectName, threadID)
-    if (requestSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName) return
-    clearStoredAssistantAnnotationDraft(projectName, threadID)
+    await api.patchAssistantThread(props.ctx, projectName, threadID, { archived: true })
+    if (selected.value?.name !== projectName) return
+    const remaining = assistantThreads.value.filter((thread) => thread.id !== threadID)
     assistantThreads.value = remaining
     if (!wasActive) return
-
-    assistantRunController.disconnect()
-    activeAssistantSubscription?.abort()
-    setActiveAssistantRun(null)
-    activeAssistantProject = ''
-    messageStreaming.value = false
-    reviewPanelHold.value = null
-    messages.value = []
-    if (nextThread) {
-      await selectAssistantThread(nextThread.id)
-      return
-    }
-
-    // Keep the composer usable after deleting the final thread. Creating this
-    // blank thread intentionally omits a title so the backend's asynchronous
-    // title generation remains the only source of automatic names.
-    const replacement = await api.createAssistantThread(props.ctx, projectName)
-    if (requestSerial !== assistantThreadRequestSerial || selected.value?.name !== projectName) return
-    assistantThreads.value = [replacement]
-    activeAssistantThreadID.value = replacement.id
-    persistAssistantThreadFocus(assistantThreadFocusScope(projectName), replacement.id)
-    activeAssistantThreadSequence = 1
-    setActiveAssistantRun(null)
-    messages.value = []
+    nextThreadID = remaining[0]?.id ?? ''
+    createReplacement = !nextThreadID
   } catch (e) {
-    if (requestSerial === assistantThreadRequestSerial && selected.value?.name === projectName) {
-      threadError.value = e instanceof Error ? e.message : String(e)
-    }
+    if (selected.value?.name === projectName) threadError.value = e instanceof Error ? e.message : String(e)
   } finally {
+    threadActioningID.value = ''
     threadMutationBusy.value = false
+  }
+  if (selected.value?.name !== projectName) return
+  if (nextThreadID) {
+    await selectAssistantThread(nextThreadID)
+    if (activeAssistantThreadID.value === threadID) await createAssistantThread()
+  } else if (createReplacement) {
+    await createAssistantThread()
   }
 }
 
@@ -5281,6 +5364,18 @@ function openBuiltInWorkbenchTab(kind: WorkbenchBuiltInTab) {
   workbench.value = openWorkbenchBuiltInTab(workbench.value, kind)
 }
 
+function toggleThreadPanel() {
+  threadRailRef.value?.toggle?.()
+}
+
+function previewThreadPanel() {
+  threadRailRef.value?.previewEnter?.()
+}
+
+function closeThreadPanelPreview() {
+  threadRailRef.value?.previewLeave?.()
+}
+
 function openWorkbenchLauncher() {
   workbenchLauncherQuery.value = ''
   openBuiltInWorkbenchTab('launcher')
@@ -5376,7 +5471,6 @@ function workbenchTabIcon(tab: WorkbenchTabDescriptor): Component {
   if (tab.kind === 'history') return GitBranch
   if (tab.kind === 'settings') return Settings2
   if (tab.kind === 'skills') return Plug
-  if (tab.kind === 'threads') return MessageSquare
   if (tab.kind === 'launcher') return Plus
   return Wrench
 }
@@ -6403,18 +6497,24 @@ function detachMountedTool() {
 }
 
 function startResize(e: PointerEvent) {
-  if (!workspaceRef.value || window.innerWidth < 768) return
+  if (!splitRegionRef.value || window.innerWidth < 768) return
   e.preventDefault()
   window.addEventListener('pointermove', resizeWorkspace)
   window.addEventListener('pointerup', stopResize)
 }
 
+function splitPercentFromPointer(clientX: number, rect: Pick<DOMRect, 'left' | 'width'>): number | null {
+  if (!Number.isFinite(clientX) || !Number.isFinite(rect.left) || !Number.isFinite(rect.width) || rect.width <= 0) return null
+  const pct = ((clientX - rect.left) / rect.width) * 100
+  return Math.min(68, Math.max(32, pct))
+}
+
 function resizeWorkspace(e: PointerEvent) {
-  const root = workspaceRef.value
-  if (!root) return
-  const rect = root.getBoundingClientRect()
-  const pct = ((e.clientX - rect.left) / rect.width) * 100
-  splitWidth.value = Math.min(68, Math.max(32, pct))
+  const splitRegion = splitRegionRef.value
+  if (!splitRegion) return
+  const pct = splitPercentFromPointer(e.clientX, splitRegion.getBoundingClientRect())
+  if (pct === null) return
+  splitWidth.value = pct
 }
 
 function stopResize() {
@@ -7089,33 +7189,81 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     </div>
   </div>
 
-  <div v-else ref="workspaceRef" data-app-studio-workspace class="flex h-full min-h-0 w-full overflow-hidden bg-surface-raised/70 flex-col md:flex-row" :aria-busy="conversationLoading || conversationRefreshing">
-    <section
-      class="flex min-h-[360px] min-w-0 flex-col border-b border-border-subtle md:min-h-0 md:border-b-0 md:border-r"
-      :style="chatPaneStyle"
-    >
-      <header class="flex h-14 shrink-0 items-center gap-2 border-b border-border-subtle px-3">
-        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
-          <MessageSquare class="h-4 w-4 text-accent" :stroke-width="1.75" />
-        </div>
-        <div class="min-w-0 flex-1">
-          <div v-if="!selected" class="shimmer h-3.5 w-32 rounded bg-surface-overlay" aria-hidden="true" />
-          <div v-else class="truncate text-[13px] font-semibold text-text-primary">
-            {{ selected?.displayName || 'Project' }}
+  <div v-else ref="workspaceRef" data-app-studio-workspace class="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface-raised/70" :aria-busy="conversationLoading || conversationRefreshing">
+    <div ref="splitRegionRef" class="relative flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+      <section data-app-studio-conversation-pane class="flex min-h-0 min-w-0 shrink-0 flex-col" :style="conversationPaneStyle">
+        <header data-app-studio-titlebar class="flex h-14 shrink-0 items-center gap-2 border-b border-border-subtle bg-surface-raised px-3">
+          <button
+            type="button"
+            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            title="Toggle thread side panel"
+            aria-label="Toggle thread side panel"
+            @click="toggleThreadPanel"
+            @pointerenter="previewThreadPanel"
+            @pointerleave="closeThreadPanelPreview"
+            @focusin="previewThreadPanel"
+            @focusout="closeThreadPanelPreview"
+          >
+            <PanelLeft class="h-4 w-4" :stroke-width="1.75" />
+          </button>
+          <div class="mx-1 h-6 w-px shrink-0 bg-border-subtle" aria-hidden="true" />
+          <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
+            <img :src="APP_STUDIO_ICON_URL" alt="" class="h-4 w-4 object-contain" />
           </div>
-          <div v-if="!selected" class="mt-2 shimmer h-2.5 w-48 rounded bg-surface-overlay" aria-hidden="true" />
-          <div v-else class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-text-muted">
-            <template v-if="selected?.repository">
+          <div class="min-w-0 flex-1">
+            <div v-if="!selected" class="shimmer h-3.5 w-32 rounded bg-surface-overlay" aria-hidden="true" />
+            <input
+              v-if="editingAssistantThreadTitle"
+              ref="assistantThreadTitleInput"
+              v-model="assistantThreadTitleDraft"
+              type="text"
+              class="h-7 w-full min-w-0 border-0 bg-transparent p-0 text-[13px] font-semibold text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-label="Rename thread"
+              :disabled="threadMutationBusy"
+              @keydown.enter.exact.prevent="commitAssistantThreadTitleRename"
+              @keydown.esc.stop.prevent="cancelAssistantThreadTitleRename"
+              @blur="commitAssistantThreadTitleRename"
+            />
+            <button
+              v-else
+              type="button"
+              class="flex max-w-full min-w-0 items-center rounded-sm text-left text-[13px] font-semibold text-text-primary transition hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="!activeAssistantThread || threadActionsDisabled"
+              :title="activeAssistantThread ? `Rename thread: ${activeAssistantThreadTitle}` : undefined"
+              aria-label="Rename thread"
+              @click="beginAssistantThreadTitleRename"
+            >
+              <span class="truncate">{{ activeAssistantThreadTitle }}</span>
+            </button>
+            <div v-if="!selected" class="mt-2 shimmer h-2.5 w-48 rounded bg-surface-overlay" aria-hidden="true" />
+            <div v-else class="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-text-muted">
+              <span class="truncate">{{ selected.displayName || selected.name || 'Project' }}</span>
+              <span aria-hidden="true">·</span>
               <GitBranch class="h-3 w-3 shrink-0" :stroke-width="2" />
-              <span class="truncate">{{ selected.repository.name || selected.repository.ref }}</span>
-            </template>
-            <template v-else>
-              <span class="truncate">{{ selected?.description || selected?.name || 'App Studio project' }}</span>
-            </template>
+              <span class="truncate">{{ selected.repository?.name || selected.repository?.ref || 'No repository' }}</span>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
+        <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+          <ThreadRail
+            ref="threadRailRef"
+            :threads="assistantThreads"
+            :active-thread-i-d="activeAssistantThreadID"
+            :unread-thread-i-ds="unreadAssistantThreadIDs"
+            :pinned-thread-i-ds="pinnedAssistantThreadIDs"
+            :loading="threadHistoryLoading || projectOpenLoading"
+            :selecting-thread-i-d="selectingThreadID"
+            :actioning-thread-i-d="threadActioningID"
+            :disabled="threadActionsDisabled"
+            :busy="threadMutationBusy"
+            @select="selectAssistantThread"
+            @create="createAssistantThread"
+            @archive="archiveAssistantThread"
+            @toggle-pin="toggleThreadPin"
+            @set-unread="setThreadUnread"
+          />
+          <section class="flex min-h-[360px] min-w-0 flex-1 flex-col border-b border-border-subtle md:min-h-0 md:border-b-0 md:border-r">
       <div v-if="error && !projectRouteFailure" class="mx-3 mt-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger">
         <template v-if="isMissingCodeConnectionError(error)">
           You need to
@@ -7651,17 +7799,19 @@ function isMissingCodeConnectionError(value: string | null): boolean {
       <div v-else class="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-[13px] text-text-muted">
         {{ loading ? 'Loading projects...' : 'Select or create a project.' }}
       </div>
-    </section>
+          </section>
+        </div>
+      </section>
 
-    <div
-      class="hidden w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-border-subtle transition hover:bg-accent/40 md:flex"
-      title="Resize"
-      @pointerdown="startResize"
-    >
-      <GripVertical class="h-4 w-4 text-text-muted" :stroke-width="1.75" />
-    </div>
+      <div
+        class="hidden w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-border-subtle transition hover:bg-accent/40 md:flex"
+        title="Resize"
+        @pointerdown="startResize"
+      >
+        <GripVertical class="h-4 w-4 text-text-muted" :stroke-width="1.75" />
+      </div>
 
-    <section class="flex min-h-[360px] min-w-0 flex-1 flex-col md:min-h-0">
+      <section data-app-studio-workbench-pane class="flex min-h-[360px] min-w-0 flex-1 flex-col md:min-h-0">
       <header class="flex h-14 shrink-0 items-center gap-2 border-b border-border-subtle px-3">
         <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
           <PanelRight class="h-4 w-4 text-accent" :stroke-width="1.75" />
@@ -8081,29 +8231,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
       </div>
 
       <div
-        v-else-if="activeWorkbenchTab?.kind === 'threads'"
-        class="min-h-0 flex-1 overflow-auto p-3"
-        role="tabpanel"
-        :id="workbenchTabPanelID(activeWorkbenchTab)"
-        :aria-labelledby="workbenchTabControlID(activeWorkbenchTab)"
-      >
-        <ThreadsWorkbench
-          ref="threadsWorkbenchRef"
-          :threads="assistantThreads"
-          :active-thread-i-d="activeAssistantThreadID"
-          :loading="threadHistoryLoading || projectOpenLoading"
-          :selecting-thread-i-d="selectingThreadID"
-          :disabled="threadActionsDisabled"
-          :busy="threadMutationBusy"
-          :error="threadError"
-          @select="selectAssistantThread"
-          @create="createAssistantThread"
-          @rename="renameAssistantThread"
-          @delete="deleteAssistantThread"
-        />
-      </div>
-
-      <div
         v-else-if="activeWorkbenchTab?.kind === 'review'"
         class="min-h-0 flex-1 overflow-auto p-3"
         role="tabpanel"
@@ -8345,7 +8472,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         <div ref="toolHostRef" class="h-full min-h-0 w-full overflow-auto p-3" />
       </div>
       </template>
-    </section>
+      </section>
+    </div>
   </div>
 
   <Teleport defer :to="projectControlSurfaceTarget">

@@ -947,7 +947,7 @@ export const api = {
     ctx: FarosContext | null,
     name: string,
     threadID: string,
-    body: { title: string },
+    body: { title?: string; archived?: boolean },
   ): Promise<ProjectAssistantThread> {
     return request<ProjectAssistantThread>(
       ctx,
