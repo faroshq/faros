@@ -76,6 +76,18 @@ const childRows = computed<Array<Record<string, unknown>>>(() => (inst.value?.ch
   namespaceLabel: child.namespace || '—',
   phaseLabel: child.phase || '—',
 })))
+const detailGroups = computed(() => {
+  const instance = inst.value
+  if (!instance) return []
+  return (view.value?.detail ?? [])
+    .map(group => ({
+      ...group,
+      fields: group.fields
+        .map(field => ({ field, value: resolve(field, instance) }))
+        .filter(({ value }) => !value.empty),
+    }))
+    .filter(group => group.fields.length > 0)
+})
 
 const readState = computed<boolean | null>(() => {
   if (loaded.value) return true
@@ -342,17 +354,17 @@ onUnmounted(() => {
             <p v-else class="muted">The infrastructure controller has not reported a status message.</p>
           </ResourceSectionCard>
 
-          <template v-if="view?.detail?.length">
+          <template v-if="detailGroups.length">
             <ResourceSectionCard
-              v-for="(group, groupIndex) in view.detail"
+              v-for="(group, groupIndex) in detailGroups"
               :id="`instance-detail-group-${groupIndex}`"
               :key="group.title || groupIndex"
               :title="group.title || ''"
             >
               <dl class="detail-fields">
-                <div v-for="field in group.fields" :key="field.label" class="detail-field">
-                  <dt>{{ field.label }}</dt>
-                  <dd><ViewValue :value="resolve(field, inst)" :interactive="!deletionInProgress" /></dd>
+                <div v-for="entry in group.fields" :key="entry.field.label" class="detail-field">
+                  <dt>{{ entry.field.label }}</dt>
+                  <dd><ViewValue :value="entry.value" :interactive="!deletionInProgress" /></dd>
                 </div>
               </dl>
             </ResourceSectionCard>

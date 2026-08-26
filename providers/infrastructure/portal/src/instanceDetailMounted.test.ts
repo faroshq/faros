@@ -122,6 +122,33 @@ describe('mounted Infrastructure instance detail deletion behavior', () => {
     expect(host.textContent).toContain('retained-value')
   })
 
+  it('omits empty template detail groups while retaining meaningful groups', async () => {
+    vi.mocked(api.getTemplate).mockResolvedValue({
+      template: {
+        view: {
+          detail: [
+            { title: 'Access', fields: [{ label: 'Snapshot', path: 'spec.snapshot' }] },
+            { title: 'Readiness', fields: [{ label: 'App', path: 'status.app' }] },
+          ],
+        },
+      } as never,
+    })
+    app = createApp(InstanceDetailPage, {
+      instanceName: instance.name,
+      tombstones: createResourceTombstones(),
+    })
+    app.mount(host)
+    await flush()
+
+    const sections = Array.from(host.querySelectorAll<HTMLElement>('section[id^="instance-detail-group-"]'))
+    expect(sections).toHaveLength(1)
+    expect(sections[0].textContent).toContain('Access')
+    expect(sections[0].textContent).toContain('Snapshot')
+    expect(sections[0].textContent).toContain('retained-value')
+    expect(host.textContent).not.toContain('Readiness')
+    expect(host.textContent).not.toContain('App —')
+  })
+
   it('retains the snapshot and recovers every action after a deferred delete fails', async () => {
     const deleteRequest = deferred<void>()
     vi.mocked(api.deleteInstance).mockReturnValue(deleteRequest.promise)
