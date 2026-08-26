@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Activity, ArrowLeft, Database, Ellipsis, RefreshCw, Table2, Warehouse } from 'lucide-vue-next'
+import { Activity, ArrowLeft, Ellipsis, RefreshCw, Table2, Warehouse } from 'lucide-vue-next'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
@@ -123,13 +123,6 @@ const statCards = computed<ResourceStatCard[]>(() => [
     label: 'Warehouse',
     value: table.value?.warehouseRef || '—',
     icon: Warehouse,
-    mono: true,
-  },
-  {
-    id: 'full-name',
-    label: 'Databricks table',
-    value: table.value?.fullName || '—',
-    icon: Database,
     mono: true,
   },
 ])
@@ -267,7 +260,7 @@ onUnmounted(() => {
 
 <template>
   <section class="databricks-resource-detail">
-    <a class="k-btn k-btn--ghost databricks-resource-back" href="/ui/providers/databricks/tables" :aria-disabled="deleting || (!!table && operationLocked(table.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Tables</a>
+    <a class="k-btn k-btn--ghost k-back-action" href="/ui/providers/databricks/tables" :aria-disabled="deleting || (!!table && operationLocked(table.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Tables</a>
 
     <ResourcePage
       :title="table?.name || name"
@@ -281,12 +274,7 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
-          <span>Databricks</span>
-          <span aria-hidden="true">·</span>
-          <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
-          <span v-else-if="table?.status === 'Ready'">validated against <code>{{ table.fullName }}</code></span>
-          <span v-else-if="table"><code>{{ table.fullName }}</code></span>
-          <span v-else class="muted">not validated yet</span>
+        <span>Databricks</span>
       </template>
       <template v-if="table" #status><StatusBadge :status="deleting ? 'Deleting' : table.status" :tone="deleting ? 'warning' : null" :title="table.message" /></template>
       <template #actions>

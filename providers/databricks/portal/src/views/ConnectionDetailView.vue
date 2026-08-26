@@ -277,7 +277,7 @@ onUnmounted(() => {
 
 <template>
   <section class="databricks-resource-detail">
-    <a class="k-btn k-btn--ghost databricks-resource-back" href="/ui/providers/databricks/connections" :aria-disabled="deleting || (!!conn && operationLocked(conn.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Connections</a>
+    <a class="k-btn k-btn--ghost k-back-action" href="/ui/providers/databricks/connections" :aria-disabled="deleting || (!!conn && operationLocked(conn.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Connections</a>
 
     <ResourcePage
       :title="conn?.name || name"
@@ -291,12 +291,7 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
-          <span>Databricks</span>
-          <span aria-hidden="true">·</span>
-          <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
-          <span v-else-if="conn?.status === 'Ready'">validated against <code>{{ conn.host }}</code></span>
-          <span v-else-if="conn"><code>{{ conn.host }}</code></span>
-          <span v-else class="muted">not validated yet</span>
+        <span>Databricks</span>
       </template>
       <template v-if="conn" #status><StatusBadge :status="deleting ? 'Deleting' : conn.status" :tone="deleting ? 'warning' : null" :title="conn.message" /></template>
       <template #actions>

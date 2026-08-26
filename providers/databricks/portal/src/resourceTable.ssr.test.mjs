@@ -900,7 +900,7 @@ test('resource page keeps first-read skeletons for background mode', async () =>
   assert.doesNotMatch(html, /Loaded body|k-resource-page__stale/)
 })
 
-test('resource detail views omit a status wrapper before the initial snapshot', async () => {
+test('resource detail views keep provider-only metadata before the initial snapshot', async () => {
   const details = {
     connection: '/src/views/ConnectionDetailView.vue',
     warehouse: '/src/views/WarehouseDetailView.vue',
@@ -913,10 +913,9 @@ test('resource detail views omit a status wrapper before the initial snapshot', 
     const html = await renderToString(createSSRApp(Component, { name: 'orders' }))
     const meta = html.match(/<div class="k-resource-page__meta">(.*?)<\/div>/s)?.[1] ?? ''
     assert.match(meta, new RegExp('<span class="k-resource-page__kind">' + kinds[name] + '</span>'))
-    assert.match(meta, /Databricks/)
-    assert.match(meta, /not validated yet/)
+    assert.match(meta, /<span>Databricks<\/span>/)
+    assert.doesNotMatch(meta, /validated against|not validated yet|deletion requested/)
     assert.doesNotMatch(meta, /k-resource-page__status/)
-    assert.doesNotMatch(meta, /not validated yet.*k-resource-page__separator/s)
   }
 })
 
@@ -1260,13 +1259,15 @@ test('resource detail views use the shared shell without dropping resource behav
   for (const [kind, source] of Object.entries(details)) {
     assert.match(source, new RegExp('<ResourcePage.*kind="' + headerKinds[kind] + '"', 's'))
     assert.doesNotMatch(source, /<ResourcePage[^>]*eyebrow=/)
-    const meta = source.match(/<template #meta>.*?<\/template>/s)?.[0] ?? ''
-    assert.match(meta, /<span>Databricks<\/span>.*<span aria-hidden="true">·<\/span>/s)
+    const meta = source.match(/<template #meta>(.*?)<\/template>/s)?.[1].trim() ?? ''
+    assert.equal(meta, '<span>Databricks</span>', `${kind} metadata is provider-only`)
+    assert.doesNotMatch(meta, /validated against|not validated yet|deletion requested|aria-hidden="true">·/)
     assert.match(source, /<template v-if="[^"]+" #status>.*StatusBadge/s)
     assert.match(source, /import ResourcePage from '\.\.\/portalkit\/ResourcePage\.vue'/, `${kind} imports ResourcePage`)
     assert.match(source, /import ResourceSectionCard from '\.\.\/portalkit\/ResourceSectionCard\.vue'/, `${kind} imports ResourceSectionCard`)
     assert.match(source, /import ResourceStatCards, \{ type ResourceStatCard \}/, `${kind} imports ResourceStatCards`)
-    assert.match(source, /<a class="k-btn k-btn--ghost databricks-resource-back"[^>]*@click\.prevent="goBack"/, `${kind} keeps the backlink outside ResourcePage`)
+    assert.match(source, /<a class="k-btn k-btn--ghost k-back-action"[^>]*@click\.prevent="goBack"/, `${kind} keeps the canonical backlink outside ResourcePage`)
+    assert.doesNotMatch(source, /databricks-resource-back/, `${kind} does not use a provider-local backlink class`)
     assert.match(source, /<ResourcePage[\s\S]*:loaded="readState"[\s\S]*:loading="loading"[\s\S]*:error="error"[\s\S]*:stale="loaded && !!error"[\s\S]*retryable[\s\S]*@retry="load"/, `${kind} keeps the read contract`)
     assert.match(source, /<template #summary><ResourceStatCards :cards="statCards" density="compact"/, `${kind} has compact stat cards`)
     assert.match(source, /<template #actions>[\s\S]*Refresh[\s\S]*<details ref="actionsMenu" class="databricks-resource-menu">[\s\S]*Delete /, `${kind} orders Refresh before overflow Delete`)
@@ -1305,7 +1306,10 @@ test('resource detail views use the shared shell without dropping resource behav
   const table = details.table
   assert.doesNotMatch(table, /id="table-status"/)
   assert.doesNotMatch(table, /The table schema is validated and ready for consumers\./)
+  assert.doesNotMatch(table, /id: 'full-name'/)
+  assert.doesNotMatch(table, /label: 'Databricks table'/)
   assert.match(table, /id="table-overview"[\s\S]*table\.connectionRef[\s\S]*table\.warehouseRef[\s\S]*table\.catalog[\s\S]*table\.schema[\s\S]*table\.table[\s\S]*table\.fullName/)
+  assert.match(table, /<dt>Full name<\/dt><dd><code>\{\{ table\.fullName \}\}<\/code><\/dd>/)
   assert.match(table, /table\.columns\.length[\s\S]*table\.refreshedAt[\s\S]*table\.creationTimestamp[\s\S]*table\.observedGeneration[\s\S]*table\.generation/)
   assert.match(table, /id="table-schema"[\s\S]*schemaTruncated[\s\S]*schemaNotice[\s\S]*schemaRows[\s\S]*Search columns…/)
   assert.match(table, /status === 'Pending'.*schemaCached/)
@@ -1313,6 +1317,7 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(table, /App Studio guidance and Databricks MCP tools will no longer be able to inspect this tableRef\./)
 
   assert.match(style, /\.databricks-resource-actions\s*\{[\s\S]*gap: 8px/)
+  assert.doesNotMatch(style, /databricks-resource-back/)
   assert.match(style, /\.databricks-resource-menu-popover\s*\{[\s\S]*position: absolute/)
   assert.match(style, /\.databricks-resource-sections\s*\{[\s\S]*flex-direction: column[\s\S]*gap: 14px/)
 })
@@ -1478,7 +1483,8 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       assert.equal(mounted.find(node => node.props?.id === `${testCase.kind}-status`), null, `${testCase.kind} keeps validation detail in the summary instead of a duplicate card`)
       assert.ok(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), `${testCase.kind} exposes visible polite deletion progress outside the menu`)
 
-      const back = mounted.find(node => node.type === 'a' && className(node).includes('databricks-resource-back'))
+      const back = mounted.find(node => node.type === 'a' && className(node).includes('k-back-action'))
+      assert.equal(mounted.find(node => node.type === 'a' && className(node).includes('databricks-resource-back')), null, `${testCase.kind} does not render the provider-local backlink class`)
       const refresh = mounted.find(node => node.type === 'button' && className(node).includes('icon-text') && hostText(node).includes('Refresh'))
       const deleteButton = mounted.find(node => node.type === 'button' && className(node).includes('databricks-resource-menu-item'))
       assert.equal(back?.props?.['aria-disabled'], true, `${testCase.kind} guards back navigation while deleting`)

@@ -278,7 +278,7 @@ onUnmounted(() => {
 
 <template>
   <section class="databricks-resource-detail">
-    <a class="k-btn k-btn--ghost databricks-resource-back" href="/ui/providers/databricks/warehouses" :aria-disabled="deleting || (!!warehouse && operationLocked(warehouse.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Warehouses</a>
+    <a class="k-btn k-btn--ghost k-back-action" href="/ui/providers/databricks/warehouses" :aria-disabled="deleting || (!!warehouse && operationLocked(warehouse.name))" @click.prevent="goBack"><ArrowLeft :size="14" aria-hidden="true" /> Warehouses</a>
 
     <ResourcePage
       :title="warehouse?.name || name"
@@ -292,12 +292,7 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
-          <span>Databricks</span>
-          <span aria-hidden="true">·</span>
-          <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
-          <span v-else-if="warehouse?.status === 'Ready'">validated against warehouse <code>{{ warehouse.warehouseID }}</code></span>
-          <span v-else-if="warehouse"><code>{{ warehouse.warehouseID }}</code></span>
-          <span v-else class="muted">not validated yet</span>
+        <span>Databricks</span>
       </template>
       <template v-if="warehouse" #status><StatusBadge :status="deleting ? 'Deleting' : warehouse.status" :tone="deleting ? 'warning' : null" :title="warehouse.message" /></template>
       <template #actions>

@@ -67,25 +67,6 @@ faros-provider-databricks .databricks-resource-detail {
   gap: 14px;
 }
 
-faros-provider-databricks .databricks-resource-back {
-  align-self: flex-start;
-  min-height: 0;
-  border-color: transparent;
-  padding: 0;
-}
-
-faros-provider-databricks .databricks-resource-back:hover {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--color-accent-hover, #a18aff);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-faros-provider-databricks .databricks-resource-back:active { transform: none; }
-faros-provider-databricks .databricks-resource-back svg { flex: none; }
-
 faros-provider-databricks .databricks-resource-actions {
   display: inline-flex;
   min-width: 0;
@@ -372,7 +353,7 @@ faros-provider-databricks .import-backdrop {
   display: flex;
   inset: 0;
   justify-content: center;
-  padding: 24px;
+  padding: 24px calc(24px + var(--app-inset-right, 0px)) calc(24px + var(--app-inset-bottom, 0px)) calc(24px + var(--app-inset-left, 0px));
   position: fixed;
   z-index: 80;
 }
@@ -468,7 +449,10 @@ faros-provider-databricks .import-spacer { flex: 1; }
 @keyframes provider-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 620px) {
-  faros-provider-databricks .import-backdrop { align-items: stretch; padding: 10px; }
+  faros-provider-databricks .import-backdrop {
+    align-items: stretch;
+    padding: 10px calc(10px + var(--app-inset-right, 0px)) calc(10px + var(--app-inset-bottom, 0px)) calc(10px + var(--app-inset-left, 0px));
+  }
   faros-provider-databricks .import-dialog { max-height: calc(100vh - 20px); }
   faros-provider-databricks .review-row,
   faros-provider-databricks .result-row { grid-template-columns: minmax(0, 1fr); }
