@@ -401,8 +401,11 @@ and resource-specific content:
 - Keep the backlink as a caller-owned hyperlink before and outside the
   `ResourcePage` shell. Detail routes hide the provider-level collection tabs;
   the backlink is the single return affordance for the resource list.
-- `ResourcePage` owns the title/read-state shell. Callers provide the resource
-  title, meta, status, and actions. Header actions use one stable order:
+- `ResourcePage` owns the title hierarchy and read-state shell. Its canonical
+  PortalKit title is responsive from 24px to 32px, with tight tracking and
+  leading, safe wrapping for long identifiers, and a 22px mobile size. Callers
+  provide the resource title, meta, status, and actions; they must not add
+  provider-local title-size overrides. Header actions use one stable order:
   provider-specific primary action, `Refresh`, then an overflow menu containing
   `Delete`.
 - Use `ResourceStatCards` for provider-defined, meaningful facts with
@@ -470,8 +473,9 @@ sections, editors, tables, and actions. Secrets and credential values are never
 rendered, even when a provider exposes a credential reference or edit workflow.
 
 Current consumers cover Code Repository and Connection; Edge and Edge Service;
-Databricks Connection, Warehouse, and Table; and Infrastructure Application
-Template Instance. These are adoption examples, not a universal field schema.
+Databricks Connection, Warehouse, and Table; Infrastructure Application
+Template Instance; and MCP Access. These nine consumers inherit the canonical
+title hierarchy. They are adoption examples, not a universal field schema.
 The canonical Vue sources live under `provider-sdk/portalkit-vue`; edit them
 there and run `make sync-portalkit` to update provider copies.
 

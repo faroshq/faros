@@ -1230,9 +1230,12 @@ html.light [data-k-tip]::after {
 .k-resource-page__title {
   margin: 0;
   color: var(--color-text-primary, #e9e9f2);
-  font-size: 18px;
+  overflow-wrap: anywhere;
   font-weight: 600;
-  line-height: 1.25;
+  font-size: clamp(24px, 4vw, 32px);
+  letter-spacing: -.02em;
+  line-height: 1.12;
+  word-break: break-word;
 }
 .k-resource-page__subtitle {
   margin: 4px 0 0;
@@ -1514,6 +1517,7 @@ html.light [data-k-tip]::after {
 }
 
 @media (max-width: 520px) {
+  .k-resource-page__title { font-size: 22px; }
   .k-resource-stat-cards { grid-template-columns: minmax(0, 1fr); }
   .k-resource-section-card { padding: 16px; }
   .k-resource-section-card__header { flex-direction: column; gap: 10px; }

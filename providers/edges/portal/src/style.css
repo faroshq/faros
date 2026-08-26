@@ -212,11 +212,6 @@ faros-provider-edges .edge-detail__back:hover {
 }
 faros-provider-edges .edge-detail__back:active { transform: none; }
 faros-provider-edges .edge-detail__back svg { flex: none; }
-faros-provider-edges .edge-detail__resource > section > header h1 {
-  font-size: clamp(24px, 4vw, 32px);
-  letter-spacing: -.02em;
-  line-height: 1.12;
-}
 faros-provider-edges .edge-detail__resource > section > header > div:first-child > div {
   align-items: center;
   gap: 7px;
@@ -411,7 +406,6 @@ faros-provider-edges .edge-technical pre { overflow: auto; }
 @media (max-width: 520px) {
   faros-provider-edges .edge-detail__provider-mark { width: 32px; height: 32px; }
   faros-provider-edges .edge-detail__resource > section > header { padding-left: 44px; }
-  faros-provider-edges .edge-detail__resource > section > header h1 { font-size: 22px; }
   faros-provider-edges .edge-detail__actions { width: 100%; justify-content: flex-start; }
   faros-provider-edges .edge-disclosure summary { align-items: flex-start; }
 }
@@ -478,11 +472,6 @@ faros-provider-edges .service-detail__page textarea {
   box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
-}
-faros-provider-edges .service-detail__resource > section > header h1 {
-  font-size: clamp(24px, 4vw, 32px);
-  letter-spacing: -.02em;
-  line-height: 1.12;
 }
 faros-provider-edges .service-detail__back {
   align-self: flex-start;

@@ -151,6 +151,37 @@ test('keeps the canonical stylesheet handoff and native table-row contract', () 
   assert.doesNotMatch(table, /:role="interactive \? 'button' : undefined"/)
 })
 
+test('keeps the responsive ResourcePage title canonical across provider detail views', () => {
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const codeStyle = fs.readFileSync(new URL('../providers/code/portal/src/style.css', import.meta.url), 'utf8')
+  const edgesStyle = fs.readFileSync(new URL('../providers/edges/portal/src/style.css', import.meta.url), 'utf8')
+  const title = css.match(/\.k-resource-page__title\s*\{([^}]*)\}/s)?.[1] ?? ''
+
+  assert.match(title, /font-size:\s*clamp\(24px,\s*4vw,\s*32px\)/)
+  assert.match(title, /letter-spacing:\s*-\.02em/)
+  assert.match(title, /line-height:\s*1\.12/)
+  assert.match(title, /overflow-wrap:\s*anywhere/)
+  assert.match(title, /word-break:\s*break-word/)
+  assert.match(css, /@media\s*\(max-width:\s*520px\)[\s\S]*\.k-resource-page__title\s*\{[^}]*font-size:\s*22px;/)
+
+  for (const relative of [
+    '../providers/code/portal/src/views/ConnectionDetailView.vue',
+    '../providers/code/portal/src/views/RepoDetailView.vue',
+    '../providers/databricks/portal/src/views/ConnectionDetailView.vue',
+    '../providers/databricks/portal/src/views/TableDetailView.vue',
+    '../providers/databricks/portal/src/views/WarehouseDetailView.vue',
+    '../providers/edges/portal/src/Detail.vue',
+    '../providers/edges/portal/src/ServiceEdit.vue',
+    '../providers/infrastructure/portal/src/views/InstanceDetailPage.vue',
+    '../portal/src/pages/MCPPage.vue',
+  ]) {
+    assert.match(fs.readFileSync(new URL(relative, import.meta.url), 'utf8'), /<ResourcePage\b/)
+  }
+
+  assert.doesNotMatch(codeStyle, /(?:repo|connection)-detail__resource\s*>\s*section\s*>\s*header\s+h1/)
+  assert.doesNotMatch(edgesStyle, /(?:edge|service)-detail__resource\s*>\s*section\s*>\s*header\s+h1/)
+})
+
 test('keeps sidebar divider and child toggles on the borderless text-button recipe', () => {
   const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
   const layout = fs.readFileSync(new URL('../portal/src/components/AppLayout.vue', import.meta.url), 'utf8')
