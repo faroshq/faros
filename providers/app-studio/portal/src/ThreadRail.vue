@@ -405,6 +405,12 @@ function dismissContextMenu() {
   if (wasOpen) scheduleClose()
 }
 
+function handleContextMenuFocusOut(event: FocusEvent) {
+  const next = event.relatedTarget
+  if (next instanceof Node && actionMenu.value?.contains(next)) return
+  dismissContextMenu()
+}
+
 function handleContextMenuKeydown(event: KeyboardEvent) {
   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
   const menu = actionMenu.value
@@ -654,6 +660,7 @@ defineExpose({
       data-thread-context-menu
       class="fixed z-[200] w-48 rounded-md border border-border-default bg-surface-overlay p-1 shadow-2xl"
       :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
+      @focusout="handleContextMenuFocusOut"
       @keydown="handleContextMenuKeydown"
       @keydown.esc.stop.prevent="closeContextMenu(true)"
     >

@@ -96,10 +96,12 @@ import {
 import {
   markAssistantThreadRead,
   markAssistantThreadUnread,
+  removeAssistantThreadReadState,
   reconcileAssistantThreadReadState,
 } from './assistantThreadReadState'
 import {
   readAssistantThreadPins,
+  removeAssistantThreadPin,
   toggleAssistantThreadPin,
 } from './assistantThreadPinState'
 import {
@@ -4604,6 +4606,14 @@ async function archiveAssistantThread(threadID: string) {
   try {
     await api.patchAssistantThread(props.ctx, projectName, threadID, { archived: true })
     if (!requestIsCurrent()) return
+    const threadStateScopeKey = assistantThreadFocusStorageKey(assistantThreadFocusScope(projectName))
+    // A paginated list is not a snapshot, so the state helpers intentionally
+    // retain IDs absent from it. Archive success is the explicit lifecycle
+    // event that retires the archived thread's local markers.
+    removeAssistantThreadPin(threadStateScopeKey, threadID)
+    removeAssistantThreadReadState(threadStateScopeKey, threadID)
+    pinnedAssistantThreadIDs.value = pinnedAssistantThreadIDs.value.filter((candidate) => candidate !== threadID)
+    unreadAssistantThreadIDs.value = unreadAssistantThreadIDs.value.filter((candidate) => candidate !== threadID)
     const remaining = assistantThreads.value.filter((thread) => thread.id !== threadID)
     assistantThreads.value = remaining
     if (!wasActive) {

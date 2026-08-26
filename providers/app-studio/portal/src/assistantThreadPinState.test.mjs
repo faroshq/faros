@@ -29,11 +29,29 @@ test('pins are project scoped, ordered by latest pin, and toggle off', () => {
   assert.deepEqual(pins.toggleAssistantThreadPin('scope-a', 'two', state, storage), ['one'])
 })
 
-test('missing threads are pruned and storage failures remain nonblocking', () => {
+test('missing threads remain preserved while stored pins are sanitized', () => {
   const storage = memoryStorage()
   pins.toggleAssistantThreadPin('scope', 'one', [], storage)
-  assert.deepEqual(pins.readAssistantThreadPins('scope', ['two'], storage), [])
+  assert.deepEqual(pins.readAssistantThreadPins('scope', ['two'], storage), ['one'])
 
+  storage.setItem(pins.assistantThreadPinStorageKey('scope'), JSON.stringify([
+    ' one ',
+    'one',
+    42,
+    '',
+    null,
+  ]))
+  assert.deepEqual(pins.readAssistantThreadPins('scope', ['two'], storage), ['one'])
+  assert.deepEqual(
+    JSON.parse(storage.values.get(pins.assistantThreadPinStorageKey('scope'))),
+    ['one'],
+  )
+
+  pins.removeAssistantThreadPin('scope', 'one', storage)
+  assert.deepEqual(pins.readAssistantThreadPins('scope', ['two'], storage), [])
+})
+
+test('storage failures remain nonblocking', () => {
   const broken = {
     getItem() { throw new Error('blocked') },
     setItem() { throw new Error('full') },

@@ -23,6 +23,44 @@ function defaultStorage(): AssistantThreadReadStateStorage | undefined {
   }
 }
 
+function normalizeThreadID(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+  return normalized || undefined
+}
+
+function normalizedEntries<T>(entries: Iterable<[string, T]>): Record<string, T> {
+  const seen = new Set<string>()
+  const normalized: Array<[string, T]> = []
+  for (const [rawThreadID, value] of entries) {
+    const threadID = normalizeThreadID(rawThreadID)
+    if (!threadID || seen.has(threadID)) continue
+    seen.add(threadID)
+    normalized.push([threadID, value])
+  }
+  return Object.fromEntries(normalized)
+}
+
+function sanitizeSeen(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return normalizedEntries(
+    Object.entries(value).flatMap(([threadID, updatedAt]) =>
+      typeof updatedAt === 'string' && updatedAt.trim()
+        ? [[threadID, updatedAt.trim()] as [string, string]]
+        : [],
+    ),
+  )
+}
+
+function sanitizeManualUnread(value: unknown): Record<string, true> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return normalizedEntries(
+    Object.entries(value)
+      .filter(([, marker]) => marker === true)
+      .map(([threadID]) => [threadID, true as const]),
+  )
+}
+
 export function assistantThreadReadStateStorageKey(scopeKey: string): string {
   return `${scopeKey}:read-state:v1`
 }
@@ -36,11 +74,12 @@ function readState(
     const raw = storage.getItem(assistantThreadReadStateStorageKey(scopeKey))
     if (!raw) return undefined
     const value = JSON.parse(raw) as Partial<StoredAssistantThreadReadState>
-    if (value.version !== 1 || !value.seen || typeof value.seen !== 'object') return undefined
-    const manualUnread = value.manualUnread && typeof value.manualUnread === 'object'
-      ? Object.fromEntries(Object.keys(value.manualUnread).map((threadID) => [threadID, true as const]))
-      : {}
-    return { version: 1, seen: value.seen, manualUnread }
+    if (value.version !== 1 || !value.seen || typeof value.seen !== 'object' || Array.isArray(value.seen)) return undefined
+    return {
+      version: 1,
+      seen: sanitizeSeen(value.seen),
+      manualUnread: sanitizeManualUnread(value.manualUnread),
+    }
   } catch {
     return undefined
   }
@@ -79,30 +118,34 @@ export function reconcileAssistantThreadReadState(
 ): string[] {
   if (!scopeKey) return []
   const stored = readState(scopeKey, storage)
-  const seen: Record<string, string> = {}
-  const manualUnread: Record<string, true> = {}
+  // Thread pagination is not a snapshot. Preserve markers for IDs omitted by
+  // this response; explicit archive success is responsible for retiring them.
+  const seen: Record<string, string> = { ...(stored?.seen ?? {}) }
+  const manualUnread: Record<string, true> = { ...(stored?.manualUnread ?? {}) }
   const unread: string[] = []
 
   for (const thread of threads) {
+    const threadID = normalizeThreadID(thread.id)
     const updatedAt = thread.updatedAt?.trim()
-    if (!thread.id || !updatedAt) continue
-    const previous = stored?.seen[thread.id]
-    if (thread.id === activeThreadID) {
-      seen[thread.id] = updatedAt
+    if (!threadID || !updatedAt) continue
+    const previous = stored?.seen[threadID]
+    if (threadID === normalizeThreadID(activeThreadID)) {
+      seen[threadID] = updatedAt
+      delete manualUnread[threadID]
       continue
     }
-    if (stored?.manualUnread[thread.id]) {
-      seen[thread.id] = previous || updatedAt
-      manualUnread[thread.id] = true
-      unread.push(thread.id)
+    if (stored?.manualUnread[threadID]) {
+      seen[threadID] = previous || updatedAt
+      manualUnread[threadID] = true
+      unread.push(threadID)
       continue
     }
     if (!stored || !previous) {
-      seen[thread.id] = updatedAt
+      seen[threadID] = updatedAt
       continue
     }
-    seen[thread.id] = previous
-    if (updatedAfterSeen(updatedAt, previous)) unread.push(thread.id)
+    seen[threadID] = previous
+    if (updatedAfterSeen(updatedAt, previous)) unread.push(threadID)
   }
 
   writeState(scopeKey, { version: 1, seen, manualUnread }, storage)
@@ -114,12 +157,14 @@ export function markAssistantThreadRead(
   thread: AssistantThreadReadStateThread,
   storage: AssistantThreadReadStateStorage | null | undefined = defaultStorage(),
 ) {
-  if (!scopeKey || !thread.id || !thread.updatedAt) return
+  const threadID = normalizeThreadID(thread.id)
+  const updatedAt = thread.updatedAt?.trim()
+  if (!scopeKey || !threadID || !updatedAt) return
   const stored = readState(scopeKey, storage) ?? { version: 1, seen: {}, manualUnread: {} }
-  const { [thread.id]: _removed, ...manualUnread } = stored.manualUnread
+  const { [threadID]: _removed, ...manualUnread } = stored.manualUnread
   writeState(scopeKey, {
     version: 1,
-    seen: { ...stored.seen, [thread.id]: thread.updatedAt },
+    seen: { ...stored.seen, [threadID]: updatedAt },
     manualUnread,
   }, storage)
 }
@@ -129,11 +174,31 @@ export function markAssistantThreadUnread(
   thread: AssistantThreadReadStateThread,
   storage: AssistantThreadReadStateStorage | null | undefined = defaultStorage(),
 ) {
-  if (!scopeKey || !thread.id || !thread.updatedAt) return
+  const threadID = normalizeThreadID(thread.id)
+  const updatedAt = thread.updatedAt?.trim()
+  if (!scopeKey || !threadID || !updatedAt) return
   const stored = readState(scopeKey, storage) ?? { version: 1, seen: {}, manualUnread: {} }
   writeState(scopeKey, {
     version: 1,
-    seen: { ...stored.seen, [thread.id]: stored.seen[thread.id] || thread.updatedAt },
-    manualUnread: { ...stored.manualUnread, [thread.id]: true },
+    seen: { ...stored.seen, [threadID]: stored.seen[threadID] || updatedAt },
+    manualUnread: { ...stored.manualUnread, [threadID]: true },
   }, storage)
+}
+
+/**
+ * Retire all local read markers for a thread only after the server has
+ * accepted an archive. Missing state and storage failures remain harmless.
+ */
+export function removeAssistantThreadReadState(
+  scopeKey: string,
+  threadID: string,
+  storage: AssistantThreadReadStateStorage | null | undefined = defaultStorage(),
+): void {
+  const normalizedThreadID = normalizeThreadID(threadID)
+  if (!scopeKey || !normalizedThreadID || !storage) return
+  const stored = readState(scopeKey, storage)
+  if (!stored) return
+  const { [normalizedThreadID]: _removedSeen, ...seen } = stored.seen
+  const { [normalizedThreadID]: _removedUnread, ...manualUnread } = stored.manualUnread
+  writeState(scopeKey, { version: 1, seen, manualUnread }, storage)
 }

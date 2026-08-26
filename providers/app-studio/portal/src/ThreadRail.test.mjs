@@ -179,6 +179,8 @@ test('provides row hover actions and an accessible right-click action menu', asy
   assert.match(source, /function togglePin\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
   assert.match(source, /function toggleUnread\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
   assert.match(source, /function archiveThread\(threadID: string\) \{[\s\S]*closeContextMenu\(true\)/)
+  assert.match(source, /@focusout="handleContextMenuFocusOut"/)
+  assert.match(source, /function handleContextMenuFocusOut\(event: FocusEvent\) \{[\s\S]*const next = event\.relatedTarget[\s\S]*if \(next instanceof Node && actionMenu\.value\?\.contains\(next\)\) return[\s\S]*dismissContextMenu\(\)/)
   assert.match(source, /function dismissContextMenu\(\) \{[\s\S]*const wasOpen = Boolean\(contextMenu\.value\)[\s\S]*closeContextMenu\(\)[\s\S]*if \(wasOpen\) scheduleClose\(\)/)
   assert.match(source, /if \(target instanceof Node && actionMenu\.value\?\.contains\(target\)\) return\n  dismissContextMenu\(\)/)
   assert.match(source, /window\.addEventListener\('blur', dismissContextMenu\)/)

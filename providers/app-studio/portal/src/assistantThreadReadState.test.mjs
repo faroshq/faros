@@ -16,6 +16,7 @@ const {
   assistantThreadReadStateStorageKey,
   markAssistantThreadRead,
   markAssistantThreadUnread,
+  removeAssistantThreadReadState,
   reconcileAssistantThreadReadState,
 } = await import(moduleURL)
 
@@ -78,6 +79,64 @@ test('manual unread markers persist until explicitly read or selected', () => {
 
   markAssistantThreadUnread('scope', threads[1], storage)
   assert.deepEqual(reconcileAssistantThreadReadState('scope', threads, 'two', storage), [])
+})
+
+test('omitted threads retain seen and manual unread markers until explicitly removed', () => {
+  const storage = memoryStorage()
+  const threads = [thread('one', '2026-08-26T10:00:00Z'), thread('two', '2026-08-26T09:00:00Z')]
+  const scope = 'scope'
+  reconcileAssistantThreadReadState(scope, threads, 'one', storage)
+  markAssistantThreadUnread(scope, threads[1], storage)
+
+  assert.deepEqual(reconcileAssistantThreadReadState(scope, [threads[0]], 'one', storage), [])
+  const retained = JSON.parse(storage.values.get(assistantThreadReadStateStorageKey(scope)))
+  assert.equal(retained.seen.two, threads[1].updatedAt)
+  assert.equal(retained.manualUnread.two, true)
+
+  assert.deepEqual(reconcileAssistantThreadReadState(scope, threads, 'one', storage), ['two'])
+  removeAssistantThreadReadState(scope, 'two', storage)
+  const cleaned = JSON.parse(storage.values.get(assistantThreadReadStateStorageKey(scope)))
+  assert.equal(Object.hasOwn(cleaned.seen, 'two'), false)
+  assert.equal(Object.hasOwn(cleaned.manualUnread, 'two'), false)
+})
+
+test('omitted seen markers preserve the baseline until a thread reappears updated', () => {
+  const storage = memoryStorage()
+  const scope = 'scope'
+  const initial = [thread('one', '2026-08-26T10:00:00Z'), thread('two', '2026-08-26T09:00:00Z')]
+  reconcileAssistantThreadReadState(scope, initial, 'one', storage)
+
+  assert.deepEqual(reconcileAssistantThreadReadState(scope, [initial[0]], 'one', storage), [])
+  assert.deepEqual(reconcileAssistantThreadReadState(scope, initial, 'one', storage), [])
+  assert.deepEqual(
+    reconcileAssistantThreadReadState(scope, [initial[0], thread('two', '2026-08-26T12:00:00Z')], 'one', storage),
+    ['two'],
+  )
+})
+
+test('malformed persisted state is ignored without manufacturing unread markers', () => {
+  const storage = memoryStorage()
+  const scope = 'scope'
+  const key = assistantThreadReadStateStorageKey(scope)
+  storage.setItem(key, JSON.stringify({
+    version: 1,
+    seen: { one: '2026-08-26T10:00:00Z' },
+    manualUnread: { one: false, two: 0, three: 'yes', four: true },
+  }))
+
+  assert.deepEqual(
+    reconcileAssistantThreadReadState(scope, [
+      thread('one', '2026-08-26T10:00:00Z'),
+      thread('two', '2026-08-26T10:00:00Z'),
+      thread('three', '2026-08-26T10:00:00Z'),
+      thread('four', '2026-08-26T10:00:00Z'),
+    ], 'none', storage),
+    ['four'],
+  )
+  assert.deepEqual(JSON.parse(storage.values.get(key)).manualUnread, { four: true })
+
+  storage.setItem(key, '{not-json')
+  assert.doesNotThrow(() => reconcileAssistantThreadReadState(scope, [thread('one', '2026-08-26T10:00:00Z')], 'none', storage))
 })
 
 test('storage failures do not block thread navigation', () => {
