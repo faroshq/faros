@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Activity, ArrowLeft, Boxes, CalendarClock, Ellipsis, FileCode2, RefreshCw } from 'lucide-vue-next'
+import { ArrowLeft, Boxes, CalendarClock, Ellipsis, FileCode2, RefreshCw } from 'lucide-vue-next'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import ViewValue from '../components/ViewValue.vue'
 import { api, isContextChangedError } from '../api'
@@ -95,24 +95,7 @@ const readState = computed<boolean | null>(() => {
   return loading.value ? false : null
 })
 
-type StatTone = 'default' | 'success' | 'warning' | 'danger'
-
-function statTone(phase: string): StatTone {
-  if (phase === 'Ready') return 'success'
-  if (phase === 'Deleting' || phase === 'Pending') return 'warning'
-  if (/fail|error|unavailable/i.test(phase)) return 'danger'
-  return 'default'
-}
-
 const statCards = computed<ResourceStatCard[]>(() => [
-  {
-    id: 'status',
-    label: 'Status',
-    value: displayedPhase.value || '—',
-    detail: displayedMessage.value || undefined,
-    icon: Activity,
-    tone: statTone(displayedPhase.value),
-  },
   {
     id: 'template',
     label: 'Template',

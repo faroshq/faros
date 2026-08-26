@@ -161,7 +161,7 @@ describe('mounted Infrastructure instance detail deletion behavior', () => {
     app.mount(host)
     await flush()
 
-    expect(text('.k-resource-stat-card[data-k-resource-stat-card="status"]')).toContain('Ready')
+    expect(text('.k-resource-page__status .k-badge')).toContain('Ready')
     expect(host.textContent).toContain('retained-value')
     const details = host.querySelector<HTMLDetailsElement>('.instance-detail__menu')
     const deleteButton = host.querySelector<HTMLButtonElement>('.instance-detail__menu-item')
@@ -177,7 +177,7 @@ describe('mounted Infrastructure instance detail deletion behavior', () => {
     await flush()
 
     expect(details!.hasAttribute('open')).toBe(false)
-    expect(text('.k-resource-stat-card[data-k-resource-stat-card="status"]')).toContain('Deleting')
+    expect(text('.k-resource-page__status .k-badge')).toContain('Deleting')
     expect(host.querySelector('[role="status"][aria-live="polite"].instance-message')?.textContent)
       .toContain('Deleting this instance.')
     expect(host.textContent).toContain('retained-value')
@@ -194,7 +194,7 @@ describe('mounted Infrastructure instance detail deletion behavior', () => {
     expect(host.querySelector('[role="alert"][aria-live="assertive"]')?.textContent)
       .toContain('HTTPError: delete failed')
     expect(host.querySelector('[role="status"][aria-live="polite"].instance-message')).toBeNull()
-    expect(text('.k-resource-stat-card[data-k-resource-stat-card="status"]')).toContain('Ready')
+    expect(text('.k-resource-page__status .k-badge')).toContain('Ready')
     expect(host.textContent).toContain('retained-value')
     expect(refresh!.disabled).toBe(false)
     expect(back!.getAttribute('aria-disabled')).toBeNull()

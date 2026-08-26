@@ -15,6 +15,7 @@ describe('Infrastructure instance detail conformance', () => {
 
   it('retains the shared detail renderer and product-facing summary facts', () => {
     expect(source).toContain('ResourceStatCards')
+    expect(source).not.toContain("id: 'status'")
     expect(source).toContain('id: \'created\'')
     expect(source).toContain('label: \'Child resources\'')
     expect(source).toContain('.filter(({ value }) => !value.empty)')
