@@ -83,12 +83,16 @@ const readState = computed<boolean | null>(() => {
   return loading.value ? false : null
 })
 
+const showValidationCard = computed(() =>
+  deleting.value || (!!conn.value && conn.value.status !== 'Ready'),
+)
+
 const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
     label: 'Status',
     value: deleting.value ? 'Deleting' : conn.value?.status || '—',
-    detail: deleting.value ? 'Deletion in progress' : hint.value || 'Credential validation',
+    detail: deleting.value ? 'Deletion in progress' : hint.value || undefined,
     icon: Activity,
     tone: statTone(deleting.value ? 'Deleting' : conn.value?.status),
   },
@@ -326,11 +330,9 @@ onUnmounted(() => {
         </p>
 
         <div v-if="conn" class="databricks-resource-sections">
-          <ResourceSectionCard id="connection-status" eyebrow="Validation" title="Status" description="Credential validation and provider feedback for this connection.">
+          <ResourceSectionCard v-if="showValidationCard" id="connection-status" eyebrow="Validation" title="Needs attention" description="Credential validation and provider feedback for this connection.">
             <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
-            <p v-else-if="hint" class="muted">{{ hint }}</p>
-            <p v-else class="muted">The connection is validated and ready for dependent resources.</p>
-            <p v-if="conn.message" class="muted">{{ conn.message }}</p>
+            <p v-else class="muted">{{ hint }}</p>
           </ResourceSectionCard>
 
           <ResourceSectionCard id="connection-overview" eyebrow="Connection" title="Overview" description="Workspace endpoint, authentication, and reconciliation details.">

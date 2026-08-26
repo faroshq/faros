@@ -1259,7 +1259,9 @@ test('resource detail views use the shared shell without dropping resource behav
   }
 
   const connection = details.connection
-  assert.match(connection, /id="connection-status"/)
+  assert.match(connection, /const showValidationCard = computed\(\(\) =>[\s\S]*conn\.value\.status !== 'Ready'/)
+  assert.match(connection, /<ResourceSectionCard v-if="showValidationCard" id="connection-status"/)
+  assert.doesNotMatch(connection, /The connection is validated and ready for dependent resources\./)
   assert.match(connection, /Waiting for the connection controller to validate the credential\./)
   assert.match(connection, /Workspace host[\s\S]*conn\.authType[\s\S]*conn\.secretName[\s\S]*conn\.secretNamespace[\s\S]*conn\.secretKey[\s\S]*conn\.workspaceID/)
   assert.match(connection, /conn\.observedGeneration[\s\S]*conn\.generation[\s\S]*controller has not caught up/)
@@ -1388,6 +1390,9 @@ test('mounted resource detail deletes stay truthful through pending rejection an
     try {
       await flushVue()
       assert.equal(typeof mounted.instance.setupState.deleteFromMenu, 'function', `${testCase.kind} exposes the overflow delete action`)
+      if (testCase.kind === 'connection') {
+        assert.equal(mounted.find(node => node.props?.id === 'connection-status'), null, 'connection omits redundant validation card when Ready')
+      }
       const menu = mounted.find(node => node.type === 'details' && className(node).includes('databricks-resource-menu'))
       assert.ok(menu, `${testCase.kind} renders an overflow menu`)
       menu.props.open = true
@@ -1403,6 +1408,9 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       assert.ok(status, `${testCase.kind} renders a status badge while deletion is pending`)
       assert.match(hostText(status), /Deleting/)
       assert.match(className(status), /k-badge--warning/)
+      if (testCase.kind === 'connection') {
+        assert.ok(mounted.find(node => node.props?.id === 'connection-status'), 'connection restores validation card for actionable deleting state')
+      }
       assert.ok(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), `${testCase.kind} exposes visible polite deletion progress outside the menu`)
 
       const back = mounted.find(node => node.type === 'a' && className(node).includes('databricks-resource-back'))
