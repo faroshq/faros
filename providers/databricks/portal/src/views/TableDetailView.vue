@@ -271,7 +271,7 @@ onUnmounted(() => {
 
     <ResourcePage
       :title="table?.name || name"
-      eyebrow="Table"
+      kind="Table"
       :loaded="readState"
       :loading="loading"
       :refresh-mode="refreshMode"
@@ -281,12 +281,14 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
+          <span>Databricks</span>
+          <span aria-hidden="true">·</span>
           <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
           <span v-else-if="table?.status === 'Ready'">validated against <code>{{ table.fullName }}</code></span>
           <span v-else-if="table"><code>{{ table.fullName }}</code></span>
           <span v-else class="muted">not validated yet</span>
       </template>
-      <template #status><StatusBadge v-if="table" :status="deleting ? 'Deleting' : table.status" :tone="deleting ? 'warning' : null" :title="table.message" /></template>
+      <template v-if="table" #status><StatusBadge :status="deleting ? 'Deleting' : table.status" :tone="deleting ? 'warning' : null" :title="table.message" /></template>
       <template #actions>
         <div class="databricks-resource-actions" role="group" aria-label="Table actions">
           <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || deleting || (!!table && operationLocked(table.name))" :aria-busy="loading || undefined" @click="load">

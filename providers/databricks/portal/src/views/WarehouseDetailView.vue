@@ -282,7 +282,7 @@ onUnmounted(() => {
 
     <ResourcePage
       :title="warehouse?.name || name"
-      eyebrow="Warehouse"
+      kind="Warehouse"
       :loaded="readState"
       :loading="loading"
       :refresh-mode="refreshMode"
@@ -292,12 +292,14 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
+          <span>Databricks</span>
+          <span aria-hidden="true">·</span>
           <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
           <span v-else-if="warehouse?.status === 'Ready'">validated against warehouse <code>{{ warehouse.warehouseID }}</code></span>
           <span v-else-if="warehouse"><code>{{ warehouse.warehouseID }}</code></span>
           <span v-else class="muted">not validated yet</span>
       </template>
-      <template #status><StatusBadge v-if="warehouse" :status="deleting ? 'Deleting' : warehouse.status" :tone="deleting ? 'warning' : null" :title="warehouse.message" /></template>
+      <template v-if="warehouse" #status><StatusBadge :status="deleting ? 'Deleting' : warehouse.status" :tone="deleting ? 'warning' : null" :title="warehouse.message" /></template>
       <template #actions>
         <div class="databricks-resource-actions" role="group" aria-label="Warehouse actions">
           <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || deleting || (!!warehouse && operationLocked(warehouse.name))" :aria-busy="loading || undefined" @click="load">

@@ -281,7 +281,7 @@ onUnmounted(() => {
 
     <ResourcePage
       :title="conn?.name || name"
-      eyebrow="Connection"
+      kind="Connection"
       :loaded="readState"
       :loading="loading"
       :refresh-mode="refreshMode"
@@ -291,12 +291,14 @@ onUnmounted(() => {
       @retry="load"
     >
       <template #meta>
+          <span>Databricks</span>
+          <span aria-hidden="true">·</span>
           <span v-if="deleting">deletion requested; awaiting hub confirmation</span>
           <span v-else-if="conn?.status === 'Ready'">validated against <code>{{ conn.host }}</code></span>
           <span v-else-if="conn"><code>{{ conn.host }}</code></span>
           <span v-else class="muted">not validated yet</span>
       </template>
-      <template #status><StatusBadge v-if="conn" :status="deleting ? 'Deleting' : conn.status" :tone="deleting ? 'warning' : null" :title="conn.message" /></template>
+      <template v-if="conn" #status><StatusBadge :status="deleting ? 'Deleting' : conn.status" :tone="deleting ? 'warning' : null" :title="conn.message" /></template>
       <template #actions>
         <div class="databricks-resource-actions" role="group" aria-label="Connection actions">
           <button class="k-btn k-btn--ghost icon-text" type="button" :disabled="loading || deleting || (!!conn && operationLocked(conn.name))" :aria-busy="loading || undefined" @click="load">

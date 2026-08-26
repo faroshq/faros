@@ -5,11 +5,52 @@ import test from 'node:test'
 const page = fs.readFileSync(new URL('./MCPPage.vue', import.meta.url), 'utf8')
 const router = fs.readFileSync(new URL('../router/index.ts', import.meta.url), 'utf8')
 
+test('MCP detail keeps the canonical borderless backlink before its resource page', () => {
+  const css = fs.readFileSync(new URL('../../../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const back = css.match(/\.k-back-action\s*\{([^}]*)\}/s)?.[1] ?? ''
+  const hover = css.match(/\.k-back-action:hover\s*\{([^}]*)\}/s)?.[1] ?? ''
+  const focus = css.match(/\.k-back-action:focus-visible\s*\{([^}]*)\}/s)?.[1] ?? ''
+  const active = css.match(/\.k-back-action:active\s*\{([^}]*)\}/s)?.[1] ?? ''
+  const detailStart = page.indexOf('<template v-else>')
+  const backStart = page.indexOf('<a', detailStart)
+  const resourceStart = page.indexOf('<ResourcePage', detailStart)
+
+  assert.ok(detailStart >= 0)
+  assert.ok(backStart >= 0 && backStart < resourceStart)
+  assert.match(page.slice(backStart, resourceStart), /class="k-btn k-btn--ghost k-back-action"/)
+  assert.match(page.slice(backStart, resourceStart), /href="\/ui\/mcp"/)
+  assert.match(page.slice(backStart, resourceStart), />\s*[\s\S]*MCP Access\s*<\/a>/)
+
+  assert.match(back, /min-height:\s*auto/)
+  assert.match(back, /border:\s*0/)
+  assert.match(back, /background:\s*transparent/)
+  assert.match(back, /box-shadow:\s*none/)
+  assert.match(back, /color:\s*var\(--color-accent,/)
+  assert.match(back, /gap:\s*6px/)
+  assert.match(back, /padding:\s*0/)
+  assert.match(back, /font-size:\s*12px/)
+  assert.match(back, /font-weight:\s*500/)
+  assert.match(back, /align-self:\s*flex-start/)
+  assert.match(back, /inline-size:\s*fit-content/)
+  assert.match(back, /justify-self:\s*start/)
+  assert.match(hover, /border:\s*0/)
+  assert.match(hover, /background:\s*transparent/)
+  assert.match(hover, /box-shadow:\s*none/)
+  assert.match(hover, /color:\s*var\(--color-accent-hover,/)
+  assert.match(hover, /text-decoration:\s*underline/)
+  assert.match(focus, /outline:\s*2px solid var\(--color-accent,/)
+  assert.match(focus, /outline-offset:\s*2px/)
+  assert.doesNotMatch(focus, /(?:background|border|box-shadow)\s*:/)
+  assert.match(active, /transform:\s*none/)
+})
+
 test('MCP detail keeps the shared resource composition and deep-link contract', () => {
   assert.match(router, /path: '\/mcp\/:name'/)
   assert.match(router, /name: 'mcp-detail'/)
   assert.match(page, /<a[\s\S]*href="\/ui\/mcp"/)
   assert.match(page, /<ResourcePage/)
+  assert.match(page, /kind="MCP server"/)
+  assert.doesNotMatch(page, /<ResourcePage\b[^>]*\beyebrow=/)
   assert.match(page, /<ResourceStatCards[\s\S]*density="compact"/)
   assert.match(page, /<ResourceSectionCard/)
   assert.match(page, /<StatusBadge/)

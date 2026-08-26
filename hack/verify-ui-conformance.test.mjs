@@ -182,6 +182,53 @@ test('keeps the responsive ResourcePage title canonical across provider detail v
   assert.doesNotMatch(edgesStyle, /(?:edge|service)-detail__resource\s*>\s*section\s*>\s*header\s+h1/)
 })
 
+test('keeps the ResourcePage title-first metadata and actions contract canonical', () => {
+  const page = fs.readFileSync(new URL('../provider-sdk/portalkit-vue/ResourcePage.vue', import.meta.url), 'utf8')
+  const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
+  const title = page.indexOf('<h1 class="k-resource-page__title">')
+  const meta = page.indexOf('class="k-resource-page__meta"')
+  const subtitle = page.indexOf('class="k-resource-page__subtitle"')
+  const headerSide = page.indexOf('class="k-resource-page__header-side"')
+  const headerEnd = page.indexOf('</header>', headerSide)
+  const metadataSource = page.slice(meta, subtitle)
+  const headerSideSource = page.slice(headerSide, headerEnd)
+
+  assert.match(page, /kind\?: string/)
+  assert.doesNotMatch(page, /\beyebrow\b/)
+  assert.ok(title >= 0 && title < meta && meta < subtitle, 'title, metadata, and subtitle must be ordered')
+  assert.match(metadataSource, /class="k-resource-page__kind"[^>]*>\{\{ kind \}\}/)
+  assert.match(metadataSource, /slot name="meta"/)
+  assert.match(metadataSource, /class="k-resource-page__status"[^>]*><slot name="status" \/>/)
+  assert.match(metadataSource, /class="k-resource-page__separator"[^>]*aria-hidden="true">·<\/span>/)
+  assert.doesNotMatch(page, /k-resource-page__eyebrow/)
+  assert.doesNotMatch(headerSideSource, /\$slots\.status|k-resource-page__status/)
+  assert.match(headerSideSource, /\$slots\.actions/)
+  const kindRule = css.match(/\.k-resource-page__kind\s*\{([^}]*)\}/s)?.[1] ?? ''
+  assert.match(kindRule, /display:\s*inline-flex;/)
+  assert.match(kindRule, /flex:\s*0 0 auto;/)
+  assert.match(kindRule, /align-items:\s*center;/)
+  assert.doesNotMatch(kindRule, /(?:color|font-family|font-size|font-weight|letter-spacing|text-transform):/)
+  assert.match(css, /\.k-resource-page__separator\s*\{[\s\S]*flex:\s*0 0 auto;/)
+  assert.match(css, /\.k-resource-page__status\s*\{[^}]*display:\s*inline-flex;/)
+
+  for (const relative of [
+    '../providers/code/portal/src/views/ConnectionDetailView.vue',
+    '../providers/code/portal/src/views/RepoDetailView.vue',
+    '../providers/databricks/portal/src/views/ConnectionDetailView.vue',
+    '../providers/databricks/portal/src/views/TableDetailView.vue',
+    '../providers/databricks/portal/src/views/WarehouseDetailView.vue',
+    '../providers/edges/portal/src/Detail.vue',
+    '../providers/edges/portal/src/ServiceEdit.vue',
+    '../providers/infrastructure/portal/src/views/InstanceDetailPage.vue',
+    '../portal/src/pages/MCPPage.vue',
+  ]) {
+    const source = fs.readFileSync(new URL(relative, import.meta.url), 'utf8')
+    for (const match of source.matchAll(/<ResourcePage\b[^>]*>/g)) {
+      assert.doesNotMatch(match[0], /\beyebrow\s*=/, `${relative} ResourcePage uses kind instead of eyebrow`)
+    }
+  }
+})
+
 test('keeps sidebar divider and child toggles on the borderless text-button recipe', () => {
   const css = fs.readFileSync(new URL('../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
   const layout = fs.readFileSync(new URL('../portal/src/components/AppLayout.vue', import.meta.url), 'utf8')

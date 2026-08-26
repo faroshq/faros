@@ -5,8 +5,8 @@
 
   ResourcePage owns page composition and read-state presentation only. It does
   not fetch, route, or decide what the resource body contains. Callers provide
-  the snapshot and map `retry` to their own behavior. The optional eyebrow,
-  summary, and body slots remain caller-owned.
+  the snapshot and map `retry` to their own behavior. The resource kind,
+  metadata, status, actions, summary, and body remain caller-owned.
 -->
 <script setup lang="ts">
 import { computed } from 'vue'
@@ -18,7 +18,7 @@ ensureFarosUIStyles()
 
 const props = withDefaults(defineProps<{
   title: string
-  eyebrow?: string
+  kind?: string
   subtitle?: string
   loaded?: ResourceReadState['loaded']
   loading?: ResourceReadState['loading']
@@ -27,7 +27,7 @@ const props = withDefaults(defineProps<{
   stale?: ResourceReadState['stale']
   retryable?: ResourceReadState['retryable']
 }>(), {
-  eyebrow: '',
+  kind: '',
   subtitle: '',
   // A null sentinel preserves the distinction between an omitted read
   // contract and an explicit first read that has not completed.
@@ -69,13 +69,17 @@ const ariaBusy = computed(() =>
     </span>
     <header class="k-resource-page__header">
       <div class="k-resource-page__heading">
-        <p v-if="eyebrow" class="k-resource-page__eyebrow">{{ eyebrow }}</p>
         <h1 class="k-resource-page__title">{{ title }}</h1>
+        <div v-if="kind || $slots.meta || $slots.status" class="k-resource-page__meta">
+          <span v-if="kind" class="k-resource-page__kind">{{ kind }}</span>
+          <span v-if="kind && ($slots.meta || $slots.status)" class="k-resource-page__separator" aria-hidden="true">·</span>
+          <template v-if="$slots.meta"><slot name="meta" /></template>
+          <span v-if="$slots.meta && $slots.status" class="k-resource-page__separator" aria-hidden="true">·</span>
+          <span v-if="$slots.status" class="k-resource-page__status"><slot name="status" /></span>
+        </div>
         <p v-if="subtitle" class="k-resource-page__subtitle">{{ subtitle }}</p>
-        <div v-if="$slots.meta" class="k-resource-page__meta"><slot name="meta" /></div>
       </div>
-      <div v-if="$slots.status || $slots.actions" class="k-resource-page__header-side">
-        <div v-if="$slots.status" class="k-resource-page__status"><slot name="status" /></div>
+      <div v-if="$slots.actions" class="k-resource-page__header-side">
         <div v-if="$slots.actions" class="k-resource-page__actions"><slot name="actions" /></div>
       </div>
     </header>

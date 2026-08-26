@@ -568,7 +568,7 @@ function rel(ts?: string): string {
 
         <ResourcePage
           :title="selectedServer?.name || selected || 'MCP server'"
-          eyebrow="MCP server"
+          kind="MCP server"
           :subtitle="selectedServer?.displayName || 'Named endpoint for workspace tools'"
           :loaded="readState"
           :loading="loading"

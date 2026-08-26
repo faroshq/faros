@@ -14,6 +14,26 @@ const workloads = readSource('Workloads.vue')
 const style = readSource('style.css')
 const providerIcon = readFileSync(resolve(process.cwd(), 'public', 'icon.svg'), 'utf8')
 
+function resourcePageBlock(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('</ResourcePage>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + '</ResourcePage>'.length) : ''
+}
+
+function resourcePageOpening(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + 1) : ''
+}
+
+function resourcePageSlot(source, name) {
+  const block = resourcePageBlock(source)
+  const start = block.indexOf('<template #' + name + '>')
+  const contentStart = start >= 0 ? start + ('<template #' + name + '>').length : -1
+  const end = contentStart >= 0 ? block.indexOf('</template>', contentStart) : -1
+  return contentStart >= 0 && end >= 0 ? block.slice(contentStart, end) : ''
+}
+
 describe('resource detail cards', () => {
   it('uses a network topology mark for the Edges provider', () => {
     expect(providerIcon).toMatch(/<rect x="9" y="2" width="6" height="6"/)
@@ -40,7 +60,23 @@ describe('resource detail cards', () => {
     expect(detail).toMatch(/<div class="edge-detail">/)
     expect(detail).toMatch(/<a class="k-btn k-btn--ghost edge-detail__back" href="\/ui\/providers\/edges" @click\.prevent="emit\('back'\)"[^>]*>[\s\S]*<ArrowLeft[\s\S]*\/> Edges/)
     expect(detail).toMatch(/class="edge-detail__provider-mark"/)
-    expect(detail).toMatch(/:title="name"[\s\S]*<template #meta>[\s\S]*edgeTypeLabel[\s\S]*Edges[\s\S]*<StatusBadge/)
+    const page = resourcePageBlock(detail)
+    const opening = resourcePageOpening(detail)
+    const meta = resourcePageSlot(detail, 'meta')
+    const status = resourcePageSlot(detail, 'status')
+    expect(opening).toContain(':kind="edgeTypeLabel"')
+    expect(opening).not.toContain('eyebrow=')
+    expect(meta).toContain('<span>Edges</span>')
+    expect(meta).toContain('edge.hostname')
+    expect(meta).not.toContain('StatusBadge')
+    expect(status).toContain('StatusBadge')
+    const headerOrder = [
+      page.indexOf(':kind="edgeTypeLabel"'),
+      page.indexOf('<template #meta>'),
+      page.indexOf('<template #status>'),
+    ]
+    expect(headerOrder.every(index => index >= 0)).toBe(true)
+    expect(headerOrder).toEqual([...headerOrder].sort((a, b) => a - b))
     expect(detail).toMatch(/<template #actions>[\s\S]*Open terminal[\s\S]*Refresh[\s\S]*More edge actions[\s\S]*Delete/)
     expect(detail).not.toMatch(/:breadcrumbs=/)
     expect(detail).not.toMatch(/edge-overview|edge-detail-section|edge-section-summary|Resource details/)

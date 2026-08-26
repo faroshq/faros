@@ -254,7 +254,7 @@ onUnmounted(() => {
 
       <ResourcePage
         :title="conn?.name || name"
-        eyebrow="Connection"
+        kind="Connection"
         :loaded="connectionReadState"
         :loading="loading"
         :refresh-mode="refreshMode"
@@ -264,8 +264,6 @@ onUnmounted(() => {
         @retry="load"
       >
         <template #meta>
-          <span>Connection</span>
-          <span class="connection-header__separator" aria-hidden="true">·</span>
           <span>{{ conn?.provider || 'Provider unavailable' }}</span>
           <span class="connection-header__separator" aria-hidden="true">·</span>
           <span>{{ conn?.type || 'Type unavailable' }}</span>
@@ -273,7 +271,8 @@ onUnmounted(() => {
             <span class="connection-header__separator" aria-hidden="true">·</span>
             <span>authenticated as <code>{{ conn.login }}</code></span>
           </template>
-          <span class="connection-header__separator" aria-hidden="true">·</span>
+        </template>
+        <template #status>
           <StatusBadge :status="connectionStatus" :tone="connectionStatusTone" :title="conn?.message" />
         </template>
 

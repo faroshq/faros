@@ -14,6 +14,13 @@ describe('Infrastructure instance detail conformance', () => {
   })
 
   it('retains the shared detail renderer and product-facing summary facts', () => {
+    expect(source).toContain('kind="Instance"')
+    expect(source).not.toMatch(/<ResourcePage[^>]*eyebrow=/)
+    expect(source).not.toContain(':subtitle="inst?.template || \'Template instance\'"')
+    expect(source).toContain('<span>Infrastructure</span>')
+    expect(source).toContain('<span aria-hidden="true">·</span>')
+    expect(source).toContain('<span v-if="inst">Template <code>{{ inst.template }}</code></span>')
+    expect(source).toMatch(/<template v-if="inst" #status>/)
     expect(source).toContain('ResourceStatCards')
     expect(source).not.toContain("id: 'status'")
     expect(source).toContain('id: \'created\'')

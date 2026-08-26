@@ -269,8 +269,7 @@ onUnmounted(() => {
 
     <ResourcePage
       :title="inst?.name || instanceName"
-      eyebrow="Infrastructure instance"
-      :subtitle="inst?.template || 'Template instance'"
+      kind="Instance"
       :loaded="readState"
       :loading="loading"
       :refresh-mode="refreshMode"
@@ -280,12 +279,13 @@ onUnmounted(() => {
       @retry="load('foreground')"
     >
       <template #meta>
+        <span>Infrastructure</span>
+        <span aria-hidden="true">·</span>
         <span v-if="inst">Template <code>{{ inst.template }}</code></span>
         <span v-else class="muted">Template metadata unavailable</span>
       </template>
-      <template #status>
+      <template v-if="inst" #status>
         <StatusBadge
-          v-if="inst"
           :status="displayedPhase"
           :tone="displayedPhase === 'Deleting' ? 'warning' : null"
           :title="displayedMessage"

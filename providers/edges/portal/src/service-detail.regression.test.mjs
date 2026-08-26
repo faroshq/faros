@@ -6,6 +6,26 @@ const readSource = (file) => readFileSync(resolve(process.cwd(), 'src', file), '
 const styles = readSource('style.css')
 const serviceEdit = readSource('ServiceEdit.vue')
 
+function resourcePageBlock(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('</ResourcePage>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + '</ResourcePage>'.length) : ''
+}
+
+function resourcePageOpening(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + 1) : ''
+}
+
+function resourcePageSlot(source, name) {
+  const block = resourcePageBlock(source)
+  const start = block.indexOf('<template #' + name + '>')
+  const contentStart = start >= 0 ? start + ('<template #' + name + '>').length : -1
+  const end = contentStart >= 0 ? block.indexOf('</template>', contentStart) : -1
+  return contentStart >= 0 && end >= 0 ? block.slice(contentStart, end) : ''
+}
+
 describe('Service detail narrow-screen regressions', () => {
   it('contains the resource composition and collapses facts before the viewport can overflow', () => {
     expect(styles).toMatch(/\.service-detail\s*\{[\s\S]*max-width:\s*100%;/)
@@ -30,6 +50,25 @@ describe('Service detail narrow-screen regressions', () => {
     expect(serviceEdit).not.toMatch(/id: 'credentials'/)
     expect(serviceEdit).toMatch(/id: 'status'[\s\S]*detail: credentialState\.value\.detail/)
     expect(serviceEdit).toMatch(/<ResourceSectionCard[^>]*id="service-credentials"[^>]*eyebrow="Access"[^>]*title="Credentials"/)
+  })
+
+  it('uses the shared Service kind, meta, status, and subtitle header contract', () => {
+    const page = resourcePageBlock(serviceEdit)
+    const opening = resourcePageOpening(serviceEdit)
+    const meta = resourcePageSlot(serviceEdit, 'meta')
+    const status = resourcePageSlot(serviceEdit, 'status')
+    expect(opening).toContain('kind="Service"')
+    expect(opening).not.toContain('eyebrow=')
+    expect(opening).toMatch(/:subtitle="entry\?\.displayName \|\| service\?\.serviceType \|\| 'Edge service'"/)
+    expect(meta).toMatch(/<span>Edges<\/span>[\s\S]*service\?\.edgeName/)
+    expect(status).toContain('StatusBadge')
+    const headerOrder = [
+      page.indexOf('kind="Service"'),
+      page.indexOf('<template #meta>'),
+      page.indexOf('<template #status>'),
+    ]
+    expect(headerOrder.every(index => index >= 0)).toBe(true)
+    expect(headerOrder).toEqual([...headerOrder].sort((a, b) => a - b))
   })
 
   it('keeps deletion status visible and politely announced after the menu closes', () => {

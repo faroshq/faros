@@ -900,6 +900,26 @@ test('resource page keeps first-read skeletons for background mode', async () =>
   assert.doesNotMatch(html, /Loaded body|k-resource-page__stale/)
 })
 
+test('resource detail views omit a status wrapper before the initial snapshot', async () => {
+  const details = {
+    connection: '/src/views/ConnectionDetailView.vue',
+    warehouse: '/src/views/WarehouseDetailView.vue',
+    table: '/src/views/TableDetailView.vue',
+  }
+  const kinds = { connection: 'Connection', warehouse: 'Warehouse', table: 'Table' }
+
+  for (const [name, path] of Object.entries(details)) {
+    const Component = (await vite.ssrLoadModule(path)).default
+    const html = await renderToString(createSSRApp(Component, { name: 'orders' }))
+    const meta = html.match(/<div class="k-resource-page__meta">(.*?)<\/div>/s)?.[1] ?? ''
+    assert.match(meta, new RegExp('<span class="k-resource-page__kind">' + kinds[name] + '</span>'))
+    assert.match(meta, /Databricks/)
+    assert.match(meta, /not validated yet/)
+    assert.doesNotMatch(meta, /k-resource-page__status/)
+    assert.doesNotMatch(meta, /not validated yet.*k-resource-page__separator/s)
+  }
+})
+
 test('status tones distinguish retryable and actionable condition failures', async () => {
   const StatusBadge = (await vite.ssrLoadModule('/src/portalkit/StatusBadge.vue')).default
   const retrying = await renderToString(createSSRApp(StatusBadge, { status: 'Retrying' }))
@@ -1236,7 +1256,13 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(app, /WarehouseDetailView v-else-if="route\.page === 'warehouses' && route\.warehouse"/)
   assert.match(app, /TableDetailView v-else-if="route\.page === 'tables' && route\.table"/)
 
+  const headerKinds = { connection: 'Connection', warehouse: 'Warehouse', table: 'Table' }
   for (const [kind, source] of Object.entries(details)) {
+    assert.match(source, new RegExp('<ResourcePage.*kind="' + headerKinds[kind] + '"', 's'))
+    assert.doesNotMatch(source, /<ResourcePage[^>]*eyebrow=/)
+    const meta = source.match(/<template #meta>.*?<\/template>/s)?.[0] ?? ''
+    assert.match(meta, /<span>Databricks<\/span>.*<span aria-hidden="true">·<\/span>/s)
+    assert.match(source, /<template v-if="[^"]+" #status>.*StatusBadge/s)
     assert.match(source, /import ResourcePage from '\.\.\/portalkit\/ResourcePage\.vue'/, `${kind} imports ResourcePage`)
     assert.match(source, /import ResourceSectionCard from '\.\.\/portalkit\/ResourceSectionCard\.vue'/, `${kind} imports ResourceSectionCard`)
     assert.match(source, /import ResourceStatCards, \{ type ResourceStatCard \}/, `${kind} imports ResourceStatCards`)

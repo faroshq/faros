@@ -11,6 +11,26 @@ const sectionCard = readSource('portalkit/ResourceSectionCard.vue')
 const statCards = readSource('portalkit/ResourceStatCards.vue')
 const farosUI = readSource('portalkit/faros-ui.css')
 
+function resourcePageBlock(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('</ResourcePage>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + '</ResourcePage>'.length) : ''
+}
+
+function resourcePageOpening(source) {
+  const start = source.indexOf('<ResourcePage')
+  const end = source.indexOf('>', start)
+  return start >= 0 && end >= 0 ? source.slice(start, end + 1) : ''
+}
+
+function resourcePageSlot(source, name) {
+  const block = resourcePageBlock(source)
+  const start = block.indexOf('<template #' + name + '>')
+  const contentStart = start >= 0 ? start + ('<template #' + name + '>').length : -1
+  const end = contentStart >= 0 ? block.indexOf('</template>', contentStart) : -1
+  return contentStart >= 0 && end >= 0 ? block.slice(contentStart, end) : ''
+}
+
 describe('Code repository resource detail cards', () => {
   it('hides provider tabs for repository detail and preserves the backlink', () => {
     expect(app).toMatch(/<template v-if="!route\.repo && !route\.connection">[\s\S]*<Tabs :tabs=/)
@@ -22,7 +42,23 @@ describe('Code repository resource detail cards', () => {
     expect(detail).toMatch(/const repositoryRefreshing = computed\(\(\) => repoLoading\.value\)/)
     const repositoryActionBusy = detail.match(/const repositoryActionBusy = computed\([^\n]+/)?.[0] ?? ''
     expect(repositoryActionBusy).not.toMatch(/connectionsLoading|keysLoading|collabsLoading|packagesLoading/)
-    expect(detail).toMatch(/<template #meta>[\s\S]*Repository[\s\S]*StatusBadge/)
+    const page = resourcePageBlock(detail)
+    const opening = resourcePageOpening(detail)
+    const meta = resourcePageSlot(detail, 'meta')
+    const status = resourcePageSlot(detail, 'status')
+    expect(opening).toContain('kind="Repository"')
+    expect(opening).not.toContain('eyebrow=')
+    expect(meta).toContain('providerLabel(currentConn?.provider)')
+    expect(meta).not.toContain('Repository')
+    expect(meta).not.toContain('StatusBadge')
+    expect(status).toContain('StatusBadge')
+    const headerOrder = [
+      page.indexOf('kind="Repository"'),
+      page.indexOf('<template #meta>'),
+      page.indexOf('<template #status>'),
+    ]
+    expect(headerOrder.every(index => index >= 0)).toBe(true)
+    expect(headerOrder).toEqual([...headerOrder].sort((a, b) => a - b))
     expect(detail).toMatch(/const repositoryTitle = computed\([\s\S]*repositoryOwner\.value \? `\$\{repositoryOwner\.value\}\/\$\{repositoryName\}`/)
     expect(detail).toMatch(/:title="repositoryTitle"/)
     expect(detail).toMatch(/<div class="repo-detail__provider-mark"[\s\S]*<Github v-if="isGitHubProvider"[\s\S]*<GitBranch v-else/)
@@ -111,7 +147,22 @@ describe('Code connection resource detail cards', () => {
 
   it('keeps the shared read contract and Refresh-before-overflow Delete order', () => {
     expect(connectionDetail).toMatch(/<ResourcePage[\s\S]*:title="conn\?\.name \|\| name"/)
-    expect(connectionDetail).toMatch(/<template #meta>[\s\S]*Connection[\s\S]*StatusBadge/)
+    const page = resourcePageBlock(connectionDetail)
+    const opening = resourcePageOpening(connectionDetail)
+    const meta = resourcePageSlot(connectionDetail, 'meta')
+    const status = resourcePageSlot(connectionDetail, 'status')
+    expect(opening).toContain('kind="Connection"')
+    expect(opening).not.toContain('eyebrow=')
+    expect(meta).toMatch(/conn\?\.provider[\s\S]*connection-header__separator[\s\S]*conn\?\.type[\s\S]*connection-header__separator[\s\S]*conn\.login/)
+    expect(meta).not.toContain('<span>Connection</span>')
+    expect(meta).not.toContain('StatusBadge')
+    expect(status).toContain('StatusBadge')
+    const headerOrder = [
+      page.indexOf('kind="Connection"'),
+      page.indexOf('<template #meta>'),
+      page.indexOf('<template #status>'),
+    ]
+    expect(headerOrder).toEqual([...headerOrder].sort((a, b) => a - b))
     expect(connectionDetail).toMatch(/<template #actions>[\s\S]*Refresh[\s\S]*More connection actions[\s\S]*Delete connection/)
     expect(connectionDetail).toContain(':loaded="connectionReadState"')
     expect(connectionDetail).toContain(':stale="loaded && !!error"')

@@ -811,6 +811,7 @@ onUnmounted(() => {
       </div>
       <ResourcePage
         :title="repositoryTitle"
+        kind="Repository"
         :loaded="repositoryReadState"
         :loading="repoLoading"
         :refresh-mode="repositoryRefreshMode"
@@ -820,10 +821,9 @@ onUnmounted(() => {
         @retry="loadRepository"
       >
     <template #meta>
-      <span>Repository</span>
-      <span class="repo-header__separator" aria-hidden="true">·</span>
       <span>{{ providerLabel(currentConn?.provider) || 'Provider unavailable' }}</span>
-      <span class="repo-header__separator" aria-hidden="true">·</span>
+    </template>
+    <template #status>
       <StatusBadge :status="repositoryStatus" :tone="repositoryStatusTone" :title="repo?.message" />
     </template>
     <template #actions>

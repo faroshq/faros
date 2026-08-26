@@ -33,10 +33,11 @@ vi.mock('./portalkit/ResourcePage.vue', async () => {
   type StubSlots = Record<string, () => VNode[]>
   return {
     default: {
-      props: ['title', 'loaded', 'loading', 'error', 'stale'],
+      props: ['title', 'kind', 'loaded', 'loading', 'error', 'stale'],
       setup: (props: { title: string }, { slots }: { slots: StubSlots }) => () => h('section', { class: 'resource-page-stub' }, [
         h('h1', props.title),
         slots.meta?.(),
+       slots.status?.(),
         slots.actions?.(),
         slots.summary?.(),
         slots.body?.(),

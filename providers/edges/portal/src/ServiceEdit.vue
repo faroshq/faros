@@ -350,7 +350,7 @@ async function onDelete(): Promise<void> {
       <ResourcePage
         class="service-detail__page"
         :title="title"
-        eyebrow="Edges / Services"
+        kind="Service"
         :subtitle="entry?.displayName || service?.serviceType || 'Edge service'"
         :loaded="readLoaded"
         :loading="readLoading"
@@ -360,7 +360,7 @@ async function onDelete(): Promise<void> {
         @retry="refreshDetail"
       >
         <template #meta>
-          <span>Service</span>
+          <span>Edges</span>
           <span class="service-detail__separator" aria-hidden="true">·</span>
           <span class="mono">{{ service?.edgeName || 'Edge unavailable' }}</span>
         </template>

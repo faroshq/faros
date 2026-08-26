@@ -140,7 +140,7 @@ writing any CSS**:
 | `.k-cell-mono` | Data-like cells (names, ids, timestamps) |
 | `.k-badge` (+ `--success/--warning/--danger/--muted`, `__dot`) | **Square 3px mono tag**: 10px/600 uppercase, `0.06em`, `*-subtle` bg, `color-mix(currentColor 35%)` hairline |
 | `.k-btn` (+ `--primary/--ghost/--text/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; text = transparent, borderless inline action; danger = danger-subtle tint, **no glow** |
-| `.k-back-action` | Intrinsic-width back-navigation modifier for `.k-btn`; start-aligned in flex/grid page flows, muted → accent on hover |
+| `.k-back-action` | Intrinsic-width, start-aligned borderless link modifier for `.k-btn`; 12px/500 accent link with a 6px icon gap, accent-hover underline, and no control surface |
 | `.k-input` | 4px overlay-bg input; focus = accent border + 3px subtle ring + glow |
 | `.k-eyebrow` / `.k-kpi` | Tracked uppercase label over an expanded tabular numeral |
 | `.k-menu` / `.k-menu-item` (+ `--danger`, `.is-selected`, `.k-menu-sep`) | Dropdown/context menu panel + items; selection = accent-subtle, no glow |
@@ -403,8 +403,14 @@ and resource-specific content:
   the backlink is the single return affordance for the resource list.
 - `ResourcePage` owns the title hierarchy and read-state shell. Its canonical
   PortalKit title is responsive from 24px to 32px, with tight tracking and
-  leading, safe wrapping for long identifiers, and a 22px mobile size. Callers
-  provide the resource title, meta, status, and actions; they must not add
+  leading, safe wrapping for long identifiers, and a 22px mobile size. Header
+  content has one fixed order: title → optional resource `kind` →
+  caller-provided context (`#meta`) → optional status (`#status`) → optional
+  subtitle, with PortalKit-owned dot separators between metadata items. The
+  header-side region contains actions only and follows that stack in source
+  order.
+  ResourcePage exposes `kind` as its only resource-type prop; section cards may
+  continue to use their independent `eyebrow` label. Callers must not add
   provider-local title-size overrides. Header actions use one stable order:
   provider-specific primary action, `Refresh`, then an overflow menu containing
   `Delete`.

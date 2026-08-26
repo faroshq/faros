@@ -440,6 +440,7 @@ onUnmounted(() => {
 
       <ResourcePage
         :title="name"
+        :kind="edgeTypeLabel"
         :loaded="readComplete"
         :loading="loading"
         :refresh-mode="refreshMode"
@@ -449,15 +450,14 @@ onUnmounted(() => {
         @retry="load"
       >
         <template #meta>
-          <span>{{ edgeTypeLabel }}</span>
-          <span class="edge-header__separator" aria-hidden="true">·</span>
           <span>Edges</span>
-          <span class="edge-header__separator" aria-hidden="true">·</span>
-          <StatusBadge :status="edgeStatus" :tone="edgeStatusTone" :connected="edge?.connected ?? null" />
           <template v-if="edge?.hostname">
             <span class="edge-header__separator" aria-hidden="true">·</span>
             <span class="mono">{{ edge.hostname }}</span>
           </template>
+        </template>
+        <template #status>
+          <StatusBadge :status="edgeStatus" :tone="edgeStatusTone" :connected="edge?.connected ?? null" />
         </template>
 
         <template #actions>
