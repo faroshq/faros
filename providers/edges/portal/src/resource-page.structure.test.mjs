@@ -12,8 +12,17 @@ const app = readSource('App.vue')
 const services = readSource('Services.vue')
 const workloads = readSource('Workloads.vue')
 const style = readSource('style.css')
+const providerIcon = readFileSync(resolve(process.cwd(), 'public', 'icon.svg'), 'utf8')
 
 describe('resource detail cards', () => {
+  it('uses a network topology mark for the Edges provider', () => {
+    expect(providerIcon).toMatch(/<rect x="9" y="2" width="6" height="6"/)
+    expect(providerIcon).toMatch(/<rect x="2" y="16" width="6" height="6"/)
+    expect(providerIcon).toMatch(/<rect x="16" y="16" width="6" height="6"/)
+    expect(providerIcon).toContain('M5 16v-3a1 1 0 0 1 1-1h12')
+    expect(providerIcon).not.toContain('<circle')
+  })
+
   it('keeps the ResourcePage read-state contract additive', () => {
     expect(resourcePage).toMatch(/class="k-resource-page__summary"/)
     expect(resourcePage).toMatch(/class="k-resource-page__body"/)

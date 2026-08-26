@@ -205,12 +205,14 @@ faros-provider-code .repo-detail__menu summary::-webkit-details-marker {
 faros-provider-code .repo-detail__menu summary::marker {
   display: none;
 }
-faros-provider-code .repo-detail__menu-popover {
+faros-provider-code .repo-detail .repo-detail__menu-popover {
   position: absolute;
   z-index: 5;
   top: calc(100% + 6px);
   right: 0;
+  width: max-content;
   min-width: 170px;
+  max-width: min(240px, calc(100vw - 32px));
   border: 1px solid var(--color-border-default, rgba(255,255,255,.11));
   border-radius: 6px;
   background: var(--color-surface-overlay, #171927);
@@ -229,6 +231,7 @@ faros-provider-code .repo-detail__menu-item {
   font-size: 12px;
   padding: 8px 10px;
   text-align: left;
+  white-space: nowrap;
 }
 faros-provider-code .repo-detail__menu-item:hover:not(:disabled) {
   background: var(--color-danger-subtle, rgba(255, 93, 93, 0.12));
@@ -467,12 +470,14 @@ faros-provider-code .connection-detail__menu summary {
 }
 faros-provider-code .connection-detail__menu summary::-webkit-details-marker,
 faros-provider-code .connection-detail__menu summary::marker { display: none; }
-faros-provider-code .connection-detail__menu-popover {
+faros-provider-code .connection-detail .connection-detail__menu-popover {
   position: absolute;
   z-index: 5;
   top: calc(100% + 6px);
   right: 0;
+  width: max-content;
   min-width: 170px;
+  max-width: min(240px, calc(100vw - 32px));
   border: 1px solid var(--color-border-default, rgba(255, 255, 255, .11));
   border-radius: 6px;
   background: var(--color-surface-overlay, #171927);
@@ -491,6 +496,7 @@ faros-provider-code .connection-detail__menu-item {
   font-size: 12px;
   padding: 8px 10px;
   text-align: left;
+  white-space: nowrap;
 }
 faros-provider-code .connection-detail__menu-item:hover:not(:disabled) {
   background: var(--color-danger-subtle, rgba(255, 93, 93, .12));

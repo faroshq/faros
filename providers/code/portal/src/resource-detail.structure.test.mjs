@@ -39,6 +39,13 @@ describe('Code repository resource detail cards', () => {
     expect(detail).toMatch(/<p v-if="repositoryDeleting" class="repo-detail__deleting" role="status" aria-live="polite">[\s\S]*Deleting this repository\./)
   })
 
+  it('keeps overflow action menus wider than their icon triggers', () => {
+    expect(style).toMatch(/\.repo-detail \.repo-detail__menu-popover\s*\{[\s\S]*width:\s*max-content;[\s\S]*min-width:\s*170px;[\s\S]*max-width:\s*min\(240px, calc\(100vw - 32px\)\)/)
+    expect(style).toMatch(/\.repo-detail__menu-item\s*\{[\s\S]*width:\s*100%;[\s\S]*white-space:\s*nowrap/)
+    expect(style).toMatch(/\.connection-detail \.connection-detail__menu-popover\s*\{[\s\S]*width:\s*max-content;[\s\S]*min-width:\s*170px;[\s\S]*max-width:\s*min\(240px, calc\(100vw - 32px\)\)/)
+    expect(style).toMatch(/\.connection-detail__menu-item\s*\{[\s\S]*width:\s*100%;[\s\S]*white-space:\s*nowrap/)
+  })
+
   it('uses compact provider-owned stat cards and canonical section cards', () => {
     expect(sectionCard).toMatch(/class="k-resource-section-card"/)
     expect(sectionCard).toMatch(/class="k-resource-section-card__actions"/)
