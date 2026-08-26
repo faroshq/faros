@@ -1270,6 +1270,9 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(connection, /Leave the token blank to keep the current Secret./)
 
   const warehouse = details.warehouse
+  assert.match(warehouse, /const showValidationCard = computed\(\(\) =>[\s\S]*warehouse\.value\.status !== 'Ready'/)
+  assert.match(warehouse, /<ResourceSectionCard v-if="showValidationCard" id="warehouse-status"/)
+  assert.doesNotMatch(warehouse, /The warehouse is validated and ready for table metadata refreshes\./)
   assert.match(warehouse, /id="warehouse-overview"[\s\S]*warehouse\.connectionRef[\s\S]*warehouse\.warehouseID[\s\S]*warehouse\.state/)
   assert.match(warehouse, /warehouse\.observedGeneration[\s\S]*warehouse\.generation[\s\S]*controller has not caught up/)
   assert.match(warehouse, /id="warehouse-edit"[\s\S]*warehouse-edit-id[\s\S]*Use the 16-character ID/)
@@ -1393,6 +1396,9 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       if (testCase.kind === 'connection') {
         assert.equal(mounted.find(node => node.props?.id === 'connection-status'), null, 'connection omits redundant validation card when Ready')
       }
+      if (testCase.kind === 'warehouse') {
+        assert.equal(mounted.find(node => node.props?.id === 'warehouse-status'), null, 'warehouse omits redundant validation card when Ready')
+      }
       const menu = mounted.find(node => node.type === 'details' && className(node).includes('databricks-resource-menu'))
       assert.ok(menu, `${testCase.kind} renders an overflow menu`)
       menu.props.open = true
@@ -1410,6 +1416,9 @@ test('mounted resource detail deletes stay truthful through pending rejection an
       assert.match(className(status), /k-badge--warning/)
       if (testCase.kind === 'connection') {
         assert.ok(mounted.find(node => node.props?.id === 'connection-status'), 'connection restores validation card for actionable deleting state')
+      }
+      if (testCase.kind === 'warehouse') {
+        assert.ok(mounted.find(node => node.props?.id === 'warehouse-status'), 'warehouse restores validation card for actionable deleting state')
       }
       assert.ok(mounted.find(node => node.props?.role === 'status' && node.props?.['aria-live'] === 'polite' && hostText(node).includes(`Deleting this ${testCase.kind}`)), `${testCase.kind} exposes visible polite deletion progress outside the menu`)
 

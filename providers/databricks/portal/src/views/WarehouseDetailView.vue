@@ -84,12 +84,16 @@ const readState = computed<boolean | null>(() => {
   return loading.value ? false : null
 })
 
+const showValidationCard = computed(() =>
+  deleting.value || (!!warehouse.value && warehouse.value.status !== 'Ready'),
+)
+
 const statCards = computed<ResourceStatCard[]>(() => [
   {
     id: 'status',
     label: 'Status',
     value: deleting.value ? 'Deleting' : warehouse.value?.status || '—',
-    detail: deleting.value ? 'Deletion in progress' : hint.value || 'Warehouse validation',
+    detail: deleting.value ? 'Deletion in progress' : hint.value || undefined,
     icon: Activity,
     tone: statTone(deleting.value ? 'Deleting' : warehouse.value?.status),
   },
@@ -327,11 +331,9 @@ onUnmounted(() => {
         </p>
 
         <div v-if="warehouse" class="databricks-resource-sections">
-          <ResourceSectionCard id="warehouse-status" eyebrow="Validation" title="Status" description="Warehouse validation and dependent-resource guidance.">
+          <ResourceSectionCard v-if="showValidationCard" id="warehouse-status" eyebrow="Validation" title="Needs attention" description="Warehouse validation and dependent-resource guidance.">
             <p v-if="deleting" class="muted">Deletion requested. The hub is waiting to confirm removal.</p>
-            <p v-else-if="hint" class="muted">{{ hint }}</p>
-            <p v-else class="muted">The warehouse is validated and ready for table metadata refreshes.</p>
-            <p v-if="warehouse.message" class="muted">{{ warehouse.message }}</p>
+            <p v-else class="muted">{{ hint }}</p>
           </ResourceSectionCard>
 
           <ResourceSectionCard id="warehouse-overview" eyebrow="Warehouse" title="Overview" description="Connection reference, Databricks state, and reconciliation details.">
