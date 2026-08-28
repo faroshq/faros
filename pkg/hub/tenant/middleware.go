@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -265,8 +266,12 @@ func Middleware(userResolver UserResolver, lookup MembershipLookup) func(next ht
 				return
 			}
 
-			// Step 5: find the matching entry.
-			role, ok := matchEntry(index, orgUUID, workspaceUUID)
+			// Step 5: find the matching entry. Soft-deleted workspace rows are
+			// intentionally excluded from ordinary workspace authorization. The
+			// workspace list and the two lifecycle actions (delete/undelete) are
+			// the only routes that may still use a prior workspace grant while
+			// its 30-day recovery window is open.
+			role, ok := matchEntryForRequest(r, index, orgUUID, workspaceUUID)
 			if !ok {
 				if workspaceUUID == "" {
 					writeStatus(w, http.StatusForbidden, "Forbidden",
@@ -295,7 +300,8 @@ func Middleware(userResolver UserResolver, lookup MembershipLookup) func(next ht
 // org-scope requests (WorkspaceUUID == "") it returns the role of the
 // org-scope Membership entry (the one with empty WorkspaceUUID); for
 // workspace-scope requests it returns the role of the matching
-// workspace-scope entry.
+// workspace-scope entry. Soft-deleted entries never match here; callers that
+// need a recovery/lifecycle exception must use matchEntryForRequest.
 //
 // Returns ("", false) when no entry matches.
 func matchEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUUID string) (string, bool) {
@@ -306,11 +312,109 @@ func matchEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUU
 		if e.OrgUUID != orgUUID {
 			continue
 		}
-		if e.WorkspaceUUID == workspaceUUID {
+		if e.WorkspaceUUID == workspaceUUID && e.SoftDeletedAt == nil {
 			return e.Role, true
 		}
 	}
 	return "", false
+}
+
+// matchEntryForRequest applies the normal membership rule and the narrow
+// lifecycle exceptions needed to recover a workspace after the reconciler has
+// marked its UMI row SoftDeletedAt. The exceptions are deliberately based on
+// the concrete REST route: a soft-deleted membership must never authorize an
+// ordinary workspace API just because the caller was once an admin there.
+func matchEntryForRequest(r *http.Request, index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUUID string) (string, bool) {
+	if role, ok := matchEntry(index, orgUUID, workspaceUUID); ok {
+		return role, true
+	}
+
+	if workspaceUUID == "" && isWorkspaceListRequest(r) {
+		// A workspace-only grant still makes this one workspace visible in the
+		// switcher while it is recoverable. Return member here even when the
+		// historical row says admin: the empty workspace header means this is
+		// an Org-scope listing, not authorization as an Org administrator.
+		if hasWorkspaceEntry(index, orgUUID) {
+			return tenancyv1alpha1.MembershipRoleMember, true
+		}
+	}
+
+	if workspaceUUID != "" && (isWorkspaceDeleteRequest(r) || isWorkspaceUndeleteRequest(r)) {
+		if role, ok := softDeletedWorkspaceEntry(index, orgUUID, workspaceUUID); ok {
+			return role, true
+		}
+	}
+	return "", false
+}
+
+// hasWorkspaceEntry reports whether the caller has ever held a workspace
+// grant in this Org. It intentionally includes SoftDeletedAt rows: listing
+// is the recovery surface, while the ordinary workspace handlers still
+// require a live row through matchEntry.
+func hasWorkspaceEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID string) bool {
+	if index == nil {
+		return false
+	}
+	for _, e := range index.Spec.Entries {
+		if e.OrgUUID == orgUUID && e.WorkspaceUUID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func softDeletedWorkspaceEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUUID string) (string, bool) {
+	if index == nil {
+		return "", false
+	}
+	for _, e := range index.Spec.Entries {
+		if e.OrgUUID == orgUUID && e.WorkspaceUUID == workspaceUUID && e.SoftDeletedAt != nil {
+			return e.Role, true
+		}
+	}
+	return "", false
+}
+
+// isWorkspaceListRequest recognizes the one Org-scope route that remains
+// useful for a caller whose workspace row is in the soft-delete grace window.
+// The tenant middleware is mounted at /api/orgs, so checking the route shape
+// here keeps the exception from applying to unrelated handlers.
+func isWorkspaceListRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet || r.Header.Get(HeaderFarosWorkspace) != "" {
+		return false
+	}
+	parts := pathParts(r)
+	return len(parts) >= 1 && parts[len(parts)-1] == "workspaces"
+}
+
+func isWorkspaceDeleteRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodDelete {
+		return false
+	}
+	parts := pathParts(r)
+	workspaceUUID := r.Header.Get(HeaderFarosWorkspace)
+	return workspaceUUID != "" && len(parts) >= 2 && parts[len(parts)-2] == "workspaces" && parts[len(parts)-1] == workspaceUUID
+}
+
+func isWorkspaceUndeleteRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost {
+		return false
+	}
+	parts := pathParts(r)
+	workspaceUUID := r.Header.Get(HeaderFarosWorkspace)
+	return workspaceUUID != "" && len(parts) >= 3 && parts[len(parts)-3] == "workspaces" &&
+		parts[len(parts)-2] == workspaceUUID && parts[len(parts)-1] == "undelete"
+}
+
+func pathParts(r *http.Request) []string {
+	if r == nil || r.URL == nil {
+		return nil
+	}
+	path := strings.Trim(r.URL.Path, "/")
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, "/")
 }
 
 // writeStatus emits a minimal Kubernetes Status envelope so kubectl /

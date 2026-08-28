@@ -141,6 +141,13 @@ export const useProvidersStore = defineStore('providers', () => {
   const loaded = ref(false)
   const loading = ref(false)
   const error = ref<string | null>(null)
+  // CatalogEntry responses are organization-scoped: an org's own provider
+  // registration can shadow a platform entry with the same name. Keep the
+  // scope alongside the data so a late response from the previous org cannot
+  // repopulate the new org's catalog.
+  const catalogOrgUUID = ref<string | null>(null)
+  let catalogRequestSequence = 0
+  let catalogRequestOrg: string | null = null
 
   // bindingNamesByProvider maps provider-name → kcp APIBinding name in the
   // user's tenant workspace. Empty when the provider is not enabled for
@@ -164,6 +171,12 @@ export const useProvidersStore = defineStore('providers', () => {
   // the active workspace; callers that only read individual entries (the
   // sidebar, the Disable button) tolerate the staleness and don't need it.
   const bindingsWorkspace = ref<string | null>(null)
+  let bindingRequestSequence = 0
+  // Provider enables are long-lived writes (the hub may ask us to retry while
+  // it provisions the provider workspace). Keep a separate generation from
+  // catalog/binding reads so a completion for organization A cannot publish a
+  // binding into the currently selected organization/workspace B.
+  let enableRequestSequence = 0
 
   // ProviderNavItem captures one provider entry plus its declared sub-nav.
   // children[] carries the routes the side-nav renders indented under the
@@ -391,28 +404,86 @@ export const useProvidersStore = defineStore('providers', () => {
     return names.map((name) => dependencyLabel(name))
   }
 
-  async function load() {
-    if (loading.value) return
+  function clearBindings(invalidate = true) {
+    if (invalidate) bindingRequestSequence++
+    bindingNamesByProvider.value = {}
+    bindingsByProvider.value = {}
+    bindingsWorkspace.value = null
+  }
+
+  // Drop every org-scoped catalog value before starting the next org's read.
+  // In-flight requests are fenced by catalogRequestSequence, so a slow old
+  // response cannot restore the previous organization's providers.
+  function resetForOrganization() {
+    catalogRequestSequence++
+    enableRequestSequence++
+    catalogRequestOrg = null
+    loading.value = false
+    loaded.value = false
+    catalogOrgUUID.value = null
+    items.value = []
+    categories.value = []
+    error.value = null
+    clearBindings()
+  }
+
+  async function load(requestedOrgUUID?: string | null) {
+    // App.vue passes the reactive tenant selection when an org switch is
+    // already in flight. Falling back to localStorage keeps existing callers
+    // (including the initial auth bootstrap) compatible while ensuring a
+    // same-tick switch cannot start a request under the previous org.
+    const targetOrgUUID = requestedOrgUUID === undefined
+      ? readTenantSelection().orgUUID
+      : requestedOrgUUID
+    const hasExplicitOrg = requestedOrgUUID !== undefined
+    if (loading.value && catalogRequestOrg === targetOrgUUID) return
+    const requestSequence = ++catalogRequestSequence
+    catalogRequestOrg = targetOrgUUID
     loading.value = true
     error.value = null
     try {
-      const res = await authFetch('/api/providers', { tenant: true })
+      // The catalog is org-scoped, but this request may begin in the same
+      // tick as the tenant store's persistence watcher. Pass the captured
+      // org directly instead of asking authFetch to read potentially stale
+      // localStorage tenant headers.
+      const res = await authFetch('/api/providers', {
+        headers: targetOrgUUID ? { 'X-Faros-Org': targetOrgUUID } : undefined,
+      })
       if (!res.ok) {
         throw new Error(`provider list failed: ${res.status} ${res.statusText}`)
       }
       const body = (await res.json()) as ProvidersResponse
+      if (
+        requestSequence !== catalogRequestSequence ||
+        (!hasExplicitOrg && readTenantSelection().orgUUID !== targetOrgUUID)
+      ) return
       items.value = body.items ?? []
       categories.value = body.categories ?? []
+      catalogOrgUUID.value = targetOrgUUID
       loaded.value = true
       // Best-effort: also refresh the user's enabled set. Failure here
       // doesn't block the catalog from rendering.
-      await refreshBindings().catch(() => {
-        /* surfaced via Disable button being unavailable */
-      })
+      // During an org watcher flush, localStorage can still carry the old
+      // workspace selection. Do not issue a binding request under that stale
+      // scope; the auth-cluster watcher will refresh once the new workspace
+      // selection is persisted.
+      const currentSelection = readTenantSelection()
+      if (currentSelection.orgUUID === targetOrgUUID && currentSelection.workspaceMode !== 'organization') {
+        await refreshBindings().catch(() => {
+          /* surfaced via Disable button being unavailable */
+        })
+      }
     } catch (e) {
+      if (
+        requestSequence !== catalogRequestSequence ||
+        (!hasExplicitOrg && readTenantSelection().orgUUID !== targetOrgUUID)
+      ) return
       error.value = e instanceof Error ? e.message : String(e)
     } finally {
-      loading.value = false
+      if (requestSequence === catalogRequestSequence) {
+        loading.value = false
+        catalogRequestOrg = null
+      }
     }
   }
 
@@ -429,10 +500,18 @@ export const useProvidersStore = defineStore('providers', () => {
   // target workspace, with tenant.Middleware verifying the caller's
   // Membership upstream.
   async function refreshBindings() {
+    const requestSequence = ++bindingRequestSequence
     const t = readTenantSelection()
-    if (!t.orgUUID || !t.workspaceUUID) return
+    clearBindings(false)
+    // Organization-only mode is intentionally workspace-free. Even if an
+    // older tab has not observed the synchronous tenant normalization yet,
+    // never probe its stale workspace for enabled bindings.
+    if (t.workspaceMode === 'organization' || !t.orgUUID || !t.workspaceUUID) return
     const url = `/api/orgs/${encodeURIComponent(t.orgUUID)}/workspaces/${encodeURIComponent(t.workspaceUUID)}/providers/enabled`
     const res = await authFetch(url, { tenant: true })
+    if (requestSequence !== bindingRequestSequence) return
+    const current = readTenantSelection()
+    if (current.orgUUID !== t.orgUUID || current.workspaceUUID !== t.workspaceUUID) return
     if (!res.ok) throw new Error(`list enabled providers: ${res.status}`)
     const body = (await res.json()) as {
       bindingNamesByProvider?: Record<string, string>
@@ -474,6 +553,12 @@ export const useProvidersStore = defineStore('providers', () => {
     if (!t.orgUUID || !t.workspaceUUID) {
       throw new Error('select an organization and workspace before enabling a provider')
     }
+    const enableRequestGeneration = ++enableRequestSequence
+    const bindingGenerationAtStart = bindingRequestSequence
+    const isCurrentEnable = (): boolean =>
+      enableRequestGeneration === enableRequestSequence &&
+      bindingGenerationAtStart === bindingRequestSequence &&
+      sameTenantSelection(t, readTenantSelection())
 
     const body = {
       acceptedClaims: accept.map((c) => ({ group: c.group ?? '', resource: c.resource })),
@@ -488,6 +573,10 @@ export const useProvidersStore = defineStore('providers', () => {
     // with a manual page refresh. Non-409 failures are terminal — throw at once.
     const backoffMs = [750, 1250, 1750, 2500, 3000] // ~9s total across 6 attempts
     for (let attempt = 0; ; attempt++) {
+      // A workspace/org switch or a newer enable invalidates the old write.
+      // Do not continue posting a request whose completion can no longer be
+      // applied to the visible binding state.
+      if (!isCurrentEnable()) return
       const res = await authFetch(url, {
         method: 'POST',
         tenant: true,
@@ -500,24 +589,57 @@ export const useProvidersStore = defineStore('providers', () => {
         await new Promise((r) => setTimeout(r, backoffMs[attempt]))
         continue
       }
+      if (!isCurrentEnable()) return
       throw new Error(`enable ${p.name} failed: ${res.status} ${res.statusText} ${detail}`)
     }
-    bindingNamesByProvider.value = { ...bindingNamesByProvider.value, [p.name]: p.name }
+    if (!isCurrentEnable()) return
+    // Re-read the server-owned binding projection instead of optimistically
+    // mutating the map. The refresh is itself generation-fenced, and if the
+    // selection changed while the write completed it cannot retarget the new
+    // workspace or expose A's binding under B.
+    await refreshBindings()
   }
 
   // readTenantSelection mirrors the storage shape written by
   // tenant.ts's savePersisted — kept inline to avoid an import cycle
   // with @/stores/tenant. Used for the enable/disable request *body*;
   // the org/workspace request *headers* come from authFetch({tenant:true}).
-  function readTenantSelection(): { orgUUID: string | null; workspaceUUID: string | null } {
+  function readTenantSelection(): {
+    orgUUID: string | null
+    workspaceUUID: string | null
+    workspaceMode: 'workspace' | 'organization'
+  } {
     try {
       const raw = localStorage.getItem('faros:portal:tenant')
-      if (!raw) return { orgUUID: null, workspaceUUID: null }
-      const parsed = JSON.parse(raw) as { orgUUID?: string | null; workspaceUUID?: string | null }
-      return { orgUUID: parsed.orgUUID ?? null, workspaceUUID: parsed.workspaceUUID ?? null }
+      if (!raw) return { orgUUID: null, workspaceUUID: null, workspaceMode: 'workspace' }
+      const parsed = JSON.parse(raw) as {
+        orgUUID?: string | null
+        workspaceUUID?: string | null
+        workspaceMode?: 'workspace' | 'organization'
+      }
+      const orgUUID = parsed.orgUUID ?? null
+      const storedWorkspaceUUID = parsed.workspaceUUID ?? null
+      const workspaceMode = parsed.workspaceMode === 'organization' ||
+        (parsed.workspaceMode === undefined && orgUUID !== null && storedWorkspaceUUID === null)
+        ? 'organization'
+        : 'workspace'
+      return {
+        orgUUID,
+        workspaceUUID: workspaceMode === 'organization' ? null : storedWorkspaceUUID,
+        workspaceMode,
+      }
     } catch {
-      return { orgUUID: null, workspaceUUID: null }
+      return { orgUUID: null, workspaceUUID: null, workspaceMode: 'workspace' }
     }
+  }
+
+  function sameTenantSelection(
+    left: ReturnType<typeof readTenantSelection>,
+    right: ReturnType<typeof readTenantSelection>,
+  ): boolean {
+    return left.orgUUID === right.orgUUID &&
+      left.workspaceUUID === right.workspaceUUID &&
+      left.workspaceMode === right.workspaceMode
   }
 
   async function disable(p: ProviderDTO): Promise<void> {
@@ -558,6 +680,7 @@ export const useProvidersStore = defineStore('providers', () => {
     loaded,
     loading,
     error,
+    catalogOrgUUID,
     bindingNamesByProvider,
     bindingsWorkspace,
     enabledNavItems,
@@ -578,6 +701,8 @@ export const useProvidersStore = defineStore('providers', () => {
     dependencyLabel,
     dependencyLabels,
     load,
+    resetForOrganization,
+    clearBindings,
     refreshBindings,
     enable,
     disable,
