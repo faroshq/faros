@@ -227,6 +227,97 @@ func TestMiddleware_SoftDeletedWorkspaceStillListsAndUndeletes(t *testing.T) {
 	})
 }
 
+func TestMiddleware_SoftDeletedOrgUndeleteAllowed(t *testing.T) {
+	requestedAt := metav1.NewTime(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
+		OrgUUID:       "org-uuid",
+		Role:          tenancyv1alpha1.MembershipRoleAdmin,
+		SoftDeletedAt: &requestedAt,
+	})
+	resolver := UserResolverFunc(func(_ *http.Request) (string, error) { return "alice", nil })
+	lookup := MembershipLookupFunc(func(_ context.Context, _ string) (*tenancyv1alpha1.UserMembershipIndex, error) {
+		return index, nil
+	})
+
+	var got TenantContext
+	h := Middleware(resolver, lookup)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = FromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/org-uuid/undelete", nil)
+	req.Header.Set(HeaderFarosOrg, "org-uuid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	want := TenantContext{User: "alice", OrgUUID: "org-uuid", Role: tenancyv1alpha1.MembershipRoleAdmin}
+	if got != want {
+		t.Errorf("context: got %+v, want %+v", got, want)
+	}
+}
+
+func TestMiddleware_SoftDeletedOrgDeniedForOrdinaryAPI(t *testing.T) {
+	requestedAt := metav1.NewTime(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
+		OrgUUID:       "org-uuid",
+		Role:          tenancyv1alpha1.MembershipRoleAdmin,
+		SoftDeletedAt: &requestedAt,
+	})
+	resolver := UserResolverFunc(func(_ *http.Request) (string, error) { return "alice", nil })
+	lookup := MembershipLookupFunc(func(_ context.Context, _ string) (*tenancyv1alpha1.UserMembershipIndex, error) {
+		return index, nil
+	})
+	nextCalled := false
+	h := Middleware(resolver, lookup)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/orgs/org-uuid", nil)
+	req.Header.Set(HeaderFarosOrg, "org-uuid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status: got %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+	if nextCalled {
+		t.Error("ordinary Org API reached handler with a soft-deleted membership")
+	}
+}
+
+func TestMiddleware_SoftDeletedOrgUndeleteBindsPathOrg(t *testing.T) {
+	requestedAt := metav1.NewTime(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	index := fakeIndex("alice", tenancyv1alpha1.MembershipIndexEntry{
+		OrgUUID:       "org-uuid",
+		Role:          tenancyv1alpha1.MembershipRoleAdmin,
+		SoftDeletedAt: &requestedAt,
+	})
+	resolver := UserResolverFunc(func(_ *http.Request) (string, error) { return "alice", nil })
+	lookup := MembershipLookupFunc(func(_ context.Context, _ string) (*tenancyv1alpha1.UserMembershipIndex, error) {
+		return index, nil
+	})
+	nextCalled := false
+	h := Middleware(resolver, lookup)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orgs/other-org/undelete", nil)
+	req.Header.Set(HeaderFarosOrg, "org-uuid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status: got %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+	if nextCalled {
+		t.Error("Org undelete reached handler when path Org differed from X-Faros-Org")
+	}
+}
+
 func TestMiddleware_MissingOrgHeader(t *testing.T) {
 	resolver := UserResolverFunc(func(_ *http.Request) (string, error) { return "alice", nil })
 	lookup := MembershipLookupFunc(func(_ context.Context, _ string) (*tenancyv1alpha1.UserMembershipIndex, error) {

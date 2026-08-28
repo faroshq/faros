@@ -266,11 +266,12 @@ func Middleware(userResolver UserResolver, lookup MembershipLookup) func(next ht
 				return
 			}
 
-			// Step 5: find the matching entry. Soft-deleted workspace rows are
-			// intentionally excluded from ordinary workspace authorization. The
-			// workspace list and the two lifecycle actions (delete/undelete) are
-			// the only routes that may still use a prior workspace grant while
-			// its 30-day recovery window is open.
+			// Step 5: find the matching entry. Soft-deleted org and workspace rows
+			// are intentionally excluded from ordinary authorization. The exact
+			// org undelete route may use a prior org-scope grant, while the
+			// workspace list and the two workspace lifecycle actions
+			// (delete/undelete) may use a prior workspace grant during its 30-day
+			// recovery window.
 			role, ok := matchEntryForRequest(r, index, orgUUID, workspaceUUID)
 			if !ok {
 				if workspaceUUID == "" {
@@ -320,16 +321,23 @@ func matchEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUU
 }
 
 // matchEntryForRequest applies the normal membership rule and the narrow
-// lifecycle exceptions needed to recover a workspace after the reconciler has
-// marked its UMI row SoftDeletedAt. The exceptions are deliberately based on
-// the concrete REST route: a soft-deleted membership must never authorize an
-// ordinary workspace API just because the caller was once an admin there.
+// lifecycle exceptions needed to recover an Org or Workspace after the
+// reconciler has marked its UMI row SoftDeletedAt. The exceptions are
+// deliberately based on the concrete REST route: a soft-deleted membership
+// must never authorize an ordinary Org or Workspace API just because the
+// caller was once an admin there.
 func matchEntryForRequest(r *http.Request, index *tenancyv1alpha1.UserMembershipIndex, orgUUID, workspaceUUID string) (string, bool) {
 	if role, ok := matchEntry(index, orgUUID, workspaceUUID); ok {
 		return role, true
 	}
 
-	if workspaceUUID == "" && isWorkspaceListRequest(r) {
+	if workspaceUUID == "" && isOrgUndeleteRequest(r, orgUUID) {
+		if role, ok := softDeletedOrgEntry(index, orgUUID); ok {
+			return role, true
+		}
+	}
+
+	if workspaceUUID == "" && isWorkspaceListRequest(r) && requestPathOrgMatches(r, orgUUID) {
 		// A workspace-only grant still makes this one workspace visible in the
 		// switcher while it is recoverable. Return member here even when the
 		// historical row says admin: the empty workspace header means this is
@@ -339,7 +347,8 @@ func matchEntryForRequest(r *http.Request, index *tenancyv1alpha1.UserMembership
 		}
 	}
 
-	if workspaceUUID != "" && (isWorkspaceDeleteRequest(r) || isWorkspaceUndeleteRequest(r)) {
+	if workspaceUUID != "" && requestPathOrgMatches(r, orgUUID) &&
+		(isWorkspaceDeleteRequest(r) || isWorkspaceUndeleteRequest(r)) {
 		if role, ok := softDeletedWorkspaceEntry(index, orgUUID, workspaceUUID); ok {
 			return role, true
 		}
@@ -373,6 +382,51 @@ func softDeletedWorkspaceEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUU
 		}
 	}
 	return "", false
+}
+
+// softDeletedOrgEntry returns the prior role for an org-scope membership in
+// the Org's recovery window. It is used only by the exact Org undelete route;
+// ordinary Org routes continue to require a live org-scope entry.
+func softDeletedOrgEntry(index *tenancyv1alpha1.UserMembershipIndex, orgUUID string) (string, bool) {
+	if index == nil {
+		return "", false
+	}
+	for _, e := range index.Spec.Entries {
+		if e.OrgUUID == orgUUID && e.WorkspaceUUID == "" && e.SoftDeletedAt != nil {
+			return e.Role, true
+		}
+	}
+	return "", false
+}
+
+// isOrgUndeleteRequest recognizes the only Org-scoped route that may use a
+// prior org-scope grant. The path Org must match X-Faros-Org, and a workspace
+// header is forbidden because this exception is not workspace-scoped.
+func isOrgUndeleteRequest(r *http.Request, orgUUID string) bool {
+	if r == nil || r.Method != http.MethodPost || orgUUID == "" || r.Header.Get(HeaderFarosWorkspace) != "" {
+		return false
+	}
+	parts := pathParts(r)
+	return len(parts) >= 4 && parts[len(parts)-3] == "orgs" && parts[len(parts)-2] == orgUUID &&
+		parts[len(parts)-1] == "undelete"
+}
+
+// requestPathOrgMatches binds lifecycle exceptions to the Org in their REST
+// path as well as the X-Faros-Org header. The middleware is mounted at
+// /api/orgs, so the route's orgs/{org} segment is the authoritative path
+// portion to compare here; handlers perform the same consistency check for
+// ordinary live-membership requests.
+func requestPathOrgMatches(r *http.Request, orgUUID string) bool {
+	if r == nil || orgUUID == "" {
+		return false
+	}
+	parts := pathParts(r)
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "orgs" {
+			return parts[i+1] == orgUUID
+		}
+	}
+	return false
 }
 
 // isWorkspaceListRequest recognizes the one Org-scope route that remains
