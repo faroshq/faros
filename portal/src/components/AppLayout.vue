@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick, watchEffect } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useTerminalSessionsStore } from '@/stores/terminalSessions'
@@ -84,6 +84,37 @@ watchEffect(() => {
   if (path === '/settings' || path.startsWith('/settings/') || path === '/providers' || path === '/organizations' || path.startsWith('/organizations/')) return
   void router.replace('/settings/workspaces')
 })
+
+// Keep the routed slot suppressed for the whole navigation transition, but
+// defer the explanatory shell so a fast workspace switch does not flash a
+// status message. Watching the token (rather than only its boolean state)
+// resets the timer for a newer switch that starts before an older navigation
+// settles.
+const WORKSPACE_TRANSITION_INDICATOR_DELAY_MS = 200
+const showWorkspaceTransitionIndicator = ref(false)
+let workspaceTransitionTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearWorkspaceTransitionTimer(): void {
+  if (workspaceTransitionTimer === undefined) return
+  clearTimeout(workspaceTransitionTimer)
+  workspaceTransitionTimer = undefined
+}
+
+watch(
+  () => tenantStore.workspaceTransitionToken,
+  (token) => {
+    clearWorkspaceTransitionTimer()
+    showWorkspaceTransitionIndicator.value = false
+    if (token === null) return
+    workspaceTransitionTimer = setTimeout(() => {
+      workspaceTransitionTimer = undefined
+      if (tenantStore.workspaceTransitionToken === token) {
+        showWorkspaceTransitionIndicator.value = true
+      }
+    }, WORKSPACE_TRANSITION_INDICATOR_DELAY_MS)
+  },
+  { immediate: true, flush: 'sync' },
+)
 
 const mainPaddingBottom = computed(() => {
   if (!terminalStore.isVisible || terminalStore.sessions.length === 0) return undefined
@@ -370,6 +401,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragEnd)
+  clearWorkspaceTransitionTimer()
   // TerminalDock outlives routed layouts. Never carry this page's dock
   // clearance into standalone shells such as platform admin or login.
   setLayoutInsets({ left: '0px', right: '0px', bottom: '0px' })
@@ -807,7 +839,17 @@ watchEffect(() => {
         auth cluster.
       -->
       <div :key="auth.clusterName ?? 'unauth'" :class="slotClass">
-        <FirstWorkspaceWizard v-if="showWorkspaceWizard" />
+        <div
+          v-if="tenantStore.workspaceTransitioning"
+          class="flex min-h-52 flex-col items-center justify-center px-4 py-12 text-center"
+          aria-busy="true"
+        >
+          <div v-if="showWorkspaceTransitionIndicator" class="flex flex-col items-center">
+            <Loader2 class="h-5 w-5 animate-spin text-accent" :stroke-width="1.75" aria-hidden="true" />
+            <p class="mt-3 text-[13px] font-semibold text-text-primary">Switching workspace…</p>
+          </div>
+        </div>
+        <FirstWorkspaceWizard v-else-if="showWorkspaceWizard" />
         <div v-else-if="showWorkspacePending" class="flex min-h-52 flex-col items-center justify-center px-4 py-12 text-center">
           <Loader2 v-if="tenantStore.workspaceLoadState !== 'error'" class="h-5 w-5 animate-spin text-accent" :stroke-width="1.75" aria-hidden="true" />
           <p class="mt-3 text-[13px] font-semibold text-text-primary">

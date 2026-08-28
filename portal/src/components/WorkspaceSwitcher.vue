@@ -89,18 +89,23 @@ function workspaceStatus(workspace: WorkspaceRow): 'Ready' | 'Pending' | 'Deleti
   return workspace.clusterName ? 'Ready' : 'Pending'
 }
 
-function chooseWorkspace(workspace: WorkspaceRow) {
+async function chooseWorkspace(workspace: WorkspaceRow): Promise<void> {
   // The hub withholds clusterName until the workspace's kcp cluster is
   // serving. A pending row must not replace a usable cluster context.
   if (!isWorkspaceUsable(workspace)) return
   const changed = tenant.selectWorkspace(workspace.uuid)
-  close({ restoreFocus: true })
   // A successful switch starts a new workspace-scoped session. Returning to
   // the named dashboard route keeps provider/detail URLs from being replayed
   // against the new workspace before their own data has been revalidated.
   // Same/current selections return false and stay on the current route.
+  close({ restoreFocus: true })
   if (!changed) return
-  void router.replace({ name: 'dashboard' })
+  const transitionToken = tenant.beginWorkspaceTransition()
+  try {
+    await router.replace({ name: 'dashboard' })
+  } finally {
+    tenant.endWorkspaceTransition(transitionToken)
+  }
 }
 
 function manageWorkspaces() {

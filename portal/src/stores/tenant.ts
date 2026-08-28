@@ -333,6 +333,26 @@ export const useTenantStore = defineStore('tenant', () => {
   let selectionRevision = 0
   let workspaceCreationSequence = 0
 
+  // Workspace switches briefly invalidate the routed provider surface while
+  // the dashboard route is being restored. Keep that interval explicit so
+  // the shell can suppress the outgoing provider before its stale access
+  // checks render an unavailable state. The token is monotonic because a
+  // second switch may begin before the first navigation settles; an older
+  // finally must never clear the newer transition.
+  const workspaceTransitionToken = ref<number | null>(null)
+  let workspaceTransitionSequence = 0
+
+  function beginWorkspaceTransition(): number {
+    const token = ++workspaceTransitionSequence
+    workspaceTransitionToken.value = token
+    return token
+  }
+
+  function endWorkspaceTransition(token: number): void {
+    if (workspaceTransitionToken.value !== token) return
+    workspaceTransitionToken.value = null
+  }
+
   function isCurrentWorkspaceCreate(
     targetOrgUUID: string,
     creationSequence: number,
@@ -360,6 +380,7 @@ export const useTenantStore = defineStore('tenant', () => {
     orgUUID.value ? workspaceLoadStateByOrg.value[orgUUID.value] ?? 'idle' : 'idle',
   )
   const workspaceSelectionHydrated = computed(() => workspaceLoadState.value === 'ready')
+  const workspaceTransitioning = computed(() => workspaceTransitionToken.value !== null)
 
   // Whenever the selection changes, mirror to localStorage so a
   // refresh keeps the same active context.
@@ -1200,6 +1221,8 @@ export const useTenantStore = defineStore('tenant', () => {
     activeWorkspaceUsable,
     workspaceLoadState,
     workspaceSelectionHydrated,
+    workspaceTransitionToken,
+    workspaceTransitioning,
     // actions: selection
     tenantHeaders,
     fetchOrgs,
@@ -1207,6 +1230,8 @@ export const useTenantStore = defineStore('tenant', () => {
     selectOrg,
     selectOrganization,
     selectWorkspace,
+    beginWorkspaceTransition,
+    endWorkspaceTransition,
     bootstrap,
     // actions: org
     createOrg,
