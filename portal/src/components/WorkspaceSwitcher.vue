@@ -93,8 +93,14 @@ function chooseWorkspace(workspace: WorkspaceRow) {
   // The hub withholds clusterName until the workspace's kcp cluster is
   // serving. A pending row must not replace a usable cluster context.
   if (!isWorkspaceUsable(workspace)) return
-  tenant.selectWorkspace(workspace.uuid)
+  const changed = tenant.selectWorkspace(workspace.uuid)
   close({ restoreFocus: true })
+  // A successful switch starts a new workspace-scoped session. Returning to
+  // the named dashboard route keeps provider/detail URLs from being replayed
+  // against the new workspace before their own data has been revalidated.
+  // Same/current selections return false and stay on the current route.
+  if (!changed) return
+  void router.replace({ name: 'dashboard' })
 }
 
 function manageWorkspaces() {
