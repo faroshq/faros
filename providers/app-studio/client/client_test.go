@@ -148,7 +148,7 @@ func TestGraphQLResourceListForwardsAndAppliesLabelSelector(t *testing.T) {
 	}
 }
 
-func TestGraphQLProjectDeleteHonorsUIDPrecondition(t *testing.T) {
+func TestGraphQLProjectDeleteUsesNativeUIDPrecondition(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
 		expectedUID  types.UID
@@ -156,27 +156,35 @@ func TestGraphQLProjectDeleteHonorsUIDPrecondition(t *testing.T) {
 		wantDeletes  int
 	}{
 		{name: "matching identity deletes", expectedUID: "project-current", wantDeletes: 1},
-		{name: "reused name fails closed", expectedUID: "project-old", wantConflict: true},
+		{name: "API server rejects a reused name", expectedUID: "project-old", wantConflict: true, wantDeletes: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			deleteCalls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var req struct {
-					Query string `json:"query"`
+				if r.Method != http.MethodDelete {
+					t.Fatalf("method = %s, want DELETE", r.Method)
 				}
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					t.Fatalf("decode GraphQL request: %v", err)
+				if got, want := r.URL.Path, "/clusters/cluster-id/apis/ai.faros.sh/v1alpha1/projects/demo"; got != want {
+					t.Fatalf("delete path = %q, want %q", got, want)
 				}
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case strings.Contains(req.Query, "ProjectYaml"):
-					_, _ = w.Write([]byte(`{"data":{"ai_faros_sh":{"v1alpha1":{"ProjectYaml":"apiVersion: ai.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\n  uid: project-current\n"}}}}`))
-				case strings.Contains(req.Query, "deleteProject"):
-					deleteCalls++
-					_, _ = w.Write([]byte(`{"data":{"ai_faros_sh":{"v1alpha1":{"deleteProject":true}}}}`))
-				default:
-					t.Fatalf("unexpected GraphQL query: %s", req.Query)
+				if got := r.Header.Get("Authorization"); got != "Bearer caller-token" {
+					t.Fatalf("Authorization = %q, want caller token", got)
 				}
+				var opts metav1.DeleteOptions
+				if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+					t.Fatalf("decode delete options: %v", err)
+				}
+				if opts.Preconditions == nil || opts.Preconditions.UID == nil || *opts.Preconditions.UID != tt.expectedUID {
+					t.Fatalf("delete preconditions = %#v, want UID %q", opts.Preconditions, tt.expectedUID)
+				}
+				deleteCalls++
+				if tt.wantConflict {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"UID precondition failed","reason":"Conflict","code":409}`))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
 			}))
 			t.Cleanup(server.Close)
 
