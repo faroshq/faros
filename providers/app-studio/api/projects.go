@@ -93,7 +93,15 @@ func (s *Server) consumeProjectInitialBootstrap(ctx context.Context, scope store
 }
 
 type ProjectView struct {
-	Name           string                        `json:"name"`
+	Name string `json:"name"`
+	// UID is the immutable Kubernetes identity. Project names may be reused
+	// after an asynchronous delete, so portal mutations must never key on name
+	// alone.
+	UID string `json:"uid"`
+	// Deleting is derived from metadata.deletionTimestamp, not from the
+	// controller's eventually-updated status phase. This keeps terminating
+	// projects visibly locked while their finalizers complete.
+	Deleting       bool                          `json:"deleting"`
 	DisplayName    string                        `json:"displayName"`
 	Description    string                        `json:"description,omitempty"`
 	Phase          string                        `json:"phase,omitempty"`
@@ -1608,6 +1616,8 @@ func projectView(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project,
 	p = projectWithLiveBindingStatus(ctx, c, p, id)
 	view := ProjectView{
 		Name:         p.Name,
+		UID:          string(p.UID),
+		Deleting:     p.DeletionTimestamp != nil,
 		DisplayName:  p.Spec.DisplayName,
 		Description:  p.Spec.Description,
 		Phase:        p.Status.Phase,
