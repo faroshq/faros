@@ -745,9 +745,18 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := mux.Vars(r)["project"]
+	expectedUID := strings.TrimSpace(r.URL.Query().Get("uid"))
+	if expectedUID == "" {
+		writeStatus(w, http.StatusBadRequest, "BadRequest", "project UID is required; refresh the project list and try again")
+		return
+	}
 	p, err := c.Projects().Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		writeProjectError(w, err)
+		return
+	}
+	if string(p.UID) != expectedUID {
+		writeStatus(w, http.StatusConflict, "Conflict", "project identity changed; refresh the project list before deleting")
 		return
 	}
 	messageScope := projectMessageScope(id.orgUUID, id.workspaceUUID, p)
@@ -784,7 +793,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := c.Projects().Delete(r.Context(), name, metav1.DeleteOptions{}); err != nil {
+	uid := p.UID
+	if err := c.Projects().Delete(r.Context(), name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil {
 		writeProjectError(w, err)
 		return
 	}

@@ -511,7 +511,7 @@ test('restores the opening Share mode on every unsaved exit while reflecting suc
   assert.ok(settingsExit.includes('restorePreviewDraft()'))
   assert.ok(settingsExit.includes("emit('open-publishing')"))
 
-  assert.match(dialog, /function restorePreviewDraft\(\)[\s\S]*emit\('update:previewMode', initialPreviewMode\.value\)/)
+  assert.match(dialog, /function restorePreviewDraft\(\)[\s\S]*emit\('update:previewMode', props\.previewSavedMode\)/)
 
   const parentCloseStart = app.indexOf('function closeShareDialog()')
   const parentSettingsStart = app.indexOf('function openPublishingFromShare()', parentCloseStart)
@@ -521,4 +521,21 @@ test('restores the opening Share mode on every unsaved exit while reflecting suc
   const publishEnd = app.indexOf('\n\nasync function unpublishCurrentProject', publishStart)
   assert.ok(publishEnd > publishStart)
   assert.ok(app.slice(publishStart, publishEnd).includes("shareMode.value = state.publication?.mode === 'public' ? 'public' : mode"))
+})
+
+test('keeps Preview edits dirty until the API acknowledges the desired mode', () => {
+  assert.match(dialog, /previewSavedMode\?: ProjectPublishingMode/)
+  assert.match(dialog, /sharePreviewAccessDraftState\([\s\S]*selectedPreviewMode\.value,[\s\S]*props\.previewSavedMode,[\s\S]*props\.previewSupported,[\s\S]*props\.previewConverged/)
+  assert.match(dialog, /const previewDirty = computed\(\(\) => previewDraftState\.value\.dirty\)/)
+  assert.match(dialog, /const previewPending = computed\(\(\) => previewDraftState\.value\.pending\)/)
+  assert.doesNotMatch(dialog, /watch\(\(\) => props\.previewMode/)
+  assert.doesNotMatch(dialog, /initialPreviewMode|previewModeTouched/)
+  assert.match(app, /:preview-saved-mode="previewAccess\?\.mode === 'public' \? 'public' : 'restricted'"/)
+
+  const saveStart = app.indexOf('async function savePreviewAccess()')
+  const saveEnd = app.indexOf('async function grantCurrentProjectPreviewAccess', saveStart)
+  assert.ok(saveStart >= 0 && saveEnd > saveStart)
+  const save = app.slice(saveStart, saveEnd)
+  assert.match(save, /previewAccess\.value = state/)
+  assert.match(save, /previewMode\.value = state\.mode === 'public' \? 'public' : 'restricted'/)
 })

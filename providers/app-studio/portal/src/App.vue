@@ -5907,7 +5907,7 @@ async function requestDeleteProject(project: Project) {
   projectDeletionRetry.value = null
   invalidateProjectListRequests()
   try {
-    await api.deleteProject(props.ctx, name)
+    await api.deleteProject(props.ctx, name, target.uid ?? '')
     // Use the scope captured before the await. The active identity may have
     // changed while the server deleted the old project.
     projectDeletion.acknowledge(operation)
@@ -9741,6 +9741,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
     :members="publishingMembers"
     :grants="publishing?.grants ?? []"
     v-model:preview-mode="previewMode"
+    :preview-saved-mode="previewAccess?.mode === 'public' ? 'public' : 'restricted'"
     :preview-url="previewAccess?.url ?? ''"
     :preview-supported="Boolean(previewAccess?.supported)"
     :preview-converged="previewAccess?.converged !== false"

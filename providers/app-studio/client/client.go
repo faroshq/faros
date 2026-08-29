@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -306,7 +307,25 @@ func (g *gqlResource) UpdateStatus(ctx context.Context, obj *unstructured.Unstru
 	return obj, nil
 }
 
-func (g *gqlResource) Delete(ctx context.Context, name string, _ metav1.DeleteOptions, _ ...string) error {
+func (g *gqlResource) Delete(ctx context.Context, name string, opts metav1.DeleteOptions, _ ...string) error {
+	// The gateway's generated delete mutation does not expose Kubernetes
+	// DeleteOptions. Do not silently discard an identity precondition: compare
+	// the live object immediately before the mutation and fail closed if the
+	// name has been reused. Dynamic clients still forward the same precondition
+	// atomically to the API server.
+	if opts.Preconditions != nil && opts.Preconditions.UID != nil {
+		current, err := g.scope.Get(ctx, g.res, g.namespace, name)
+		if err != nil {
+			return err
+		}
+		if current.GetUID() != *opts.Preconditions.UID {
+			return apierrors.NewConflict(
+				g.res.GVR.GroupResource(),
+				name,
+				fmt.Errorf("UID precondition failed: expected %q, found %q", *opts.Preconditions.UID, current.GetUID()),
+			)
+		}
+	}
 	return g.scope.Delete(ctx, g.res, g.namespace, name)
 }
 

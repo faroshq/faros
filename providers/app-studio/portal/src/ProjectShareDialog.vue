@@ -4,6 +4,7 @@ import { Check, Copy, ExternalLink, Link2, Loader2, MonitorPlay, Rocket, Users, 
 import { copyTextWithFallback } from './clipboard'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import { confirmDialog, confirmState } from './portalkit/confirm'
+import { sharePreviewAccessDraftState } from './sharePreviewAccess'
 import type { ProjectPublishingGrant, ProjectPublishingMember, ProjectPublishingMode } from './types'
 
 type ShareLoadState = 'idle' | 'loading' | 'partial' | 'ready' | 'error'
@@ -32,6 +33,9 @@ const props = withDefaults(defineProps<{
   // just-changed mode, so the dialog says pending instead of claiming the URL
   // already changed hands.
   previewMode?: ProjectPublishingMode
+  // API-acknowledged desired mode. Keep this separate from previewMode, which
+  // is the editable v-model draft echoed by the parent before any save occurs.
+  previewSavedMode?: ProjectPublishingMode
   previewURL?: string
   previewSupported?: boolean
   previewConverged?: boolean
@@ -49,6 +53,7 @@ const props = withDefaults(defineProps<{
   publicationStateAvailable: false,
   productionURL: '',
   previewMode: 'restricted',
+  previewSavedMode: 'restricted',
   previewURL: '',
   previewSupported: false,
   previewConverged: true,
@@ -100,12 +105,9 @@ const selectedMode = computed({
     emit('update:mode', mode)
   },
 })
-const initialPreviewMode = ref(props.previewMode)
-const previewModeTouched = ref(false)
 const selectedPreviewMode = computed({
   get: () => props.previewMode,
   set: (mode: ProjectPublishingMode) => {
-    previewModeTouched.value = true
     emit('update:previewMode', mode)
   },
 })
@@ -116,8 +118,14 @@ const previewActiveGrants = computed(() => props.previewGrants.filter((grant) =>
 const previewAvailableMembers = computed(() => props.members.filter((member) => (
   !previewActiveGrants.value.some((grant) => grant.user === member.user)
 )))
-const previewDirty = computed(() => props.previewSupported && selectedPreviewMode.value !== initialPreviewMode.value)
-const previewPending = computed(() => props.previewSupported && !previewDirty.value && !props.previewConverged)
+const previewDraftState = computed(() => sharePreviewAccessDraftState(
+  selectedPreviewMode.value,
+  props.previewSavedMode,
+  props.previewSupported,
+  props.previewConverged,
+))
+const previewDirty = computed(() => previewDraftState.value.dirty)
+const previewPending = computed(() => previewDraftState.value.pending)
 // Same rule as production: grants only make sense on a restricted channel, and
 // a draft mode must be saved first so a public preview cannot take a grant.
 const previewShowViewers = computed(() => props.previewSupported && selectedPreviewMode.value === 'restricted')
@@ -230,10 +238,7 @@ function restoreProductionDraft() {
 }
 
 function restorePreviewDraft() {
-  if (previewModeTouched.value && selectedPreviewMode.value !== initialPreviewMode.value) {
-    emit('update:previewMode', initialPreviewMode.value)
-  }
-  previewModeTouched.value = false
+  if (selectedPreviewMode.value !== props.previewSavedMode) emit('update:previewMode', props.previewSavedMode)
 }
 
 function restoreChannelDraft(channel: ShareChannel) {
@@ -288,9 +293,7 @@ async function focusDialog() {
 watch(() => props.open, (open) => {
   if (open) {
     initialMode.value = props.mode
-    initialPreviewMode.value = props.previewMode
     modeTouched.value = false
-    previewModeTouched.value = false
     editingChannel.value = props.loading ? null : defaultEditingChannel()
     void focusDialog()
   } else {
@@ -300,7 +303,6 @@ watch(() => props.open, (open) => {
     productionCopyState.value = 'idle'
     previewCopyState.value = 'idle'
     modeTouched.value = false
-    previewModeTouched.value = false
     editingChannel.value = null
   }
 })
@@ -308,18 +310,7 @@ watch(() => props.open, (open) => {
 watch(() => props.loading, (loading, wasLoading) => {
   if (!props.open || !wasLoading || loading) return
   if (!modeTouched.value) initialMode.value = props.mode
-  if (!previewModeTouched.value) initialPreviewMode.value = props.previewMode
   if (!editingChannel.value) editingChannel.value = defaultEditingChannel()
-})
-
-// Once the saved preview mode matches the selection, the edit is no longer a
-// draft — same settle rule the production channel uses.
-watch(() => props.previewMode, (mode) => {
-  if (!props.open || props.loading || !previewModeTouched.value) return
-  if (mode === selectedPreviewMode.value && props.previewConverged) {
-    initialPreviewMode.value = mode
-    previewModeTouched.value = false
-  }
 })
 
 watch(() => [props.published, props.publication?.mode] as const, ([published, publicationMode]) => {

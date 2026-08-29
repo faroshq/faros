@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -144,5 +145,60 @@ func TestGraphQLResourceListForwardsAndAppliesLabelSelector(t *testing.T) {
 	}
 	if len(got.Items) != 1 || got.Items[0].GetName() != "app-a" {
 		t.Fatalf("packages = %#v, want only app-a", got.Items)
+	}
+}
+
+func TestGraphQLProjectDeleteHonorsUIDPrecondition(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		expectedUID  types.UID
+		wantConflict bool
+		wantDeletes  int
+	}{
+		{name: "matching identity deletes", expectedUID: "project-current", wantDeletes: 1},
+		{name: "reused name fails closed", expectedUID: "project-old", wantConflict: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deleteCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Query string `json:"query"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode GraphQL request: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(req.Query, "ProjectYaml"):
+					_, _ = w.Write([]byte(`{"data":{"ai_faros_sh":{"v1alpha1":{"ProjectYaml":"apiVersion: ai.faros.sh/v1alpha1\nkind: Project\nmetadata:\n  name: demo\n  uid: project-current\n"}}}}`))
+				case strings.Contains(req.Query, "deleteProject"):
+					deleteCalls++
+					_, _ = w.Write([]byte(`{"data":{"ai_faros_sh":{"v1alpha1":{"deleteProject":true}}}}`))
+				default:
+					t.Fatalf("unexpected GraphQL query: %s", req.Query)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			graphQL := tenant.NewGraphQLClient(server.URL, false)
+			scope, err := graphQL.For("cluster-id", "caller-token")
+			if err != nil {
+				t.Fatalf("create GraphQL scope: %v", err)
+			}
+			client := NewFromGraphQL(scope)
+			err = client.Projects().Delete(context.Background(), "demo", metav1.DeleteOptions{
+				Preconditions: &metav1.Preconditions{UID: &tt.expectedUID},
+			})
+			if tt.wantConflict {
+				if !apierrors.IsConflict(err) {
+					t.Fatalf("Delete error = %v, want conflict", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if deleteCalls != tt.wantDeletes {
+				t.Fatalf("delete mutation calls = %d, want %d", deleteCalls, tt.wantDeletes)
+			}
+		})
 	}
 }
