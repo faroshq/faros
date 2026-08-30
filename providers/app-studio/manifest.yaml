@@ -98,5 +98,6 @@ spec:
       - name: assistant.runSandbox.mode
         value: "on"
         description: >-
-          Enables universal sandboxes when this App Studio and Infrastructure
-          are both self-hosted by the organization.
+          Enables universal sandboxes when this self-hosted App Studio and the
+          workspace's platform or same-organization Infrastructure binding are
+          both valid; the exact Infrastructure export remains fenced.

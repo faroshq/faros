@@ -495,6 +495,25 @@ func (r *Registry) GetForOrg(orgUUID, name string) (Provider, bool) {
 	return cloneProvider(*p), true
 }
 
+// GetByNameAndExportPath returns the one registry record whose provider name
+// and APIExport path both match exactly. Unlike GetForOrg, it does not infer a
+// scope from the caller: the APIBinding selector has already established the
+// export path, and that path is the authority for choosing between a
+// same-name platform and organization-owned provider.
+func (r *Registry) GetByNameAndExportPath(name, exportPath string) (Provider, bool) {
+	if name == "" || exportPath == "" {
+		return Provider{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for key, p := range r.byKey {
+		if key.Name == name && p.APIExportPath == exportPath {
+			return cloneProvider(*p), true
+		}
+	}
+	return Provider{}, false
+}
+
 // List returns a snapshot of every registered provider across all scopes.
 // Callers serving a tenant must use ListForOrg instead; this is for the
 // sweeper and admin surfaces that legitimately span orgs.

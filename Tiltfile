@@ -1088,6 +1088,11 @@ local_resource(
         'providers/edges/portal/src',
         'providers/edges/portal/package.json',
         'providers/edges/go.mod',
+        # Restart whenever edges-init writes/updates the runtime kubeconfig.
+        # The provider still starts in health-only mode while the file is
+        # absent, but the controller manager needs this restart to activate
+        # after init provisions the provider workspace and token.
+        '.kcp/edges-runtime.kubeconfig',
     ],
     resource_deps=['hub'],
     readiness_probe=probe(
@@ -1143,7 +1148,7 @@ local_resource(
     cmd='kubectl config delete-context faros >/dev/null 2>&1 || true; kubectl config delete-cluster faros >/dev/null 2>&1 || true; rm -f ~/.faros/agent-dev-edge-kube-1.kubeconfig ~/.faros/agent-dev-edge-kube-1.json && make dev-login-static && make dev-edge-create TYPE=kubernetes DEV_EDGE_NAME=dev-edge-kube-1',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub'],
+    resource_deps=['hub', 'edges-init', 'edges'],
     labels=['edges'],
 )
 
@@ -1165,7 +1170,7 @@ local_resource(
     cmd='kubectl config delete-context faros >/dev/null 2>&1 || true; kubectl config delete-cluster faros >/dev/null 2>&1 || true; rm -f ~/.faros/agent-dev-edge-server-1.kubeconfig ~/.faros/agent-dev-edge-server-1.json && make dev-login-static && make dev-edge-create TYPE=server DEV_EDGE_NAME=dev-edge-server-1',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub'],
+    resource_deps=['hub', 'edges-init', 'edges'],
     labels=['edges'],
 )
 

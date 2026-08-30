@@ -97,12 +97,12 @@ func TestCodingSandboxBindingMatrixE2E(t *testing.T) {
 		{
 			name: "hybrid SaaS App Studio BYO Infrastructure", mode: CodingSandboxModeOn,
 			appStudio: platform["app-studio"], infrastructure: orgOwned["infrastructure"],
-			wantReason: "mixed platform and self-hosted ownership",
+			wantEligible: true, wantExport: orgOwned["infrastructure"].Path,
 		},
 		{
 			name: "hybrid BYO App Studio SaaS Infrastructure", mode: CodingSandboxModeOn,
 			appStudio: orgOwned["app-studio"], infrastructure: platform["infrastructure"],
-			wantReason: "mixed platform and self-hosted ownership",
+			wantEligible: true, wantExport: platform["infrastructure"].Path,
 		},
 	}
 

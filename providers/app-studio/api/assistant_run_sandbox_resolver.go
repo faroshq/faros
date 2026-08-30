@@ -72,24 +72,43 @@ func (s *Server) resolveCodingSandboxEligibilityFromHub(ctx context.Context, id 
 		return CodingSandboxEligibility{Reason: "App Studio or Infrastructure is being disabled in this workspace"}, nil
 	}
 
-	appStudioExport := strings.TrimSpace(appStudio.ExportPath)
 	infrastructureExport := strings.TrimSpace(infrastructure.ExportPath)
 	orgProviderPrefix := "root:faros:tenants:" + scope.OrgUUID + ":providers:"
 	orgAppStudioExport := orgProviderPrefix + "app-studio"
 	orgInfrastructureExport := orgProviderPrefix + "infrastructure"
 
-	switch {
-	case !appStudio.SelfHosted && !infrastructure.SelfHosted &&
-		appStudioExport == projectAssistantPlatformAppStudioExportPath &&
-		infrastructureExport == projectAssistantPlatformInfrastructureExportPath:
-		return eligibleCodingSandbox(infrastructureExport, "workspace uses platform App Studio and platform Infrastructure"), nil
-	case appStudio.SelfHosted && infrastructure.SelfHosted &&
-		appStudioExport == orgAppStudioExport && infrastructureExport == orgInfrastructureExport:
-		return eligibleCodingSandbox(infrastructureExport, "workspace uses same-organization App Studio and Infrastructure"), nil
-	case appStudio.SelfHosted != infrastructure.SelfHosted:
-		return CodingSandboxEligibility{Reason: "App Studio and Infrastructure use mixed platform and self-hosted ownership"}, nil
-	default:
+	if !validCodingSandboxProviderBinding(appStudio, "app-studio", projectAssistantPlatformAppStudioExportPath, orgAppStudioExport) ||
+		!validCodingSandboxProviderBinding(infrastructure, "infrastructure", projectAssistantPlatformInfrastructureExportPath, orgInfrastructureExport) {
 		return CodingSandboxEligibility{Reason: "App Studio or Infrastructure binding points at an unexpected provider export"}, nil
+	}
+
+	reason := "workspace uses platform App Studio and platform Infrastructure"
+	switch {
+	case appStudio.SelfHosted && infrastructure.SelfHosted:
+		reason = "workspace uses same-organization App Studio and Infrastructure"
+	case !appStudio.SelfHosted && infrastructure.SelfHosted:
+		reason = "workspace uses platform App Studio and same-organization Infrastructure"
+	case appStudio.SelfHosted && !infrastructure.SelfHosted:
+		reason = "workspace uses same-organization App Studio and platform Infrastructure"
+	}
+	return eligibleCodingSandbox(infrastructureExport, reason), nil
+}
+
+// validCodingSandboxProviderBinding accepts only the platform export with its
+// platform ownership flag or this Org's export with its self-hosted flag. The
+// path and flag are validated together so a malformed or foreign binding can
+// never select a sandbox transport.
+func validCodingSandboxProviderBinding(binding enabledProviderBinding, providerName, platformExport, orgExport string) bool {
+	if strings.TrimSpace(binding.BindingName) != providerName {
+		return false
+	}
+	switch strings.TrimSpace(binding.ExportPath) {
+	case platformExport:
+		return !binding.SelfHosted
+	case orgExport:
+		return binding.SelfHosted
+	default:
+		return false
 	}
 }
 

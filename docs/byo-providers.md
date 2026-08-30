@@ -233,16 +233,27 @@ to look up and paste is a chance to get it wrong.
 
 App Studio exposes one operator choice: `assistant.runSandbox.mode=off|on`.
 `off` always keeps the existing Template-backed development-image path. `on`
-allows the universal sandbox only when the workspace binds either platform App
-Studio plus platform Infrastructure, or self-hosted App Studio plus
-Infrastructure owned by the same organization. A mixed platform/self-hosted
-pair remains on the development-image path.
+allows the universal sandbox when the workspace has independently valid App
+Studio and Infrastructure bindings in any of the four supported ownership
+combinations: platform/platform, platform App Studio with same-organization
+self-hosted Infrastructure, same-organization self-hosted App Studio with
+platform Infrastructure, or same-organization self-hosted App Studio with
+same-organization self-hosted Infrastructure. Mixed ownership is therefore
+not, by itself, a reason to fall back to the development-image path.
+
+The Infrastructure binding remains exact: admission and checkpoint recovery
+carry the selected Infrastructure APIExport, and data-plane routing must use
+that same verified export. A run is not eligible for the universal sandbox if
+the selected export is missing, stale, or cannot be verified against the
+workspace binding. This export fence applies equally to platform and
+self-hosted providers.
 
 The hosted Faros deployment sets `off`. App Studio's self-host recipe supplies
 `on`, while Infrastructure's recipe enables its coding-sandbox Template and
 requires immutable universal and dev-agent image references. Operators may
-change the binary policy later; the workspace binding resolver still prevents
-one provider copy from sending sandbox work to a differently owned copy.
+change the binary policy later; the workspace binding resolver still validates
+each provider independently and prevents one provider copy from sending
+sandbox work to an unverified Infrastructure export.
 
 As a safety net, a value with no declared `value` is still filled in when the
 hub knows it authoritatively: `hub.url` / `hub.externalURL` / `hub.internalURL`,

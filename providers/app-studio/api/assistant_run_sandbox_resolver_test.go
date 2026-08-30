@@ -63,11 +63,11 @@ func TestProductionCodingSandboxResolverOwnershipMatrix(t *testing.T) {
 		},
 		{
 			name: "SaaS App Studio with BYO Infrastructure", appStudio: platformAppStudio, infrastructure: orgInfrastructure,
-			wantReason: "mixed platform and self-hosted ownership",
+			wantEligible: true, wantExport: orgInfrastructure.ExportPath,
 		},
 		{
 			name: "BYO App Studio with SaaS Infrastructure", appStudio: orgAppStudio, infrastructure: platformInfrastructure,
-			wantReason: "mixed platform and self-hosted ownership",
+			wantEligible: true, wantExport: platformInfrastructure.ExportPath,
 		},
 	}
 
@@ -129,6 +129,20 @@ func TestProductionCodingSandboxResolverHandlesBindingHealth(t *testing.T) {
 			name: "foreign Org export", bindings: map[string]enabledProviderBinding{
 				"app-studio":     {BindingName: "app-studio", ExportPath: "root:faros:tenants:org-b:providers:app-studio", SelfHosted: true},
 				"infrastructure": {BindingName: "infrastructure", ExportPath: "root:faros:tenants:org-b:providers:infrastructure", SelfHosted: true},
+			},
+			wantReason: "unexpected provider export",
+		},
+		{
+			name: "platform export marked self-hosted", bindings: map[string]enabledProviderBinding{
+				"app-studio":     {BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath, SelfHosted: true},
+				"infrastructure": platformInfrastructure,
+			},
+			wantReason: "unexpected provider export",
+		},
+		{
+			name: "Org export marked platform", bindings: map[string]enabledProviderBinding{
+				"app-studio":     platformAppStudio,
+				"infrastructure": {BindingName: "infrastructure", ExportPath: "root:faros:tenants:" + org + ":providers:infrastructure"},
 			},
 			wantReason: "unexpected provider export",
 		},

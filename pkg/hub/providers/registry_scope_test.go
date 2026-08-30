@@ -73,6 +73,29 @@ func TestRegistryGetIsGlobalOnly(t *testing.T) {
 	}
 }
 
+// A bound selector chooses by the APIExport path, not by the caller's Org
+// preference. Same-name platform and Org records therefore need an exact
+// lookup rather than GetForOrg's shadowing behavior.
+func TestRegistryGetByNameAndExportPath(t *testing.T) {
+	reg := NewRegistry()
+	platformPath := "root:faros:providers:vault"
+	orgPath := "root:faros:tenants:org1:providers:vault"
+	reg.Upsert(Provider{Name: "vault", DisplayName: "Platform Vault", APIExportPath: platformPath})
+	reg.Upsert(Provider{Name: "vault", OrgUUID: "org1", DisplayName: "Org1 Vault", APIExportPath: orgPath})
+
+	platform, ok := reg.GetByNameAndExportPath("vault", platformPath)
+	if !ok || platform.DisplayName != "Platform Vault" || platform.OrgUUID != "" {
+		t.Fatalf("platform lookup = %+v, %v; want platform record", platform, ok)
+	}
+	org, ok := reg.GetByNameAndExportPath("vault", orgPath)
+	if !ok || org.DisplayName != "Org1 Vault" || org.OrgUUID != "org1" {
+		t.Fatalf("org lookup = %+v, %v; want org1 record", org, ok)
+	}
+	if _, ok := reg.GetByNameAndExportPath("vault", "root:faros:providers:other"); ok {
+		t.Fatal("lookup resolved a provider with a different APIExport path")
+	}
+}
+
 func TestRegistryListForOrg(t *testing.T) {
 	reg := newScopedRegistry()
 

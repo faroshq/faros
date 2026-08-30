@@ -845,6 +845,17 @@ func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevis
 	if err != nil {
 		t.Fatalf("cold ensure: %v", err)
 	}
+	remote.mu.Lock()
+	initialIdentities := append([]identity(nil), remote.identities...)
+	remote.mu.Unlock()
+	if len(initialIdentities) != 3 {
+		t.Fatalf("cold setup worker identities = %d, want list, seed, and baseline calls", len(initialIdentities))
+	}
+	for i, got := range initialIdentities {
+		if got.providerExportPath != projectAssistantPlatformInfrastructureExportPath {
+			t.Errorf("cold setup worker identity %d provider export = %q, want %q", i, got.providerExportPath, projectAssistantPlatformInfrastructureExportPath)
+		}
+	}
 	if first.metadataSnapshot().RemoteRevision != 1 {
 		t.Fatalf("cold remote revision = %d, want worker-owned revision 1", first.metadataSnapshot().RemoteRevision)
 	}
@@ -1226,6 +1237,72 @@ func TestAttachProjectAssistantRunSandboxAllowsLegacyCheckpointWithoutSandbox(t 
 	release()
 }
 
+func TestAttachProjectAssistantRunSandboxCarriesCheckpointProviderExportToSandboxIdentity(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const runID = "run-attach"
+	const exportPath = "root:faros:tenants:org:providers:infrastructure"
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"}}
+	scope := workspace.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "demo", ProjectUID: "project-uid"}
+	name := projectAssistantRunSandboxName(scope, project, runID)
+	instance := newRunSandboxTestInstance(name, projectAssistantRunSandboxCacheStateActive, now)
+	instance.SetGeneration(1)
+	_ = unstructured.SetNestedField(instance.Object, readyRunSandboxStatus(1), "status")
+	annotations := instance.GetAnnotations()
+	annotations[projectAssistantRunSandboxClaimOwner] = runID
+	annotations[projectAssistantRunSandboxCacheGeneration] = runID
+	annotations[projectAssistantRunSandboxClaimExpiry] = now.Add(time.Hour).Format(time.RFC3339Nano)
+	instance.SetAnnotations(annotations)
+	template := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Template",
+		"metadata":   map[string]any{"name": projectAssistantRunSandboxDefaultTemplate},
+		"spec": map[string]any{"development": map[string]any{"components": map[string]any{
+			"workspace": map[string]any{"workspacePath": ".", "devImage": "${faros.devImage.universal}"},
+		}}},
+	}}
+	client := newRunSandboxTestClient(instance, template)
+	fake := &sandboxClientFake{}
+	server := &Server{
+		runSandboxConfig:     CodingSandboxConfig{Mode: CodingSandboxModeOn, ReplicaCount: 1},
+		runSandboxConfigured: true,
+		runSandboxClientFactory: func(*Server) projectAssistantSandboxClient {
+			return fake
+		},
+	}
+	server.codingSandboxResolver = func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error) {
+		return eligibleCodingSandbox(exportPath, "test provider pair"), nil
+	}
+	req := projectAssistantRunRequest{
+		Identity:       identity{orgUUID: "org", workspaceUUID: "ws", clusterID: "cluster", token: "token"},
+		Client:         client,
+		Project:        project,
+		WorkspaceScope: scope,
+		AssistantRun:   &store.AssistantRun{ID: runID},
+	}
+	checkpoint := &projectAssistantSandboxCheckpoint{Metadata: projectAssistantRunSandboxMetadata{
+		Version: 3, Status: "active", RunID: runID,
+		OrgUUID: "org", WorkspaceUUID: "ws", ProjectUID: "project-uid",
+		Template:            projectAssistantRunSandboxDefaultTemplate,
+		ProviderExportPath:  exportPath,
+		TransportGeneration: projectAssistantSandboxTransportGeneration,
+		Instance:            projectAssistantSandboxInstance{Name: name},
+		RemoteCheckpointID:  "baseline", CacheGeneration: runID,
+		HardExpiresAt: now.Add(time.Hour), IdleExpiresAt: now.Add(time.Minute),
+	}}
+	sandbox, release, err := server.attachProjectAssistantRunSandbox(ctx, req, newProjectEinoAssistantRunState(), checkpoint)
+	if err != nil {
+		t.Fatalf("attach sandbox: %v", err)
+	}
+	defer release()
+	if sandbox == nil {
+		t.Fatal("attach returned nil sandbox")
+	}
+	if sandbox.id.providerExportPath != exportPath {
+		t.Fatalf("attached sandbox provider export = %q, want %q", sandbox.id.providerExportPath, exportPath)
+	}
+}
+
 func TestProjectAssistantRunSandboxCheckpointPersistsWithoutPreviewTemplate(t *testing.T) {
 	ctx := context.Background()
 	files := workspace.NewFileStore(t.TempDir())
@@ -1460,17 +1537,19 @@ type sandboxClientFake struct {
 }
 
 type sandboxRevisionDomainFake struct {
-	mu       sync.Mutex
-	revision uint64
-	digest   string
-	files    map[string]string
-	actions  []string
+	mu         sync.Mutex
+	revision   uint64
+	digest     string
+	files      map[string]string
+	actions    []string
+	identities []identity
 }
 
-func (f *sandboxRevisionDomainFake) Workspace(_ context.Context, _ identity, _ dataPlaneRef, request projectAssistantSandboxWorkspaceRequest) (projectAssistantSandboxWorkspaceResponse, error) {
+func (f *sandboxRevisionDomainFake) Workspace(_ context.Context, id identity, _ dataPlaneRef, request projectAssistantSandboxWorkspaceRequest) (projectAssistantSandboxWorkspaceResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.actions = append(f.actions, request.Action)
+	f.identities = append(f.identities, id)
 	switch request.Action {
 	case "list":
 		return projectAssistantSandboxWorkspaceResponse{Status: "ok", SourceRevision: f.revision, SourceDigest: f.digest}, nil
@@ -1509,9 +1588,10 @@ func (f *sandboxRevisionDomainFake) Workspace(_ context.Context, _ identity, _ d
 	}
 }
 
-func (f *sandboxRevisionDomainFake) Exec(_ context.Context, _ identity, _ dataPlaneRef, request projectSandboxExecRequest) (projectSandboxExecResponse, error) {
+func (f *sandboxRevisionDomainFake) Exec(_ context.Context, id identity, _ dataPlaneRef, request projectSandboxExecRequest) (projectSandboxExecResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.identities = append(f.identities, id)
 	if request.SourceRevision != f.revision || !sandboxDigestEqual(request.SourceDigest, f.digest) {
 		return projectSandboxExecResponse{}, errProjectAssistantRunSandboxConflict
 	}

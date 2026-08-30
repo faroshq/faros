@@ -666,6 +666,21 @@ func (s *Server) Run(ctx context.Context) error {
 			// resolver (lives here to avoid a providers→proxy→kcp→providers
 			// import cycle).
 			backendProxy.SetTenantResolver(newKCPTenantResolver(kcpProxy, userClient, bootstrapper))
+			// Bound provider selectors name the APIExport a concrete child
+			// workspace is currently serving. Resolve that binding from kcp after
+			// the tenant resolver has authenticated and authorized the workspace;
+			// the selector itself is never trusted as a scope or registry key.
+			backendProxy.SetProviderBindingResolver(func(ctx context.Context, orgUUID, wsUUID, providerName string) (providers.ProviderBindingSelection, error) {
+				bindings, err := bootstrapper.ListProviderAPIBindings(ctx, orgUUID, wsUUID)
+				if err != nil {
+					return providers.ProviderBindingSelection{}, err
+				}
+				binding, ok := bindings[providerName]
+				if !ok || binding.ExportPath == "" {
+					return providers.ProviderBindingSelection{}, fmt.Errorf("provider %q is not bound in tenant workspace %s:%s", providerName, orgUUID, wsUUID)
+				}
+				return providers.ProviderBindingSelection{ExportPath: binding.ExportPath, Terminating: binding.Terminating}, nil
+			})
 			// Inject X-Faros-Cluster (the resolved tenant's logical-cluster
 			// ID) so providers can address per-workspace surfaces that key on
 			// the ID — notably the GraphQL gateway at /graphql/clusters/{id}.

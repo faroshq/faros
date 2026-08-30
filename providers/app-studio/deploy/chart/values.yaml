@@ -66,8 +66,9 @@ assistant:
   # it is separate from the project's hosted development preview.
   runSandbox:
     # off | on. Off always uses the existing Template-backed development
-    # image. On uses the universal sandbox only when this workspace binds a
-    # compatible platform/platform or same-organization provider pair.
+    # image. On uses the universal sandbox when both provider bindings resolve
+    # independently to valid platform or same-organization exports; mixed
+    # ownership is supported and the Infrastructure export remains fenced.
     mode: "off"
 
 # Browser-console sharing starts automatically while the embedded preview is

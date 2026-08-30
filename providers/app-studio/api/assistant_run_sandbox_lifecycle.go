@@ -150,12 +150,14 @@ func (s *Server) ensureProjectAssistantRunSandbox(
 		return nil, nil, fmt.Errorf("snapshot run sandbox source: %w", err)
 	}
 	client := s.projectAssistantRunSandboxClient()
+	sandboxIdentity := req.Identity
+	sandboxIdentity.providerExportPath = eligibility.ProviderExportPath
 	seedDigest := projectSandboxSyncDigest(snapshot.Files)
 	var remoteRevision uint64
 	var remoteDigest string
 	if err := retryProjectAssistantRunSandboxSeed(readyCtx, projectAssistantRunSandboxReadyTimeout, projectAssistantRunSandboxReadyPoll, func(seedCtx context.Context) error {
 		var reconcileErr error
-		remoteRevision, remoteDigest, reconcileErr = reconcileProjectAssistantRunSandboxSource(seedCtx, client, req.Identity, target.dataPlaneRefFor("workspace"), snapshot.Files, seedDigest)
+		remoteRevision, remoteDigest, reconcileErr = reconcileProjectAssistantRunSandboxSource(seedCtx, client, sandboxIdentity, target.dataPlaneRefFor("workspace"), snapshot.Files, seedDigest)
 		return reconcileErr
 	}); err != nil {
 		rollback()
@@ -165,7 +167,7 @@ func (s *Server) ensureProjectAssistantRunSandbox(
 	// coordinator restarts on the sandbox workspace volume and lets /diff
 	// return before-digests while App Studio reads complete after-bytes before
 	// applying an atomic FileStore transaction.
-	baseline, err := client.Workspace(readyCtx, req.Identity, target.dataPlaneRefFor("workspace"), projectAssistantSandboxWorkspaceRequest{
+	baseline, err := client.Workspace(readyCtx, sandboxIdentity, target.dataPlaneRefFor("workspace"), projectAssistantSandboxWorkspaceRequest{
 		Action: "checkpoint", CheckpointAction: "create",
 		SourceRevision: remoteRevision, SourceDigest: remoteDigest,
 	})
@@ -183,7 +185,7 @@ func (s *Server) ensureProjectAssistantRunSandbox(
 	}
 	now := time.Now().UTC()
 	sandbox := &projectAssistantRunSandbox{
-		server: s, client: client, id: req.Identity,
+		server: s, client: client, id: sandboxIdentity,
 		project: req.Project.DeepCopy(), scope: req.WorkspaceScope, target: target,
 		instance: projectAssistantSandboxInstance{APIVersion: target.APIVersion, Kind: target.Kind, Resource: target.Resource, Name: target.ResourceName},
 		runState: runState,
@@ -317,8 +319,10 @@ func (s *Server) attachProjectAssistantRunSandbox(
 		rollback()
 		return nil, nil, fmt.Errorf("wait for checkpoint run sandbox instance %q: %w", target.ResourceName, err)
 	}
+	sandboxIdentity := req.Identity
+	sandboxIdentity.providerExportPath = metadata.ProviderExportPath
 	sandbox := &projectAssistantRunSandbox{
-		server: s, client: s.projectAssistantRunSandboxClient(), id: req.Identity,
+		server: s, client: s.projectAssistantRunSandboxClient(), id: sandboxIdentity,
 		project: req.Project.DeepCopy(), scope: req.WorkspaceScope, target: target,
 		instance: projectAssistantSandboxInstance{APIVersion: target.APIVersion, Kind: target.Kind, Resource: target.Resource, Name: target.ResourceName}, runState: runState, metadata: metadata,
 	}

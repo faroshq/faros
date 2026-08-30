@@ -81,8 +81,8 @@ type Server struct {
 	runSandboxConfig     CodingSandboxConfig
 	runSandboxConfigured bool
 	// codingSandboxResolver resolves the caller's exact workspace bindings and
-	// accepts only compatible platform/platform or same-Org/Org ownership.
-	// Nil is fail-closed whenever sandbox mode is on.
+	// validates each provider independently as platform-owned or owned by the
+	// caller's Org. Nil is fail-closed whenever sandbox mode is on.
 	codingSandboxResolver  func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error)
 	runSandboxSetupFactory func(context.Context, projectAssistantRunRequest, *projectEinoAssistantRunState, *projectAssistantSandboxCheckpoint) (*projectAssistantRunSandbox, func(), error)
 	// runSandboxClientFactory is an App Studio-only seam for the Infrastructure

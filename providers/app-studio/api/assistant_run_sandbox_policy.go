@@ -111,7 +111,8 @@ const (
 // CodingSandboxConfig is process-owned policy. Mode is deliberately binary:
 // off always uses the existing Template-backed development image, while on
 // uses the universal sandbox only when the workspace's App Studio and
-// Infrastructure bindings form a compatible ownership pair.
+// Infrastructure bindings independently resolve to valid platform or
+// same-organization exports.
 type CodingSandboxConfig struct {
 	Mode         CodingSandboxMode
 	ReplicaCount int
@@ -119,7 +120,7 @@ type CodingSandboxConfig struct {
 
 // CodingSandboxEligibility is reevaluated at every start and resume before any
 // Infrastructure lookup. Binding resolution is fail-closed when the hub cannot
-// prove a compatible provider ownership pair and transport route.
+// prove both provider bindings and the exact Infrastructure transport route.
 type CodingSandboxEligibility struct {
 	Eligible            bool   `json:"eligible"`
 	Reason              string `json:"reason"`
