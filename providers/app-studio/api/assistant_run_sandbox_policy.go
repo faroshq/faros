@@ -119,7 +119,7 @@ type CodingSandboxConfig struct {
 
 // CodingSandboxEligibility is reevaluated at every start and resume before any
 // Infrastructure lookup. Binding resolution is fail-closed when the hub cannot
-// prove a compatible provider ownership pair and transport identity.
+// prove a compatible provider ownership pair and transport route.
 type CodingSandboxEligibility struct {
 	Eligible            bool   `json:"eligible"`
 	Reason              string `json:"reason"`

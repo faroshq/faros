@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
-import { Boxes, Server, ArrowRight, Copy, Check, Loader2, CircleDot, PartyPopper } from 'lucide-vue-next'
+import { ArrowLeft, Boxes, Server, ArrowRight, Copy, Check, Loader2, CircleDot, PartyPopper } from 'lucide-vue-next'
 import { createEdge, probeEdge } from './api'
 import type { EdgeType, ErrorResponse } from './types'
 
 const props = defineProps<{ cluster: string | null }>()
-const emit = defineEmits<{ connected: [] }>()
+const emit = defineEmits<{
+  cancel: []
+  created: [name: string, type: EdgeType]
+}>()
 
 type Step = 1 | 2 | 3
 const step = ref<Step>(1)
@@ -136,9 +139,9 @@ function fmt(s: number) {
     <div v-if="error" class="banner error">{{ error }}</div>
 
     <!-- Step 1 -->
-    <div v-if="step === 1" class="wiz-card">
+    <div v-if="step === 1" class="wiz-card k-card">
       <label class="lbl">Edge name</label>
-      <input v-model="name" class="input" placeholder="e.g. prod-us-east-1" @keyup.enter="canContinue && handleCreate()" />
+      <input v-model="name" class="k-input" placeholder="e.g. prod-us-east-1" @keyup.enter="canContinue && handleCreate()" />
 
       <label class="lbl">Type</label>
       <div class="types">
@@ -151,10 +154,13 @@ function fmt(s: number) {
       </div>
 
       <label class="lbl">Labels <span class="muted">(optional)</span></label>
-      <input v-model="labels" class="input" placeholder="env=prod, region=us-east" />
+      <input v-model="labels" class="k-input" placeholder="env=prod, region=us-east" />
 
       <div class="wiz-actions">
-        <button class="btn primary" :disabled="!canContinue" @click="handleCreate">
+        <button class="k-btn k-btn--ghost" @click="emit('cancel')">
+          <ArrowLeft :size="14" aria-hidden="true" /> Back to edges
+        </button>
+        <button class="k-btn k-btn--primary" :disabled="!canContinue" @click="handleCreate">
           <Loader2 v-if="saving" :size="14" class="spin" />
           {{ saving ? 'Creating…' : 'Create & continue' }}
           <ArrowRight v-if="!saving" :size="14" />
@@ -163,7 +169,7 @@ function fmt(s: number) {
     </div>
 
     <!-- Step 2 -->
-    <div v-else-if="step === 2" class="wiz-card">
+    <div v-else-if="step === 2" class="wiz-card k-card">
       <h3>Install the agent on your {{ edgeType === 'kubernetes' ? 'cluster' : 'server' }}</h3>
       <p class="muted">Run one of the commands below from the target. This updates automatically when
         <b>{{ trimmed }}</b> connects.</p>
@@ -172,7 +178,7 @@ function fmt(s: number) {
       <div v-else-if="!joinToken" class="muted row"><Loader2 :size="14" class="spin" /> Generating join token…</div>
 
       <template v-if="joinToken || tokenError">
-        <div v-if="edgeType === 'kubernetes'" class="snippet">
+        <div v-if="edgeType === 'kubernetes'" class="snippet k-card">
           <div class="snippet-head"><span>Helm (recommended)</span>
             <button class="copy" :disabled="!joinToken" @click="copy(helmSnippet, 'helm')">
               <component :is="copied === 'helm' ? Check : Copy" :size="12" /> {{ copied === 'helm' ? 'Copied' : 'Copy' }}
@@ -180,7 +186,7 @@ function fmt(s: number) {
           </div>
           <pre>{{ helmText }}</pre>
         </div>
-        <div class="snippet">
+        <div class="snippet k-card">
           <div class="snippet-head"><span>CLI — faros agent join</span>
             <button class="copy" :disabled="!joinToken" @click="copy(cliSnippet, 'cli')">
               <component :is="copied === 'cli' ? Check : Copy" :size="12" /> {{ copied === 'cli' ? 'Copied' : 'Copy' }}
@@ -192,17 +198,18 @@ function fmt(s: number) {
 
       <div class="waiting"><Loader2 :size="14" class="spin" /> Waiting for <b>{{ trimmed }}</b> to connect… <span class="muted">({{ fmt(elapsed) }})</span></div>
       <div class="wiz-actions">
-        <button class="btn" @click="emit('connected')">Skip — I'll come back later</button>
+        <button class="k-btn k-btn--ghost" @click="emit('cancel')">Back to edges</button>
+        <button class="k-btn k-btn--ghost" @click="emit('created', trimmed, edgeType)">Skip — view edge details</button>
       </div>
     </div>
 
     <!-- Step 3 -->
-    <div v-else class="wiz-card center">
+    <div v-else class="wiz-card k-card center">
       <PartyPopper :size="30" />
       <h3><b>{{ trimmed }}</b> is online</h3>
       <p class="muted">Agent {{ agentVersion || '—' }} · connected after {{ fmt(elapsed) }}</p>
       <div class="wiz-actions">
-        <button class="btn primary" @click="emit('connected')">View edges <ArrowRight :size="14" /></button>
+        <button class="k-btn k-btn--primary" @click="emit('created', trimmed, edgeType)">View edge details <ArrowRight :size="14" /></button>
       </div>
     </div>
   </div>

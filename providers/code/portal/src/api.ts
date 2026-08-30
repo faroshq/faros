@@ -13,11 +13,15 @@ import type {
   ConnectionDetail,
   DeployKey,
   ErrorResponse,
+  KubernetesListOptions,
+  KubernetesListPage,
   Package,
   PackageRow,
   Repository,
   RepositoryDetail,
 } from './types'
+
+export type { KubernetesListOptions, KubernetesListPage } from './types'
 
 const GROUP = 'code.faros.sh'
 const VERSION = 'v1alpha1'
@@ -26,6 +30,8 @@ const TOKEN_KEY = 'token'
 
 let bearerToken: string | null = null
 let clusterName: string | null = null
+let providerBasePath: string | null = null
+let callerUser: string | null = null
 let apiContextGeneration = 0
 
 interface APIRequestContext {
@@ -40,6 +46,7 @@ interface APIRequestContext {
 export interface APIReadContext {
   token?: string | null
   tenant?: string | null
+  user?: string | null
 }
 
 function captureRequestContext(): APIRequestContext {
@@ -56,24 +63,29 @@ function assertRequestContext(context: APIRequestContext): void {
   }
 }
 
-// setBasePath is a no-op: kcp paths are built from the cluster name, not the
-// provider basePath. Kept so App.vue's watcher type-checks.
-export function setBasePath(_ctxBasePath?: string | null) {
-  void _ctxBasePath
+// The GraphQL path is built from the cluster name, not the provider basePath,
+// but basePath is still part of the shell authority. Track it so in-flight
+// requests are fenced when the host switches provider roots.
+export function setBasePath(ctxBasePath?: string | null) {
+  const nextBasePath = ctxBasePath || null
+  if (nextBasePath === providerBasePath) return
+  providerBasePath = nextBasePath
+  apiContextGeneration += 1
 }
 export function setAPIContext(context: APIReadContext): void {
   const nextToken = context.token || null
   const nextTenant = context.tenant || null
-  if (nextToken === bearerToken && nextTenant === clusterName) return
+  const nextUser = context.user || null
+  if (nextToken === bearerToken && nextTenant === clusterName && nextUser === callerUser) return
   bearerToken = nextToken
   clusterName = nextTenant
+  callerUser = nextUser
   apiContextGeneration += 1
 }
 
 interface KCPMetadata {
   name: string
   uid: string
-  resourceVersion?: string | null
   generation?: number | null
   creationTimestamp?: string | null
   deletionTimestamp?: string | null
@@ -135,7 +147,6 @@ function validateRawCR(
   if (!isRecord(metadata) || typeof metadata.name !== 'string' || !metadata.name || typeof metadata.uid !== 'string' || !metadata.uid) {
     throw protocolError(`${label} was missing valid metadata.name or metadata.uid`)
   }
-  validateOptionalString(metadata.resourceVersion, `${label} metadata.resourceVersion`)
   validateOptionalString(metadata.creationTimestamp, `${label} metadata.creationTimestamp`)
   validateOptionalString(metadata.deletionTimestamp, `${label} metadata.deletionTimestamp`)
   if (metadata.generation !== undefined && metadata.generation !== null &&
@@ -423,23 +434,22 @@ function repoFromCR(cr: RawCR): Repository {
     owner: spec.owner ? String(spec.owner) : undefined,
     visibility: String(spec.visibility ?? 'private'),
     description: spec.description ? String(spec.description) : undefined,
+    defaultBranch: spec.defaultBranch ? String(spec.defaultBranch) : undefined,
     htmlURL: status.htmlURL ? String(status.htmlURL) : undefined,
-    sshURL: status.sshURL ? String(status.sshURL) : undefined,
     cloneURL: status.cloneURL ? String(status.cloneURL) : undefined,
+    sshURL: status.sshURL ? String(status.sshURL) : undefined,
     ready: reconciliation.reconciled && condTrue(cr, 'Ready'),
     message: reconciliation.waitingMessage ?? condMsg(cr, 'Ready'),
   }
 }
 
-// repoDetailFromCR is repoFromCR plus the raw status the detail view needs to
-// explain a pending repository: every condition verbatim and observed-vs-current
-// generation.
+// repoDetailFromCR is repoFromCR plus the provider health facts the conditions
+// section needs: the provider repository ID and every condition verbatim.
 function repoDetailFromCR(cr: RawCR): RepositoryDetail {
   const status = cr.status ?? {}
   return {
     ...repoFromCR(cr),
     repoID: status.repoID ? String(status.repoID) : undefined,
-    creationTimestamp: cr.metadata.creationTimestamp ?? undefined,
     conditions: (status.conditions ?? []).map(c => ({
       type: c.type,
       status: c.status,
@@ -590,16 +600,15 @@ async function deleteCodeResource(kind: CodeResourceKind, resource: string, name
 // is the GraphQL field code_faros_sh (dots → underscores), list fields are
 // the capitalised plural (Connections), single-get is the capitalised singular
 // (Connection(name: …)).
-const GQL_META = 'metadata { name uid resourceVersion generation creationTimestamp deletionTimestamp }'
+const GQL_META = 'metadata { name uid generation creationTimestamp deletionTimestamp }'
 const GQL_COND = 'conditions { type status reason message }'
 const F_CONNECTION = `${GQL_META} spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration ${GQL_COND} }`
 // Detail fragment: adds generation/observedGeneration and per-condition
 // lastTransitionTime so the detail view can explain why a connection is pending.
 const F_CONNECTION_DETAIL = `${GQL_META} spec { provider type owner secretRef { name namespace key } baseURL } status { login scopes observedGeneration conditions { type status reason message lastTransitionTime } }`
-const F_REPOSITORY = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch autoInit } status { repoID htmlURL cloneURL sshURL observedGeneration ${GQL_COND} }`
-// Detail fragment: adds generation/observedGeneration and per-condition
-// lastTransitionTime so the detail view can explain why a repository is pending.
-const F_REPOSITORY_DETAIL = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch autoInit } status { repoID htmlURL cloneURL sshURL observedGeneration conditions { type status reason message lastTransitionTime } }`
+const F_REPOSITORY = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { htmlURL cloneURL sshURL observedGeneration ${GQL_COND} }`
+// Detail fragment adds per-condition lastTransitionTime for the conditions card.
+const F_REPOSITORY_DETAIL = `${GQL_META} spec { connectionRef name owner visibility description defaultBranch } status { repoID htmlURL cloneURL sshURL observedGeneration conditions { type status reason message lastTransitionTime } }`
 const F_DEPLOYKEY = `${GQL_META} spec { repositoryRef title publicKey readOnly } status { keyID secretRef { name } observedGeneration ${GQL_COND} }`
 const F_COLLABORATOR = `${GQL_META} spec { repositoryRef username permission } status { invitationID observedGeneration ${GQL_COND} }`
 const F_PACKAGE = `${GQL_META} spec { repositoryRef } status { packageName type visibility htmlURL versionCount updatedAt observedGeneration ${GQL_COND} }`
@@ -624,6 +633,131 @@ function listResourceKind(kind: string): CodeResourceKind {
     case 'Packages': return 'Package'
     default: throw protocolError(`Unsupported code resource list ${kind}`)
   }
+}
+
+const DEFAULT_LIST_LIMIT = 100
+const MAX_LIST_PAGES = 100
+
+interface RawListPage {
+  items: RawCR[]
+  continue?: string
+  remainingItemCount?: number
+  resourceVersion?: string
+}
+
+function requestReadContext(context?: APIReadContext): APIRequestContext {
+  return context === undefined ? captureRequestContext() : explicitRequestContext(context)
+}
+
+function validateListOptions(options: KubernetesListOptions | undefined, label: string): void {
+  if (options === undefined) return
+  if (options.limit !== undefined &&
+    (typeof options.limit !== 'number' || !Number.isSafeInteger(options.limit) || options.limit <= 0)) {
+    throw protocolError(`${label} limit had an invalid shape`)
+  }
+  if (options.continue !== undefined && typeof options.continue !== 'string') {
+    throw protocolError(`${label} continue had an invalid shape`)
+  }
+}
+
+function mapListPage<T>(page: RawListPage, map: (item: RawCR) => T): KubernetesListPage<T> {
+  return {
+    items: page.items.map(map),
+    continue: page.continue,
+    remainingItemCount: page.remainingItemCount,
+    resourceVersion: page.resourceVersion,
+  }
+}
+
+// gqlListPage queries one Kubernetes list page. The gateway treats limit and
+// continue as optional arguments, so undefined variables are omitted from the
+// JSON request while the query remains usable for both the first and next page.
+async function gqlListPage(
+  kind: string,
+  fields: string,
+  labelselector: string | undefined,
+  options: KubernetesListOptions | undefined,
+  context?: APIRequestContext,
+): Promise<RawListPage> {
+  validateListOptions(options, `${kind} list`)
+  const declarations = labelselector === undefined
+    ? ['$limit: Int', '$continue: String']
+    : ['$sel: String!', '$limit: Int', '$continue: String']
+  const args = [
+    ...(labelselector === undefined ? [] : ['labelselector: $sel']),
+    'limit: $limit',
+    'continue: $continue',
+  ]
+  const variables: Record<string, unknown> = {}
+  if (labelselector !== undefined) variables.sel = labelselector
+  if (options?.limit !== undefined) variables.limit = options.limit
+  if (options?.continue !== undefined) variables.continue = options.continue
+  const query = `query(${declarations.join(', ')}) { code_faros_sh { v1alpha1 { ${kind}(${args.join(', ')}) { resourceVersion continue remainingItemCount items { ${fields} } } } } }`
+  const data = await graphqlQuery<unknown>(query, variables, context)
+  const version = codeVersionPayload(data, `${kind} list`)
+  if (!hasOwn(version, kind) || !isRecord(version[kind])) {
+    throw protocolError(`${kind} list response was missing ${kind}`)
+  }
+  const list = version[kind]
+  if (!hasOwn(list, 'items') || !Array.isArray(list.items)) {
+    throw protocolError(`${kind} list response was missing its items array`)
+  }
+
+  const continueValue = list.continue
+  if (continueValue !== undefined && continueValue !== null && typeof continueValue !== 'string') {
+    throw protocolError(`${kind} list response had an invalid continue token`)
+  }
+  const remainingItemCount = list.remainingItemCount
+  validateOptionalInteger(remainingItemCount, `${kind} list response remainingItemCount`)
+  const resourceVersion = list.resourceVersion
+  validateOptionalString(resourceVersion, `${kind} list response resourceVersion`)
+
+  const resourceKind = listResourceKind(kind)
+  const items = list.items.map((item, index) => validateResourceForKind(item, resourceKind, `${kind} list item ${index}`))
+  const nextContinue = typeof continueValue === 'string' && continueValue.length > 0 ? continueValue : undefined
+  if (typeof remainingItemCount === 'number' &&
+    ((remainingItemCount > 0 && nextContinue === undefined) || (remainingItemCount === 0 && nextContinue !== undefined))) {
+    throw protocolError(`${kind} list response had inconsistent continue and remainingItemCount metadata`)
+  }
+  return {
+    items,
+    continue: nextContinue,
+    remainingItemCount: typeof remainingItemCount === 'number' ? remainingItemCount : undefined,
+    resourceVersion: typeof resourceVersion === 'string' ? resourceVersion : undefined,
+  }
+}
+
+// gqlListAll walks only lists with a server-side selector (or workspace-wide
+// lists). Opaque cursor repetition and unbounded streams are protocol failures;
+// returning a partial aggregate would make the UI silently incomplete.
+async function gqlListAll(
+  kind: string,
+  fields: string,
+  labelselector: string | undefined,
+  context: APIRequestContext,
+): Promise<RawCR[]> {
+  const items: RawCR[] = []
+  const seenContinueTokens = new Set<string>()
+  let continueToken: string | undefined
+  for (let pageNumber = 0; pageNumber < MAX_LIST_PAGES; pageNumber += 1) {
+    const page = await gqlListPage(
+      kind,
+      fields,
+      labelselector,
+      continueToken === undefined
+        ? { limit: DEFAULT_LIST_LIMIT }
+        : { limit: DEFAULT_LIST_LIMIT, continue: continueToken },
+      context,
+    )
+    items.push(...page.items)
+    if (!page.continue) return items
+    if (seenContinueTokens.has(page.continue)) {
+      throw protocolError(`${kind} list response repeated a continue token`)
+    }
+    seenContinueTokens.add(page.continue)
+    continueToken = page.continue
+  }
+  throw protocolError(`${kind} list exceeded the maximum page count`)
 }
 
 // gqlList queries a resource's list field and returns the RawCR-shaped items. An
@@ -674,8 +808,18 @@ async function gqlGet(kind: CodeResourceKind, resource: string, name: string, fi
 
 export const api = {
   // ── Connections ──────────────────────────────────────────────────────────
+  async listConnectionsPage(
+    options: KubernetesListOptions = {},
+    context?: APIReadContext,
+  ): Promise<KubernetesListPage<Connection>> {
+    return mapListPage(
+      await gqlListPage('Connections', F_CONNECTION, undefined, options, requestReadContext(context)),
+      connFromCR,
+    )
+  },
+
   async listConnections(context?: APIReadContext): Promise<Connection[]> {
-    return (await gqlList('Connections', F_CONNECTION, undefined, context ? explicitRequestContext(context) : undefined)).map(connFromCR)
+    return (await gqlListAll('Connections', F_CONNECTION, undefined, requestReadContext(context))).map(connFromCR)
   },
 
   // getConnection fetches one Connection with the full spec/status the detail
@@ -733,32 +877,60 @@ export const api = {
   },
 
   // oauthConfig probes the provider backend (via the hub /services proxy) for
-  // whether the "Connect with GitHub" flow is configured. Returns enabled:false
-  // (never throws) so the view can silently fall back to the PAT form.
+  // whether the "Connect with GitHub" flow is configured. A valid disabled
+  // response is expected when no OAuth app is configured, but transport,
+  // status, and response-shape failures must reach the view so it can offer a
+  // retry instead of reporting a false "not configured" state.
   async oauthConfig(): Promise<{ enabled: boolean; startURL?: string; scopes?: string }> {
+    const context = captureRequestContext()
+    assertRequestContext(context)
+    const headers: Record<string, string> = { Accept: 'application/json' }
+    if (bearerToken) headers['Authorization'] = 'Bearer ' + bearerToken
+    const res = await fetch('/services/providers/code/oauth/github/config', { headers, credentials: 'same-origin' })
+    if (!res.ok) {
+      const text = await res.text()
+      assertRequestContext(context)
+      throw <ErrorResponse>{ reason: 'HTTPError', message: `${res.status}: ${text || res.statusText}` }
+    }
+    let body: unknown
     try {
-      const headers: Record<string, string> = { Accept: 'application/json' }
-      if (bearerToken) headers['Authorization'] = 'Bearer ' + bearerToken
-      const res = await fetch('/services/providers/code/oauth/github/config', { headers, credentials: 'same-origin' })
-      if (!res.ok) return { enabled: false }
-      const body: unknown = await res.json()
-      if (!isRecord(body) || typeof body.enabled !== 'boolean') return { enabled: false }
-      if ((body.startURL !== undefined && typeof body.startURL !== 'string') ||
-        (body.scopes !== undefined && typeof body.scopes !== 'string')) return { enabled: false }
-      if (body.enabled && (typeof body.startURL !== 'string' || !body.startURL.trim())) return { enabled: false }
-      return {
-        enabled: body.enabled,
-        startURL: body.startURL as string | undefined,
-        scopes: body.scopes as string | undefined,
-      }
+      body = await res.json()
     } catch {
-      return { enabled: false }
+      assertRequestContext(context)
+      throw protocolError('OAuth configuration returned malformed JSON')
+    }
+    assertRequestContext(context)
+    if (!isRecord(body) || typeof body.enabled !== 'boolean') {
+      throw protocolError('OAuth configuration response had an invalid shape')
+    }
+    if ((body.startURL !== undefined && typeof body.startURL !== 'string') ||
+      (body.scopes !== undefined && typeof body.scopes !== 'string')) {
+      throw protocolError('OAuth configuration response had an invalid shape')
+    }
+    if (body.enabled && (typeof body.startURL !== 'string' || !body.startURL.trim())) {
+      throw protocolError('OAuth configuration response was enabled but missing a start URL')
+    }
+    if (!body.enabled) return { enabled: false }
+    return {
+      enabled: true,
+      startURL: body.startURL as string,
+      scopes: body.scopes as string | undefined,
     }
   },
 
   // ── Repositories ─────────────────────────────────────────────────────────
+  async listRepositoriesPage(
+    options: KubernetesListOptions = {},
+    context?: APIReadContext,
+  ): Promise<KubernetesListPage<Repository>> {
+    return mapListPage(
+      await gqlListPage('Repositories', F_REPOSITORY, undefined, options, requestReadContext(context)),
+      repoFromCR,
+    )
+  },
+
   async listRepositories(context?: APIReadContext): Promise<Repository[]> {
-    return (await gqlList('Repositories', F_REPOSITORY, undefined, context ? explicitRequestContext(context) : undefined)).map(repoFromCR)
+    return (await gqlListAll('Repositories', F_REPOSITORY, undefined, requestReadContext(context))).map(repoFromCR)
   },
 
   async getRepository(name: string): Promise<RepositoryDetail> {
@@ -879,12 +1051,38 @@ export const api = {
   // every page view (which GitHub rate-limits). listPackages narrows to one
   // repository by the label the crawler stamps; listAllPackages spans the
   // workspace for the Packages tab.
+  async listPackagesPage(
+    repositoryRef: string,
+    options: KubernetesListOptions = {},
+    context?: APIReadContext,
+  ): Promise<KubernetesListPage<Package>> {
+    return mapListPage(
+      await gqlListPage('Packages', F_PACKAGE, `${PACKAGE_REPO_LABEL}=${repositoryRef}`, options, requestReadContext(context)),
+      pkgFromCR,
+    )
+  },
+
   async listPackages(repositoryRef: string): Promise<Package[]> {
-    return (await gqlList('Packages', F_PACKAGE, `${PACKAGE_REPO_LABEL}=${repositoryRef}`)).map(pkgFromCR)
+    return (await gqlListAll(
+      'Packages',
+      F_PACKAGE,
+      `${PACKAGE_REPO_LABEL}=${repositoryRef}`,
+      requestReadContext(),
+    )).map(pkgFromCR)
+  },
+
+  async listAllPackagesPage(
+    options: KubernetesListOptions = {},
+    context?: APIReadContext,
+  ): Promise<KubernetesListPage<PackageRow>> {
+    return mapListPage(
+      await gqlListPage('Packages', F_PACKAGE, undefined, options, requestReadContext(context)),
+      pkgRowFromCR,
+    )
   },
 
   async listAllPackages(): Promise<PackageRow[]> {
-    return (await gqlList('Packages', F_PACKAGE)).map(pkgRowFromCR)
+    return (await gqlListAll('Packages', F_PACKAGE, undefined, requestReadContext())).map(pkgRowFromCR)
   },
 }
 

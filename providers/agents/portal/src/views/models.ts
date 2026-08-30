@@ -10,7 +10,7 @@
 // Each credential is its own Secret (faros-agents-model-<name>).
 
 import { html, nothing, svg, type TemplateResult } from 'lit'
-import { state } from 'lit/decorators.js'
+import { property, state } from 'lit/decorators.js'
 import { repeat } from 'lit/directives/repeat.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
@@ -18,6 +18,7 @@ import { errorState } from '../ui/states'
 import { toast } from '../ui/toast'
 import { confirmModal } from '../portalkit/modal'
 import { mutate } from '../mutate'
+import type { CreateSuccessDetail } from '../router'
 import { PROVIDER_PRESETS } from '../conn-defs'
 import {
   fmtTokens,
@@ -30,6 +31,8 @@ import {
 } from '../types'
 
 export class Models extends StoreElement {
+  @property({ type: Boolean }) routeOwned = false
+  @property({ type: Boolean }) createRoute = false
   @state() private catalog: ModelInfo[] = []
   @state() private usage: UsageResponse | null = null
   @state() private usageError: string | null = null
@@ -93,15 +96,16 @@ export class Models extends StoreElement {
   }
 
   private async del(name: string): Promise<void> {
+    const authority = this.captureAuthority()
     const ok = await confirmModal({
       title: `Delete credential “${name}”?`,
       message: 'Agents using it will need reassigning.',
       danger: true,
       confirmLabel: 'Delete',
     })
-    if (!ok) return
-    await mutate(this.store, {
-      run: () => this.api.deleteCredential(name),
+    if (!ok || !this.authorityIsCurrent(authority)) return
+    await mutate(authority.store, {
+      run: () => authority.api.deleteCredential(name),
       success: 'Credential deleted.',
       failure: 'Delete failed',
       reload: ['credentials'],
@@ -109,11 +113,17 @@ export class Models extends StoreElement {
   }
 
   render(): TemplateResult {
+    if (this.createRoute) return this.createSurface()
     const creds = this.store.credentials
-    return html`<div class="agents-panel">
+    return html`<div class="agents-panel k-card agents-route-panel">
       <div class="agents-panel-head">
         <h3>Models</h3>
-        ${this.creating ? nothing : html`<button @click=${() => (this.creating = true)}>${icon('plus')} New model</button>`}
+        ${this.creating
+          ? nothing
+          : html`<button
+              class="k-btn k-btn--primary"
+              @click=${() => (this.routeOwned ? this.navigate({ kind: 'create', resource: 'model' }) : (this.creating = true))}
+            >${icon('plus')} New model</button>`}
       </div>
       <p class="muted">
         Model credentials shared across the workspace (each is a Secret <code>faros-agents-model-&lt;name&gt;</code>). Assign them to
@@ -139,11 +149,22 @@ export class Models extends StoreElement {
     </div>`
   }
 
+  private createSurface(): TemplateResult {
+    return html`<div class="agents-menu agents-create-page k-create-page">
+      <button type="button" class="k-btn k-btn--ghost k-back-action" @click=${() => this.cancelCreate()}>${icon('arrow-left')} Models</button>
+      <header class="k-create-header"><h1 class="k-create-title">Add model credential</h1><p class="k-create-description">Configure a workspace model endpoint and credential for your agents.</p></header>
+      ${this.createForm()}
+      <datalist id="agents-catalog-models">
+        ${this.catalog.map((m) => html`<option value=${m.id}>${m.label || m.id}</option>`)}
+      </datalist>
+    </div>`
+  }
+
   // ---- dashboard -----------------------------------------------------------
 
   private dashboard(): TemplateResult {
     if (this.usageError) return errorState(`Usage unavailable: ${this.usageError}`, () => void this.loadUsage())
-    if (!this.usage) return html`<div class="agents-dash-loading muted">Loading usage…</div>`
+    if (!this.usage) return html`<div class="k-card agents-dash-loading k-loading-reveal muted" role="status">Loading usage…</div>`
     // Normalize defensively as well as in the client: a throw in here takes the
     // whole Models view down with it, including the controls to fix whatever
     // was wrong. Nothing about an empty workspace should cost the user the page.
@@ -156,20 +177,19 @@ export class Models extends StoreElement {
     const t = u.total
     const tokens = t.inputTokens + t.outputTokens
     const errRate = t.runs ? Math.round((t.errors / t.runs) * 100) + '%' : '0%'
-    const stat = (label: string, value: string, sub = ''): TemplateResult => html`<div class="agents-stat">
+    const stat = (label: string, value: string, sub = ''): TemplateResult => html`<div class="k-card agents-stat">
       <div class="agents-stat-v">${value}</div>
       <div class="agents-stat-k">${label}</div>
       ${sub ? html`<div class="agents-stat-sub">${sub}</div>` : nothing}
     </div>`
     const maxModel = Math.max(1, ...u.byModel.map((b) => b.usdMicros))
     const maxAgent = Math.max(1, ...u.byAgent.map((b) => b.usdMicros))
-    return html`<div class="agents-dash">
+    return html`<div class="k-card agents-dash">
       <div class="agents-dash-head">
         <h3>Usage &amp; cost</h3>
         <div class="agents-seg" role="group" aria-label="Usage window">
           ${[7, 30, 90].map(
-            (d) => html`<button
-              class=${d === this.windowDays ? 'on' : ''}
+            (d) => html`<button class="k-btn k-btn--ghost ${d === this.windowDays ? 'on' : ''}"
               aria-pressed=${d === this.windowDays ? 'true' : 'false'}
               @click=${() => {
                 if (d === this.windowDays) return
@@ -190,11 +210,11 @@ export class Models extends StoreElement {
         ${stat('latency', t.latencyP50MS ? `${t.latencyP50MS}ms` : '—', t.latencyP95MS ? `${t.latencyP95MS}ms p95` : 'p50 / p95')}
       </div>
       <div class="agents-dash-grid">
-        <div class="agents-dash-card">
+        <div class="k-card agents-dash-card">
           <div class="agents-dash-card-h">Daily spend</div>
           ${sparkline(u.series)}
         </div>
-        <div class="agents-dash-card">
+        <div class="k-card agents-dash-card">
           <div class="agents-dash-card-h">Spend by model</div>
           <div class="agents-bars">
             ${u.byModel.length && u.byModel.some((b) => b.usdMicros > 0 || b.runs > 0)
@@ -202,7 +222,7 @@ export class Models extends StoreElement {
               : html`<div class="muted agents-bars-empty">No runs yet in this window.</div>`}
           </div>
         </div>
-        <div class="agents-dash-card">
+        <div class="k-card agents-dash-card">
           <div class="agents-dash-card-h">Spend by agent</div>
           <div class="agents-bars">
             ${u.byAgent.length
@@ -227,7 +247,7 @@ export class Models extends StoreElement {
     const fallbackOf = this.store.agents.data.filter((a) => a.spec?.models?.chat !== c.name && (a.spec?.modelFallbacks || []).includes(c.name))
     const disc = this.discovered.get(c.name)
     const isEditing = this.editName === c.name
-    return html`<article class="agents-model-card ${isEditing ? 'is-editing' : ''}">
+    return html`<article class="k-card agents-model-card ${isEditing ? 'is-editing' : ''}">
       <div class="agents-model-head">
         <div class="agents-model-title">
           <span class="agents-model-glyph">${icon('cpu')}</span>
@@ -264,11 +284,11 @@ export class Models extends StoreElement {
       ${disc?.length ? this.servedModels(c, disc) : nothing}
       ${isEditing ? this.rotateForm(c) : nothing}
       <div class="agents-model-actions">
-        <button class="secondary" @click=${() => void this.testCredential(c.name)}>${icon('plug')} Test</button>
-        <button class="secondary" @click=${() => (this.editName = isEditing ? null : c.name)}>
+        <button class="k-btn k-btn--ghost secondary" @click=${() => void this.testCredential(c.name)}>${icon('plug')} Test</button>
+        <button class="k-btn k-btn--ghost secondary" @click=${() => (this.editName = isEditing ? null : c.name)}>
           ${isEditing ? 'Close' : html`${icon('key')} Rotate / model`}
         </button>
-        <button class="agents-iconbtn agents-iconbtn-danger" aria-label="Delete ${c.name}" title="Delete" @click=${() => void this.del(c.name)}>
+        <button class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger" aria-label="Delete ${c.name}" title="Delete" @click=${() => void this.del(c.name)}>
           ${icon('trash')}
         </button>
       </div>
@@ -277,9 +297,9 @@ export class Models extends StoreElement {
 
   private healthBadge(name: string): TemplateResult {
     const t = this.tested.get(name)
-    if (!t) return html`<span class="agents-health agents-health-unknown" title="not tested">${icon('circle')} untested</span>`
-    if (t.ok) return html`<span class="agents-health agents-health-ok" title="healthy">${icon('circle')} healthy · ${t.latencyMS}ms</span>`
-    return html`<span class="agents-health agents-health-bad" title=${t.error || 'failed'}>${icon('circle')} failed</span>`
+    if (!t) return html`<span class="k-badge k-badge--muted agents-health agents-health-unknown" title="not tested">${icon('circle')} untested</span>`
+    if (t.ok) return html`<span class="k-badge k-badge--success agents-health agents-health-ok" title="healthy">${icon('circle')} healthy · ${t.latencyMS}ms</span>`
+    return html`<span class="k-badge k-badge--danger agents-health agents-health-bad" title=${t.error || 'failed'}>${icon('circle')} failed</span>`
   }
 
   // servedModels renders the endpoint's discovered model list as a filterable
@@ -295,8 +315,7 @@ export class Models extends StoreElement {
       <div class="agents-discovered-head">
         <span class="muted">${disc.length} served model${disc.length === 1 ? '' : 's'} — click to switch:</span>
         ${disc.length > 12
-          ? html`<input
-              class="agents-discovered-filter mono"
+          ? html`<input class="k-input agents-discovered-filter mono"
               placeholder="filter…"
               .value=${raw}
               @input=${(e: Event) => (this.discFilter = new Map(this.discFilter).set(c.name, (e.target as HTMLInputElement).value))}
@@ -306,7 +325,7 @@ export class Models extends StoreElement {
       ${visible.map(
         (m) =>
           html`<button
-            class="agents-chip agents-chip-btn ${m === c.model ? 'agents-chip-current' : ''}"
+            class="k-btn k-btn--ghost agents-chip agents-chip-btn ${m === c.model ? 'agents-chip-current' : ''}"
             title=${m === c.model ? 'current model' : `switch ${c.name} to ${m}`}
             @click=${() => void this.switchModel(c, m)}
           >
@@ -347,7 +366,7 @@ export class Models extends StoreElement {
     const servedSet = new Set(served)
     const listId = `agents-models-${c.name}`
     return html`<form
-      class="agents-rotate-form"
+      class="agents-rotate-form k-card"
       @submit=${(e: Event) => {
         e.preventDefault()
         const f = e.target as HTMLFormElement
@@ -377,9 +396,9 @@ export class Models extends StoreElement {
       <div class="agents-grid2">
         <label>
           Model <span class="agents-hint">leave blank to keep ${c.model || 'the current one'}</span>
-          <input name="model" class="mono" placeholder=${c.model || 'gpt-4o'} list=${listId} />
+          <input class="k-input mono" name="model"  placeholder=${c.model || 'gpt-4o'} list=${listId} />
         </label>
-        <label>Base URL<input name="baseURL" .value=${c.baseURL || ''} class="mono" placeholder="https://api.openai.com/v1" /></label>
+        <label>Base URL<input class="k-input mono" name="baseURL" .value=${c.baseURL || ''}  placeholder="https://api.openai.com/v1" /></label>
       </div>
       <datalist id=${listId}>
         ${served.map((m) => html`<option value=${m}></option>`)}
@@ -387,43 +406,57 @@ export class Models extends StoreElement {
       </datalist>
       <label>
         New API key <span class="agents-hint">leave blank to keep the current key</span>
-        <input name="apiKey" type="password" autocomplete="off" placeholder="sk-… (rotate)" />
+        <input class="k-input" name="apiKey" type="password" autocomplete="off" placeholder="sk-… (rotate)" />
       </label>
       <div class="agents-form-actions">
-        <button type="submit">Save</button>
-        <button type="button" class="secondary" @click=${() => (this.editName = null)}>Cancel</button>
+        <button class="k-btn k-btn--primary" type="submit">Save</button>
+        <button type="button" class="k-btn k-btn--ghost secondary" @click=${() => (this.editName = null)}>Cancel</button>
       </div>
     </form>`
   }
 
   private createForm(): TemplateResult {
     return html`<form
-      class="agents-cred-form agents-model-create"
+      class=${this.createRoute ? 'agents-cred-form agents-model-create k-create-surface' : 'agents-cred-form agents-model-create'}
       @submit=${(e: Event) => {
         e.preventDefault()
         const f = e.target as HTMLFormElement
         const g = (n: string): string => (f.querySelector<HTMLInputElement>(`[name=${n}]`)?.value || '').trim()
+        const body = {
+          name: g('name'),
+          provider: 'openai-compatible',
+          baseURL: g('baseURL'),
+          model: g('model'),
+          apiKey: g('apiKey'),
+        }
         void mutate(this.store, {
-          run: () =>
-            this.api.saveCredential({
-              name: g('name'),
-              provider: 'openai-compatible',
-              baseURL: g('baseURL'),
-              model: g('model'),
-              apiKey: g('apiKey'),
-            }),
+          run: () => this.api.saveCredential(body),
           success: 'Credential saved.',
           failure: 'Save failed',
           reload: ['credentials'],
-        }).then((ok) => ok && (this.creating = false))
+        }).then((res) => {
+          if (!res) return
+          if (this.routeOwned) {
+            this.dispatchEvent(
+              new CustomEvent<CreateSuccessDetail>('agents-create-success', {
+                detail: { resource: 'model', name: body.name, item: res },
+                bubbles: true,
+                composed: true,
+              }),
+            )
+            return
+          }
+          this.creating = false
+        })
       }}
     >
-      <h4>New model credential</h4>
+      <div class=${this.createRoute ? 'k-create-body' : ''}>
+      ${this.createRoute ? nothing : html`<h4>New model credential</h4>`}
       <div class="agents-grid2">
-        <label>Name<input name="name" required pattern="[a-z0-9-]+" placeholder="my-openai" /></label>
+        <label>Name<input class="k-input" name="name" required pattern="[a-z0-9-]+" placeholder="my-openai" /></label>
         <label>
           Provider
-          <select
+          <select class="k-input"
             name="preset"
             @change=${(e: Event) => {
               const p = PROVIDER_PRESETS.find((x) => x.id === (e.target as HTMLSelectElement).value)
@@ -438,15 +471,24 @@ export class Models extends StoreElement {
             ${PROVIDER_PRESETS.map((p) => html`<option value=${p.id}>${p.label}</option>`)}
           </select>
         </label>
-        <label>Base URL<input name="baseURL" class="mono" .value=${PROVIDER_PRESETS[0].baseURL} placeholder="https://api.openai.com/v1" /></label>
-        <label>Model<input name="model" class="mono" placeholder="gpt-4o" required list="agents-catalog-models" /></label>
+        <label>Base URL<input class="k-input mono" name="baseURL"  .value=${PROVIDER_PRESETS[0].baseURL} placeholder="https://api.openai.com/v1" /></label>
+        <label>Model<input class="k-input mono" name="model"  placeholder="gpt-4o" required list="agents-catalog-models" /></label>
       </div>
-      <label>API key<input name="apiKey" type="password" autocomplete="off" placeholder="sk-…" required /></label>
-      <div class="agents-form-actions">
-        <button type="submit">Add credential</button>
-        <button type="button" class="secondary" @click=${() => (this.creating = false)}>Cancel</button>
+      <label>API key<input class="k-input" name="apiKey" type="password" autocomplete="off" placeholder="sk-…" required /></label>
+      </div>
+      <div class=${this.createRoute ? 'k-create-actions' : 'agents-form-actions'}>
+        <button type="button" class="k-btn k-btn--ghost secondary" @click=${() => this.cancelCreate()}>Cancel</button>
+        <button class="k-btn k-btn--primary" type="submit">Add credential</button>
       </div>
     </form>`
+  }
+
+  private cancelCreate(): void {
+    if (this.createRoute) {
+      this.dispatchEvent(new CustomEvent('agents-cancel', { bubbles: true, composed: true }))
+      return
+    }
+    this.creating = false
   }
 }
 

@@ -18,6 +18,7 @@ limitations under the License.
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch, type CSSProperties } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  Building2,
   ChevronDown,
   Code2,
   LogOut,
@@ -26,34 +27,37 @@ import {
   Pin,
   Plug,
   Settings,
+  ShieldAlert,
   Sun,
   Terminal,
   UserRound,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
+import { useTenantStore } from '@/stores/tenant'
 import { useThemeStore, type ThemeMode } from '@/stores/theme'
 
 interface Props {
   expanded?: boolean
-  time: string
+  showPlatformAdmin?: boolean
   showUndock?: boolean
   undockLabel?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   expanded: false,
+  showPlatformAdmin: false,
   showUndock: false,
   undockLabel: 'Undock',
 })
 
 const emit = defineEmits<{
   cli: []
-  profile: []
   undock: []
   logout: []
 }>()
 
 const auth = useAuthStore()
+const tenant = useTenantStore()
 const theme = useThemeStore()
 const route = useRoute()
 
@@ -65,18 +69,78 @@ const position = ref({ top: 0, left: 0 })
 
 let positionFrame: number | null = null
 let disposed = false
+let resizeObserver: ResizeObserver | null = null
+let deferredTabClose: ReturnType<typeof setTimeout> | undefined
 const panelId = useId()
 
 const email = computed(() => auth.user?.email?.trim() || 'Authenticated user')
+const identityLabel = computed(() => auth.user?.email?.trim() ? 'Email' : 'Account')
 const mcpActive = computed(() => route.path === '/mcp' || route.path.startsWith('/mcp/'))
-const settingsActive = computed(() => route.path === '/tenant' || route.path.startsWith('/tenant/'))
-const contextRouteActive = computed(() => mcpActive.value || settingsActive.value)
+const settingsActive = computed(() => route.path === '/settings' || route.path.startsWith('/settings/'))
+const adminActive = computed(() => route.path === '/bonkers' || route.path.startsWith('/bonkers/'))
+const organizationsActive = computed(() => route.path === '/organizations' || route.path.startsWith('/organizations/'))
+const contextRouteActive = computed(() => mcpActive.value || settingsActive.value || adminActive.value || organizationsActive.value)
+const orgLabel = computed(() => {
+  const displayName = tenant.activeOrg?.displayName?.trim()
+  if (displayName) return displayName
+  if (tenant.orgUUID) return `Organization ${tenant.orgUUID.slice(0, 8)}`
+  return 'Choose organization'
+})
+const orgDetail = computed(() => {
+  const org = tenant.activeOrg
+  if (tenant.orgLoadState === 'error') return 'Authority context is unverified'
+  if (!org && tenant.orgUUID && tenant.orgLoadState !== 'ready') return 'Loading authority context…'
+  if (!org && tenant.orgUUID) return 'Organization is no longer available'
+  if (!org) return 'No authority context selected'
+  if (tenant.orgs.length > 1) return 'Switch organization'
+  if (org.personal) return 'Personal organization'
+  return org.role === 'admin' ? 'Organization admin' : 'Organization member'
+})
+const organizationDestination = computed(() => tenant.orgs.length > 1
+  ? { path: '/organizations', query: { from: route.fullPath } }
+  : { path: '/settings/organizations' },
+)
 const initials = computed(() => {
   const value = email.value === 'Authenticated user' ? '' : email.value
   const parts = value.split(/[@.\s_-]+/).filter(Boolean)
   if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
   return (parts[0]?.slice(0, 2) || '?').toUpperCase()
 })
+
+type DeveloperWorkspaceState = 'loading' | 'error' | 'organization' | 'pending' | 'ready'
+
+const workspaceReadError = computed(() => tenant.orgUUID
+  ? tenant.workspaceErrorByOrg[tenant.orgUUID] ?? null
+  : null)
+const developerWorkspaceState = computed<DeveloperWorkspaceState>(() => {
+  if (!tenant.orgUUID) return 'organization'
+  if (tenant.orgLoadState === 'error' || tenant.orgError || tenant.workspaceLoadState === 'error' || workspaceReadError.value) return 'error'
+  if (
+    tenant.orgLoadState !== 'ready' ||
+    !tenant.workspaceSelectionHydrated ||
+    tenant.workspaceLoadState !== 'ready' ||
+    tenant.workspaceTransitioning
+  ) return 'loading'
+  if (!tenant.activeOrg) return 'error'
+  if (tenant.workspaceMode === 'organization' || !tenant.workspaceUUID) return 'organization'
+  if (!tenant.activeWorkspace) return 'error'
+  if (!tenant.activeWorkspaceUsable) return 'pending'
+  return 'ready'
+})
+const developerWorkspaceName = computed(() => {
+  const workspace = tenant.activeWorkspace
+  return workspace?.displayName?.trim() || workspace?.uuid || 'Workspace'
+})
+const developerAccessDisabledReason = computed<string | undefined>(() => {
+  switch (developerWorkspaceState.value) {
+    case 'ready': return undefined
+    case 'loading': return 'Workspace context is loading. Wait for verification before opening developer access.'
+    case 'error': return 'Workspace data could not be verified. Retry before opening developer access.'
+    case 'organization': return 'Select a Workspace before opening developer access.'
+    case 'pending': return `${developerWorkspaceName.value} will support developer access after its control plane is ready.`
+  }
+})
+const developerAccessReady = computed(() => developerWorkspaceState.value === 'ready')
 
 const appearanceOptions: Array<{
   mode: ThemeMode
@@ -100,7 +164,7 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 function updatePosition() {
-  if (!isOpen.value || typeof window === 'undefined') return
+  if (!isOpen.value || disposed || typeof window === 'undefined') return
 
   const trigger = triggerRef.value
   const panel = panelRef.value
@@ -110,7 +174,7 @@ function updatePosition() {
   const gap = 8
   const triggerRect = trigger.getBoundingClientRect()
   const panelRect = panel.getBoundingClientRect()
-  const panelWidth = panelRect.width || Math.min(320, Math.max(0, window.innerWidth - margin * 2))
+  const panelWidth = panelRect.width || Math.min(340, Math.max(0, window.innerWidth - margin * 2))
   const panelHeight = panelRect.height || Math.min(600, Math.max(0, window.innerHeight - margin * 2))
   const belowSpace = window.innerHeight - triggerRect.bottom - gap
   const aboveSpace = triggerRect.top - gap
@@ -157,19 +221,13 @@ function positionPopover() {
   })
 }
 
-function getFocusableItems() {
-  const panel = panelRef.value
-  if (!panel) return []
-  return Array.from(panel.querySelectorAll<HTMLElement>('button:not([disabled]), a[href]'))
-}
-
-function focusFirstItem() {
-  getFocusableItems()[0]?.focus()
-}
-
 function closeMenu(restoreFocus = false) {
   if (!isOpen.value) return
   isOpen.value = false
+  if (deferredTabClose !== undefined) {
+    clearTimeout(deferredTabClose)
+    deferredTabClose = undefined
+  }
   if (restoreFocus) {
     void nextTick(() => triggerRef.value?.focus())
   }
@@ -186,18 +244,38 @@ function toggleMenu() {
 }
 
 function onPanelKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    event.stopPropagation()
-    closeMenu(true)
-  }
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  closeMenu(true)
 }
 
 function onDocumentKeydown(event: KeyboardEvent) {
-  if (isOpen.value && event.key === 'Escape' && !panelRef.value?.contains(event.target as Node)) {
+  if (!isOpen.value) return
+  if (event.key === 'Escape' && !panelRef.value?.contains(event.target as Node)) {
     event.preventDefault()
     closeMenu(true)
+    return
   }
+  if (event.key !== 'Tab' || deferredTabClose !== undefined) return
+  // Let the browser move focus normally. The focusin handler closes as soon
+  // as focus leaves the panel; this fallback covers environments where Tab
+  // has no focus target and therefore emits no focusin event.
+  deferredTabClose = setTimeout(() => {
+    deferredTabClose = undefined
+    if (isOpen.value && !panelRef.value?.contains(document.activeElement)) closeMenu()
+  }, 0)
+}
+
+function observePanelResize() {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (typeof ResizeObserver === 'undefined' || !panelRef.value) return
+  resizeObserver = new ResizeObserver(() => {
+    if (!isOpen.value || disposed) return
+    positionPopover()
+  })
+  resizeObserver.observe(panelRef.value)
 }
 
 function onDocumentPointerdown(event: PointerEvent) {
@@ -214,16 +292,18 @@ function onDocumentFocusin(event: FocusEvent) {
   closeMenu()
 }
 
-function emitAndClose(eventName: 'cli' | 'profile' | 'undock' | 'logout') {
+function emitAndClose(eventName: 'cli' | 'undock' | 'logout') {
   if (eventName === 'cli') emit('cli')
-  else if (eventName === 'profile') emit('profile')
   else if (eventName === 'undock') emit('undock')
   else emit('logout')
-  closeMenu()
+  // Every menu action has to leave focus somewhere deterministic. Restoring
+  // the trigger also gives actions that open another surface (CLI setup) a
+  // stable handoff target while that surface establishes its own focus.
+  closeMenu(true)
 }
 
 function onRouteNavigation() {
-  closeMenu()
+  closeMenu(true)
 }
 
 watch(isOpen, async (open) => {
@@ -234,7 +314,11 @@ watch(isOpen, async (open) => {
     updatePosition()
     await nextTick()
     if (!isOpen.value || disposed) return
-    focusFirstItem()
+    observePanelResize()
+    // This is a non-modal popover dialog, not a menu. Focus the dialog itself
+    // so assistive technology announces the surface; ordinary Tab order owns
+    // movement between its links and buttons.
+    panelRef.value?.focus()
     document.addEventListener('pointerdown', onDocumentPointerdown, true)
     document.addEventListener('keydown', onDocumentKeydown)
     document.addEventListener('focusin', onDocumentFocusin)
@@ -242,6 +326,8 @@ watch(isOpen, async (open) => {
     window.addEventListener('scroll', positionPopover, { capture: true, passive: true })
   } else {
     positionReady.value = false
+    resizeObserver?.disconnect()
+    resizeObserver = null
     if (typeof window !== 'undefined') {
       if (positionFrame !== null) {
         window.cancelAnimationFrame(positionFrame)
@@ -264,6 +350,9 @@ onBeforeUnmount(() => {
   if (typeof window !== 'undefined' && positionFrame !== null) {
     window.cancelAnimationFrame(positionFrame)
   }
+  if (deferredTabClose !== undefined) clearTimeout(deferredTabClose)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   document.removeEventListener('pointerdown', onDocumentPointerdown, true)
   document.removeEventListener('keydown', onDocumentKeydown)
   document.removeEventListener('focusin', onDocumentFocusin)
@@ -282,7 +371,7 @@ onBeforeUnmount(() => {
     :aria-controls="panelId"
     aria-haspopup="dialog"
     :aria-expanded="isOpen"
-    class="group flex min-w-0 items-center rounded-md border border-border-subtle bg-surface-overlay/50 text-left transition-colors hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+    class="account-trigger k-btn k-btn--ghost group flex min-w-0 items-center rounded-md text-left transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
     :class="[
       expanded ? 'w-full gap-2 px-2.5 py-2' : 'h-8 w-8 justify-center p-0',
       contextRouteActive ? 'border-accent/30 text-accent' : '',
@@ -290,18 +379,14 @@ onBeforeUnmount(() => {
     :title="expanded ? undefined : 'Account & access'"
     @click="toggleMenu"
   >
-    <span v-if="expanded" class="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-raised text-text-secondary">
-      <UserRound class="h-3 w-3" :stroke-width="1.75" aria-hidden="true" />
-      <span class="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
-    </span>
-    <span v-else class="k-avatar k-avatar--sm" aria-hidden="true">
+    <span class="k-avatar k-avatar--sm" aria-hidden="true">
       <UserRound v-if="initials === '?'" class="h-3 w-3" :stroke-width="1.75" />
       <span v-else>{{ initials }}</span>
     </span>
 
     <span v-if="expanded" class="min-w-0 flex-1">
       <span class="block truncate font-mono text-[10px] text-text-secondary group-hover:text-text-primary">{{ email }}</span>
-      <span class="mt-0.5 block text-[10px] text-text-muted">Account &amp; access</span>
+      <span class="mt-0.5 block truncate text-[10px] text-text-secondary">{{ orgLabel }}</span>
     </span>
     <ChevronDown
       v-if="expanded"
@@ -319,63 +404,77 @@ onBeforeUnmount(() => {
       ref="panelRef"
       role="dialog"
       aria-label="Account and access"
-      class="k-menu fixed z-[80] max-h-[calc(100vh-24px)] w-[320px] max-w-[calc(100vw-24px)] overflow-y-auto"
+      tabindex="-1"
+      class="k-menu fixed z-[80] max-h-[calc(100vh-24px)] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto"
       :style="popoverStyle"
       @keydown="onPanelKeydown"
     >
-      <div class="px-2 py-1.5">
-        <span class="k-eyebrow">Identity</span>
-      </div>
-      <button type="button" class="k-menu-item" @click="emitAndClose('profile')">
+      <div class="flex items-center gap-2 px-2 py-2">
         <span class="k-avatar k-avatar--sm" aria-hidden="true">
           <UserRound v-if="initials === '?'" class="h-3 w-3" :stroke-width="1.75" />
           <span v-else>{{ initials }}</span>
         </span>
         <span class="min-w-0 flex-1">
           <span class="block truncate font-mono text-[11px] text-text-primary">{{ email }}</span>
-          <span class="mt-0.5 block text-[10px] text-text-muted">View profile</span>
+          <span class="mt-0.5 block text-[10px] text-text-secondary">{{ identityLabel }}</span>
         </span>
-        <ChevronDown class="h-3 w-3 -rotate-90 text-text-muted" :stroke-width="1.75" aria-hidden="true" />
-      </button>
+      </div>
 
+      <router-link
+        :to="organizationDestination"
+        class="account-menu-item k-menu-item py-2"
+        :class="organizationsActive ? 'is-selected' : ''"
+        :aria-current="organizationsActive ? 'page' : undefined"
+        @click="closeMenu(true)"
+      >
+        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
+          <Building2 class="h-3.5 w-3.5 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+        </span>
+        <span class="min-w-0 flex-1">
+          <span class="block truncate font-mono text-[11px] text-text-primary">{{ orgLabel }}</span>
+          <span class="mt-0.5 block text-[10px] text-text-secondary">{{ orgDetail }}</span>
+        </span>
+        <ChevronDown class="h-3 w-3 -rotate-90 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+      </router-link>
       <div class="my-1 h-px bg-border-subtle" />
 
       <div class="px-2 py-1.5">
         <span class="k-eyebrow">Developer access</span>
       </div>
-      <button type="button" class="k-menu-item" @click="emitAndClose('cli')">
+      <button
+        type="button"
+        class="account-menu-item k-menu-item"
+        :disabled="!developerAccessReady"
+        :title="developerAccessDisabledReason"
+        @click="emitAndClose('cli')"
+      >
         <Terminal class="h-3.5 w-3.5 shrink-0 text-accent" :stroke-width="1.75" aria-hidden="true" />
         <span class="flex-1">CLI setup</span>
-        <Code2 class="h-3 w-3 text-text-muted" :stroke-width="1.75" aria-hidden="true" />
+        <Code2 class="h-3 w-3 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
       </button>
       <router-link
+        v-if="developerAccessReady"
         to="/mcp"
-        class="k-menu-item"
+        class="account-menu-item k-menu-item"
         :class="mcpActive ? 'is-selected' : ''"
         :aria-current="mcpActive ? 'page' : undefined"
-        @click="closeMenu()"
+        @click="closeMenu(true)"
       >
         <Plug class="h-3.5 w-3.5 shrink-0 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
         <span class="flex-1">MCP Access</span>
-        <ChevronDown class="h-3 w-3 -rotate-90 text-text-muted" :stroke-width="1.75" aria-hidden="true" />
+        <ChevronDown class="h-3 w-3 -rotate-90 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
       </router-link>
-
-      <div class="my-1 h-px bg-border-subtle" />
-
-      <div class="px-2 py-1.5">
-        <span class="k-eyebrow">Session</span>
-      </div>
-      <div class="flex items-start gap-2 px-2 py-1.5">
-        <UserRound class="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-muted" :stroke-width="1.75" aria-hidden="true" />
-        <div class="min-w-0 flex-1">
-          <span class="block text-[10px] text-text-muted">Authenticated as</span>
-          <span class="block truncate font-mono text-[11px] text-text-secondary">{{ email }}</span>
-        </div>
-        <div class="shrink-0 text-right">
-          <span class="block text-[10px] text-text-muted">Local time</span>
-          <span class="block font-mono text-[11px] tabular-nums text-text-secondary">{{ time }}</span>
-        </div>
-      </div>
+      <button
+        v-else
+        type="button"
+        class="account-menu-item k-menu-item"
+        disabled
+        :title="developerAccessDisabledReason"
+      >
+        <Plug class="h-3.5 w-3.5 shrink-0 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+        <span class="flex-1">MCP Access</span>
+        <ChevronDown class="h-3 w-3 -rotate-90 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+      </button>
 
       <div class="my-1 h-px bg-border-subtle" />
 
@@ -387,7 +486,7 @@ onBeforeUnmount(() => {
           v-for="option in appearanceOptions"
           :key="option.mode"
           type="button"
-          class="k-menu-item justify-center px-2"
+          class="account-menu-item account-appearance-option k-menu-item justify-center px-2"
           :class="theme.mode === option.mode ? 'is-selected' : ''"
           :aria-pressed="theme.mode === option.mode"
           @click="theme.setMode(option.mode)"
@@ -400,26 +499,54 @@ onBeforeUnmount(() => {
       <div class="my-1 h-px bg-border-subtle" />
 
       <router-link
-        to="/tenant"
-        class="k-menu-item"
+        to="/settings/workspaces"
+        class="account-menu-item k-menu-item"
         :class="settingsActive ? 'is-selected' : ''"
         :aria-current="settingsActive ? 'page' : undefined"
-        @click="closeMenu()"
+        @click="closeMenu(true)"
       >
         <Settings class="h-3.5 w-3.5 shrink-0 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
         <span class="flex-1">Settings</span>
-        <ChevronDown class="h-3 w-3 -rotate-90 text-text-muted" :stroke-width="1.75" aria-hidden="true" />
+        <ChevronDown class="h-3 w-3 -rotate-90 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
       </router-link>
-      <button v-if="showUndock" type="button" class="k-menu-item" @click="emitAndClose('undock')">
+      <router-link
+        v-if="showPlatformAdmin"
+        to="/bonkers"
+        class="account-menu-item k-menu-item"
+        :class="adminActive ? 'is-selected' : ''"
+        :aria-current="adminActive ? 'page' : undefined"
+        @click="closeMenu(true)"
+      >
+        <ShieldAlert class="h-3.5 w-3.5 shrink-0 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+        <span class="flex-1">Platform admin</span>
+        <ChevronDown class="h-3 w-3 -rotate-90 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
+      </router-link>
+      <button v-if="showUndock" type="button" class="account-menu-item k-menu-item" @click="emitAndClose('undock')">
         <Pin class="h-3.5 w-3.5 shrink-0 text-text-secondary" :stroke-width="1.75" aria-hidden="true" />
         <span class="flex-1">{{ undockLabel }}</span>
       </button>
 
       <div class="k-menu-sep" />
-      <button type="button" class="k-menu-item k-menu-item--danger" @click="emitAndClose('logout')">
+      <button type="button" class="account-menu-item k-menu-item k-menu-item--danger" @click="emitAndClose('logout')">
         <LogOut class="h-3.5 w-3.5 shrink-0" :stroke-width="1.75" aria-hidden="true" />
         <span class="flex-1">Logout</span>
       </button>
     </div>
   </Teleport>
 </template>
+
+<style scoped>
+/* Compact menus keep the desktop rhythm, while touch users receive the same
+   minimum hit area as the shell navigation. */
+@media (pointer: coarse) {
+  .account-trigger,
+  .account-menu-item {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .account-appearance-option {
+    min-height: 44px;
+  }
+}
+</style>

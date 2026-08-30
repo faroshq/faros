@@ -107,6 +107,23 @@ test('migrates the legacy deployments tab and active id to source History', () =
   assert.equal(restored.tabs[1].title, 'History')
 })
 
+test('drops the retired Threads tab while preserving the rest of a saved layout', () => {
+  const parsed = persistence.parseWorkbenchPersistence(JSON.stringify({
+    version: 1,
+    tabs: [{ kind: 'preview' }, { kind: 'threads' }, { kind: 'settings' }],
+    activeTabID: 'threads',
+  }))
+  assert.deepEqual(parsed, {
+    version: 1,
+    tabs: [{ kind: 'preview' }, { kind: 'settings' }],
+    activeTabID: '',
+  })
+
+  const restored = persistence.restoreWorkbenchState(parsed, [])
+  assert.deepEqual(restored.tabs.map((tab) => tab.id), ['preview', 'settings'])
+  assert.equal(restored.activeTabID, 'preview')
+})
+
 test('scope keys isolate tenant, organization, workspace, user, and project', () => {
   const storage = memoryStorage()
   const state = workbench.createDefaultWorkbenchState()
@@ -145,6 +162,40 @@ test('catalog fingerprints remain usable and isolated when persistence identity 
   )
   assert.equal(resolved.id, connectionsTool.id)
   assert.equal(resolved.path, 'connections/detail')
+})
+
+test('persists workbench visibility separately from the project tab layout', () => {
+  const storage = memoryStorage()
+  assert.equal(persistence.WORKBENCH_VISIBILITY_STORAGE_KEY, 'faros:app-studio:workbench-visible:v1')
+  assert.equal(persistence.readWorkbenchVisibility(storage), true)
+
+  persistence.writeWorkbenchVisibility(false, storage)
+  assert.equal(persistence.readWorkbenchVisibility(storage), false)
+  assert.equal(storage.getItem(persistence.workbenchPersistenceStorageKey(scope)), null)
+
+  storage.setItem(persistence.WORKBENCH_VISIBILITY_STORAGE_KEY, 'unexpected')
+  assert.equal(persistence.readWorkbenchVisibility(storage), true)
+
+  persistence.writeWorkbenchVisibility(true, storage)
+  assert.equal(persistence.readWorkbenchVisibility(storage), true)
+})
+
+test('visibility changes leave the persisted tab and nested split state untouched', () => {
+  const storage = memoryStorage()
+  let state = workbench.createDefaultWorkbenchState()
+  state = workbench.openWorkbenchBuiltInTab(state, 'history')
+  state = workbench.openWorkbenchProviderTool(state, { ...connectionsTool, path: 'connections/detail' })
+  const layoutKey = persistence.workbenchPersistenceStorageKey(scope)
+  persistence.writeWorkbenchPersistence(scope, state, storage)
+  const layoutBeforeVisibilityToggle = storage.getItem(layoutKey)
+
+  persistence.writeWorkbenchVisibility(false, storage)
+  assert.equal(storage.getItem(layoutKey), layoutBeforeVisibilityToggle)
+  assert.deepEqual(persistence.readWorkbenchPersistence(scope, storage), JSON.parse(layoutBeforeVisibilityToggle))
+
+  persistence.writeWorkbenchVisibility(true, storage)
+  assert.equal(storage.getItem(layoutKey), layoutBeforeVisibilityToggle)
+  assert.deepEqual(persistence.readWorkbenchPersistence(scope, storage), JSON.parse(layoutBeforeVisibilityToggle))
 })
 
 test('reactive catalog readiness invalidates provider-tool derivation', () => {
@@ -253,6 +304,8 @@ test('storage exceptions are best effort and project deletion cleanup is safe', 
   assert.doesNotThrow(() => persistence.readWorkbenchPersistence(scope, throwing))
   assert.doesNotThrow(() => persistence.writeWorkbenchPersistence(scope, workbench.createDefaultWorkbenchState(), throwing))
   assert.doesNotThrow(() => persistence.removeWorkbenchPersistence(scope, throwing))
+  assert.doesNotThrow(() => persistence.readWorkbenchVisibility(throwing))
+  assert.doesNotThrow(() => persistence.writeWorkbenchVisibility(false, throwing))
 
   const storage = memoryStorage()
   persistence.writeWorkbenchPersistence(scope, workbench.createDefaultWorkbenchState(), storage)

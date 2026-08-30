@@ -8,7 +8,7 @@ import { property, state } from 'lit/decorators.js'
 import { repeat } from 'lit/directives/repeat.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
-import { errorState, loadingState } from '../ui/states'
+import { errorState, loadingState, staleState } from '../ui/states'
 import { toast } from '../ui/toast'
 import { attachCodeCopy, renderMarkdown } from '../ui/markdown'
 import { fmtDuration, fmtTime, fmtTokens, fmtUSD, prettyJSON, type RunDetail as Run, type RunStep, type RunSummary } from '../types'
@@ -32,6 +32,7 @@ export class RunDetailView extends StoreElement {
   // in-process.
   private pollHandle = 0
   private tickHandle = 0
+  private requestGeneration = 0
   @state() private now = Date.now()
 
   connectedCallback(): void {
@@ -41,6 +42,7 @@ export class RunDetailView extends StoreElement {
 
   disconnectedCallback(): void {
     this.store?.removeEventListener('server', this.onServerEvent as EventListener)
+    this.requestGeneration += 1
     this.stopLive()
     super.disconnectedCallback()
   }
@@ -54,7 +56,7 @@ export class RunDetailView extends StoreElement {
       return
     }
     if (!this.pollHandle) {
-      this.pollHandle = window.setInterval(() => void this.load(), 3000)
+      this.pollHandle = window.setInterval(() => void this.load('background'), 3000)
     }
     if (!this.tickHandle) {
       // Separate, faster tick purely for the elapsed-time readout: a clock that
@@ -88,22 +90,27 @@ export class RunDetailView extends StoreElement {
       ev.data.id === this.runID ||
       ev.data.parentRunID === this.runID ||
       this.run?.children?.some((c) => c.id === ev.data.id)
-    if (ev.type === 'run' && mine) void this.load()
-    if (ev.type === 'inbox' && ev.data.runID === this.runID) void this.load()
+    if (ev.type === 'run' && mine) void this.load('background')
+    if (ev.type === 'inbox' && ev.data.runID === this.runID) void this.load('background')
   }
 
   protected updated(): void {
     attachCodeCopy(this)
   }
 
-  private async load(): Promise<void> {
+  private async load(_mode: 'foreground' | 'background' = 'foreground'): Promise<void> {
+    const requestedRunID = this.runID
+    const requestGeneration = ++this.requestGeneration
     try {
-      this.run = await this.api.getRun(this.runID)
+      const run = await this.api.getRun(requestedRunID)
+      if (requestGeneration !== this.requestGeneration || requestedRunID !== this.runID) return
+      this.run = run
       this.error = null
     } catch (e) {
+      if (requestGeneration !== this.requestGeneration || requestedRunID !== this.runID) return
       this.error = (e as Error).message
     }
-    this.syncLive(this.run)
+    if (requestGeneration === this.requestGeneration) this.syncLive(this.run)
   }
 
   private toggle(id: string): void {
@@ -135,10 +142,10 @@ export class RunDetailView extends StoreElement {
   }
 
   render(): TemplateResult {
-    const back = html`<button class="agents-back" @click=${() => this.navigate({ kind: 'menu', menu: 'activity' })}>
+    const back = html`<button class="k-btn k-btn--ghost agents-back" @click=${() => this.navigate({ kind: 'menu', menu: 'activity' })}>
       ${icon('arrow-left')} Activity
     </button>`
-    if (this.error) {
+    if (this.error && !this.run) {
       return html`<div class="agents-detail">
         <div class="agents-detail-head"><div class="agents-detail-title">${back}</div></div>
         ${errorState(this.error, () => void this.load())}
@@ -155,10 +162,11 @@ export class RunDetailView extends StoreElement {
       <div class="agents-detail-head">
         <div class="agents-detail-title">${back}<h2>Run ${phaseChip(r.phase)}</h2></div>
         <div class="agents-detail-actions">
-          ${LIVE_PHASES.has(r.phase) ? html`<button class="secondary" @click=${() => void this.cancel()}>${icon('x')} Cancel run</button>` : nothing}
-          <button class="secondary" @click=${() => void this.load()}>${icon('refresh')} Refresh</button>
+          ${LIVE_PHASES.has(r.phase) ? html`<button class="k-btn k-btn--ghost secondary" @click=${() => void this.cancel()}>${icon('x')} Cancel run</button>` : nothing}
+          <button class="k-btn k-btn--ghost secondary" @click=${() => void this.load()}>${icon('refresh')} Refresh</button>
         </div>
       </div>
+      ${this.error ? staleState(this.error, () => void this.load('foreground')) : nothing}
       ${this.header(r)} ${this.pending(r)} ${this.output(r)} ${this.timeline(r)} ${this.childRuns(r)}
     </div>`
   }
@@ -167,11 +175,11 @@ export class RunDetailView extends StoreElement {
     const cell = (k: string, v: unknown): TemplateResult => html`<div class="agents-runmeta-cell">
       <span class="agents-runmeta-k">${k}</span><span class="agents-runmeta-v">${v}</span>
     </div>`
-    return html`<section class="agents-panel">
+    return html`<section class="agents-panel k-card">
       <div class="agents-runmeta">
         ${cell(
           'agent',
-          html`<button class="agents-linkbtn" @click=${() => this.navigate({ kind: 'agent', name: r.agent, tab: 'config' })}>${r.agent}</button>`,
+          html`<button class="k-btn k-btn--ghost agents-linkbtn" @click=${() => this.navigate({ kind: 'agent', name: r.agent, tab: 'config' })}>${r.agent}</button>`,
         )}
         ${cell('trigger', html`<span class="mono">${r.trigger}</span> <span class="muted">(${r.class})</span>`)}
         ${r.sessionID ? cell('session', html`<span class="mono">${r.sessionID}</span>`) : nothing}
@@ -193,7 +201,7 @@ export class RunDetailView extends StoreElement {
         ${r.parentRunID
           ? cell(
               'parent',
-              html`<button class="agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: r.parentRunID as string })}>
+              html`<button class="k-btn k-btn--ghost agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: r.parentRunID as string })}>
                 ${r.parentRunID.slice(0, 8)}
               </button>`,
             )
@@ -206,13 +214,13 @@ export class RunDetailView extends StoreElement {
   private pending(r: Run): TemplateResult | typeof nothing {
     if (r.phase !== 'PendingApproval' || !r.pending) return nothing
     const p = r.pending
-    return html`<section class="agents-panel">
+    return html`<section class="agents-panel k-card">
       <div class="agents-approval" role="group" aria-label="Tool approval required">
         <div class="agents-approval-head">${icon('key')} Paused — approval required for <span class="mono">${p.tool}</span></div>
         ${p.args ? html`<pre class="agents-approval-args">${prettyJSON(p.args)}</pre>` : nothing}
         <div class="agents-approval-actions">
-          <button @click=${() => void this.resolve(p.inboxID, 'approve')}>${icon('check')} Approve &amp; resume</button>
-          <button class="secondary" @click=${() => void this.resolve(p.inboxID, 'deny')}>${icon('x')} Deny</button>
+          <button class="k-btn k-btn--primary" @click=${() => void this.resolve(p.inboxID, 'approve')}>${icon('check')} Approve &amp; resume</button>
+          <button class="k-btn k-btn--ghost secondary" @click=${() => void this.resolve(p.inboxID, 'deny')}>${icon('x')} Deny</button>
         </div>
       </div>
     </section>`
@@ -223,7 +231,7 @@ export class RunDetailView extends StoreElement {
     // The answer lives on the run record; message carries the failure reason. A
     // failed run can have both (it produced text, then broke).
     if (failed && r.message) {
-      return html`<section class="agents-panel">
+      return html`<section class="agents-panel k-card">
         <h3>${icon('x')} Error</h3>
         <div class="agents-err" role="alert">${r.message}</div>
         ${r.output ? html`<h3>${icon('message')} Partial output</h3>
@@ -232,7 +240,7 @@ export class RunDetailView extends StoreElement {
     }
     const body = r.output || r.message
     if (!body) return nothing
-    return html`<section class="agents-panel">
+    return html`<section class="agents-panel k-card">
       <h3>${icon('message')} Output</h3>
       <div class="agents-body">${renderMarkdown(body)}</div>
       ${r.sources?.length
@@ -247,7 +255,7 @@ export class RunDetailView extends StoreElement {
   }
 
   private timeline(r: Run): TemplateResult {
-    return html`<section class="agents-panel">
+    return html`<section class="agents-panel k-card">
       <h3>${icon('workflow')} Steps <span class="muted">(${r.steps.length})</span></h3>
       ${r.steps.length === 0
         ? html`<p class="agents-hint">${icon('wrench')} This run made no tool calls.</p>`
@@ -265,7 +273,7 @@ export class RunDetailView extends StoreElement {
     const open = this.expanded.has(s.id)
     const cls = s.outcome === 'error' ? 'err' : s.outcome === 'pending_approval' ? 'wait' : 'ok'
     return html`<li class="agents-step is-${cls}">
-      <button class="agents-step-head" aria-expanded=${open ? 'true' : 'false'} @click=${() => this.toggle(s.id)}>
+      <button class="k-btn k-btn--ghost agents-step-head" aria-expanded=${open ? 'true' : 'false'} @click=${() => this.toggle(s.id)}>
         <span class="agents-step-n">${i + 1}</span>
         <span class="agents-step-name mono">${s.tool}</span>
         <span class="agents-step-meta">${s.outcome}${s.durationMS ? ` · ${fmtDuration(s.durationMS)}` : ''} · ${fmtTime(s.at)}</span>
@@ -298,7 +306,7 @@ export class RunDetailView extends StoreElement {
       // used it and did not is a fact rather than an absence.
       if (!granted) return nothing
       const tried = r.steps.some((s) => s.tool === 'spawn')
-      return html`<section class="agents-panel">
+      return html`<section class="agents-panel k-card">
         <h3>${icon('corner-down-right')} Child runs <span class="muted">(0)</span></h3>
         <p class="agents-hint">
           ${tried
@@ -331,7 +339,7 @@ export class RunDetailView extends StoreElement {
       problems ? `${problems} failed` : '',
     ].filter(Boolean)
 
-    return html`<section class="agents-panel">
+    return html`<section class="agents-panel k-card">
       <h3>
         ${icon('corner-down-right')} Child runs <span class="muted">(${kids.length})</span>
         ${workers ? html`<span class="muted">· ${workers} spawned worker${workers === 1 ? '' : 's'}</span>` : nothing}
@@ -343,7 +351,7 @@ export class RunDetailView extends StoreElement {
           ? html`<span class="muted">— this updates as they finish</span>`
           : nothing}
       </p>
-      <div class="agents-tablewrap">
+      <div class="agents-tablewrap k-table">
         <table class="agents-table">
           <thead>
             <tr><th>Agent</th><th>Kind</th><th>Input</th><th>Phase</th><th>Duration</th><th>Usage</th></tr>

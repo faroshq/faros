@@ -57,10 +57,14 @@ export const useAdminStore = defineStore('admin', () => {
   const providers = ref<AdminProvider[]>([])
   const identities = ref<RootIdentity[]>([])
   const loading = ref(false)
+  // True only after all admin collections have been read successfully at
+  // least once. Keep this true during later refreshes so callers can render
+  // cached rows as stale when an authoritative refresh fails.
+  const loaded = ref(false)
   const forbidden = ref(false)
   const error = ref<string | null>(null)
   // isAdmin: null = not checked yet, true/false after checkAccess. Drives the
-  // sidebar menu item + the /bonkers route guard so non-admins never load the
+  // account menu item + the /bonkers route guard so non-admins never load the
   // page (which would 403 on its data fetches).
   const isAdmin = ref<boolean | null>(null)
 
@@ -118,6 +122,7 @@ export const useAdminStore = defineStore('admin', () => {
       orgs.value = o
       providers.value = p
       identities.value = i
+      loaded.value = true
     } catch (e) {
       if ((e as Error).message !== 'forbidden') {
         error.value = (e as Error).message
@@ -189,5 +194,5 @@ export const useAdminStore = defineStore('admin', () => {
     URL.revokeObjectURL(url)
   }
 
-  return { users, orgs, providers, identities, loading, forbidden, error, isAdmin, kubeconfigServers, checkAccess, refresh, createProvider, deleteProvider, downloadProviderKubeconfig }
+  return { users, orgs, providers, identities, loading, loaded, forbidden, error, isAdmin, kubeconfigServers, checkAccess, refresh, createProvider, deleteProvider, downloadProviderKubeconfig }
 })

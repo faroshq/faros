@@ -42,6 +42,8 @@ export interface WorkbenchPersistedState {
 
 export const WORKBENCH_PERSISTENCE_VERSION = 1 as const
 export const WORKBENCH_PERSISTENCE_PREFIX = 'faros:app-studio:workbench:v1'
+/** Visibility is an independent preference, so hiding the pane never mutates a saved tab layout. */
+export const WORKBENCH_VISIBILITY_STORAGE_KEY = 'faros:app-studio:workbench-visible:v1'
 
 // A workbench is intentionally small. This bound protects the portal from a
 // manually edited or otherwise corrupted localStorage value while leaving
@@ -61,7 +63,6 @@ const builtInKinds: ReadonlySet<WorkbenchBuiltInTab> = new Set([
   'history',
   'settings',
   'skills',
-  'threads',
   'launcher',
 ])
 
@@ -71,6 +72,37 @@ function defaultStorage(): WorkbenchPersistenceStorage | undefined {
     return window.localStorage
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Read the pane visibility preference. A missing or inaccessible preference
+ * keeps the workbench visible so the primary project surface remains usable.
+ */
+export function readWorkbenchVisibility(
+  storage: WorkbenchPersistenceStorage | null | undefined = defaultStorage(),
+): boolean {
+  if (!storage) return true
+  try {
+    const value = storage.getItem(WORKBENCH_VISIBILITY_STORAGE_KEY)
+    if (value === '1') return true
+    if (value === '0') return false
+    return true
+  } catch {
+    return true
+  }
+}
+
+/** Persist pane visibility without making storage policy a UI failure. */
+export function writeWorkbenchVisibility(
+  visible: boolean,
+  storage: WorkbenchPersistenceStorage | null | undefined = defaultStorage(),
+): void {
+  if (!storage) return
+  try {
+    storage.setItem(WORKBENCH_VISIBILITY_STORAGE_KEY, visible ? '1' : '0')
+  } catch {
+    // Visibility is a progressive preference; the in-memory state remains valid.
   }
 }
 
@@ -175,7 +207,11 @@ export function parseWorkbenchPersistence(raw: string | null): WorkbenchPersiste
     for (const item of value.tabs) {
       if (!isRecord(item) || typeof item.kind !== 'string') return null
       let tab: WorkbenchPersistedTab
-      if (item.kind === 'deployments') {
+      if (item.kind === 'threads') {
+        // Threads moved to the project-scoped side panel. Drop the retired
+        // workbench tab while preserving the rest of an existing layout.
+        continue
+      } else if (item.kind === 'deployments') {
         // Deployments was the pre-History production rollback surface. Keep
         // project layouts stable while moving the tab to source restoration.
         tab = { kind: 'history' }
@@ -198,7 +234,7 @@ export function parseWorkbenchPersistence(raw: string | null): WorkbenchPersiste
     }
 
     const activeTabID = typeof value.activeTabID === 'string' && value.activeTabID.length <= MAX_WORKBENCH_ID_LENGTH
-      ? value.activeTabID === 'deployments' ? 'history' : value.activeTabID
+      ? value.activeTabID === 'deployments' ? 'history' : value.activeTabID === 'threads' ? '' : value.activeTabID
       : ''
     return { version: WORKBENCH_PERSISTENCE_VERSION, tabs, activeTabID }
   } catch {

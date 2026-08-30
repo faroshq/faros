@@ -8,36 +8,147 @@
 
 import type { Edge, EdgeDetail, EdgeType, ErrorResponse } from './types'
 
+// Kubernetes list options are deliberately small: GraphQL treats continue
+// values as opaque strings and the portal only needs bounded cursor pages.
+export interface KubernetesListOptions {
+  limit?: number
+  continue?: string
+}
+
+// A page keeps the Kubernetes list metadata intact. Callers that need the
+// complete legacy list use the bounded walkers below; server-mode tables use
+// this envelope directly so they never pretend one page is the whole list.
+export interface KubernetesListPage<T> {
+  items: T[]
+  continue?: string
+  remainingItemCount?: number
+  resourceVersion?: string
+}
+
+const LIST_PAGE_SIZE = 100
+const MAX_LIST_PAGES = 100
+
+function protocolError(message: string): ErrorResponse {
+  return { reason: 'ProtocolError', message }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function validateListOptions(options: KubernetesListOptions, kind: string): KubernetesListOptions {
+  if (options.limit !== undefined &&
+    (!Number.isSafeInteger(options.limit) || options.limit <= 0)) {
+    throw protocolError(`${kind} list limit had an invalid shape`)
+  }
+  if (options.continue !== undefined && typeof options.continue !== 'string') {
+    throw protocolError(`${kind} list continue had an invalid shape`)
+  }
+  return options
+}
+
 let bearerToken: string | null = null
 let clusterName: string | null = null
+let contextGeneration = 0
+
+// A cursor walk must stay bound to the caller and workspace that started it.
+// The singleton context changes when the shell switches tenant or rotates the
+// token; generation catches a change even if the values later change back.
+class ContextChangedError extends Error {
+  readonly reason = 'ContextChanged'
+
+  constructor() {
+    super('workspace or authentication context changed while the request was in flight')
+    this.name = 'ContextChangedError'
+  }
+}
+
+export function isContextChangedError(error: unknown): boolean {
+  return error instanceof ContextChangedError || (error as { reason?: string } | null)?.reason === 'ContextChanged'
+}
+
+interface RequestContext {
+  generation: number
+  token: string | null
+  tenant: string | null
+}
+
+function requestContext(): RequestContext {
+  return { generation: contextGeneration, token: bearerToken, tenant: clusterName }
+}
+
+function assertCurrentContext(expected: RequestContext): void {
+  if (expected.generation !== contextGeneration || expected.token !== bearerToken || expected.tenant !== clusterName) {
+    throw new ContextChangedError()
+  }
+}
 
 export function setToken(token?: string | null) {
-  bearerToken = token || null
+  const next = token || null
+  if (next !== bearerToken) contextGeneration += 1
+  bearerToken = next
 }
 export function setTenant(name?: string | null) {
-  clusterName = name || null
+  const next = name || null
+  if (next !== clusterName) contextGeneration += 1
+  clusterName = next
 }
 
-async function graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  if (!clusterName) {
+async function graphql<T>(
+  query: string,
+  variables: Record<string, unknown> = {},
+  context: RequestContext = requestContext(),
+): Promise<T> {
+  assertCurrentContext(context)
+  if (!context.tenant) {
     throw <ErrorResponse>{ reason: 'TenantMissing', message: 'no workspace selected' }
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' }
-  if (bearerToken) headers['Authorization'] = 'Bearer ' + bearerToken
-  const res = await fetch('/graphql/' + clusterName, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers,
-    body: JSON.stringify({ query, variables }),
-  })
-  const text = await res.text()
+  if (context.token) headers['Authorization'] = 'Bearer ' + context.token
+  let res: Response
+  try {
+    res = await fetch('/graphql/' + context.tenant, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({ query, variables }),
+    })
+  } catch (error) {
+    assertCurrentContext(context)
+    throw error
+  }
+  let text: string
+  try {
+    text = await res.text()
+  } catch (error) {
+    assertCurrentContext(context)
+    throw error
+  }
+  assertCurrentContext(context)
   if (!res.ok) {
     throw <ErrorResponse>{ reason: res.status === 404 ? 'NotFound' : 'HTTPError', message: text || res.statusText }
   }
-  const body = (text ? JSON.parse(text) : {}) as { data?: T; errors?: { message: string }[] }
-  if (body.errors && body.errors.length) {
-    throw <ErrorResponse>{ reason: 'GraphQLError', message: body.errors.map((e) => e.message).join('; ') }
+  let parsed: unknown = {}
+  if (text) {
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw protocolError('GraphQL returned malformed JSON; retry the read.')
+    }
   }
+  if (!isRecord(parsed)) {
+    throw protocolError('GraphQL returned a malformed response envelope; retry the read.')
+  }
+  const body = parsed as { data?: unknown; errors?: unknown }
+  if (body.errors !== undefined) {
+    if (!Array.isArray(body.errors) || !body.errors.every((entry) => isRecord(entry) && typeof entry.message === 'string')) {
+      throw protocolError('GraphQL returned malformed errors; retry the read.')
+    }
+    if (body.errors.length) {
+      throw <ErrorResponse>{ reason: 'GraphQLError', message: body.errors.map((entry) => String((entry as { message: string }).message)).join('; ') }
+    }
+  }
+  assertCurrentContext(context)
   return (body.data ?? {}) as T
 }
 
@@ -99,27 +210,56 @@ export async function listEdges(): Promise<Edge[]> {
   return [...kube, ...server].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// getEdge fetches one edge with full status for the detail view.
+// getEdge fetches one edge with the product-facing status plus a read-only
+// object snapshot for the detail view's opt-in technical disclosure. The
+// default view never renders the API group/version or raw object shape.
 export async function getEdge(name: string, type: EdgeType): Promise<EdgeDetail> {
   const kind = type === 'server' ? 'LinuxServer' : 'KubernetesCluster'
+  const apiVersion = 'edges.faros.sh/v1alpha1'
+  const specSelection = type === 'server'
+    ? `labels sshPort sshUserMapping sshKeySecretRef { name namespace } sshCredentialsRef { name namespace }`
+    : 'labels'
   const data = await graphql<{
     edges_faros_sh?: {
       v1alpha1?: Record<string, {
-        metadata: { name: string; creationTimestamp?: string; labels?: Record<string, string> }
+        metadata: {
+          name: string
+          namespace?: string
+          uid?: string
+          resourceVersion?: string
+          generation?: number
+          creationTimestamp?: string
+          labels?: Record<string, string>
+          annotations?: Record<string, string>
+        }
+        spec?: {
+          labels?: Record<string, string>
+          sshPort?: number
+          sshUserMapping?: string
+          sshKeySecretRef?: { name?: string; namespace?: string }
+          sshCredentialsRef?: { name?: string; namespace?: string }
+        }
         status?: {
-          phase?: string; connected?: boolean; hostname?: string; agentVersion?: string
-          lastHeartbeatTime?: string; joinToken?: string; workspacePath?: string
-          conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }>
+          URL?: string
+          phase?: string
+          connected?: boolean
+          hostname?: string
+          agentVersion?: string
+          lastHeartbeatTime?: string
+          joinToken?: string
+          workspacePath?: string
+          conditions?: Array<{ type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string; observedGeneration?: number }>
         }
       } | null>
     }
   }>(
     `query GetEdge($name: String!) {
        edges_faros_sh { v1alpha1 { ${kind}(name: $name) {
-         metadata { name creationTimestamp labels }
+         metadata { name namespace uid resourceVersion generation creationTimestamp labels annotations }
+         spec { ${specSelection} }
          status {
-           phase connected hostname agentVersion lastHeartbeatTime joinToken workspacePath
-           conditions { type status reason message lastTransitionTime }
+           URL phase connected hostname agentVersion lastHeartbeatTime joinToken workspacePath
+           conditions { type status reason message lastTransitionTime observedGeneration }
          }
        } } }
      }`,
@@ -128,19 +268,54 @@ export async function getEdge(name: string, type: EdgeType): Promise<EdgeDetail>
   const cr = data.edges_faros_sh?.v1alpha1?.[kind]
   if (!cr) throw <ErrorResponse>{ reason: 'NotFound', message: `${kind} ${name} not found` }
   const s = cr.status ?? {}
+  // The bootstrap token is an onboarding credential, not part of the
+  // read-only technical object snapshot. Keep it on EdgeDetail for the join
+  // instructions, but remove it before the snapshot reaches YAML rendering.
+  const technicalStatus = Object.fromEntries(
+    Object.entries(s).filter(([key]) => key !== 'joinToken'),
+  )
+  const metadata = cr.metadata
+  const spec = cr.spec ?? {}
+  const rawObject: Record<string, unknown> = {
+    apiVersion,
+    kind,
+    metadata: {
+      name: metadata.name,
+      ...(metadata.namespace ? { namespace: metadata.namespace } : {}),
+      ...(metadata.uid ? { uid: metadata.uid } : {}),
+      ...(metadata.resourceVersion ? { resourceVersion: metadata.resourceVersion } : {}),
+      ...(metadata.generation !== undefined ? { generation: metadata.generation } : {}),
+      ...(metadata.creationTimestamp ? { creationTimestamp: metadata.creationTimestamp } : {}),
+      ...(metadata.labels ? { labels: metadata.labels } : {}),
+      ...(metadata.annotations ? { annotations: metadata.annotations } : {}),
+    },
+    spec,
+    status: technicalStatus,
+  }
   return {
-    name: cr.metadata.name,
+    name: metadata.name,
     type,
-    creationTimestamp: cr.metadata.creationTimestamp,
-    labels: cr.metadata.labels,
+    creationTimestamp: metadata.creationTimestamp,
+    labels: metadata.labels,
     phase: s.phase,
     connected: !!s.connected,
     hostname: s.hostname,
     agentVersion: s.agentVersion,
     lastHeartbeatTime: s.lastHeartbeatTime,
+    apiVersion,
+    kind: kind as EdgeDetail['kind'],
+    namespace: metadata.namespace,
+    uid: metadata.uid,
+    resourceVersion: metadata.resourceVersion,
+    generation: metadata.generation,
+    annotations: metadata.annotations,
+    spec,
+    observedGeneration: s.conditions?.reduce((max, condition) => Math.max(max, condition.observedGeneration ?? 0), 0) || undefined,
+    statusURL: s.URL,
     joinToken: s.joinToken,
     workspacePath: s.workspacePath,
     conditions: s.conditions ?? [],
+    rawObject,
   }
 }
 
@@ -328,13 +503,171 @@ function toEdgeService(it: RawEdgeService): EdgeService {
   }
 }
 
-// listServices returns every Service across all edges (for the top-level
-// Services view).
-export async function listServices(): Promise<EdgeService[]> {
+interface RawListPage<T> {
+  items: T[]
+  continue?: string
+  remainingItemCount?: number
+  resourceVersion?: string
+}
+
+function optionalListString(
+  collection: Record<string, unknown>,
+  key: 'continue' | 'resourceVersion',
+  kind: string,
+): string | undefined {
+  if (!(key in collection) || collection[key] === undefined || collection[key] === null) return undefined
+  if (typeof collection[key] !== 'string') {
+    throw protocolError(`${kind} list response had an invalid ${key}`)
+  }
+  const value = collection[key] as string
+  return key === 'continue' && value.length === 0 ? undefined : value
+}
+
+function optionalRemainingItemCount(collection: Record<string, unknown>, kind: string): number | undefined {
+  if (!('remainingItemCount' in collection) || collection.remainingItemCount === undefined || collection.remainingItemCount === null) return undefined
+  const value = collection.remainingItemCount
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw protocolError(`${kind} list response had an invalid remainingItemCount`)
+  }
+  return value
+}
+
+function listCollection(data: unknown, kind: 'Services' | 'Workloads'): Record<string, unknown> {
+  const group = isRecord(data) ? data.edges_faros_sh : undefined
+  const version = isRecord(group) ? group.v1alpha1 : undefined
+  const collection = isRecord(version) ? version[kind] : undefined
+  if (!isRecord(collection)) {
+    throw protocolError(`${kind} list response was missing ${kind}`)
+  }
+  if (!Array.isArray(collection.items)) {
+    throw protocolError(`${kind} list response was missing its items array`)
+  }
+  return collection
+}
+
+function parseListPage<T>(
+  data: unknown,
+  kind: 'Services' | 'Workloads',
+  mapItem: (item: unknown, index: number) => T,
+): RawListPage<T> {
+  const collection = listCollection(data, kind)
+  const nextContinue = optionalListString(collection, 'continue', kind)
+  const remainingItemCount = optionalRemainingItemCount(collection, kind)
+  if (remainingItemCount !== undefined &&
+    ((remainingItemCount > 0 && nextContinue === undefined) ||
+      (remainingItemCount === 0 && nextContinue !== undefined))) {
+    throw protocolError(`${kind} list response had inconsistent continue and remainingItemCount metadata`)
+  }
+  const resourceVersion = optionalListString(collection, 'resourceVersion', kind)
+  const items = collection.items as unknown[]
+  return {
+    items: items.map(mapItem),
+    continue: nextContinue,
+    remainingItemCount,
+    resourceVersion,
+  }
+}
+
+function mapListPage<T, U>(page: RawListPage<T>, map: (item: T) => U): KubernetesListPage<U> {
+  return {
+    items: page.items.map(map),
+    continue: page.continue,
+    remainingItemCount: page.remainingItemCount,
+    resourceVersion: page.resourceVersion,
+  }
+}
+
+function parseRawEdgeService(item: unknown, index: number): RawEdgeService {
+  if (!isRecord(item) || !isRecord(item.metadata) || typeof item.metadata.name !== 'string' || !item.metadata.name) {
+    throw protocolError(`Services list item ${index} was malformed`)
+  }
+  return item as unknown as RawEdgeService
+}
+
+async function listServicesPageRaw(
+  options: KubernetesListOptions = {},
+  context: RequestContext = requestContext(),
+): Promise<RawListPage<RawEdgeService>> {
+  const request = validateListOptions(options, 'Services')
+  const variables: Record<string, unknown> = {}
+  if (request.limit !== undefined) variables.limit = request.limit
+  if (request.continue !== undefined) variables.continue = request.continue
+  const data = await graphql<unknown>(
+    `query ListServicesPage($limit: Int, $continue: String) {
+       edges_faros_sh { v1alpha1 {
+         Services(limit: $limit, continue: $continue) {
+           items { ${EDGE_SVC_SEL} }
+           continue remainingItemCount resourceVersion
+         }
+       } }
+     }`,
+    variables,
+    context,
+  )
+  return parseListPage(data, 'Services', parseRawEdgeService)
+}
+
+export async function listServicesPage(options: KubernetesListOptions = {}): Promise<KubernetesListPage<EdgeService>> {
+  const context = requestContext()
+  return mapListPage(await listServicesPageRaw(options, context), toEdgeService)
+}
+
+// getService reads one exact Service resource for URL-owned instance pages.
+// This deliberately does not search the bounded list cache: a deep link may
+// target a resource beyond the table's current cursor page, and the instance
+// view must distinguish an authoritative not-found from an incomplete list.
+export async function getService(name: string): Promise<EdgeService> {
   const data = await graphql<{
-    edges_faros_sh?: { v1alpha1?: { Services?: { items?: RawEdgeService[] } } }
-  }>(`query ListServices { edges_faros_sh { v1alpha1 { Services { items { ${EDGE_SVC_SEL} } } } } }`)
-  const items = data.edges_faros_sh?.v1alpha1?.Services?.items ?? []
+    edges_faros_sh?: {
+      v1alpha1?: {
+        Service?: RawEdgeService | null
+      }
+    }
+  }>(
+    `query GetService($name: String!) {
+       edges_faros_sh { v1alpha1 { Service(name: $name) { ${EDGE_SVC_SEL} } } }
+     }`,
+    { name },
+  )
+  const resource = data.edges_faros_sh?.v1alpha1?.Service
+  if (!resource) throw <ErrorResponse>{ reason: 'NotFound', message: `Service ${name} not found` }
+  return toEdgeService(resource)
+}
+
+async function listAllPages<T>(
+  kind: 'Services' | 'Workloads',
+  fetchPage: (options: KubernetesListOptions, context: RequestContext) => Promise<RawListPage<T>>,
+): Promise<T[]> {
+  const context = requestContext()
+  const items: T[] = []
+  const seenContinueTokens = new Set<string>()
+  let continueToken: string | undefined
+  for (let pageNumber = 0; pageNumber < MAX_LIST_PAGES; pageNumber += 1) {
+    assertCurrentContext(context)
+    const page = await fetchPage({
+      limit: LIST_PAGE_SIZE,
+      ...(continueToken === undefined ? {} : { continue: continueToken }),
+    }, context)
+    assertCurrentContext(context)
+    items.push(...page.items)
+    if (!page.continue) {
+      assertCurrentContext(context)
+      return items
+    }
+    if (seenContinueTokens.has(page.continue)) {
+      throw protocolError(`${kind} list response repeated a continue token`)
+    }
+    seenContinueTokens.add(page.continue)
+    continueToken = page.continue
+  }
+  throw protocolError(`${kind} list exceeded the maximum page count`)
+}
+
+// listServices returns every Service across all edges (for the top-level
+// Services view). The page walker is bounded so a broken gateway cannot leave
+// the refresh pending forever or silently return a partial aggregate.
+export async function listServices(): Promise<EdgeService[]> {
+  const items = await listAllPages('Services', listServicesPageRaw)
   return items.map(toEdgeService).sort((a, b) => a.name.localeCompare(b.name))
 }
 
@@ -365,19 +698,22 @@ export interface EdgeServiceEdit {
   targetNamespace?: string
   targetName?: string
   instructions?: string
+  // Explicit target mode is needed for the valid "host with blank host" case:
+  // blank host means agent loopback, not a request to retain a stale targetRef.
+  targetMode?: 'host' | 'kube'
 }
 
 // updateEdgeService merge-patches the editable spec fields. host and targetRef
 // are mutually exclusive — the unused one is cleared (null/empty) so switching
 // target mode takes effect.
 export async function updateEdgeService(name: string, e: EdgeServiceEdit): Promise<void> {
-  const byHost = !!e.host?.trim()
+  const byHost = e.targetMode ? e.targetMode === 'host' : !!e.host?.trim()
   const spec: Record<string, unknown> = {
     type: e.serviceType,
     scheme: e.scheme,
     port: e.port,
     instructions: e.instructions ?? '',
-    host: byHost ? e.host!.trim() : '',
+    host: byHost ? (e.host ?? '').trim() : '',
     targetRef: byHost
       ? null
       : e.targetName?.trim()
@@ -534,11 +870,43 @@ const WORKLOAD_SEL = `
   status { phase readyReplicas availableReplicas edges { edgeName phase readyReplicas message } }
 `
 
+function parseRawWorkload(item: unknown, index: number): RawWorkload {
+  if (!isRecord(item) || !isRecord(item.metadata) || typeof item.metadata.name !== 'string' || !item.metadata.name) {
+    throw protocolError(`Workloads list item ${index} was malformed`)
+  }
+  return item as unknown as RawWorkload
+}
+
+async function listWorkloadsPageRaw(
+  options: KubernetesListOptions = {},
+  context: RequestContext = requestContext(),
+): Promise<RawListPage<RawWorkload>> {
+  const request = validateListOptions(options, 'Workloads')
+  const variables: Record<string, unknown> = {}
+  if (request.limit !== undefined) variables.limit = request.limit
+  if (request.continue !== undefined) variables.continue = request.continue
+  const data = await graphql<unknown>(
+    `query ListWorkloadsPage($limit: Int, $continue: String) {
+       edges_faros_sh { v1alpha1 {
+         Workloads(limit: $limit, continue: $continue) {
+           items { ${WORKLOAD_SEL} }
+           continue remainingItemCount resourceVersion
+         }
+       } }
+     }`,
+    variables,
+    context,
+  )
+  return parseListPage(data, 'Workloads', parseRawWorkload)
+}
+
+export async function listWorkloadsPage(options: KubernetesListOptions = {}): Promise<KubernetesListPage<Workload>> {
+  const context = requestContext()
+  return mapListPage(await listWorkloadsPageRaw(options, context), toWorkload)
+}
+
 export async function listWorkloads(): Promise<Workload[]> {
-  const data = await graphql<{
-    edges_faros_sh?: { v1alpha1?: { Workloads?: { items?: RawWorkload[] } } }
-  }>(`query ListWorkloads { edges_faros_sh { v1alpha1 { Workloads { items { ${WORKLOAD_SEL} } } } } }`)
-  const items = data.edges_faros_sh?.v1alpha1?.Workloads?.items ?? []
+  const items = await listAllPages('Workloads', listWorkloadsPageRaw)
   return items.map(toWorkload).sort((a, b) => a.name.localeCompare(b.name))
 }
 

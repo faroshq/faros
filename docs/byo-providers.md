@@ -345,8 +345,8 @@ All nine, each embedding its own chart values reference:
 | `infrastructure` | none — self-bootstrap values use `{{workspacePath}}` / `{{kubeconfigSecret}}` |
 | `code` | none |
 | `databricks` | none |
-| `kuery` | none — the edges identity hash is resolved |
-| `app-studio` | none — infrastructure + code identity hashes are resolved |
+| `kuery` | none — claims no first-party resources; edge discovery acts as a per-workspace ServiceAccount through each tenant's own edges binding, so no identity hashes are involved |
+| `app-studio` | none — claims no first-party resources at all; its reconcilers act as workspace ServiceAccounts through each tenant's own bindings, so no identity hashes are involved |
 | `agents` | `store.databaseURLSecretRef.name` — Postgres is its only hard dependency, and the hub cannot invent your database |
 
 Identity hashes are declared with `identityFor` rather than as literals, so the
@@ -478,6 +478,29 @@ Names must be RFC1123 labels: the name becomes a kcp workspace name and appears
 in URL paths.
 
 ## Known gaps
+
+- **The agent holds cluster-admin in the tenant's cluster, and its ClusterRole
+  now says so.** It used to be an allowlist of API groups, which read like a
+  containment boundary and was not one: it granted
+  `rbac.authorization.k8s.io/*` with `verbs: ["*"]`, and `*` covers `escalate`
+  and `bind`, so the agent could always mint a ClusterRole with any permission
+  and bind itself to it. Verified by doing exactly that with the old rules — the
+  ServiceAccount self-granted `cluster-admin`, after which
+  `auth can-i '*' '*'` returned `yes`.
+
+  What the list did buy was a confusing failure. Installing a provider through
+  an edge kubeconfig got far enough to create the CRD (`apiextensions.k8s.io`
+  was on the list) and then died on the provider's own custom resource:
+
+  ```
+  infrastructureproviders.infrastructure.faros.sh "…" is forbidden:
+  User "system:serviceaccount:faros-agent:faros-agent" cannot get …
+  ```
+
+  Bounding the agent for real means removing that escalate/bind path, which
+  needs its own design — the agent legitimately creates RBAC for the workloads
+  it deploys. Until then the grant is stated honestly rather than implying a
+  limit that does not hold.
 
 - **Nothing checks the virtual-workspace URL before handing out a credential.**
   On a multi-shard platform whose shards advertise unreachable virtual-workspace

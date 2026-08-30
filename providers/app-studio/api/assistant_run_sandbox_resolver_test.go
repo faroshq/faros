@@ -33,16 +33,16 @@ func TestProductionCodingSandboxResolverOwnershipMatrix(t *testing.T) {
 		ws  = "workspace-a"
 	)
 	platformAppStudio := enabledProviderBinding{
-		BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath, StaleClaimsKnown: true,
+		BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath,
 	}
 	platformInfrastructure := enabledProviderBinding{
-		BindingName: "infrastructure", ExportPath: projectAssistantPlatformInfrastructureExportPath, StaleClaimsKnown: true,
+		BindingName: "infrastructure", ExportPath: projectAssistantPlatformInfrastructureExportPath,
 	}
 	orgAppStudio := enabledProviderBinding{
-		BindingName: "app-studio", ExportPath: "root:faros:tenants:" + org + ":providers:app-studio", SelfHosted: true, StaleClaimsKnown: true,
+		BindingName: "app-studio", ExportPath: "root:faros:tenants:" + org + ":providers:app-studio", SelfHosted: true,
 	}
 	orgInfrastructure := enabledProviderBinding{
-		BindingName: "infrastructure", ExportPath: "root:faros:tenants:" + org + ":providers:infrastructure", SelfHosted: true, StaleClaimsKnown: true,
+		BindingName: "infrastructure", ExportPath: "root:faros:tenants:" + org + ":providers:infrastructure", SelfHosted: true,
 	}
 
 	tests := []struct {
@@ -102,8 +102,8 @@ func TestProductionCodingSandboxResolverHandlesBindingHealth(t *testing.T) {
 		org = "org-a"
 		ws  = "workspace-a"
 	)
-	platformAppStudio := enabledProviderBinding{BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath, StaleClaimsKnown: true}
-	platformInfrastructure := enabledProviderBinding{BindingName: "infrastructure", ExportPath: projectAssistantPlatformInfrastructureExportPath, StaleClaimsKnown: true}
+	platformAppStudio := enabledProviderBinding{BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath}
+	platformInfrastructure := enabledProviderBinding{BindingName: "infrastructure", ExportPath: projectAssistantPlatformInfrastructureExportPath}
 
 	tests := []struct {
 		name       string
@@ -126,31 +126,9 @@ func TestProductionCodingSandboxResolverHandlesBindingHealth(t *testing.T) {
 			wantReason: "being disabled",
 		},
 		{
-			name: "stale Infrastructure claim", bindings: map[string]enabledProviderBinding{
-				"app-studio": func() enabledProviderBinding {
-					b := platformAppStudio
-					b.StaleClaims = []enabledProviderStaleClaim{{Group: codingSandboxInfrastructureGroup, Resource: codingSandboxInfrastructureResource}}
-					return b
-				}(),
-				"infrastructure": platformInfrastructure,
-			},
-			wantReason: "stale Infrastructure instances claim",
-		},
-		{
-			name: "unrelated stale claim does not block sandbox", bindings: map[string]enabledProviderBinding{
-				"app-studio": func() enabledProviderBinding {
-					b := platformAppStudio
-					b.StaleClaims = []enabledProviderStaleClaim{{Group: "code.faros.sh", Resource: "repositories"}}
-					return b
-				}(),
-				"infrastructure": platformInfrastructure,
-			},
-			wantReason: "",
-		},
-		{
 			name: "foreign Org export", bindings: map[string]enabledProviderBinding{
-				"app-studio":     {BindingName: "app-studio", ExportPath: "root:faros:tenants:org-b:providers:app-studio", SelfHosted: true, StaleClaimsKnown: true},
-				"infrastructure": {BindingName: "infrastructure", ExportPath: "root:faros:tenants:org-b:providers:infrastructure", SelfHosted: true, StaleClaimsKnown: true},
+				"app-studio":     {BindingName: "app-studio", ExportPath: "root:faros:tenants:org-b:providers:app-studio", SelfHosted: true},
+				"infrastructure": {BindingName: "infrastructure", ExportPath: "root:faros:tenants:org-b:providers:infrastructure", SelfHosted: true},
 			},
 			wantReason: "unexpected provider export",
 		},
@@ -167,29 +145,6 @@ func TestProductionCodingSandboxResolverHandlesBindingHealth(t *testing.T) {
 				t.Fatalf("eligibility = %#v, want eligible=%t reason containing %q", eligibility, wantEligible, tt.wantReason)
 			}
 		})
-	}
-}
-
-func TestProductionCodingSandboxResolverFailsClosedWhenStaleClaimInspectionIsUnknown(t *testing.T) {
-	const (
-		org = "org-a"
-		ws  = "workspace-a"
-	)
-	server := newCodingSandboxBindingServer(t, org, ws, map[string]enabledProviderBinding{
-		"app-studio": {
-			BindingName: "app-studio", ExportPath: projectAssistantPlatformAppStudioExportPath,
-			StaleClaimsKnown: false,
-		},
-		"infrastructure": {
-			BindingName: "infrastructure", ExportPath: projectAssistantPlatformInfrastructureExportPath,
-			StaleClaimsKnown: true,
-		},
-	})
-	eligibility := server.ResolveCodingSandboxEligibility(
-		context.Background(), testCodingSandboxIdentity(org, ws), workspace.Scope{OrgUUID: org, WorkspaceUUID: ws},
-	)
-	if eligibility.Eligible || !strings.Contains(eligibility.Reason, "stale claim inspection") {
-		t.Fatalf("eligibility = %#v, want stale-claim inspection failure", eligibility)
 	}
 }
 

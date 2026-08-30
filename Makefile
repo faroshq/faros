@@ -1,4 +1,4 @@
-.PHONY: sync-portalkit verify-portalkit
+.PHONY: sync-portalkit verify-portalkit verify-ui-conformance test-portal-settings-conformance test-create-flow-conformance build-portal
 .PHONY: build-access-proxy docker-build-access-proxy
 .PHONY: dev-edge-create dev-run-edge build test lint fix-lint codegen crds clean certs dev-setup run-dex run-hub run-hub-static run-hub-embedded run-hub-embedded-static run-hub-standalone run-hub-embedded-graphql run-kcp dev-login dev-login-static dev-create-workload dev dev-infra dev-run-kcp path boilerplate verify-boilerplate verify-codegen ldflags tools docker-build docker-build-hub docker-build-agent docker-build-dex docker-build-dev-agent load-dev-agent-image docker-build-universal-dev-image load-universal-dev-image docker-push-dex verify help-dev dev-status dev-clean-hooks helm-build-local helm-push-local helm-clean build-quickstart-provider build-quickstart-provider-portal build-kuery-provider build-kuery-provider-portal run-provider-kuery kuery-db-up kuery-db-down install-provider-kuery init-provider-kuery uninstall-provider-kuery run-provider-quickstart install-provider-quickstart init-provider-quickstart uninstall-provider-quickstart build-infrastructure-provider build-infrastructure-provider-portal codegen-infrastructure-provider run-provider-infrastructure install-provider-infrastructure init-provider-infrastructure uninstall-provider-infrastructure build-app-studio-provider build-app-studio-provider-portal codegen-app-studio-provider app-studio-preview-console-dev-key verify-app-studio-preview-console-dev-key verify-app-studio-eval app-studio-db-up app-studio-db-down run-provider-app-studio install-provider-app-studio init-provider-app-studio uninstall-provider-app-studio build-agents-provider build-agents-provider-portal codegen-agents-provider agents-db-up agents-db-down run-provider-agents install-provider-agents init-provider-agents uninstall-provider-agents build-code-provider build-code-provider-portal codegen-code-provider run-provider-code install-provider-code init-provider-code uninstall-provider-code build-databricks-provider build-databricks-provider-portal codegen-databricks-provider run-provider-databricks install-provider-databricks init-provider-databricks uninstall-provider-databricks test-databricks-provider-chart dev-kro-up dev-kro-down dev-kro-seed e2e-infrastructure e2e-provider e2e-provider-flags e2e-provider-all
 
@@ -366,6 +366,16 @@ sync-portalkit: ## Vendor the shared portalkit UI kits into provider portals
 
 verify-portalkit: ## Verify vendored portalkit copies are in sync with the canonical source
 	@hack/sync-portalkit.sh --verify
+
+test-portal-settings-conformance: ## Verify portal shell and organization/workspace source contracts
+	@node --test portal/src/theme-bootstrap.test.mjs portal/src/pages/OrganizationsWorkspace.conformance.test.mjs
+
+test-create-flow-conformance: ## Verify route-owned creation uses the canonical page skeleton
+	@node --test hack/create-flow-conformance.test.mjs
+
+verify-ui-conformance: test-portal-settings-conformance test-create-flow-conformance ## Verify provider UI source uses the canonical k-* design vocabulary
+	@node hack/verify-ui-conformance.test.mjs
+	@node hack/verify-ui-conformance.mjs
 
 # --- Tool installation ---
 
@@ -1242,10 +1252,6 @@ KUERY_MANIFEST ?= providers/kuery/manifest.yaml
 KUERY_PROVIDER_MANIFEST ?= providers/kuery/provider.yaml
 KUERY_WORKSPACE_PATH ?= root:faros:providers:kuery
 KUERY_SCHEMAS_DIR ?= providers/kuery/deploy/chart/files/schemas
-# Optional: identityHash of the edges export for kuery's first-party edges
-# permission claim (copy from /bonkers Root identities). Empty → APIExport is
-# still created (Enable binds), but edge engagement won't activate until set.
-KUERY_EDGES_IDENTITY_HASH ?=
 # Dev runtime kubeconfig for the engagement controller, written by
 # init-provider-kuery from the provider SA token the hub mints.
 KUERY_RUNTIME_KUBECONFIG ?= $(KCP_DATA_DIR)/kuery-runtime.kubeconfig
@@ -1373,26 +1379,15 @@ init-provider-kuery: build-kuery-provider ## Bootstrap kuery APIExport (schemas+
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(KUERY_KCP_SERVER)/clusters/$(KUERY_WORKSPACE_PATH)" "$$TOKEN" \
 		> $(KUERY_RUNTIME_KUBECONFIG)
-	@# kcp requires kuery's first-party edges permissionClaim to carry the
-	@# identityHash of the export that serves edges. Tenants consume edges
-	@# through the core.faros.sh binding, so resolve core.faros.sh's
-	@# identityHash from system:controllers (override via KUERY_EDGES_IDENTITY_HASH).
-	@# The slice + bind grant are created inside install.Bootstrap using the
-	@# provider SA (cluster-admin → has `bind`), not the admin kubeconfig.
+	@# No identity hashes: kuery claims no first-party resources — edge
+	@# discovery acts as a per-workspace ServiceAccount through each tenant's
+	@# own edges binding. The slice + bind grant are created inside
+	@# install.Bootstrap using the provider SA (cluster-admin → has `bind`),
+	@# not the admin kubeconfig.
 	@echo "Running kuery-provider init (schemas + APIExport + endpoint slice + bind grant)"
-	@HASH="$(KUERY_EDGES_IDENTITY_HASH)"; \
-	if [ -z "$$HASH" ]; then \
-		HASH=$$(kubectl --kubeconfig=$(KUERY_KCP_KUBECONFIG) \
-			--server=$(KUERY_KCP_SERVER)/clusters/root:faros:system:controllers \
-			--insecure-skip-tls-verify \
-			get apiexport core.faros.sh -o jsonpath='{.status.identityHash}'); \
-		echo "resolved edges identityHash from core.faros.sh: $$HASH"; \
-	fi; \
-	test -n "$$HASH" || { echo "could not resolve core.faros.sh identityHash — is the hub bootstrapped?"; exit 1; }; \
 	FAROS_PROVIDER_KUBECONFIG=$(KUERY_RUNTIME_KUBECONFIG) \
 	KUERY_WORKSPACE_PATH=$(KUERY_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(KUERY_SCHEMAS_DIR) \
-	KUERY_EDGES_IDENTITY_HASH=$$HASH \
 		$(BINDIR)/kuery-provider init
 
 uninstall-provider-kuery: ## Delete kuery CatalogEntry + Provider (full teardown)
@@ -1708,25 +1703,13 @@ init-provider-app-studio: build-app-studio-provider ## Bootstrap App Studio APIE
 	printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: faros\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\ncontexts:\n- name: faros\n  context:\n    cluster: faros\n    user: faros\ncurrent-context: faros\nusers:\n- name: faros\n  user:\n    token: %s\n' \
 		"$(APP_STUDIO_KCP_SERVER)/clusters/$(APP_STUDIO_WORKSPACE_PATH)" "$$TOKEN" \
 		> $(APP_STUDIO_PROVIDER_KUBECONFIG)
-	@echo "Running app-studio-provider init (creates APIExport + schemas + endpoint slice + bind grant + instance claims)"
-	@# The instance permission claims need the infrastructure APIExport's
-	@# identityHash. Auto-discover it in dev; APP_STUDIO_INFRA_IDENTITY_HASH
-	@# in the environment wins (prod supplies it via Helm).
-	INFRA_HASH=$${APP_STUDIO_INFRA_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(APP_STUDIO_KCP_KUBECONFIG) \
-		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:providers:infrastructure \
-		--insecure-skip-tls-verify \
-		get apiexport infrastructure.providers.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
-	if [ -z "$$INFRA_HASH" ]; then echo "WARNING: could not discover the infrastructure APIExport identityHash — instance claims will be hash-less"; fi; \
-	CODE_HASH=$${APP_STUDIO_CODE_IDENTITY_HASH:-$$(kubectl --kubeconfig=$(APP_STUDIO_KCP_KUBECONFIG) \
-		--server=$(APP_STUDIO_KCP_SERVER)/clusters/root:faros:providers:code \
-		--insecure-skip-tls-verify \
-		get apiexport code.providers.faros.sh -o jsonpath='{.status.identityHash}' 2>/dev/null)}; \
-	if [ -z "$$CODE_HASH" ]; then echo "WARNING: could not discover the code APIExport identityHash — the repositories claim will be hash-less"; fi; \
+	@echo "Running app-studio-provider init (creates APIExport + schemas + endpoint slice + bind grant)"
+	@# No identity hashes: app-studio claims no first-party resources. The
+	@# reconcilers act as workspace ServiceAccounts through each tenant's own
+	@# bindings, so no APIExport identityHash pinning is involved.
 	FAROS_PROVIDER_KUBECONFIG=$(APP_STUDIO_PROVIDER_KUBECONFIG) \
 	APP_STUDIO_WORKSPACE_PATH=$(APP_STUDIO_WORKSPACE_PATH) \
 	FAROS_SCHEMAS_DIR=$(APP_STUDIO_SCHEMAS_DIR) \
-	APP_STUDIO_INFRA_IDENTITY_HASH="$$INFRA_HASH" \
-	APP_STUDIO_CODE_IDENTITY_HASH="$$CODE_HASH" \
 		$(BINDIR)/app-studio-provider init
 
 ## Delete the App Studio CatalogEntry. Useful while iterating on the chart.
@@ -2431,7 +2414,7 @@ clean:
 path: ## Print export command to add bin/ to PATH
 	@echo 'export PATH=$(CURDIR)/$(BINDIR):$$PATH'
 
-verify: verify-boilerplate verify-codegen verify-portalkit verify-app-studio-preview-console-dev-key verify-app-studio-eval vet lint build test ## Run all checks
+verify: verify-boilerplate verify-codegen verify-portalkit verify-ui-conformance verify-app-studio-preview-console-dev-key verify-app-studio-eval build-portal vet lint build test ## Run all checks
 
 # --- Helm chart packaging ---
 

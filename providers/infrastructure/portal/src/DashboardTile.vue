@@ -15,39 +15,13 @@
 // the workspace isn't bootstrapped yet (X-Faros-Tenant resolver returns
 // nothing), we just render an empty state instead of bubbling errors.
 
-import { computed, onMounted, onUnmounted, ref, watch, h } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ArrowRight } from 'lucide-vue-next'
+import { AlertTriangle, Check, ChevronRight, Clock, Package } from 'lucide-vue-next'
 import { api, isContextChangedError, setTenant, setToken } from './api'
 import { tileClass } from './portalkit/dashboardtile'
-import { ic } from './portalkit/icons'
-import { createLatestRefreshController, createResourceTombstones } from './refresh'
+import { createLatestRefreshController, createResourceTombstones, type ResourceRefreshMode } from './refresh'
 import type { Instance } from './types'
-
-// Inline icon components — the provider's portal bundle is
-// intentionally self-contained (no parent node_modules symlink) so we
-// can't pull lucide-vue-next here without bloating package.json. SVG
-// strings copied verbatim from lucide.dev so a future swap to the
-// icon lib (if we add the symlink later) is a 1:1 visual replacement.
-//
-// Each component accepts the same `class` prop a real lucide component
-// would, so the call sites read identically in the template.
-function inlineIcon(path: string) {
-  return (props: { class?: string }) =>
-    h(
-      'svg',
-      {
-        xmlns: 'http://www.w3.org/2000/svg',
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        'stroke-width': 2,
-        'stroke-linecap': 'round',
-        'stroke-linejoin': 'round',
-        class: props.class,
-      },
-      [h('path', { d: path })],
-    )
-}
-const ChevronRight = inlineIcon('m9 18 6-6-6-6')
 
 interface FarosContext {
   token?: string | null
@@ -143,8 +117,8 @@ const refresh = createLatestRefreshController(async requestID => {
   }
 })
 
-function load(): Promise<void> {
-  return refresh.request()
+function load(mode: ResourceRefreshMode = 'foreground'): Promise<void> {
+  return refresh.request(mode)
 }
 
 function dispatchNavigate(path: string) {
@@ -163,7 +137,7 @@ function openInstance(instance: Instance) {
 onMounted(() => {
   // 30s poll matches the catalog/instance list cadence in the main app —
   // anything tighter wastes the hub roundtrips for a tile users glance at.
-  pollHandle = window.setInterval(() => { void load() }, 30000)
+  pollHandle = window.setInterval(() => { void load('background') }, 30000)
 })
 onUnmounted(() => {
   if (pollHandle !== null) window.clearInterval(pollHandle)
@@ -205,41 +179,41 @@ function dotFor(phase: string) {
     </div>
     <div v-else-if="!loaded && error" :class="tileClass.error" role="alert" aria-live="assertive">
       Failed to load: {{ error }}
-      <button type="button" class="ml-2 font-medium underline" @click="load">Retry</button>
+      <button type="button" class="ml-2 font-medium underline" @click="load('foreground')">Retry</button>
     </div>
 
     <template v-else>
       <span v-if="loading" class="sr-only" role="status" aria-live="polite">Updating infrastructure instances…</span>
       <div v-if="error" :class="tileClass.error" role="alert" aria-live="assertive">
         Showing the last successful result. {{ error }}
-        <button type="button" class="ml-2 font-medium underline" @click="load">Retry</button>
+        <button type="button" class="ml-2 font-medium underline" @click="load('foreground')">Retry</button>
       </div>
       <!-- Slim horizontal status row (matches the clusters/edges tiles): a
            single inline line of icon + count + label chips rather than four
            stacked boxes, so the tile stays compact. -->
       <div :class="tileClass.stats">
         <span :class="[tileClass.stat, tileClass.statTotal]">
-          <span v-html="ic('package', tileClass.statIcon)" />
+          <Package :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span :class="tileClass.statNum">{{ stats.total }}</span>
           <span :class="tileClass.statLabel">total</span>
         </span>
         <span :class="[tileClass.stat, tileClass.statOk]">
-          <span v-html="ic('check', tileClass.statIcon)" />
+          <Check :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.ready }}</span>
           <span :class="tileClass.statLabel">ready</span>
         </span>
         <span v-if="stats.pending > 0" :class="[tileClass.stat, tileClass.statMuted]">
-          <span v-html="ic('clock', tileClass.statIcon)" />
+          <Clock :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.pending }}</span>
           <span :class="tileClass.statLabel">pending</span>
         </span>
         <span v-if="stats.deleting > 0" :class="[tileClass.stat, tileClass.statWarn]">
-          <span v-html="ic('clock', tileClass.statIcon)" />
+          <Clock :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.deleting }}</span>
           <span :class="tileClass.statLabel">deleting</span>
         </span>
         <span v-if="stats.failed > 0" :class="[tileClass.stat, tileClass.statBad]">
-          <span v-html="ic('alert-triangle', tileClass.statIcon)" />
+          <AlertTriangle :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.failed }}</span>
           <span :class="tileClass.statLabel">failed</span>
         </span>
@@ -287,7 +261,7 @@ function dotFor(phase: string) {
             class="ml-1 font-medium text-accent transition-colors hover:text-accent-hover"
             @click="dispatchNavigate('templates')"
           >
-            Browse templates →
+            Browse templates <ArrowRight :size="14" aria-hidden="true" />
           </button>
         </div>
         <div class="mt-1 text-text-muted/70">
@@ -297,7 +271,7 @@ function dotFor(phase: string) {
             class="font-medium text-accent transition-colors hover:text-accent-hover"
             @click="dispatchNavigate('instances')"
           >
-            Open Instances →
+            Open Instances <ArrowRight :size="14" aria-hidden="true" />
           </button>
         </div>
       </div>

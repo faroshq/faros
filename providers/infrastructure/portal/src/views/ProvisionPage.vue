@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { ArrowLeft } from 'lucide-vue-next'
 import DynamicForm from '../components/DynamicForm.vue'
 import { api, isContextChangedError } from '../api'
 import type { Template, ErrorResponse } from '../types'
+import { useDelayedLoading } from '../portalkit/useDelayedLoading'
 import { REASON_CLOUD_CREDENTIALS_MISSING, REASON_API_BINDING_MISSING, REASON_TENANT_MISSING } from '../types'
 
 const props = defineProps<{ templateName: string }>()
@@ -16,6 +18,8 @@ const values = ref<Record<string, unknown>>({})
 const instanceName = ref('')
 const loading = ref(true)
 const loaded = ref(false)
+const initialReadPending = computed(() => loading.value && !loaded.value)
+const showInitialLoading = useDelayedLoading(initialReadPending)
 const readError = ref<string | null>(null)
 const mutationError = ref<string | null>(null)
 const submitting = ref(false)
@@ -100,45 +104,52 @@ async function submit() {
 </script>
 
 <template>
-  <section class="page">
-    <button type="button" class="link back" :disabled="submitting" @click="emit('navigate', 'catalog')">← Back to templates</button>
-    <div v-if="loading && !loaded" class="page-loading-shell" role="status" aria-live="polite" aria-busy="true">
+  <section class="page k-create-page">
+    <button type="button" class="k-btn k-btn--ghost k-back-action" :disabled="submitting" @click="emit('navigate', 'catalog')"><ArrowLeft :size="14" aria-hidden="true" /> Back to templates</button>
+    <div
+      v-if="initialReadPending"
+      class="page-loading-shell k-delayed-loading"
+      :role="showInitialLoading ? 'status' : undefined"
+      :aria-live="showInitialLoading ? 'polite' : undefined"
+      :aria-busy="showInitialLoading ? 'true' : undefined"
+      :aria-hidden="showInitialLoading ? undefined : 'true'"
+    >
       <span>Loading template…</span>
       <div class="shimmer page-loading-line page-loading-line-short" aria-hidden="true" />
       <div class="shimmer page-loading-panel" aria-hidden="true" />
     </div>
     <div v-else-if="!template && readError" class="read-error" role="alert" aria-live="assertive">
       <span>{{ readError }}</span>
-      <button type="button" class="read-retry" @click="load">Retry</button>
+      <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
     </div>
     <template v-else-if="template">
-      <header class="page-head">
-        <div>
-          <h2 class="page-title">Provision {{ template.displayName }}</h2>
-          <p class="page-meta">{{ template.description }}</p>
-        </div>
+      <header class="k-create-header">
+        <h2 class="k-create-title">Provision {{ template.displayName }}</h2>
+        <p class="k-create-description">{{ template.description }}</p>
       </header>
       <div v-if="readError" class="stale-banner" role="alert" aria-live="assertive">
         <span>Showing the last successful template. {{ readError }}</span>
-        <button type="button" class="read-retry" @click="load">Retry</button>
+        <button type="button" class="k-btn k-btn--ghost" @click="load">Retry</button>
       </div>
       <span v-if="loading" class="sr-only" role="status" aria-live="polite">Rechecking template…</span>
-      <form class="form" :aria-busy="submitting || loading" @submit.prevent="submit">
+      <form class="k-create-surface k-create-surface--wide" :aria-busy="submitting || loading" @submit.prevent="submit">
+        <div class="k-create-body">
         <div class="dynform-row">
-          <label>
+          <label for="infrastructure-instance-name">
             <span class="dynform-label">Instance name<span class="required">*</span></span>
             <span class="dynform-desc">DNS-1123 subdomain. Lowercase alnum, '-', '.'.</span>
           </label>
-          <input v-model="instanceName" placeholder="my-instance" />
+          <input id="infrastructure-instance-name" v-model="instanceName" class="k-input" placeholder="my-instance" />
         </div>
         <DynamicForm :schema="template.inputsSchema" v-model:values="values" />
         <div v-if="mutationError" class="read-error" role="alert" aria-live="assertive">{{ mutationError }}</div>
         <span v-if="submitting" class="sr-only" role="status" aria-live="polite">Provisioning instance…</span>
-        <div class="actions">
-          <button type="submit" class="primary" :disabled="submitting || loading">
+        </div>
+        <div class="k-create-actions">
+          <button type="button" class="k-btn k-btn--ghost" :disabled="submitting" @click="emit('navigate', 'catalog')">Cancel</button>
+          <button type="submit" class="k-btn k-btn--primary" :disabled="submitting || loading">
             {{ submitting ? 'Provisioning…' : 'Provision' }}
           </button>
-          <button type="button" class="link" :disabled="submitting" @click="emit('navigate', 'catalog')">Cancel</button>
         </div>
       </form>
     </template>

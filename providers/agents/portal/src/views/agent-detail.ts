@@ -10,6 +10,7 @@ import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
 import { loadingState } from '../ui/states'
 import { confirmModal } from '../portalkit/modal'
+import { tabClass, tabsClass } from '../portalkit/tabs'
 import { mutate } from '../mutate'
 import type { AgentTab } from '../router'
 
@@ -27,25 +28,27 @@ export class AgentDetail extends StoreElement {
   @property({ type: String }) tab: AgentTab = 'config'
 
   private async del(): Promise<void> {
+    const authority = this.captureAuthority()
+    const name = this.name
     const ok = await confirmModal({
-      title: `Delete agent “${this.name}”?`,
+      title: `Delete agent “${name}”?`,
       message: 'This also deletes its chat history.',
       danger: true,
       confirmLabel: 'Delete',
     })
-    if (!ok) return
-    const res = await mutate(this.store, {
-      run: () => this.api.deleteAgent(this.name),
-      success: `Agent “${this.name}” deleted.`,
+    if (!ok || !this.authorityIsCurrent(authority)) return
+    const res = await mutate(authority.store, {
+      run: () => authority.api.deleteAgent(name),
+      success: `Agent “${name}” deleted.`,
       failure: 'Delete failed',
       reload: ['agents'],
     })
-    if (res !== undefined) this.navigate({ kind: 'menu', menu: 'agents' })
+    if (res !== undefined && this.authorityIsCurrent(authority)) this.navigate({ kind: 'menu', menu: 'agents' })
   }
 
   render(): TemplateResult {
     const a = this.store.agent(this.name)
-    const back = html`<button class="agents-back" @click=${() => this.navigate({ kind: 'menu', menu: 'agents' })}>
+    const back = html`<button class="k-btn k-btn--ghost agents-back" @click=${() => this.navigate({ kind: 'menu', menu: 'agents' })}>
       ${icon('arrow-left')} Agents
     </button>`
     if (!a) {
@@ -54,7 +57,7 @@ export class AgentDetail extends StoreElement {
       return html`<div class="agents-detail">
         <div class="agents-detail-head"><div class="agents-detail-title">${back}</div></div>
         ${this.store.agents.loaded
-          ? html`<div class="agents-state agents-state-empty">${icon('bot')} No agent named “${this.name}” in this workspace.</div>`
+          ? html`<div class="k-card agents-state agents-state-empty" role="status">${icon('bot')} No agent named “${this.name}” in this workspace.</div>`
           : loadingState('Loading agent…')}
       </div>`
     }
@@ -64,13 +67,14 @@ export class AgentDetail extends StoreElement {
           <div class="agents-detail-title">
             ${back}
             <h2>${a.spec?.displayName || a.metadata.name}</h2>
-            ${a.status?.suspendedReason ? html`<span class="agents-badge agents-badge-warn">${a.status.suspendedReason}</span>` : nothing}
+            ${a.status?.suspendedReason ? html`<span class="k-badge agents-badge k-badge--warning agents-badge-warn">${a.status.suspendedReason}</span>` : nothing}
           </div>
           <div class="agents-detail-actions">
-            <nav class="agents-subnav" aria-label="Agent sections">
+            <nav class="${tabsClass('agents-subnav')}" aria-label="Agent sections">
               ${TABS.map(
                 ([id, label]) => html`<button
-                  class="agents-subtab ${this.tab === id ? 'sel' : ''}"
+                  class="k-btn k-btn--ghost ${tabClass({ active: this.tab === id, className: 'agents-subtab' })}"
+                  type="button"
                   aria-current=${this.tab === id ? 'page' : nothing}
                   @click=${() => this.navigate({ kind: 'agent', name: this.name, tab: id })}
                 >
@@ -78,7 +82,7 @@ export class AgentDetail extends StoreElement {
                 </button>`,
               )}
             </nav>
-            <button class="secondary" @click=${() => void this.del()}>${icon('trash')} Delete</button>
+            <button class="k-btn k-btn--ghost secondary" @click=${() => void this.del()}>${icon('trash')} Delete</button>
           </div>
         </div>
         ${this.tab === 'runs'

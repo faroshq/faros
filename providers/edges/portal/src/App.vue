@@ -1,86 +1,154 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
-import { Server, Boxes, RefreshCw, Trash2, CircleDot, Plus } from 'lucide-vue-next'
+import { Server, Boxes, Plug } from 'lucide-vue-next'
 import { setToken, setTenant, listEdges, deleteEdge } from './api'
 import Wizard from './Wizard.vue'
 import Detail from './Detail.vue'
+import EdgeCollection from './EdgeCollection.vue'
 import Workloads from './Workloads.vue'
 import Services from './Services.vue'
+import ServiceCreate from './ServiceCreate.vue'
+import WorkloadCreate from './WorkloadCreate.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
+import Tabs from './portalkit/Tabs.vue'
 import { confirmDialog } from './portalkit/confirm'
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  type ResourceRefreshMode,
+} from './refresh'
 import type { Edge, EdgeType, FarosContext, ErrorResponse } from './types'
+import {
+  edgeDetailPath,
+  navigationDetail,
+  parseSubPath,
+  serviceCreatePath,
+  serviceDetailPath,
+  workloadDeployPath,
+  type EdgeRoute,
+} from './routes'
 
 const props = defineProps<{ ctx: FarosContext | null }>()
 
-// Top-level view is driven by the shell route: /providers/edges → the edges
-// fleet; /providers/edges/workloads → the workloads scheduled across them. The
-// sidebar renders both as nav items (CatalogEntry ui.children), so switching
-// happens via the menu; the in-page toggle mirrors it through navigate().
-const view = computed<'edges' | 'workloads' | 'services'>(() => {
-  const sub = props.ctx?.subPath ?? ''
-  if (sub.startsWith('workloads')) return 'workloads'
-  if (sub.startsWith('services')) return 'services'
-  return 'edges'
-})
+// The shell owns the provider prefix and passes only the trailing path. Every
+// consequential action is represented here so browser refresh/back/forward
+// return to the same page and no stale local overlay can capture the UI.
+const route = computed<EdgeRoute>(() => parseSubPath(props.ctx?.subPath))
+const view = computed(() => route.value.page)
+
+const edgeRouteTabs = [
+  { id: 'edges', label: 'Edges', icon: Server },
+  { id: 'workloads', label: 'Workloads', icon: Boxes },
+  { id: 'services', label: 'Services', icon: Plug },
+] as const
 
 // navigate pushes the shell's router via a bubbling CustomEvent the element's
-// ProviderFrame host listens for. path is the trailing segment appended to
-// /providers/edges/ (empty = the edges list).
+// ProviderFrame host listens for. path is relative to /providers/edges/.
 const rootRef = ref<HTMLElement | null>(null)
-function navigate(path: string) {
-  rootRef.value?.dispatchEvent(new CustomEvent('faros-navigate', { detail: { path }, bubbles: true }))
+function navigate(path: string, replace = false) {
+  rootRef.value?.dispatchEvent(new CustomEvent('faros-navigate', {
+    detail: navigationDetail(path, replace),
+    bubbles: true,
+  }))
 }
 
-// The wizard shows automatically on first load when the workspace has no edges,
-// and on demand via "Connect edge". It closes back to the list on completion.
-const wizardOpen = ref(false)
+function selectView(id: string): void {
+  // Keep the provider landing page canonical at /providers/edges; the parser
+  // also accepts the explicit `edges` collection alias for deep links.
+  navigate(id === 'edges' ? '' : id)
+}
+
+function onServiceNavigate(name: string | null, options?: { replace?: boolean }): void {
+  navigate(name === null ? 'services' : serviceDetailPath(name), options?.replace === true)
+}
+
+// The first empty read redirects to the same connect route users can open from
+// the collection. firstLoadDone prevents a cancel/back cycle from reopening it.
 const firstLoadDone = ref(false)
+const workloadResult = ref<string | null>(null)
 
-// Selected edge → detail view. Null = list.
-const selected = ref<{ name: string; type: EdgeType } | null>(null)
-
-function openDetail(e: Edge) {
-  selected.value = { name: e.name, type: e.type }
+function onEdgeCreated(name: string, type: EdgeType): void {
+  navigate(edgeDetailPath(type, name), true)
 }
-function closeDetail() {
-  selected.value = null
-  refresh()
+function onServiceCreated(name: string): void {
+  navigate(serviceDetailPath(name), true)
+}
+function onEdgeDeleted(): void {
+  navigate('', true)
+  void refresh()
+}
+function onWorkloadCompleted(message: string): void {
+  workloadResult.value = message
+  navigate('workloads', true)
+}
+function onWorkloadDismissResult(): void {
+  workloadResult.value = null
 }
 
-// The shell sidebar (Workloads/Services nav items) changes the route while
-// the detail or wizard overlay is open. The route must win: the template
-// gates every view on !selected/!wizardOpen, so without closing them here
-// the overlay keeps rendering and the sidebar appears dead.
-watch(view, (v) => {
-  selected.value = null
-  wizardOpen.value = false
-  if (v === 'edges') refresh()
-})
+function openDetail(row: Record<string, unknown>): void {
+  const type = row.type === 'server' ? 'server' : 'kubernetes'
+  navigate(edgeDetailPath(type, String(row.name)))
+}
 
 const edges = ref<Edge[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const refreshMode = ref<ResourceRefreshMode>('foreground')
+const foregroundLoading = computed(() => loading.value && refreshMode.value === 'foreground')
+// Nested list views keep their own cursor/cache authority. Remount them when
+// the shell changes tenant or token so a prior workspace's rows and cursors
+// cannot remain visible while the new context is loading.
+const contextGeneration = ref(0)
 
-async function refresh() {
+const poller = createAdaptiveRefreshTimer(() => {
+  if (props.ctx?.tenant) void refresh('background')
+}, () => {
+  if (!firstLoadDone.value || error.value) return FAST_REFRESH_MS
+  const unsettled = edges.value.some(edge => !edge.connected || ['pending', 'provisioning', 'deleting'].includes((edge.phase || '').toLowerCase()))
+  return unsettled ? FAST_REFRESH_MS : STABLE_REFRESH_MS
+})
+
+const edgeRefresh = createLatestRefreshController(async (requestID, mode) => {
+  refreshMode.value = mode
   loading.value = true
-  error.value = null
+  if (mode === 'foreground') error.value = null
   try {
-    edges.value = await listEdges()
-    // Auto-open the wizard the first time we confirm the workspace has no edges.
+    const nextEdges = await listEdges()
+    if (!edgeRefresh.isCurrent(requestID)) return
+    edges.value = nextEdges
+    error.value = null
+    // Redirect to the route-owned wizard the first time we confirm the
+    // workspace has no edges. The flag remains set after cancellation.
     if (!firstLoadDone.value) {
       firstLoadDone.value = true
-      if (edges.value.length === 0) wizardOpen.value = true
+      const collectionRoute = route.value.page === 'edges' && !route.value.edge && !route.value.connect
+      if (edges.value.length === 0 && collectionRoute) navigate('connect/edge', true)
     }
   } catch (e) {
+    if (!edgeRefresh.isCurrent(requestID)) return
     error.value = (e as ErrorResponse)?.message ?? 'Failed to load edges'
   } finally {
-    loading.value = false
+    if (edgeRefresh.isCurrent(requestID)) loading.value = false
+    poller.schedule()
   }
+})
+
+function refresh(mode: ResourceRefreshMode | Event = 'foreground') {
+  const requestedMode = typeof mode === 'string' ? mode : 'foreground'
+  if (requestedMode === 'foreground') {
+    refreshMode.value = 'foreground'
+    loading.value = true
+  }
+  return edgeRefresh.request(requestedMode)
 }
 
-function onWizardDone() {
-  wizardOpen.value = false
-  refresh()
+function onEdgeCollectionActivated(): void {
+  // The first activation happens before the initial authoritative read, so
+  // avoid a duplicate request. Every later activation follows a detail/action
+  // route and revalidates rows without remounting ResourceTable's state.
+  if (firstLoadDone.value) void refresh('foreground')
 }
 
 async function onDelete(edge: Edge) {
@@ -95,126 +163,125 @@ async function onDelete(edge: Edge) {
 
 // Re-auth + reload whenever the shell pushes a new context (token/workspace).
 watch(
-  () => [props.ctx?.token, props.ctx?.tenant] as const,
-  ([token, tenant]) => {
+  () => [props.ctx?.token, props.ctx?.tenant, props.ctx?.user?.sub] as const,
+  ([token, tenant, userSub], previous) => {
+    const authorityChanged = !previous || tenant !== previous[1] || userSub !== previous[2]
     setToken(token ?? null)
     setTenant(tenant ?? null)
-    if (tenant) refresh()
+    if (authorityChanged) {
+      contextGeneration.value += 1
+      edgeRefresh.invalidate()
+      edges.value = []
+      firstLoadDone.value = false
+      workloadResult.value = null
+      loading.value = Boolean(tenant)
+      error.value = null
+      if (tenant) void refresh('foreground')
+      return
+    }
+    // Token rotation within the same user/workspace is a credential refresh,
+    // not a resource identity change. Preserve the authoritative snapshot and
+    // quietly revalidate it with the new token.
+    if (tenant) void refresh('background')
   },
   { immediate: true },
 )
 
-// Light polling so status/connected updates without a manual refresh.
-const timer = setInterval(() => {
-  if (props.ctx?.tenant && !loading.value) refresh()
-}, 10000)
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  edgeRefresh.stop()
+  poller.stop()
+})
 
-function rel(ts?: string): string {
-  if (!ts) return '—'
-  const d = new Date(ts).getTime()
-  if (Number.isNaN(d)) return '—'
-  const secs = Math.max(0, Math.floor((Date.now() - d) / 1000))
-  if (secs < 60) return `${secs}s ago`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
 </script>
 
 <template>
-  <div ref="rootRef" class="edges-app">
-    <!-- Section nav: Edges | Workloads | Services. Mirrors the sidebar's sub-nav
-         items and pushes the shell route via navigate(). Hidden while the wizard
-         or a detail view is open so those flows stay focused. -->
-    <nav v-if="!wizardOpen && !selected" class="wiz-steps" style="margin-bottom: 4px;">
-      <button class="wiz-step" :class="{ active: view === 'edges' }" @click="navigate('')">Edges</button>
-      <button class="wiz-step" :class="{ active: view === 'workloads' }" @click="navigate('workloads')">Workloads</button>
-      <button class="wiz-step" :class="{ active: view === 'services' }" @click="navigate('services')">Services</button>
-    </nav>
-
-    <!-- Workloads view. -->
-    <Workloads v-if="view === 'workloads' && !wizardOpen && !selected" />
-
-    <!-- Services view. -->
-    <Services v-else-if="view === 'services' && !wizardOpen && !selected" />
-
-    <!-- Onboarding / add-edge wizard (shown on first load when empty, or on demand). -->
-    <Wizard v-else-if="wizardOpen" :cluster="props.ctx?.tenant ?? null" @connected="onWizardDone" />
-
-    <!-- Per-edge detail view. -->
-    <Detail
-      v-else-if="selected"
-      :name="selected.name"
-      :type="selected.type"
-      :cluster="props.ctx?.tenant ?? null"
-      :token="props.ctx?.token ?? null"
-      @back="closeDetail"
-      @deleted="closeDetail"
+  <div ref="rootRef" class="edges-app" :key="contextGeneration">
+    <Tabs
+      v-if="!route.edge && !route.service && !route.connect && !route.create && !route.deploy"
+      :tabs="edgeRouteTabs"
+      :active="view"
+      aria-label="Edges sections"
+      @select="selectView"
     />
 
-    <template v-else>
-    <header class="edges-header">
-      <div>
-        <h1>Edges</h1>
-        <p>Kubernetes clusters and Linux/SSH servers connected to this workspace.</p>
-      </div>
-      <div class="header-actions">
-        <button class="btn" :disabled="loading" @click="refresh">
-          <RefreshCw :size="14" :class="{ spin: loading }" /> Refresh
-        </button>
-        <button class="btn primary" @click="wizardOpen = true">
-          <Plus :size="14" /> Connect edge
-        </button>
-      </div>
-    </header>
-
-    <div v-if="error" class="banner error">{{ error }}</div>
-
-    <div v-if="loading && edges.length === 0" class="muted pad">Loading edges…</div>
-
-    <div v-else-if="edges.length === 0" class="empty">
-      <Boxes :size="28" />
-      <div class="empty-title">No edges connected yet</div>
-      <div class="muted">Click <b>Connect edge</b> to onboard one, or run <code>faros edge create</code>.</div>
-    </div>
-
-    <div v-else class="edges-table-wrap">
-      <table class="edges-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>Agent</th>
-            <th>Last heartbeat</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="e in edges" :key="e.type + '/' + e.name" class="clickable" @click="openDetail(e)">
-            <td class="name">{{ e.name }}</td>
-            <td>
-              <span class="pill">
-                <component :is="e.type === 'server' ? Server : Boxes" :size="12" />
-                {{ e.type === 'server' ? 'Server' : 'Kubernetes' }}
-              </span>
-            </td>
-            <td>
-              <span class="status" :class="e.connected ? 'ok' : 'down'">
-                <CircleDot :size="11" /> {{ e.connected ? 'Connected' : (e.phase || 'Disconnected') }}
-              </span>
-            </td>
-            <td class="mono muted">{{ e.agentVersion || '—' }}</td>
-            <td class="muted">{{ rel(e.lastHeartbeatTime) }}</td>
-            <td class="actions">
-              <button class="icon danger" title="Delete" @click.stop="onDelete(e)"><Trash2 :size="14" /></button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    </template>
+    <ServiceCreate
+      v-if="route.create?.resource === 'service'"
+      :key="`create-service:${contextGeneration}:${route.create.edgeType ?? 'any'}:${route.create.edgeName ?? ''}`"
+      :initial-edge-type="route.create.edgeType"
+      :initial-edge-name="route.create.edgeName"
+      @cancel="navigate('services', true)"
+      @created="onServiceCreated"
+    />
+    <WorkloadCreate
+      v-if="route.deploy?.resource === 'workload'"
+      :key="`deploy-workload:${contextGeneration}:${route.deploy.mode}:${route.deploy.app ?? ''}`"
+      :mode="route.deploy.mode"
+      :app-type="route.deploy.app"
+      @cancel="navigate('workloads', true)"
+      @completed="onWorkloadCompleted"
+    />
+    <Wizard
+      v-if="route.connect?.resource === 'edge'"
+      :cluster="props.ctx?.tenant ?? null"
+      @cancel="navigate('', true)"
+      @created="onEdgeCreated"
+    />
+    <Detail
+      v-if="route.edge"
+      :key="`edge-detail:${contextGeneration}:${route.edge.type}:${route.edge.name}`"
+      :name="route.edge.name"
+      :type="route.edge.type"
+      :cluster="props.ctx?.tenant ?? null"
+      :token="props.ctx?.token ?? null"
+      @back="navigate('', true)"
+      @deleted="onEdgeDeleted"
+      @add-service="navigate(serviceCreatePath(route.edge.type, route.edge.name))"
+    />
+    <Services
+      v-if="route.page === 'services' && route.service"
+      :key="`service-detail:${contextGeneration}:${route.service}`"
+      :selected-name="route.service"
+      @navigate="onServiceNavigate"
+    />
+    <!-- Keep collection instances alive while a route-owned create/detail page
+         is active, so search/filter/page/scroll state returns unchanged. The
+         route still owns every consequential form; this only preserves the
+         read-only collection snapshot behind it. -->
+    <KeepAlive>
+      <Services
+        v-if="route.page === 'services' && !route.service && !route.create"
+        :key="`services:${contextGeneration}`"
+        @navigate="onServiceNavigate"
+        @create="navigate('create/service')"
+      />
+    </KeepAlive>
+    <KeepAlive>
+      <Workloads
+        v-if="route.page === 'workloads' && !route.deploy"
+        :key="`workloads:${contextGeneration}`"
+        :result="workloadResult"
+        @create="navigate('deploy/workload/manual')"
+        @deploy="(app) => navigate(workloadDeployPath('marketplace', app.type))"
+        @dismiss-result="onWorkloadDismissResult"
+      />
+    </KeepAlive>
+    <KeepAlive>
+      <EdgeCollection
+        v-if="route.page === 'edges' && !route.edge && !route.connect"
+        :key="`edges:${contextGeneration}`"
+        :edges="edges"
+        :loaded="firstLoadDone"
+        :loading="loading"
+        :refresh-mode="refreshMode"
+        :error="error"
+        :foreground-loading="foregroundLoading"
+        @activated="onEdgeCollectionActivated"
+        @refresh="refresh"
+        @open="openDetail"
+        @delete="onDelete"
+        @connect="navigate('connect/edge')"
+      />
+    </KeepAlive>
     <ConfirmDialog />
   </div>
 </template>

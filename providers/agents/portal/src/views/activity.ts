@@ -10,7 +10,7 @@ import { property, state } from 'lit/decorators.js'
 import { repeat } from 'lit/directives/repeat.js'
 import { StoreElement } from '../ui/base'
 import { icon, type IconName } from '../ui/icon'
-import { emptyState, errorState, loadingState } from '../ui/states'
+import { emptyState, errorState, loadingState, staleState } from '../ui/states'
 import { toast } from '../ui/toast'
 import { fmtDuration, fmtTime, fmtTokens, fmtUSD, type InboxItem, type RunPhase, type RunSummary } from '../types'
 import type { RunFilter } from '../api'
@@ -27,7 +27,8 @@ export const PHASE_META: Record<RunPhase, { label: string; cls: string; glyph: I
 
 export function phaseChip(phase: RunPhase): TemplateResult {
   const m = PHASE_META[phase] || { label: phase, cls: 'pending', glyph: 'circle' as IconName }
-  return html`<span class="agents-phase agents-phase-${m.cls}">${icon(m.glyph)} ${m.label}</span>`
+  const tone = m.cls === 'ok' || m.cls === 'running' ? 'k-badge--success' : m.cls === 'failed' || m.cls === 'aborted' ? 'k-badge--danger' : 'k-badge--warning'
+  return html`<span class="k-badge ${tone} agents-phase agents-phase-${m.cls}">${icon(m.glyph)} ${m.label}</span>`
 }
 
 const PHASES: RunPhase[] = ['Pending', 'Running', 'PendingApproval', 'Succeeded', 'Failed', 'Aborted']
@@ -52,6 +53,7 @@ export class Activity extends StoreElement {
   @state() private nextCursor = ''
   @state() private loading = false
   @state() private error: string | null = null
+  @state() private loaded = false
   @state() private filterAgent = ''
   @state() private filterClass = ''
   @state() private filterPhase = ''
@@ -61,6 +63,7 @@ export class Activity extends StoreElement {
 
   private started = false
   private refreshTimer = 0
+  private requestGeneration = 0
 
   connectedCallback(): void {
     super.connectedCallback()
@@ -70,6 +73,7 @@ export class Activity extends StoreElement {
   disconnectedCallback(): void {
     this.store?.removeEventListener('server', this.onServerEvent as EventListener)
     if (this.refreshTimer) clearTimeout(this.refreshTimer)
+    this.requestGeneration += 1
     super.disconnectedCallback()
   }
 
@@ -77,7 +81,7 @@ export class Activity extends StoreElement {
     super.willUpdate()
     if (!this.started && this.api) {
       this.started = true
-      void this.reload()
+      void this.reload('foreground')
     }
   }
 
@@ -88,7 +92,7 @@ export class Activity extends StoreElement {
     if (this.refreshTimer) return
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = 0
-      void this.reload()
+      void this.reload('background')
     }, 700)
   }
 
@@ -104,30 +108,43 @@ export class Activity extends StoreElement {
     }
   }
 
-  private async reload(): Promise<void> {
-    this.loading = true
+  private async reload(mode: 'foreground' | 'background' = 'foreground'): Promise<void> {
+    // Event-driven refreshes are deliberately quiet once a snapshot exists.
+    // Manual refresh/filter changes remain foreground work and keep their
+    // existing explicit pending feedback.
+    if (mode === 'foreground' || !this.loaded) this.loading = true
+    const requestGeneration = ++this.requestGeneration
     try {
       const page = await this.api.listRuns(this.filter())
+      if (requestGeneration !== this.requestGeneration) return
       this.runs = page.items
       this.nextCursor = page.nextCursor || ''
       this.error = null
+      this.loaded = true
     } catch (e) {
+      if (requestGeneration !== this.requestGeneration) return
       this.error = (e as Error).message
+    } finally {
+      if (requestGeneration === this.requestGeneration) this.loading = false
     }
-    this.loading = false
   }
 
   private async more(): Promise<void> {
     if (!this.nextCursor || this.loading) return
     this.loading = true
+    const requestGeneration = ++this.requestGeneration
     try {
       const page = await this.api.listRuns(this.filter(this.nextCursor))
+      if (requestGeneration !== this.requestGeneration) return
       this.runs = [...this.runs, ...page.items]
       this.nextCursor = page.nextCursor || ''
     } catch (e) {
-      toast('error', `Could not load more runs: ${(e as Error).message}`)
+      if (requestGeneration === this.requestGeneration) {
+        toast('error', `Could not load more runs: ${(e as Error).message}`)
+      }
+    } finally {
+      if (requestGeneration === this.requestGeneration) this.loading = false
     }
-    this.loading = false
   }
 
   private async resolve(item: InboxItem, decision: 'approve' | 'deny'): Promise<void> {
@@ -135,15 +152,17 @@ export class Activity extends StoreElement {
       await this.api.resolveInbox(item.id, decision)
       toast('ok', decision === 'approve' ? 'Approved — the run is resuming.' : 'Denied.')
       void this.store.load('inbox')
-      void this.reload()
+      void this.reload('foreground')
     } catch (e) {
       toast('error', `Could not ${decision}: ${(e as Error).message}`)
     }
   }
 
   render(): TemplateResult {
-    return html`<div class="agents-panel">
-      ${this.agent ? nothing : html`<h3>Activity</h3>`}
+    return html`<div class="agents-panel k-card agents-route-panel agents-activity-panel">
+      ${this.agent
+        ? nothing
+        : html`<div class="agents-panel-head agents-activity-head"><h3>Activity</h3></div>`}
       ${this.approvals()} ${this.filters()} ${this.table()}
     </div>`
   }
@@ -153,9 +172,10 @@ export class Activity extends StoreElement {
   private approvals(): TemplateResult | typeof nothing {
     const slice = this.store.inbox
     const pending = this.store.pendingInbox().filter((i) => !this.agent || i.agentName === this.agent)
-    if (slice.error) return errorState(slice.error, () => void this.store.load('inbox'))
-    if (!pending.length) return nothing
-    return html`<section class="agents-approvals">
+    if (slice.error && !slice.hasSnapshot) return errorState(slice.error, () => void this.store.load('inbox'))
+    const stale = slice.error ? staleState(slice.error, () => void this.store.load('inbox')) : nothing
+    if (!pending.length) return stale
+    return html`${stale}<section class="agents-approvals">
       <h4>${icon('inbox')} Needs your attention (${pending.length})</h4>
       ${repeat(
         pending,
@@ -164,11 +184,11 @@ export class Activity extends StoreElement {
           <div class="agents-approval-body">
             <div class="agents-approval-prompt">${i.prompt}</div>
             <div class="agents-approval-meta">
-              <span class="agents-badge">${i.agentName}</span>
-              ${i.payload?.tool ? html`<span class="agents-badge mono">${i.payload.tool}</span>` : nothing}
+              <span class="k-badge agents-badge">${i.agentName}</span>
+              ${i.payload?.tool ? html`<span class="k-badge agents-badge mono">${i.payload.tool}</span>` : nothing}
               <span class="muted">${fmtTime(i.createdAt)}</span>
               ${i.runID
-                ? html`<button class="agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: i.runID as string })}>
+                ? html`<button class="k-btn k-btn--ghost agents-linkbtn" @click=${() => this.navigate({ kind: 'run', id: i.runID as string })}>
                     view run
                   </button>`
                 : nothing}
@@ -176,8 +196,8 @@ export class Activity extends StoreElement {
           </div>
           <div class="agents-approval-actions">
             ${i.kind === 'approval'
-              ? html`<button @click=${() => void this.resolve(i, 'approve')}>${icon('check')} Approve</button>
-                  <button class="secondary" @click=${() => void this.resolve(i, 'deny')}>${icon('x')} Deny</button>`
+              ? html`<button class="k-btn k-btn--primary" @click=${() => void this.resolve(i, 'approve')}>${icon('check')} Approve</button>
+                  <button class="k-btn k-btn--ghost secondary" @click=${() => void this.resolve(i, 'deny')}>${icon('x')} Deny</button>`
               : html`<span class="agents-hint">Answer from the agent's channel or chat.</span>`}
           </div>
         </div>`,
@@ -192,8 +212,8 @@ export class Activity extends StoreElement {
       ${this.agent
         ? nothing
         : html`<label class="agents-filter">
-            Agent
-            <select @change=${(e: Event) => {
+            <span class="agents-filter-label">Agent</span>
+            <select class="k-input agents-filter-control" @change=${(e: Event) => {
               this.filterAgent = (e.target as HTMLSelectElement).value
               void this.reload()
             }}>
@@ -202,8 +222,8 @@ export class Activity extends StoreElement {
             </select>
           </label>`}
       <label class="agents-filter">
-        Class
-        <select @change=${(e: Event) => {
+        <span class="agents-filter-label">Class</span>
+        <select class="k-input agents-filter-control" @change=${(e: Event) => {
           this.filterClass = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -213,8 +233,8 @@ export class Activity extends StoreElement {
         </select>
       </label>
       <label class="agents-filter">
-        Phase
-        <select @change=${(e: Event) => {
+        <span class="agents-filter-label">Phase</span>
+        <select class="k-input agents-filter-control" @change=${(e: Event) => {
           this.filterPhase = (e.target as HTMLSelectElement).value
           void this.reload()
         }}>
@@ -223,11 +243,10 @@ export class Activity extends StoreElement {
         </select>
       </label>
       <div class="agents-filter">
-        <span id="agents-range-label">Range</span>
-        <div class="agents-seg" role="group" aria-labelledby="agents-range-label">
+        <span class="agents-filter-label">Range</span>
+        <div class="agents-seg" role="group" aria-label="Run range">
           ${RANGES.map(
-            (r) => html`<button
-              class=${r.id === this.range ? 'on' : ''}
+            (r) => html`<button class="k-btn k-btn--ghost agents-range-button ${r.id === this.range ? 'on' : ''}"
               aria-pressed=${r.id === this.range ? 'true' : 'false'}
               @click=${() => {
                 if (r.id === this.range) return
@@ -240,18 +259,22 @@ export class Activity extends StoreElement {
           )}
         </div>
       </div>
-      <button class="secondary agents-filter-refresh" aria-label="Refresh runs" @click=${() => void this.reload()}>
+      <button class="k-btn k-btn--ghost secondary agents-filter-refresh" aria-label="Refresh runs" @click=${() => void this.reload()}>
         ${icon('refresh')} Refresh
       </button>
     </div>`
   }
 
   private table(): TemplateResult {
-    if (this.error) return errorState(this.error, () => void this.reload())
-    if (this.loading && !this.runs.length) return loadingState('Loading runs…')
-    if (!this.runs.length) return emptyState('gauge', 'No runs yet. Chat with an agent or fire a schedule to see one here.')
+    if (this.error && !this.loaded) return errorState(this.error, () => void this.reload('foreground'))
+    if (this.loading && !this.loaded) return loadingState('Loading runs…')
+    const stale = this.error ? staleState(this.error, () => void this.reload('foreground')) : nothing
+    if (!this.runs.length) {
+      return html`${stale}${emptyState('gauge', 'No runs yet. Chat with an agent or fire a schedule to see one here.')}`
+    }
     return html`
-      <div class="agents-tablewrap">
+      ${stale}
+      <div class="agents-tablewrap k-table">
         <table class="agents-table agents-runs">
           <thead>
             <tr>
@@ -275,7 +298,7 @@ export class Activity extends StoreElement {
       </div>
       ${this.nextCursor
         ? html`<div class="agents-form-actions">
-            <button class="secondary" ?disabled=${this.loading} @click=${() => void this.more()}>
+            <button class="k-btn k-btn--ghost secondary" ?disabled=${this.loading} @click=${() => void this.more()}>
               ${this.loading ? 'Loading…' : 'Load more'}
             </button>
           </div>`
@@ -300,13 +323,13 @@ export class Activity extends StoreElement {
     >
       ${this.agent ? nothing : html`<td><strong>${r.agent}</strong></td>`}
       <td>
-        <span class="agents-badge ${r.class === 'interactive' ? 'agents-cat-tool' : ''}"
+        <span class="k-badge agents-badge ${r.class === 'interactive' ? 'agents-cat-tool' : ''}"
           >${icon(r.class === 'interactive' ? 'message' : 'clock')} ${r.trigger}</span
         >
-        ${r.parentRunID ? html`<span class="agents-badge agents-badge-muted">delegated</span>` : nothing}
+        ${r.parentRunID ? html`<span class="k-badge agents-badge k-badge--muted agents-badge-muted">delegated</span>` : nothing}
       </td>
       <td class="agents-cell-task muted">${r.inputPreview || '—'}</td>
-      <td>${phaseChip(r.phase)}${r.attempt && r.attempt > 1 ? html` <span class="agents-badge">try ${r.attempt}</span>` : nothing}</td>
+      <td>${phaseChip(r.phase)}${r.attempt && r.attempt > 1 ? html` <span class="k-badge agents-badge">try ${r.attempt}</span>` : nothing}</td>
       <td class="muted">${r.durationMS ? fmtDuration(r.durationMS) : '—'}</td>
       <td class="muted mono">
         ${fmtTokens(r.inputTokens + r.outputTokens)}${r.usdMicros ? ` · ${fmtUSD(r.usdMicros)}` : ''}

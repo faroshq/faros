@@ -17,6 +17,24 @@ export interface ErrorResponse {
   message: string
 }
 
+// Kubernetes list options are deliberately small: the GraphQL gateway treats
+// continue tokens as opaque values and the portal only needs bounded server
+// pages for the resource lists it owns.
+export interface KubernetesListOptions {
+  limit?: number
+  continue?: string
+}
+
+// KubernetesListPage is the typed transport envelope returned by a GraphQL
+// list query. A null/empty continue token means this is the terminal page;
+// remainingItemCount is only supplied by Kubernetes when it can be estimated.
+export interface KubernetesListPage<T> {
+  items: T[]
+  continue?: string
+  remainingItemCount?: number
+  resourceVersion?: string
+}
+
 export interface Connection {
   name: string
   uid?: string
@@ -67,19 +85,19 @@ export interface Repository {
   owner?: string
   visibility: string
   description?: string
+  defaultBranch?: string
   htmlURL?: string
-  sshURL?: string
   cloneURL?: string
+  sshURL?: string
   ready: boolean
   message?: string
 }
 
-// RepositoryDetail is a Repository plus the full status needed to debug one that
-// is stuck "pending": every condition verbatim and observed-vs-current
-// generation (a lag means the controller has not reconciled the latest spec).
+// RepositoryDetail is a Repository plus the provider health facts needed by the
+// conditions section: the provider-side repository ID and every condition
+// verbatim, with observed-vs-current generation for reconciliation context.
 export interface RepositoryDetail extends Repository {
   repoID?: string
-  creationTimestamp?: string
   conditions: ConditionInfo[]
 }
 

@@ -13,7 +13,8 @@
 // Read-only, and silent about a workspace that has not been bootstrapped: see
 // portalkit/dashboardtile.
 
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { AlertTriangle, ChevronRight, Clock, Link2, Package } from 'lucide-vue-next'
 import { api } from './api'
 import type { Connection, Repository } from './types'
 import {
@@ -21,31 +22,17 @@ import {
   isBenignTileError,
   mostRecent,
   navigateFromTile,
-  TILE_POLL_MS,
   tileClass,
   tileErrorText,
   type TileContext,
 } from './portalkit/dashboardtile'
-import { ic } from './portalkit/icons'
-import { createLatestRefreshController, type LatestRefreshController } from './refresh'
-
-// Inline chevron — provider bundles are self-contained (no shared icon lib),
-// the same reason the infrastructure tile inlines its own.
-const ChevronRight = (props: { class?: string }) =>
-  h(
-    'svg',
-    {
-      xmlns: 'http://www.w3.org/2000/svg',
-      viewBox: '0 0 24 24',
-      fill: 'none',
-      stroke: 'currentColor',
-      'stroke-width': 2,
-      'stroke-linecap': 'round',
-      'stroke-linejoin': 'round',
-      class: props.class,
-    },
-    [h('path', { d: 'm9 18 6-6-6-6' })],
-  )
+import {
+  FAST_REFRESH_MS,
+  STABLE_REFRESH_MS,
+  createAdaptiveRefreshTimer,
+  createLatestRefreshController,
+  type LatestRefreshController,
+} from './refresh'
 
 const props = defineProps<{ context: TileContext | null }>()
 
@@ -55,8 +42,13 @@ const connections = ref<Connection[]>([])
 const loading = ref(true)
 const loaded = ref(false)
 const error = ref<string | null>(null)
-let timer: number | undefined
 let refresh!: LatestRefreshController
+const poller = createAdaptiveRefreshTimer(() => load('background'), () => {
+  if (!loaded.value || error.value) return FAST_REFRESH_MS
+  const pending = repositories.value.some(repository => !repository.ready || !!repository.deletionTimestamp) ||
+    connections.value.some(connection => !connection.validated || !!connection.deletionTimestamp)
+  return pending ? FAST_REFRESH_MS : STABLE_REFRESH_MS
+})
 
 const stats = computed(() => {
   const repos = repositories.value.length
@@ -69,11 +61,11 @@ const stats = computed(() => {
 // a stable list rather than faking recency.
 const rows = computed(() => mostRecent(repositories.value, (r) => r.name))
 
-function load() {
-  refresh.request()
+function load(mode: 'foreground' | 'background' = 'foreground') {
+  refresh.request(mode)
 }
 
-refresh = createLatestRefreshController(async requestID => {
+refresh = createLatestRefreshController(async (requestID, _mode) => {
   const ctx = props.context
   if (!hasWorkspaceContext(ctx)) {
     if (!refresh.isCurrent(requestID)) return
@@ -82,6 +74,7 @@ refresh = createLatestRefreshController(async requestID => {
     error.value = null
     loaded.value = true
     loading.value = false
+    poller.schedule()
     return
   }
   loading.value = true
@@ -99,16 +92,19 @@ refresh = createLatestRefreshController(async requestID => {
     if (!refresh.isCurrent(requestID)) return
     error.value = isBenignTileError(e) ? null : tileErrorText(e)
   } finally {
-    if (refresh.isCurrent(requestID)) loading.value = false
+    if (refresh.isCurrent(requestID)) {
+      loading.value = false
+      poller.schedule()
+    }
   }
 })
 
 onMounted(() => {
   load()
-  timer = window.setInterval(load, TILE_POLL_MS)
+  poller.schedule()
 })
 onUnmounted(() => {
-  window.clearInterval(timer)
+  poller.stop()
   refresh.stop()
 })
 watch(
@@ -128,31 +124,31 @@ watch(
 <template>
   <div ref="rootRef" :class="tileClass.root" :aria-busy="loading">
     <div v-if="loading && !loaded" :class="tileClass.message" role="status" aria-live="polite">Loading repositories&hellip;</div>
-    <div v-else-if="error && !loaded" :class="tileClass.error" role="alert" aria-live="assertive">Failed to load: {{ error }} <button type="button" class="link" @click="load">Retry</button></div>
+      <div v-else-if="error && !loaded" :class="tileClass.error" role="alert" aria-live="assertive">Failed to load: {{ error }} <button type="button" class="k-btn k-btn--ghost code-inline-action" @click="load()">Retry</button></div>
 
     <template v-else>
-      <div v-if="error" :class="tileClass.error" role="alert" aria-live="assertive">Showing cached data. {{ error }} <button type="button" class="link" @click="load">Retry</button></div>
+      <div v-if="error" :class="tileClass.error" role="alert" aria-live="assertive">Showing cached data. {{ error }} <button type="button" class="k-btn k-btn--ghost code-inline-action" @click="load()">Retry</button></div>
       <span v-else-if="loading" class="sr-only" role="status" aria-live="polite">Updating repositories…</span>
       <div :class="tileClass.stats">
         <span :class="[tileClass.stat, tileClass.statTotal]">
-          <span v-html="ic('package', tileClass.statIcon)" />
+          <Package :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span :class="tileClass.statNum">{{ stats.repos }}</span>
           <span :class="tileClass.statLabel">{{ stats.repos === 1 ? 'repository' : 'repositories' }}</span>
         </span>
         <span :class="[tileClass.stat, tileClass.statMuted]">
-          <span v-html="ic('link', tileClass.statIcon)" />
+          <Link2 :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.connections }}</span>
           <span>{{ stats.connections === 1 ? 'connection' : 'connections' }}</span>
         </span>
         <!-- A broken connection is the failure everything else inherits, so it
              is the one number that earns colour on this tile. -->
         <span v-if="stats.broken > 0" :class="[tileClass.stat, tileClass.statBad]">
-          <span v-html="ic('alert-triangle', tileClass.statIcon)" />
+          <AlertTriangle :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.broken }}</span>
           <span :class="tileClass.statLabel">not validated</span>
         </span>
         <span v-if="stats.notReady > 0" :class="[tileClass.stat, tileClass.statWarn]">
-          <span v-html="ic('clock', tileClass.statIcon)" />
+          <Clock :class="tileClass.statIcon" :stroke-width="1.75" aria-hidden="true" />
           <span class="tabular-nums">{{ stats.notReady }}</span>
           <span :class="tileClass.statLabel">not ready</span>
         </span>
@@ -177,7 +173,7 @@ watch(
               />
               <span :class="tileClass.rowPrimary">{{ repo.repo || repo.name }}</span>
               <span :class="tileClass.rowSecondary">{{ repo.connectionRef }}</span>
-              <ChevronRight :class="tileClass.chevron" />
+              <ChevronRight :class="tileClass.chevron" :stroke-width="1.75" aria-hidden="true" />
             </button>
           </li>
         </ul>

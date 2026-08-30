@@ -59,7 +59,7 @@ free.
 | `--color-success` | `#2fd6a0` | `#0c9c66` | + `-subtle` at 12% alpha (light: `#e5f6ef`), + `-border` at 30% |
 | `--color-warning` | `#f0a63a` | `#c07508` | + `-subtle` (light: `#fdf2e0`) |
 | `--color-danger` | `#ff5d5d` | `#d63a40` | + `-subtle` (light: `#fcebec`), + `-hover` (`#ff7676` / `#bf2f35`) |
-| `--color-danger-surface`, `--color-surface-base`, `--color-text-error`, `--color-on-accent` | aliases | aliases | Compatibility aliases (= danger-subtle / surface / danger / `#fff`) so no `var()` ever falls through to a stale literal |
+| `--color-danger-surface`, `--color-surface-base`, `--color-text-error`, `--color-on-accent` | aliases | aliases | Compatibility aliases (= danger-subtle / surface / danger / `#0a0b12` dark, `#fff` light) so no `var()` ever falls through to a stale literal |
 
 Rules:
 
@@ -102,8 +102,10 @@ qualifies.
 
 ## 4. Typography
 
-Self-hosted via `@fontsource`, imported in `portal/src/main.ts`. No other
-faces, no CDN fonts.
+Self-hosted via `@fontsource`, imported in `portal/src/main.ts`. Dex renders as
+a standalone document, so `hack/dex/web/static/fonts/` embeds the matching
+`@fontsource` WOFF2 files and `main.css` declares them locally. No other faces,
+no CDN fonts.
 
 | Role | Face | Usage |
 |---|---|---|
@@ -124,8 +126,12 @@ Numbers that align in columns always get `font-variant-numeric: tabular-nums`.
 
 ## 5. The recipes (`k-*` classes)
 
-`portal/src/assets/faros-ui.css` is the component vocabulary. It cascades into
-every light-DOM provider — **use these classes before writing any CSS**:
+`provider-sdk/portalkit/faros-ui.css` is the canonical component vocabulary. The
+host copy at `portal/src/assets/faros-ui.css` and the copies vendored under each
+portal's `src/portalkit/` are exact sync outputs — `make sync-portalkit` writes
+them and `make verify-portalkit` rejects drift or unexpected files. The
+stylesheet cascades into every light-DOM provider — **use these classes before
+writing any CSS**:
 
 | Class | What it is |
 |---|---|
@@ -133,10 +139,12 @@ every light-DOM provider — **use these classes before writing any CSS**:
 | `.k-table` | 6px table wrapper; mono 9–10px uppercase headers, 13px rows, accent-tint hover via `.is-interactive` |
 | `.k-cell-mono` | Data-like cells (names, ids, timestamps) |
 | `.k-badge` (+ `--success/--warning/--danger/--muted`, `__dot`) | **Square 3px mono tag**: 10px/600 uppercase, `0.06em`, `*-subtle` bg, `color-mix(currentColor 35%)` hairline |
-| `.k-btn` (+ `--primary/--ghost/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; danger = danger-subtle tint, **no glow** |
+| `.k-btn` (+ `--primary/--ghost/--text/--danger`) | 4px control; primary = solid accent + glow; ghost = overlay bg + hairline; text = transparent, borderless inline action; danger = danger-subtle tint, **no glow** |
+| `.k-back-action` | Intrinsic-width, start-aligned borderless link modifier for `.k-btn`; 12px/500 accent link with a 6px icon gap, accent-hover underline, and no control surface. Vue resource detail pages use `ResourceBackLink`, which always renders a real `href`; only an unmodified primary activation is intercepted for caller-owned SPA `back` routing, while modified and non-primary clicks retain native browser behavior. Disabled state prevents navigation and `back` emission, exposes `aria-disabled="true"`, and leaves keyboard tab order with `tabindex="-1"`. The arrow flips in RTL; coarse and hybrid any-pointer targets are at least 44×44px. Use `.k-back-action` directly for create flows and other non-detail controls. |
 | `.k-input` | 4px overlay-bg input; focus = accent border + 3px subtle ring + glow |
 | `.k-eyebrow` / `.k-kpi` | Tracked uppercase label over an expanded tabular numeral |
 | `.k-menu` / `.k-menu-item` (+ `--danger`, `.is-selected`, `.k-menu-sep`) | Dropdown/context menu panel + items; selection = accent-subtle, no glow |
+| `.k-layout-selector` (+ `__trigger`, `__menu`, `__item`) | Controlled grid/list presentation menu; compact icon trigger, radio semantics, no glow |
 | `.k-kbd` | Shortcut key-cap: mono 9px uppercase, 3px, darker bottom edge |
 | `[data-k-tip="…"]` | CSS-only tooltip: 300ms delay, shows on hover AND focus, 260px max |
 | `.k-progress` / `.k-progress__bar` (+ `--accent/--warning/--danger`) | 2px-radius track, semantic fill |
@@ -172,17 +180,56 @@ texture (login, empty states — sparingly), `.island` floating dock card,
   rows lift text to primary. Vue resource tables use
   `portalkit/ResourceTableEditButton.vue` and
   `portalkit/ResourceTableDeleteButton.vue` for compact row actions that reveal
-  on row hover or keyboard focus (and remain visible on touch). Give every action
-  a resource-specific accessible label, and keep destructive actions inside
-  `confirmDialog({ danger: true })`. Labeled actions remain appropriate on detail
-  pages.
+  on row hover or keyboard focus (and remain visible on touch). The primary
+  column takes the table's remaining width, and its right edge owns these row
+  actions so operations stay reachable without horizontal scrolling. Mark an
+  equivalent primary field with `primary: true`; otherwise `name`, then the
+  first non-action column, is used. Give every action
+  a resource-specific accessible label. Use
+  `portalkit/ResourceTableActionButton.vue` for other compact row actions:
+  callers supply the Lucide icon and accessible label, and may provide a busy
+  label/state, disabled state, and one of the sanctioned `neutral`, `accent`,
+  `warning`, or `danger` tones. It inherits the same hover/focus/touch visibility
+  and event-isolation contract as the edit/delete shortcuts. Keep
+  `ResourceTableEditButton` and `ResourceTableDeleteButton` as the preferred
+  semantic shortcuts for edit/delete; destructive confirmation remains
+  caller-owned via `confirmDialog({ danger: true })`. The primary resource name
+  uses a text-level
+  `.k-table-resource-link` action (accent, regular weight, transparent at rest
+  and hover), cross-resource references use ordinary cell text, external URLs
+  use a concise linked action plus `ExternalLink` icon, resource IDs and fully
+  qualified names use ordinary cell text, finite non-status enum values use a
+  muted square `.k-badge`, and secondary counts use muted text. Operational and
+  lifecycle state use `StatusBadge` with semantic tone; keep verbose provider
+  feedback in its title and accessible name rather than as a second visible
+  status line. Reserve mono for genuinely technical table content such as schema
+  column names and types; providers must not restyle these properties locally.
+  `ResourceTable` keeps native table-row
+  semantics: interactive `<tr>` elements are focusable with `tabindex="0"`,
+  Enter/Space activates the row, and nested links, buttons, inputs, selects,
+  summaries, and other explicit controls do not activate the row. Do not turn a
+  row into `role="button"`. Labeled actions remain appropriate on detail pages.
+  `ResourceTable` has exactly two blessed configurations:
+  - **Queryable** (default): the current resource-list contract. Search, filters,
+    and client/server pagination remain independently configured; configured
+    controls have matching initial-loading skeletons, filters apply to the
+    authoritative result set, and query/filter/page changes reset to page one.
+    Every existing `ResourceTable` remains Queryable until it is explicitly
+    reviewed for conversion; never infer Simple from omitted control props.
+  - **Simple** (`variant="simple"`): explicit opt-in for a short, bounded,
+    contextual list. It has no search, filters, pagination, controlled query,
+    filter values, page, cursor, or page metadata. Loading begins directly with
+    the table skeleton. Empty/error, native row semantics, nested-control
+    isolation, and row-action accessibility are identical to Queryable.
 - **Modals / dialogs.** 6px, surface-raised, hairline, heavy elevation shadow
   allowed. The scrim derives from **surface** (`color-mix(surface 60%)`), never
   from text (a text-derived scrim inverts to white in dark). Use the portalkit
   `confirmDialog()` — never `window.confirm`.
-- **Navigation.** Idle items are muted text on nothing; active = accent text on
-  `accent-subtle` + nav glow (`0 0 14px`). Section headers are 9px mono
-  uppercase with a trailing hairline rule.
+- **Navigation.** Shell/sidebar idle items are muted text on nothing; an active
+  shell nav item is accent text on `accent-subtle` + nav glow (`0 0 14px`).
+  Provider-level route/section tabs are the separate PortalKit pattern in §10:
+  they never glow or shadow. Section headers are 9px mono uppercase with a
+  trailing hairline rule.
 - **Sidebar rail.** The vertical dock is a **56px icon rail by default** —
   labels are a click away (toggle at the top, state persisted per browser),
   not a permanent tax on the canvas. Collapsed rows are icon-only, centered,
@@ -252,9 +299,19 @@ Two integration modes, one look:
 
 **Portalkit** (confirm dialogs, ResourceTable, StatusBadge, tenant helpers) is
 canonical in `provider-sdk/portalkit` (vanilla TS) and
-`provider-sdk/portalkit-vue` (SFC). Edit there, run `make sync-portalkit`;
-never edit the vendored copies under `*/src/portalkit/` — CI's
-`verify-portalkit` fails on drift.
+`provider-sdk/portalkit-vue` (SFC). The shared provider-tab recipe is in the
+canonical `provider-sdk/portalkit/faros-ui.css`; `tabs.ts` and
+`provider-sdk/portalkit-vue/Tabs.vue` provide class/component helpers. Edit
+canonical files, then run `make sync-portalkit`. Never edit the vendored copies
+under `*/src/portalkit/` — CI's `verify-portalkit` fails on drift.
+
+Standalone bundles call `ensureFarosUIStyles()` before rendering. It first
+accepts a host stylesheet whose computed `:root` marker
+`--faros-ui-canonical: 1` is present, or an existing `#k-faros-ui` style. If
+neither exists, it appends the exact vendored stylesheet as a
+`data-faros-ui-source="portalkit-fallback"` fallback. It never replaces or
+mutates an existing style element, so a provider's older fallback cannot
+overwrite the host's canonical CSS.
 
 ## 10. Extended component specs
 
@@ -285,9 +342,13 @@ and renders the identical recipe; it can migrate opportunistically. Contract:
   variant additionally turns the card border `danger`. No tinted backgrounds.
 - Type: 13px `text-primary` message; optional 10px mono uppercase eyebrow for
   the source ("EDGES", "BUILD").
-- Behavior: auto-dismiss 5s (errors 8s, or sticky with an explicit ✕), pause
-  on hover, `role="status"` (`role="alert"` for errors), entry = slide-up
-  fade (`agents-toast-in`), exit = fade. Toasts never glow.
+- Behavior: auto-dismiss `ok` in 4s, `info` in 6s, and `error` in 9s; pause on
+  hover and re-arm with the full duration on leave. Every card has an explicit
+  dismiss button; the host uses `role="status"` (`role="alert"` for errors).
+  Entry is a slide-up fade (`k-toast-in`); toasts never glow. The Agents
+  adapter delegates DOM, timers, actions, and the visible-item cap to this
+  canonical bus while retaining its subscription API and reconciling renderer
+  removals.
 
 ### Dropdown / context menu — ✅ implemented as `.k-menu` (faros-ui.css)
 App-studio's `PreviewActionsMenu` / `ResponseModePicker` /
@@ -297,9 +358,195 @@ App-studio's `PreviewActionsMenu` / `ResponseModePicker` /
 - Items: 4px radius (`rounded-md`), `padding: 6px 8px`, 12px
   `text-secondary`; hover = `surface-overlay` bg + `text-primary`; active/
   selected = `accent-subtle` bg + `accent` text, NO glow (menus aren't nav).
+- Focus: a crisp 2px inset accent outline, with no glow. Disabled items remain
+  visible at reduced opacity and do not retain the hover surface.
 - Destructive items: `danger` text, `danger-subtle` hover bg, separated by a
   hairline `border-subtle` divider.
 - Keyboard: arrows + Home/End, Escape closes, focus returns to the trigger.
+
+### Layout selector — ✅ implemented as `portalkit-vue/LayoutSelector.vue`
+
+Use the shared selector when the same resource collection has grid and list
+presentations. It is a controlled component (`modelValue` plus
+`update:modelValue`) with exactly two stable values: `grid` and `list`. The
+optional persistence helper validates stored values, defaults to `grid`, and
+treats unavailable or failing browser storage as a non-fatal preference miss.
+
+- Trigger: compact current-layout icon plus chevron, with `aria-haspopup`,
+  `aria-expanded`, `aria-controls`, and an accessible name that includes the
+  current mode. Focus uses a crisp accent outline; it never glows.
+- Menu: visible mono-uppercase Layout label and `role="menu"`; Grid and List
+  are `role="menuitemradio"` with `aria-checked`. Selection uses the standard
+  `accent-subtle` menu state and no glow.
+- Keyboard: click, Enter, and Space select; closed ArrowDown/ArrowUp opens on
+  the first/last item; open arrows wrap; Home/End jump; Escape closes and
+  restores trigger focus. Tab closes after normal focus movement without a
+  focus trap. Pointer or focus movement outside closes the menu.
+
+### Provider route tabs — ✅ implemented as PortalKit `Tabs`
+
+This is the labeled provider-level route/section navigation used by Agents, App
+Studio, Code, Databricks, Edges, and Kuery. The canonical recipe is in
+`provider-sdk/portalkit/faros-ui.css`; `tabs.ts` and
+`provider-sdk/portalkit-vue/Tabs.vue` provide helpers, and
+`make sync-portalkit` vendors the exact assets into the portals. Infrastructure
+and Quickstart have no equivalent provider-level bar.
+
+- Markup: a labeled nav with an icon + label and an optional count. Counts are
+  square 3px-radius mono tags; tabs use the 4px control radius.
+- Geometry: `padding: 7px 13px`, 4px gap, and a 1px bottom hairline. Narrow
+  hosts keep the row horizontal and allow overflow.
+- States: idle is muted text on transparent; hover is `surface-hover`; active
+  is accent text on `accent-subtle`; focus-visible is a 2px outline. Tabs have
+  no glow or shadow.
+- Semantics: each tab is `type="button"` and the active tab exposes
+  `aria-current="page"`. Routing remains caller-owned; Vue `Tabs` emits
+  `select` and exposes each id as `data-k-tab-id`.
+
+Detail/workbench tabsets are not automatically provider-route tabs; apply this
+spec when the tabset is the provider-level route/section bar.
+
+### Resource instance pages — ✅ implemented with PortalKit
+
+`ResourcePage`, `ResourceStatCards`, and `ResourceSectionCard` form the shared
+composition for provider resource instance screens. The caller owns navigation
+and resource-specific content:
+
+- For Vue resource detail pages, use `ResourceBackLink` as the caller-owned
+  hyperlink before and outside the `ResourcePage` shell. It always renders a
+  real `href`; only an unmodified primary activation is intercepted for
+  caller-owned SPA `back` routing, while modified and non-primary clicks retain
+  native browser behavior. Disabled state prevents navigation and `back`
+  emission, exposes `aria-disabled="true"`, and leaves keyboard tab order with
+  `tabindex="-1"`. Its arrow flips in RTL. Coarse and hybrid any-pointer input
+  receive at least 44×44px targets for the backlink and ResourcePage actions.
+  Detail routes hide the provider-level collection tabs; the backlink is the
+  single return affordance for the resource list.
+- `ResourcePage` owns the title hierarchy and read-state shell. Its canonical
+  PortalKit title is responsive from 24px to 32px, with tight tracking and
+  leading, safe wrapping for long identifiers, and a 22px mobile size. Header
+  content has one fixed order: title → optional resource `kind` →
+  caller-provided context (`#meta`) → optional status (`#status`) → optional
+  subtitle, with PortalKit-owned dot separators between metadata items. The
+  header-side region contains actions only and follows that stack in source
+  order.
+  Callers may provide a `#loading` slot for loading visuals; the canonical
+  shell owns the polite status/live-region semantics and supplies the three-bar
+  skeleton fallback. Coarse and hybrid any-pointer input receive at least
+  44×44px targets for ResourcePage actions.
+  ResourcePage exposes `kind` as its only resource-type prop; section cards may
+  continue to use their independent `eyebrow` label. Callers must not add
+  provider-local title-size overrides. Header actions use one stable order:
+  provider-specific primary action, `Refresh`, then an overflow menu containing
+  `Delete`.
+- Use `ResourceStatCards` for provider-defined, meaningful facts with
+  provider-chosen icons. Default density keeps the existing card geometry
+  unchanged. The `density="compact"` option is opt-in for fact-heavy summaries.
+  Both densities use the same responsive grid: three columns, then two, then
+  one at narrower widths. `ResourceStatCards` renders a native list and
+  balances one, two, four, and three-plus cards with count-aware grid classes;
+  `ResourcePage` owns summary-slot spacing, so callers should not add a second
+  wrapper margin. These facts are not a universal resource field schema.
+- Put product-facing content first in vertically stacked `ResourceSectionCard`
+  cards. Providers own each card's content and optional actions. Section action
+  buttons may use a leading Lucide icon with a visible label; icon-only actions
+  are not the default. Technical details are optional rather than a mandatory
+  final card. Providers may promote Conditions or health into an always-visible
+  product-facing section and omit raw configuration, metadata, or YAML when it
+  adds end-user noise. When technical details are shown, keep them closed by
+  default and limited to sanitized configuration, health, metadata, or a
+  read-only object snapshot; credentials, tokens, and other secrets do not
+  belong there.
+- `ResourceSectionCard` also supports a headerless body, which lets legacy or
+  template-driven groups keep their existing content without inventing a
+  second container. The shared card owns border-box containment (`width: 100%`,
+  `min-width: 0`); wide tables keep their controls and card width stable while
+  the table canvas scrolls internally.
+- Primary header anchors that use an accent background retain the
+  `text-on-accent` contrast token in both normal and hover states; changing the
+  background to `accent-hover` must not reduce readable contrast.
+- Solid accent actions use `--color-on-accent`: near-black text on the bright
+  dark-theme violet and white text on the light-theme violet. Keep this token
+  shared across the host and standalone provider fallbacks so normal-size
+  labels remain readable.
+- The read contract distinguishes first-load loading and error states from a
+  later refresh failure. A successful snapshot remains visible when a later
+  read fails, with a stale/error notice and `Retry`; `ResourcePage` emits retry
+  and the caller owns the fetch. Initial failures expose the same retry path.
+  The canonical shell retains polite status/live-region semantics for loading;
+  callers customize only the loading visuals through `#loading`.
+
+#### Resource reads and background refresh
+
+Resource pages, resource tables, and dashboard resource summaries share the
+`ResourceReadState` contract from PortalKit. `refreshMode` is either
+`foreground` or `background`. A first read may use a skeleton or pending state,
+but once a populated snapshot—or an authoritative empty snapshot—exists, keep
+it visible through every later background read and transient failure. A
+background read must not replace an empty or no-match body, spin or disable
+header actions, or otherwise disturb the useful surface. An out-of-flow
+`aria-busy` indicator or live status is appropriate when it helps communicate
+that a refresh is running.
+
+User `Refresh`, `Retry`, query, filter, and page actions are foreground reads:
+show immediate feedback even when the request is queued behind another read.
+Reads serialize. A timer request does not invalidate a useful active read; at
+most one follow-up is coalesced, with foreground priority. Explicit authority
+or resource/tenant/user identity invalidation fences stale results. Token
+rotation alone is not an identity change. Reset snapshots only when the
+tenant, user, or resource identity changes. Stop or unmount must cancel the
+timer and queued work.
+
+Use a slower cadence for stable resources (current providers use about 30s) and
+a faster, provider-appropriate cadence for unsettled or error states. Keep
+read-state ownership in the canonical PortalKit `ResourcePage`,
+`ResourceTable`, and `page-state.ts` surfaces; edit canonical sources first,
+then run `make sync-portalkit` so vendored portal copies stay synchronized.
+
+Adoption is intentionally lossless. Before moving a resource to this
+composition, inventory every legacy field, custom workflow/action/editor/table,
+read or mutation state (including stale and deleting states), and sensitive-data
+boundary. The shared layout must not flatten or discard provider-specific
+content; providers remain responsible for choosing meaningful stat cards,
+sections, editors, tables, and actions. Secrets and credential values are never
+rendered, even when a provider exposes a credential reference or edit workflow.
+
+Current consumers cover Code Repository and Connection; Edge and Edge Service;
+Databricks Connection, Warehouse, and Table; Infrastructure Application
+Template Instance; and MCP Access. These nine consumers inherit the canonical
+title hierarchy. They are adoption examples, not a universal field schema.
+The canonical Vue sources live under `provider-sdk/portalkit-vue`; edit them
+there and run `make sync-portalkit` to update provider copies.
+
+### Resource creation
+
+Use a focused, route-owned flow when creating an independently managed resource
+or when creation requires prerequisites, sensitive input, multiple meaningful
+decisions, or follow-up progress.
+
+Use a dialog, drawer, or inline control for compact additions whose meaning
+depends on the current parent. Do not insert substantial creation forms into
+collection pages where they reflow or compete with the collection.
+
+Choose the surface based on the user's task—not field count, API shape, or
+implementation convenience. Use the operation's truthful domain verb, such as
+**Connect**, **Provision**, or **Deploy**.
+
+Use readable, provider-owned creation routes. Avoid collisions between action
+routes and valid resource identifiers; prefer `/create/<resource-type>` when
+existing detail routes use `/<collection>/:name`.
+
+Route-owned creation uses one back action, one page title and description, one
+principal form surface, and a right-aligned **Cancel → primary action** footer.
+Simple forms are constrained; dense provisioning forms may use the full content
+column. Wizards keep this page skeleton and place progress inside it rather than
+retaining dialog chrome.
+
+After creation, navigate to the resource when it owns status or recovery;
+otherwise return to the collection with the result clearly visible.
+
+This is the target standard. Existing creation flows will adopt it
+incrementally.
 
 ### Select / combobox
 - Closed control: exactly `.k-input` (4px, overlay bg, focus ring + glow) with
@@ -312,10 +559,14 @@ App-studio's `PreviewActionsMenu` / `ResponseModePicker` /
 ### Checkbox / radio
 Native inputs + `accent-color: var(--color-accent)` (inherited from `body`) is
 the system default — keep it; don't hand-draw controls for standard forms.
-If a custom one is ever justified (indeterminate states, dense tables):
-14×14px, 3px radius (radio: circle), `border-default` 1px, checked =
-`accent` fill + white 10px check, focus = the standard 3px `accent-subtle`
-ring. Label: 12px `text-secondary`, gap 8px.
+For a dense native checkbox that sits inside a composite control, use the
+canonical `.k-checkbox` reset in `provider-sdk/portalkit/faros-ui.css`: 14×14px,
+zero min dimensions, padding, and margin, native accent color, and no ordinary
+focus shadow. Its `:focus-visible` treatment is only the compact 3px
+`accent-subtle` ring — never `accent-glow`. Keep the composite row (for example
+the `treeitem`) as the keyboard focus owner; a visually present checkbox may be
+`tabindex="-1"`/`aria-hidden="true"` and route pointer activation back to that
+row. Label: 12px `text-secondary`, gap 8px.
 
 ### Toggle switch — ✅ implemented as `.k-toggle` (faros-ui.css)
 Sharp: 3px track (`bg-accent` when `aria-checked="true"`, `border-default`
@@ -347,12 +598,36 @@ track (`rounded-xs`), `accent` filled portion, 12×12px square 2px-radius
 readouts are mono `tabular-nums`.
 
 ### Pagination
-None exists — lists poll and truncate today. When needed:
-- Prefer "Load more" (a `.k-btn--ghost`) or infinite scroll for streams.
-- True pagination: 4px-radius ghost icon-buttons (‹ ›) + mono `tabular-nums`
-  "12–24 of 96" label in `text-muted`; current page indicator uses
-  `accent-subtle` bg + `accent` text like an active tab. No number soup —
-  never render more than 5 page buttons.
+`portalkit/ResourceTable.vue` owns filtering and true pagination for bounded
+resource lists. Opt in with `searchable`, `filters`, `paginated`, and
+`page-size`; it searches and filters the complete loaded row set before slicing
+the visible page. A filter or page-size change returns to page one, while polling
+retains the current page when it remains valid. The shared presentation is:
+- 4px-radius ghost icon-buttons (‹ ›) + mono `tabular-nums` "12–24 of 96" label
+  in `text-muted`.
+- Current page indicator in `accent-subtle` with `accent` text. No number soup.
+- Search plus compact, visibly labeled facets above the table; short categorical
+  filters use the shared select-only PortalKit listbox, while resource-reference
+  inventories explicitly opt into search inside the same menu. Narrow screens stack facets at
+  full width. One `Clear filters` action appears only when a facet is active.
+- For wide tables, only the table canvas scrolls horizontally. Search/filter
+  controls and the pagination footer remain pinned to the full card width.
+- Primary resource names disclose their full value in a viewport-positioned
+  overlay only when measurement shows real truncation, so table scroll and card
+  boundaries cannot clip it. When a primary-column slot renders a label other
+  than `row[column.key]`, provide the column's `fullValue(row)` accessor so the
+  disclosure matches the visible label. Icon-only row actions use the shared `data-k-tip` tooltip on
+  hover and keyboard focus; never add a duplicate native `title` tooltip.
+- Prefer "Load more" (a `.k-btn--ghost`) or infinite scroll for streams such as
+  activity/event feeds; do not force page navigation onto an append-only flow.
+
+For a cursor-backed resource list, set `pagination-mode="server"` and control
+the table with `page`, `page-size`, `query`, `filter-values`, `cursor`, and
+`page-info`. Handle the typed `change` event to fetch the supplied page. Server
+mode renders the supplied rows as-is; it does not apply local search, filters,
+or slicing. Cursor values are opaque, and `page-info` should expose only the
+next-page state the backend actually returned—never an exact total inferred
+from a remaining-item count.
 
 ### Date / time picker
 None exists — all dates are read-only mono output via `portal/src/utils/time.ts`
@@ -456,9 +731,15 @@ Before merging any UI change:
 - [ ] No new `border-radius` outside {2,3,4,6,8,12px, circles}; no pills.
 - [ ] Badges are square mono tags; status maps to the §6 tone table.
 - [ ] Exactly the sanctioned things glow; danger never glows.
+- [ ] Provider-level route/section tabs use PortalKit `Tabs`: caller-owned
+      routing, `aria-current="page"`, and no tab glow/shadow.
 - [ ] Works in BOTH themes (toggle it — don't trust the default).
 - [ ] Uses `k-*` / portalkit primitives instead of re-derived markup.
 - [ ] No per-page `max-w-*` wrapper (width is owned by `AppLayout`).
+- [ ] The creation surface matches the task: focused and route-owned for
+      independently managed resources; contextual for compact, parent-dependent
+      additions. Route-owned flows use the canonical creation skeleton, and
+      substantial forms do not reflow collection pages.
 - [ ] Mono for identifiers; tabular-nums for aligned digits.
 - [ ] Icons are Lucide (or portalkit `ic()`) per §11 — no emoji, no Unicode
       glyph icons; stroke/size on the law; only status icons carry color.

@@ -1,0 +1,1677 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import test from 'node:test'
+
+const root = path.resolve(new URL('../../../', import.meta.url).pathname)
+const portalSrc = path.join(root, 'portal', 'src')
+const tenantSettingsPage = fs.readFileSync(path.join(portalSrc, 'pages/TenantSettingsPage.vue'), 'utf8')
+const memberList = fs.readFileSync(path.join(portalSrc, 'components/MemberList.vue'), 'utf8')
+const organizationsPage = fs.readFileSync(path.join(portalSrc, 'pages/OrganizationsPage.vue'), 'utf8')
+const organizationCreatePage = fs.readFileSync(path.join(portalSrc, 'pages/OrganizationCreatePage.vue'), 'utf8')
+const accountMenu = fs.readFileSync(path.join(portalSrc, 'components/AccountAccessMenu.vue'), 'utf8')
+const appLayout = fs.readFileSync(path.join(portalSrc, 'components/AppLayout.vue'), 'utf8')
+const app = fs.readFileSync(path.join(portalSrc, 'App.vue'), 'utf8')
+const tenant = fs.readFileSync(path.join(portalSrc, 'stores/tenant.ts'), 'utf8')
+const router = fs.readFileSync(path.join(portalSrc, 'router/index.ts'), 'utf8')
+const switcher = fs.readFileSync(path.join(portalSrc, 'components/WorkspaceSwitcher.vue'), 'utf8')
+const workspaceControlHeader = fs.readFileSync(path.join(portalSrc, 'components/WorkspaceControlHeader.vue'), 'utf8')
+const popover = fs.readFileSync(path.join(portalSrc, 'composables/useAnchoredPopover.ts'), 'utf8')
+const providerFrame = fs.readFileSync(path.join(portalSrc, 'pages/ProviderFrame.vue'), 'utf8')
+const providersStore = fs.readFileSync(path.join(portalSrc, 'stores/providers.ts'), 'utf8')
+const farosUi = fs.readFileSync(path.join(root, 'provider-sdk/portalkit/faros-ui.css'), 'utf8')
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+test('settings tabs preserve a Workspace-first scope hierarchy', () => {
+  assert.match(tenantSettingsPage, /activeSection === 'workspaces' \? 'Workspaces' : 'Organization settings'/)
+  assert.match(tenantSettingsPage, /import Tabs from ['"]@\/portalkit\/Tabs\.vue['"]/)
+  assert.match(tenantSettingsPage, /:tabs="settingsTabs"[\s\S]*:active="activeSection"[\s\S]*aria-label="Settings sections"/)
+  const topLevelTabsStart = tenantSettingsPage.indexOf('const settingsTabs = [')
+  const topLevelTabsEnd = tenantSettingsPage.indexOf('] as const', topLevelTabsStart)
+  assert.ok(topLevelTabsStart >= 0 && topLevelTabsEnd > topLevelTabsStart)
+  const topLevelTabs = tenantSettingsPage.slice(topLevelTabsStart, topLevelTabsEnd)
+  assert.match(topLevelTabs, /id: 'organizations', label: 'Organizations', icon: Building2/)
+  assert.match(topLevelTabs, /id: 'workspaces', label: 'Workspaces', icon: FolderTree/)
+  assert.ok(topLevelTabs.indexOf("id: 'workspaces'") < topLevelTabs.indexOf("id: 'organizations'"))
+  assert.doesNotMatch(topLevelTabs, /id: 'access'|id: 'service-accounts'/)
+  assert.doesNotMatch(tenantSettingsPage, /workspaceSettingsTabs|workspaceSection/)
+  assert.match(tenantSettingsPage, /const activeOrg = computed\(\(\) => tenant\.activeOrg\)/)
+  assert.match(tenantSettingsPage, /if \(route\.path === '\/settings\/organizations'\) return 'organizations'/)
+  assert.match(tenantSettingsPage, /router\.push\('\/settings\/organizations'\)/)
+  assert.match(router, /path: '\/settings\/organizations'/)
+  assert.match(router, /name: 'settings-organizations'/)
+  assert.match(tenantSettingsPage, /from: activeSection === 'organizations' \? '\/settings\/organizations' : '\/settings\/workspaces'/)
+  assert.match(tenantSettingsPage, /const workspaces = computed<WorkspaceRow\[\]>\(\(\) =>/)
+  assert.match(tenantSettingsPage, /workspace\.orgUUID === org/)
+  assert.match(tenantSettingsPage, /await tenant\.fetchWorkspaces\(orgUUID, \{ selectDefault: false \}\)/)
+  assert.match(tenantSettingsPage, /scopedOrgUUID\.value = null/)
+  assert.match(tenantSettingsPage, /Choose an organization/)
+  assert.doesNotMatch(tenantSettingsPage, /v-for="o in tenant\.orgs"/)
+  assert.doesNotMatch(tenantSettingsPage, /New organization/)
+})
+
+test('organization settings are scoped to the selected org and gate governance writes', () => {
+  assert.match(tenantSettingsPage, /const organizationSettingsOrg = computed\(\(\) =>/)
+  assert.match(tenantSettingsPage, /managedOrgSnapshot\.value\?\.uuid === managedOrgTargetUUID\.value/)
+  assert.match(tenantSettingsPage, /const organizationTargetUUID = computed\(\(\) => organizationSettingsOrg\.value\?\.uuid \?\? null\)/)
+  assert.match(tenantSettingsPage, /<template v-else-if="activeSection === 'organizations'">/)
+
+  const orgSectionStart = tenantSettingsPage.indexOf('<template v-else-if="activeSection === \'organizations\'">')
+  const orgSectionEnd = tenantSettingsPage.indexOf('<!-- Issued-token modal.', orgSectionStart)
+  assert.ok(orgSectionStart >= 0 && orgSectionEnd > orgSectionStart)
+  const orgSection = tenantSettingsPage.slice(orgSectionStart, orgSectionEnd)
+  assert.doesNotMatch(orgSection, /v-for="(?:o|org) in tenant\.orgs"/)
+  assert.doesNotMatch(orgSection, /Create (?:a )?new organization|tenant\.createOrg/)
+  assert.match(orgSection, /organizationSettingsOrg\.displayName/)
+  assert.match(orgSection, /organizationSettingsOrg\.uuid/)
+  assert.match(orgSection, /organizationSettingsOrg\.personal/)
+  assert.match(tenantSettingsPage, /const canManageOrg = computed\(\(\) => organizationSettingsOrg\.value\?\.role === 'admin'\)/)
+  assert.match(tenantSettingsPage, /const canEditOrg = computed\(\(\) => canManageOrg\.value && !organizationSettingsOrg\.value\?\.deletionRequestedAt\)/)
+  assert.match(tenantSettingsPage, /const canManageOrgMembers = computed\(\(\) => canManageOrg\.value && !organizationSettingsOrg\.value\?\.deletionRequestedAt\)/)
+  assert.match(tenantSettingsPage, /const canDeleteOrg = computed\(\(\) => canEditOrg\.value && !organizationSettingsOrg\.value\?\.personal\)/)
+  assert.match(tenantSettingsPage, /startEditOrgName\(\): void[\s\S]*?if \(!org \|\| !canEditOrg\.value\) return/)
+  assert.match(tenantSettingsPage, /saveOrgName\(\): Promise<void>[\s\S]*?if \(!target \|\| !canEditOrg\.value /)
+  assert.match(tenantSettingsPage, /onAddOrgMember\(user: string[\s\S]*?if \(!target \|\| !canManageOrgMembers\.value\) return false/)
+  assert.match(tenantSettingsPage, /onChangeOrgMemberRole\(user: string[\s\S]*?if \(!target \|\| !canManageOrgMembers\.value\) return/)
+  assert.match(tenantSettingsPage, /onRemoveOrgMember\(user: string[\s\S]*?if \(!target \|\| !canManageOrgMembers\.value\) return/)
+  assert.match(orgSection, /:readonly="!canManageOrgMembers"/)
+  assert.match(orgSection, /v-if="canEditOrg"/)
+  assert.match(orgSection, /v-if="canManageOrg"/)
+})
+
+test('organization metadata links back to the chooser with a scoped return path', () => {
+  const orgSectionStart = tenantSettingsPage.indexOf('<template v-else-if="activeSection === \'organizations\'">')
+  const orgSectionEnd = tenantSettingsPage.indexOf('<!-- Issued-token modal.', orgSectionStart)
+  assert.ok(orgSectionStart >= 0 && orgSectionEnd > orgSectionStart)
+  const orgSection = tenantSettingsPage.slice(orgSectionStart, orgSectionEnd)
+  const linkStart = orgSection.indexOf('<router-link')
+  const dangerStart = orgSection.indexOf('<div v-if="canManageOrg"')
+  assert.ok(linkStart >= 0 && dangerStart > linkStart)
+  const link = orgSection.slice(linkStart, dangerStart)
+  assert.match(link, /:to="\{ path: '\/organizations', query: \{ from: '\/settings\/organizations' \} \}"/)
+  assert.match(link, />\s*Change organization\s*[\s\S]*<ExternalLink/)
+  assert.equal((link.match(/Change organization/g) ?? []).length, 1)
+})
+
+test('organization settings use the org MemberList contract and lifecycle actions', () => {
+  const orgSectionStart = tenantSettingsPage.indexOf('<template v-else-if="activeSection === \'organizations\'">')
+  const orgSectionEnd = tenantSettingsPage.indexOf('<!-- Issued-token modal.', orgSectionStart)
+  const orgSection = tenantSettingsPage.slice(orgSectionStart, orgSectionEnd)
+  assert.match(orgSection, /<MemberList/)
+  assert.match(orgSection, /:members="orgMembers"/)
+  assert.match(orgSection, /:loading="orgMembersLoading"/)
+  assert.match(orgSection, /:busy="orgMemberBusy"/)
+  assert.match(orgSection, /scope-label="this organization"/)
+  assert.match(orgSection, /:add="onAddOrgMember"/)
+  assert.match(orgSection, /@change-role="onChangeOrgMemberRole"/)
+  assert.match(orgSection, /@remove="onRemoveOrgMember"/)
+  assert.match(tenantSettingsPage, /tenant\.listOrgMembers\(targetOrgUUID\)/)
+  assert.match(tenantSettingsPage, /tenant\.addOrgMember\(target, user, role\)/)
+  assert.match(tenantSettingsPage, /tenant\.patchOrgMemberRole\(target, user, role\)/)
+  assert.match(tenantSettingsPage, /tenant\.removeOrgMember\(target, user, true\)/)
+  assert.match(tenantSettingsPage, /confirmDialog\(\{[\s\S]*Remove \$\{user\} from this organization/)
+  assert.match(tenantSettingsPage, /message: 'They will lose organization-level access and membership in all child workspaces in this organization\.'/)
+  assert.match(tenantSettingsPage, /tenant\.patchOrgDisplayName\(target, orgNameDraft\.value\.trim\(\)\)/)
+  assert.match(tenantSettingsPage, /tenant\.deleteOrg\(target\)/)
+  assert.match(tenantSettingsPage, /tenant\.undeleteOrg\(target\)/)
+  assert.match(tenantSettingsPage, /toast\('ok', 'Organization deletion requested\. Restore it within 30 days\.'/)
+  assert.match(orgSection, /recoverable 30-day grace window/)
+  assert.match(orgSection, /Restore organization/)
+})
+
+test('organization deletion preserves a narrowly scoped recovery target and protects personal orgs', () => {
+  assert.match(tenantSettingsPage, /const managedOrgSnapshot = ref</)
+  assert.match(tenantSettingsPage, /const managedOrgTargetUUID = ref<string \| null>\(null\)/)
+  assert.match(tenantSettingsPage, /const expectedOrgLifecycleRefresh = ref<string \| null>\(null\)/)
+  assert.match(tenantSettingsPage, /managedOrgTargetUUID\.value = target/)
+  assert.match(tenantSettingsPage, /managedOrgSnapshot\.value = \{[\s\S]*deletionRequestedAt: new Date\(\)\.toISOString\(\)/)
+  assert.match(tenantSettingsPage, /expectedOrgLifecycleRefresh\.value = target/)
+  assert.match(tenantSettingsPage, /watch\(\s*\[activeSection, \(\) => tenant\.orgUUID, \(\) => tenant\.workspaceMode\],/)
+  assert.match(tenantSettingsPage, /\[section, orgUUID, workspaceMode\], \[previousSection, previousOrgUUID, previousWorkspaceMode\]\)/)
+  assert.match(tenantSettingsPage, /orgMemberContextGeneration\+\+/)
+  assert.match(tenantSettingsPage, /previousOrgUUID === expectedOrgLifecycleRefresh\.value[\s\S]*workspaceMode === 'workspace'/)
+  assert.match(tenantSettingsPage, /previousOrgUUID === expectedOrgLifecycleRefresh\.value/)
+  assert.match(tenantSettingsPage, /if \(!isExpectedDeleteRefresh\) \{[\s\S]*clearManagedOrgSnapshot\(\)/)
+  assert.match(tenantSettingsPage, /if \(org\.personal\) \{[\s\S]*Personal organizations cannot be deleted\./)
+  assert.match(tenantSettingsPage, /v-else-if="!organizationSettingsOrg\.deletionRequestedAt && organizationSettingsOrg\.personal"/)
+  assert.doesNotMatch(tenantSettingsPage, /tenant\.selectOrg\(target\)|tenant\.selectOrganization\(target\)/)
+})
+
+test('workspace action columns remain headerless', () => {
+  assert.match(tenantSettingsPage, /\{ key: 'actions', label: '', ariaLabel: 'Actions' \}/)
+  assert.doesNotMatch(tenantSettingsPage, /\{ key: 'actions', label: 'Actions' \}/)
+  assert.match(tenantSettingsPage, /const appAccessColumns = computed\(\(\) => \[[\s\S]*\{ key: 'actions', label: '', ariaLabel: 'Actions' \}/)
+  assert.match(tenantSettingsPage, /const serviceAccountColumns = \[[\s\S]*\{ key: 'actions', label: '', ariaLabel: 'Actions' \}/)
+})
+
+test('account access keeps identity and organization rows compact', () => {
+  const identityRow = accountMenu.indexOf('{{ email }}', accountMenu.indexOf('<Teleport'))
+  const organizationRow = accountMenu.indexOf(':to="organizationDestination"')
+  assert.ok(identityRow >= 0 && organizationRow > identityRow)
+  const identityAndOrganizationRows = accountMenu.slice(identityRow, organizationRow)
+  assert.doesNotMatch(identityAndOrganizationRows, /<span class="k-eyebrow">(?:Identity|Organization)<\/span>/)
+  assert.doesNotMatch(identityAndOrganizationRows, /h-px bg-border-subtle/)
+  assert.match(accountMenu, /const organizationDestination = computed\(\(\) => tenant\.orgs\.length > 1[\s\S]*\{ path: '\/settings\/organizations' \}/)
+  assert.match(memberList, /memberColumns[\s\S]*\{ key: 'actions', label: '', ariaLabel: 'Actions' \}/)
+})
+
+test('account popover actions leave focus on a connected control', () => {
+  assert.match(accountMenu, /function closeMenu\(restoreFocus = false\)/)
+  assert.match(accountMenu, /nextTick\(\(\) => triggerRef\.value\?\.focus\(\)\)/)
+
+  const actionStart = accountMenu.indexOf('function emitAndClose')
+  const actionEnd = accountMenu.indexOf('\n}\n\nfunction onRouteNavigation', actionStart)
+  assert.ok(actionStart >= 0 && actionEnd > actionStart)
+  assert.match(accountMenu.slice(actionStart, actionEnd), /emit\('cli'\)[\s\S]*closeMenu\(true\)/)
+
+  const panel = accountMenu.slice(accountMenu.indexOf('<Teleport'))
+  assert.equal((panel.match(/@click="closeMenu\(true\)"/g) ?? []).length, 4)
+})
+
+test('settings use one top-level gap and one continuous Workspace detail page', () => {
+  const tabsStart = tenantSettingsPage.indexOf('      <Tabs\n')
+  const contentBoundary = tenantSettingsPage.indexOf('      <div class="mt-4">', tabsStart)
+  assert.ok(tabsStart >= 0 && contentBoundary > tabsStart)
+
+  const tabsAndBoundary = tenantSettingsPage.slice(tabsStart, contentBoundary)
+  assert.match(tabsAndBoundary, /@select="navigateSettings"\s*\/>\s*$/)
+
+  const detailStart = tenantSettingsPage.indexOf('<!-- ========== Workspace detail ========== -->')
+  const organizationStart = tenantSettingsPage.indexOf('<!-- Organization settings are scoped', detailStart)
+  assert.ok(detailStart >= 0 && organizationStart > detailStart)
+  const detail = tenantSettingsPage.slice(detailStart, organizationStart)
+  const controlHeaderOffset = detail.indexOf('<WorkspaceControlHeader')
+  const detailsOffset = detail.indexOf('<template #details>')
+  const lifecycleOffset = detail.indexOf('<template v-if="canManageWs" #lifecycle>')
+  const accessOffset = detail.indexOf('<!-- Access -->')
+  const serviceAccountsOffset = detail.indexOf('<!-- Service accounts -->')
+  assert.ok(controlHeaderOffset >= 0 && detailsOffset > controlHeaderOffset && lifecycleOffset > detailsOffset)
+  assert.ok(accessOffset > lifecycleOffset && serviceAccountsOffset > accessOffset)
+  const controlHeaderEnd = detail.indexOf('</WorkspaceControlHeader>', controlHeaderOffset)
+  assert.ok(controlHeaderEnd > lifecycleOffset)
+  const controlHeader = detail.slice(controlHeaderOffset, controlHeaderEnd)
+  assert.match(controlHeader, /role="group" aria-label="Workspace details"/)
+  assert.match(controlHeader, /aria-labelledby="workspace-danger-zone-title"/)
+  assert.doesNotMatch(detail.slice(controlHeaderEnd), /Workspace details|workspace-danger-zone-title/)
+  assert.doesNotMatch(detail, /:tabs="workspaceSettingsTabs"|aria-label="Workspace settings sections"/)
+  assert.match(detail, /aria-labelledby="workspace-members-title"/)
+  assert.match(detail, /aria-labelledby="workspace-app-access-title"/)
+  assert.match(detail, /aria-labelledby="workspace-service-accounts-title"/)
+  assert.doesNotMatch(detail, /workspaceSection/)
+  assert.doesNotMatch(tenantSettingsPage, /<template v-else-if="activeSection === '(?:access|service-accounts)'">/)
+})
+
+test('workspace settings retain selection, lifecycle, access, and token controls', () => {
+  for (const pattern of [
+    /workspaceStatus\(workspace\)/,
+    /tenant\.createWorkspace\(org, name, \{ selectCreated: false \}\)/,
+    /tenant\.patchWorkspaceDisplayName/,
+    /tenant\.downloadKubeconfig/,
+    /tenant\.deleteWorkspace/,
+    /tenant\.undeleteWorkspace/,
+    /tenant\.listWorkspaceMembers/,
+    /tenant\.listAppAccessGrants/,
+    /tenant\.revokeAppAccessGrant/,
+    /tenant\.listServiceAccounts/,
+    /tenant\.issueSAToken/,
+    /tenant\.revokeSATokens/,
+    /role="dialog" aria-modal="true"/,
+    /selectedWorkspaceUUID\.value = workspace\.uuid/,
+    /router\.push\(workspaceRoutePath\(workspace\.uuid\)\)/,
+  ]) assert.match(tenantSettingsPage, pattern)
+  const activateStart = tenantSettingsPage.indexOf('async function activateInspectedWorkspace(): Promise<void>')
+  const activateEnd = tenantSettingsPage.indexOf('\n}\n\nconst kubeconfigDisabledReason', activateStart)
+  assert.ok(activateStart >= 0 && activateEnd > activateStart)
+  const activate = tenantSettingsPage.slice(activateStart, activateEnd)
+  assert.match(activate, /activateWorkspaceDisabledReason\.value/)
+  assert.match(activate, /tenant\.selectWorkspace\(workspace\.uuid\)/)
+  assert.match(activate, /tenant\.beginWorkspaceTransition\(\)/)
+  assert.match(activate, /await router\.push\(\{ name: 'dashboard' \}\)/)
+  assert.match(activate, /finally \{[\s\S]*tenant\.endWorkspaceTransition\(transitionToken\)/)
+  assert.match(tenantSettingsPage, /tenant\.orgLoadState === 'loading'/)
+  assert.match(tenantSettingsPage, /tenant\.orgLoadState !== 'ready' \|\| tenant\.orgError \|\| !tenant\.orgListLoaded/)
+  assert.match(tenantSettingsPage, /workspaceLoadState !== 'ready' \|\| tenant\.workspaceErrorByOrg\[workspace\.orgUUID\]/)
+  assert.match(workspaceControlHeader, /Inspecting workspace/)
+  assert.match(workspaceControlHeader, /Active operating Workspace:/)
+  assert.match(workspaceControlHeader, /Switch operating context/)
+  assert.match(workspaceControlHeader, /class="min-w-0" role="status" aria-live="polite" aria-atomic="true"/)
+  assert.doesNotMatch(workspaceControlHeader, /class="mt-5 flex[^\"]*"\s+role="status"/)
+  assert.match(memberList, /tableLabel: string/)
+  assert.match(memberList, /:aria-label="tableLabel"/)
+  assert.match(tenantSettingsPage, /scope-label="this workspace"[\s\S]*table-label="Workspace members"/)
+  assert.match(tenantSettingsPage, /scope-label="this organization"[\s\S]*table-label="Organization members"/)
+  // Settings must keep provisioning/deleting rows inspectable for lifecycle
+  // controls, while the global workspace target only accepts ready rows.
+  assert.doesNotMatch(tenantSettingsPage, /return workspaceStatus\(workspace\) === 'Ready'/)
+  assert.match(tenantSettingsPage, /v-if="canManageWs"[\s\S]*?aria-labelledby="workspace-danger-zone-title"/)
+  assert.match(tenantSettingsPage, /const canEditWs = computed\(\(\) => canManageWs\.value && !selWs\.value\?\.deletionRequestedAt\)/)
+  assert.match(tenantSettingsPage, /:readonly="!canEditWs"/)
+  assert.match(tenantSettingsPage, /v-if="selWs\.deletionRequestedAt"[\s\S]*management is unavailable while deletion is pending/)
+  assert.match(tenantSettingsPage, /workspaceListError.*role="alert"/s)
+})
+
+test('workspace settings routes own local inspection without subsection navigation', () => {
+  for (const [routePath, routeName] of [
+    ['/settings/workspaces', 'settings-workspaces'],
+    ['/settings/workspaces/:workspaceUUID', 'settings-workspace-overview'],
+  ]) {
+    assert.match(router, new RegExp(`path: '${routePath.replaceAll('/', '\\/')}'[\\s\\S]*name: '${routeName}'`))
+  }
+  assert.doesNotMatch(router, /settings\/workspaces\/:workspaceUUID\/(?:access|service-accounts)/)
+  assert.doesNotMatch(router, /path: '\/settings\/(?:access|service-accounts)'/)
+  assert.doesNotMatch(router, /path: '\/tenant'/)
+  assert.match(tenantSettingsPage, /const workspaceRouteUUID = computed<string \| null>/)
+  assert.match(tenantSettingsPage, /function workspaceRoutePath\(workspaceUUID: string\): string/)
+  assert.match(tenantSettingsPage, /const routedWorkspace = loadedWorkspaces\.find\(\(workspace\) => workspace\.uuid === requestedWorkspaceUUID\)/)
+  assert.match(tenantSettingsPage, /if \(!routedWorkspace\) \{[\s\S]*router\.replace\('\/settings\/workspaces'\)/)
+  const reloadStart = tenantSettingsPage.indexOf('async function reloadScopedWorkspaces(orgUUID: string | null)')
+  const reloadEnd = tenantSettingsPage.indexOf('\n}\n\n// App bootstrap', reloadStart)
+  assert.ok(reloadStart >= 0 && reloadEnd > reloadStart)
+  const reload = tenantSettingsPage.slice(reloadStart, reloadEnd)
+  const noOrgStart = reload.indexOf('if (!orgUUID)')
+  const noOrgEnd = reload.indexOf('\n  }\n\n  workspaceListLoading.value = true', noOrgStart)
+  assert.ok(noOrgStart >= 0 && noOrgEnd > noOrgStart)
+  const noOrg = reload.slice(noOrgStart, noOrgEnd)
+  assert.match(noOrg, /workspaceListLoading\.value = false/)
+  assert.match(noOrg, /activeSection\.value === 'workspaces' && workspaceRouteUUID\.value/)
+  assert.match(noOrg, /await router\.replace\('\/settings\/workspaces'\)/)
+  const routeWatchStart = tenantSettingsPage.indexOf('watch(\n  workspaceRouteUUID,')
+  const routeWatchEnd = tenantSettingsPage.indexOf('\n)\n\n// Workspace CRUD refreshes', routeWatchStart)
+  assert.ok(routeWatchStart >= 0 && routeWatchEnd > routeWatchStart)
+  const routeWatch = tenantSettingsPage.slice(routeWatchStart, routeWatchEnd)
+  assert.match(routeWatch, /if \(workspaceRouteUUID\.value\) void router\.replace\('\/settings\/workspaces'\)/)
+  assert.doesNotMatch(tenantSettingsPage, /workspaceRouteSection/)
+  assert.doesNotMatch(tenantSettingsPage, /navigateWorkspaceSection|workspaceSettingsTabs|workspaceSection/)
+  assert.match(tenantSettingsPage, /await tenant\.fetchWorkspaces\(orgUUID, \{ selectDefault: false \}\)/)
+  assert.match(tenantSettingsPage, /watch\(\s*selectedWorkspaceUUID,[\s\S]*Promise\.all\(\[reloadWsMembers\(\), reloadAppAccessGrants\(\), reloadSAs\(\)\]\)/)
+  assert.match(tenantSettingsPage, /if \(!selectedWorkspaceUUID\.value \|\| selWs\.value\?\.deletionRequestedAt\) return/)
+})
+
+test('service-account token responses are fenced before modal assignment', () => {
+  const issueStart = tenantSettingsPage.indexOf('async function onIssueToken(uuid: string, name: string)')
+  const issueEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onRevokeTokens', issueStart)
+  assert.ok(issueStart >= 0 && issueEnd > issueStart)
+  const issue = tenantSettingsPage.slice(issueStart, issueEnd)
+  assert.match(issue, /const tokenRequestRoute = route\.fullPath/)
+  assert.match(issue, /const tokenRequestIsAdmin = canEditWs\.value/)
+  assert.match(issue, /if \(!target \|\| !tokenRequestIsAdmin\) return/)
+  assert.match(issue, /invalidateServiceAccountRequests\(\)[\s\S]*const tokenRequestGeneration = serviceAccountRequestGeneration/)
+  assert.match(issue, /const tokenResponseIsCurrent =[\s\S]*tokenRequestGeneration === serviceAccountRequestGeneration[\s\S]*route\.fullPath === tokenRequestRoute[\s\S]*isCurrentTarget\(target\)[\s\S]*canEditWs\.value/)
+  assert.doesNotMatch(issue, /workspaceSection|tokenRequestSection/)
+  const responseFence = issue.indexOf('if (!tokenResponseIsCurrent) return')
+  const modalAssignment = issue.indexOf('issuedToken.value = tok')
+  assert.ok(responseFence >= 0 && modalAssignment > responseFence, 'stale token responses must be discarded before modal state assignment')
+  assert.equal(issue.indexOf('await reloadSAs()', modalAssignment) > modalAssignment, true)
+})
+
+test('one-time token copy exposes manual recovery instead of swallowing failure', () => {
+  const copyStart = tenantSettingsPage.indexOf('async function copyToken()')
+  const copyEnd = tenantSettingsPage.indexOf('\n}\n\nfunction dismissToken', copyStart)
+  assert.ok(copyStart >= 0 && copyEnd > copyStart)
+  const copy = tenantSettingsPage.slice(copyStart, copyEnd)
+  assert.match(copy, /tokenCopyError\.value = null/)
+  assert.match(copy, /await navigator\.clipboard\.writeText/)
+  assert.match(copy, /tokenCopyError\.value = 'The token could not be copied automatically\./)
+  assert.doesNotMatch(copy, /\/\* ignore \*\//)
+  assert.match(tenantSettingsPage, /id="issued-token-copy-error"/)
+  assert.match(tenantSettingsPage, /role="alert"/)
+  assert.match(tenantSettingsPage, /@focus="\(\$event\.target as HTMLTextAreaElement\)\.select\(\)"/)
+  assert.match(tenantSettingsPage, /Close without copying/)
+})
+
+test('Workspace inspection remains local until the explicit context switch', () => {
+  const inspectStart = tenantSettingsPage.indexOf('function selectWorkspace(workspace: WorkspaceRow): void')
+  const inspectEnd = tenantSettingsPage.indexOf('\n}\n\nfunction selectWorkspaceFromControl', inspectStart)
+  assert.ok(inspectStart >= 0 && inspectEnd > inspectStart)
+  const inspect = tenantSettingsPage.slice(inspectStart, inspectEnd)
+  assert.match(inspect, /selectedWorkspaceUUID\.value = workspace\.uuid/)
+  assert.match(inspect, /router\.push\(workspaceRoutePath\(workspace\.uuid\)\)/)
+  assert.doesNotMatch(inspect, /tenant\.selectWorkspace/)
+
+  assert.match(workspaceControlHeader, /Inspecting workspace/)
+  assert.match(workspaceControlHeader, /This is your active operating Workspace\./)
+  assert.match(workspaceControlHeader, /Changes below affect the inspected Workspace only\./)
+  assert.match(tenantSettingsPage, /tenant\.selectWorkspace\(workspace\.uuid\)/)
+})
+
+test('Workspace settings adapt list selection for mobile and large inventories', () => {
+  assert.match(tenantSettingsPage, /const WORKSPACE_SEARCH_THRESHOLD = 5/)
+  assert.match(tenantSettingsPage, /const filteredWorkspaces = computed/)
+  assert.match(tenantSettingsPage, /id="workspace-inspection-select"/)
+  assert.match(tenantSettingsPage, /class="k-input min-h-11 w-full text-base"/)
+  assert.match(tenantSettingsPage, /@change="selectWorkspaceFromControl"/)
+  assert.match(tenantSettingsPage, /id="workspace-settings-search"/)
+  assert.match(tenantSettingsPage, /max-h-96[^"]*overflow-y-auto/)
+})
+
+test('Workspace lifecycle filter hides deleting rows by default and uses the standard filter control', () => {
+  assert.match(tenantSettingsPage, /import ResourceTableFilter from ['"]@\/portalkit\/ResourceTableFilter\.vue['"]/)
+  assert.match(tenantSettingsPage, /const workspaceLifecycleFilter = ref<WorkspaceLifecycleFilter>\('not-deleting'\)/)
+  assert.match(tenantSettingsPage, /label: 'Lifecycle'/)
+  assert.match(tenantSettingsPage, /allLabel: 'All workspaces'/)
+  assert.match(tenantSettingsPage, /value: 'not-deleting', label: 'Not deleting'/)
+  assert.match(tenantSettingsPage, /value: 'deleting', label: 'Deleting'/)
+  assert.match(tenantSettingsPage, /if \(filter === 'deleting'\) return !!workspace\.deletionRequestedAt/)
+  assert.match(tenantSettingsPage, /if \(filter === 'not-deleting'\) return !workspace\.deletionRequestedAt/)
+  assert.match(tenantSettingsPage, /const lifecycleFilteredWorkspaces = computed\(\(\) =>\s*workspaces\.value\.filter/)
+  assert.match(tenantSettingsPage, /<ResourceTableFilter[\s\S]*:definition="workspaceLifecycleFilterDefinition"[\s\S]*@update:model-value="setWorkspaceLifecycleFilter"/)
+  assert.match(tenantSettingsPage, /class="k-table__controls" role="search" aria-label="Filter workspaces"/)
+  assert.match(tenantSettingsPage, /class="k-table__search hidden lg:block"/)
+  assert.match(tenantSettingsPage, /class="k-table__search-clear"/)
+  assert.match(tenantSettingsPage, /class="k-table__clear-filters"/)
+  assert.match(tenantSettingsPage, /workspaceFilterResultAnnouncement/)
+  assert.match(tenantSettingsPage, /v-for="workspace in lifecycleFilteredWorkspaces"/)
+  assert.match(tenantSettingsPage, /<li v-for="workspace in filteredWorkspaces"/)
+
+  const setterStart = tenantSettingsPage.indexOf('function setWorkspaceLifecycleFilter(value: string): void')
+  const setterEnd = tenantSettingsPage.indexOf('\n}\n\nfunction clearWorkspaceFilters', setterStart)
+  assert.ok(setterStart >= 0 && setterEnd > setterStart)
+  const setter = tenantSettingsPage.slice(setterStart, setterEnd)
+  assert.doesNotMatch(setter, /workspaceSearch\.value = ''/)
+  assert.match(setter, /workspaceMatchesLifecycleFilter\(workspace, nextFilter\)/)
+  assert.match(setter, /selectWorkspace\(firstVisibleWorkspace\)/)
+  assert.match(setter, /selectedWorkspaceUUID\.value = null/)
+  assert.match(setter, /router\.push\('\/settings\/workspaces'\)/)
+
+  const clearStart = tenantSettingsPage.indexOf('function clearWorkspaceFilters(): void')
+  const clearEnd = tenantSettingsPage.indexOf('\n}\n\n// Organization switching', clearStart)
+  assert.ok(clearStart >= 0 && clearEnd > clearStart)
+  const clear = tenantSettingsPage.slice(clearStart, clearEnd)
+  assert.match(clear, /workspaceSearch\.value = ''/)
+  assert.match(clear, /setWorkspaceLifecycleFilter\(''\)/)
+
+  assert.match(tenantSettingsPage, /if \(!workspaceMatchesLifecycleFilter\(routedWorkspace\)\)[\s\S]*routedWorkspace\.deletionRequestedAt \? 'deleting' : 'not-deleting'/)
+  assert.match(tenantSettingsPage, /workspaceLifecycleFilter\.value = 'not-deleting'[\s\S]*dismissToken\(\)/)
+})
+
+test('settings adopts the winning workspace load after a concurrent startup request', () => {
+  assert.match(tenantSettingsPage, /tenant\.workspaceLoadStateByOrg\[tenant\.orgUUID\] \?\? 'idle'/)
+  assert.match(tenantSettingsPage, /loadState !== 'ready' && loadState !== 'error'/)
+  assert.match(tenantSettingsPage, /scopedOrgUUID\.value = orgUUID/)
+  assert.match(tenantSettingsPage, /workspaceListError\.value = loadState === 'error'/)
+  assert.match(tenantSettingsPage, /if \(loadState === 'error'\) \{[\s\S]*scopedOrgUUID\.value = null/)
+  assert.match(tenantSettingsPage, /scopedOrgUUID\.value = orgUUID[\s\S]*normalizeWorkspaceSelection\(orgUUID, loadedWorkspaces\)/)
+})
+
+test('workspace access and service-account data stay fenced to the current selection', () => {
+  const membersStart = tenantSettingsPage.indexOf('async function reloadWsMembers()')
+  const membersEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onAddWsMember', membersStart)
+  assert.ok(membersStart >= 0 && membersEnd > membersStart)
+  const members = tenantSettingsPage.slice(membersStart, membersEnd)
+  assert.match(members, /if \(!target \|\| selWs\.value\?\.deletionRequestedAt\)/)
+  assert.match(members, /isCurrentTarget\(target\) && !selWs\.value\?\.deletionRequestedAt/)
+
+  const appStart = tenantSettingsPage.indexOf('async function reloadAppAccessGrants()')
+  const appEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onRevokeAppAccess', appStart)
+  assert.ok(appStart >= 0 && appEnd > appStart)
+  const app = tenantSettingsPage.slice(appStart, appEnd)
+  assert.match(app, /if \(!target \|\| selWs\.value\?\.deletionRequestedAt\)/)
+  assert.match(app, /isCurrentTarget\(target\) && !selWs\.value\?\.deletionRequestedAt/)
+
+  const serviceStart = tenantSettingsPage.indexOf('async function reloadSAs()')
+  const serviceEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onCreateSA', serviceStart)
+  assert.ok(serviceStart >= 0 && serviceEnd > serviceStart)
+  const service = tenantSettingsPage.slice(serviceStart, serviceEnd)
+  assert.match(service, /const targetIsAdmin = canEditWs\.value/)
+  assert.match(service, /if \(!target \|\| !targetIsAdmin\)/)
+  assert.match(service, /isCurrentTarget\(target\) && canEditWs\.value/)
+  assert.match(tenantSettingsPage, /clearWorkspaceAccessState\(\)[\s\S]*clearServiceAccountState\(\)[\s\S]*Promise\.all\(\[reloadWsMembers\(\), reloadAppAccessGrants\(\), reloadSAs\(\)\]\)/)
+})
+
+test('workspace access reload generations invalidate stale reads and let mutations win', () => {
+  assert.match(tenantSettingsPage, /let wsMembersRequestGeneration = 0/)
+  assert.match(tenantSettingsPage, /let appAccessRequestGeneration = 0/)
+  assert.match(tenantSettingsPage, /let serviceAccountRequestGeneration = 0/)
+
+  const membersStart = tenantSettingsPage.indexOf('async function reloadWsMembers()')
+  const membersEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onAddWsMember', membersStart)
+  assert.ok(membersStart >= 0 && membersEnd > membersStart)
+  const members = tenantSettingsPage.slice(membersStart, membersEnd)
+  assert.match(members, /const requestGeneration = \+\+wsMembersRequestGeneration/)
+  assert.match(members, /requestGeneration === wsMembersRequestGeneration && isCurrentTarget\(target\)/)
+  assert.match(members, /finally \{[\s\S]*requestGeneration === wsMembersRequestGeneration && isCurrentTarget\(target\)/)
+  const addMemberStart = tenantSettingsPage.indexOf('async function onAddWsMember')
+  const addMemberEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onChangeWsMemberRole', addMemberStart)
+  assert.match(tenantSettingsPage.slice(addMemberStart, addMemberEnd), /invalidateWsMembersRequests\(\)[\s\S]*await tenant\.addWorkspaceMember/)
+
+  const appStart = tenantSettingsPage.indexOf('async function reloadAppAccessGrants()')
+  const appEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onRevokeAppAccess', appStart)
+  assert.ok(appStart >= 0 && appEnd > appStart)
+  const app = tenantSettingsPage.slice(appStart, appEnd)
+  assert.match(app, /const requestGeneration = \+\+appAccessRequestGeneration/)
+  assert.match(app, /requestGeneration === appAccessRequestGeneration && isCurrentTarget\(target\)/)
+  assert.match(app, /finally \{[\s\S]*requestGeneration === appAccessRequestGeneration && isCurrentTarget\(target\)/)
+  const revokeAppStart = tenantSettingsPage.indexOf('async function onRevokeAppAccess')
+  const revokeAppEnd = tenantSettingsPage.indexOf('\n}\n\n// ===== Workspace pane: service accounts', revokeAppStart)
+  assert.match(tenantSettingsPage.slice(revokeAppStart, revokeAppEnd), /invalidateAppAccessRequests\(\)[\s\S]*await tenant\.revokeAppAccessGrant/)
+
+  const serviceStart = tenantSettingsPage.indexOf('async function reloadSAs()')
+  const serviceEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onCreateSA', serviceStart)
+  assert.ok(serviceStart >= 0 && serviceEnd > serviceStart)
+  const service = tenantSettingsPage.slice(serviceStart, serviceEnd)
+  assert.match(service, /const requestGeneration = \+\+serviceAccountRequestGeneration/)
+  assert.match(service, /requestGeneration === serviceAccountRequestGeneration && isCurrentTarget\(target\)/)
+  assert.match(service, /finally \{[\s\S]*requestGeneration === serviceAccountRequestGeneration && isCurrentTarget\(target\)/)
+  const createSAStart = tenantSettingsPage.indexOf('async function onCreateSA')
+  const createSAEnd = tenantSettingsPage.indexOf('\n}\n\nasync function onDeleteSA', createSAStart)
+  assert.match(tenantSettingsPage.slice(createSAStart, createSAEnd), /invalidateServiceAccountRequests\(\)[\s\S]*await tenant\.createServiceAccount/)
+
+  const clearAccessStart = tenantSettingsPage.indexOf('function clearWorkspaceAccessState(): void')
+  const clearAccessEnd = tenantSettingsPage.indexOf('\n}\n\nfunction clearServiceAccountState', clearAccessStart)
+  const clearAccess = tenantSettingsPage.slice(clearAccessStart, clearAccessEnd)
+  assert.match(clearAccess, /invalidateWsMembersRequests\(\)/)
+  assert.match(clearAccess, /invalidateAppAccessRequests\(\)/)
+  const clearServiceStart = tenantSettingsPage.indexOf('function clearServiceAccountState(): void')
+  const clearServiceEnd = tenantSettingsPage.indexOf('\n}\n\n// Access state is scoped', clearServiceStart)
+  const clearService = tenantSettingsPage.slice(clearServiceStart, clearServiceEnd)
+  assert.match(clearService, /invalidateServiceAccountRequests\(\)/)
+  const scopeWatchStart = tenantSettingsPage.indexOf('watch(\n  [activeSection, () => tenant.orgUUID],')
+  const scopeWatchEnd = tenantSettingsPage.indexOf('\n)\n\n// ===== Data loading per selected workspace', scopeWatchStart)
+  assert.ok(scopeWatchStart >= 0 && scopeWatchEnd > scopeWatchStart)
+  const scopeWatch = tenantSettingsPage.slice(scopeWatchStart, scopeWatchEnd)
+  assert.match(scopeWatch, /clearWorkspaceAccessState\(\)/)
+  assert.match(scopeWatch, /clearServiceAccountState\(\)/)
+})
+
+test('deleting workspace rows expose an honest live grace-period countdown', () => {
+  assert.match(tenantSettingsPage, /const WORKSPACE_GRACE_PERIOD_MS = 30 \* 24 \* 60 \* 60 \* 1000/)
+  assert.match(tenantSettingsPage, /const DAY_MS = 24 \* 60 \* 60 \* 1000/)
+  assert.match(tenantSettingsPage, /const requestedAtMs = Date\.parse\(deletionRequestedAt\)/)
+  assert.match(tenantSettingsPage, /const remainingMs = requestedAtMs \+ WORKSPACE_GRACE_PERIOD_MS - deletionCountdownNow\.value/)
+  assert.match(tenantSettingsPage, /if \(remainingMs <= 0\) return 'Deletion window expired\.'/)
+  assert.match(tenantSettingsPage, /if \(remainingMs < DAY_MS\) return 'Deletion scheduled today \(under one day\)\.'/)
+  assert.match(tenantSettingsPage, /const days = Math\.ceil\(remainingMs \/ DAY_MS\)/)
+  assert.match(tenantSettingsPage, /days === 1 \? 'day' : 'days'/)
+  assert.match(tenantSettingsPage, /return `\$\{days\} \$\{days === 1 \? 'day' : 'days'\} until deletion\.`/)
+  assert.match(tenantSettingsPage, /return 'Deletion timing unavailable\.'/)
+
+  const workspaceRowStart = tenantSettingsPage.indexOf('<li v-for="workspace in filteredWorkspaces"')
+  const workspaceRowEnd = tenantSettingsPage.indexOf('</li>', workspaceRowStart)
+  assert.ok(workspaceRowStart >= 0 && workspaceRowEnd > workspaceRowStart)
+  const workspaceRow = tenantSettingsPage.slice(workspaceRowStart, workspaceRowEnd)
+  assert.match(workspaceRow, /:aria-label="workspaceButtonLabel\(workspace\)"/)
+  assert.match(workspaceRow, /<span class="block truncate text-\[12px\]">\{\{ workspace\.displayName \|\| workspace\.uuid \}\}<\/span>/)
+  assert.match(workspaceRow, /<span\s+v-if="workspace\.deletionRequestedAt"\s+class="block text-\[10px\] italic text-text-muted"[\s\S]*?workspaceDeletionCountdown\(workspace\.deletionRequestedAt\)/)
+  assert.match(workspaceRow, /workspaceStatus\(workspace\)/)
+  assert.match(tenantSettingsPage, /return countdown\s*\? `\$\{name\}, \$\{workspaceStatus\(workspace\)\}\. \$\{countdown\}`/)
+
+  assert.match(tenantSettingsPage, /const deletionCountdownNow = ref\(Date\.now\(\)\)/)
+  assert.match(tenantSettingsPage, /window\.setInterval\(\(\) => \{\s*deletionCountdownNow\.value = Date\.now\(\)\s*\}, WORKSPACE_COUNTDOWN_REFRESH_MS\)/s)
+  const cleanupStart = tenantSettingsPage.indexOf('onBeforeUnmount(() => {')
+  const cleanupEnd = tenantSettingsPage.indexOf('\n})', cleanupStart)
+  assert.ok(cleanupStart >= 0 && cleanupEnd > cleanupStart)
+  const cleanup = tenantSettingsPage.slice(cleanupStart, cleanupEnd)
+  assert.match(cleanup, /window\.removeEventListener\('keydown', onTokenDialogKeydown\)/)
+  assert.match(cleanup, /window\.clearInterval\(deletionCountdownTimer\)/)
+})
+
+function assertSimpleResourceTable(source, { columns, rows, rowKey, loading, emptyText }) {
+  assert.equal((source.match(/<ResourceTable\b/g) ?? []).length, 1)
+  assert.match(source, new RegExp(`:columns="${columns}"`))
+  assert.match(source, new RegExp(`:rows="${rows}"`))
+  assert.match(source, /variant="simple"/)
+  assert.match(source, /:interactive="false"/)
+  assert.match(source, new RegExp(`row-key="${rowKey}"`))
+  assert.match(source, new RegExp(`:loading="${loading}"`))
+  assert.match(source, emptyText)
+  assert.doesNotMatch(source, /<table\b|<ul\b|\bk-table\b/)
+}
+
+test('settings access lists use the canonical simple ResourceTable contract', () => {
+  assert.match(memberList, /import ResourceTable from ['"]@\/portalkit\/ResourceTable\.vue['"]$/m)
+  assert.match(memberList, /import ResourceTableDeleteButton from ['"]@\/portalkit\/ResourceTableDeleteButton\.vue['"]$/m)
+  assertSimpleResourceTable(memberList, {
+    columns: 'memberColumns',
+    rows: 'memberRows',
+    rowKey: 'user',
+    loading: 'loading',
+    emptyText: /:empty-text="memberEmptyText"/,
+  })
+  assert.match(memberList, /const memberRows = computed<Record<string, unknown>\[\]>\(\(\) =>\s*props\.members\.map\(/)
+  assert.doesNotMatch(memberList, /v-if="loading"|v-else-if="members\.length/)
+
+  const appAccessStart = tenantSettingsPage.indexOf('<section v-if="showAppAccess && !selWs.deletionRequestedAt"')
+  const appAccessEnd = tenantSettingsPage.indexOf('</section>', appAccessStart) + '</section>'.length
+  assert.ok(appAccessStart >= 0 && appAccessEnd > appAccessStart)
+  const appAccess = tenantSettingsPage.slice(appAccessStart, appAccessEnd)
+  assertSimpleResourceTable(appAccess, {
+    columns: 'appAccessColumns',
+    rows: 'appAccessRows',
+    rowKey: 'binding',
+    loading: 'appAccessLoading',
+    emptyText: /empty-text="No app access grants\./,
+  })
+  assert.match(tenantSettingsPage, /const appAccessRows = computed<Record<string, unknown>\[\]>\(\(\) =>\s*appAccessGrants\.value\.map\(/)
+  assert.match(appAccess, /ResourceTableDeleteButton/)
+  assert.doesNotMatch(appAccess, /v-if="appAccessLoading"|v-else-if="appAccessGrants\.length/)
+
+  const serviceAccountsStart = tenantSettingsPage.indexOf('<ResourceTable\n                  v-if="canEditWs"')
+  const serviceAccountsEnd = tenantSettingsPage.indexOf('</ResourceTable>', serviceAccountsStart) + '</ResourceTable>'.length
+  assert.ok(serviceAccountsStart >= 0 && serviceAccountsEnd > serviceAccountsStart)
+  const serviceAccounts = tenantSettingsPage.slice(serviceAccountsStart, serviceAccountsEnd)
+  assertSimpleResourceTable(serviceAccounts, {
+    columns: 'serviceAccountColumns',
+    rows: 'serviceAccountRows',
+    rowKey: 'uuid',
+    loading: 'sasLoading',
+    emptyText: /empty-text="No service accounts in this workspace\."/,
+  })
+  assert.match(tenantSettingsPage, /const serviceAccountRows = computed<Record<string, unknown>\[\]>\(\(\) =>\s*sas\.value\.map\(/)
+  assert.match(tenantSettingsPage, /import ResourceTableActionButton from ['"]@\/portalkit\/ResourceTableActionButton\.vue['"]$/m)
+  const actionButtons = [...serviceAccounts.matchAll(/<ResourceTableActionButton\b[\s\S]*?\/>/g)].map(match => match[0])
+  assert.equal(actionButtons.length, 2)
+  assert.ok(actionButtons.some(action => /:icon="KeyRound"/.test(action) && /tone="accent"/.test(action)))
+  assert.ok(actionButtons.some(action => /:icon="Ban"/.test(action) && /tone="warning"/.test(action)))
+  assert.match(actionButtons.join('\n'), /:label="`Issue token for \$\{String\(row\.displayName\)\}`"/)
+  assert.match(actionButtons.join('\n'), /:label="`Revoke tokens for \$\{String\(row\.displayName\)\}`"/)
+  assert.match(actionButtons.join('\n'), /:busy-label="`Issuing token for \$\{String\(row\.displayName\)\}…`"/)
+  assert.match(actionButtons.join('\n'), /:busy-label="`Revoking tokens for \$\{String\(row\.displayName\)\}…`"/)
+  assert.doesNotMatch(serviceAccounts, /<button\b[\s\S]*?(?:Issue token|Revoke tokens)[\s\S]*?<\/button>/)
+  assert.equal((serviceAccounts.match(/<ResourceTableDeleteButton\b/g) ?? []).length, 1)
+  assert.match(tenantSettingsPage, /type ServiceAccountOperation = 'issue' \| 'revoke' \| 'delete'/)
+  assert.match(tenantSettingsPage, /const saBusy = ref<Record<string, ServiceAccountOperation>>\(\{\}\)/)
+  assert.match(tenantSettingsPage, /function saOperation\(uuid: string\): ServiceAccountOperation \| undefined/)
+  assert.match(tenantSettingsPage, /function beginSAOperation\(uuid: string, operation: ServiceAccountOperation\)/)
+  assert.match(tenantSettingsPage, /beginSAOperation\(uuid, 'issue'\)/)
+  assert.match(tenantSettingsPage, /beginSAOperation\(uuid, 'revoke'\)/)
+  assert.match(tenantSettingsPage, /beginSAOperation\(uuid, 'delete'\)/)
+  assert.match(serviceAccounts, /Revoke tokens/)
+  assert.match(serviceAccounts, /Revoking tokens for/)
+  assert.equal((serviceAccounts.match(/:disabled="isSABusy\(String\(row\.uuid\)\)"/g) ?? []).length, 3)
+  assert.match(serviceAccounts, /saOperation\(String\(row\.uuid\)\) === 'issue'/)
+  assert.match(serviceAccounts, /saOperation\(String\(row\.uuid\)\) === 'revoke'/)
+  assert.match(serviceAccounts, /saOperation\(String\(row\.uuid\)\) === 'delete'/)
+  assert.match(serviceAccounts, /:disabled="isSABusy\(String\(row\.uuid\)\)"[\s\S]*?:busy="saOperation\(String\(row\.uuid\)\) === 'delete'"/)
+  assert.doesNotMatch(serviceAccounts, /v-if="sasLoading"|v-else-if="sas\.length|<li\b/)
+})
+
+test('Workspace danger zone is recoverable, admin-only, and grouped in the Workspace card', () => {
+  const headerStart = tenantSettingsPage.indexOf('<WorkspaceControlHeader')
+  const headerEnd = tenantSettingsPage.indexOf('</WorkspaceControlHeader>', headerStart)
+  const lifecycleStart = tenantSettingsPage.indexOf('<template v-if="canManageWs" #lifecycle>', headerStart)
+  const lifecycleEnd = tenantSettingsPage.indexOf('</template>', lifecycleStart) + '</template>'.length
+  assert.ok(lifecycleStart >= 0 && lifecycleEnd > lifecycleStart)
+  assert.ok(headerStart >= 0 && lifecycleStart > headerStart && lifecycleEnd < headerEnd)
+  const lifecycle = tenantSettingsPage.slice(lifecycleStart, lifecycleEnd)
+  assert.match(lifecycle, /workspace-danger-zone-title[\s\S]*Danger zone/)
+  assert.match(lifecycle, /Deleting starts a recoverable 30-day grace window/)
+  assert.match(lifecycle, /This workspace is in its recoverable 30-day grace window/)
+  assert.match(lifecycle, /border border-danger\/20/)
+  assert.match(lifecycle, /k-btn k-btn--danger[\s\S]*Delete workspace/)
+  assert.match(lifecycle, /k-btn k-btn--ghost[\s\S]*Restore workspace/)
+  assert.doesNotMatch(lifecycle, /irreversible/i)
+  assert.match(lifecycle, /@click="onDeleteWorkspace"/)
+  assert.match(lifecycle, /@click="onUndeleteWorkspace"/)
+  assert.match(workspaceControlHeader, /\$slots\.lifecycle[\s\S]*slot name="lifecycle"/)
+})
+
+test('tenant settings creation preserves the current operating workspace', () => {
+  const pageStart = tenantSettingsPage.indexOf('async function onCreateWorkspace()')
+  const pageEnd = tenantSettingsPage.indexOf('\n}\n\n// ===== Workspace pane:', pageStart)
+  assert.ok(pageStart >= 0 && pageEnd > pageStart)
+  const pageCreate = tenantSettingsPage.slice(pageStart, pageEnd)
+  assert.match(pageCreate, /tenant\.createWorkspace\(org, name, \{ selectCreated: false \}\)/)
+  assert.doesNotMatch(pageCreate, /selectWorkspace\(created\)/)
+
+  const storeStart = tenant.indexOf('async function createWorkspace(')
+  const storeEnd = tenant.indexOf('\n\n  // bootstrap drives', storeStart)
+  assert.ok(storeStart >= 0 && storeEnd > storeStart)
+  const storeCreate = tenant.slice(storeStart, storeEnd)
+  assert.match(storeCreate, /options: CreateWorkspaceOptions = \{\}/)
+  assert.match(storeCreate, /const selectCreated = options\.selectCreated !== false/)
+  assert.match(storeCreate, /fetchWorkspaces\(targetOrgUUID, \{ selectDefault: false \}\)/)
+  assert.match(storeCreate, /isCurrentWorkspaceCreate\(targetOrgUUID, creationSequence, selectionRevisionAtStart\)[\s\S]*selectCreated/)
+
+  const wizard = fs.readFileSync(path.join(portalSrc, 'components/FirstWorkspaceWizard.vue'), 'utf8')
+  assert.match(wizard, /tenant\.createWorkspace\(tenant\.orgUUID, trimmed\.value\)/)
+})
+
+test('workspace creation and organization switching fence late responses', () => {
+  const createStart = tenantSettingsPage.indexOf('async function onCreateWorkspace()')
+  const createEnd = tenantSettingsPage.indexOf('\n}\n\n// ===== Workspace pane:', createStart)
+  assert.ok(createStart >= 0 && createEnd > createStart)
+  const pageCreate = tenantSettingsPage.slice(createStart, createEnd)
+  assert.match(pageCreate, /const request = \+\+workspaceCreateRequest/)
+  assert.match(pageCreate, /if \(request !== workspaceCreateRequest \|\| tenant\.orgUUID !== org\) return/)
+  assert.match(pageCreate, /if \(request === workspaceCreateRequest\) newWsBusy\.value = false/)
+
+  const storeStart = tenant.indexOf('async function createWorkspace(')
+  const storeEnd = tenant.indexOf('\n\n  // bootstrap drives', storeStart)
+  assert.ok(storeStart >= 0 && storeEnd > storeStart)
+  const storeCreate = tenant.slice(storeStart, storeEnd)
+  assert.match(storeCreate, /const creationSequence = \+\+workspaceCreationSequence/)
+  assert.match(storeCreate, /const selectionRevisionAtStart = selectionRevision/)
+  assert.match(storeCreate, /const workspaceAtStart = workspaceUUID\.value/)
+  assert.match(tenant, /function isCurrentWorkspaceCreate\(/)
+  assert.match(storeCreate, /if \(isCurrentWorkspaceCreate\(targetOrgUUID, creationSequence, selectionRevisionAtStart\)\) \{[\s\S]*failed to create workspace/)
+  assert.match(storeCreate, /if \(!isCurrentWorkspaceCreate\(targetOrgUUID, creationSequence, selectionRevisionAtStart\)\) return created/)
+  assert.match(tenant, /creationSequence === workspaceCreationSequence/)
+  assert.match(tenant, /selectionRevision === selectionRevisionAtStart/)
+  assert.match(storeCreate, /workspaceUUID\.value === workspaceAtStart/)
+
+  const fetchStart = tenant.indexOf('async function fetchWorkspaces(')
+  const fetchEnd = tenant.indexOf('\n\n  function selectOrg', fetchStart)
+  assert.ok(fetchStart >= 0 && fetchEnd > fetchStart)
+  const fetchWorkspaces = tenant.slice(fetchStart, fetchEnd)
+  assert.match(tenant, /const workspaceRequestEpochByOrg = new Map<string, number>\(\)/)
+  assert.match(fetchWorkspaces, /const \{ epoch, selectionRevisionAtStart \} = beginWorkspaceRequest\(targetOrgUUID\)/)
+  assert.match(fetchWorkspaces, /epoch !== workspaceRequestEpochByOrg\.get\(targetOrgUUID\)/)
+  assert.match(fetchWorkspaces, /finishWorkspaceRequest\(targetOrgUUID\)/)
+  assert.match(fetchWorkspaces, /if \(targetOrgUUID === orgUUID\.value\) \{\s*error\.value = `failed to list workspaces:/)
+  assert.match(fetchWorkspaces, /catch \(e: unknown\)[\s\S]*if \(targetOrgUUID === orgUUID\.value\) error\.value = \(e as Error\)\.message/)
+
+  const chooserStart = organizationsPage.indexOf('async function chooseOrganization(org: OrgRow)')
+  const chooserEnd = organizationsPage.indexOf('\n}\n\nasync function retryFailedSwitch', chooserStart)
+  assert.ok(chooserStart >= 0 && chooserEnd > chooserStart)
+  const chooser = organizationsPage.slice(chooserStart, chooserEnd)
+  assert.match(chooser, /if \(switchingOrg\.value\) return/)
+  assert.match(chooser, /await tenant\.selectOrganization\(org\.uuid\)/)
+  assert.match(chooser, /if \(tenant\.error\) \{[\s\S]*failedSwitchOrg\.value = org\.uuid/)
+  assert.match(chooser, /await router\.replace\('\/settings\/workspaces'\)/)
+  assert.match(organizationsPage, /await tenant\.fetchWorkspaces\(orgUUID, \{ selectDefault: false \}\)/)
+})
+
+test('workspace list adoption follows the winning per-org load state', () => {
+  const reloadStart = tenantSettingsPage.indexOf('async function reloadScopedWorkspaces(orgUUID: string | null)')
+  const reloadEnd = tenantSettingsPage.indexOf('\n}\n\n// App bootstrap and the shell switcher', reloadStart)
+  assert.ok(reloadStart >= 0 && reloadEnd > reloadStart)
+  const reload = tenantSettingsPage.slice(reloadStart, reloadEnd)
+  assert.match(reload, /const loadState = tenant\.workspaceLoadStateByOrg\[orgUUID\] \?\? 'idle'/)
+  assert.match(reload, /if \(loadState === 'loading'\) return/)
+  assert.match(reload, /if \(loadState === 'error'\) \{[\s\S]*workspaceListError\.value = tenant\.workspaceErrorByOrg\[orgUUID\] \?\? 'Failed to load workspaces\.'/)
+  assert.match(reload, /if \(loadState !== 'ready'\) \{[\s\S]*workspaceListError\.value = 'Failed to load workspaces\.'/)
+  assert.match(reload, /workspaceListError\.value = null/)
+  assert.match(reload, /workspaceListLoading\.value = false/)
+  assert.match(reload, /workspaceLoadStateByOrg\[orgUUID \?\? ''\] \?\? 'idle'\) !== 'loading'/)
+
+  const adoptionStart = tenantSettingsPage.indexOf('// App bootstrap and the shell switcher')
+  const adoptionEnd = tenantSettingsPage.indexOf('\n)\n\nfunction selectWorkspace', adoptionStart)
+  assert.ok(adoptionStart >= 0 && adoptionEnd > adoptionStart)
+  const adoption = tenantSettingsPage.slice(adoptionStart, adoptionEnd)
+  assert.match(adoption, /workspaceLoadStateByOrg\[tenant\.orgUUID\]/)
+  assert.match(adoption, /loadState === 'ready' && scopedOrgUUID\.value === orgUUID && !workspaceListError\.value/)
+  assert.match(adoption, /if \(loadState === 'error'\) \{[\s\S]*if \(scopedOrgUUID\.value !== orgUUID\) selectedWorkspaceUUID\.value = null[\s\S]*workspaceListLoading\.value = false/)
+  assert.match(adoption, /scopedOrgUUID\.value = orgUUID[\s\S]*workspaceListLoading\.value = false/)
+  assert.match(tenantSettingsPage, /const workspaceListInitialLoading = computed\(\(\) => workspaceListLoading\.value && workspaces\.value\.length === 0\)/)
+  assert.doesNotMatch(tenantSettingsPage, /scopedOrgUUID\.value !== org \|\| workspaceListLoading\.value/)
+})
+
+test('settings sections keep read failures local and expose independent retries', () => {
+  for (const [state, loader, kind, retryLabel] of [
+    ['orgMembersError', 'reloadOrgMembers', 'org-members', 'organization members'],
+    ['wsMembersError', 'reloadWsMembers', 'workspace-members', 'workspace members'],
+    ['appAccessError', 'reloadAppAccessGrants', 'app-access', 'app access grants'],
+    ['sasError', 'reloadSAs', 'service-accounts', 'service accounts'],
+  ]) {
+    assert.match(tenantSettingsPage, new RegExp(`const ${state} = ref<string \\| null>`))
+    const loaderStart = tenantSettingsPage.indexOf(`async function ${loader}`)
+    assert.ok(loaderStart >= 0, `missing ${loader}`)
+    const loaderEnd = tenantSettingsPage.indexOf('\n}\n\n', loaderStart)
+    assert.ok(loaderEnd > loaderStart, `unterminated ${loader}`)
+    const source = tenantSettingsPage.slice(loaderStart, loaderEnd)
+    assert.match(source, new RegExp(`tenant\\.listReadError\\('${kind}'`))
+    assert.match(source, /(?:request|requestGeneration) === .*Request/)
+    assert.match(source, /finally \{[\s\S]*(?:request|requestGeneration) === .*Request/)
+    assert.match(tenantSettingsPage, new RegExp(`@click="${loader}(?:\\(\\))?"`))
+    assert.match(tenantSettingsPage, new RegExp(`${state}[\\s\\S]*?Retry`))
+    assert.match(tenantSettingsPage, new RegExp(`Failed to load ${retryLabel.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}`))
+  }
+
+  assert.match(tenant, /type ListReadKind = 'org-members' \| 'workspace-members' \| 'app-access' \| 'service-accounts'/)
+  assert.match(tenant, /beginListRead\(kind: ListReadKind, targetOrgUUID: string/)
+  assert.match(tenant, /finishListRead\(read: \{ key: string; sequence: number \}, message: string \| null\)/)
+  assert.match(tenant, /if \(listReadSequences\.get\(read\.key\) !== read\.sequence\) return/)
+})
+
+test('app access is always scoped to the inspected workspace', () => {
+  assert.match(tenantSettingsPage, /const showAppAccess = computed\(\(\) => !!selWs\.value\)/)
+  assert.match(tenantSettingsPage, /tenant\.listAppAccessGrants\(target\.org, target\.ws\)/)
+  assert.match(tenantSettingsPage, /tenant\.revokeAppAccessGrant\(target\.org, target\.ws, grant\.binding\)/)
+  assert.doesNotMatch(tenantSettingsPage, /useProvidersStore|providers\.|providerBindings|activeWorkspaceBindings/)
+
+  const appAccessStart = tenantSettingsPage.indexOf('<section v-if="showAppAccess && !selWs.deletionRequestedAt"')
+  const appAccessEnd = tenantSettingsPage.indexOf('</section>', appAccessStart) + '</section>'.length
+  assert.ok(appAccessStart >= 0 && appAccessEnd > appAccessStart)
+  const appAccess = tenantSettingsPage.slice(appAccessStart, appAccessEnd)
+  assert.match(appAccess, /App access/)
+  assert.match(appAccess, /:rows="appAccessRows"/)
+  assert.match(appAccess, /@click="reloadAppAccessGrants"/)
+})
+
+test('settings route names preserve the organizations section with trailing slashes', () => {
+  const activeStart = tenantSettingsPage.indexOf('const activeSection = computed<SettingsSection>(() => {')
+  const activeEnd = tenantSettingsPage.indexOf('\n})\n\nfunction navigateSettings', activeStart)
+  assert.ok(activeStart >= 0 && activeEnd > activeStart)
+  const activeSection = tenantSettingsPage.slice(activeStart, activeEnd)
+  const routeNameOffset = activeSection.indexOf("route.name === 'settings-organizations'")
+  const normalizedPathOffset = activeSection.indexOf("route.path.replace(/\\/+$/, '')")
+  assert.ok(routeNameOffset >= 0 && normalizedPathOffset > routeNameOffset)
+  assert.match(activeSection, /if \(route\.name === 'settings-organizations'\) return 'organizations'/)
+  assert.ok(activeSection.includes("route.path.replace(/\\/+$/, '') === '/settings/organizations'"))
+  assert.match(router, /path: '\/settings\/organizations'[\s\S]*name: 'settings-organizations'/)
+})
+
+test('choosing the current organization continues to the requested destination', () => {
+  const chooserStart = organizationsPage.indexOf('async function chooseOrganization(org: OrgRow)')
+  const chooserEnd = organizationsPage.indexOf('\n}\n\nasync function retryFailedSwitch', chooserStart)
+  assert.ok(chooserStart >= 0 && chooserEnd > chooserStart)
+  const chooser = organizationsPage.slice(chooserStart, chooserEnd)
+  const currentOrgStart = chooser.indexOf('if (org.uuid === tenant.orgUUID)')
+  const currentOrgEnd = chooser.indexOf('\n  }\n\n  switchingOrg.value', currentOrgStart)
+  assert.ok(currentOrgStart >= 0 && currentOrgEnd > currentOrgStart)
+  const currentOrg = chooser.slice(currentOrgStart, currentOrgEnd)
+  assert.match(currentOrg, /await router\.replace\(backPath\.value\)/)
+  assert.match(currentOrg, /localError\.value = null/)
+  assert.doesNotMatch(currentOrg, /selectOrganization|fetchWorkspaces/)
+  assert.match(organizationsPage, /const backPath = computed\(\(\) => validatedInternalPath\(route\.query\.from\)\)/)
+})
+
+function extractValidatedInternalPath() {
+  const start = organizationsPage.indexOf('function validatedInternalPath(')
+  const end = organizationsPage.indexOf('\n}\n\nconst backPath', start)
+  assert.ok(start >= 0 && end > start)
+  const signature = organizationsPage.slice(start, organizationsPage.indexOf('{', start))
+    .trim()
+    .replace(/: unknown\)\s*:\s*string$/, ')')
+  const body = organizationsPage.slice(organizationsPage.indexOf('{', start), end + 2)
+  return new Function(`return ${signature}${body}`)()
+}
+
+test('Account & Access routes zero/one org to settings and many orgs to the chooser', () => {
+  assert.match(accountMenu, /tenant\.orgs\.length > 1/)
+  assert.match(accountMenu, /path: '\/organizations'/)
+  assert.match(accountMenu, /query: \{ from: route\.fullPath \}/)
+  assert.match(accountMenu, /: \{ path: '\/settings\/organizations' \}/)
+  assert.match(router, /path: '\/organizations'/)
+})
+
+test('organization chooser is a standalone full-viewport surface without app chrome', () => {
+  assert.doesNotMatch(organizationsPage, /\bAppLayout\b/)
+  assert.doesNotMatch(organizationsPage, /TerminalDock|AccountAccessMenu|WorkspaceSwitcher/)
+  assert.match(organizationsPage, /<div class="relative flex min-h-screen[^>]*bg-surface">/)
+  assert.match(organizationsPage, /<div class="contour-grid contour-grid-fade pointer-events-none/)
+  assert.doesNotMatch(organizationsPage, /<div class="contour-grid relative flex min-h-screen/)
+  assert.match(organizationsPage, /<header[^>]*max-w-4xl/)
+  assert.match(organizationsPage, /<span[^>]*>FAROS<\/span>/)
+  assert.match(organizationsPage, /<main[^>]*items-start[^>]*justify-center/)
+  assert.doesNotMatch(organizationsPage, /<main[^>]*lg:items-center|<main[^>]*items-center/)
+  assert.match(organizationsPage, /<section class="w-full max-w-2xl"[^>]*aria-labelledby=/)
+  assert.match(organizationsPage, /Choose an organization to continue/)
+  assert.doesNotMatch(organizationsPage, /Manage organizations/)
+  assert.doesNotMatch(organizationsPage, /authority context/i)
+  assert.doesNotMatch(organizationsPage, /workspaceState(?:Class)?|Ready workspace available|Workspace provisioning|Workspace deletion in progress/)
+  assert.doesNotMatch(organizationsPage, /Workspace is selected after switching|Organization is the authority boundary/)
+  assert.doesNotMatch(organizationsPage, /k-badge|\bCurrent\b/)
+  assert.doesNotMatch(organizationsPage, /Search|filteredOrgs|const search|v-model="search"/)
+})
+
+test('standalone chooser hides the persistent terminal dock without unmounting it', () => {
+  assert.match(app, /import \{ useRoute, useRouter \} from 'vue-router'/)
+  assert.match(app, /const hideTerminalDock = computed\(\s*\(\) => route\.path === '\/organizations' \|\| route\.path\.startsWith\('\/organizations\/'\),\s*\)/s)
+  assert.match(app, /<TerminalDock v-show="!hideTerminalDock" \/>/)
+  assert.doesNotMatch(app, /<TerminalDock v-if=/)
+})
+
+test('standalone chooser keeps back, create, and recovery actions visible', () => {
+  assert.match(organizationsPage, /<router-link :to="backPath"[^>]*k-back-action/)
+  assert.match(organizationsPage, /path: '\/organizations\/new', query: \{ from: backPath \}/)
+  assert.match(organizationsPage, /Create organization/)
+  assert.match(organizationsPage, /path: '\/organizations\/new', query: \{ from: backPath \}[^>]*class="k-btn k-btn--primary/)
+  assert.doesNotMatch(organizationsPage, /path: '\/organizations\/new', query: \{ from: backPath \}[^>]*class="k-btn k-btn--ghost/)
+  assert.doesNotMatch(organizationsPage, /Manage organizations/)
+  assert.match(organizationsPage, /Loading organizations/)
+  assert.match(organizationsPage, /No organizations yet/)
+  assert.match(organizationsPage, /Retry/)
+})
+
+test('organization creation is a shell-free one-field flow with recoverable errors', () => {
+  assert.match(router, /path: '\/organizations\/new'/)
+  assert.match(router, /OrganizationCreatePage\.vue/)
+  assert.doesNotMatch(organizationCreatePage, /AppLayout|TerminalDock|AccountAccessMenu|WorkspaceSwitcher/)
+  assert.match(organizationCreatePage, /<div class="relative flex min-h-screen[^>]*bg-surface">/)
+  assert.match(organizationCreatePage, /<div class="contour-grid contour-grid-fade pointer-events-none/)
+  assert.match(organizationCreatePage, /<main[^>]*items-start[^>]*justify-center/)
+  assert.doesNotMatch(organizationCreatePage, /<main[^>]*lg:items-center|<main[^>]*items-center/)
+  assert.equal((organizationCreatePage.match(/<input\b/g) ?? []).length, 1)
+  assert.match(organizationCreatePage, /@submit\.prevent="createOrganization"/)
+  assert.match(organizationCreatePage, /tenant\.createOrg\(displayName\)/)
+  assert.match(organizationCreatePage, /:disabled="creating \|\| !organizationName\.trim\(\)"/)
+  assert.match(organizationCreatePage, /v-if="localError"/)
+  assert.match(organizationCreatePage, /const chooserPath = computed\(\(\) => \(\{\s*path: '\/organizations',\s*query: \{ from: backPath\.value \},\s*\}\)\)/s)
+  assert.equal((organizationCreatePage.match(/<router-link v-if="!creating" :to="chooserPath"/g) ?? []).length, 2)
+  assert.equal((organizationCreatePage.match(/<button v-else[\s\S]*?disabled[\s\S]*?aria-disabled="true"[\s\S]*?<\/button>/g) ?? []).length, 2)
+  assert.match(organizationCreatePage, /const submittingRoute = \{\s*name: route\.name,\s*fullPath: route\.fullPath,\s*\}/s)
+  assert.match(organizationCreatePage, /if \(\s*route\.name === submittingRoute\.name &&\s*route\.fullPath === submittingRoute\.fullPath[\s\S]*?await router\.replace\('\/settings\/workspaces'\)/s)
+  assert.doesNotMatch(organizationCreatePage, /router-link :to="backPath"/)
+  assert.match(organizationCreatePage, />Cancel<\/router-link>/)
+  assert.match(organizationCreatePage, /Enter a name for your organization\./)
+  assert.match(organizationCreatePage, /await router\.replace\('\/settings\/workspaces'\)/)
+})
+
+test('organization Back validation stays same-origin and cannot loop into the chooser', () => {
+  const validate = extractValidatedInternalPath()
+  assert.equal(validate('/dashboard'), '/dashboard')
+  assert.equal(validate('/dashboard?tab=one#top'), '/dashboard?tab=one#top')
+  assert.equal(validate('//evil.example/path'), '/settings/workspaces')
+  assert.equal(validate('https://evil.example/path'), '/settings/workspaces')
+  assert.equal(validate('/organizations?from=/dashboard'), '/settings/workspaces')
+  assert.equal(validate('/login'), '/settings/workspaces')
+  assert.equal(validate('/auth/callback'), '/settings/workspaces')
+  assert.equal(validate(['/settings/workspaces', '/dashboard']), '/settings/workspaces')
+})
+
+test('account popover uses a dialog with ordinary Tab order', () => {
+  assert.match(accountMenu, /role="dialog"[\s\S]*aria-label="Account and access"[\s\S]*tabindex="-1"/)
+  assert.match(accountMenu, /panelRef\.value\?\.focus\(\)/)
+  assert.doesNotMatch(accountMenu, /function onTriggerKeydown\(event: KeyboardEvent\)/)
+  assert.doesNotMatch(accountMenu, /function focusMenuItem\(index: number\)/)
+  assert.doesNotMatch(accountMenu, /@keydown="onTriggerKeydown"/)
+  assert.match(accountMenu, /@keydown="onPanelKeydown"/)
+
+  const keydownStart = accountMenu.indexOf('function onPanelKeydown(event: KeyboardEvent)')
+  const keydownEnd = accountMenu.indexOf('\n}\n\nfunction onDocumentKeydown', keydownStart)
+  assert.ok(keydownStart >= 0 && keydownEnd > keydownStart)
+  const keydown = accountMenu.slice(keydownStart, keydownEnd)
+  assert.match(keydown, /event\.key !== 'Escape'/)
+  assert.match(keydown, /event\.preventDefault\(\)/)
+  assert.match(keydown, /closeMenu\(true\)/)
+  assert.doesNotMatch(keydown, /ArrowDown|ArrowUp|Home|End/)
+  assert.match(accountMenu, /event\.key !== 'Tab' \|\| deferredTabClose !== undefined/)
+})
+
+test('account developer access gates unverified Workspace context without another visible status row', () => {
+  assert.match(accountMenu, /type DeveloperWorkspaceState = 'loading' \| 'error' \| 'organization' \| 'pending' \| 'ready'/)
+  assert.match(accountMenu, /tenant\.orgLoadState === 'error' \|\| tenant\.orgError \|\| tenant\.workspaceLoadState === 'error' \|\| workspaceReadError\.value/)
+  assert.match(accountMenu, /tenant\.orgLoadState !== 'ready'[\s\S]*!tenant\.workspaceSelectionHydrated[\s\S]*tenant\.workspaceLoadState !== 'ready'[\s\S]*tenant\.workspaceTransitioning/)
+  assert.match(accountMenu, /if \(!tenant\.activeOrg\) return 'error'/)
+  assert.match(accountMenu, /if \(tenant\.workspaceMode === 'organization' \|\| !tenant\.workspaceUUID\) return 'organization'/)
+  assert.match(accountMenu, /if \(!tenant\.activeWorkspace\) return 'error'/)
+  assert.match(accountMenu, /if \(!tenant\.activeWorkspaceUsable\) return 'pending'/)
+  assert.match(accountMenu, /:disabled="!developerAccessReady"/)
+  assert.match(accountMenu, /v-if="developerAccessReady"[\s\S]*to="\/mcp"/)
+  assert.match(accountMenu, /:title="developerAccessDisabledReason"/)
+  assert.doesNotMatch(accountMenu, /Using Workspace|developerScopeId|retryWorkspaceContext/)
+  assert.match(farosUi, /\.k-menu-item:focus-visible\s*\{[^}]*outline: 2px solid var\(--color-accent/s)
+  assert.match(farosUi, /\.k-menu-item:disabled,[\s\S]*\.k-menu-item\[aria-disabled="true"\][\s\S]*opacity: 0\.45/)
+})
+
+test('member role controls have resource-specific names and use muted badges', () => {
+  assert.match(memberList, /placeholder="email or user UUID"[\s\S]*aria-label="Member email or user UUID"/)
+  assert.match(memberList, /v-model="newRole"[\s\S]*aria-label="Role for new member"/)
+
+  const roleStart = memberList.indexOf('<template #role="{ row }">')
+  const roleEnd = memberList.indexOf('</template>', roleStart)
+  assert.ok(roleStart >= 0 && roleEnd > roleStart)
+  const role = memberList.slice(roleStart, roleEnd)
+  assert.match(role, /class="k-badge k-badge--muted/)
+  assert.doesNotMatch(role, /rounded-sm|border-border-default|k-badge__dot/)
+
+  const roleSelectStart = role.indexOf('<select')
+  assert.ok(roleSelectStart >= 0)
+  const roleSelect = role.slice(roleSelectStart)
+  assert.match(roleSelect, /:aria-label="`Role for \$\{memberUser\(row\)\} in \$\{scopeLabel\}`"/)
+})
+
+test('organization selection clears workspace and fences workspace-scoped pages', () => {
+  assert.match(organizationsPage, /await tenant\.selectOrganization\(org\.uuid\)/)
+  assert.match(organizationsPage, /await router\.replace\('\/settings\/workspaces'\)/)
+  const selectionStart = tenant.indexOf('async function selectOrganization(')
+  const selectionEnd = tenant.indexOf('\n  function selectWorkspace', selectionStart)
+  assert.ok(selectionStart >= 0 && selectionEnd > selectionStart)
+  const selection = tenant.slice(selectionStart, selectionEnd)
+  assert.match(selection, /workspaceUUID\.value = null/)
+  assert.match(selection, /fetchWorkspaces\(uuid, \{ selectDefault: false \}\)/)
+  assert.match(appLayout, /path === '\/organizations' \|\| path\.startsWith\('\/organizations\/'\)/)
+  assert.match(appLayout, /void router\.replace\('\/settings\/workspaces'\)/)
+})
+
+test('workspace trigger is borderless at rest, has no count, and filters lifecycle states honestly', () => {
+  const workspacesStart = switcher.indexOf('const workspaces = computed')
+  const workspacesEnd = switcher.indexOf('const workspaceLabel', workspacesStart)
+  assert.ok(workspacesStart >= 0 && workspacesEnd > workspacesStart)
+  assert.match(switcher.slice(workspacesStart, workspacesEnd), /\.filter\(isWorkspaceAvailable\)/)
+  const triggerStart = switcher.indexOf('<button\n      ref="triggerRef"')
+  const triggerEnd = switcher.indexOf('      @click="toggle"', triggerStart)
+  assert.ok(triggerStart >= 0 && triggerEnd > triggerStart)
+  const trigger = switcher.slice(triggerStart, triggerEnd)
+  assert.match(trigger, /border-0/)
+  assert.doesNotMatch(trigger, /border-(?:subtle|default|accent)/)
+  assert.doesNotMatch(switcher, /\{\{\s*workspaces\.length\s*\}\}/)
+  assert.match(switcher, /:disabled="workspaceUnavailable\(workspace\)"/)
+  assert.match(switcher, /if \(!isWorkspaceUsable\(workspace\)\) return/)
+  assert.match(switcher, /k-badge--warning/)
+  assert.match(switcher, /isWorkspaceAvailable/)
+  assert.match(switcher, /function workspaceStatus\(workspace: WorkspaceRow\): WorkspaceStatus/)
+  assert.match(switcher, /type WorkspaceStatus = 'Ready' \| 'Pending' \| 'Unverified'/)
+  assert.doesNotMatch(switcher, /Deleting|k-badge--danger/)
+  assert.match(switcher, /No available workspaces in this organization\./)
+})
+
+test('workspace trigger keeps organization provenance visible and truthful', () => {
+  assert.match(switcher, /const orgLabel = computed\(\(\) => \{[\s\S]*Choose organization/)
+  assert.match(switcher, /const orgContextLabel = computed\(\(\) =>[\s\S]*Last known · unverified/)
+  assert.match(switcher, /v-if="variant === 'horizontal'"[\s\S]*\{\{ orgContextLabel \}\}/)
+  assert.match(switcher, /const workspaceTriggerLabel = computed\(\(\) =>[\s\S]*Organization provenance:/)
+  assert.match(switcher, /:aria-label="workspaceTriggerLabel"/)
+  assert.match(switcher, /AI tools and resources follow the selected context\. A successful switch opens Dashboard\./)
+  assert.doesNotMatch(switcher, /Switch organization|organization selector|v-for="org in tenant\.orgs"/i)
+})
+
+test('workspace rows disambiguate duplicate names with real IDs and accessible labels', () => {
+  assert.match(switcher, /const workspaceNameCounts = computed\(\(\) =>/)
+  assert.match(switcher, /function workspaceNeedsDisambiguation\(workspace: WorkspaceRow\)/)
+  assert.match(switcher, /function workspaceIdentifier\(workspace: WorkspaceRow\): string/)
+  assert.match(switcher, /return `ID \$\{workspace\.uuid\.slice\(0, length\)\}`/)
+  assert.match(switcher, /function workspaceOptionLabel\(workspace: WorkspaceRow\): string/)
+  assert.match(switcher, /:aria-label="workspaceOptionLabel\(workspace\)"/)
+
+  const optionLabelStart = switcher.indexOf('function workspaceOptionLabel(workspace: WorkspaceRow): string')
+  const optionLabelEnd = switcher.indexOf('\n}', optionLabelStart)
+  assert.ok(optionLabelStart >= 0 && optionLabelEnd > optionLabelStart)
+  const optionLabel = switcher.slice(optionLabelStart, optionLabelEnd)
+  assert.match(optionLabel, /\$\{workspace\.uuid\}/)
+  assert.match(optionLabel, /\$\{workspaceStatus\(workspace\)\}/)
+
+  const optionStart = switcher.indexOf('<button\n              v-for="workspace in filteredWorkspaces"')
+  const optionEnd = switcher.indexOf('\n            </button>', optionStart)
+  assert.ok(optionStart >= 0 && optionEnd > optionStart)
+  const option = switcher.slice(optionStart, optionEnd)
+  assert.match(option, /v-if="workspaceIdentifier\(workspace\)"/)
+  assert.match(option, /\{\{ workspaceIdentifier\(workspace\) \}\}/)
+
+  // The cached-authority warning belongs to the context header/error state;
+  // repeating it in every row obscures the identifiers used to disambiguate
+  // duplicate names.
+  assert.doesNotMatch(option, /Last known · unverified/)
+})
+
+test('workspace trigger status dot requires verified context authority', () => {
+  assert.match(switcher, /const contextAuthorityVerified = computed\(\(\) =>[\s\S]*orgLoadState\.value === 'ready'[\s\S]*workspaceLoadState\.value === 'ready'[\s\S]*!workspaceDataUnverified\.value/)
+  assert.match(switcher, /const workspaceReady = computed\(\(\) =>[\s\S]*isWorkspaceUsable\(tenant\.activeWorkspace\)[\s\S]*contextAuthorityVerified\.value/)
+  assert.match(switcher, /const workspaceTriggerWarning = computed\(\(\) => !!tenant\.workspaceUUID && !workspaceReady\.value\)/)
+  assert.match(switcher, /v-if="workspaceReady"[\s\S]*v-else-if="workspaceTriggerWarning"/)
+  assert.match(switcher, /const workspaceTriggerState = computed\(\(\) =>[\s\S]*last known and unverified[\s\S]*pending verification/)
+})
+
+test('workspace search is thresholded and clears its query when hidden', () => {
+  const thresholdMatch = switcher.match(/const\s+([A-Z][A-Z0-9_]*SEARCH[A-Z0-9_]*)\s*=\s*(\d+)/)
+  assert.ok(thresholdMatch, 'search visibility should have a named numeric threshold')
+  const [, thresholdName, thresholdValue] = thresholdMatch
+  assert.ok(Number(thresholdValue) > 0)
+
+  const visibilityMatch = switcher.match(new RegExp(
+    `const\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*computed\\(\\(\\)\\s*=>\\s*(?:workspaces|availableWorkspaces)\\.value\\.length\\s*>\\s*${escapeRegExp(thresholdName)}`,
+  ))
+  assert.ok(visibilityMatch, 'the threshold must control visibility from the available workspace set')
+  const [, visibilityName] = visibilityMatch
+
+  const searchInputStart = switcher.indexOf('ref="searchRef"')
+  assert.ok(searchInputStart >= 0)
+  const searchWrapperStart = switcher.lastIndexOf('<div', searchInputStart)
+  const searchWrapper = switcher.slice(searchWrapperStart, searchInputStart)
+  assert.match(searchWrapper, new RegExp(`v-if="${escapeRegExp(visibilityName)}"`))
+
+  const filteredStart = switcher.indexOf('const filteredWorkspaces = computed')
+  const filteredEnd = switcher.indexOf('\n})', filteredStart)
+  assert.ok(filteredStart >= 0 && filteredEnd > filteredStart)
+  assert.match(switcher.slice(filteredStart, filteredEnd), new RegExp(`${escapeRegExp(visibilityName)}\\.value\\s*\\?\\s*search\\.value`))
+
+  const visibilityWatchStart = switcher.indexOf(`watch(${visibilityName}`)
+  const visibilityWatchEnd = switcher.indexOf('\n})', visibilityWatchStart)
+  assert.ok(visibilityWatchStart >= 0 && visibilityWatchEnd > visibilityWatchStart)
+  const visibilityWatch = switcher.slice(visibilityWatchStart, visibilityWatchEnd)
+  assert.match(visibilityWatch, /(?:if \(!visible\)|if \(visible\) return)/)
+
+  const clearOffset = visibilityWatch.indexOf("search.value = ''")
+  const nextTickOffset = visibilityWatch.indexOf('nextTick()', clearOffset)
+  const focusOffset = visibilityWatch.indexOf('focusInitialPanelControl()', nextTickOffset)
+  const openGuardOffset = visibilityWatch.indexOf('if (!open.value) return', clearOffset)
+  assert.ok(clearOffset >= 0, 'hiding search should clear its query')
+  assert.ok(openGuardOffset > clearOffset, 'focus restoration should be gated on an open popover')
+  assert.ok(nextTickOffset > openGuardOffset, 'focus restoration should wait for the hidden search to unmount')
+  assert.ok(focusOffset > nextTickOffset, 'focus restoration should use focusInitialPanelControl after nextTick')
+  assert.doesNotMatch(visibilityWatch.slice(0, clearOffset), /focusInitialPanelControl\(\)/)
+
+  // Removing the search input must preserve focus ownership: only a search
+  // owner, or focus that has already escaped the panel, may trigger recovery.
+  // A focused in-panel action/control must not be displaced by the watcher.
+  const searchFocusCapture = visibilityWatch.match(
+    /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:document\.activeElement\s*===\s*searchRef\.value|searchRef\.value\s*===\s*document\.activeElement)/,
+  )
+  assert.ok(searchFocusCapture, 'the hidden-search watcher should capture whether Search owns focus')
+  const [, searchFocusName] = searchFocusCapture
+  assert.ok(visibilityWatch.indexOf(searchFocusCapture[0]) < clearOffset)
+
+  const outsideFocusCapture = visibilityWatch.match(
+    /(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*!.*contains\(document\.activeElement\)/,
+  )
+  assert.ok(outsideFocusCapture, 'the hidden-search watcher should detect focus outside the panel')
+  const [, outsideFocusName] = outsideFocusCapture
+
+  // The refocus gate must admit either ownership case. An equivalent inverse
+  // guard is also valid, provided it returns only when neither case applies;
+  // an outside-focus-only condition would steal no focus for a removed Search.
+  const focusContext = visibilityWatch.slice(0, focusOffset)
+  const positiveOwnership = new RegExp(
+    `(?:${escapeRegExp(searchFocusName)}\\s*\\|\\|\\s*${escapeRegExp(outsideFocusName)}|${escapeRegExp(outsideFocusName)}\\s*\\|\\|\\s*${escapeRegExp(searchFocusName)})`,
+  )
+  const inverseOwnership = new RegExp(
+    `(?:!\\s*${escapeRegExp(searchFocusName)}\\s*&&\\s*!\\s*${escapeRegExp(outsideFocusName)}|!\\s*${escapeRegExp(outsideFocusName)}\\s*&&\\s*!\\s*${escapeRegExp(searchFocusName)})[\\s\\S]*?return`,
+  )
+  const nearestIfStart = focusContext.lastIndexOf('if (')
+  const nearestIf = focusContext.slice(nearestIfStart)
+  const outsideOnlyFocusGate = new RegExp(`^if \\(` + escapeRegExp(outsideFocusName) + `\\s*\\)`)
+  assert.ok(
+    positiveOwnership.test(focusContext) || (inverseOwnership.test(focusContext) && !outsideOnlyFocusGate.test(nearestIf)),
+    'refocus should be gated by Search ownership or focus outside the panel, never outside focus alone',
+  )
+})
+
+test('workspace context consequence guide is limited to verified multi-workspace contexts', () => {
+  const guideText = 'AI tools and resources follow the selected context. A successful switch opens Dashboard.'
+  const guideStart = switcher.indexOf(guideText)
+  assert.ok(guideStart >= 0)
+  const guideWrapperStart = switcher.lastIndexOf('<div', guideStart)
+  const guideWrapper = switcher.slice(guideWrapperStart, guideStart)
+  const guideGuard = guideWrapper.match(/v-if="([^"]+)"/)
+  assert.ok(guideGuard, 'the consequence guide should have an explicit visibility guard')
+  const [, guideVisibility] = guideGuard
+  assert.match(guideVisibility, /context|guide/i)
+
+  const guideDefinitionStart = switcher.indexOf(`const ${guideVisibility} = computed`)
+  const guideDefinitionEnd = switcher.indexOf('\n)', guideDefinitionStart)
+  assert.ok(guideDefinitionStart >= 0 && guideDefinitionEnd > guideDefinitionStart)
+  const guideDefinition = switcher.slice(guideDefinitionStart, guideDefinitionEnd)
+  assert.match(guideDefinition, /length\s*>\s*1/)
+  assert.match(guideDefinition, /contextAuthorityVerified\.value/)
+
+  const countNameMatch = guideDefinition.match(/([A-Za-z_$][\w$]*)\.value\.length\s*>\s*1/)
+  let guideUsabilitySource = guideDefinition
+  if (countNameMatch && !/isWorkspaceUsable/.test(guideUsabilitySource)) {
+    const [, countName] = countNameMatch
+    const countDefinitionStart = switcher.lastIndexOf(`const ${countName} = computed`, guideDefinitionStart)
+    const countDefinitionEnd = switcher.indexOf('\n)', countDefinitionStart)
+    assert.ok(countDefinitionStart >= 0 && countDefinitionEnd > countDefinitionStart)
+    guideUsabilitySource += switcher.slice(countDefinitionStart, countDefinitionEnd)
+  }
+  assert.match(guideUsabilitySource, /isWorkspaceUsable/)
+})
+
+test('workspace option badges omit Ready while Pending and Unverified remain accessible', () => {
+  const optionStart = switcher.indexOf('<button\n              v-for="workspace in filteredWorkspaces"')
+  const badgeClassStart = switcher.indexOf('class="k-badge shrink-0', optionStart)
+  const badgeStart = switcher.lastIndexOf('<span', badgeClassStart)
+  const badgeEnd = switcher.indexOf('\n              </span>', badgeStart)
+  assert.ok(optionStart >= 0 && badgeClassStart > optionStart && badgeStart > optionStart && badgeEnd > badgeStart)
+  const badge = switcher.slice(badgeStart, badgeEnd)
+  assert.match(badge, /v-if="workspaceStatus\(workspace\) !== 'Ready'"/)
+  assert.match(badge, /workspaceStatus\(workspace\)/)
+  assert.match(switcher, /if \(workspaceDataUnverified\.value\) return 'Unverified'/)
+  assert.match(switcher, /return workspace\.clusterName \? 'Ready' : 'Pending'/)
+
+  const optionLabelStart = switcher.indexOf('function workspaceOptionLabel(workspace: WorkspaceRow): string')
+  const optionLabelEnd = switcher.indexOf('\n}', optionLabelStart)
+  assert.ok(optionLabelStart >= 0 && optionLabelEnd > optionLabelStart)
+  assert.match(switcher.slice(optionLabelStart, optionLabelEnd), /\$\{workspaceStatus\(workspace\)\}/)
+  assert.match(switcher.slice(optionStart, badgeStart), /:aria-label="workspaceOptionLabel\(workspace\)"/)
+})
+
+test('app-access actions keep the canonical table edge padding', () => {
+  assert.doesNotMatch(tenantSettingsPage, /<th v-if="canManageWs"[^>]*\bpr-0\b/)
+  assert.doesNotMatch(tenantSettingsPage, /<td v-if="canManageWs"[^>]*\bpr-0\b/)
+})
+
+test('workspace popover links its trigger and panel for assistive technology', () => {
+  assert.match(switcher, /:aria-controls=/)
+})
+
+test('workspace popover supports design-book keyboard navigation', () => {
+  assert.match(switcher, /@keydown=/)
+  assert.match(switcher, /ArrowDown|ArrowUp|Home|End/)
+})
+
+test('workspace popover enters enabled options from search and preserves text editing keys', () => {
+  const keydownStart = switcher.indexOf('function onPanelKeydown(')
+  const keydownEnd = switcher.indexOf('\n}\n\nwatch(open', keydownStart)
+  assert.ok(keydownStart >= 0 && keydownEnd > keydownStart)
+  const keydown = switcher.slice(keydownStart, keydownEnd)
+
+  const searchNavigationStart = keydown.indexOf('if (event.target === searchRef.value)')
+  const optionNavigationStart = keydown.indexOf("if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return")
+  const searchNavigationEnd = keydown.indexOf('\n  }\n\n  // Keep other text fields', searchNavigationStart)
+  assert.ok(searchNavigationStart >= 0 && searchNavigationEnd > searchNavigationStart && optionNavigationStart > searchNavigationEnd)
+  const searchNavigation = keydown.slice(searchNavigationStart, searchNavigationEnd)
+  assert.match(searchNavigation, /!showWorkspaceSearch\.value \|\| !\['ArrowDown', 'ArrowUp'\]\.includes\(event\.key\)/)
+  assert.match(searchNavigation, /event\.preventDefault\(\)/)
+  assert.match(searchNavigation, /focusWorkspaceOption\(event\.key === 'ArrowDown' \? 0 : options\.length - 1\)/)
+  assert.doesNotMatch(searchNavigation, /ArrowLeft|ArrowRight|Home|End/)
+  assert.ok(searchNavigation.lastIndexOf('return') > searchNavigation.indexOf('focusWorkspaceOption'))
+
+  // Keyboard entry and ordinary option navigation must use the same enabled
+  // option set, so pending/unverified rows can never receive focus.
+  assert.match(switcher, /querySelectorAll<HTMLButtonElement>\('button\[role="option"\]:not\(:disabled\)'\)/)
+  assert.match(keydown, /active\.getAttribute\('role'\) !== 'option'/)
+  assert.match(keydown, /options\.indexOf\(active\)/)
+  assert.match(keydown, /event\.key === 'Home'[\s\S]*focusWorkspaceOption\(0\)/)
+  assert.match(keydown, /event\.key === 'End'[\s\S]*focusWorkspaceOption\(options\.length - 1\)/)
+  assert.match(keydown, /event\.key === 'ArrowDown'[\s\S]*focusWorkspaceOption\(current < 0 \? 0 : current \+ 1\)/)
+  assert.match(keydown, /else focusWorkspaceOption\(current < 0 \? options\.length - 1 : current - 1\)/)
+
+  const editingGuard = keydown.indexOf('event.target instanceof HTMLInputElement')
+  assert.ok(editingGuard >= 0 && editingGuard > searchNavigationStart)
+  assert.match(keydown, /event\.target instanceof HTMLTextAreaElement/)
+  assert.match(keydown, /event\.target\.isContentEditable/)
+
+  const escapeStart = keydown.indexOf("if (event.key === 'Escape')")
+  const escapeEnd = keydown.indexOf('\n  }', escapeStart)
+  assert.ok(escapeStart >= 0 && escapeEnd > escapeStart)
+  assert.match(keydown.slice(escapeStart, escapeEnd), /event\.preventDefault\(\)[\s\S]*event\.stopPropagation\(\)[\s\S]*close\(\{ restoreFocus: true \}\)/)
+})
+
+test('workspace popover opens on a selected or first enabled option with an actionable fallback', () => {
+  const focusStart = switcher.indexOf('function focusInitialPanelControl()')
+  const focusEnd = switcher.indexOf('\n}\n\nfunction onPanelKeydown', focusStart)
+  assert.ok(focusStart >= 0 && focusEnd > focusStart)
+  const focus = switcher.slice(focusStart, focusEnd)
+
+  assert.match(focus, /if \(showWorkspaceSearch\.value && searchRef\.value\)/)
+  assert.match(focus, /searchRef\.value\.focus\(\)/)
+  assert.match(focus, /const options = workspaceOptions\(\)/)
+  assert.match(focus, /const selected = options\.find\(\(option\) => option\.getAttribute\('aria-selected'\) === 'true'\)/)
+  assert.match(focus, /const target = selected \?\? options\[0\]/)
+
+  const manageRef = switcher.match(/ref="([^"]*manage[^"]*)"/i)
+  assert.ok(manageRef, 'the no-enabled-option fallback must retain an actionable management control')
+  assert.match(focus, new RegExp(`const manage = ${escapeRegExp(manageRef[1])}\\.value`))
+  assert.match(focus, /manage && !manage\.disabled/)
+  assert.match(focus, /target\?\.focus\(\)/)
+  assert.match(focus, /panel\.querySelector<HTMLElement>\('button:not\(:disabled\), input:not\(:disabled\), \[href\]'\)/)
+  assert.match(focus, /if \(!panel\.contains\(document\.activeElement\)\) panel\.focus\(\)/)
+
+  const openStart = switcher.indexOf('watch(open, async (isOpen) =>')
+  const openEnd = switcher.indexOf('\n})', openStart)
+  assert.ok(openStart >= 0 && openEnd > openStart)
+  const openWatch = switcher.slice(openStart, openEnd)
+  assert.match(openWatch, /await nextTick\(\)/)
+  assert.match(openWatch, /focusInitialPanelControl\(\)/)
+  const focusCalls = openWatch.match(/focusInitialPanelControl\(\)/g) ?? []
+  assert.equal(focusCalls.length, 2, 'first-load completion must move focus onto the newly available options')
+  const initialFocusOffset = openWatch.indexOf('focusInitialPanelControl()')
+  const ensureContextOffset = openWatch.indexOf('ensureContextLoaded()')
+  const postLoadFocusOffset = openWatch.indexOf('focusInitialPanelControl()', ensureContextOffset)
+  assert.ok(initialFocusOffset >= 0 && ensureContextOffset > initialFocusOffset && postLoadFocusOffset > ensureContextOffset)
+})
+
+test('workspace popover exposes truthful status semantics outside the options listbox', () => {
+  const listboxStart = switcher.indexOf('role="listbox"')
+  const loadingStart = switcher.indexOf('role="status" aria-live="polite"')
+  const errorStart = switcher.indexOf('role="alert" aria-live="assertive"')
+  const retryStart = switcher.indexOf('>\n              Retry', errorStart)
+  const emptyStart = switcher.indexOf('No available workspaces in this organization.')
+  assert.ok(listboxStart >= 0)
+  assert.ok(loadingStart > listboxStart)
+  assert.ok(errorStart > loadingStart)
+  assert.ok(retryStart > errorStart)
+  assert.ok(emptyStart > errorStart)
+  assert.match(switcher, /role="listbox"[\s\S]*:aria-busy="contextLoading"/)
+  assert.match(switcher, /:aria-controls="listboxId"/)
+  assert.match(switcher, /class="min-h-0 flex-1 overflow-y-auto"/)
+})
+
+test('workspace popover distinguishes first-load and cached-refresh failures', () => {
+  assert.match(switcher, /const orgListLoaded = computed\(\(\) => tenant\.orgListLoaded\)/)
+  assert.match(switcher, /const hasCachedOrgRows = computed\(\(\) => tenant\.orgs\.length > 0\)/)
+  assert.match(switcher, /const orgFirstLoadFailed = computed\(\(\) => orgLoadState\.value === 'error' && !orgListLoaded\.value\)/)
+  assert.match(switcher, /const orgRefreshFailed = computed\(\(\) => orgLoadState\.value === 'error' && orgListLoaded\.value\)/)
+  assert.match(switcher, /const hasWorkspaceCache = computed\(\(\) =>[\s\S]*Object\.prototype\.hasOwnProperty\.call\(tenant\.workspacesByOrg, tenant\.orgUUID\)/)
+  assert.match(switcher, /const hasCachedWorkspaceRows = computed\(\(\) => workspaces\.value\.length > 0\)/)
+  assert.match(switcher, /const workspaceFirstLoadFailed = computed\(\(\) => workspaceLoadState\.value === 'error' && !hasWorkspaceCache\.value\)/)
+  assert.match(switcher, /const workspaceRefreshFailed = computed\(\(\) => workspaceLoadState\.value === 'error' && hasWorkspaceCache\.value\)/)
+  assert.match(switcher, /tenant\.orgLoadState/)
+  assert.match(switcher, /tenant\.orgError/)
+  assert.match(switcher, /recoveryMessage\('Unable to load organizations'/)
+  assert.match(switcher, /no verified organization list is available, so workspace switching is paused/)
+  assert.match(switcher, /recoveryMessage\('Unable to load workspaces'/)
+  assert.match(switcher, /last-known workspaces \(unverified\), so switching is paused/)
+  assert.match(switcher, /last verified workspace list was empty, so switching is paused/)
+  assert.match(switcher, /workspaceLoading && !hasCachedWorkspaceRows/)
+  assert.match(switcher, /orgRefreshing && hasCachedOrgRows/)
+  assert.match(switcher, /function retryOrganizations\(\)/)
+  assert.match(switcher, /function retryWorkspaces\(\)/)
+  assert.match(switcher, /async function retryContext\(\): Promise<void>/)
+  const emptyStart = switcher.indexOf('workspaceCanShowEmpty && filteredWorkspaces.length === 0')
+  const firstLoadStart = switcher.indexOf('workspaceFirstLoadFailed')
+  assert.ok(emptyStart >= 0)
+  assert.ok(firstLoadStart >= 0 && firstLoadStart < emptyStart)
+  assert.match(switcher, /const workspaceSwitchingBlocked = computed\(\(\) =>[\s\S]*orgAuthorityUnverified\.value[\s\S]*workspaceLoadState\.value === 'error'/)
+  assert.match(switcher, /if \(workspaceUnavailable\(workspace\)\) return/)
+})
+
+test('cached authority failures keep the active context and disable stale options', () => {
+  assert.match(switcher, /const workspaceDataUnverified = computed\(\(\) =>[\s\S]*orgFirstLoadFailed\.value[\s\S]*orgAuthorityUnverified\.value[\s\S]*workspaceRefreshFailed\.value/)
+  assert.match(switcher, /const orgContextLabel = computed\(\(\) =>[\s\S]*Last known · unverified/)
+  assert.match(switcher, /workspaceIdentifier\(workspace\)/)
+  assert.doesNotMatch(switcher, /Last known · unverified[^\n]*workspaceIdentifier\(workspace\)/)
+  assert.match(switcher, /if \(orgAuthorityUnverified\.value\) return 'Organization data is last known and unverified\. Retry before switching\.'/)
+  assert.match(switcher, /if \(workspaceRefreshFailed\.value\) return 'Workspace data is last known and unverified\. Retry before switching\.'/)
+  assert.match(switcher, /:disabled="workspaceUnavailable\(workspace\)"/)
+  assert.match(switcher, /:aria-disabled="workspaceUnavailable\(workspace\)"/)
+
+  const organizationRecoveryStart = switcher.indexOf('const organizationRefreshMessage = computed')
+  const organizationRecoveryEnd = switcher.indexOf('\n)', organizationRecoveryStart)
+  assert.ok(organizationRecoveryStart >= 0 && organizationRecoveryEnd > organizationRecoveryStart)
+  const organizationRecovery = switcher.slice(organizationRecoveryStart, organizationRecoveryEnd)
+  assert.match(organizationRecovery, /last-known organization \(unverified\)/i)
+  assert.match(organizationRecovery, /workspace switching is paused/i)
+
+  const workspaceRecoveryStart = switcher.indexOf('const workspaceRefreshMessage = computed')
+  const workspaceRecoveryEnd = switcher.indexOf('\n)', workspaceRecoveryStart)
+  assert.ok(workspaceRecoveryStart >= 0 && workspaceRecoveryEnd > workspaceRecoveryStart)
+  const workspaceRecovery = switcher.slice(workspaceRecoveryStart, workspaceRecoveryEnd)
+  assert.match(workspaceRecovery, /last-known workspaces \(unverified\)/i)
+  assert.match(workspaceRecovery, /switching is paused/i)
+
+  const organizationRefreshBlockStart = switcher.indexOf('<div v-if="orgRefreshFailed"')
+  const organizationRefreshBlockEnd = switcher.indexOf('\n          </div>', organizationRefreshBlockStart)
+  assert.ok(organizationRefreshBlockStart >= 0 && organizationRefreshBlockEnd > organizationRefreshBlockStart)
+  assert.match(switcher.slice(organizationRefreshBlockStart, organizationRefreshBlockEnd), /organizationRefreshMessage[\s\S]*@click="retryOrganizations"/)
+
+  const workspaceRefreshBlockStart = switcher.indexOf('<div v-else-if="workspaceRefreshFailed"')
+  const workspaceRefreshBlockEnd = switcher.indexOf('\n          </div>', workspaceRefreshBlockStart)
+  assert.ok(workspaceRefreshBlockStart >= 0 && workspaceRefreshBlockEnd > workspaceRefreshBlockStart)
+  assert.match(switcher.slice(workspaceRefreshBlockStart, workspaceRefreshBlockEnd), /workspaceRefreshMessage[\s\S]*@click="retryWorkspaces"/)
+})
+
+test('workspace popover keeps AA contrast tokens and coarse-pointer targets', () => {
+  assert.doesNotMatch(switcher, /#[0-9a-f]{3,8}/i)
+  assert.match(switcher, /text-text-secondary/)
+  assert.match(switcher, /placeholder:text-text-secondary/)
+  assert.match(switcher, /focus-visible:ring-2 focus-visible:ring-accent/)
+  assert.match(switcher, /<span class="text-text-primary">\{\{ workspaceStatus\(workspace\) \}\}<\/span>/)
+  assert.match(switcher, /@media \(pointer: coarse\)/)
+  assert.match(switcher, /min-height: 44px/)
+  assert.match(switcher, /workspace-switcher-trigger--compact/)
+})
+
+test('workspace popover returns focus to its trigger on close', () => {
+  assert.match(popover, /focus\(\)/)
+  const chooseStart = switcher.indexOf('function chooseWorkspace(')
+  const chooseEnd = switcher.indexOf('\n}', chooseStart)
+  const manageStart = switcher.indexOf('function manageWorkspaces()')
+  const manageEnd = switcher.indexOf('\n}', manageStart)
+  assert.ok(chooseStart >= 0 && chooseEnd > chooseStart)
+  assert.ok(manageStart >= 0 && manageEnd > manageStart)
+  assert.match(switcher.slice(chooseStart, chooseEnd), /close\(\{ restoreFocus: true \}\)/)
+  assert.match(switcher.slice(manageStart, manageEnd), /close\(\{ restoreFocus: true \}\)/)
+})
+
+test('workspace selection redirects only after a successful different-workspace switch', () => {
+  const chooseStart = switcher.indexOf('function chooseWorkspace(')
+  const chooseEnd = switcher.indexOf('\n}\n\nfunction manageWorkspaces', chooseStart)
+  assert.ok(chooseStart >= 0 && chooseEnd > chooseStart)
+  const choose = switcher.slice(chooseStart, chooseEnd)
+  assert.match(choose, /if \(!isWorkspaceUsable\(workspace\)\) return/)
+  assert.match(choose, /const changed = tenant\.selectWorkspace\(workspace\.uuid\)/)
+  assert.match(choose, /close\(\{ restoreFocus: true \}\)/)
+  assert.match(choose, /if \(!changed\) return/)
+  assert.match(choose, /router\.replace\(\{ name: 'dashboard' \}\)/)
+})
+
+test('workspace transition tokens are monotonic and stale completions cannot clear the current switch', () => {
+  assert.match(tenant, /const workspaceTransitionToken = ref<number \| null>\(null\)/)
+  assert.match(tenant, /let workspaceTransitionSequence = 0/)
+  assert.match(tenant, /const token = \+\+workspaceTransitionSequence/)
+  assert.match(tenant, /workspaceTransitionToken\.value = token/)
+  const endStart = tenant.indexOf('function endWorkspaceTransition(token: number): void')
+  const endEnd = tenant.indexOf('\n  }', endStart)
+  assert.ok(endStart >= 0 && endEnd > endStart)
+  const end = tenant.slice(endStart, endEnd)
+  assert.match(end, /if \(workspaceTransitionToken\.value !== token\) return/)
+  assert.match(end, /workspaceTransitionToken\.value = null/)
+  assert.match(tenant, /const workspaceTransitioning = computed\(\(\) => workspaceTransitionToken\.value !== null\)/)
+  assert.match(tenant, /workspaceTransitionToken,\s*workspaceTransitioning/)
+})
+
+test('workspace selection fences dashboard navigation with its own transition token', () => {
+  const chooseStart = switcher.indexOf('async function chooseWorkspace(')
+  const chooseEnd = switcher.indexOf('\n}\n\nfunction manageWorkspaces', chooseStart)
+  assert.ok(chooseStart >= 0 && chooseEnd > chooseStart)
+  const choose = switcher.slice(chooseStart, chooseEnd)
+  const invalid = choose.indexOf('if (!isWorkspaceUsable(workspace)) return')
+  const changed = choose.indexOf('const changed = tenant.selectWorkspace(workspace.uuid)')
+  const unchanged = choose.indexOf('if (!changed) return')
+  const begin = choose.indexOf('const transitionToken = tenant.beginWorkspaceTransition()')
+  const replace = choose.indexOf("await router.replace({ name: 'dashboard' })")
+  const finallyBlock = choose.indexOf('finally {')
+  assert.ok(invalid >= 0 && changed > invalid)
+  assert.ok(unchanged >= 0 && begin > unchanged)
+  assert.ok(replace > begin && finallyBlock > replace)
+  assert.match(choose, /try \{[\s\S]*await router\.replace\(\{ name: 'dashboard' \}\)[\s\S]*finally \{[\s\S]*tenant\.endWorkspaceTransition\(transitionToken\)/)
+})
+
+test('workspace transition shell suppresses the slot before delayed status and settled errors', () => {
+  assert.match(appLayout, /const WORKSPACE_TRANSITION_INDICATOR_DELAY_MS = 200/)
+  assert.match(appLayout, /workspaceTransitionTimer = setTimeout\([\s\S]*WORKSPACE_TRANSITION_INDICATOR_DELAY_MS/)
+  assert.match(appLayout, /if \(tenantStore\.workspaceTransitionToken === token\)/)
+  assert.match(appLayout, /clearTimeout\(workspaceTransitionTimer\)/)
+  assert.match(appLayout, /onUnmounted\([\s\S]*clearWorkspaceTransitionTimer\(\)/)
+  assert.match(appLayout, /Switching workspace…/)
+
+  const slotStart = appLayout.indexOf('<div :key="auth.clusterName ?? \'unauth\'"')
+  const transition = appLayout.indexOf('v-if="tenantStore.workspaceTransitioning"', slotStart)
+  const wizard = appLayout.indexOf('<FirstWorkspaceWizard v-else-if="showWorkspaceWizard" />', slotStart)
+  const pending = appLayout.indexOf('<div v-else-if="showWorkspacePending"', slotStart)
+  const routedSlot = appLayout.indexOf('<slot v-else />', slotStart)
+  assert.ok(slotStart >= 0 && transition > slotStart)
+  assert.ok(wizard > transition && pending > wizard && routedSlot > pending)
+
+  const pendingBranch = appLayout.slice(pending, routedSlot)
+  assert.match(pendingBranch, /workspacePendingTitle/)
+  assert.match(pendingBranch, /v-if="tenantStore\.workspaceLoadState === 'error'/)
+  assert.doesNotMatch(pendingBranch, /workspaceTransitionTimer|showWorkspaceTransitionIndicator/)
+})
+
+test('workspace hydration defers transient copy and does not call an unresolved read provisioning', () => {
+  assert.match(appLayout, /import \{ useDelayedLoading \} from '@\/portalkit\/useDelayedLoading'/)
+  assert.match(appLayout, /const showWorkspacePendingIndicator = useDelayedLoading\(showWorkspacePending\)/)
+  assert.match(appLayout, /tenantStore\.workspaceLoadState === 'error' \|\| showWorkspacePendingIndicator\.value/)
+  assert.match(appLayout, /if \(!tenantStore\.workspaceSelectionHydrated\) return 'Loading workspace…'/)
+  assert.match(appLayout, /return 'Workspace is still provisioning'/)
+  assert.match(appLayout, /v-else-if="tenantStore\.workspaceSelectionHydrated"/)
+})
+
+test('provider frames gate APIExport providers on an authoritative workspace binding', () => {
+  assert.match(providerFrame, /const isBuiltinProvider = computed/)
+  assert.match(providerFrame, /p\.builtin \|\| !!p\.builtinRoute/)
+  assert.match(providerFrame, /const requiresBinding = computed/)
+  assert.match(providerFrame, /!isBuiltinProvider\.value/)
+  assert.match(providerFrame, /p\.apiExportName \|\| p\.apiExportPath/)
+  assert.match(providerFrame, /p\.hasUI && !isBuiltinProvider\.value/)
+  assert.match(providerFrame, /providers\.bindingsLoadState === 'ready'/)
+  assert.match(providerFrame, /providers\.bindingsWorkspace === tenant\.workspaceUUID/)
+  assert.match(providerFrame, /providers\.bindingsOrgUUID === tenant\.orgUUID/)
+  assert.match(providerFrame, /providers\.isEnabled\(entry\.value\.name\)/)
+  assert.match(providerFrame, /const accessAllowed = computed/)
+  assert.match(providerFrame, /!!entry\.value\.hasUI/)
+  assert.match(providerFrame, /v-if="accessAllowed"[\s\S]*ref="mountRef"/)
+  assert.match(providerFrame, /clearMountedElement\(\)/)
+  assert.match(providerFrame, /not enabled in this workspace/)
+  assert.match(providerFrame, /:to="\{ name: 'dashboard' \}"[\s\S]*>Dashboard<\/router-link>/)
+  assert.match(providerFrame, /to="\/providers"[\s\S]*>Providers<\/router-link>/)
+})
+
+test('provider catalog and binding checks have finite loading, missing, error, and retry states', () => {
+  assert.match(providerFrame, /const catalogLoading = computed/)
+  assert.match(providerFrame, /const catalogError = computed/)
+  assert.match(providerFrame, /const catalogMissing = computed/)
+  assert.match(providerFrame, /Failed to load provider catalog/)
+  assert.match(providerFrame, /@click="retryCatalog"/)
+  assert.match(providerFrame, /Provider <code class="font-mono text-text-secondary">\{\{ props\.providerName \}\}<\/code> is not available/)
+  assert.match(providerFrame, /Checking provider access&hellip;/)
+  assert.match(providerFrame, /Could not check provider access/)
+  assert.match(providerFrame, /@click="retryBindings"/)
+  assert.match(providerFrame, /This provider does not publish a portal UI\./)
+  assert.match(providerFrame, /loadState\.value !== 'ready'/)
+  assert.match(providersStore, /const bindingsLoadState = ref<ProviderBindingsLoadState>\('idle'\)/)
+  assert.match(providersStore, /const bindingsError = ref<string \| null>\(null\)/)
+  assert.match(providersStore, /const bindingsRequestWorkspaceUUID = ref<string \| null>\(null\)/)
+  assert.match(providersStore, /bindingsLoadState\.value = 'loading'/)
+  assert.match(providersStore, /bindingsLoadState\.value = 'ready'/)
+  assert.match(providersStore, /bindingsLoadState\.value = 'error'/)
+  assert.match(providersStore, /if \(requestSequence !== bindingRequestSequence\) return/)
+})
+
+test('provider hard refresh waits for the hydrated AppLayout mount outlet', () => {
+  const mountWatchStart = providerFrame.indexOf('// Mount only after both catalog and workspace access are settled.')
+  const mountWatchEnd = providerFrame.indexOf('// Theme / token / sub-route changes', mountWatchStart)
+  assert.ok(mountWatchStart >= 0 && mountWatchEnd > mountWatchStart)
+  const mountWatch = providerFrame.slice(mountWatchStart, mountWatchEnd)
+
+  assert.match(mountWatch, /mountRef\.value/)
+  assert.match(mountWatch, /async \(\[name, version, ready, settled, allowed, mount\]\) =>/)
+  assert.match(mountWatch, /if \(!name \|\| !ready \|\| !settled \|\| !allowed \|\| !mount\) return/)
+  assert.match(mountWatch, /await loadAndMount\(name, version, mount\)/)
+
+  const loaderStart = providerFrame.indexOf('async function loadAndMount(')
+  const loaderEnd = providerFrame.indexOf('\n}\n\nfunction pushContext', loaderStart)
+  assert.ok(loaderStart >= 0 && loaderEnd > loaderStart)
+  const loader = providerFrame.slice(loaderStart, loaderEnd)
+  assert.match(loader, /mount: HTMLDivElement/)
+  assert.equal((loader.match(/mountRef\.value !== mount/g) ?? []).length, 2)
+})
+
+test('provider binding reads and disables ignore stale tenant work', () => {
+  const refreshStart = providersStore.indexOf('async function refreshBindings()')
+  const refreshEnd = providersStore.indexOf('\n\n  // enable hits', refreshStart)
+  assert.ok(refreshStart >= 0 && refreshEnd > refreshStart)
+  const refresh = providersStore.slice(refreshStart, refreshEnd)
+  const refreshCatchStart = refresh.indexOf('} catch (e: unknown)')
+  assert.ok(refreshCatchStart >= 0)
+  const refreshCatch = refresh.slice(refreshCatchStart)
+  assert.match(refreshCatch, /requestSequence !== bindingRequestSequence/)
+  assert.match(refreshCatch, /sameTenantSelection\(t, readTenantSelection\(\)\)/)
+  assert.match(refreshCatch, /if \(requestSequence !== bindingRequestSequence\) return/)
+  assert.match(refreshCatch, /if \(!sameTenantSelection\(t, readTenantSelection\(\)\)\) return/)
+  assert.match(refreshCatch, /bindingsLoadState\.value = 'error'/)
+  assert.match(refreshCatch, /throw e/)
+
+  const enableStart = providersStore.indexOf('async function enable(')
+  const enableEnd = providersStore.indexOf('\n\n  // readTenantSelection', enableStart)
+  assert.ok(enableStart >= 0 && enableEnd > enableStart)
+  const enable = providersStore.slice(enableStart, enableEnd)
+  assert.match(enable, /const enableRequestGeneration = \(enableRequestGenerations\.get\(p\.name\) \?\? 0\) \+ 1/)
+  assert.match(enable, /enableRequestGenerations\.set\(p\.name, enableRequestGeneration\)/)
+  assert.match(enable, /enableRequestGenerations\.get\(p\.name\) === enableRequestGeneration/)
+  assert.doesNotMatch(enable, /bindingRequestSequence/)
+  assert.match(enable, /await refreshBindings\(\)/)
+  assert.match(enable, /catch \(e: unknown\)[\s\S]*if \(!isCurrentEnable\(\)\) return[\s\S]*throw e/)
+
+  const disableStart = providersStore.indexOf('async function disable(')
+  const disableEnd = providersStore.indexOf('\n\n  function byName', disableStart)
+  assert.ok(disableStart >= 0 && disableEnd > disableStart)
+  const disable = providersStore.slice(disableStart, disableEnd)
+  assert.ok(disable.indexOf('const t = readTenantSelection()') < disable.indexOf('const bindingName ='))
+  assert.match(disable, /bindingsLoadState\.value === 'ready'/)
+  assert.match(disable, /bindingsOrgUUID\.value === t\.orgUUID/)
+  assert.match(disable, /bindingsWorkspace\.value === t\.workspaceUUID/)
+  assert.match(disable, /bindingsRequestOrgUUID\.value === t\.orgUUID/)
+  assert.match(disable, /bindingsRequestWorkspaceUUID\.value === t\.workspaceUUID/)
+  assert.match(disable, /const disableRequestGeneration = \(disableRequestGenerations\.get\(p\.name\) \?\? 0\) \+ 1/)
+  assert.match(disable, /disableRequestGenerations\.set\(p\.name, disableRequestGeneration\)/)
+  assert.match(disable, /disableRequestGenerations\.get\(p\.name\) === disableRequestGeneration/)
+  assert.doesNotMatch(disable, /bindingRequestSequence/)
+  assert.match(disable, /sameTenantSelection\(t, readTenantSelection\(\)\)/)
+  assert.match(disable, /const res = await authFetch\(url, \{ method: 'POST', tenant: true \}\)/)
+  assert.match(disable, /if \(!isCurrentDisable\(\)\) return/)
+  assert.match(disable, /await refreshBindings\(\)/)
+  assert.match(disable, /catch \(e: unknown\)[\s\S]*if \(!isCurrentDisable\(\)\) return[\s\S]*throw e/)
+})
+
+test('provider mutations keep per-provider generations and always resync after writes', () => {
+  assert.match(providersStore, /const enableRequestGenerations = new Map<string, number>\(\)/)
+  assert.match(providersStore, /const disableRequestGenerations = new Map<string, number>\(\)/)
+  assert.match(providersStore, /let providerActionEpoch = 0/)
+
+  const resetStart = providersStore.indexOf('function resetForOrganization()')
+  const resetEnd = providersStore.indexOf('\n\n  async function load', resetStart)
+  assert.ok(resetStart >= 0 && resetEnd > resetStart)
+  const reset = providersStore.slice(resetStart, resetEnd)
+  assert.match(reset, /providerActionEpoch\+\+/)
+  assert.match(reset, /enableRequestGenerations\.clear\(\)/)
+  assert.match(reset, /disableRequestGenerations\.clear\(\)/)
+
+  const refreshStart = providersStore.indexOf('async function refreshBindings()')
+  const refreshEnd = providersStore.indexOf('\n\n  // enable hits', refreshStart)
+  const refresh = providersStore.slice(refreshStart, refreshEnd)
+  assert.doesNotMatch(refresh, /bindingsLoadState\.value === 'loading'[\s\S]*return/)
+
+  const enableStart = providersStore.indexOf('async function enable(')
+  const enableEnd = providersStore.indexOf('\n\n  // readTenantSelection', enableStart)
+  const enable = providersStore.slice(enableStart, enableEnd)
+  const disableStart = providersStore.indexOf('async function disable(')
+  const disableEnd = providersStore.indexOf('\n\n  function byName', disableStart)
+  const disable = providersStore.slice(disableStart, disableEnd)
+  assert.match(enable, /sameTenantSelection\(t, readTenantSelection\(\)\)/)
+  assert.match(disable, /sameTenantSelection\(t, readTenantSelection\(\)\)/)
+  assert.match(enable, /await refreshBindings\(\)/)
+  assert.match(disable, /await refreshBindings\(\)/)
+})
+
+test('the tenant bridge clears the old cluster while no workspace is selected', () => {
+  const bridgeStart = app.indexOf('watch(\n  () => tenant.activeWorkspace?.clusterName')
+  const bridgeEnd = app.indexOf('\n)\n\n// Side-menu enabled set', bridgeStart)
+  assert.ok(bridgeStart >= 0 && bridgeEnd > bridgeStart)
+  const bridge = app.slice(bridgeStart, bridgeEnd)
+  assert.match(bridge, /auth\.setClusterName\(cluster \?\? null\)/)
+  assert.match(app, /tenant\.workspaceMode, tenant\.workspaceSelectionHydrated, tenant\.workspaceLoadState/)
+  assert.match(app, /\(\[, mode, hydrated\]\) =>/)
+  assert.doesNotMatch(app, /\(\[mode, hydrated\]\) =>/)
+  assert.match(app, /if \(mode === 'organization' \|\| hydrated\)/)
+})
+
+test('workspace-scoped content stays fenced while the selected workspace is pending', () => {
+  const wizardStart = appLayout.indexOf('const showWorkspaceWizard = computed')
+  const wizardEnd = appLayout.indexOf('\n})\n\n// An explicit organization switch', wizardStart)
+  assert.ok(wizardStart >= 0 && wizardEnd > wizardStart)
+  const wizard = appLayout.slice(wizardStart, wizardEnd)
+  assert.match(wizard, /activeWorkspace\?\.clusterName/)
+  assert.match(appLayout, /workspaceSelectionHydrated/)
+  assert.match(appLayout, /activeWorkspaceUsable/)
+})
+
+test('workspace selection persistence distinguishes org-only mode from first-login bootstrap', () => {
+  assert.match(tenant, /workspaceMode\?: 'workspace' \| 'organization'/)
+  assert.match(tenant, /workspaceMode\.value = 'organization'/)
+  assert.match(tenant, /selectDefault: workspaceMode\.value !== 'organization'/)
+  assert.match(tenant, /workspaceSelectionHydrated/)
+  assert.match(tenant, /if \(workspaceMode\.value === 'organization'\) \{\s*workspaceUUID\.value = null/)
+  assert.match(tenant, /if \(targetOrgUUID === orgUUID\.value\) \{[\s\S]*workspaceMode\.value = 'workspace'[\s\S]*workspaceUUID\.value = created\.uuid/)
+})
+
+test('created organizations and persisted org-only context never trigger first-login takeover', () => {
+  const createStart = tenant.indexOf('async function createOrg(')
+  const createEnd = tenant.indexOf('\n\n  async function createWorkspace', createStart)
+  assert.ok(createStart >= 0 && createEnd > createStart)
+  const create = tenant.slice(createStart, createEnd)
+  assert.match(create, /await fetchOrgs\(\)/)
+  assert.match(create, /await selectOrganization\(created\.uuid\)/)
+  assert.doesNotMatch(create, /selectOrg\(created\.uuid\)/)
+
+  const persistedStart = tenant.indexOf('function loadPersisted()')
+  const persistedEnd = tenant.indexOf('\n\nfunction savePersisted', persistedStart)
+  assert.ok(persistedStart >= 0 && persistedEnd > persistedStart)
+  const persisted = tenant.slice(persistedStart, persistedEnd)
+  assert.match(persisted, /parsed\.workspaceMode === 'organization' \|\|\s*\(orgUUID !== null && storedWorkspaceUUID === null\)/)
+  assert.match(persisted, /if \(!raw\) return \{ orgUUID: null, workspaceUUID: null, workspaceMode: 'workspace' \}/)
+
+  const bootstrapStart = tenant.indexOf('async function bootstrap()')
+  const bootstrapEnd = tenant.indexOf('\n\n  // ===== org-level CRUD =====', bootstrapStart)
+  assert.ok(bootstrapStart >= 0 && bootstrapEnd > bootstrapStart)
+  const bootstrap = tenant.slice(bootstrapStart, bootstrapEnd)
+  assert.match(bootstrap, /if \(orgUUID\.value && workspaceMode\.value === 'organization'\) \{[\s\S]*bootstrapState\.value = 'ready'/)
+  assert.match(bootstrap, /bootstrapState\.value = 'provisioning'/)
+})
+
+test('provider catalog resets and fences late org-scoped responses', () => {
+  const providers = fs.readFileSync(path.join(portalSrc, 'stores/providers.ts'), 'utf8')
+  assert.match(app, /providers\.resetForOrganization\(\)/)
+  assert.match(providers, /function resetForOrganization\(\)/)
+  assert.match(providers, /catalogRequestSequence/)
+  assert.match(providers, /clearBindings\(\)/)
+  assert.match(providers, /readTenantSelection\(\)\.orgUUID !== targetOrgUUID/)
+  const loadStart = providers.indexOf('async function load(')
+  const loadEnd = providers.indexOf('\n\n  // refreshBindings', loadStart)
+  assert.ok(loadStart >= 0 && loadEnd > loadStart)
+  const load = providers.slice(loadStart, loadEnd)
+  assert.match(load, /headers: targetOrgUUID \? \{ 'X-Faros-Org': targetOrgUUID \} : undefined/)
+  assert.doesNotMatch(load, /tenant:\s*true/)
+})
+
+test('organization rows use native list and button semantics', () => {
+  assert.match(organizationsPage, /<ul v-else[^>]*aria-label="Organizations"/)
+  assert.match(organizationsPage, /<li v-for="org in tenant\.orgs"/)
+  assert.doesNotMatch(organizationsPage, /role="listbox"/)
+  assert.doesNotMatch(organizationsPage, /role="option"/)
+  assert.match(organizationsPage, /:aria-pressed="tenant\.orgUUID === org\.uuid"/)
+})
+
+test('anchored popovers close safely and follow async panel size changes', () => {
+  assert.match(popover, /if \(!open\.value\) return/)
+  assert.match(popover, /event\.key === 'Tab'/)
+  assert.match(popover, /focusin/)
+  assert.match(popover, /ResizeObserver/)
+  assert.match(popover, /observePanelResize/)
+})
+
+test('fixed account popover closes on Tab fallback and tracks async height', () => {
+  assert.match(accountMenu, /event\.key !== 'Tab'/)
+  assert.match(accountMenu, /deferredTabClose = setTimeout/)
+  assert.match(accountMenu, /ResizeObserver/)
+  assert.match(accountMenu, /function observePanelResize\(\)/)
+  assert.match(accountMenu, /positionPopover\(\)/)
+  assert.match(accountMenu, /if \(!isOpen\.value \|\| disposed\) return/)
+})
+
+test('pending workspace shell leaves workspace-optional routes reachable', () => {
+  const pendingStart = appLayout.indexOf('const showWorkspacePending = computed')
+  const pendingEnd = appLayout.indexOf('\n})\n\n// An explicit organization switch', pendingStart)
+  assert.ok(pendingStart >= 0 && pendingEnd > pendingStart)
+  const pending = appLayout.slice(pendingStart, pendingEnd)
+  assert.match(pending, /path === '\/settings' \|\| path\.startsWith\('\/settings\/'\)/)
+  assert.match(pending, /path === '\/providers'/)
+  assert.match(pending, /path === '\/organizations' \|\| path\.startsWith\('\/organizations\/'\)/)
+})
+
+test('provider route links and sub-navigation toggles are sibling controls', () => {
+  const linkBodies = [...appLayout.matchAll(/<router-link\b[\s\S]*?<\/router-link>/g)].map(([body]) => body)
+  assert.ok(linkBodies.length > 0)
+  assert.ok(linkBodies.some((body) => body.includes(':to="item.to"')))
+  for (const body of linkBodies) assert.doesNotMatch(body, /<button\b/)
+  assert.equal((appLayout.match(/@click="toggleNavGroup\('item:/g) ?? []).length, 2)
+  assert.equal((appLayout.match(/<div\n\s+class="(?:group\/nav )?flex items-center gap-2\.5 rounded-md px-3 py-1\.5/g) ?? []).length, 2)
+})
+
+test('collapsed provider links expose their label on the interactive link', () => {
+  const verticalStart = appLayout.indexOf('<!-- Scrollable nav region.')
+  const verticalEnd = appLayout.indexOf('</aside>', verticalStart)
+  assert.ok(verticalStart >= 0 && verticalEnd > verticalStart)
+  const vertical = appLayout.slice(verticalStart, verticalEnd)
+  const providerLinks = [...vertical.matchAll(/<router-link\b[\s\S]*?:to="item\.to"[\s\S]*?<\/router-link>/g)]
+    .map(([body]) => body)
+    .filter(body => !body.includes('v-for="item in staticNavItems"'))
+  assert.equal(providerLinks.length, 2)
+  for (const link of providerLinks) assert.match(link, /:aria-label="sidebarExpanded \? undefined : item\.label"/)
+  assert.match(vertical, /:aria-label="sidebarExpanded \? undefined : providersHeaderItem\.label"/)
+})
+
+test('Providers follows Dashboard in every shell layout', () => {
+  assert.match(appLayout, /const staticNavItems: NavItem\[\] = \[\s*\{ label: 'Dashboard', to: '\/', icon: LayoutDashboard \},\s*\]/)
+  assert.match(appLayout, /const providersHeaderItem: NavItem = \{ label: 'Providers', to: '\/providers', icon: Puzzle, exact: true \}/)
+  assert.match(appLayout, /items: \[\.\.\.staticNavItems, providersHeaderItem\]/)
+
+  const verticalStatic = appLayout.indexOf('v-for="item in staticNavItems"')
+  const verticalProviders = appLayout.indexOf(':to="providersHeaderItem.to"', verticalStatic)
+  const verticalCategories = appLayout.indexOf('v-for="group in providersStore.categorizedNavItems.groups"', verticalProviders)
+  assert.ok(verticalStatic >= 0 && verticalProviders > verticalStatic && verticalCategories > verticalProviders)
+})
+
+test('deleted account/context components have no source references or stale profile event', () => {
+  const files = []
+  function visit(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue
+      const absolute = path.join(dir, entry.name)
+      if (entry.isDirectory()) visit(absolute)
+      else if (/\.(vue|ts|mjs)$/.test(entry.name)) files.push(absolute)
+    }
+  }
+  visit(portalSrc)
+  const source = files
+    .filter((file) => file !== new URL(import.meta.url).pathname)
+    .map((file) => fs.readFileSync(file, 'utf8'))
+    .join('\n')
+  assert.doesNotMatch(source, /TenantContextChip|UserProfileModal|@profile|emit\(['"]profile/)
+})
