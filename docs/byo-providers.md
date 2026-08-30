@@ -229,6 +229,32 @@ A `requiredValue` with no `value` is one the installer must type. Prefer a
 placeholder wherever the hub already knows the answer — every value a person has
 to look up and paste is a chance to get it wrong.
 
+### App Studio universal sandbox policy
+
+App Studio exposes one operator choice: `assistant.runSandbox.mode=off|on`.
+`off` always keeps the existing Template-backed development-image path. `on`
+allows the universal sandbox when the workspace has independently valid App
+Studio and Infrastructure bindings in any of the four supported ownership
+combinations: platform/platform, platform App Studio with same-organization
+self-hosted Infrastructure, same-organization self-hosted App Studio with
+platform Infrastructure, or same-organization self-hosted App Studio with
+same-organization self-hosted Infrastructure. Mixed ownership is therefore
+not, by itself, a reason to fall back to the development-image path.
+
+The Infrastructure binding remains exact: admission and checkpoint recovery
+carry the selected Infrastructure APIExport, and data-plane routing must use
+that same verified export. A run is not eligible for the universal sandbox if
+the selected export is missing, stale, or cannot be verified against the
+workspace binding. This export fence applies equally to platform and
+self-hosted providers.
+
+The hosted Faros deployment sets `off`. App Studio's self-host recipe supplies
+`on`, while Infrastructure's recipe enables its coding-sandbox Template and
+requires immutable universal and dev-agent image references. Operators may
+change the binary policy later; the workspace binding resolver still validates
+each provider independently and prevents one provider copy from sending
+sandbox work to an unverified Infrastructure export.
+
 As a safety net, a value with no declared `value` is still filled in when the
 hub knows it authoritatively: `hub.url` / `hub.externalURL` / `hub.internalURL`,
 and the kubeconfig Secret name and key. That covers recipes published before a
@@ -404,7 +430,7 @@ Registry scoping enforces the rest:
 
 | Lookup | Scope | Why |
 |---|---|---|
-| `Get(name)` | platform only | Backs the bare-name request paths (UI/backend proxy, heartbeat) that carry no tenant context. If org records were reachable, an Org could name a provider after a platform one and capture its route. |
+| `Get(name)` | platform only | Backs platform-only UI assets and requests without verified tenant context (including heartbeat). Tenant-scoped backend requests use `GetForOrg`; keeping this lookup global prevents an Org from capturing a platform route by name. |
 | `GetForOrg(org, name)` | Org's own, else platform | The tenant-scoped Enable path, where the Org is known and verified. |
 | `ListForOrg(org)` | Org's own + platform | The catalog. An empty org means platform-only, never everything. |
 
@@ -503,14 +529,21 @@ in URL paths.
   cannot keep a platform provider of the same name looking alive. Org providers
   therefore never set `HeartbeatRequired`, leaving readiness resting on endpoint
   validity. An org-scoped heartbeat path is future work.
-- **The provider UI is not portable; the backend is.** `/services/providers/{name}`
-  now resolves in the caller's Org and routes an org-owned provider over its edge
-  tunnel. `/ui/providers/{name}` does not: it still resolves platform-only, so an
-  Org self-hosting a provider that ships a micro-frontend gets the PLATFORM's
-  bundle while its own copy serves the API — wrong rather than broken, which is
-  the harder failure to notice.
-
-  This is not the same change as the backend one. The bundle is loaded with a
+- **UI remains platform-only; org backends use the edge transport.**
+  `/ui/providers/{name}` serves the platform provider's assets, while a
+  tenant-scoped `/services/providers/{name}` request resolves that Org's copy
+  and routes its backend through the platform Edges provider's tunnel. The hub
+  never dials an Org-controlled `spec.backend.url`: a missing, incomplete, or
+  unusable edge route — including a platform Edges provider that is not Ready —
+  returns `503 Service Unavailable`. An org provider that declares
+  `spec.ui.url` remains platform-UI-only and gets no default `iconURL` (the
+  portal falls back to its generic glyph). API-only org providers — the common
+  case — are unaffected: `EndpointsValid` accepts an APIExport alone as "this
+  provider offers something", which opens no route since the UI and backend
+  proxies independently require their respective endpoints.
+  An Org self-hosting a provider that ships a micro-frontend therefore gets the
+  platform bundle while its own copy serves the API — wrong rather than broken,
+  which is the harder failure to notice. The bundle is loaded with a
   plain `<script src="/ui/providers/{name}/main.js">`
   ([ProviderFrame.vue](../portal/src/pages/ProviderFrame.vue)), so the request
   carries no `Authorization` header, and `BrowserIdentity` — the hub's only way
@@ -518,7 +551,6 @@ in URL paths.
   by. Closing it needs either the portal fetching the bundle with credentials
   and injecting it as a blob, or the Org encoded in the asset path so no
   identity is needed. Both are portal-visible changes; neither is a proxy tweak.
-
 - **No edge-driven install.** The Org installs the chart itself with the returned
   kubeconfig. One-click install onto a chosen edge needs credential projection
   into the edge cluster (the agent's `Placement` plane ships no kcp credential

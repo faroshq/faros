@@ -68,7 +68,7 @@ type CatalogReconciler struct {
 	hubInternalURL string
 
 	// edgeRoutes resolves an org-owned provider's edge transport. Nil in
-	// registry-only mode and on hubs that predate edge transport.
+	// registry-only mode; org-owned backends then remain unavailable.
 	edgeRoutes EdgeRouteResolver
 
 	// clusterPaths caches logical-cluster-ID → canonical workspace path. The
@@ -94,8 +94,8 @@ type CatalogReconcilerOptions struct {
 	HubInternalURL string
 
 	// EdgeRoutes resolves an org-owned provider's edge transport and reconciles
-	// the hub-owned Service in front of it. Nil leaves org-owned providers on
-	// their declared backend URL, which is the pre-edge-transport behaviour.
+	// the hub-owned Service in front of it. Nil leaves org-owned provider
+	// backends unavailable; the proxy never falls through to their declared URL.
 	EdgeRoutes EdgeRouteResolver
 }
 

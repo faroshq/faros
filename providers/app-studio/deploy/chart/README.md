@@ -34,7 +34,7 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 |---|---|---|
 | `nameOverride` | `""` |  |
 | `fullnameOverride` | `""` |  |
-| `replicaCount` | `1` | App Studio assistant project mutations use a single active writer. The chart rejects other values and uses a Recreate deployment strategy to prevent cross-pod overlap during upgrades. Safe to scale with the default emptyDir workspace: runs and external operations are guarded by durable claims, pr… |
+| `replicaCount` | `1` | App Studio assistant project mutations use a single active writer. The chart uses RollingUpdate with the default emptyDir workspace and Recreate for a PVC-backed workspace, where a ReadWriteOnce volume must never overlap across pods. |
 | `internalPort` | `8091` | internalPort carries peer-forwarded project requests between replicas. Deliberately not part of the Service. |
 | `image` |  |  |
 | `image.repository` | `ghcr.io/faroshq/faros/app-studio-provider` |  |
@@ -55,9 +55,7 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 | `providerKubeconfig.secretName` | `faros-provider-kubeconfig` |  |
 | `assistant` |  | Assistant chat behavior. |
 | `assistant.toolDisclosure` | `""` | How much tool-level detail the chat disclosures show. "" / "summary" (default) — tool names + per-tool sanitized summaries (paths, queries, counts — never raw file contents or secrets). "minimal" — fully opaque generic labels only ("Edited files"), for deployments whose users should not see imple… |
-| `assistant.runSandbox.mode` | `off` | Coding sandbox policy: off disables it, byo-only fails closed until a scoped BYO binding resolves, and force uses the platform provider only with explicit development mode. |
-| `assistant.runSandbox.developmentMode` | `false` | Explicit development-only authority required by force mode. |
-| `assistant.runSandbox.enabled` | `null` | Deprecated boolean. true maps to byo-only with a startup warning. |
+| `assistant.runSandbox.mode` | `off` | Coding sandbox policy: `off` always uses the existing Template-backed development image. `on` permits the universal sandbox for any independently valid platform or same-organization self-hosted App Studio and Infrastructure bindings: platform/platform, platform App Studio plus self-hosted Infrastructure, self-hosted App Studio plus platform Infrastructure, or both self-hosted in the same organization. Mixed ownership alone does not force the development-image fallback. The selected Infrastructure APIExport must still match the workspace's verified binding. Mode `on` requires one App Studio replica. |
 | `previewConsole` |  | Browser-console sharing starts automatically while the embedded preview is open. Until both signing fields are configured, App Studio stays available but reports console instrumentation as unavailable. The private key signs short-lived iframe capabilities. Its matching current and previous public… |
 | `previewConsole.enabled` | `true` |  |
 | `previewConsole.signingKeyID` | `""` |  |

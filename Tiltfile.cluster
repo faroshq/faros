@@ -1475,46 +1475,6 @@ kubectl --context %s -n %s create configmap app-studio-actions-ca \
     labels=['providers-app-studio'],
 )
 
-# The app-studio init container applies its APIExport with first-party
-# permission claims on the infrastructure/code APIExports — kcp REQUIRES
-# their identityHashes (empty hash = hard apply failure). The host init
-# target auto-discovered them; here a resource does the same lookups and
-# writes them to a file that read_file() below watches: the moment discovery
-# succeeds (after infrastructure/code exist), Tilt re-renders the chart with
-# the hashes and the pods restart with valid claims.
-app_studio_hash_file = '.kcp/app-studio-identity-hashes.env'
-local_resource(
-    'app-studio-identity-hashes',
-    cmd='''
-set -eu
-lookup() {
-  kubectl --kubeconfig=%s --server=%s/clusters/root:faros:providers:$1 \
-    --insecure-skip-tls-verify get apiexport $2 \
-    -o jsonpath='{.status.identityHash}' 2>/dev/null || true
-}
-infra="$(lookup infrastructure infrastructure.providers.faros.sh)"
-code="$(lookup code code.providers.faros.sh)"
-if [ -z "$infra" ] || [ -z "$code" ]; then
-  echo "identityHashes not discoverable yet (infra='$infra' code='$code')"
-  echo "re-trigger after the infrastructure operator has bootstrapped and code-init has run"
-  exit 0
-fi
-printf 'infra=%%s\\ncode=%%s\\n' "$infra" "$code" > %s
-echo "wrote %s"
-'''.strip() % (KCP_ADMIN_KUBECONFIG, KCP_ADMIN_SERVER, app_studio_hash_file, app_studio_hash_file),
-    deps=['.kcp/code-runtime.kubeconfig', 'tilt-frontproxy.kubeconfig'],
-    allow_parallel=True,
-    labels=['providers-app-studio'],
-)
-
-app_studio_infra_hash = cfg.get('app-studio-infra-identity-hash', '')
-app_studio_code_hash = cfg.get('app-studio-code-identity-hash', '')
-for _line in str(read_file(app_studio_hash_file, '')).splitlines():
-    if _line.startswith('infra=') and not app_studio_infra_hash:
-        app_studio_infra_hash = _line[len('infra='):].strip()
-    if _line.startswith('code=') and not app_studio_code_hash:
-        app_studio_code_hash = _line[len('code='):].strip()
-
 # At REPLICA_COUNT=2: durable run claims + project affinity live in the shared
 # providers-db Postgres, workspaces are emptyDir caches rebuilt from git on
 # adoption (docs/app-studio-replica-awareness.md).
@@ -1536,8 +1496,6 @@ provider_pod(
         'hub.actionsCABundleConfigMap.name=app-studio-actions-ca',
         'hub.actionsCABundleConfigMap.key=ca-bundle.pem',
         'previewConsole.enabled=false',
-        'apiExport.infraIdentityHash=%s' % app_studio_infra_hash,
-        'apiExport.codeIdentityHash=%s' % app_studio_code_hash,
     ],
     resource_deps=[
         'app-studio-secrets',
@@ -1592,8 +1550,8 @@ local_resource(
 # secrets sync delivers).
 #
 # The kubernetesclusters permission claim needs the EDGES APIExport's
-# identityHash (kcp hard-rejects hash-less claims on non-built-in types) —
-# same discovery-file pattern as app-studio's hashes below.
+# identityHash (kcp hard-rejects hash-less claims on non-built-in types), so
+# this resource keeps a dedicated discovery file for the Kuery claim.
 kuery_hash_file = '.kcp/kuery-edges-identity-hash.env'
 local_resource(
     'kuery-edges-identity-hash',

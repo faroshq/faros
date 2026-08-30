@@ -471,9 +471,11 @@ creates a workspace for it in your organization, mints a credential scoped to
 that workspace alone, and generates the exact `helm` commands — under
 **Providers → Self-Hosting** in the portal.
 
-Nothing to fill in: the infrastructure and code identity hashes it needs are
-resolved for you. It does expect the `infrastructure` and `code` providers to be
-available — self-host those too if you want the whole chain in your cluster.
+Nothing to fill in for cross-provider identities: App Studio uses
+workspace-local ServiceAccounts through each workspace's own bindings, so it
+does not pin Infrastructure or Code identity hashes. It expects the
+`infrastructure` and `code` providers to be available, but either dependency may
+be the platform copy or a same-organization self-hosted copy.
 
 Once installed, the provider registers itself and your workspaces enable it
 exactly like the platform copy. See

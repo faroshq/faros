@@ -51,7 +51,8 @@ func (p *ProviderProxy) resolveProvider(r *http.Request, name string) (Provider,
 // resolution in that case, which is the pre-existing behaviour: unresolvable
 // identity must not silently widen what a request can reach.
 func (p *ProviderProxy) callerOrgUUID(r *http.Request) string {
-	_, tenantPath, err := p.tenantResolver.Resolve(r)
+	user, tenantPath, err := p.resolveTenant(r)
+	rememberTenantResolution(r, user, tenantPath, err)
 	if err != nil || tenantPath == "" {
 		return ""
 	}
@@ -88,7 +89,7 @@ func (p *ProviderProxy) serveOverEdge(w http.ResponseWriter, r *http.Request, pr
 	// the PLATFORM registry, never org-scoped: an org supplying the transport
 	// for its own traffic would sit on both ends of the trust boundary.
 	edges, ok := p.reg.Get(EdgesProviderName)
-	if !ok || edges.BackendURL == nil {
+	if !ok || !edges.Ready() || edges.BackendURL == nil {
 		p.log.Info("edge transport unavailable: the platform edges provider has no backend",
 			"provider", prov.Name, "org", prov.OrgUUID)
 		http.Error(w, "edge transport unavailable for provider: "+prov.Name, http.StatusServiceUnavailable)

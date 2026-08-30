@@ -143,12 +143,14 @@ dev_agent_image = 'ghcr.io/faroshq/faros-dev-agent:latest'
 dev_agent_image_repository = 'ghcr.io/faroshq/faros-dev-agent'
 universal_dev_image = 'ghcr.io/faroshq/faros-universal-dev:latest'
 universal_dev_image_repository = 'ghcr.io/faroshq/faros-universal-dev'
-# The local loop keeps the historical force default, while allowing an
-# explicit off/byo-only mode to avoid constructing any platform sandbox
+# The local loop defaults the binary operator policy to on, while allowing an
+# explicit off mode to avoid constructing any universal sandbox
 # resources. Keep this in Starlark as well as the shell fallback below so the
 # effective mode controls Tilt's resource graph (not only the provider env).
-app_studio_sandbox_mode = os.getenv('APP_STUDIO_RUN_SANDBOX_MODE', '').strip().lower() or 'force'
-app_studio_sandbox_force = app_studio_sandbox_mode == 'force'
+app_studio_sandbox_mode = os.getenv('APP_STUDIO_RUN_SANDBOX_MODE', '').strip().lower() or 'on'
+if app_studio_sandbox_mode not in ['off', 'on']:
+    fail('APP_STUDIO_RUN_SANDBOX_MODE must be off or on')
+app_studio_sandbox_on = app_studio_sandbox_mode == 'on'
 # Host address as seen FROM INSIDE the faros-kro containers. Resolve
 # host.docker.internal inside the node first: on Docker Desktop/OrbStack the
 # bridge gateway below is the VM, not the host, and dialing it gets connection
@@ -360,7 +362,7 @@ local_resource(
 local_resource(
     'app-studio',
     cmd='make build-app-studio-provider',
-    serve_cmd='APP_STUDIO_RUN_SANDBOX_MODE=${APP_STUDIO_RUN_SANDBOX_MODE:-force} APP_STUDIO_DEVELOPMENT_MODE=true APP_STUDIO_REPLICA_COUNT=1 make run-provider-app-studio',
+    serve_cmd='APP_STUDIO_RUN_SANDBOX_MODE=${APP_STUDIO_RUN_SANDBOX_MODE:-on} APP_STUDIO_REPLICA_COUNT=1 make run-provider-app-studio',
     deps=[
         'providers/app-studio/main.go',
         'providers/app-studio/heartbeat.go',
@@ -383,7 +385,7 @@ local_resource(
     ],
     resource_deps=(
         ['hub', 'app-studio-db', 'dev-agent-image', 'app-studio-preview-console-key']
-        + (['universal-dev-image'] if app_studio_sandbox_force else [])
+        + (['universal-dev-image'] if app_studio_sandbox_on else [])
     ),
     readiness_probe=probe(
         period_secs=5,
@@ -546,7 +548,7 @@ docker exec {kro_node} ctr -n k8s.io images tag --force \
 # Platform-curated Node/Go/Python toolchain image for the private coding
 # environment. It is separate from the injected dev-agent binary so the image
 # can be pinned independently in a production InfrastructureProvider CR.
-if app_studio_sandbox_force:
+if app_studio_sandbox_on:
     local_resource(
         'universal-dev-image',
         cmd=('''
@@ -768,7 +770,7 @@ infrastructure_resource_deps = [
     'app-studio-preview-port-forward',
     'app-studio-preview-console-key',
 ]
-if app_studio_sandbox_force:
+if app_studio_sandbox_on:
     infrastructure_sandbox_digest_script = ('''
 dev_agent_digest="$(docker exec {kro_node} ctr -n k8s.io images ls 'name=={dev_agent_image}' | awk 'NR == 2 {{ print $3 }}')"
 case "$dev_agent_digest" in
@@ -887,10 +889,10 @@ local_resource(
 # the runtime kubeconfig and rotates the token).
 infrastructure_init_cmd = 'make init-provider-infrastructure'
 infrastructure_init_resource_deps = ['hub', 'infrastructure-register']
-if app_studio_sandbox_force:
+if app_studio_sandbox_on:
     # The init command owns Template seeding, so it must receive the same
     # immutable universal image contract as the long-lived provider. Without
-    # this, local force mode can run against a stale platform Template even
+    # this, local on mode can run against a stale platform Template even
     # though the serving process correctly enables coding sandboxes.
     infrastructure_init_cmd = ('''set -eu
 {sandbox_digest_script}{sandbox_env}
@@ -1086,6 +1088,11 @@ local_resource(
         'providers/edges/portal/src',
         'providers/edges/portal/package.json',
         'providers/edges/go.mod',
+        # Restart whenever edges-init writes/updates the runtime kubeconfig.
+        # The provider still starts in health-only mode while the file is
+        # absent, but the controller manager needs this restart to activate
+        # after init provisions the provider workspace and token.
+        '.kcp/edges-runtime.kubeconfig',
     ],
     resource_deps=['hub'],
     readiness_probe=probe(
@@ -1141,7 +1148,7 @@ local_resource(
     cmd='kubectl config delete-context faros >/dev/null 2>&1 || true; kubectl config delete-cluster faros >/dev/null 2>&1 || true; rm -f ~/.faros/agent-dev-edge-kube-1.kubeconfig ~/.faros/agent-dev-edge-kube-1.json && make dev-login-static && make dev-edge-create TYPE=kubernetes DEV_EDGE_NAME=dev-edge-kube-1',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub'],
+    resource_deps=['hub', 'edges-init', 'edges'],
     labels=['edges'],
 )
 
@@ -1163,7 +1170,7 @@ local_resource(
     cmd='kubectl config delete-context faros >/dev/null 2>&1 || true; kubectl config delete-cluster faros >/dev/null 2>&1 || true; rm -f ~/.faros/agent-dev-edge-server-1.kubeconfig ~/.faros/agent-dev-edge-server-1.json && make dev-login-static && make dev-edge-create TYPE=server DEV_EDGE_NAME=dev-edge-server-1',
     trigger_mode=TRIGGER_MODE_MANUAL,
     auto_init=False,
-    resource_deps=['hub'],
+    resource_deps=['hub', 'edges-init', 'edges'],
     labels=['edges'],
 )
 

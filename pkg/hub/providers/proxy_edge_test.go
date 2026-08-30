@@ -11,18 +11,25 @@ You may obtain a copy of the License at
 package providers
 
 import (
+	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
 )
 
 const (
-	testOrg     = "86b7f9e7-6fa4-448f-a78f-36a3a5ab8dd9"
-	testCluster = "260dym853j73uupr"
+	testOrg       = "86b7f9e7-6fa4-448f-a78f-36a3a5ab8dd9"
+	testCluster   = "260dym853j73uupr"
+	testWorkspace = "ws-1"
+
+	testPlatformInfrastructureExport = "root:faros:providers:infrastructure"
+	testOrgInfrastructureExport      = "root:faros:tenants:" + testOrg + ":providers:infrastructure"
 )
 
 // edgeUpstream stands in for the platform edges provider and records what the
@@ -56,12 +63,16 @@ func newEdgeBackedProxy(t *testing.T, orgOfCaller string) (*ProviderProxy, *edge
 	// A platform provider of the same name as the org's, so a test can tell
 	// which one was chosen instead of inferring it.
 	platformURL, _ := url.Parse("http://platform.invalid")
-	reg.Upsert(Provider{Name: "infrastructure", BackendURL: platformURL, EndpointsValid: true})
+	reg.Upsert(Provider{
+		Name: "infrastructure", BackendURL: platformURL, EndpointsValid: true,
+		APIExportPath: testPlatformInfrastructureExport,
+	})
 	// The org's own copy, reached over its edge.
 	reg.Upsert(Provider{
 		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		APIExportPath: testOrgInfrastructureExport,
 		EdgeRoute: &EdgeRoute{
-			WorkspaceUUID: "ws-1", Cluster: testCluster,
+			WorkspaceUUID: testWorkspace, Cluster: testCluster,
 			EdgeName: "prod-eu", ServiceName: "provider-infrastructure",
 		},
 	})
@@ -74,6 +85,46 @@ func newEdgeBackedProxy(t *testing.T, orgOfCaller string) (*ProviderProxy, *edge
 		return "alice", "root:faros:tenants:" + orgOfCaller, nil
 	}))
 	return proxy, rec
+}
+
+func setConcreteTenantResolver(proxy *ProviderProxy) {
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg + ":" + testWorkspace, nil
+	}))
+}
+
+func boundProviderRequestPath(exportPath, rest string) string {
+	return "/services/providers/infrastructure/__bound/v1/" + base64.RawURLEncoding.EncodeToString([]byte(exportPath)) + rest
+}
+
+func TestParseConcreteTenantPath(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		path                   string
+		wantOrg, wantWorkspace string
+		wantOK                 bool
+	}{
+		{
+			name:          "concrete child workspace",
+			path:          "root:faros:tenants:org-a:workspace-a",
+			wantOrg:       "org-a",
+			wantWorkspace: "workspace-a",
+			wantOK:        true,
+		},
+		{name: "organization only", path: "root:faros:tenants:org-a"},
+		{name: "extra segment", path: "root:faros:tenants:org-a:workspace-a:edge-a"},
+		{name: "platform path", path: "root:faros:providers:infrastructure"},
+		{name: "legacy foreign path", path: "root:faros:orgs:org-a:workspace-a"},
+		{name: "empty organization", path: "root:faros:tenants::workspace-a"},
+		{name: "empty workspace", path: "root:faros:tenants:org-a:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			org, workspace, ok := parseConcreteTenantPath(tc.path)
+			if org != tc.wantOrg || workspace != tc.wantWorkspace || ok != tc.wantOK {
+				t.Errorf("parseConcreteTenantPath(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.path, org, workspace, ok, tc.wantOrg, tc.wantWorkspace, tc.wantOK)
+			}
+		})
+	}
 }
 
 func serveProxy(p *ProviderProxy, path string) *httptest.ResponseRecorder {
@@ -167,6 +218,38 @@ func TestBackendProxyUnusableEdgeRouteIs503(t *testing.T) {
 	}
 }
 
+// A missing route is the critical fail-closed case: the declared backend URL
+// is tenant-controlled and must never become a direct hub dial target.
+func TestBackendProxyMissingEdgeRouteNeverDialsBackendURL(t *testing.T) {
+	var directHit atomic.Bool
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		directHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(direct.Close)
+	directURL, err := url.Parse(direct.URL)
+	if err != nil {
+		t.Fatalf("parse direct backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		BackendURL: directURL,
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if directHit.Load() {
+		t.Fatal("hub directly dialed an organization provider backend without an edge route")
+	}
+}
+
 // With no platform edges provider there is no transport. Failing closed matters
 // because the alternative — falling through to the org provider's declared
 // BackendURL — is a hub-initiated request at an address the tenant chose.
@@ -186,6 +269,39 @@ func TestBackendProxyWithoutEdgesProviderIs503(t *testing.T) {
 
 	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestBackendProxyUnreadyEdgesProviderIs503(t *testing.T) {
+	var transportHit atomic.Bool
+	transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		transportHit.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(transport.Close)
+	transportURL, err := url.Parse(transport.URL)
+	if err != nil {
+		t.Fatalf("parse edges backend: %v", err)
+	}
+
+	reg := NewRegistry()
+	// A configured endpoint is not enough: the platform transport must also be
+	// Ready, including its heartbeat/endpoint health contract.
+	reg.Upsert(Provider{Name: EdgesProviderName, BackendURL: transportURL, EndpointsValid: false})
+	reg.Upsert(Provider{
+		Name: "infrastructure", OrgUUID: testOrg, EndpointsValid: true,
+		EdgeRoute: &EdgeRoute{WorkspaceUUID: "ws-1", Cluster: testCluster, EdgeName: "prod-eu", ServiceName: "provider-infrastructure"},
+	})
+	proxy := NewBackendProxy(reg, logr.Discard())
+	proxy.SetTenantResolver(TenantResolverFunc(func(*http.Request) (string, string, error) {
+		return "alice", "root:faros:tenants:" + testOrg, nil
+	}))
+
+	if w := serveProxy(proxy, "/services/providers/infrastructure/x"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if transportHit.Load() {
+		t.Fatal("unready platform edges provider received organization backend traffic")
 	}
 }
 
@@ -216,6 +332,105 @@ func TestBackendProxyAlwaysUsesThePlatformEdgesProvider(t *testing.T) {
 	}
 	if !platformEdges.hit {
 		t.Error("the platform edges provider was not used")
+	}
+}
+
+// A workspace can remain bound to the platform export after an Org starts
+// self-hosting a same-name provider. The explicit selector must honor the
+// binding instead of applying the bare-route org-first preference.
+func TestBackendProxyBoundSelectorRoutesPlatformBinding(t *testing.T) {
+	proxy, rec := newEdgeBackedProxy(t, testOrg)
+	setConcreteTenantResolver(proxy)
+	proxy.SetProviderBindingResolver(func(_ context.Context, _, _, _ string) (ProviderBindingSelection, error) {
+		return ProviderBindingSelection{ExportPath: testPlatformInfrastructureExport}, nil
+	})
+
+	var platformHit atomic.Bool
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		platformHit.Store(true)
+		if r.URL.Path != "/dataplane/x" {
+			t.Errorf("platform provider saw path %q, want /dataplane/x", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(platform.Close)
+	platformURL, err := url.Parse(platform.URL)
+	if err != nil {
+		t.Fatalf("parse platform upstream: %v", err)
+	}
+	proxy.reg.Upsert(Provider{
+		Name: "infrastructure", BackendURL: platformURL, EndpointsValid: true,
+		APIExportPath: testPlatformInfrastructureExport,
+	})
+
+	w := serveProxy(proxy, boundProviderRequestPath(testPlatformInfrastructureExport, "/dataplane/x"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", w.Code, w.Body.String())
+	}
+	if !platformHit.Load() {
+		t.Fatal("platform provider was not selected by its bound export")
+	}
+	if rec.hit {
+		t.Fatal("same-name org provider was selected despite the platform binding")
+	}
+}
+
+// A workspace bound to an Org export must select that exact registry record,
+// then carry the request over the platform edges transport.
+func TestBackendProxyBoundSelectorRoutesOrgBindingOverEdge(t *testing.T) {
+	proxy, rec := newEdgeBackedProxy(t, testOrg)
+	setConcreteTenantResolver(proxy)
+	proxy.SetProviderBindingResolver(func(_ context.Context, _, _, _ string) (ProviderBindingSelection, error) {
+		return ProviderBindingSelection{ExportPath: testOrgInfrastructureExport}, nil
+	})
+
+	w := serveProxy(proxy, boundProviderRequestPath(testOrgInfrastructureExport, "/dataplane/x"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", w.Code, w.Body.String())
+	}
+	if !rec.hit {
+		t.Fatal("org provider was not routed over the platform edges transport")
+	}
+	wantPrefix := "/edgeproxy/clusters/" + testCluster + "/apis/edges.faros.sh/v1alpha1/services/provider-infrastructure/proxy"
+	if rec.path != wantPrefix+"/dataplane/x" {
+		t.Errorf("edges provider saw path %q, want %q (selector must be stripped)", rec.path, wantPrefix+"/dataplane/x")
+	}
+}
+
+// The selector is an authorization-bound route, not a hint. A stale or
+// mismatched export must not fall back to either same-name provider.
+func TestBackendProxyBoundSelectorMismatchFailsClosed(t *testing.T) {
+	proxy, rec := newEdgeBackedProxy(t, testOrg)
+	setConcreteTenantResolver(proxy)
+	proxy.SetProviderBindingResolver(func(_ context.Context, _, _, _ string) (ProviderBindingSelection, error) {
+		return ProviderBindingSelection{ExportPath: testPlatformInfrastructureExport}, nil
+	})
+
+	w := serveProxy(proxy, boundProviderRequestPath(testOrgInfrastructureExport, "/dataplane/x"))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for mismatched binding", w.Code)
+	}
+	if rec.hit {
+		t.Fatal("mismatched selector reached the org provider edge")
+	}
+}
+
+// A terminating APIBinding may still serve while kcp deletes claimed content,
+// but it cannot authorize a new sandbox data-plane request. The exact selector
+// must fail closed even when its export path still matches.
+func TestBackendProxyBoundSelectorTerminatingBindingFailsClosed(t *testing.T) {
+	proxy, rec := newEdgeBackedProxy(t, testOrg)
+	setConcreteTenantResolver(proxy)
+	proxy.SetProviderBindingResolver(func(_ context.Context, _, _, _ string) (ProviderBindingSelection, error) {
+		return ProviderBindingSelection{ExportPath: testOrgInfrastructureExport, Terminating: true}, nil
+	})
+
+	w := serveProxy(proxy, boundProviderRequestPath(testOrgInfrastructureExport, "/dataplane/x"))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for terminating binding", w.Code)
+	}
+	if rec.hit {
+		t.Fatal("terminating binding reached the org provider edge")
 	}
 }
 

@@ -12,6 +12,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,10 +63,19 @@ type dataPlaneRef struct {
 // crafted value (a component name with a slash, say) cannot reroute the
 // request; kcp cluster IDs keep their colons (':' is a valid path character
 // PathEscape leaves alone).
-func (s *Server) dataPlaneURL(clusterID string, ref dataPlaneRef, verb, tail string) string {
+//
+// A sandbox identity may carry the exact Infrastructure APIExport path that
+// was validated when the sandbox was admitted. That selector is encoded as a
+// path-safe opaque value and placed before the data-plane route. Generic
+// request identities leave it empty and retain the original provider path.
+func (s *Server) dataPlaneURL(id identity, ref dataPlaneRef, verb, tail string) string {
+	providerPath := "/services/providers/" + infraDataPlaneProvider
+	if exportPath := strings.TrimSpace(id.providerExportPath); exportPath != "" {
+		providerPath += "/__bound/v1/" + base64.RawURLEncoding.EncodeToString([]byte(exportPath))
+	}
 	u := strings.TrimRight(s.hubBase, "/") +
-		fmt.Sprintf("/services/providers/%s/dataplane/clusters/%s/%s/%s",
-			infraDataPlaneProvider, url.PathEscape(clusterID), url.PathEscape(ref.Resource), url.PathEscape(ref.Name))
+		fmt.Sprintf("%s/dataplane/clusters/%s/%s/%s",
+			providerPath, url.PathEscape(id.clusterID), url.PathEscape(ref.Resource), url.PathEscape(ref.Name))
 	if ref.Component != "" {
 		u += "/components/" + url.PathEscape(ref.Component)
 	}
@@ -91,13 +101,16 @@ func (s *Server) newDataPlaneRequest(ctx context.Context, method string, id iden
 	if strings.TrimSpace(ref.Resource) == "" || strings.TrimSpace(ref.Name) == "" {
 		return nil, fmt.Errorf("development target is incomplete (resource %q, name %q); the project's template binding did not resolve", ref.Resource, ref.Name)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, s.dataPlaneURL(id.clusterID, ref, verb, tail), body)
+	req, err := http.NewRequestWithContext(ctx, method, s.dataPlaneURL(id, ref, verb, tail), body)
 	if err != nil {
 		return nil, err
 	}
-	if token := strings.TrimSpace(id.token); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	// The hub verified this identity before forwarding the request to App
+	// Studio. Forward the complete server-owned identity contract to the
+	// infrastructure provider; forwarding only the bearer token would force the
+	// next proxy hop to reconstruct context and would lose the workspace/cluster
+	// binding that scopes the data-plane target.
+	setHubCallerIdentityHeaders(req, id)
 	return req, nil
 }
 

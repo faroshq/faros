@@ -31,12 +31,17 @@ import (
 // the org/workspace UUIDs are derived from it rather than from client-supplied
 // headers (defense in depth — a spoofed header cannot mis-scope storage).
 type identity struct {
-	tenantPath    string // X-Faros-Tenant, e.g. root:faros:orgs:<org>:<ws>
-	clusterID     string // X-Faros-Cluster, the workspace's kcp logical-cluster ID
-	orgUUID       string // parsed from tenantPath
-	workspaceUUID string // parsed from tenantPath ("" when the path is org-only)
-	user          string // X-Faros-User
-	token         string // bearer token, forwarded as-is from Authorization
+	tenantPath string // X-Faros-Tenant, e.g. root:faros:orgs:<org>:<ws>
+	clusterID  string // X-Faros-Cluster, the workspace's kcp logical-cluster ID
+	// providerExportPath is populated only on identities captured by a coding
+	// sandbox. It selects the provider export that owns that sandbox's data
+	// plane; ordinary request identities leave it empty and use the generic
+	// provider route.
+	providerExportPath string
+	orgUUID            string // parsed from tenantPath
+	workspaceUUID      string // parsed from tenantPath ("" when the path is org-only)
+	user               string // X-Faros-User
+	token              string // bearer token, forwarded as-is from Authorization
 }
 
 const tenantPathPrefix = "root:faros:tenants:"

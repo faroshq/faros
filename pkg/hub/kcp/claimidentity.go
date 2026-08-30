@@ -373,11 +373,20 @@ func (b *Bootstrapper) StaleClaimIdentities(ctx context.Context, orgUUID, wsUUID
 		}
 		ex, gerr := exportClient.Resource(apiExportGVR).Get(ctx, name, metav1.GetOptions{})
 		if gerr != nil {
-			// A provider mid-teardown or mid-provision is not a finding. Skip it
-			// rather than fail the whole listing — this feeds a page render.
-			continue
+			// An incomplete export means ownership is unknown, not clean. The REST
+			// layer preserves the enabled set while marking stale inspection
+			// incomplete, so a dependent provider cannot fail open on this read.
+			return nil, fmt.Errorf("getting APIExport %q in %s: %w", name, path, gerr)
 		}
-		be.identity, _, _ = unstructured.NestedString(ex.Object, "status", "identityHash")
+		var found bool
+		var ierr error
+		be.identity, found, ierr = unstructured.NestedString(ex.Object, "status", "identityHash")
+		if ierr != nil {
+			return nil, fmt.Errorf("reading identityHash of APIExport %q in %s: %w", name, path, ierr)
+		}
+		if !found || strings.TrimSpace(be.identity) == "" {
+			return nil, fmt.Errorf("APIExport %q in %s has no status.identityHash", name, path)
+		}
 		pcs, _, _ := unstructured.NestedSlice(ex.Object, "spec", "permissionClaims")
 		for _, pc := range pcs {
 			m, ok := pc.(map[string]any)
@@ -387,6 +396,9 @@ func (b *Bootstrapper) StaleClaimIdentities(ctx context.Context, orgUUID, wsUUID
 			g, _ := m["group"].(string)
 			r, _ := m["resource"].(string)
 			h, _ := m["identityHash"].(string)
+			if strings.HasSuffix(g, ".faros.sh") && strings.TrimSpace(h) == "" {
+				return nil, fmt.Errorf("APIExport %q in %s has no identityHash for permission claim %s/%s", name, path, g, r)
+			}
 			if h != "" {
 				be.claims[g+"/"+r] = h
 			}

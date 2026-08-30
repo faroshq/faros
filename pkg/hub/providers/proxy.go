@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io/fs"
@@ -34,6 +35,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/faroshq/faros/pkg/apiurl"
+	"github.com/faroshq/faros/pkg/kcppaths"
 )
 
 // NewUIProxy returns an http.Handler serving /ui/providers/{name}/* by reverse
@@ -88,9 +90,27 @@ func (f TenantResolverFunc) Resolve(r *http.Request) (string, string, error) {
 	return f(r)
 }
 
-// NewBackendProxy returns an http.Handler serving /services/providers/{name}/*
-// by reverse proxying to the provider's spec.backend.url. The user's
-// Authorization header is forwarded as-is. If a TenantResolver is
+// ProviderBindingSelection describes the current APIBinding state needed by a
+// bound-provider route. Terminating bindings remain visible to the catalog but
+// cannot authorize new data-plane requests.
+type ProviderBindingSelection struct {
+	ExportPath  string
+	Terminating bool
+}
+
+// ProviderBindingResolver resolves the APIExport currently bound by a concrete
+// tenant workspace. It is used only by the versioned opaque selector route;
+// bare provider routes keep their existing org-first behavior.
+//
+// orgUUID and workspaceUUID are parsed from a tenant path already authenticated
+// and authorized by a TenantResolver. Implementations must not derive either
+// value from an untrusted header or from the selector itself.
+type ProviderBindingResolver func(ctx context.Context, orgUUID, workspaceUUID, providerName string) (ProviderBindingSelection, error)
+
+// NewBackendProxy returns an http.Handler serving /services/providers/{name}/*.
+// Platform providers are reverse-proxied to spec.backend.url; organization-
+// owned providers are reachable only through their registered edge route. The
+// user's Authorization header is forwarded as-is. If a TenantResolver is
 // installed via SetTenantResolver, the proxy resolves the caller's
 // identity and injects X-Faros-User + X-Faros-Tenant so the provider can
 // scope work without re-parsing the bearer token. Incoming
@@ -123,7 +143,7 @@ func NewBackendProxy(reg *Registry, log logr.Logger) *ProviderProxy {
 			p.log.V(2).Info("no tenant resolver wired; forwarding without X-Faros-* headers", "provider", name)
 			return
 		}
-		user, tenantPath, err := p.tenantResolver.Resolve(req)
+		user, tenantPath, err := p.resolveTenant(req)
 		if err != nil {
 			// Anonymous (no bearer) is common on /healthz probes
 			// and isn't worth screaming about — keep at V(2). Real
@@ -177,6 +197,13 @@ func (p *ProviderProxy) SetTenantResolver(r TenantResolver) {
 	p.tenantResolver = r
 }
 
+// SetProviderBindingResolver installs the resolver used by bound-provider
+// selector routes. If it is nil, selector routes fail closed while unqualified
+// routes retain their existing behavior.
+func (p *ProviderProxy) SetProviderBindingResolver(r ProviderBindingResolver) {
+	p.providerBindingResolver = r
+}
+
 // SetClusterResolver installs an optional resolver mapping a tenant workspace
 // path to its kcp logical-cluster ID, injected as X-Faros-Cluster on
 // backend-proxied requests. Wire alongside SetTenantResolver; without it the
@@ -211,6 +238,10 @@ type ProviderProxy struct {
 	// See SetTenantResolver.
 	tenantResolver TenantResolver
 
+	// providerBindingResolver verifies that a selector names the APIExport
+	// currently bound in the caller's concrete tenant workspace.
+	providerBindingResolver ProviderBindingResolver
+
 	// clusterResolver, when set, maps the resolved tenant workspace path to
 	// its kcp logical-cluster ID, injected as X-Faros-Cluster. Providers need
 	// the ID (not the path) to address per-workspace surfaces that key on it —
@@ -228,6 +259,40 @@ type ProviderProxy struct {
 	// bearer through /services/providers/{name}, where it would act as a
 	// TokenReview oracle against the provider's runtime cluster.
 	denyHubOnlyEndpoints bool
+}
+
+// providerTenantResolution is cached on the request while it passes through
+// the proxy. Selector authorization and identity-header injection must use the
+// same verified tenant result; resolving twice could otherwise authorize one
+// workspace and forward headers for another if membership changes mid-request.
+type providerTenantResolution struct {
+	user       string
+	tenantPath string
+	err        error
+}
+
+type providerTenantResolutionContextKey struct{}
+
+func (p *ProviderProxy) resolveTenant(r *http.Request) (string, string, error) {
+	if r == nil {
+		return "", "", errors.New("tenant resolver unavailable")
+	}
+	if resolved, ok := r.Context().Value(providerTenantResolutionContextKey{}).(providerTenantResolution); ok {
+		return resolved.user, resolved.tenantPath, resolved.err
+	}
+	if p.tenantResolver == nil {
+		return "", "", errors.New("tenant resolver unavailable")
+	}
+	return p.tenantResolver.Resolve(r)
+}
+
+func rememberTenantResolution(r *http.Request, user, tenantPath string, err error) {
+	if r == nil {
+		return
+	}
+	*r = *r.WithContext(context.WithValue(r.Context(), providerTenantResolutionContextKey{}, providerTenantResolution{
+		user: user, tenantPath: tenantPath, err: err,
+	}))
 }
 
 // SetFallback installs the portal SPA handler invoked for non-asset paths
@@ -250,6 +315,49 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		http.NotFound(w, r)
 		return
+	}
+
+	// A bound selector is meaningful only on the backend proxy. It is opaque
+	// outside this handler: decode it, authenticate the caller's concrete
+	// workspace, compare it to that workspace's current APIBinding, and only
+	// then select the exact registry record. Any malformed, stale, unbound, or
+	// otherwise unverifiable selector is hidden behind a 404.
+	var selectedExportPath string
+	var selectorPresent bool
+	var prov Provider
+	var found bool
+	if !p.fallbackForSPA {
+		selectedExportPath, rest, selectorPresent, ok = parseBoundProviderPath(rest)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if selectorPresent {
+			if p.tenantResolver == nil || p.providerBindingResolver == nil {
+				http.NotFound(w, r)
+				return
+			}
+			user, tenantPath, err := p.resolveTenant(r)
+			orgUUID, workspaceUUID, concrete := parseConcreteTenantPath(tenantPath)
+			if err != nil || user == "" || !concrete {
+				p.log.V(2).Info("bound provider selector rejected: tenant resolution unavailable", "provider", name, "err", err)
+				http.NotFound(w, r)
+				return
+			}
+			rememberTenantResolution(r, user, tenantPath, nil)
+			binding, err := p.providerBindingResolver(r.Context(), orgUUID, workspaceUUID, name)
+			if err != nil || binding.Terminating || binding.ExportPath != selectedExportPath {
+				p.log.V(2).Info("bound provider selector rejected: binding mismatch", "provider", name, "tenant", tenantPath, "err", err)
+				http.NotFound(w, r)
+				return
+			}
+			prov, found = p.reg.GetByNameAndExportPath(name, selectedExportPath)
+			if !found {
+				p.log.V(2).Info("bound provider selector rejected: provider export is not registered", "provider", name, "exportPath", selectedExportPath)
+				http.NotFound(w, r)
+				return
+			}
+		}
 	}
 
 	if p.denyHubOnlyEndpoints && isHubOnlyProviderPath(rest) {
@@ -277,7 +385,9 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// UI proxy stays platform-scoped: it serves static assets, and an org's
 	// bundle is not something the hub hosts.
-	prov, found := p.resolveProvider(r, name)
+	if !selectorPresent {
+		prov, found = p.resolveProvider(r, name)
+	}
 	if !found {
 		http.Error(w, "provider not found: "+name, http.StatusNotFound)
 		return
@@ -288,11 +398,17 @@ func (p *ProviderProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// An org-owned provider runs in the tenant's own cluster, so its backend is
-	// reached over the edge tunnel. Do this before pick(): BackendURL for such
-	// a provider is an address inside that cluster, and dialling it from here
-	// would either fail or — worse, if it happened to resolve — reach something
-	// else entirely.
-	if prov.EdgeRoute != nil {
+	// reached exclusively over the edge tunnel. Do this before pick(): its
+	// BackendURL is an address inside a tenant-controlled cluster, and direct
+	// dialing would either fail or — worse, if it happened to resolve — reach a
+	// different service. A missing/incomplete route must fail closed rather than
+	// falling through to that URL. UI resolution remains platform-scoped above.
+	if prov.OrgUUID != "" && !p.fallbackForSPA {
+		if prov.EdgeRoute == nil {
+			p.log.Info("organization provider has no edge route", "provider", name, "org", prov.OrgUUID)
+			http.Error(w, "organization provider edge route unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		p.serveOverEdge(w, r, prov, rest)
 		return
 	}
@@ -421,6 +537,57 @@ func splitProviderPath(reqPath, prefix string) (name, rest string, ok bool) {
 		return "", "", false
 	}
 	return name, tail[slash:], true
+}
+
+const boundProviderPathPrefix = "/__bound/v1"
+
+// parseBoundProviderPath recognizes and strips the versioned opaque selector
+// prefix. The bools are (exportPath, forwardedRest, selectorPresent, valid).
+// Paths that do not start with the reserved prefix are ordinary unqualified
+// provider paths. A path that does start with it must contain one canonical
+// raw base64url segment and is invalid otherwise.
+func parseBoundProviderPath(rest string) (string, string, bool, bool) {
+	if rest != boundProviderPathPrefix && !strings.HasPrefix(rest, boundProviderPathPrefix+"/") {
+		return "", rest, false, true
+	}
+
+	tail := strings.TrimPrefix(rest, boundProviderPathPrefix+"/")
+	if tail == rest || tail == "" {
+		return "", "", true, false
+	}
+	encoded := tail
+	forwardedRest := "/"
+	if slash := strings.IndexByte(tail, '/'); slash >= 0 {
+		encoded = tail[:slash]
+		forwardedRest = tail[slash:]
+		if forwardedRest == "" {
+			forwardedRest = "/"
+		}
+	}
+	if encoded == "" {
+		return "", "", true, false
+	}
+
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return "", "", true, false
+	}
+	return string(decoded), forwardedRest, true, true
+}
+
+// parseConcreteTenantPath parses the canonical child-workspace path used by
+// provider APIBindings: root:faros:tenants:{org}:{workspace}. It rejects
+// organization-only paths, extra segments, and paths outside the tenant tree.
+func parseConcreteTenantPath(path string) (orgUUID, workspaceUUID string, ok bool) {
+	rest, found := strings.CutPrefix(path, kcppaths.TenantsParent+":")
+	if !found {
+		return "", "", false
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // isAssetPath reports whether the request looks like a static asset the

@@ -11,9 +11,16 @@ You may obtain a copy of the License at
 package kcp
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+
+	"k8s.io/client-go/rest"
+
+	"github.com/faroshq/faros/pkg/kcppaths"
 )
 
 const (
@@ -148,6 +155,102 @@ func TestClaimIdentityMismatchQuietCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := compareClaims(tc.claims, tc.declared, tc.serving); len(got) != 0 {
 				t.Errorf("reported a mismatch on a valid configuration: %+v", got)
+			}
+		})
+	}
+}
+
+type staleClaimIdentityRoundTripper struct {
+	export       map[string]any
+	exportStatus int
+}
+
+func (t staleClaimIdentityRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	status := http.StatusOK
+	var body map[string]any
+	switch {
+	case strings.HasSuffix(req.URL.Path, "/apis/apis.kcp.io/v1alpha2/apibindings"):
+		body = map[string]any{
+			"apiVersion": "apis.kcp.io/v1alpha2",
+			"kind":       "APIBindingList",
+			"items": []any{map[string]any{
+				"apiVersion": "apis.kcp.io/v1alpha2",
+				"kind":       "APIBinding",
+				"metadata":   map[string]any{"name": "app-studio"},
+				"spec": map[string]any{"reference": map[string]any{"export": map[string]any{
+					"path": kcppaths.ProviderPath("app-studio"), "name": "ai.faros.sh",
+				}}},
+				"status": map[string]any{
+					"phase":          "Bound",
+					"boundResources": []any{map[string]any{"group": "infrastructure.faros.sh"}},
+				},
+			}},
+		}
+	case strings.Contains(req.URL.Path, "/apis/apis.kcp.io/v1alpha1/apiexports/"):
+		status = t.exportStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		body = t.export
+		if status >= http.StatusBadRequest {
+			body = map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Status",
+				"status":     "Failure",
+				"message":    "APIExport read failed",
+				"code":       status,
+			}
+		}
+	default:
+		status = http.StatusNotFound
+		body = map[string]any{"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": status}
+	}
+	raw, _ := json.Marshal(body)
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(string(raw))),
+		Request:    req,
+	}, nil
+}
+
+func TestStaleClaimIdentitiesReturnsUnknownOnIncompleteAPIExport(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		export       map[string]any
+		exportStatus int
+	}{
+		{
+			name: "missing status identity",
+			export: map[string]any{
+				"apiVersion": "apis.kcp.io/v1alpha1", "kind": "APIExport",
+				"metadata": map[string]any{"name": "ai.faros.sh"},
+				"status":   map[string]any{},
+			},
+		},
+		{
+			name: "missing first-party claim identity",
+			export: map[string]any{
+				"apiVersion": "apis.kcp.io/v1alpha1", "kind": "APIExport",
+				"metadata": map[string]any{"name": "ai.faros.sh"},
+				"status":   map[string]any{"identityHash": "export-hash"},
+				"spec": map[string]any{"permissionClaims": []any{map[string]any{
+					"group": "infrastructure.faros.sh", "resource": "instances",
+				}}},
+			},
+		},
+		{
+			name:         "APIExport read failure",
+			exportStatus: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := staleClaimIdentityRoundTripper{export: tc.export, exportStatus: tc.exportStatus}
+			bootstrapper := NewBootstrapper(&rest.Config{Host: "https://kcp.test", Transport: transport})
+			got, err := bootstrapper.StaleClaimIdentities(t.Context(), "org-a", "ws-a")
+			if err == nil {
+				t.Fatalf("StaleClaimIdentities returned %v, want incomplete inspection error", got)
 			}
 		})
 	}
