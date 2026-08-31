@@ -48,6 +48,7 @@ type MemoryStore struct {
 	bootstrapPermits  map[Scope]projectBootstrapPermit
 	projectThumbnails map[Scope]ProjectThumbnail
 	attachments       map[Scope]map[string]Attachment
+	attachmentDeleted map[Scope]struct{}
 }
 
 type projectBootstrapPermit struct {
@@ -70,6 +71,7 @@ func NewMemoryStore() *MemoryStore {
 		bootstrapPermits:      map[Scope]projectBootstrapPermit{},
 		projectThumbnails:     map[Scope]ProjectThumbnail{},
 		attachments:           map[Scope]map[string]Attachment{},
+		attachmentDeleted:     map[Scope]struct{}{},
 	}
 }
 
@@ -589,6 +591,7 @@ func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) erro
 	delete(s.approvalModes, scope)
 	delete(s.projectThumbnails, scope)
 	delete(s.attachments, scope)
+	s.attachmentDeleted[scope] = struct{}{}
 	return nil
 }
 
@@ -599,6 +602,9 @@ func (s *MemoryStore) CreateAttachment(_ context.Context, scope Scope, attachmen
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, deleted := s.attachmentDeleted[scope]; deleted {
+		return Attachment{}, ErrAttachmentProjectDeleted
+	}
 	if s.attachments == nil {
 		s.attachments = map[Scope]map[string]Attachment{}
 	}
@@ -607,6 +613,20 @@ func (s *MemoryStore) CreateAttachment(_ context.Context, scope Scope, attachmen
 	}
 	if _, exists := s.attachments[scope][prepared.ID]; exists {
 		return Attachment{}, ErrAttachmentConflict
+	}
+	now := time.Now()
+	var storedBytes int64
+	var storedCount int
+	for id, existing := range s.attachments[scope] {
+		if attachmentExpired(existing, now) {
+			delete(s.attachments[scope], id)
+			continue
+		}
+		storedBytes += existing.SizeBytes
+		storedCount++
+	}
+	if storedCount+1 > AttachmentProjectMaxCount || storedBytes+prepared.SizeBytes > AttachmentProjectMaxBytes {
+		return Attachment{}, ErrAttachmentQuotaExceeded
 	}
 	s.attachments[scope][prepared.ID] = cloneAttachment(prepared)
 	return cloneAttachment(prepared), nil
@@ -661,30 +681,82 @@ func (s *MemoryStore) ListAttachments(_ context.Context, scope Scope) ([]Attachm
 	return result, nil
 }
 
-func (s *MemoryStore) BindAttachment(_ context.Context, scope Scope, receipt AttachmentReceipt, actor string) (Attachment, error) {
-	if err := scope.validate(); err != nil {
+func (s *MemoryStore) BindAttachment(ctx context.Context, scope Scope, receipt AttachmentReceipt, actor string) (Attachment, error) {
+	bound, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt}, actor, "legacy:"+strings.TrimSpace(receipt.ID))
+	if err != nil {
 		return Attachment{}, err
 	}
-	actor = strings.TrimSpace(actor)
+	return bound[0], nil
+}
+
+func (s *MemoryStore) BindAttachments(_ context.Context, scope Scope, receipts []AttachmentReceipt, actor, bindingID string) ([]Attachment, error) {
+	if err := scope.validate(); err != nil {
+		return nil, err
+	}
+	actor, bindingID = strings.TrimSpace(actor), strings.TrimSpace(bindingID)
+	if actor == "" || bindingID == "" || len(receipts) == 0 {
+		return nil, fmt.Errorf("attachment actor, binding ID, and receipts are required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	attachment, ok := s.attachments[scope][strings.TrimSpace(receipt.ID)]
-	if !ok {
-		return Attachment{}, ErrAttachmentNotFound
+	seen := map[string]struct{}{}
+	result := make([]Attachment, 0, len(receipts))
+	for _, receipt := range receipts {
+		id := strings.TrimSpace(receipt.ID)
+		if _, duplicate := seen[id]; duplicate {
+			return nil, ErrAttachmentReceiptMismatch
+		}
+		seen[id] = struct{}{}
+		attachment, ok := s.attachments[scope][id]
+		if !ok {
+			return nil, ErrAttachmentNotFound
+		}
+		if attachmentExpired(attachment, time.Now()) {
+			delete(s.attachments[scope], attachment.ID)
+			return nil, ErrAttachmentNotFound
+		}
+		if err := validateAttachmentReceipt(attachment, receipt, actor); err != nil {
+			return nil, err
+		}
+		if !attachment.Draft && attachment.BindingID != "" && attachment.BindingID != bindingID {
+			return nil, ErrAttachmentConflict
+		}
+		result = append(result, attachment)
 	}
-	if attachmentExpired(attachment, time.Now()) {
-		delete(s.attachments[scope], attachment.ID)
-		return Attachment{}, ErrAttachmentNotFound
+	for i := range result {
+		if result[i].Draft {
+			result[i].Draft = false
+			result[i].BindingID = bindingID
+			result[i].DraftExpiresAt = result[i].ExpiresAt
+			result[i].ExpiresAt = nil
+			s.attachments[scope][result[i].ID] = cloneAttachment(result[i])
+		}
+		result[i] = cloneAttachment(result[i])
 	}
-	if err := validateAttachmentReceipt(attachment, receipt, actor); err != nil {
-		return Attachment{}, err
+	return result, nil
+}
+
+func (s *MemoryStore) RollbackAttachmentBinding(_ context.Context, scope Scope, bindingID string) error {
+	if err := scope.validate(); err != nil {
+		return err
 	}
-	if attachment.Draft {
-		attachment.Draft = false
-		attachment.ExpiresAt = nil
-		s.attachments[scope][attachment.ID] = cloneAttachment(attachment)
+	bindingID = strings.TrimSpace(bindingID)
+	if bindingID == "" {
+		return fmt.Errorf("attachment binding ID is required")
 	}
-	return cloneAttachment(attachment), nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, attachment := range s.attachments[scope] {
+		if attachment.BindingID != bindingID {
+			continue
+		}
+		attachment.Draft = true
+		attachment.ExpiresAt = attachment.DraftExpiresAt
+		attachment.DraftExpiresAt = nil
+		attachment.BindingID = ""
+		s.attachments[scope][id] = cloneAttachment(attachment)
+	}
+	return nil
 }
 
 func (s *MemoryStore) DeleteAttachment(_ context.Context, scope Scope, id, actor string) error {
@@ -718,6 +790,7 @@ func (s *MemoryStore) DeleteProjectAttachments(_ context.Context, scope Scope) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.attachments, scope)
+	s.attachmentDeleted[scope] = struct{}{}
 	return nil
 }
 

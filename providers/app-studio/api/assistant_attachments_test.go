@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/faroshq/provider-app-studio/store"
 )
+
+func TestParseAttachmentDraftRejectsPermanentUpload(t *testing.T) {
+	request := httptest.NewRequest("POST", "/", nil)
+	request.Header.Set("X-Faros-Attachment-Draft", "false")
+	if _, err := parseAttachmentDraft(request); err == nil || !strings.Contains(err.Error(), "permanent attachment upload is not supported") {
+		t.Fatalf("permanent upload error = %v", err)
+	}
+}
 
 type projectAssistantAttachmentReaderTestDouble struct {
 	contents map[string][]byte
@@ -183,6 +192,30 @@ func TestProjectAssistantReadAttachmentToolAlignsMultibyteRange(t *testing.T) {
 	}
 	if envelope["content"] != "€" || envelope["offset"] != float64(1) || envelope["nextOffset"] != float64(4) || envelope["complete"] != false {
 		t.Fatalf("multibyte attachment range = %#v", envelope)
+	}
+}
+
+func TestProjectAssistantReadAttachmentContentIsTransient(t *testing.T) {
+	raw := `{"attachmentID":"text-1","filename":"notes.txt","contentType":"text/plain","sizeBytes":18,"offset":0,"nextOffset":18,"content":"private plan text","complete":true}`
+	state := newProjectEinoAssistantRunState()
+	placeholder := state.RegisterTransientToolResult(projectToolReadAttachment, raw)
+	if strings.Contains(placeholder, "private plan text") || !strings.Contains(placeholder, "contentSHA256") {
+		t.Fatalf("persistent placeholder leaked content: %s", placeholder)
+	}
+	expanded := state.ExpandTransientToolMessages([]*schema.Message{{
+		Role: schema.Tool, ToolName: projectToolReadAttachment, ToolCallID: "call-1", Content: placeholder,
+	}})
+	if len(expanded) != 1 || expanded[0].Content != raw {
+		t.Fatalf("immediate model input did not recover transient content: %#v", expanded)
+	}
+	state.RecordModelInput([]chatMessage{{Role: "tool", Name: projectToolReadAttachment, ToolCallID: "call-1", Content: raw}})
+	checkpoint := state.CheckpointState()
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private plan text") || !strings.Contains(string(encoded), "contentSHA256") {
+		t.Fatalf("checkpoint persisted raw attachment content: %s", encoded)
 	}
 }
 

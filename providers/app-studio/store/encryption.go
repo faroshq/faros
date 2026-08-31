@@ -1107,17 +1107,48 @@ func (s *encryptedStore) ListAttachments(ctx context.Context, scope Scope) ([]At
 }
 
 func (s *encryptedStore) BindAttachment(ctx context.Context, scope Scope, receipt AttachmentReceipt, actor string) (Attachment, error) {
+	bound, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt}, actor, "legacy:"+strings.TrimSpace(receipt.ID))
+	if err != nil {
+		return Attachment{}, err
+	}
+	return bound[0], nil
+}
+
+func (s *encryptedStore) BindAttachments(ctx context.Context, scope Scope, receipts []AttachmentReceipt, actor, bindingID string) ([]Attachment, error) {
 	attachmentStore, ok := s.inner.(AttachmentStore)
 	if !ok {
-		return Attachment{}, ErrAttachmentNotFound
+		return nil, ErrAttachmentNotFound
 	}
-	if _, err := VerifyAttachmentReceipt(ctx, s, scope, receipt, actor); err != nil {
-		return Attachment{}, err
+	verified := make([]Attachment, 0, len(receipts))
+	for _, receipt := range receipts {
+		attachment, err := VerifyAttachmentReceipt(ctx, s, scope, receipt, actor)
+		if err != nil {
+			return nil, err
+		}
+		verified = append(verified, attachment)
 	}
-	if _, err := attachmentStore.BindAttachment(ctx, scope, receipt, actor); err != nil {
-		return Attachment{}, err
+	if _, err := attachmentStore.BindAttachments(ctx, scope, receipts, actor, bindingID); err != nil {
+		return nil, err
 	}
-	return s.GetAttachment(ctx, scope, receipt.ID)
+	// Do not perform a fallible read after the inner store commits the batch.
+	// Verification above already returned the plaintext objects; project the
+	// committed lifecycle fields onto those copies so success/failure remains
+	// aligned with the atomic storage boundary.
+	for index := range verified {
+		verified[index].Draft = false
+		verified[index].BindingID = bindingID
+		verified[index].DraftExpiresAt = verified[index].ExpiresAt
+		verified[index].ExpiresAt = nil
+	}
+	return verified, nil
+}
+
+func (s *encryptedStore) RollbackAttachmentBinding(ctx context.Context, scope Scope, bindingID string) error {
+	attachmentStore, ok := s.inner.(AttachmentStore)
+	if !ok {
+		return ErrAttachmentNotFound
+	}
+	return attachmentStore.RollbackAttachmentBinding(ctx, scope, bindingID)
 }
 
 func (s *encryptedStore) DeleteAttachment(ctx context.Context, scope Scope, id, actor string) error {

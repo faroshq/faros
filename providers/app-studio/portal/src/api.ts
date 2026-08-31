@@ -158,12 +158,13 @@ async function request<T>(ctx: FarosContext | null, method: string, path: string
   return (text ? JSON.parse(text) : null) as T
 }
 
-async function requestBlob(ctx: FarosContext | null, path: string): Promise<Blob> {
+async function requestBlob(ctx: FarosContext | null, path: string, signal?: AbortSignal): Promise<Blob> {
   const res = await fetch(path, {
     method: 'GET',
     credentials: 'same-origin',
     headers: tenantHeaders({ token: ctx?.token }),
     cache: 'no-cache',
+    signal,
   })
   if (!res.ok) {
     throw new ProjectAPIRequestError(res.statusText || 'project thumbnail is unavailable', res.status)
@@ -1093,8 +1094,8 @@ export const api = {
     return assistantAttachmentReceipts(body)
   },
 
-  async getAssistantAttachment(ctx: FarosContext | null, name: string, attachmentID: string): Promise<Blob> {
-    return requestBlob(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments/${encodeURIComponent(attachmentID)}`)
+  async getAssistantAttachment(ctx: FarosContext | null, name: string, attachmentID: string, signal?: AbortSignal): Promise<Blob> {
+    return requestBlob(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments/${encodeURIComponent(attachmentID)}`, signal)
   },
 
   async uploadAssistantAttachment(ctx: FarosContext | null, name: string, file: File, signal?: AbortSignal): Promise<ProjectAssistantAttachmentReceipt> {

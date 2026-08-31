@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,7 +104,7 @@ func TestMemoryAttachmentLifecycleAndReceiptAdmission(t *testing.T) {
 func TestMemoryAttachmentDraftExpiry(t *testing.T) {
 	ctx := context.Background()
 	scope := attachmentTestScope()
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	expired := now.Add(-time.Minute)
 	s := NewMemoryStore()
 	if _, err := s.CreateAttachment(ctx, scope, attachmentTestRecord(now.Add(-time.Hour), true, &expired)); err != nil {
@@ -147,6 +149,72 @@ func TestMemoryAttachmentDraftExpiry(t *testing.T) {
 	}
 	if listed, err := s.ListAttachments(ctx, scope); err != nil || len(listed) != 0 {
 		t.Fatalf("attachments after project deletion = %#v, %v", listed, err)
+	}
+}
+
+func TestMemoryAttachmentBatchBindingIsAtomicAndRollbackRestoresDrafts(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	first := attachmentTestRecord(now, true, &expires)
+	second := attachmentTestRecord(now.Add(time.Microsecond), true, &expires)
+	second.ID = "att-second"
+	second.Filename = "second.png"
+	for _, attachment := range []Attachment{first, second} {
+		if _, err := s.CreateAttachment(ctx, scope, attachment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipt := func(attachment Attachment) AttachmentReceipt {
+		return AttachmentReceipt{ID: attachment.ID, Filename: attachment.Filename, ContentType: attachment.ContentType, SizeBytes: attachment.SizeBytes, SHA256: attachment.SHA256, CreatedAt: attachment.CreatedAt}
+	}
+	bad := receipt(second)
+	bad.SHA256 = strings.Repeat("0", 64)
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt(first), bad}, "alice", "run-bad"); !errors.Is(err, ErrAttachmentReceiptMismatch) {
+		t.Fatalf("invalid batch error = %v", err)
+	}
+	if got, _ := s.GetAttachment(ctx, scope, first.ID); !got.Draft {
+		t.Fatal("first attachment was promoted by a rejected batch")
+	}
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt(first), receipt(second)}, "alice", "run-1"); err != nil {
+		t.Fatalf("bind batch: %v", err)
+	}
+	if err := s.RollbackAttachmentBinding(ctx, scope, "run-1"); err != nil {
+		t.Fatalf("rollback batch: %v", err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		got, err := s.GetAttachment(ctx, scope, id)
+		if err != nil || !got.Draft || got.ExpiresAt == nil || got.BindingID != "" {
+			t.Fatalf("rolled back attachment %q = %#v, %v", id, got, err)
+		}
+	}
+}
+
+func TestMemoryAttachmentProjectQuotaAndDeletionTombstone(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := attachmentTestScope()
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour)
+	for index := 0; index < AttachmentProjectMaxCount; index++ {
+		attachment := attachmentTestRecord(now.Add(time.Duration(index)*time.Microsecond), true, &expires)
+		attachment.ID = fmt.Sprintf("att-%d", index)
+		if _, err := s.CreateAttachment(ctx, scope, attachment); err != nil {
+			t.Fatalf("create attachment %d: %v", index, err)
+		}
+	}
+	over := attachmentTestRecord(now, true, &expires)
+	over.ID = "over-quota"
+	if _, err := s.CreateAttachment(ctx, scope, over); !errors.Is(err, ErrAttachmentQuotaExceeded) {
+		t.Fatalf("quota error = %v", err)
+	}
+	if err := s.DeleteProjectAttachments(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAttachment(ctx, scope, over); !errors.Is(err, ErrAttachmentProjectDeleted) {
+		t.Fatalf("create after project deletion error = %v", err)
 	}
 }
 

@@ -13,7 +13,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   error: '',
   retryable: false,
-  retryAction: 'upload',
+  retryAction: undefined,
 })
 
 const emit = defineEmits<{
@@ -43,7 +43,7 @@ function syncPreview(file: File) {
 function statusLabel(): string {
   if (props.status === 'uploading') return 'Uploading'
   if (props.status === 'deleting') return 'Removing'
-  if (props.status === 'error') return props.retryAction === 'delete' ? 'Removal failed' : 'Upload failed'
+  if (props.status === 'error') return props.retryAction === 'delete' ? 'Removal failed' : props.retryAction === 'upload' ? 'Upload failed' : 'Cannot attach'
   return ''
 }
 

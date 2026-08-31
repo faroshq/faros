@@ -416,6 +416,20 @@ test('first-project retry reuses the created project and durable request identit
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
 })
 
+test('first-project attachment retry remains current on the project-less create route', () => {
+  const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('Use the attached files as context for this project.', 'request-1', 'gpt-high'), 'demo')
+  assert.equal(state.firstProjectSubmissionCanRetryFromCreateRoute(pending, 4, 4, 'demo', ''), true)
+  assert.equal(state.firstProjectSubmissionCanRetryFromCreateRoute(pending, 4, 5, 'demo', ''), false)
+  assert.equal(state.firstProjectSubmissionCanRetryFromCreateRoute(pending, 4, 4, 'other', ''), false)
+  assert.equal(state.firstProjectSubmissionCanRetryFromCreateRoute(pending, 4, 4, 'demo', 'other'), false)
+})
+
+test('attachment-only project input gets a neutral planning prompt without changing authored text', () => {
+  assert.equal(state.projectCreationPrompt('', 0), '')
+  assert.equal(state.projectCreationPrompt('  ', 1), state.ATTACHMENT_ONLY_PROJECT_PROMPT)
+  assert.equal(state.projectCreationPrompt('  Build the app  ', 1), 'Build the app')
+})
+
 test('first-project pending submission matches the project/message handoff into normal send', () => {
   const pending = state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1', 'gpt-high'), 'demo')
   assert.equal(state.firstProjectSubmissionMatches(pending, 'demo', 'ship it'), true)

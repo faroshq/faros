@@ -151,6 +151,18 @@ export interface PendingFirstProjectSubmission {
   modelID: string
 }
 
+/**
+ * A project may be started from attachments alone. The planning endpoint still
+ * requires text, so use an explicit neutral description that records what the
+ * user actually supplied without inventing a product requirement.
+ */
+export const ATTACHMENT_ONLY_PROJECT_PROMPT = 'Use the attached files as context for this project.'
+
+export function projectCreationPrompt(content: string, attachmentCount: number): string {
+  const trimmed = content.trim()
+  return trimmed || (attachmentCount > 0 ? ATTACHMENT_ONLY_PROJECT_PROMPT : '')
+}
+
 export function newFirstProjectSubmission(content: string, clientRequestID: string, modelID = ''): PendingFirstProjectSubmission {
   return { content, clientRequestID, projectName: '', modelID }
 }
@@ -202,6 +214,25 @@ export function firstProjectSubmissionMatches(submission: PendingFirstProjectSub
 export function firstProjectSubmissionIsCurrent(submission: PendingFirstProjectSubmission, generation: number, currentGeneration: number, selectedProject: string, routeProject: string, draftProject: string): boolean {
 	return generation === currentGeneration && selectedProject === (submission.projectName || draftProject) &&
 		(routeProject === submission.projectName || (!submission.projectName && routeProject === ''))
+}
+
+/**
+ * The create route is also the recovery surface for a project that was
+ * created before its first attachment/turn was accepted. Its URL has no
+ * project segment, but the selected project still proves which pending
+ * submission owns the retry.
+ */
+export function firstProjectSubmissionCanRetryFromCreateRoute(
+  submission: PendingFirstProjectSubmission,
+  generation: number,
+  currentGeneration: number,
+  selectedProject: string,
+  routeProject: string,
+): boolean {
+	return generation === currentGeneration &&
+		Boolean(submission.projectName) &&
+		selectedProject === submission.projectName &&
+		routeProject === ''
 }
 
 export function normalizeAssistantRunStatus(status: unknown): AssistantRun['status'] | undefined {

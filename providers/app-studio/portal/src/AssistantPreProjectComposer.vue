@@ -39,6 +39,7 @@ const emit = defineEmits<{
 
 const rootRef = ref<HTMLDivElement | null>(null)
 const addMenuRootRef = ref<HTMLDivElement | null>(null)
+const attachmentMenuTriggerRef = ref<HTMLButtonElement | null>(null)
 const editorRef = ref<HTMLTextAreaElement | null>(null)
 const attachmentMenuOpen = ref(false)
 const attachmentInputRef = ref<HTMLInputElement | null>(null)
@@ -125,7 +126,7 @@ function statusLabel(attachment: AssistantStagedAttachment): string {
   if (attachment.status === 'staged') return 'Ready to attach'
   if (attachment.status === 'uploading') return 'Uploading'
   if (attachment.status === 'deleting') return 'Removing'
-  if (attachment.status === 'error') return attachment.retryAction === 'delete' ? 'Removal failed' : 'Upload failed'
+  if (attachment.status === 'error') return attachment.retryAction === 'delete' ? 'Removal failed' : attachment.retryAction === 'upload' ? 'Upload failed' : 'Cannot attach'
   return 'Ready'
 }
 
@@ -136,6 +137,7 @@ function attachmentLabel(attachment: AssistantStagedAttachment): string {
 useDismissibleAddMenu({
   open: attachmentMenuOpen,
   root: addMenuRootRef,
+  trigger: attachmentMenuTriggerRef,
   onClose: closeAttachmentMenu,
 })
 
@@ -235,6 +237,7 @@ onBeforeUnmount(() => {
             <slot name="menu" />
           </div>
           <button
+            ref="attachmentMenuTriggerRef"
             type="button"
             class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
             :disabled="disabled"

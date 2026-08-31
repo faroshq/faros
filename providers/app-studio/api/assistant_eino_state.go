@@ -667,7 +667,8 @@ func (s *projectEinoAssistantRunState) progressReminderPending() bool {
 
 func (s *projectEinoAssistantRunState) RegisterTransientToolResult(name, result string) string {
 	persistent := projectEinoAssistantPersistentToolResult(name, result)
-	if s == nil || projectToolBaseName(name) != projectToolGetPreviewConsoleLogs {
+	baseName := projectToolBaseName(name)
+	if s == nil || (baseName != projectToolGetPreviewConsoleLogs && baseName != projectToolReadAttachment) {
 		return persistent
 	}
 
@@ -689,14 +690,14 @@ func (s *projectEinoAssistantRunState) RegisterTransientToolResult(name, result 
 	if err := json.Unmarshal([]byte(persistent), &placeholder); err != nil {
 		placeholder = map[string]any{
 			"status":         "unavailable",
-			"summary":        "transient preview console result omitted from persistence",
+			"summary":        "transient tool result omitted from persistence",
 			"transientEvent": true,
 		}
 	}
 	placeholder["transientReference"] = reference
 	encoded, err := json.Marshal(placeholder)
 	if err != nil {
-		return `{"status":"unavailable","summary":"transient preview console result omitted from persistence"}`
+		return `{"status":"unavailable","summary":"transient tool result omitted from persistence"}`
 	}
 	return string(encoded)
 }
@@ -743,7 +744,7 @@ func (s *projectEinoAssistantRunState) ExpandTransientToolMessages(input []*sche
 			continue
 		}
 		switch projectToolBaseName(toolName) {
-		case projectToolGetPreviewConsoleLogs:
+		case projectToolGetPreviewConsoleLogs, projectToolReadAttachment:
 			result, ok := s.transientToolResults[strings.TrimSpace(placeholder.TransientReference)]
 			if !ok {
 				expanded = append(expanded, message)
@@ -2226,7 +2227,8 @@ func (s *projectEinoAssistantRunState) RecordModelInput(messages []chatMessage) 
 	messages = cloneChatMessages(messages)
 	for index := range messages {
 		if messages[index].Role == "tool" &&
-			projectToolBaseName(messages[index].Name) == projectToolGetPreviewConsoleLogs {
+			(projectToolBaseName(messages[index].Name) == projectToolGetPreviewConsoleLogs ||
+				projectToolBaseName(messages[index].Name) == projectToolReadAttachment) {
 			messages[index].Content = projectEinoAssistantPersistentToolResult(
 				messages[index].Name,
 				messages[index].Content,

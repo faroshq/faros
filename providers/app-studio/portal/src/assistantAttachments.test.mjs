@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { createServer } from 'vite'
+import { createSSRApp } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 
 let vite
 test.before(async () => {
@@ -65,4 +67,60 @@ test('keeps upload protocol and durable-accept clearing explicit in the portal s
   assert.match(composer, /Retry attachment upload/)
   assert.match(composer, /update:attachmentsPending/)
   assert.match(app, /startPostAccepted = true[\s\S]*clearSelectedTurnAttachments\(\)/)
+})
+
+test('history renders image previews through the scoped API while text stays compact', async () => {
+  const [{ default: AttachmentComponent }, { api }, app, apiSource] = await Promise.all([
+    vite.ssrLoadModule('/src/AssistantMessageAttachments.vue'),
+    vite.ssrLoadModule('/src/api.ts'),
+    readFile(new URL('./App.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./api.ts', import.meta.url), 'utf8'),
+  ])
+  const originalGet = api.getAssistantAttachment
+  const calls = []
+  // The component and this test resolve the same Vite module instance. Keep
+  // the fetch stub at the existing scoped API seam rather than bypassing it.
+  assert.equal(typeof originalGet, 'function')
+  api.getAssistantAttachment = async (...args) => {
+    calls.push(args)
+    return new Blob(['image-bytes'], { type: 'image/png' })
+  }
+  const image = {
+    id: 'att-image', filename: 'screen.png', contentType: 'image/png', sizeBytes: 12,
+    sha256: 'a'.repeat(64), createdAt: '2026-08-31T00:00:00Z',
+  }
+  const text = {
+    id: 'att-text', filename: 'plan.txt', contentType: 'text/plain', sizeBytes: 42,
+    sha256: 'b'.repeat(64), createdAt: '2026-08-31T00:00:00Z',
+  }
+  try {
+    const html = await renderToString(createSSRApp(AttachmentComponent, {
+      attachments: [image, text],
+      ctx: { token: 'user-token' },
+      projectName: 'demo',
+    }))
+    assert.match(html, /aria-busy="true"/)
+    assert.match(html, /Loading screen\.png/)
+    assert.match(html, /plan\.txt/)
+    await Promise.resolve()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0][1], 'demo')
+    assert.equal(calls[0][2], 'att-image')
+    assert.ok(calls[0][3] instanceof AbortSignal)
+  } finally {
+    api.getAssistantAttachment = originalGet
+  }
+  assert.match(app, /<AssistantMessageAttachments[\s\S]*:ctx="props\.ctx"[\s\S]*:project-name="message\.projectID"/)
+  assert.match(apiSource, /async getAssistantAttachment\(ctx: FarosContext \| null, name: string, attachmentID: string, signal\?: AbortSignal\)/)
+  assert.match(apiSource, /cache: 'no-cache'[\s\S]*signal,/)
+})
+
+test('image preview lifecycle revokes object URLs and aborts stale scoped requests', async () => {
+  const componentSource = await readFile(new URL('./AssistantMessageAttachments.vue', import.meta.url), 'utf8')
+  assert.match(componentSource, /URL\.createObjectURL\(blob\)/)
+  assert.match(componentSource, /URL\.revokeObjectURL\(preview\.url\)/)
+  assert.match(componentSource, /URL\.revokeObjectURL\(url\)/)
+  assert.match(componentSource, /new AbortController\(\)/)
+  assert.match(componentSource, /api\.getAssistantAttachment\(props\.ctx, props\.projectName, attachment\.id, controller\.signal\)/)
+  assert.match(componentSource, /onBeforeUnmount\(\(\) => \{[\s\S]*releasePreview\(attachmentID\)/)
 })

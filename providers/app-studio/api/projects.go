@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -793,6 +794,16 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	const attachmentCleanupFinalizer = "ai.faros.sh/attachment-storage"
+	if !slices.Contains(p.Finalizers, attachmentCleanupFinalizer) {
+		next := p.DeepCopy()
+		next.Finalizers = append(next.Finalizers, attachmentCleanupFinalizer)
+		p, err = c.Projects().Update(r.Context(), next, metav1.UpdateOptions{})
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+	}
 	uid := p.UID
 	if err := c.Projects().Delete(r.Context(), name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &uid},
@@ -803,7 +814,9 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
 		if err := s.store.DeleteProjectMessages(cleanupCtx, messageScope); err != nil {
-			klog.FromContext(r.Context()).Error(err, "delete project messages", "project", name)
+			cancelCleanup()
+			writeStatus(w, http.StatusInternalServerError, "InternalError", "delete project assistant data: "+err.Error())
+			return
 		}
 		cancelCleanup()
 	}
@@ -814,9 +827,27 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	if s.attachments != nil && !s.attachmentsInStore {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
 		if err := s.attachments.DeleteProjectAttachments(cleanupCtx, messageScope); err != nil {
-			klog.FromContext(r.Context()).Error(err, "delete project attachments", "project", name)
+			cancelCleanup()
+			writeStatus(w, http.StatusInternalServerError, "InternalError", "delete project attachments: "+err.Error())
+			return
 		}
 		cancelCleanup()
+	}
+	current, err := c.Projects().Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			writeProjectError(w, err)
+			return
+		}
+		current = nil
+	}
+	if current != nil && slices.Contains(current.Finalizers, attachmentCleanupFinalizer) {
+		next := current.DeepCopy()
+		next.Finalizers = slices.DeleteFunc(next.Finalizers, func(value string) bool { return value == attachmentCleanupFinalizer })
+		if _, err := c.Projects().Update(r.Context(), next, metav1.UpdateOptions{}); err != nil {
+			writeProjectError(w, err)
+			return
+		}
 	}
 	if thumbnailStore, ok := s.projectThumbnailStore(); ok {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())

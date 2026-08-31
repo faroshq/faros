@@ -102,6 +102,28 @@ func (s *Server) bindProjectAssistantAttachment(ctx context.Context, id identity
 // for attachment-bearing turns. It verifies the complete set before promoting
 // any draft, so a stale or forged receipt cannot leave a partially-bound turn.
 func (s *Server) bindProjectAssistantContentPartAttachments(ctx context.Context, id identity, project *aiv1alpha1.Project, parts []projectAssistantContentPart) error {
+	receipts := projectAssistantContentPartAttachmentReceipts(parts)
+	if len(receipts) == 0 {
+		return nil
+	}
+	return s.bindProjectAssistantContentPartAttachmentsForRun(ctx, id, project, parts, "legacy:"+receipts[0].ID)
+}
+
+func projectAssistantContentPartAttachmentReceipts(parts []projectAssistantContentPart) []store.AttachmentReceipt {
+	receipts := make([]store.AttachmentReceipt, 0)
+	for _, part := range parts {
+		if part.Type != projectAssistantContentPartAttachmentType || part.Attachment == nil {
+			continue
+		}
+		receipts = append(receipts, store.AttachmentReceipt{
+			ID: part.Attachment.ID, Filename: part.Attachment.Filename, ContentType: part.Attachment.ContentType,
+			SizeBytes: part.Attachment.SizeBytes, SHA256: part.Attachment.SHA256, CreatedAt: part.Attachment.CreatedAt,
+		})
+	}
+	return receipts
+}
+
+func (s *Server) verifyProjectAssistantContentPartAttachments(ctx context.Context, id identity, project *aiv1alpha1.Project, parts []projectAssistantContentPart) error {
 	if s == nil || project == nil {
 		return newValidationError("project attachments are unavailable")
 	}
@@ -109,20 +131,7 @@ func (s *Server) bindProjectAssistantContentPartAttachments(ctx context.Context,
 	if attachmentStore == nil && s.store != nil {
 		attachmentStore, _ = s.store.(store.AttachmentStore)
 	}
-	receipts := make([]store.AttachmentReceipt, 0)
-	for _, part := range parts {
-		if part.Type != projectAssistantContentPartAttachmentType || part.Attachment == nil {
-			continue
-		}
-		receipts = append(receipts, store.AttachmentReceipt{
-			ID:          part.Attachment.ID,
-			Filename:    part.Attachment.Filename,
-			ContentType: part.Attachment.ContentType,
-			SizeBytes:   part.Attachment.SizeBytes,
-			SHA256:      part.Attachment.SHA256,
-			CreatedAt:   part.Attachment.CreatedAt,
-		})
-	}
+	receipts := projectAssistantContentPartAttachmentReceipts(parts)
 	if len(receipts) == 0 {
 		return nil
 	}
@@ -135,12 +144,39 @@ func (s *Server) bindProjectAssistantContentPartAttachments(ctx context.Context,
 			return newValidationError("an attachment is unavailable or does not match its upload receipt")
 		}
 	}
-	for _, receipt := range receipts {
-		if _, err := attachmentStore.BindAttachment(ctx, scope, receipt, id.user); err != nil {
-			return fmt.Errorf("bind project attachment: %w", err)
-		}
+	return nil
+}
+
+func (s *Server) bindProjectAssistantContentPartAttachmentsForRun(ctx context.Context, id identity, project *aiv1alpha1.Project, parts []projectAssistantContentPart, bindingID string) error {
+	if err := s.verifyProjectAssistantContentPartAttachments(ctx, id, project, parts); err != nil {
+		return err
+	}
+	receipts := projectAssistantContentPartAttachmentReceipts(parts)
+	if len(receipts) == 0 {
+		return nil
+	}
+	attachmentStore, ok := s.store.(store.AttachmentStore)
+	if s.attachments != nil {
+		attachmentStore, ok = s.attachments, true
+	}
+	if !ok {
+		return fmt.Errorf("project attachment store is not configured")
+	}
+	if _, err := attachmentStore.BindAttachments(ctx, projectMessageScope(id.orgUUID, id.workspaceUUID, project), receipts, id.user, bindingID); err != nil {
+		return fmt.Errorf("bind project attachments: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) rollbackProjectAssistantAttachmentBinding(ctx context.Context, id identity, project *aiv1alpha1.Project, bindingID string) error {
+	attachmentStore, ok := s.store.(store.AttachmentStore)
+	if s.attachments != nil {
+		attachmentStore, ok = s.attachments, true
+	}
+	if !ok {
+		return nil
+	}
+	return attachmentStore.RollbackAttachmentBinding(ctx, projectMessageScope(id.orgUUID, id.workspaceUUID, project), bindingID)
 }
 
 // projectAssistantAttachmentReader returns the bounded model adapter for the
@@ -188,6 +224,10 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 	}
 	if id.user == "" {
 		writeStatus(w, http.StatusUnauthorized, "Unauthorized", "caller identity missing — the hub did not provide X-Faros-User")
+		return
+	}
+	if project.DeletionTimestamp != nil {
+		writeStatus(w, http.StatusConflict, "Conflict", "project is being deleted")
 		return
 	}
 	attachmentStore, ok := s.projectAttachmentStore(w)
@@ -245,11 +285,8 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 		writeStatus(w, http.StatusBadRequest, "BadRequest", err.Error())
 		return
 	}
-	var expiresAt *time.Time
-	if draft {
-		expires := now.Add(s.attachmentRetention())
-		expiresAt = &expires
-	}
+	expires := now.Add(s.attachmentRetention())
+	expiresAt := &expires
 	created, err := attachmentStore.CreateAttachment(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, project), store.Attachment{
 		ID:          "att-" + uuid.NewString(),
 		ActorID:     id.user,
@@ -263,7 +300,7 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 		Data:        data,
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrAttachmentConflict) {
+		if errors.Is(err, store.ErrAttachmentConflict) || errors.Is(err, store.ErrAttachmentQuotaExceeded) || errors.Is(err, store.ErrAttachmentProjectDeleted) {
 			writeStatus(w, http.StatusConflict, "Conflict", err.Error())
 		} else {
 			writeStatus(w, http.StatusInternalServerError, "InternalError", "create project attachment: "+err.Error())
@@ -303,16 +340,16 @@ func parseAttachmentDraft(r *http.Request) (bool, error) {
 		raw = strings.TrimSpace(r.Header.Get("X-Faros-Attachment-Draft"))
 	}
 	if raw == "" {
-		// Composer uploads are provisional until the turn admission path binds
-		// the complete receipt. This keeps abandoned uploads bounded while
-		// preserving a deliberate false value for non-composer callers.
 		return true, nil
 	}
 	draft, err := strconv.ParseBool(raw)
 	if err != nil {
 		return false, fmt.Errorf("draft must be a boolean")
 	}
-	return draft, nil
+	if !draft {
+		return false, fmt.Errorf("permanent attachment upload is not supported; attachments are retained only by an admitted assistant turn")
+	}
+	return true, nil
 }
 
 func (s *Server) getProjectAssistantAttachment(w http.ResponseWriter, r *http.Request) {

@@ -18,6 +18,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1075,7 +1077,25 @@ func projectAssistantMutationFromSuccessfulResult(name, result string, successfu
 }
 
 func projectEinoAssistantPersistentToolResult(name, result string) string {
-	if projectToolBaseName(name) != projectToolGetPreviewConsoleLogs {
+	baseName := projectToolBaseName(name)
+	if baseName == projectToolReadAttachment {
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+			return result
+		}
+		content, _ := decoded["content"].(string)
+		delete(decoded, "content")
+		digest := sha256.Sum256([]byte(content))
+		decoded["contentSHA256"] = hex.EncodeToString(digest[:])
+		decoded["transientEvent"] = true
+		decoded["summary"] = "attachment content omitted from persistence; call read_attachment again if the bytes are still needed"
+		persistent, err := json.Marshal(decoded)
+		if err != nil {
+			return `{"status":"unavailable","summary":"transient attachment content omitted from persistence","transientEvent":true}`
+		}
+		return string(persistent)
+	}
+	if baseName != projectToolGetPreviewConsoleLogs {
 		return result
 	}
 	var decoded struct {

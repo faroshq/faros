@@ -558,6 +558,10 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 		request.ModelID = selected.ID
 		request.modelRevisionID = selected.RevisionID
 	}
+	if err := s.verifyProjectAssistantContentPartAttachments(r.Context(), id, project, request.ContentParts); err != nil {
+		s.writeAssistantThreadError(w, err)
+		return
+	}
 	initialBootstrap := false
 	if !replay && request.continuationOfTurnID == "" && request.CollaborationMode != store.AssistantRunModeReview {
 		initialBootstrap, err = s.consumeProjectInitialBootstrap(r.Context(), scope, id.user, request.Content, request.ClientUserMessageID)
@@ -589,10 +593,6 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 		s.writeAssistantThreadError(w, err)
 		return
 	}
-	if err := s.bindProjectAssistantContentPartAttachments(r.Context(), id, project, request.ContentParts); err != nil {
-		s.writeAssistantThreadError(w, err)
-		return
-	}
 	var canonicalTurn store.AssistantTurn
 	started, err := s.startProjectAssistantRunDurablyWithModeAndSkills(r.Context(), scope, id.user, request.Content, request.ClientUserMessageID, request.CollaborationMode, projectAssistantDurableSkillSelection{
 		ModelID:         request.ModelID,
@@ -601,7 +601,21 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 		ContextResources: contextResources, ContextResourceReceipts: selectedContextResources,
 		ContentParts: request.ContentParts,
 	},
-		func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) error {
+		func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) (callbackErr error) {
+			if err := s.bindProjectAssistantContentPartAttachmentsForRun(r.Context(), id, project, request.ContentParts, created.ID); err != nil {
+				return err
+			}
+			attachmentBindingCommitted := false
+			defer func() {
+				if attachmentBindingCommitted {
+					return
+				}
+				cleanupCtx, cancel := detachedProjectPersistenceContext(r.Context())
+				defer cancel()
+				if rollbackErr := s.rollbackProjectAssistantAttachmentBinding(cleanupCtx, id, project, created.ID); rollbackErr != nil {
+					callbackErr = errors.Join(callbackErr, fmt.Errorf("rollback project attachment binding: %w", rollbackErr))
+				}
+			}()
 			start := &projectAssistantStreamStart{
 				SkillSnapshot: &skillSnapshot, SelectedSkills: cloneProjectAssistantSkillReceipts(selectedSkills),
 				SelectedContextResources: cloneProjectAssistantContextResourceReceipts(selectedContextResources),
@@ -643,6 +657,7 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 				return err
 			}
 			s.startAssistantThreadMirror(scope, thread.ID, canonicalTurn, created)
+			attachmentBindingCommitted = true
 			return nil
 		})
 	if err != nil {

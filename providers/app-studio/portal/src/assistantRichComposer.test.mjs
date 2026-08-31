@@ -94,6 +94,10 @@ test('Add flyouts dismiss on outside pointer/focus while preserving in-composer 
   assert.match(dismiss, /function handleFocusIn\(event: FocusEvent\)/)
   assert.match(dismiss, /function handleKeydown\(event: KeyboardEvent\)/)
   assert.match(dismiss, /event\.key !== 'Escape'/)
+  assert.match(dismiss, /nextTick\(\(\) => \{[\s\S]*trigger\.value\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(dismiss, /function dismissibleMenuNavigationIndex\(key: string, currentIndex: number, itemCount: number\)/)
+  assert.match(dismiss, /watch\(open, \(isOpen\) => \{[\s\S]*focusFirstMenuItem\(\)/)
+  assert.match(dismiss, /root\.value\?\.addEventListener\('keydown', handleMenuKeydown\)/)
   assert.match(dismiss, /document\.addEventListener\('pointerdown', handlePointerDown, true\)/)
   assert.match(dismiss, /document\.addEventListener\('focusin', handleFocusIn, true\)/)
   assert.match(dismiss, /document\.removeEventListener\('pointerdown', handlePointerDown, true\)/)
@@ -120,11 +124,59 @@ test('rich attachment removal retries deletion without re-uploading the file', a
   const retryBody = source.slice(retryStart, retryEnd)
   assert.match(source, /retryAction\?: 'upload' \| 'delete'/)
   assert.match(source, /chip\.retryAction = 'delete'/)
-  assert.match(source, /chip\.retryAction === 'delete' \? 'Removal failed' : 'Upload failed'/)
+  assert.match(source, /chip\.retryAction === 'delete' \? 'Removal failed' : chip\.retryAction === 'upload' \? 'Upload failed' : 'Cannot attach'/)
   assert.match(retryBody, /if \(chip\.retryAction === 'delete'\) \{[\s\S]*void removeAttachment\(chip\)[\s\S]*return/)
   assert.ok(retryBody.indexOf('void removeAttachment(chip)') < retryBody.indexOf('void uploadAttachment(chip.file)'), 'delete retry must not enqueue an upload')
   assert.match(source, /:retry-action="chip\.retryAction"/)
   assert.match(source, /attachmentStatusLabel\(chip\)/)
+})
+
+test('Add menu keyboard navigation wraps, skips disabled entries, and restores trigger focus on Escape', async () => {
+  const { dismissibleMenuNavigationIndex } = await vite.ssrLoadModule('/src/useDismissibleAddMenu.ts')
+  assert.equal(dismissibleMenuNavigationIndex('ArrowDown', -1, 3), 0)
+  assert.equal(dismissibleMenuNavigationIndex('ArrowDown', 2, 3), 0)
+  assert.equal(dismissibleMenuNavigationIndex('ArrowUp', -1, 3), 2)
+  assert.equal(dismissibleMenuNavigationIndex('ArrowUp', 0, 3), 2)
+  assert.equal(dismissibleMenuNavigationIndex('Home', 2, 3), 0)
+  assert.equal(dismissibleMenuNavigationIndex('End', 0, 3), 2)
+  assert.equal(dismissibleMenuNavigationIndex('ArrowDown', 0, 0), null)
+  assert.equal(dismissibleMenuNavigationIndex('PageDown', 0, 3), null)
+
+  const [rich, preProject, dismiss] = await Promise.all([
+    readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./AssistantPreProjectComposer.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./useDismissibleAddMenu.ts', import.meta.url), 'utf8'),
+  ])
+  for (const source of [rich, preProject]) {
+    assert.match(source, /ref="attachmentMenuTriggerRef"/)
+    assert.match(source, /trigger: attachmentMenuTriggerRef/)
+  }
+  assert.match(dismiss, /event\.key !== 'Escape'/)
+  assert.match(dismiss, /onClose\(\)[\s\S]*trigger\.value\?\.focus/)
+  assert.match(dismiss, /key === 'ArrowDown'/)
+  assert.match(dismiss, /key === 'ArrowUp'/)
+  assert.match(dismiss, /key === 'Home'/)
+  assert.match(dismiss, /key === 'End'/)
+  assert.match(dismiss, /item\.hasAttribute\('disabled'\)/)
+  assert.match(dismiss, /item\.getAttribute\('aria-disabled'\) !== 'true'/)
+})
+
+test('local attachment validation chips are removal-only while upload failures retain retry', async () => {
+  const { assistantAttachmentValidationError, newAssistantStagedAttachment } = await vite.ssrLoadModule('/src/assistantAttachments.ts')
+  const invalidFile = { name: 'notes.pdf', type: 'application/pdf', size: 10 }
+  const staged = newAssistantStagedAttachment(invalidFile, assistantAttachmentValidationError(invalidFile))
+  assert.ok(staged.error)
+  assert.equal(staged.retryable, false)
+
+  const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
+  const localErrorStart = source.indexOf('function attachmentError(')
+  const localErrorEnd = source.indexOf('\n}\n\nfunction appendAttachmentError', localErrorStart)
+  assert.ok(localErrorStart >= 0 && localErrorEnd > localErrorStart)
+  assert.doesNotMatch(source.slice(localErrorStart, localErrorEnd), /retryAction/)
+  assert.match(source, /if \(!chip\.retryAction\) return/)
+  assert.match(source, /current\.retryAction = 'upload'/)
+  assert.match(source, /:retryable="chip\.status === 'error' && !!chip\.retryAction"/)
+  assert.match(source, /chip\.retryAction === 'delete' \? 'Removal failed' : chip\.retryAction === 'upload' \? 'Upload failed' : 'Cannot attach'/)
 })
 
 test('rich composer presents a hoverable annotation preview with an in-pill clear control', async () => {

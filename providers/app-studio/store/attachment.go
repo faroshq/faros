@@ -38,6 +38,12 @@ const (
 	AttachmentMaxTextBytes     = 1 << 20
 	AttachmentMaxFilenameBytes = 255
 	AttachmentMaxIDBytes       = 128
+	// AttachmentProjectMaxBytes and AttachmentProjectMaxCount bound all stored
+	// drafts and retained attachments for one immutable Project UID. Eight
+	// maximum-size images fit in the byte budget (the turn-level maximum), while
+	// the count budget leaves room for abandoned drafts until retention runs.
+	AttachmentProjectMaxBytes = 64 << 20
+	AttachmentProjectMaxCount = 64
 	// DefaultAttachmentDraftRetention bounds uncommitted composer uploads. A
 	// caller can shorten this through provider configuration, but cannot make a
 	// draft immortal by omitting an expiry.
@@ -50,6 +56,8 @@ var (
 	ErrAttachmentForbidden       = errors.New("attachment ownership check failed")
 	ErrAttachmentImmutable       = errors.New("attachment is immutable")
 	ErrAttachmentReceiptMismatch = errors.New("attachment receipt does not match stored metadata")
+	ErrAttachmentQuotaExceeded   = errors.New("project attachment quota exceeded")
+	ErrAttachmentProjectDeleted  = errors.New("project attachment storage is closed")
 )
 
 // Attachment is an immutable project-scoped blob and its receipt metadata.
@@ -71,6 +79,11 @@ type Attachment struct {
 	Data          []byte     `json:"-"`
 	DataEncrypted bool       `json:"-"`
 	DataKeyID     string     `json:"-"`
+	// BindingID identifies the durable assistant run that retained this draft.
+	// DraftExpiresAt preserves its prior expiry so a compensated run start can
+	// atomically restore the complete batch to its retryable draft state.
+	BindingID      string     `json:"-"`
+	DraftExpiresAt *time.Time `json:"-"`
 }
 
 // AttachmentReceipt is the client-carried, immutable metadata used to bind a
@@ -92,6 +105,8 @@ type AttachmentStore interface {
 	ListAttachments(context.Context, Scope) ([]Attachment, error)
 	GetAttachment(context.Context, Scope, string) (Attachment, error)
 	BindAttachment(context.Context, Scope, AttachmentReceipt, string) (Attachment, error)
+	BindAttachments(context.Context, Scope, []AttachmentReceipt, string, string) ([]Attachment, error)
+	RollbackAttachmentBinding(context.Context, Scope, string) error
 	DeleteAttachment(context.Context, Scope, string, string) error
 	DeleteProjectAttachments(context.Context, Scope) error
 	DeleteExpiredAttachments(context.Context, time.Time) (int64, error)
@@ -290,6 +305,10 @@ func cloneAttachment(attachment Attachment) Attachment {
 	if attachment.ExpiresAt != nil {
 		expires := *attachment.ExpiresAt
 		attachment.ExpiresAt = &expires
+	}
+	if attachment.DraftExpiresAt != nil {
+		expires := *attachment.DraftExpiresAt
+		attachment.DraftExpiresAt = &expires
 	}
 	return attachment
 }

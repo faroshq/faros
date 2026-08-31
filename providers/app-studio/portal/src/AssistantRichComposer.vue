@@ -79,6 +79,7 @@ const emit = defineEmits<{
 
 const rootRef = ref<HTMLDivElement | null>(null)
 const addMenuRootRef = ref<HTMLDivElement | null>(null)
+const attachmentMenuTriggerRef = ref<HTMLButtonElement | null>(null)
 const editorRef = ref<HTMLDivElement | null>(null)
 const commandPaletteOpen = ref(false)
 const commandPaletteFromSlash = ref(false)
@@ -120,13 +121,14 @@ function attachmentStatusLabel(chip: Pick<AssistantAttachmentChip, 'status' | 'r
   if (chip.status === 'staged') return 'Ready to attach'
   if (chip.status === 'uploading') return 'Uploading'
   if (chip.status === 'deleting') return 'Removing'
-  if (chip.status === 'error') return chip.retryAction === 'delete' ? 'Removal failed' : 'Upload failed'
+  if (chip.status === 'error') return chip.retryAction === 'delete' ? 'Removal failed' : chip.retryAction === 'upload' ? 'Upload failed' : 'Cannot attach'
   return 'Ready'
 }
 
 useDismissibleAddMenu({
   open: attachmentMenuOpen,
   root: addMenuRootRef,
+  trigger: attachmentMenuTriggerRef,
   onClose: closeAttachmentMenu,
 })
 
@@ -532,7 +534,6 @@ function attachmentError(file: File, message: string): AssistantAttachmentChip {
     file,
     status: 'error',
     error: message,
-    retryAction: 'upload',
   }
 }
 
@@ -601,6 +602,7 @@ function handleAttachmentInput(event: Event) {
 
 function retryAttachment(chip: AssistantAttachmentChip) {
   if (chip.status === 'uploading' || chip.status === 'deleting') return
+  if (!chip.retryAction) return
   if (chip.retryAction === 'delete') {
     void removeAttachment(chip)
     return
@@ -1012,6 +1014,7 @@ defineExpose({ focus: () => focusEditor(false), openPalette, closePalette })
             </button>
           </div>
           <button
+            ref="attachmentMenuTriggerRef"
             type="button"
             class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted transition hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
             :disabled="disabled"

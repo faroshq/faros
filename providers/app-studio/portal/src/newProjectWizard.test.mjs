@@ -307,3 +307,23 @@ test('keeps a project-bound first submission when returning to ~new for attachme
   assert.match(appSource, /pendingFirstProjectSubmission &&[\s\S]*pathName !== pendingFirstProjectSubmission\.projectName[\s\S]*!shouldKeepProjectBoundFirstSubmission\(\)/)
   assert.match(appSource, /if \(!shouldKeepProjectBoundFirstSubmission\(\)\) clearPendingFirstProjectSubmission\(\)/)
 })
+
+test('attachment-only landing submission is admitted and uses an explicit derived planning input', () => {
+  assert.match(appSource, /const createPromptContent = computed\(\(\) => projectCreationPrompt\(prompt\.value, preProjectAttachments\.value\.length\)\)/)
+  assert.match(appSource, /canSubmitCreatePrompt\(createPromptContent\.value, createReadiness\.value\)/)
+  assert.match(appSource, /const content = projectCreationPrompt\(prompt\.value, preProjectAttachments\.value\.length\)/)
+  assert.match(appSource, /if \(!prompt\.value\.trim\(\)\) prompt\.value = content/)
+  assert.match(appSource, /startContentParts = startAttachmentParts\.length[\s\S]*type: 'text' as const, text: startPlan\.content/)
+})
+
+test('project-bound retry remains fenced by mount and pending-submission identity', () => {
+  const guardStart = appSource.indexOf('const current = () => appComponentMounted')
+  const guardEnd = appSource.indexOf('\n\n  try {', guardStart)
+  assert.ok(guardStart >= 0 && guardEnd > guardStart)
+  const guard = appSource.slice(guardStart, guardEnd)
+  assert.match(guard, /appComponentMounted && pendingFirstProjectSubmission === submission && \(/)
+  assert.match(guard, /firstProjectSubmissionIsCurrent\([\s\S]*\) \|\| firstProjectSubmissionCanRetryFromCreateRoute\(/)
+  assert.equal((guard.match(/appComponentMounted/g) || []).length, 1)
+  assert.equal((guard.match(/pendingFirstProjectSubmission === submission/g) || []).length, 1)
+  assert.match(guard, /\n  \)$/)
+})

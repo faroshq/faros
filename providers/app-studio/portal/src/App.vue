@@ -186,6 +186,7 @@ import {
   assistantRunTerminal,
   firstProjectStartPlan,
   firstProjectSubmissionAccepted,
+  firstProjectSubmissionCanRetryFromCreateRoute,
   firstProjectSubmissionIsCurrent,
   firstProjectSubmissionMatches,
   firstProjectSubmissionWithProject,
@@ -194,6 +195,7 @@ import {
   normalizeAssistantRunStatus,
   normalizeSnapshotMessage,
   orderConversationMessages,
+  projectCreationPrompt,
   replaceOptimisticUserMessage,
   reconcileAssistantRunInterrupt,
   reconcileAssistantRunTerminal,
@@ -1725,7 +1727,8 @@ const assistantComposerStopDisabled = computed(() => assistantComposerStopContro
 const configuredLLMModels = computed(() => (llmSettings.value?.models ?? []).filter((model) => model.configured))
 const selectedLLMModel = computed(() => configuredLLMModels.value.find((model) => model.id === selectedLLMModelID.value) ?? configuredLLMModels.value[0])
 const llmConfigured = computed(() => configuredLLMModels.value.length > 0)
-const canStartProjectFromPrompt = computed(() => !createSetupLoading.value && canSubmitCreatePrompt(prompt.value, createReadiness.value) && llmConfigured.value)
+const createPromptContent = computed(() => projectCreationPrompt(prompt.value, preProjectAttachments.value.length))
+const canStartProjectFromPrompt = computed(() => !createSetupLoading.value && canSubmitCreatePrompt(createPromptContent.value, createReadiness.value) && llmConfigured.value)
 const assistantComposerHasChipContent = computed(() => assistantComposerParts.value.some((part) => part.type !== 'text'))
 const canSendPrompt = computed(() =>
   llmConfigured.value &&
@@ -4428,8 +4431,11 @@ async function setDefaultLLMModel(modelID: string) {
 }
 
 async function createProjectFromPrompt() {
-  const content = prompt.value.trim()
+  const content = projectCreationPrompt(prompt.value, preProjectAttachments.value.length)
   if (!content) return
+  // Keep the derived planning input visible in the wizard. It is deliberately
+  // neutral: the only claim made is that attachments were supplied as context.
+  if (!prompt.value.trim()) prompt.value = content
   // Submitting the landing idea hands off to one stable project-details
   // surface. The actual create still runs from onWizardCreate, which re-checks
   // setup before using the durable project/thread path below.
@@ -4509,20 +4515,26 @@ async function createProjectAndStartConversation(
     messages.value = [{ id: `temp-${Date.now()}-user`, projectID: draftName, role: 'user', content, createdAt: now }]
   }
 
-  const current = () => appComponentMounted && pendingFirstProjectSubmission === submission && firstProjectSubmissionIsCurrent(
-    submission,
-    generation,
-    projectCreateGeneration,
-    selected.value?.name ?? '',
-    selectedNameFromPath.value,
-    draftName,
-  ) || (
-    appComponentMounted &&
-    pendingFirstProjectSubmission === submission &&
-    generation === projectCreateGeneration &&
-    submission.projectName !== '' &&
-    !selected.value &&
-    isCreateRoute.value
+  const current = () => appComponentMounted && pendingFirstProjectSubmission === submission && (
+    firstProjectSubmissionIsCurrent(
+      submission,
+      generation,
+      projectCreateGeneration,
+      selected.value?.name ?? '',
+      selectedNameFromPath.value,
+      draftName,
+    ) || firstProjectSubmissionCanRetryFromCreateRoute(
+      submission,
+      generation,
+      projectCreateGeneration,
+      selected.value?.name ?? '',
+      selectedNameFromPath.value,
+    ) || (
+      generation === projectCreateGeneration &&
+      submission.projectName !== '' &&
+      !selected.value &&
+      isCreateRoute.value
+    )
   )
 
   try {
@@ -8640,7 +8652,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 v-if="message.role === 'user'"
                 class="flex max-w-[86%] flex-col items-end gap-1 sm:max-w-[72%]"
               >
-                <AssistantMessageAttachments :attachments="assistantAttachmentsForMessage(message)" />
+                <AssistantMessageAttachments
+                  :attachments="assistantAttachmentsForMessage(message)"
+                  :ctx="props.ctx"
+                  :project-name="message.projectID"
+                />
                 <AssistantMessageAnnotations
                   :annotations="assistantAnnotationsForMessage(message)"
                   :current-document-id="developmentPreviewAnnotationDocumentID"

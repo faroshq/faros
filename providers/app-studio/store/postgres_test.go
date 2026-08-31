@@ -400,6 +400,76 @@ func TestPostgresRetentionProtectsActiveMessagesAndConversationHighWaterMark(t *
 	}
 }
 
+func TestPostgresAttachmentLifecycleExternalDSN(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("APP_STUDIO_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("APP_STUDIO_TEST_POSTGRES_DSN is not set")
+	}
+	ctx := context.Background()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schemaName := fmt.Sprintf("app_studio_attachment_lifecycle_%d", time.Now().UTC().UnixNano())
+	if _, err := db.ExecContext(ctx, "CREATE SCHEMA "+pq.QuoteIdentifier(schemaName)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupDB, openErr := sql.Open("postgres", dsn)
+		if openErr != nil {
+			return
+		}
+		defer cleanupDB.Close()
+		_, _ = cleanupDB.ExecContext(context.Background(), "DROP SCHEMA "+pq.QuoteIdentifier(schemaName)+" CASCADE")
+	})
+	s, err := OpenPostgres(ctx, postgresDSNWithSearchPath(t, dsn, schemaName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	first := attachmentTestRecord(now, true, &expires)
+	second := attachmentTestRecord(now.Add(time.Microsecond), true, &expires)
+	second.ID, second.Filename = "att-postgres-second", "second.png"
+	for _, attachment := range []Attachment{first, second} {
+		if _, err := s.CreateAttachment(ctx, scope, attachment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipt := func(attachment Attachment) AttachmentReceipt {
+		return AttachmentReceipt{ID: attachment.ID, Filename: attachment.Filename, ContentType: attachment.ContentType, SizeBytes: attachment.SizeBytes, SHA256: attachment.SHA256, CreatedAt: attachment.CreatedAt}
+	}
+	bad := receipt(second)
+	bad.SHA256 = strings.Repeat("0", 64)
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt(first), bad}, "alice", "run-bad"); !errors.Is(err, ErrAttachmentReceiptMismatch) {
+		t.Fatalf("invalid batch error = %v", err)
+	}
+	if got, _ := s.GetAttachment(ctx, scope, first.ID); !got.Draft {
+		t.Fatal("rejected batch partially promoted an attachment")
+	}
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt(first), receipt(second)}, "alice", "run-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteAttachment(ctx, scope, first.ID, "alice"); !errors.Is(err, ErrAttachmentImmutable) {
+		t.Fatalf("delete bound attachment error = %v", err)
+	}
+	if err := s.RollbackAttachmentBinding(ctx, scope, "run-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetAttachment(ctx, scope, first.ID); !got.Draft {
+		t.Fatal("rollback did not restore draft")
+	}
+	if err := s.DeleteProjectAttachments(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAttachment(ctx, scope, first); !errors.Is(err, ErrAttachmentProjectDeleted) {
+		t.Fatalf("create after deletion error = %v", err)
+	}
+}
+
 func postgresDSNWithSearchPath(t *testing.T, dsn, schemaName string) string {
 	t.Helper()
 	u, err := url.Parse(dsn)
