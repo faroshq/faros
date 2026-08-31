@@ -1,6 +1,7 @@
 export interface ProjectCreateReadiness {
   gitConnection: {
     ready: boolean
+    status?: 'ready' | 'provider-missing' | 'connection-missing' | 'validating'
     connectionRef?: string
     message?: string
   }

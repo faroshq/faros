@@ -1923,6 +1923,23 @@ func normalizeProjectLLMSettings(settings *projectLLMSettings) error {
 	return nil
 }
 
+func verifyProjectLLMConnection(ctx context.Context, settings projectLLMSettings) error {
+	model, err := newProjectEinoChatModel(ctx, settings)
+	if err != nil {
+		return err
+	}
+	response, err := model.Generate(ctx, []*einoschema.Message{
+		einoschema.UserMessage("Reply with OK to confirm this model connection."),
+	})
+	if err != nil {
+		return fmt.Errorf("AI model connection failed: %w", err)
+	}
+	if response == nil {
+		return errors.New("AI model connection failed: provider returned no response")
+	}
+	return nil
+}
+
 func validateProjectLLMBaseURL(provider, raw string) error {
 	if strings.EqualFold(strings.TrimSpace(provider), projectLLMProviderGoogle) {
 		return nil

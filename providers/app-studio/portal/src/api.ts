@@ -105,6 +105,7 @@ function baseURL(ctx: FarosContext | null): string {
 
 interface ProjectAPIRequestOptions {
   timeoutMS?: number
+  timeoutMessage?: string
 }
 
 const ASSISTANT_THREAD_PAGE_SIZE = 500
@@ -130,7 +131,7 @@ async function request<T>(ctx: FarosContext | null, method: string, path: string
     })
     text = await res.text()
   } catch (error) {
-    if (timedOut) throw new ProjectAPIRequestError('preview console request timed out', 408)
+    if (timedOut) throw new ProjectAPIRequestError(options.timeoutMessage || 'request timed out', 408)
     throw error
   } finally {
     if (timeout !== undefined) window.clearTimeout(timeout)
@@ -846,6 +847,16 @@ export const api = {
     body: { name: string; provider?: string; baseURL?: string; model: string; apiKey: string },
   ): Promise<ProjectLLMSettings> {
     return request<ProjectLLMSettings>(ctx, 'POST', `${baseURL(ctx)}/llm-settings/models`, body)
+  },
+
+  async testLLMConnection(
+    ctx: FarosContext | null,
+    body: { provider?: string; baseURL?: string; model: string; apiKey: string },
+  ): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(ctx, 'POST', `${baseURL(ctx)}/llm-settings/test`, body, {
+      timeoutMS: 35_000,
+      timeoutMessage: 'model connection test timed out',
+    })
   },
 
   async patchLLMModel(

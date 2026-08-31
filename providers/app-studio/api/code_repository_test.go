@@ -39,6 +39,9 @@ func TestProjectCreateReadinessRequiresValidatedGitConnection(t *testing.T) {
 	if readiness.GitConnection.Ready {
 		t.Fatalf("GitConnection.Ready = true, want false")
 	}
+	if readiness.GitConnection.Status != projectCreateGitStatusConnectionMissing {
+		t.Fatalf("GitConnection.Status = %q, want %q", readiness.GitConnection.Status, projectCreateGitStatusConnectionMissing)
+	}
 	if readiness.GitConnection.ConnectionRef != "" {
 		t.Fatalf("GitConnection.ConnectionRef = %q, want empty", readiness.GitConnection.ConnectionRef)
 	}
@@ -59,11 +62,29 @@ func TestProjectCreateReadinessSelectsValidatedGitConnection(t *testing.T) {
 	if !readiness.GitConnection.Ready {
 		t.Fatalf("GitConnection.Ready = false, want true")
 	}
+	if readiness.GitConnection.Status != projectCreateGitStatusReady {
+		t.Fatalf("GitConnection.Status = %q, want %q", readiness.GitConnection.Status, projectCreateGitStatusReady)
+	}
 	if readiness.GitConnection.ConnectionRef != "github" {
 		t.Fatalf("GitConnection.ConnectionRef = %q, want github", readiness.GitConnection.ConnectionRef)
 	}
 	if readiness.GitConnection.Message != "" {
 		t.Fatalf("GitConnection.Message = %q, want empty", readiness.GitConnection.Message)
+	}
+}
+
+func TestProjectCreateReadinessReportsConnectionValidation(t *testing.T) {
+	client := newCodeRepositoryTestClient(codeConnectionObjectWithValidated("github", metav1.ConditionFalse))
+
+	readiness, err := projectCreateReadiness(context.Background(), client)
+	if err != nil {
+		t.Fatalf("projectCreateReadiness returned error: %v", err)
+	}
+	if readiness.GitConnection.Status != projectCreateGitStatusValidating {
+		t.Fatalf("GitConnection.Status = %q, want %q", readiness.GitConnection.Status, projectCreateGitStatusValidating)
+	}
+	if readiness.GitConnection.Message != "Your Git connection is still validating" {
+		t.Fatalf("GitConnection.Message = %q, want validation guidance", readiness.GitConnection.Message)
 	}
 }
 

@@ -62,6 +62,13 @@ type CreateProjectLLMModelRequest struct {
 	APIKey   string `json:"apiKey"`
 }
 
+type TestProjectLLMConnectionRequest struct {
+	Provider string `json:"provider,omitempty"`
+	BaseURL  string `json:"baseURL,omitempty"`
+	Model    string `json:"model"`
+	APIKey   string `json:"apiKey"`
+}
+
 type PatchProjectLLMModelRequest struct {
 	Name     *string `json:"name,omitempty"`
 	Provider *string `json:"provider,omitempty"`
@@ -519,6 +526,28 @@ func (s *Server) createProjectLLMModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, registry.view())
+}
+
+func (s *Server) testProjectLLMConnection(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.requireProjectClient(w, r); !ok {
+		return
+	}
+	var request TestProjectLLMConnectionRequest
+	if !decodeStrictJSON(w, r, &request) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := verifyProjectLLMConnection(ctx, projectLLMSettings{
+		Provider: request.Provider,
+		BaseURL:  request.BaseURL,
+		Model:    request.Model,
+		APIKey:   request.APIKey,
+	}); err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) patchProjectLLMModel(w http.ResponseWriter, r *http.Request) {

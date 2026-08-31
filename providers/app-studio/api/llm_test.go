@@ -19,6 +19,9 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,6 +30,42 @@ import (
 	einoschema "github.com/cloudwego/eino/schema"
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 )
+
+func TestVerifyProjectLLMConnectionCallsConfiguredModel(t *testing.T) {
+	var sawRequest bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("request path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want bearer credential", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		if !strings.Contains(string(body), "Reply with OK") {
+			t.Errorf("request body did not contain connection prompt: %s", body)
+		}
+		sawRequest = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"connection-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`)
+	}))
+	defer provider.Close()
+
+	err := verifyProjectLLMConnection(context.Background(), projectLLMSettings{
+		Provider: defaultProjectLLMProvider,
+		BaseURL:  provider.URL + "/v1",
+		Model:    "test-model",
+		APIKey:   "test-key",
+	})
+	if err != nil {
+		t.Fatalf("verifyProjectLLMConnection returned error: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("configured model was not called")
+	}
+}
 
 func TestProjectToolCallTerminalStatusPreservesCanceledSpellings(t *testing.T) {
 	for _, spelling := range []string{"canceled", "cancelled"} {
