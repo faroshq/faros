@@ -3870,10 +3870,11 @@ async function discoverLLMModels() {
     if (serial !== llmDiscoverySerial || contextFingerprint !== appContextFingerprint(props.ctx) || requestRoute !== routePath.value) return
     llmDiscoveredModels.value = result.models
     const selectable = result.models.filter((model) => model.compatibility !== 'unsuitable').length
-    const omitted = result.models.length - selectable
-    llmDiscoveryStatus.value = selectable > 0
-      ? `${selectable} model${selectable === 1 ? '' : 's'} available${omitted > 0 ? `; ${omitted} non-chat model${omitted === 1 ? '' : 's'} omitted` : ''}.`
-      : 'No compatible chat models were found. You can still enter a model ID manually.'
+    const unavailable = result.models.length - selectable
+    const total = result.models.length
+    llmDiscoveryStatus.value = total > 0
+      ? `${total} model${total === 1 ? '' : 's'} found${unavailable > 0 ? `; ${unavailable} marked unavailable for chat` : ''}.`
+      : 'No models were found. You can still enter a model ID manually.'
   } catch (e) {
     if (serial !== llmDiscoverySerial || contextFingerprint !== appContextFingerprint(props.ctx) || requestRoute !== routePath.value) return
     llmDiscoveredModels.value = []

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Check, ChevronRight, Cpu, KeyRound, Loader2, Pencil, Plus, RefreshCw, Star, Trash2 } from 'lucide-vue-next'
+import ModelIDSelector from './ModelIDSelector.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
 import type { LLMProviderPreset } from './llmDiscovery'
 import type { ProjectLLMDiscoveredModel, ProjectLLMSettings } from './types'
@@ -44,8 +45,7 @@ const props = defineProps<{
   canDiscover: boolean
 }>()
 
-const selectableDiscoveredModels = computed(() => props.discoveredModels.filter((model) => model.compatibility !== 'unsuitable'))
-const recommendedDiscoveredModels = computed(() => selectableDiscoveredModels.value.filter((model) => model.compatibility === 'recommended').slice(0, 4))
+const recommendedDiscoveredModels = computed(() => props.discoveredModels.filter((model) => model.compatibility === 'recommended').slice(0, 4))
 
 const emit = defineEmits<{
   retry: []
@@ -252,12 +252,17 @@ const emit = defineEmits<{
               </span>
             </div>
             <label for="model-id" class="grid min-w-0 content-start gap-1.5 text-[11px] font-medium text-text-secondary">Model ID
-              <input id="model-id" :value="model" list="model-discovery-options" class="k-input h-10 min-w-0 font-mono text-[12px]" :class="modelError ? 'border-danger/50 focus:border-danger focus:shadow-[0_0_0_3px_var(--color-danger-subtle)]' : ''" placeholder="e.g. gpt-5.4" :disabled="saving" :aria-invalid="Boolean(modelError)" aria-required="true" :aria-describedby="modelError ? 'model-id-error' : 'model-id-hint'" @input="emit('update:model', ($event.target as HTMLInputElement).value)" />
-              <datalist id="model-discovery-options">
-                <option v-for="available in selectableDiscoveredModels" :key="available.id" :value="available.id">{{ available.name }}</option>
-              </datalist>
+              <ModelIDSelector
+                :model-value="model"
+                :models="discoveredModels"
+                :disabled="saving"
+                :invalid="Boolean(modelError)"
+                :described-by="modelError ? 'model-id-error' : 'model-id-hint'"
+                @update:model-value="emit('update:model', $event)"
+                @select="emit('selectDiscoveredModel', $event)"
+              />
               <span v-if="modelError" id="model-id-error" class="text-[11px] font-normal leading-4 text-danger" role="alert">{{ modelError }}</span>
-              <span v-else id="model-id-hint" class="text-[11px] font-normal leading-4 text-text-muted">{{ modelHint }} Find models to populate suggestions, or enter an ID manually.</span>
+              <span v-else id="model-id-hint" class="text-[11px] font-normal leading-4 text-text-muted">{{ modelHint }} Find models to load the full catalog, then search or enter an ID.</span>
             </label>
             <div v-if="recommendedDiscoveredModels.length" class="grid gap-2" aria-label="Recommended models">
               <span class="text-[9px] font-semibold uppercase tracking-wide text-text-muted">Recommended for App Studio</span>

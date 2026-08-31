@@ -173,7 +173,7 @@ test('renders discovered suggestions while preserving manual model entry', async
   const html = await render({
     editorOpen: true,
     canDiscover: true,
-    discoveryStatus: '2 models available; 1 non-chat model omitted.',
+    discoveryStatus: '3 models found; 1 marked unavailable for chat.',
     discoveredModels: [
       { id: 'gpt-5.6', name: 'gpt-5.6', compatibility: 'recommended' },
       { id: 'custom-chat', name: 'custom-chat', compatibility: 'available' },
@@ -182,11 +182,11 @@ test('renders discovered suggestions while preserving manual model entry', async
   })
 
   assert.match(html, /Recommended for App Studio/)
-  assert.match(html, /value="gpt-5\.6"/)
-  assert.match(html, /value="custom-chat"/)
-  assert.doesNotMatch(html, /value="text-embedding-3-large"/)
-  assert.match(html, /enter an ID manually/)
-  assert.match(html, /1 non-chat model omitted/)
+  assert.match(html, /id="model-id"/)
+  assert.match(html, /aria-haspopup="listbox"/)
+  assert.doesNotMatch(html, /<datalist/)
+  assert.match(html, /search or enter an ID/)
+  assert.match(html, /3 models found; 1 marked unavailable for chat/)
 })
 
 test('keeps discovery failure separate from manual model validation', async () => {
