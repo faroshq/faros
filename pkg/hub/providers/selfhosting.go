@@ -86,15 +86,15 @@ type InstallInstructions struct {
 	ChartVersion  string `json:"chartVersion,omitempty"`
 	// KubeconfigFilename is what the instructions assume the credential was
 	// saved as, relative to the working directory.
-	KubeconfigFilename string          `json:"kubeconfigFilename"`
-	Steps              []InstallStep   `json:"steps"`
+	KubeconfigFilename string        `json:"kubeconfigFilename"`
+	Steps              []InstallStep `json:"steps"`
 	// Upgrade is the single command that moves an already-installed copy to
 	// ChartVersion while keeping the values the release was installed with.
 	// Rendered separately from Steps because an upgrade needs none of them:
 	// the namespace, Secret, and values all survive from the original install.
 	Upgrade *InstallStep    `json:"upgrade,omitempty"`
 	Values  []ResolvedValue `json:"values,omitempty"`
-	DocsURL            string          `json:"docsURL,omitempty"`
+	DocsURL string          `json:"docsURL,omitempty"`
 	// ValuesDoc is the chart's values reference in Markdown, carried inline by
 	// the provider so the portal can render it without leaving the install
 	// panel and without reaching the internet.
