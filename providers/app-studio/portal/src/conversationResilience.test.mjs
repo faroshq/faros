@@ -143,6 +143,22 @@ test('first-send thread creation cannot mutate state after an App unmount or req
   assert.match(sendMessage.slice(firstThreadStart, firstThreadEnd), /await api\.createAssistantThread\(props\.ctx, projectName\)[\s\S]*if \(!firstSendIsCurrent\(\)\) return false[\s\S]*persistAssistantThreadFocus[\s\S]*writeAssistantAnnotationDraft/)
 })
 
+test('regular send adopts the canonical thread returned by the start response', async () => {
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const sendMessage = appSource.slice(appSource.indexOf('async function sendMessage'), appSource.indexOf('function cancelMessageStream'))
+  const startResponse = sendMessage.indexOf('startPostAccepted = true')
+  const projection = sendMessage.indexOf('const userItem', startResponse)
+  assert.ok(startResponse >= 0 && projection > startResponse, 'start response and projection boundaries must remain explicit')
+  const acceptedStart = sendMessage.slice(startResponse, projection)
+  assert.match(acceptedStart, /const requestedThreadID = thread\.id/)
+  assert.match(acceptedStart, /const canonicalThreadID = canonical\.thread\.id\.trim\(\) \|\| requestedThreadID/)
+  assert.match(acceptedStart, /candidate\.id !== canonicalThreadID && candidate\.id !== requestedThreadID/)
+  assert.match(acceptedStart, /activeAssistantThreadID\.value = canonicalThreadID/)
+  assert.match(acceptedStart, /persistAssistantThreadFocus\(assistantThreadFocusScope\(projectName\), canonicalThreadID\)/)
+  assert.match(acceptedStart, /listAssistantThreadItems\(props\.ctx, projectName, canonicalThreadID\)/)
+  assert.match(acceptedStart, /clearStoredAssistantAnnotationDraft\(projectName, requestedThreadID\)/)
+})
+
 test('App keeps central loading surfaces honest while project state hydrates', async () => {
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   const productionLoadingSource = await readFile(new URL('./ProductionSettingsLoadingShell.vue', import.meta.url), 'utf8')
@@ -414,6 +430,40 @@ test('first-project retry reuses the created project and durable request identit
   )
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-1', content: 'ship it' }), true)
   assert.equal(state.firstProjectSubmissionAccepted(created, { id: 'user-2', content: 'different' }), false)
+})
+
+test('first-project retry also retains the server thread identity', () => {
+  const pending = state.newFirstProjectSubmission('ship it', 'request-1', 'gpt-high')
+  const bound = state.firstProjectSubmissionWithThread(
+    state.firstProjectSubmissionWithProject(pending, 'demo'),
+    'thread-1',
+  )
+  assert.equal(bound.clientRequestID, 'request-1')
+  assert.equal(bound.projectName, 'demo')
+  assert.equal(bound.threadID, 'thread-1')
+  assert.equal(state.firstProjectStartPlan(bound).createProject, false)
+})
+
+test('first-project startup rotates identity only for a pre-acceptance HTTP 5xx', async () => {
+  const pending = state.firstProjectSubmissionWithThread(
+    state.firstProjectSubmissionWithProject(state.newFirstProjectSubmission('ship it', 'request-1', 'gpt-high'), 'demo'),
+    'thread-1',
+  )
+  assert.equal(state.shouldRotateFirstProjectRequestID({ status: 503 }, false), true)
+  assert.equal(state.shouldRotateFirstProjectRequestID({ status: 500 }, true), false)
+  assert.equal(state.shouldRotateFirstProjectRequestID({ status: 409 }, false), false)
+  assert.equal(state.shouldRotateFirstProjectRequestID(new TypeError('network lost'), false), false)
+  const rotated = state.firstProjectSubmissionWithClientRequestID(pending, 'request-2')
+  assert.deepEqual(rotated, { ...pending, clientRequestID: 'request-2' })
+
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const startPath = appSource.slice(appSource.indexOf('async function createProjectAndStartConversation('))
+  assert.match(startPath, /let startPostAttempted = false/)
+  assert.match(startPath, /let startPostAccepted = false/)
+  assert.match(startPath, /startPostAttempted = true[\s\S]*const canonical = await startPreProjectAssistantTurn/)
+  assert.match(startPath, /const canonical = await startPreProjectAssistantTurn[\s\S]*startPostAccepted = true[\s\S]*clearPreProjectAttachments\(true\)/)
+  assert.match(startPath, /e instanceof ProjectAPIRequestError && startPostAttempted && shouldRotateFirstProjectRequestID\(e, startPostAccepted\)/)
+  assert.match(startPath, /firstProjectSubmissionWithClientRequestID\(submission, crypto\.randomUUID\(\)\)/)
 })
 
 test('first-project attachment retry remains current on the project-less create route', () => {

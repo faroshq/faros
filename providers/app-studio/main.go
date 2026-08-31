@@ -197,6 +197,29 @@ func runServe() {
 		attachmentRetention = store.DefaultAttachmentDraftRetention
 	}
 	apiServer.ConfigureAttachmentDraftRetention(attachmentRetention)
+	if quotaConfigurer, ok := msgStore.(store.AttachmentQuotaConfigurer); ok {
+		quota := store.DefaultAttachmentQuota()
+		quotaRaw := strings.TrimSpace(os.Getenv("APP_STUDIO_ATTACHMENT_WORKSPACE_QUOTA_BYTES"))
+		if quotaRaw == "" {
+			// Keep the shorter name as a compatibility alias for early chart
+			// values and local deployments.
+			quotaRaw = strings.TrimSpace(os.Getenv("APP_STUDIO_ATTACHMENT_WORKSPACE_QUOTA"))
+		}
+		if quotaRaw != "" {
+			quota.WorkspaceMaxBytes, err = store.ParseAttachmentQuotaBytes(quotaRaw)
+			if err != nil {
+				log.Fatalf("attachment workspace quota: %v", err)
+			}
+		}
+		if err := quotaConfigurer.ConfigureAttachmentQuota(quota); err != nil {
+			log.Fatalf("configure attachment quota: %v", err)
+		}
+	}
+	if bindingReconciler, ok := msgStore.(store.AttachmentBindingReconciler); ok {
+		if err := bindingReconciler.ReconcileAttachmentBindings(ctx); err != nil {
+			log.Fatalf("reconcile attachment bindings: %v", err)
+		}
+	}
 	if attachmentStore, ok := msgStore.(store.AttachmentStore); ok {
 		go runAttachmentRetention(ctx, attachmentStore, attachmentRetention)
 	}

@@ -1175,6 +1175,22 @@ func (s *encryptedStore) DeleteExpiredAttachments(ctx context.Context, before ti
 	return attachmentStore.DeleteExpiredAttachments(ctx, before)
 }
 
+func (s *encryptedStore) ConfigureAttachmentQuota(quota AttachmentQuota) error {
+	configurer, ok := s.inner.(AttachmentQuotaConfigurer)
+	if !ok {
+		return nil
+	}
+	return configurer.ConfigureAttachmentQuota(quota)
+}
+
+func (s *encryptedStore) ReconcileAttachmentBindings(ctx context.Context) error {
+	reconciler, ok := s.inner.(AttachmentBindingReconciler)
+	if !ok {
+		return nil
+	}
+	return reconciler.ReconcileAttachmentBindings(ctx)
+}
+
 func attachmentAAD(scope Scope, attachment Attachment) []byte {
 	return []byte(strings.Join([]string{
 		scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID,

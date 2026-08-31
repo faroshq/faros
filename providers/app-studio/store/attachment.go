@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"mime"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -38,12 +39,21 @@ const (
 	AttachmentMaxTextBytes     = 1 << 20
 	AttachmentMaxFilenameBytes = 255
 	AttachmentMaxIDBytes       = 128
-	// AttachmentProjectMaxBytes and AttachmentProjectMaxCount bound all stored
-	// drafts and retained attachments for one immutable Project UID. Eight
-	// maximum-size images fit in the byte budget (the turn-level maximum), while
-	// the count budget leaves room for abandoned drafts until retention runs.
-	AttachmentProjectMaxBytes = 64 << 20
-	AttachmentProjectMaxCount = 64
+	// DefaultAttachmentWorkspaceMaxBytes is the finite hosting protection for
+	// all attachment bytes in one workspace. A configured value of zero means
+	// unlimited workspace storage.
+	DefaultAttachmentWorkspaceMaxBytes = 1 << 30
+	// DefaultAttachmentDraftProjectMaxBytes and
+	// DefaultAttachmentDraftProjectMaxCount protect one project from abandoned
+	// upload drafts. Bound attachments are governed only by the workspace
+	// quota, because their lifetime is tied to a durable conversation turn.
+	DefaultAttachmentDraftProjectMaxBytes = 64 << 20
+	DefaultAttachmentDraftProjectMaxCount = 64
+	// AttachmentProjectMaxBytes and AttachmentProjectMaxCount are retained as
+	// source-compatible aliases for callers that used the former project-wide
+	// quota. They now describe draft-only abuse limits.
+	AttachmentProjectMaxBytes = DefaultAttachmentDraftProjectMaxBytes
+	AttachmentProjectMaxCount = DefaultAttachmentDraftProjectMaxCount
 	// DefaultAttachmentDraftRetention bounds uncommitted composer uploads. A
 	// caller can shorten this through provider configuration, but cannot make a
 	// draft immortal by omitting an expiry.
@@ -56,9 +66,86 @@ var (
 	ErrAttachmentForbidden       = errors.New("attachment ownership check failed")
 	ErrAttachmentImmutable       = errors.New("attachment is immutable")
 	ErrAttachmentReceiptMismatch = errors.New("attachment receipt does not match stored metadata")
-	ErrAttachmentQuotaExceeded   = errors.New("project attachment quota exceeded")
+	ErrAttachmentQuotaExceeded   = errors.New("attachment quota exceeded")
 	ErrAttachmentProjectDeleted  = errors.New("project attachment storage is closed")
 )
+
+// AttachmentStorageFinalizer is held by the Project controller while its
+// attachment scope is being closed. Keeping the name in the storage package
+// prevents the API and controller from drifting onto different finalizers.
+const AttachmentStorageFinalizer = "ai.faros.sh/attachment-storage"
+
+// AttachmentQuota controls attachment storage admission. WorkspaceMaxBytes
+// applies to bound and draft rows across every project in a workspace. The
+// draft limits apply only to unbound rows in the current project. A zero limit
+// means unlimited for that dimension.
+type AttachmentQuota struct {
+	WorkspaceMaxBytes    int64
+	DraftProjectMaxBytes int64
+	DraftProjectMaxCount int
+}
+
+// DefaultAttachmentQuota returns the hosting-safe defaults. Draft limits are
+// deliberately retained as a separate abuse guard from the workspace budget.
+func DefaultAttachmentQuota() AttachmentQuota {
+	return AttachmentQuota{
+		WorkspaceMaxBytes:    DefaultAttachmentWorkspaceMaxBytes,
+		DraftProjectMaxBytes: DefaultAttachmentDraftProjectMaxBytes,
+		DraftProjectMaxCount: DefaultAttachmentDraftProjectMaxCount,
+	}
+}
+
+// ParseAttachmentQuotaBytes parses a non-negative byte quota. Plain decimal
+// bytes and IEC suffixes (Ki, Mi, Gi, Ti) are accepted so environment values
+// remain readable while retaining exact integer semantics.
+func ParseAttachmentQuotaBytes(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, fmt.Errorf("attachment quota is empty")
+	}
+	valuePart, multiplier := raw, int64(1)
+	for suffix, factor := range map[string]int64{"Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40} {
+		if len(raw) > len(suffix) && strings.EqualFold(raw[len(raw)-len(suffix):], suffix) {
+			valuePart = strings.TrimSpace(raw[:len(raw)-len(suffix)])
+			multiplier = factor
+			break
+		}
+	}
+	value, err := strconv.ParseInt(valuePart, 10, 64)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("attachment quota must be a non-negative byte count or IEC value")
+	}
+	if value > int64(^uint64(0)>>1)/multiplier {
+		return 0, fmt.Errorf("attachment quota is too large")
+	}
+	return value * multiplier, nil
+}
+
+func validateAttachmentQuota(quota AttachmentQuota) error {
+	if quota.WorkspaceMaxBytes < 0 {
+		return fmt.Errorf("attachment workspace quota cannot be negative")
+	}
+	if quota.DraftProjectMaxBytes < 0 {
+		return fmt.Errorf("attachment draft project byte quota cannot be negative")
+	}
+	if quota.DraftProjectMaxCount < 0 {
+		return fmt.Errorf("attachment draft project count quota cannot be negative")
+	}
+	return nil
+}
+
+// AttachmentQuotaConfigurer is implemented by stores that can apply the
+// provider's startup quota configuration.
+type AttachmentQuotaConfigurer interface {
+	ConfigureAttachmentQuota(AttachmentQuota) error
+}
+
+// AttachmentBindingReconciler repairs rows left bound without a durable
+// owning conversation turn. It is called during provider startup before new
+// assistant work is admitted.
+type AttachmentBindingReconciler interface {
+	ReconcileAttachmentBindings(context.Context) error
+}
 
 // Attachment is an immutable project-scoped blob and its receipt metadata.
 // Data is omitted from JSON because API responses expose a receipt separately;
@@ -110,6 +197,66 @@ type AttachmentStore interface {
 	DeleteAttachment(context.Context, Scope, string, string) error
 	DeleteProjectAttachments(context.Context, Scope) error
 	DeleteExpiredAttachments(context.Context, time.Time) (int64, error)
+}
+
+// CreateAttachmentIdempotent admits a client-chosen upload ID while making a
+// retry after an ambiguous HTTP response safe. The returned boolean is true
+// only when this call inserted a new row. Existing rows are matched by the
+// authenticated actor and immutable content metadata; lifecycle timestamps
+// and binding state are deliberately excluded because a retry can arrive
+// after the original upload has been admitted to a turn.
+//
+// The helper performs a read before create for the common retry path, then
+// repeats the read after a conflict or quota race. This keeps the behavior
+// available to existing AttachmentStore implementations while preserving the
+// database transaction/locking semantics of their CreateAttachment method.
+func CreateAttachmentIdempotent(ctx context.Context, attachments AttachmentStore, scope Scope, candidate Attachment) (Attachment, bool, error) {
+	if attachments == nil {
+		return Attachment{}, false, ErrAttachmentNotFound
+	}
+	prepared, err := prepareAttachment(scope, candidate)
+	if err != nil {
+		return Attachment{}, false, err
+	}
+	matchExisting := func(existing Attachment) (Attachment, bool, error) {
+		if !attachmentUploadMetadataMatches(existing, prepared) {
+			return Attachment{}, false, fmt.Errorf("%w: client upload ID is already used for different content", ErrAttachmentConflict)
+		}
+		return existing, false, nil
+	}
+
+	existing, err := attachments.GetAttachment(ctx, scope, prepared.ID)
+	switch {
+	case err == nil:
+		return matchExisting(existing)
+	case !errors.Is(err, ErrAttachmentNotFound):
+		return Attachment{}, false, err
+	}
+
+	created, err := attachments.CreateAttachment(ctx, scope, prepared)
+	if err == nil {
+		return created, true, nil
+	}
+	// A concurrent upload can win the row lock, or can fill the workspace
+	// quota before this request reaches its INSERT. Recover the canonical row
+	// whenever the chosen ID now exists; otherwise preserve the original error.
+	if !errors.Is(err, ErrAttachmentConflict) && !errors.Is(err, ErrAttachmentQuotaExceeded) {
+		return Attachment{}, false, err
+	}
+	existing, lookupErr := attachments.GetAttachment(ctx, scope, prepared.ID)
+	if lookupErr != nil {
+		return Attachment{}, false, err
+	}
+	return matchExisting(existing)
+}
+
+func attachmentUploadMetadataMatches(existing, candidate Attachment) bool {
+	return existing.ActorID == candidate.ActorID &&
+		existing.Filename == candidate.Filename &&
+		existing.ContentType == candidate.ContentType &&
+		existing.SizeBytes == candidate.SizeBytes &&
+		strings.EqualFold(existing.SHA256, candidate.SHA256) &&
+		bytes.Equal(existing.Data, candidate.Data)
 }
 
 // VerifyAttachmentReceipt performs the authoritative server-side admission
@@ -171,6 +318,18 @@ func NormalizeAttachmentContentType(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported attachment content type %q", contentType)
 	}
+}
+
+// ValidateAttachmentID applies the same path-safe bound used by durable
+// attachment rows. Callers that accept a client-chosen upload ID should trim
+// it first, then use this helper so malformed IDs fail as request validation
+// rather than surfacing as a storage conflict.
+func ValidateAttachmentID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" || len([]byte(id)) > AttachmentMaxIDBytes || strings.ContainsAny(id, "/\\"+"\x00\r\n") || id == "." || id == ".." {
+		return fmt.Errorf("attachment ID must be a safe non-empty value of at most %d bytes", AttachmentMaxIDBytes)
+	}
+	return nil
 }
 
 // ValidateAttachmentContent applies the format and size contract independently
@@ -236,8 +395,8 @@ func prepareAttachment(scope Scope, attachment Attachment) (Attachment, error) {
 	attachment.Filename = strings.TrimSpace(attachment.Filename)
 	attachment.ContentType = strings.ToLower(strings.TrimSpace(attachment.ContentType))
 	attachment.SHA256 = strings.ToLower(strings.TrimSpace(attachment.SHA256))
-	if attachment.ID == "" || len([]byte(attachment.ID)) > AttachmentMaxIDBytes || strings.ContainsAny(attachment.ID, "/\\"+"\x00\r\n") || attachment.ID == "." || attachment.ID == ".." {
-		return Attachment{}, fmt.Errorf("attachment ID must be a safe non-empty value of at most %d bytes", AttachmentMaxIDBytes)
+	if err := ValidateAttachmentID(attachment.ID); err != nil {
+		return Attachment{}, err
 	}
 	if attachment.ActorID == "" {
 		return Attachment{}, fmt.Errorf("attachment actor is required")

@@ -10,6 +10,7 @@ export const ASSISTANT_LARGE_PASTE_BYTES = 10 << 10
 export const ASSISTANT_IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp'
 export const ASSISTANT_TEXT_ACCEPT = '.md,.txt,text/plain,text/markdown'
 export const ASSISTANT_ATTACHMENT_ACCEPT = `${ASSISTANT_IMAGE_ACCEPT},${ASSISTANT_TEXT_ACCEPT}`
+export const ASSISTANT_ATTACHMENT_RESOLUTION_ERROR = 'Resolve attachment uploads before creating the project (retry or remove the failed attachment).'
 
 const TEXT_FILE_EXTENSIONS = /\.(?:md|txt)$/iu
 const IMAGE_FILE_EXTENSIONS = /\.(?:png|jpe?g|webp)$/iu
@@ -28,6 +29,54 @@ export interface AssistantStagedAttachment {
   error?: string
   retryable?: boolean
   retryAction?: 'upload' | 'delete'
+}
+
+/**
+ * Keep the attachment error banner derived from candidate state. A transient
+ * upload error must not survive after that candidate succeeds or is removed,
+ * while another failed candidate still keeps an actionable message visible.
+ */
+export function assistantAttachmentErrorMessage(
+  attachments: readonly Pick<AssistantStagedAttachment, 'status' | 'error'>[],
+): string {
+  const detail = attachments.find((attachment) => attachment.status === 'error' && attachment.error?.trim())?.error?.trim()
+  if (detail) return detail
+  return attachments.some((attachment) => attachment.status === 'error')
+    ? ASSISTANT_ATTACHMENT_RESOLUTION_ERROR
+    : ''
+}
+
+/** A receipt is still usable only when its immutable content identity matches. */
+export function assistantAttachmentReceiptsMatch(
+  expected: Pick<ProjectAssistantAttachmentReceipt, 'id' | 'filename' | 'contentType' | 'sizeBytes' | 'sha256'>,
+  actual: Pick<ProjectAssistantAttachmentReceipt, 'id' | 'filename' | 'contentType' | 'sizeBytes' | 'sha256'>,
+): boolean {
+  return expected.id === actual.id &&
+    expected.filename === actual.filename &&
+    expected.contentType === actual.contentType &&
+    expected.sizeBytes === actual.sizeBytes &&
+    expected.sha256.toLowerCase() === actual.sha256.toLowerCase()
+}
+
+/** Return ready client candidates whose provisional receipt is no longer listed. */
+export function staleAssistantAttachmentClientIDs(
+  candidates: readonly Pick<AssistantStagedAttachment, 'clientID' | 'receipt' | 'status'>[],
+  listedReceipts: readonly ProjectAssistantAttachmentReceipt[],
+): string[] {
+  return candidates
+    .filter((candidate) => candidate.status === 'ready' && candidate.receipt)
+    .filter((candidate) => !listedReceipts.some((receipt) => assistantAttachmentReceiptsMatch(candidate.receipt!, receipt)))
+    .map((candidate) => candidate.clientID)
+}
+
+/** Recognize only a precise attachment receipt failure as retryable recovery. */
+export function isAssistantAttachmentReceiptUnavailableError(error: unknown): boolean {
+  const record = error && typeof error === 'object' ? error as { status?: unknown } : undefined
+  const status = typeof record?.status === 'number' ? record.status : undefined
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+  return (status === 400 || status === 404 || status === 409) &&
+    /attachment/i.test(message) &&
+    /(expired|invalid|missing|no longer|not available|not found|stale|unavailable|does not exist|receipt)/i.test(message)
 }
 
 /** Project untrusted API data into the immutable receipt used by content parts. */

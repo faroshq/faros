@@ -218,6 +218,126 @@ func TestMemoryAttachmentProjectQuotaAndDeletionTombstone(t *testing.T) {
 	}
 }
 
+func TestMemoryAttachmentQuotaAggregatesWorkspaceAndLimitsDraftsOnly(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	if err := s.ConfigureAttachmentQuota(AttachmentQuota{
+		WorkspaceMaxBytes:    int64(len(attachmentTestBlob())) * 2,
+		DraftProjectMaxBytes: int64(len(attachmentTestBlob())),
+		DraftProjectMaxCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	first := attachmentTestRecord(now, true, &expires)
+	first.ID = "draft-1"
+	if _, err := s.CreateAttachment(ctx, scope, first); err != nil {
+		t.Fatalf("create first draft: %v", err)
+	}
+	if _, err := s.CreateAttachment(ctx, scope, Attachment{ID: "draft-too-many", ActorID: "alice", Filename: "too-many.png", ContentType: first.ContentType, SizeBytes: first.SizeBytes, SHA256: first.SHA256, Draft: true, CreatedAt: now, ExpiresAt: &expires, Data: first.Data}); !errors.Is(err, ErrAttachmentQuotaExceeded) {
+		t.Fatalf("second draft quota error = %v", err)
+	}
+	receipt := AttachmentReceipt{ID: first.ID, Filename: first.Filename, ContentType: first.ContentType, SizeBytes: first.SizeBytes, SHA256: first.SHA256, CreatedAt: first.CreatedAt}
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{receipt}, "alice", "turn-1"); err != nil {
+		t.Fatalf("bind first attachment: %v", err)
+	}
+	// Once the first draft is bound, the project draft-only cap is available
+	// again even though the retained bytes still count toward the workspace.
+	second := attachmentTestRecord(now.Add(time.Microsecond), true, &expires)
+	second.ID = "draft-2"
+	if _, err := s.CreateAttachment(ctx, scope, second); err != nil {
+		t.Fatalf("create draft after binding: %v", err)
+	}
+	otherScope := scope
+	otherScope.ProjectName = "other"
+	otherScope.ProjectUID = "other-uid"
+	other := attachmentTestRecord(now.Add(2*time.Microsecond), false, nil)
+	other.ID = "bound-other"
+	if _, err := s.CreateAttachment(ctx, otherScope, other); !errors.Is(err, ErrAttachmentQuotaExceeded) {
+		t.Fatalf("workspace aggregate quota error = %v", err)
+	}
+}
+
+func TestMemoryAttachmentBindingReconcileDemotesOrphans(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	orphan := attachmentTestRecord(now, true, &expires)
+	orphan.ID = "orphan"
+	if _, err := s.CreateAttachment(ctx, scope, orphan); err != nil {
+		t.Fatal(err)
+	}
+	owned := attachmentTestRecord(now.Add(time.Microsecond), true, &expires)
+	owned.ID = "owned"
+	if _, err := s.CreateAttachment(ctx, scope, owned); err != nil {
+		t.Fatal(err)
+	}
+	toReceipt := func(a Attachment) AttachmentReceipt {
+		return AttachmentReceipt{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, SizeBytes: a.SizeBytes, SHA256: a.SHA256, CreatedAt: a.CreatedAt}
+	}
+	if _, err := s.BindAttachment(ctx, scope, toReceipt(orphan), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BindAttachments(ctx, scope, []AttachmentReceipt{toReceipt(owned)}, "alice", "owned-turn"); err != nil {
+		t.Fatal(err)
+	}
+	thread, err := s.CreateAssistantThread(ctx, scope, AssistantThread{ID: "thread-owned", ActorID: "alice", CreatedAt: now, UpdatedAt: now}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAssistantTurn(ctx, scope, AssistantTurn{ID: "owned-turn", ThreadID: thread.ID, ActorID: "alice", ClientUserMessageID: "client-owned", Status: AssistantTurnStatusCompleted, CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileAttachmentBindings(ctx); err != nil {
+		t.Fatal(err)
+	}
+	orphanAfter, err := s.GetAttachment(ctx, scope, orphan.ID)
+	if err != nil || !orphanAfter.Draft || orphanAfter.BindingID != "" || orphanAfter.ExpiresAt == nil {
+		t.Fatalf("reconciled orphan = %#v, err=%v", orphanAfter, err)
+	}
+	ownedAfter, err := s.GetAttachment(ctx, scope, owned.ID)
+	if err != nil || ownedAfter.Draft || ownedAfter.BindingID != "owned-turn" {
+		t.Fatalf("durable binding was changed = %#v, err=%v", ownedAfter, err)
+	}
+}
+
+func TestPostgresAttachmentWorkspaceLockKeyIsBinaryAndNulSafe(t *testing.T) {
+	withNUL := Scope{OrgUUID: "org\x00suffix", WorkspaceUUID: "workspace"}
+	withoutNUL := Scope{OrgUUID: "org", WorkspaceUUID: "suffixworkspace"}
+	if postgresAttachmentWorkspaceLockKey(withNUL) == postgresAttachmentWorkspaceLockKey(withoutNUL) {
+		t.Fatal("workspace lock key aliases NUL-containing and adjacent fields")
+	}
+	if postgresAttachmentWorkspaceLockKey(withNUL) != postgresAttachmentWorkspaceLockKey(withNUL) {
+		t.Fatal("workspace lock key is not deterministic")
+	}
+}
+
+func TestParseAttachmentQuotaBytes(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want int64
+	}{
+		{raw: "0", want: 0},
+		{raw: "1073741824", want: 1 << 30},
+		{raw: "1Gi", want: 1 << 30},
+		{raw: "2 Mi", want: 2 << 20},
+	} {
+		got, err := ParseAttachmentQuotaBytes(test.raw)
+		if err != nil || got != test.want {
+			t.Fatalf("parse %q = %d, %v; want %d", test.raw, got, err, test.want)
+		}
+	}
+	for _, raw := range []string{"", "-1", "1.5Gi", "9223372036854775808"} {
+		if _, err := ParseAttachmentQuotaBytes(raw); err == nil {
+			t.Fatalf("parse %q unexpectedly succeeded", raw)
+		}
+	}
+}
+
 func TestEncryptedStoreEncryptsAttachmentBytesAndVerifiesReceipt(t *testing.T) {
 	ctx := context.Background()
 	base := NewMemoryStore()
@@ -251,6 +371,69 @@ func TestEncryptedStoreEncryptsAttachmentBytesAndVerifiesReceipt(t *testing.T) {
 	bound, err := attachments.BindAttachment(ctx, scope, receipt, "alice")
 	if err != nil || bound.Draft || bound.ExpiresAt != nil {
 		t.Fatalf("bind encrypted receipt = %#v, %v", bound, err)
+	}
+}
+
+func TestCreateAttachmentIdempotentUsesStableIDAndRejectsReuseMismatch(t *testing.T) {
+	ctx := context.Background()
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	candidate := attachmentTestRecord(now, true, &expires)
+	candidate.ID = "attachment:stable-upload"
+
+	store := NewMemoryStore()
+	created, newRow, err := CreateAttachmentIdempotent(ctx, store, scope, candidate)
+	if err != nil || !newRow {
+		t.Fatalf("initial store create = %#v, new=%t, err=%v", created, newRow, err)
+	}
+	retry := candidate
+	retry.CreatedAt = now.Add(10 * time.Minute)
+	retry.ExpiresAt = func() *time.Time { value := now.Add(2 * time.Hour); return &value }()
+	recovered, newRow, err := CreateAttachmentIdempotent(ctx, store, scope, retry)
+	if err != nil || newRow || recovered.ID != candidate.ID || !recovered.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("retry recovery = %#v, new=%t, err=%v", recovered, newRow, err)
+	}
+	if listed, err := store.ListAttachments(ctx, scope); err != nil || len(listed) != 1 {
+		t.Fatalf("idempotent retry created duplicate rows: %#v, err=%v", listed, err)
+	}
+
+	mismatch := retry
+	mismatch.Filename = "different.png"
+	if _, _, err := CreateAttachmentIdempotent(ctx, store, scope, mismatch); !errors.Is(err, ErrAttachmentConflict) {
+		t.Fatalf("mismatched stable ID error = %v", err)
+	}
+	foreign := retry
+	foreign.ActorID = "bob"
+	if _, _, err := CreateAttachmentIdempotent(ctx, store, scope, foreign); !errors.Is(err, ErrAttachmentConflict) {
+		t.Fatalf("foreign stable ID error = %v", err)
+	}
+}
+
+func TestEncryptedStoreCreateAttachmentIdempotentPreservesEncryption(t *testing.T) {
+	ctx := context.Background()
+	base := NewMemoryStore()
+	wrapper, err := NewEncryptedStore(base, testEncryptionKeys(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := attachmentTestScope()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	expires := now.Add(time.Hour)
+	candidate := attachmentTestRecord(now, true, &expires)
+	candidate.ID = "attachment:encrypted-stable"
+
+	created, newRow, err := CreateAttachmentIdempotent(ctx, wrapper.(AttachmentStore), scope, candidate)
+	if err != nil || !newRow {
+		t.Fatalf("encrypted initial create = %#v, new=%t, err=%v", created, newRow, err)
+	}
+	recovered, newRow, err := CreateAttachmentIdempotent(ctx, wrapper.(AttachmentStore), scope, candidate)
+	if err != nil || newRow || recovered.ID != candidate.ID {
+		t.Fatalf("encrypted retry recovery = %#v, new=%t, err=%v", recovered, newRow, err)
+	}
+	raw, err := base.GetAttachment(ctx, scope, candidate.ID)
+	if err != nil || !raw.DataEncrypted || raw.DataKeyID == "" {
+		t.Fatalf("stable encrypted row = %#v, err=%v", raw, err)
 	}
 }
 

@@ -17,12 +17,15 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lib/pq"
@@ -51,7 +54,9 @@ const createMessageSchemaMigrationsTable = `CREATE TABLE IF NOT EXISTS app_studi
 // PostgresStore stores App Studio messages in Postgres with tenant-scoped
 // primary keys and cursor pagination.
 type PostgresStore struct {
-	db *sql.DB
+	db              *sql.DB
+	attachmentQuota AttachmentQuota
+	quotaMu         sync.RWMutex
 }
 
 // OpenPostgres opens a Postgres-backed store, initializes the schema, and
@@ -69,7 +74,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 	db.SetMaxIdleConns(4)
 	db.SetMaxOpenConns(8)
 
-	store := &PostgresStore{db: db}
+	store := &PostgresStore{db: db, attachmentQuota: DefaultAttachmentQuota()}
 	if err := store.EnsureSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -86,6 +91,55 @@ func (s *PostgresStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// ConfigureAttachmentQuota applies startup admission limits to the durable
+// backend. Existing rows are never deleted when a smaller quota is configured;
+// the limit applies to subsequent uploads.
+func (s *PostgresStore) ConfigureAttachmentQuota(quota AttachmentQuota) error {
+	if err := validateAttachmentQuota(quota); err != nil {
+		return err
+	}
+	s.quotaMu.Lock()
+	s.attachmentQuota = quota
+	s.quotaMu.Unlock()
+	return nil
+}
+
+func (s *PostgresStore) attachmentQuotaValue() AttachmentQuota {
+	s.quotaMu.RLock()
+	defer s.quotaMu.RUnlock()
+	return s.attachmentQuota
+}
+
+// ReconcileAttachmentBindings repairs the crash window between generic run
+// persistence and canonical turn creation. A retained attachment is valid
+// only when its binding ID names a durable turn in the same project scope.
+func (s *PostgresStore) ReconcileAttachmentBindings(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres store is nil")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE app_studio_attachments AS attachment
+		SET draft = true,
+			expires_at = COALESCE(attachment.draft_expires_at, attachment.created_at + INTERVAL '24 hours'),
+			draft_expires_at = NULL,
+			binding_id = ''
+		WHERE attachment.draft = false
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM app_studio_assistant_turns AS turn
+			WHERE turn.org_uuid = attachment.org_uuid
+			  AND turn.workspace_uuid = attachment.workspace_uuid
+			  AND turn.project_name = attachment.project_name
+			  AND turn.project_uid = attachment.project_uid
+			  AND turn.turn_id = attachment.binding_id
+		  )
+	`)
+	if err != nil {
+		return fmt.Errorf("reconcile attachment bindings: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
@@ -1287,21 +1341,32 @@ func (s *PostgresStore) CreateAttachment(ctx context.Context, scope Scope, attac
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM app_studio_attachments
-		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
+		WHERE org_uuid=$1 AND workspace_uuid=$2
 			AND draft=true AND expires_at IS NOT NULL AND expires_at <= now()
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID); err != nil {
-		return Attachment{}, fmt.Errorf("delete expired project attachments before quota check: %w", err)
+	`, scope.OrgUUID, scope.WorkspaceUUID); err != nil {
+		return Attachment{}, fmt.Errorf("delete expired workspace attachments before quota check: %w", err)
 	}
-	var storedCount int
-	var storedBytes int64
+	var workspaceBytes int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(sum(size_bytes), 0)
+		FROM app_studio_attachments
+		WHERE org_uuid=$1 AND workspace_uuid=$2
+	`, scope.OrgUUID, scope.WorkspaceUUID).Scan(&workspaceBytes); err != nil {
+		return Attachment{}, fmt.Errorf("measure workspace attachment quota: %w", err)
+	}
+	var draftCount int64
+	var draftBytes int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT count(*), COALESCE(sum(size_bytes), 0)
 		FROM app_studio_attachments
-		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
-	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID).Scan(&storedCount, &storedBytes); err != nil {
-		return Attachment{}, fmt.Errorf("measure project attachment quota: %w", err)
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND draft=true
+	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID).Scan(&draftCount, &draftBytes); err != nil {
+		return Attachment{}, fmt.Errorf("measure project draft attachment quota: %w", err)
 	}
-	if storedCount+1 > AttachmentProjectMaxCount || storedBytes+prepared.SizeBytes > AttachmentProjectMaxBytes {
+	quota := s.attachmentQuotaValue()
+	if (quota.WorkspaceMaxBytes > 0 && workspaceBytes+prepared.SizeBytes > quota.WorkspaceMaxBytes) ||
+		(prepared.Draft && ((quota.DraftProjectMaxCount > 0 && draftCount+1 > int64(quota.DraftProjectMaxCount)) ||
+			(quota.DraftProjectMaxBytes > 0 && draftBytes+prepared.SizeBytes > quota.DraftProjectMaxBytes))) {
 		return Attachment{}, ErrAttachmentQuotaExceeded
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -1328,11 +1393,27 @@ func (s *PostgresStore) CreateAttachment(ctx context.Context, scope Scope, attac
 }
 
 func lockPostgresAttachmentScope(ctx context.Context, tx *sql.Tx, scope Scope) error {
-	key := strings.Join([]string{scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID}, "\x00")
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
-		return fmt.Errorf("lock project attachment scope: %w", err)
+	key := postgresAttachmentWorkspaceLockKey(scope)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, key); err != nil {
+		return fmt.Errorf("lock workspace attachment scope: %w", err)
 	}
 	return nil
+}
+
+// postgresAttachmentWorkspaceLockKey returns a deterministic signed bigint
+// for a workspace lock without sending user-controlled text to PostgreSQL.
+// Length-prefixing keeps adjacent fields unambiguous even if a malformed
+// caller supplies embedded NUL bytes; the SQL parameter is always an int64.
+func postgresAttachmentWorkspaceLockKey(scope Scope) int64 {
+	hash := sha256.New()
+	for _, part := range []string{scope.OrgUUID, scope.WorkspaceUUID} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(part))
+	}
+	digest := hash.Sum(nil)
+	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
 
 func (s *PostgresStore) GetAttachment(ctx context.Context, scope Scope, id string) (Attachment, error) {
@@ -1344,16 +1425,18 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, scope Scope, id strin
 	}
 	id = strings.TrimSpace(id)
 	var attachment Attachment
-	var expiresAt sql.NullTime
+	var expiresAt, draftExpiresAt sql.NullTime
+	var bindingID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT attachment_id, actor_id, filename, content_type, size_bytes, sha256,
-			attachment_bytes, data_encrypted, data_key_id, draft, created_at, expires_at
+			attachment_bytes, data_encrypted, data_key_id, draft, created_at, expires_at,
+			binding_id, draft_expires_at
 		FROM app_studio_attachments
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND attachment_id=$5
 	`, scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID, id).Scan(
 		&attachment.ID, &attachment.ActorID, &attachment.Filename, &attachment.ContentType, &attachment.SizeBytes,
 		&attachment.SHA256, &attachment.Data, &attachment.DataEncrypted, &attachment.DataKeyID, &attachment.Draft,
-		&attachment.CreatedAt, &expiresAt)
+		&attachment.CreatedAt, &expiresAt, &bindingID, &draftExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrAttachmentNotFound
 	}
@@ -1361,9 +1444,14 @@ func (s *PostgresStore) GetAttachment(ctx context.Context, scope Scope, id strin
 		return Attachment{}, fmt.Errorf("get attachment: %w", err)
 	}
 	attachment.ProjectName, attachment.ProjectUID = scope.ProjectName, scope.ProjectUID
+	attachment.BindingID = bindingID
 	if expiresAt.Valid {
 		expires := expiresAt.Time.UTC()
 		attachment.ExpiresAt = &expires
+	}
+	if draftExpiresAt.Valid {
+		expires := draftExpiresAt.Time.UTC()
+		attachment.DraftExpiresAt = &expires
 	}
 	if attachmentExpired(attachment, time.Now()) {
 		return Attachment{}, ErrAttachmentNotFound
@@ -1383,7 +1471,8 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, scope Scope) ([]Att
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT attachment_id, actor_id, filename, content_type, size_bytes, sha256,
-			data_encrypted, data_key_id, draft, created_at, expires_at
+			data_encrypted, data_key_id, draft, created_at, expires_at,
+			binding_id, draft_expires_at
 		FROM app_studio_attachments
 		WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4
 			AND (draft=false OR expires_at IS NULL OR expires_at > now())
@@ -1396,16 +1485,22 @@ func (s *PostgresStore) ListAttachments(ctx context.Context, scope Scope) ([]Att
 	attachments := make([]Attachment, 0)
 	for rows.Next() {
 		var attachment Attachment
-		var expiresAt sql.NullTime
+		var expiresAt, draftExpiresAt sql.NullTime
+		var bindingID string
 		if err := rows.Scan(&attachment.ID, &attachment.ActorID, &attachment.Filename, &attachment.ContentType,
 			&attachment.SizeBytes, &attachment.SHA256, &attachment.DataEncrypted, &attachment.DataKeyID,
-			&attachment.Draft, &attachment.CreatedAt, &expiresAt); err != nil {
+			&attachment.Draft, &attachment.CreatedAt, &expiresAt, &bindingID, &draftExpiresAt); err != nil {
 			return nil, fmt.Errorf("scan attachment: %w", err)
 		}
 		attachment.ProjectName, attachment.ProjectUID = scope.ProjectName, scope.ProjectUID
+		attachment.BindingID = bindingID
 		if expiresAt.Valid {
 			expires := expiresAt.Time.UTC()
 			attachment.ExpiresAt = &expires
+		}
+		if draftExpiresAt.Valid {
+			expires := draftExpiresAt.Time.UTC()
+			attachment.DraftExpiresAt = &expires
 		}
 		attachments = append(attachments, attachment)
 	}
@@ -1680,6 +1775,36 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	// archived projections only when no in-progress turn remains; active turns
 	// must survive retention so a refresh can still resume them.  The FK
 	// cascade removes the associated turns and thread events atomically.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_attachments AS attachment
+		WHERE EXISTS (
+			SELECT 1
+			FROM app_studio_assistant_turns AS turn
+			JOIN app_studio_assistant_threads AS thread
+			  ON thread.org_uuid=turn.org_uuid
+			 AND thread.workspace_uuid=turn.workspace_uuid
+			 AND thread.project_name=turn.project_name
+			 AND thread.project_uid=turn.project_uid
+			 AND thread.thread_id=turn.thread_id
+			WHERE turn.org_uuid=attachment.org_uuid
+			  AND turn.workspace_uuid=attachment.workspace_uuid
+			  AND turn.project_name=attachment.project_name
+			  AND turn.project_uid=attachment.project_uid
+			  AND turn.turn_id=attachment.binding_id
+			  AND thread.updated_at < $1
+			  AND thread.status <> 'active'
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM app_studio_assistant_turns AS active_turn
+				WHERE active_turn.org_uuid=thread.org_uuid
+				  AND active_turn.workspace_uuid=thread.workspace_uuid
+				  AND active_turn.project_name=thread.project_name
+				  AND active_turn.project_uid=thread.project_uid
+				  AND active_turn.thread_id=thread.thread_id
+				  AND active_turn.status='in_progress'
+			  )
+		)`, before.UTC()); err != nil {
+		return 0, fmt.Errorf("delete stale assistant thread attachments: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_threads AS thread
 		WHERE thread.updated_at < $1
 		  AND thread.status <> 'active'

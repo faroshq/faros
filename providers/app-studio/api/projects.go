@@ -794,7 +794,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	const attachmentCleanupFinalizer = "ai.faros.sh/attachment-storage"
+	const attachmentCleanupFinalizer = store.AttachmentStorageFinalizer
 	if !slices.Contains(p.Finalizers, attachmentCleanupFinalizer) {
 		next := p.DeepCopy()
 		next.Finalizers = append(next.Finalizers, attachmentCleanupFinalizer)

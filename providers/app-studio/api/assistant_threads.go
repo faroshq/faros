@@ -602,20 +602,6 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 		ContentParts: request.ContentParts,
 	},
 		func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) (callbackErr error) {
-			if err := s.bindProjectAssistantContentPartAttachmentsForRun(r.Context(), id, project, request.ContentParts, created.ID); err != nil {
-				return err
-			}
-			attachmentBindingCommitted := false
-			defer func() {
-				if attachmentBindingCommitted {
-					return
-				}
-				cleanupCtx, cancel := detachedProjectPersistenceContext(r.Context())
-				defer cancel()
-				if rollbackErr := s.rollbackProjectAssistantAttachmentBinding(cleanupCtx, id, project, created.ID); rollbackErr != nil {
-					callbackErr = errors.Join(callbackErr, fmt.Errorf("rollback project attachment binding: %w", rollbackErr))
-				}
-			}()
 			start := &projectAssistantStreamStart{
 				SkillSnapshot: &skillSnapshot, SelectedSkills: cloneProjectAssistantSkillReceipts(selectedSkills),
 				SelectedContextResources: cloneProjectAssistantContextResourceReceipts(selectedContextResources),
@@ -648,6 +634,29 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 				return createErr
 			}
 			canonicalTurn = createdTurn
+			if canonicalTurn.ID != created.ID {
+				// A client-message collision with an unrelated generic run must
+				// never make this run mutate the existing turn's attachment owner.
+				return fmt.Errorf("assistant turn identity %q does not match durable run %q", canonicalTurn.ID, created.ID)
+			}
+			bindingID := canonicalTurn.ID
+			attachmentBindingCommitted := false
+			defer func() {
+				if attachmentBindingCommitted {
+					return
+				}
+				cleanupCtx, cancel := detachedProjectPersistenceContext(r.Context())
+				defer cancel()
+				if rollbackErr := s.rollbackProjectAssistantAttachmentBinding(cleanupCtx, id, project, bindingID); rollbackErr != nil {
+					callbackErr = errors.Join(callbackErr, fmt.Errorf("rollback project attachment binding: %w", rollbackErr))
+				}
+			}()
+			// The turn is the durable owner of retained attachment bytes. Create
+			// it before binding so a crash cannot leave an immutable attachment
+			// pointing only at a generic run that the conversation cannot recover.
+			if err := s.bindProjectAssistantContentPartAttachmentsForRun(r.Context(), id, project, request.ContentParts, bindingID); err != nil {
+				return err
+			}
 			if generateThreadTitle {
 				s.startAssistantThreadTitleGeneration(c, scope, id, thread, request.Content)
 			}
@@ -667,9 +676,26 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 	if !started.Started {
 		canonicalTurn, err = s.store.FindAssistantTurnByClientUserMessageID(r.Context(), scope, thread.ID, request.ClientUserMessageID)
 		if errors.Is(err, store.ErrAssistantTurnNotFound) {
-			canonicalTurn, err = s.repairProjectAssistantThreadTurn(r.Context(), scope, thread, request, started.Run)
+			var recoveredThread store.AssistantThread
+			recoveredThread, canonicalTurn, err = s.findProjectAssistantTurnAcrossThreads(r.Context(), scope, id.user, request.ClientUserMessageID, thread.ID)
+			if err == nil {
+				// The generic idempotency record may have been created from a
+				// different thread during a first-project replay. Return and repair
+				// that canonical thread rather than attaching the run to this new
+				// request's thread.
+				thread = recoveredThread
+			} else if errors.Is(err, store.ErrAssistantTurnNotFound) {
+				canonicalTurn, err = s.repairProjectAssistantThreadTurn(r.Context(), scope, thread, request, started.Run)
+			}
 		}
 		if err != nil {
+			s.writeAssistantThreadError(w, err)
+			return
+		}
+		// A provider restart can leave a durable turn and its generic run while
+		// the attachment batch was not committed. Binding is idempotent and is
+		// intentionally retried after canonical-turn recovery.
+		if err := s.bindProjectAssistantContentPartAttachmentsForRun(r.Context(), id, project, request.ContentParts, canonicalTurn.ID); err != nil {
 			s.writeAssistantThreadError(w, err)
 			return
 		}
@@ -687,6 +713,56 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 	}
 	thread, _ = s.store.GetAssistantThread(r.Context(), scope, thread.ID)
 	writeJSON(w, http.StatusAccepted, assistantThreadTurnStartResponse{Thread: thread, Turn: canonicalTurn, ContinuationOfTurnID: request.continuationOfTurnID})
+}
+
+// findProjectAssistantTurnAcrossThreads resolves the canonical turn for an
+// idempotent client message across all of the actor's threads. A replay can
+// arrive with a freshly created thread after the original request committed
+// its generic run; creating a second turn in that fresh thread would strand
+// the original transcript and its attachment ownership.
+func (s *Server) findProjectAssistantTurnAcrossThreads(ctx context.Context, scope store.Scope, actorID, clientUserMessageID, preferredThreadID string) (store.AssistantThread, store.AssistantTurn, error) {
+	actorID = strings.TrimSpace(actorID)
+	clientUserMessageID = strings.TrimSpace(clientUserMessageID)
+	preferredThreadID = strings.TrimSpace(preferredThreadID)
+	if actorID == "" || clientUserMessageID == "" {
+		return store.AssistantThread{}, store.AssistantTurn{}, store.ErrAssistantTurnNotFound
+	}
+	if preferredThreadID != "" {
+		if turn, err := s.store.FindAssistantTurnByClientUserMessageID(ctx, scope, preferredThreadID, clientUserMessageID); err == nil {
+			thread, threadErr := s.store.GetAssistantThread(ctx, scope, preferredThreadID)
+			if threadErr != nil {
+				return store.AssistantThread{}, store.AssistantTurn{}, threadErr
+			}
+			return thread, turn, nil
+		} else if !errors.Is(err, store.ErrAssistantTurnNotFound) {
+			return store.AssistantThread{}, store.AssistantTurn{}, err
+		}
+	}
+
+	cursor := ""
+	for {
+		page, err := s.store.ListAssistantThreads(ctx, scope, actorID, true, 100, cursor)
+		if err != nil {
+			return store.AssistantThread{}, store.AssistantTurn{}, err
+		}
+		for _, candidate := range page.Items {
+			if candidate.ID == preferredThreadID {
+				continue
+			}
+			turn, err := s.store.FindAssistantTurnByClientUserMessageID(ctx, scope, candidate.ID, clientUserMessageID)
+			if err == nil {
+				return candidate, turn, nil
+			}
+			if !errors.Is(err, store.ErrAssistantTurnNotFound) {
+				return store.AssistantThread{}, store.AssistantTurn{}, err
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return store.AssistantThread{}, store.AssistantTurn{}, store.ErrAssistantTurnNotFound
 }
 
 // repairProjectAssistantThreadTurn reconstructs the canonical thread boundary

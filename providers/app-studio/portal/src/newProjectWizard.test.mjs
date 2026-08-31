@@ -183,8 +183,8 @@ test('wizard handoff keeps the existing readiness and project/thread start path 
 
   const startPath = appSource.slice(appSource.indexOf('async function createProjectAndStartConversation('))
   assert.match(startPath, /api\.createProjectStream\(props\.ctx, \{/)
-  assert.match(startPath, /api\.createAssistantThread\(props\.ctx, projectName\)/)
-  assert.match(startPath, /api\.startAssistantTurn\(props\.ctx, projectName, thread\.id, \{/)
+  assert.match(startPath, /api\.createAssistantThread\(props\.ctx, projectName, undefined, requestedThreadID\)/)
+  assert.match(startPath, /startPreProjectAssistantTurn\(projectName, submission, thread\.id\)/)
 })
 
 test('landing intake uses a compact Faros composer with concrete prompts and a repository popover', () => {
@@ -255,6 +255,9 @@ test('landing intake uses a compact Faros composer with concrete prompts and a r
   assert.match(appSource, /function handleLandingImportEscape\(event: KeyboardEvent\)[\s\S]*event\.key !== 'Escape'[\s\S]*closeLandingImportPopover\(true\)/)
   assert.match(appSource, /function handleLandingImportOutside\(event: PointerEvent\)[\s\S]*root\.contains\(target\)[\s\S]*closeLandingImportPopover\(\)/)
   assert.match(appSource, /function toggleLandingImport\(\)[\s\S]*landingImportDialogRef\.value[\s\S]*\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(preProjectComposerSource, /'close-menu': \[\]/)
+  assert.match(preProjectComposerSource, /function closeAttachmentMenu\(\)[\s\S]*emit\('close-menu'\)/)
+  assert.match(appSource, /<AssistantPreProjectComposer[\s\S]*@close-menu="closeLandingImportPopover"/)
   assert.match(appSource, /document\.addEventListener\('pointerdown', handleLandingImportOutside\)/)
   assert.match(appSource, /document\.addEventListener\('keydown', handleLandingImportEscape\)/)
 })
@@ -289,20 +292,25 @@ test('pre-project attachments stay parent-owned across both intake surfaces and 
 
   const startPath = appSource.slice(appSource.indexOf('async function createProjectAndStartConversation('))
   assert.match(startPath, /ensurePreProjectAttachmentsUploaded\(projectName\)/)
-  assert.match(startPath, /const startAttachmentParts = preProjectAttachments\.value/)
-  assert.match(startPath, /type: 'text' as const, text: startPlan\.content/)
-  assert.match(startPath, /\.\.\.\(startContentParts\.length \? \{ contentParts: startContentParts \} : \{\}\)/)
-  const startRequest = startPath.slice(startPath.indexOf('const canonical = await api.startAssistantTurn'))
-  assert.ok(startRequest.indexOf('clearPreProjectAttachments()') > startRequest.indexOf('await api.startAssistantTurn'), 'receipts clear only after turn acceptance')
+  assert.match(appSource, /function preProjectStartContentParts\(projectName: string, content: string\)[\s\S]*type: 'text' as const, text: content/)
+  assert.match(appSource, /function startPreProjectAssistantTurn\([\s\S]*preProjectStartContentParts\(projectName, startPlan\.content\)/)
+  assert.match(startPath, /startPreProjectAssistantTurn\(projectName, submission, thread\.id\)/)
+  const startRequest = startPath.slice(startPath.indexOf('const canonical = await startPreProjectAssistantTurn'))
+  assert.ok(startRequest.indexOf('clearPreProjectAttachments(true)') > 0, 'receipts clear only after turn acceptance')
   assert.match(startPath, /preProjectAttachmentProjectName = projectName/)
   assert.match(startPath, /firstProjectSubmissionWithProject\(submission, projectName\)/)
+  assert.match(appSource, /recoverPreProjectAttachmentReceipts\(projectName, true\)/)
+  assert.match(startPath, /requestedThreadID/)
+  assert.match(startPath, /firstProjectSubmissionWithThread\(submission, requestedThreadID\)/)
+  assert.match(startPath, /canonicalThreadID/)
+  assert.match(startPath, /listAssistantThreadItems\(props\.ctx, projectName, canonicalThreadID\)/)
   assert.match(appSource, /retryPreProjectAttachment/)
   assert.match(appSource, /retryAction: 'delete'/)
   assert.match(appSource, /api\.deleteAssistantAttachment\(props\.ctx, attachment\.projectName, attachment\.receipt\.id\)/)
 })
 
 test('keeps a project-bound first submission when returning to ~new for attachment retry', () => {
-  assert.match(appSource, /function shouldKeepProjectBoundFirstSubmission\(\): boolean \{[\s\S]*isCreateRoute\.value[\s\S]*pendingFirstProjectSubmission\?\.projectName/)
+  assert.match(appSource, /function shouldKeepProjectBoundFirstSubmission\(\): boolean \{[\s\S]*isCreateRoute\.value[\s\S]*pendingFirstProjectSubmission\?\.content/)
   assert.match(appSource, /pendingFirstProjectSubmission[\s\S]*projectName !== pendingFirstProjectSubmission\.projectName[\s\S]*!shouldKeepProjectBoundFirstSubmission\(\)/)
   assert.match(appSource, /pendingFirstProjectSubmission &&[\s\S]*pathName !== pendingFirstProjectSubmission\.projectName[\s\S]*!shouldKeepProjectBoundFirstSubmission\(\)/)
   assert.match(appSource, /if \(!shouldKeepProjectBoundFirstSubmission\(\)\) clearPendingFirstProjectSubmission\(\)/)
@@ -313,7 +321,8 @@ test('attachment-only landing submission is admitted and uses an explicit derive
   assert.match(appSource, /canSubmitCreatePrompt\(createPromptContent\.value, createReadiness\.value\)/)
   assert.match(appSource, /const content = projectCreationPrompt\(prompt\.value, preProjectAttachments\.value\.length\)/)
   assert.match(appSource, /if \(!prompt\.value\.trim\(\)\) prompt\.value = content/)
-  assert.match(appSource, /startContentParts = startAttachmentParts\.length[\s\S]*type: 'text' as const, text: startPlan\.content/)
+  assert.match(appSource, /preProjectStartContentParts\(projectName, startPlan\.content\)/)
+  assert.match(appSource, /type: 'text' as const, text: content/)
 })
 
 test('project-bound retry remains fenced by mount and pending-submission identity', () => {

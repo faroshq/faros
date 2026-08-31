@@ -226,3 +226,80 @@ func TestProjectAssistantStoreAttachmentReaderVerifiesScopedReceipt(t *testing.T
 		t.Fatalf("foreign actor read error = %v", err)
 	}
 }
+
+func TestProjectAssistantAttachmentHTTPStableClientIDIsIdempotentAndDeletable(t *testing.T) {
+	project := publishingTestProject("demo", "project-uid", "")
+	client := asclient.NewFromDynamic(publishingTestDynamic(project))
+	server := NewWithWorkspace(nil, store.NewMemoryStore(), nil, "", false)
+	server.projectClientFor = func(identity) (*asclient.Client, error) { return client, nil }
+	router := mux.NewRouter()
+	server.Register(router)
+
+	clientID := "attachment:stable-http-upload"
+	data := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x02}
+	upload := func(filename, stableID, actor string) (int, attachmentReceiptResponse, string) {
+		t.Helper()
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("file", filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if stableID != "" {
+			if err := writer.WriteField("clientAttachmentID", stableID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/projects/demo/assistant/attachments", &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		request.Header.Set("X-Faros-Tenant", "root:faros:tenants:org:workspace")
+		request.Header.Set("X-Faros-Cluster", "cluster")
+		request.Header.Set("X-Faros-User", actor)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		var receipt attachmentReceiptResponse
+		if response.Code == http.StatusCreated || response.Code == http.StatusOK {
+			if err := json.Unmarshal(response.Body.Bytes(), &receipt); err != nil {
+				t.Fatalf("upload receipt: %v", err)
+			}
+		}
+		return response.Code, receipt, response.Body.String()
+	}
+
+	status, first, body := upload("screen.png", clientID, "alice")
+	if status != http.StatusCreated || first.ID != clientID {
+		t.Fatalf("initial stable upload = %d, %#v, %s", status, first, body)
+	}
+	status, retry, body := upload("screen.png", clientID, "alice")
+	if status != http.StatusOK || retry.ID != first.ID || retry.CreatedAt != first.CreatedAt {
+		t.Fatalf("stable retry = %d, %#v, body=%s; first=%#v", status, retry, body, first)
+	}
+	status, _, body = upload("different.png", clientID, "alice")
+	if status != http.StatusConflict {
+		t.Fatalf("stable ID metadata mismatch = %d, body=%s", status, body)
+	}
+	status, _, body = upload("screen.png", clientID, "bob")
+	if status != http.StatusConflict {
+		t.Fatalf("stable ID actor mismatch = %d, body=%s", status, body)
+	}
+	status, _, body = upload("screen.png", "../invalid", "alice")
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid stable ID = %d, body=%s", status, body)
+	}
+
+	request := httptest.NewRequest(http.MethodDelete, "/api/projects/demo/assistant/attachments/"+clientID, nil)
+	request.Header.Set("X-Faros-Tenant", "root:faros:tenants:org:workspace")
+	request.Header.Set("X-Faros-Cluster", "cluster")
+	request.Header.Set("X-Faros-User", "alice")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("delete by stable ID = %d, body=%s", response.Code, response.Body.String())
+	}
+}

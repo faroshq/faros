@@ -34,6 +34,7 @@ const emit = defineEmits<{
   'add-attachment': [attachment: AssistantStagedAttachment]
   'remove-attachment': [clientID: string]
   'retry-attachment': [clientID: string]
+  'close-menu': []
   submit: []
 }>()
 
@@ -61,7 +62,9 @@ function toggleAttachmentMenu() {
 }
 
 function closeAttachmentMenu() {
+  if (!attachmentMenuOpen.value) return
   attachmentMenuOpen.value = false
+  emit('close-menu')
 }
 
 function openAttachmentPicker() {

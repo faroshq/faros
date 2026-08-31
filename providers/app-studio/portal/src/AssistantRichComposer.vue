@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { FileText, Image, Loader2, Paperclip, Plus, RotateCcw, Upload, X } from 'lucide-vue-next'
-import { api } from './api'
+import { api, isProjectAPINotFoundError } from './api'
 import AssistantCommandPalette from './AssistantCommandPalette.vue'
 import AssistantAttachmentPreview from './AssistantAttachmentPreview.vue'
 import AssistantMessageAnnotations from './AssistantMessageAnnotations.vue'
@@ -115,6 +115,32 @@ const attachmentChipsPending = computed(() => attachmentChips.value.some((chip) 
 
 function attachmentLabel(chip: AssistantAttachmentChip): string {
   return chip.receipt?.filename || chip.file?.name || 'attachment'
+}
+
+function attachmentCleanupIDs(chip: Pick<AssistantAttachmentChip, 'clientID' | 'receipt'>): string[] {
+  return [...new Set([chip.receipt?.id, chip.clientID].filter((id): id is string => Boolean(id?.trim())))]
+}
+
+/** Best-effort cleanup for cancelled or ambiguously failed draft uploads. */
+async function bestEffortDeleteAttachment(
+  chip: Pick<AssistantAttachmentChip, 'clientID' | 'receipt'>,
+  projectName: string,
+): Promise<void> {
+  if (!projectName) return
+  for (const attachmentID of attachmentCleanupIDs(chip)) {
+    try {
+      await api.deleteAssistantAttachment(props.ctx, projectName, attachmentID)
+    } catch {
+      // The candidate remains locally recoverable; cleanup must not replace a
+      // useful retry with a second, ambiguous error state.
+    }
+  }
+}
+
+function isAttachmentAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError'
 }
 
 function attachmentStatusLabel(chip: Pick<AssistantAttachmentChip, 'status' | 'retryAction'>): string {
@@ -543,7 +569,7 @@ function appendAttachmentError(file: File, message: string) {
   emitAttachmentPending()
 }
 
-async function uploadAttachment(file: File) {
+async function uploadAttachment(file: File, existingClientID?: string) {
   if (props.disabled || props.activeRun) return
   if (!props.projectName.trim()) {
     appendAttachmentError(file, 'Select a project before adding an attachment.')
@@ -553,26 +579,40 @@ async function uploadAttachment(file: File) {
     appendAttachmentError(file, 'Only PNG, JPEG, WebP screenshots and .txt or .md files can be attached.')
     return
   }
-  const sharedValidationError = assistantAttachmentValidationError(file, attachmentChips.value)
+  const existingChip = existingClientID
+    ? attachmentChips.value.find((candidate) => candidate.clientID === existingClientID)
+    : undefined
+  const clientID = existingClientID || `attachment:${Date.now()}:${Math.random().toString(36).slice(2)}`
+  const validationCandidates = existingChip
+    ? attachmentChips.value.filter((candidate) => candidate.clientID !== existingClientID)
+    : attachmentChips.value
+  const sharedValidationError = assistantAttachmentValidationError(file, validationCandidates)
   if (sharedValidationError) {
     appendAttachmentError(file, sharedValidationError)
     return
   }
-  const unresolvedCount = attachmentChips.value.filter((candidate) => candidate.status !== 'ready').length
+  const unresolvedCount = attachmentChips.value.filter((candidate) => candidate.clientID !== clientID && candidate.status !== 'ready').length
   if (localParts.value.length + unresolvedCount >= MAX_ASSISTANT_COMPOSER_PARTS) {
     appendAttachmentError(file, `A turn can contain at most ${MAX_ASSISTANT_COMPOSER_PARTS} content parts.`)
     return
   }
-  const clientID = `attachment:${Date.now()}:${Math.random().toString(36).slice(2)}`
   const controller = new AbortController()
-  const chip: AssistantAttachmentChip = { clientID, file, status: 'uploading', retryAction: 'upload', controller }
-  attachmentChips.value = [...attachmentChips.value, chip]
+  const chip: AssistantAttachmentChip = existingChip || { clientID, file, status: 'uploading', retryAction: 'upload', controller }
+  chip.file = file
+  chip.status = 'uploading'
+  chip.error = undefined
+  chip.retryAction = 'upload'
+  chip.controller = controller
+  if (!existingChip) attachmentChips.value = [...attachmentChips.value, chip]
   emitAttachmentPending()
   try {
-    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, props.projectName, file, controller.signal))
+    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, props.projectName, file, controller.signal, clientID))
     if (!receipt) throw new Error('The attachment upload returned an invalid receipt.')
     const current = attachmentChips.value.find((candidate) => candidate.clientID === clientID)
-    if (!current) return
+    if (!current) {
+      void bestEffortDeleteAttachment({ ...chip, receipt }, props.projectName)
+      return
+    }
     current.receipt = receipt
     current.status = 'ready'
     current.controller = undefined
@@ -582,7 +622,21 @@ async function uploadAttachment(file: File) {
     emitState()
   } catch (error) {
     const current = attachmentChips.value.find((candidate) => candidate.clientID === clientID)
-    if (!current || (error instanceof DOMException && error.name === 'AbortError')) return
+    if (isAttachmentAbortError(error)) {
+      void bestEffortDeleteAttachment(chip, props.projectName)
+      if (current) {
+        current.status = 'staged'
+        current.controller = undefined
+        current.error = undefined
+        current.retryAction = undefined
+        emitAttachmentPending()
+      }
+      return
+    }
+    // Preserve the File candidate after an ambiguous response. The server may
+    // have created a draft even when the browser received an error.
+    void bestEffortDeleteAttachment(chip, props.projectName)
+    if (!current) return
     current.status = 'error'
     current.controller = undefined
     current.error = error instanceof Error ? error.message : 'Attachment upload failed.'
@@ -608,19 +662,25 @@ function retryAttachment(chip: AssistantAttachmentChip) {
     return
   }
   if (!chip.file) return
-  attachmentChips.value = attachmentChips.value.filter((candidate) => candidate.clientID !== chip.clientID)
+  // Keep the stable client identity across retries so a lost upload response
+  // cannot turn one browser candidate into multiple server drafts.
+  chip.status = 'staged'
+  chip.error = undefined
+  chip.retryAction = undefined
   emitAttachmentPending()
-  void uploadAttachment(chip.file)
+  void uploadAttachment(chip.file, chip.clientID)
 }
 
 async function removeAttachment(chip: AssistantAttachmentChip) {
   if (chip.status === 'uploading') {
     chip.controller?.abort()
+    void bestEffortDeleteAttachment(chip, props.projectName)
     attachmentChips.value = attachmentChips.value.filter((candidate) => candidate.clientID !== chip.clientID)
     emitAttachmentPending()
     return
   }
   if (chip.status === 'deleting') return
+  if (!chip.receipt) void bestEffortDeleteAttachment(chip, props.projectName)
   if (chip.receipt) {
     chip.status = 'deleting'
     chip.error = undefined
@@ -629,11 +689,16 @@ async function removeAttachment(chip: AssistantAttachmentChip) {
     try {
       await api.deleteAssistantAttachment(props.ctx, props.projectName, chip.receipt.id)
     } catch (error) {
-      chip.status = 'error'
-      chip.error = error instanceof Error ? error.message : 'Attachment removal failed.'
-      chip.retryAction = 'delete'
-      emitAttachmentPending()
-      return
+      if (isProjectAPINotFoundError(error)) {
+        // DELETE is idempotent from the composer perspective: an expired or
+        // already-removed draft is no longer present and can leave the UI.
+      } else {
+        chip.status = 'error'
+        chip.error = error instanceof Error ? error.message : 'Attachment removal failed.'
+        chip.retryAction = 'delete'
+        emitAttachmentPending()
+        return
+      }
     }
   }
   if (chip.receipt) {
@@ -863,7 +928,10 @@ function syncFromProps() {
 watch(() => [props.modelValue, partSignature(props.contentParts), props.selectedSkills.map((skill) => skill.id).join(','), props.selectedResources.map(assistantResourceSelectionKey).join(',')], syncFromProps)
 watch(() => props.projectName, (current, previous) => {
   if (current === previous) return
-  for (const chip of attachmentChips.value) chip.controller?.abort()
+  for (const chip of attachmentChips.value) {
+    chip.controller?.abort()
+    if (chip.status !== 'ready') void bestEffortDeleteAttachment(chip, previous)
+  }
   attachmentChips.value = []
   emitAttachmentPending()
 })
@@ -881,7 +949,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('selectionchange', saveSelection)
-  for (const chip of attachmentChips.value) chip.controller?.abort()
+  for (const chip of attachmentChips.value) {
+    chip.controller?.abort()
+    if (chip.status !== 'ready') void bestEffortDeleteAttachment(chip, props.projectName)
+  }
 })
 
 defineExpose({ focus: () => focusEditor(false), openPalette, closePalette })

@@ -49,6 +49,7 @@ type MemoryStore struct {
 	projectThumbnails map[Scope]ProjectThumbnail
 	attachments       map[Scope]map[string]Attachment
 	attachmentDeleted map[Scope]struct{}
+	attachmentQuota   AttachmentQuota
 }
 
 type projectBootstrapPermit struct {
@@ -72,6 +73,7 @@ func NewMemoryStore() *MemoryStore {
 		projectThumbnails:     map[Scope]ProjectThumbnail{},
 		attachments:           map[Scope]map[string]Attachment{},
 		attachmentDeleted:     map[Scope]struct{}{},
+		attachmentQuota:       DefaultAttachmentQuota(),
 	}
 }
 
@@ -614,22 +616,100 @@ func (s *MemoryStore) CreateAttachment(_ context.Context, scope Scope, attachmen
 	if _, exists := s.attachments[scope][prepared.ID]; exists {
 		return Attachment{}, ErrAttachmentConflict
 	}
-	now := time.Now()
-	var storedBytes int64
-	var storedCount int
-	for id, existing := range s.attachments[scope] {
-		if attachmentExpired(existing, now) {
-			delete(s.attachments[scope], id)
+	now := time.Now().UTC()
+	var workspaceBytes int64
+	var draftBytes int64
+	var draftCount int
+	for candidateScope, attachments := range s.attachments {
+		if candidateScope.OrgUUID != scope.OrgUUID || candidateScope.WorkspaceUUID != scope.WorkspaceUUID {
 			continue
 		}
-		storedBytes += existing.SizeBytes
-		storedCount++
+		for id, existing := range attachments {
+			if attachmentExpired(existing, now) {
+				delete(attachments, id)
+				continue
+			}
+			workspaceBytes += existing.SizeBytes
+			if candidateScope == scope && existing.Draft {
+				draftBytes += existing.SizeBytes
+				draftCount++
+			}
+		}
 	}
-	if storedCount+1 > AttachmentProjectMaxCount || storedBytes+prepared.SizeBytes > AttachmentProjectMaxBytes {
+	quota := s.attachmentQuota
+	if quota.WorkspaceMaxBytes > 0 && workspaceBytes+prepared.SizeBytes > quota.WorkspaceMaxBytes {
+		return Attachment{}, ErrAttachmentQuotaExceeded
+	}
+	if prepared.Draft && ((quota.DraftProjectMaxCount > 0 && draftCount+1 > quota.DraftProjectMaxCount) ||
+		(quota.DraftProjectMaxBytes > 0 && draftBytes+prepared.SizeBytes > quota.DraftProjectMaxBytes)) {
 		return Attachment{}, ErrAttachmentQuotaExceeded
 	}
 	s.attachments[scope][prepared.ID] = cloneAttachment(prepared)
 	return cloneAttachment(prepared), nil
+}
+
+// ConfigureAttachmentQuota applies startup admission limits. The in-memory
+// implementation uses the same dimensions as Postgres so tests and explicit
+// local development cannot silently bypass workspace protection.
+func (s *MemoryStore) ConfigureAttachmentQuota(quota AttachmentQuota) error {
+	if err := validateAttachmentQuota(quota); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attachmentQuota = quota
+	return nil
+}
+
+// ReconcileAttachmentBindings demotes any retained row whose binding ID is
+// not represented by a durable conversation turn. This closes the crash
+// window between generic run persistence and the canonical turn/attachment
+// commit; the normal draft retention sweeper then handles the recovered row.
+func (s *MemoryStore) ReconcileAttachmentBindings(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	for scope, attachments := range s.attachments {
+		turns := s.assistantTurns[scope]
+		for id, attachment := range attachments {
+			if attachment.Draft {
+				continue
+			}
+			owned := false
+			for _, threadTurns := range turns {
+				for _, turn := range threadTurns {
+					if turn.ID == attachment.BindingID {
+						owned = true
+						break
+					}
+				}
+				if owned {
+					break
+				}
+			}
+			if owned {
+				continue
+			}
+			expires := attachment.DraftExpiresAt
+			if expires == nil {
+				fallback := attachment.CreatedAt.Add(DefaultAttachmentDraftRetention)
+				expires = &fallback
+			}
+			attachment.Draft = true
+			attachment.BindingID = ""
+			attachment.ExpiresAt = expires
+			attachment.DraftExpiresAt = nil
+			if !expires.After(now) {
+				delete(attachments, id)
+				continue
+			}
+			attachments[id] = cloneAttachment(attachment)
+		}
+		if len(attachments) == 0 {
+			delete(s.attachments, scope)
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) GetAttachment(_ context.Context, scope Scope, id string) (Attachment, error) {
@@ -894,6 +974,16 @@ func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Tim
 			}
 			if active {
 				continue
+			}
+			if attachments := s.attachments[scope]; len(attachments) > 0 {
+				for attachmentID, attachment := range attachments {
+					if _, owned := s.assistantTurns[scope][threadID][attachment.BindingID]; owned {
+						delete(attachments, attachmentID)
+					}
+				}
+				if len(attachments) == 0 {
+					delete(s.attachments, scope)
+				}
 			}
 			delete(threads, threadID)
 			delete(s.assistantTurns[scope], threadID)

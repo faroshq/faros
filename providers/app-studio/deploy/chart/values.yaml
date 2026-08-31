@@ -109,6 +109,11 @@ store:
   # Explicit draft uploads expire after this duration; retained receipts have
   # no expiry and are removed with their Project.
   attachmentDraftRetention: "24h"
+  # Maximum attachment bytes across all Projects in one workspace. Bound
+  # attachments count toward this hosting quota for as long as their owning
+  # conversation exists; 0 disables the workspace byte limit. Draft-only
+  # per-project abuse limits remain enforced by the provider.
+  attachmentWorkspaceQuotaBytes: 1073741824
   messageEncryptionKeysSecretRef:
     name: ""
     key: keys

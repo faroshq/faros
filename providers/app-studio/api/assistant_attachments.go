@@ -249,6 +249,11 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
+	attachmentID, err := parseClientAttachmentID(r)
+	if err != nil {
+		writeStatus(w, http.StatusBadRequest, "BadRequest", err.Error())
+		return
+	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		writeStatus(w, http.StatusBadRequest, "BadRequest", "multipart field file is required")
@@ -287,8 +292,8 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 	}
 	expires := now.Add(s.attachmentRetention())
 	expiresAt := &expires
-	created, err := attachmentStore.CreateAttachment(r.Context(), projectMessageScope(id.orgUUID, id.workspaceUUID, project), store.Attachment{
-		ID:          "att-" + uuid.NewString(),
+	created, newlyCreated, err := store.CreateAttachmentIdempotent(r.Context(), attachmentStore, projectMessageScope(id.orgUUID, id.workspaceUUID, project), store.Attachment{
+		ID:          attachmentID,
 		ActorID:     id.user,
 		Filename:    header.Filename,
 		ContentType: contentType,
@@ -308,7 +313,29 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 		return
 	}
 	w.Header().Set("Location", "/api/projects/"+mux.Vars(r)["project"]+"/assistant/attachments/"+created.ID)
-	writeJSON(w, http.StatusCreated, attachmentReceipt(created))
+	if newlyCreated {
+		writeJSON(w, http.StatusCreated, attachmentReceipt(created))
+		return
+	}
+	writeJSON(w, http.StatusOK, attachmentReceipt(created))
+}
+
+func parseClientAttachmentID(r *http.Request) (string, error) {
+	if r == nil || r.MultipartForm == nil {
+		return "", fmt.Errorf("multipart attachment form is required")
+	}
+	values, supplied := r.MultipartForm.Value["clientAttachmentID"]
+	if !supplied {
+		return "att-" + uuid.NewString(), nil
+	}
+	if len(values) != 1 {
+		return "", fmt.Errorf("clientAttachmentID must be supplied at most once")
+	}
+	id := strings.TrimSpace(values[0])
+	if err := store.ValidateAttachmentID(id); err != nil {
+		return "", fmt.Errorf("clientAttachmentID: %w", err)
+	}
+	return id, nil
 }
 
 func detectProjectAttachmentContentType(filename, declared string, data []byte) string {

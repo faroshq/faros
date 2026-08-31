@@ -78,6 +78,10 @@ export function isProjectAPIInitializingError(err: unknown): err is ProjectAPIIn
   return err instanceof ProjectAPIInitializingError
 }
 
+export function isProjectAPINotFoundError(err: unknown): err is ProjectAPIRequestError {
+  return err instanceof ProjectAPIRequestError && err.status === 404
+}
+
 // tenantSelection reads the active org/workspace. Delegates to the shared,
 // security-critical portalkit/tenant helper so the storage key + shape stay in
 // lockstep with every other portal.
@@ -177,9 +181,11 @@ async function requestAssistantAttachmentUpload(
   path: string,
   file: File,
   signal?: AbortSignal,
+  clientAttachmentID?: string,
 ): Promise<ProjectAssistantAttachmentReceipt> {
   const form = new FormData()
   form.append('file', file, file.name || 'attachment')
+  if (clientAttachmentID?.trim()) form.append('clientAttachmentID', clientAttachmentID.trim())
   const headers = tenantHeaders({ token: ctx?.token })
   // The server promotes this provisional receipt atomically when the turn is
   // accepted; abandoned drafts are bounded by the provider retention policy.
@@ -1057,8 +1063,18 @@ export const api = {
     throw new ProjectAssistantThreadPaginationError(`page limit exceeded (${MAX_ASSISTANT_THREAD_PAGES})`)
   },
 
-  async createAssistantThread(ctx: FarosContext | null, name: string, title?: string): Promise<ProjectAssistantThread> {
-    return request<ProjectAssistantThread>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/threads`, { title })
+  async createAssistantThread(
+    ctx: FarosContext | null,
+    name: string,
+    title?: string,
+    threadID?: string,
+  ): Promise<ProjectAssistantThread> {
+    return request<ProjectAssistantThread>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/threads`,
+      { title, ...(threadID?.trim() ? { id: threadID.trim() } : {}) },
+    )
   },
 
   async patchAssistantThread(
@@ -1098,8 +1114,20 @@ export const api = {
     return requestBlob(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments/${encodeURIComponent(attachmentID)}`, signal)
   },
 
-  async uploadAssistantAttachment(ctx: FarosContext | null, name: string, file: File, signal?: AbortSignal): Promise<ProjectAssistantAttachmentReceipt> {
-    return requestAssistantAttachmentUpload(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments`, file, signal)
+  async uploadAssistantAttachment(
+    ctx: FarosContext | null,
+    name: string,
+    file: File,
+    signal?: AbortSignal,
+    clientAttachmentID?: string,
+  ): Promise<ProjectAssistantAttachmentReceipt> {
+    return requestAssistantAttachmentUpload(
+      ctx,
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments`,
+      file,
+      signal,
+      clientAttachmentID,
+    )
   },
 
   async deleteAssistantAttachment(ctx: FarosContext | null, name: string, attachmentID: string): Promise<void> {

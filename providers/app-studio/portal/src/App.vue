@@ -37,7 +37,7 @@ import {
   Wrench,
   X,
 } from 'lucide-vue-next'
-import { api, isProjectAPIInitializingError, ProjectAPIRequestError } from './api'
+import { api, isProjectAPIInitializingError, isProjectAPINotFoundError, ProjectAPIRequestError } from './api'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
 import Tabs from './portalkit/Tabs.vue'
 import LayoutSelector from './portalkit/LayoutSelector.vue'
@@ -156,7 +156,10 @@ import {
 } from './assistantCommandPalette'
 import {
   assistantAttachmentPart,
+  assistantAttachmentErrorMessage,
+  isAssistantAttachmentReceiptUnavailableError,
   projectAssistantAttachmentReceipt,
+  staleAssistantAttachmentClientIDs,
   type AssistantStagedAttachment,
 } from './assistantAttachments'
 import { assistantResourceSelectionKey } from './assistantResources'
@@ -189,10 +192,13 @@ import {
   firstProjectSubmissionCanRetryFromCreateRoute,
   firstProjectSubmissionIsCurrent,
   firstProjectSubmissionMatches,
+  firstProjectSubmissionWithClientRequestID,
   firstProjectSubmissionWithProject,
+  firstProjectSubmissionWithThread,
   mergeConversationSnapshot,
   newFirstProjectSubmission,
   normalizeAssistantRunStatus,
+  shouldRotateFirstProjectRequestID,
   normalizeSnapshotMessage,
   orderConversationMessages,
   projectCreationPrompt,
@@ -728,7 +734,7 @@ const prompt = ref('')
 // browser-owned candidates outside the rich-composer parts so landing/wizard
 // unmounts never discard them, then bind each receipt to the created project.
 const preProjectAttachments = shallowRef<AssistantStagedAttachment[]>([])
-const preProjectAttachmentError = ref('')
+const preProjectAttachmentError = computed(() => assistantAttachmentErrorMessage(preProjectAttachments.value))
 let preProjectAttachmentProjectName = ''
 const preProjectAttachmentControllers = new Map<string, AbortController>()
 const selectedTurnSkills = ref<ProjectAssistantSkill[]>([])
@@ -1096,17 +1102,45 @@ function updatePreProjectAttachment(clientID: string, patch: Partial<AssistantSt
   )
 }
 
-function clearPreProjectAttachments() {
+function attachmentCleanupIDs(attachment: Pick<AssistantStagedAttachment, 'clientID' | 'receipt'>): string[] {
+  return [...new Set([attachment.receipt?.id, attachment.clientID].filter((id): id is string => Boolean(id?.trim())))]
+}
+
+/** Best-effort draft cleanup; an absent receipt is already in the desired state. */
+async function bestEffortDeletePreProjectAttachment(
+  attachment: Pick<AssistantStagedAttachment, 'clientID' | 'receipt'>,
+  projectName: string,
+): Promise<void> {
+  if (!projectName) return
+  for (const attachmentID of attachmentCleanupIDs(attachment)) {
+    try {
+      await api.deleteAssistantAttachment(props.ctx, projectName, attachmentID)
+    } catch {
+      // Cleanup runs after cancellation or an ambiguous upload response. The
+      // retained File remains the recovery source, so cleanup must never turn
+      // an uncertain server state into a destructive UI error.
+    }
+  }
+}
+
+function clearPreProjectAttachments(preserveCommitted = false) {
+  const candidates = [...preProjectAttachments.value]
   for (const controller of preProjectAttachmentControllers.values()) controller.abort()
   preProjectAttachmentControllers.clear()
+  for (const candidate of candidates) {
+    const projectName = candidate.projectName || preProjectAttachmentProjectName
+    // A successful start promotes these receipts to the turn atomically. Do
+    // not delete them when clearing the browser-side draft after that boundary.
+    if (projectName && (!preserveCommitted || candidate.status !== 'ready')) {
+      void bestEffortDeletePreProjectAttachment(candidate, projectName)
+    }
+  }
   preProjectAttachments.value = []
   preProjectAttachmentProjectName = ''
-  preProjectAttachmentError.value = ''
 }
 
 function stagePreProjectAttachment(attachment: AssistantStagedAttachment) {
   preProjectAttachments.value = [...preProjectAttachments.value, attachment]
-  if (attachment.error) preProjectAttachmentError.value = attachment.error
 }
 
 async function uploadPreProjectAttachment(clientID: string, projectName: string): Promise<boolean> {
@@ -1133,9 +1167,12 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
     retryAction: undefined,
   })
   try {
-    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, projectName, attachment.file, controller.signal))
+    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, projectName, attachment.file, controller.signal, attachment.clientID))
     if (!receipt) throw new Error('The attachment upload returned an invalid receipt.')
-    if (!preProjectAttachments.value.some((candidate) => candidate.clientID === clientID)) return false
+    if (!preProjectAttachments.value.some((candidate) => candidate.clientID === clientID)) {
+      void bestEffortDeletePreProjectAttachment({ ...attachment, receipt }, projectName)
+      return false
+    }
     updatePreProjectAttachment(clientID, {
       receipt,
       projectName,
@@ -1146,8 +1183,25 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
     })
     return true
   } catch (uploadError) {
-    if (uploadError instanceof DOMException && uploadError.name === 'AbortError') return false
-    if (!preProjectAttachments.value.some((candidate) => candidate.clientID === clientID)) return false
+    const present = preProjectAttachments.value.some((candidate) => candidate.clientID === clientID)
+    const cleanupAttachment = { ...attachment, projectName }
+    if (isAbortError(uploadError)) {
+      void bestEffortDeletePreProjectAttachment(cleanupAttachment, projectName)
+      if (present) {
+        updatePreProjectAttachment(clientID, {
+          status: 'staged',
+          error: undefined,
+          retryable: false,
+          retryAction: undefined,
+        })
+      }
+      return false
+    }
+    // A failed fetch can still have committed a draft before its response was
+    // lost. Use both the server receipt (when available) and stable client ID,
+    // but keep the File candidate visible for a retry.
+    void bestEffortDeletePreProjectAttachment(cleanupAttachment, projectName)
+    if (!present) return false
     const detail = uploadError instanceof Error ? uploadError.message : 'Attachment upload failed.'
     updatePreProjectAttachment(clientID, {
       projectName,
@@ -1156,29 +1210,65 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
       retryable: true,
       retryAction: 'upload',
     })
-    preProjectAttachmentError.value = detail
     return false
   } finally {
     if (preProjectAttachmentControllers.get(clientID) === controller) preProjectAttachmentControllers.delete(clientID)
   }
 }
 
+async function recoverPreProjectAttachmentReceipts(projectName: string, force = false): Promise<void> {
+  const ready = preProjectAttachments.value.filter((candidate) =>
+    candidate.projectName === projectName && candidate.status === 'ready' && candidate.receipt,
+  )
+  if (!ready.length) return
+  let listed: Awaited<ReturnType<typeof api.listAssistantAttachments>>
+  try {
+    listed = await api.listAssistantAttachments(props.ctx, projectName)
+  } catch {
+    // A normal list outage is ambiguous, so retain ready receipts. A precise
+    // start error opts into a forced re-upload because the server has already
+    // told us that the receipt cannot be consumed.
+    if (!force) return
+    listed = []
+  }
+  const staleIDs = force
+    ? ready.map((candidate) => candidate.clientID)
+    : staleAssistantAttachmentClientIDs(ready, listed)
+  for (const clientID of staleIDs) {
+    const candidate = preProjectAttachments.value.find((attachment) => attachment.clientID === clientID)
+    if (!candidate) continue
+    await bestEffortDeletePreProjectAttachment(candidate, projectName)
+    updatePreProjectAttachment(clientID, {
+      receipt: undefined,
+      projectName,
+      status: 'staged',
+      error: undefined,
+      retryable: false,
+      retryAction: undefined,
+    })
+  }
+}
+
 async function ensurePreProjectAttachmentsUploaded(projectName: string): Promise<boolean> {
   preProjectAttachmentProjectName = projectName
+  await recoverPreProjectAttachmentReceipts(projectName)
   const candidates = [...preProjectAttachments.value]
   let allReady = true
   for (const candidate of candidates) {
     if (candidate.receipt && candidate.projectName === projectName && candidate.status === 'ready') continue
-    if (candidate.status === 'error' && candidate.retryAction === 'delete') {
+    if (
+      (candidate.status === 'error' && candidate.retryAction === 'delete') ||
+      candidate.status === 'deleting' ||
+      candidate.status === 'uploading'
+    ) {
       allReady = false
       continue
     }
     if (!(await uploadPreProjectAttachment(candidate.clientID, projectName))) allReady = false
   }
-  if (!allReady && !preProjectAttachmentError.value) {
-    preProjectAttachmentError.value = 'Resolve attachment uploads before creating the project (retry or remove the failed attachment).'
-  }
-  return allReady
+  return allReady && preProjectAttachments.value.every((candidate) =>
+    candidate.projectName === projectName && candidate.status === 'ready' && Boolean(candidate.receipt),
+  )
 }
 
 async function removePreProjectAttachment(clientID: string) {
@@ -1189,7 +1279,14 @@ async function removePreProjectAttachment(clientID: string) {
     controller.abort()
     preProjectAttachmentControllers.delete(clientID)
   }
+  const projectName = attachment.projectName || preProjectAttachmentProjectName
+  if (controller || attachment.status === 'uploading') {
+    void bestEffortDeletePreProjectAttachment(attachment, projectName)
+    preProjectAttachments.value = preProjectAttachments.value.filter((candidate) => candidate.clientID !== clientID)
+    return
+  }
   if (!attachment.receipt || !attachment.projectName) {
+    if (projectName) void bestEffortDeletePreProjectAttachment(attachment, projectName)
     preProjectAttachments.value = preProjectAttachments.value.filter((candidate) => candidate.clientID !== clientID)
     return
   }
@@ -1198,6 +1295,10 @@ async function removePreProjectAttachment(clientID: string) {
     await api.deleteAssistantAttachment(props.ctx, attachment.projectName, attachment.receipt.id)
     preProjectAttachments.value = preProjectAttachments.value.filter((candidate) => candidate.clientID !== clientID)
   } catch (removeError) {
+    if (isProjectAPINotFoundError(removeError)) {
+      preProjectAttachments.value = preProjectAttachments.value.filter((candidate) => candidate.clientID !== clientID)
+      return
+    }
     const detail = removeError instanceof Error ? removeError.message : 'Attachment removal failed.'
     updatePreProjectAttachment(clientID, {
       status: 'error',
@@ -1205,7 +1306,6 @@ async function removePreProjectAttachment(clientID: string) {
       retryable: true,
       retryAction: 'delete',
     })
-    preProjectAttachmentError.value = detail
   }
 }
 
@@ -1623,12 +1723,12 @@ const showProjectIndexRouteLoading = useDelayedLoading(projectIndexRoutePending)
 const selectedNameFromPath = computed(() => (isCreateRoute.value || isModelsRoute.value || isCreateModelRoute.value ? '' : routeSegment.value))
 const isAppStudioLandingRoute = computed(() => isProjectIndexRoute.value || isCreateRoute.value || isModelsRoute.value || isCreateModelRoute.value)
 
-// The create flow can have a durable project before its first attachment or
-// assistant turn is accepted. Keep that submission while the host is on the
-// create route so navigating back to ~new retries the same project instead of
-// creating a duplicate.
+// The create flow can have a durable project (or an ambiguous project-create
+// response) before its first attachment or assistant turn is accepted. Keep
+// that submission while the host is on the create route so navigating back to
+// ~new retries the same project/request instead of creating a duplicate.
 function shouldKeepProjectBoundFirstSubmission(): boolean {
-  return isCreateRoute.value && Boolean(pendingFirstProjectSubmission?.projectName)
+  return isCreateRoute.value && Boolean(pendingFirstProjectSubmission?.content)
 }
 
 const modelsReturnRoute = ref('')
@@ -4484,14 +4584,51 @@ async function ensureCreateSetupReady(): Promise<boolean> {
   return false
 }
 
+function preProjectStartContentParts(projectName: string, content: string): ProjectAssistantContentPart[] {
+  const attachmentParts = preProjectAttachments.value
+    .filter((attachment) => attachment.projectName === projectName && attachment.status === 'ready' && attachment.receipt)
+    .map((attachment) => assistantAttachmentPart(attachment.receipt!))
+  return attachmentParts.length
+    ? [{ type: 'text' as const, text: content }, ...attachmentParts]
+    : []
+}
+
+/** Start once, then recover expired receipts and replay the same request once. */
+async function startPreProjectAssistantTurn(
+  projectName: string,
+  submission: ReturnType<typeof newFirstProjectSubmission>,
+  threadID: string,
+): Promise<Awaited<ReturnType<typeof api.startAssistantTurn>>> {
+  const startPlan = firstProjectStartPlan(submission)
+  const start = () => {
+    const contentParts = preProjectStartContentParts(projectName, startPlan.content)
+    return api.startAssistantTurn(props.ctx, projectName, threadID, {
+      content: startPlan.content,
+      clientUserMessageID: startPlan.clientRequestID,
+      modelID: startPlan.modelID,
+      collaborationMode: 'default',
+      ...(contentParts.length ? { contentParts } : {}),
+    })
+  }
+  try {
+    return await start()
+  } catch (error) {
+    if (!isAssistantAttachmentReceiptUnavailableError(error)) throw error
+    await recoverPreProjectAttachmentReceipts(projectName, true)
+    if (!await ensurePreProjectAttachmentsUploaded(projectName)) throw error
+    return start()
+  }
+}
+
 async function createProjectAndStartConversation(
   content: string,
   createOverrides?: { templateName?: string; displayName?: string },
 ) {
-  const pendingProjectName = pendingFirstProjectSubmission?.content === content ? pendingFirstProjectSubmission.projectName : ''
-  const retry = Boolean(pendingProjectName && pendingFirstProjectSubmission?.modelID === selectedLLMModelID.value)
+  const pendingForContent = pendingFirstProjectSubmission?.content === content ? pendingFirstProjectSubmission : null
+  const pendingProjectName = pendingForContent?.projectName ?? ''
+  const retry = Boolean(pendingForContent && pendingForContent.modelID === selectedLLMModelID.value)
   let submission = retry
-    ? pendingFirstProjectSubmission!
+    ? pendingForContent!
     : firstProjectSubmissionWithProject(
         newFirstProjectSubmission(content, crypto.randomUUID(), selectedLLMModelID.value),
         pendingProjectName,
@@ -4502,8 +4639,9 @@ async function createProjectAndStartConversation(
   const draftName = `draft-${Date.now()}`
   const description = landingStarterPrompts.find((starter) => starter.prompt === content.trim())?.description ?? ''
   let acceptedRun = false
+	let startPostAttempted = false
+	let startPostAccepted = false
 	let projectName = submission.projectName
-  preProjectAttachmentError.value = ''
   busy.value = true
   messageStreaming.value = true
   conversationStatus.value = 'Starting'
@@ -4583,32 +4721,59 @@ async function createProjectAndStartConversation(
       return
     }
     const startPlan = firstProjectStartPlan(submission)
-    const startAttachmentParts = preProjectAttachments.value
-      .filter((attachment) => attachment.projectName === projectName && attachment.status === 'ready' && attachment.receipt)
-      .map((attachment) => assistantAttachmentPart(attachment.receipt!))
-    // The server derives canonical user content from contentParts when the
-    // request is structured. Preserve the original prompt as the first part;
-    // attachment-only content would otherwise lose the user's idea.
-    const startContentParts = startAttachmentParts.length
-      ? [{ type: 'text' as const, text: startPlan.content }, ...startAttachmentParts]
-      : []
-    const thread = await api.createAssistantThread(props.ctx, projectName)
+    // Bind a stable thread identity before the POST. If the response is lost,
+    // the next attempt can address the same server thread without creating a
+    // second one; the backend accepts an explicit thread ID on creation.
+    let thread = submission.threadID
+      ? assistantThreads.value.find((candidate) => candidate.id === submission.threadID) ?? {
+          id: submission.threadID,
+          status: 'idle' as const,
+          createdAt: now,
+          updatedAt: now,
+        }
+      : undefined
+    if (!thread) {
+      const requestedThreadID = `thread-${crypto.randomUUID()}`
+      submission = firstProjectSubmissionWithThread(submission, requestedThreadID)
+      pendingFirstProjectSubmission = submission
+      thread = await api.createAssistantThread(props.ctx, projectName, undefined, requestedThreadID)
+    }
+    // The explicit ID is a request identity, not a promise that the server
+    // will keep it. Persist the response's thread immediately so a later
+    // start/replay addresses the server-owned row even if it canonicalizes
+    // or aliases the requested ID.
+    if (submission.threadID !== thread.id) {
+      submission = firstProjectSubmissionWithThread(submission, thread.id)
+      pendingFirstProjectSubmission = submission
+    }
     if (!current()) return
-    assistantThreads.value = [thread]
+    assistantThreads.value = [thread, ...assistantThreads.value.filter((candidate) => candidate.id !== thread?.id)]
     activeAssistantThreadID.value = thread.id
     persistAssistantThreadFocus(assistantThreadFocusScope(projectName), thread.id)
-    const canonical = await api.startAssistantTurn(props.ctx, projectName, thread.id, {
-      content: startPlan.content,
-      clientUserMessageID: startPlan.clientRequestID,
-      modelID: startPlan.modelID,
-      collaborationMode: 'default',
-      ...(startContentParts.length ? { contentParts: startContentParts } : {}),
-    })
+    startPostAttempted = true
+    const canonical = await startPreProjectAssistantTurn(projectName, submission, thread.id)
+    // A resolved start response is the durable acceptance boundary. Any
+    // projection/history failure after this point must replay this same
+    // client request rather than manufacture a new turn.
+    startPostAccepted = true
+    if (!current()) return
     // The POST response is the durable acceptance boundary. A later history
     // projection failure must not make these receipts look sendable again.
-    clearPreProjectAttachments()
-    replaceAssistantThread(canonical.thread)
-    const items = await api.listAssistantThreadItems(props.ctx, projectName, thread.id)
+    clearPreProjectAttachments(true)
+    const canonicalThreadID = canonical.thread.id.trim() || thread.id
+    submission = firstProjectSubmissionWithThread(submission, canonicalThreadID)
+    pendingFirstProjectSubmission = submission
+    if (canonicalThreadID !== thread.id) {
+      assistantThreads.value = [
+        canonical.thread,
+        ...assistantThreads.value.filter((candidate) => candidate.id !== canonicalThreadID && candidate.id !== thread?.id),
+      ]
+    } else {
+      replaceAssistantThread(canonical.thread)
+    }
+    activeAssistantThreadID.value = canonicalThreadID
+    persistAssistantThreadFocus(assistantThreadFocusScope(projectName), canonicalThreadID)
+    const items = await api.listAssistantThreadItems(props.ctx, projectName, canonicalThreadID)
     activeAssistantThreadSequence = maxAssistantThreadSequence(items)
     const projected = assistantThreadItemsToMessages(items, projectName)
     const user = projected.find((message) => message.role === 'user' && message.id === items.find((item) => item.turnID === canonical.turn.id && item.type === 'userMessage')?.id)
@@ -4640,6 +4805,10 @@ async function createProjectAndStartConversation(
     }
   } catch (e) {
     if (!current()) return
+    if (e instanceof ProjectAPIRequestError && startPostAttempted && shouldRotateFirstProjectRequestID(e, startPostAccepted)) {
+      submission = firstProjectSubmissionWithClientRequestID(submission, crypto.randomUUID())
+      pendingFirstProjectSubmission = submission
+    }
     if (isAbortError(e)) {
       if (!acceptedRun && preProjectAttachments.value.length) {
         prompt.value = content
@@ -4672,7 +4841,6 @@ async function createProjectAndStartConversation(
     error.value = e instanceof Error ? e.message : String(e)
     prompt.value = content
     if (!acceptedRun && preProjectAttachments.value.length) {
-      preProjectAttachmentError.value = error.value
       props.navigate(CREATE_PROJECT_ROUTE)
     } else if (!projectName) {
       selected.value = null
@@ -6670,13 +6838,24 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
             ...(turnContentParts.length ? { contentParts: turnContentParts } : {}),
           })
       startPostAccepted = true
+      const requestedThreadID = thread.id
+      const canonicalThreadID = canonical.thread.id.trim() || requestedThreadID
       // The POST response is the acceptance boundary. Later projection or
       // stream setup failures must not make already-consumed attachments look
       // available for a second turn.
-      clearStoredAssistantAnnotationDraft(projectName, thread.id)
+      clearStoredAssistantAnnotationDraft(projectName, requestedThreadID)
       clearSelectedTurnAttachments()
-      replaceAssistantThread(canonical.thread)
-      const items = await api.listAssistantThreadItems(props.ctx, projectName, thread.id)
+      if (canonicalThreadID !== requestedThreadID) {
+        assistantThreads.value = [
+          canonical.thread,
+          ...assistantThreads.value.filter((candidate) => candidate.id !== canonicalThreadID && candidate.id !== requestedThreadID),
+        ]
+      } else {
+        replaceAssistantThread(canonical.thread)
+      }
+      activeAssistantThreadID.value = canonicalThreadID
+      persistAssistantThreadFocus(assistantThreadFocusScope(projectName), canonicalThreadID)
+      const items = await api.listAssistantThreadItems(props.ctx, projectName, canonicalThreadID)
       activeAssistantThreadSequence = maxAssistantThreadSequence(items)
       const userItem = [...items].reverse().find((item) => item.turnID === canonical.turn.id && item.type === 'userMessage')
       const assistantItem = [...items].reverse().find((item) => item.turnID === canonical.turn.id && item.type === 'agentMessage')
@@ -8236,6 +8415,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 @add-attachment="stagePreProjectAttachment"
                 @remove-attachment="removePreProjectAttachment"
                 @retry-attachment="retryPreProjectAttachment"
+                @close-menu="closeLandingImportPopover"
                 @submit="createProjectFromPrompt"
               >
                 <template #menu>

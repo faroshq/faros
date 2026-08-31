@@ -52,6 +52,42 @@ test('accepts screenshot/text inputs while keeping server text limits visible to
   assert.equal(assistantAttachmentMaxBytes({ name: 'notes.txt', type: '' }), MAX_ASSISTANT_TEXT_ATTACHMENT_BYTES)
 })
 
+test('derives attachment errors from the candidates that are still present', async () => {
+  const {
+    ASSISTANT_ATTACHMENT_RESOLUTION_ERROR,
+    assistantAttachmentErrorMessage,
+  } = await vite.ssrLoadModule('/src/assistantAttachments.ts')
+  const first = { clientID: 'one', status: 'error', error: 'upload failed' }
+  const second = { clientID: 'two', status: 'error', error: 'server rejected the file' }
+  assert.equal(assistantAttachmentErrorMessage([first, second]), 'upload failed')
+  assert.equal(assistantAttachmentErrorMessage([second]), 'server rejected the file')
+  assert.equal(assistantAttachmentErrorMessage([{ clientID: 'one', status: 'error' }]), ASSISTANT_ATTACHMENT_RESOLUTION_ERROR)
+  assert.equal(assistantAttachmentErrorMessage([{ clientID: 'one', status: 'ready' }]), '')
+})
+
+test('identifies missing receipts and limits startup recovery to precise attachment errors', async () => {
+  const {
+    assistantAttachmentReceiptsMatch,
+    isAssistantAttachmentReceiptUnavailableError,
+    staleAssistantAttachmentClientIDs,
+  } = await vite.ssrLoadModule('/src/assistantAttachments.ts')
+  const first = {
+    id: 'att-one', filename: 'one.txt', contentType: 'text/plain', sizeBytes: 4,
+    sha256: 'a'.repeat(64), createdAt: '2026-08-31T00:00:00Z',
+  }
+  const second = { ...first, id: 'att-two', filename: 'two.txt', sha256: 'b'.repeat(64) }
+  const candidates = [
+    { clientID: 'client-one', receipt: first, status: 'ready' },
+    { clientID: 'client-two', receipt: second, status: 'ready' },
+  ]
+  assert.equal(assistantAttachmentReceiptsMatch(first, first), true)
+  assert.deepEqual(staleAssistantAttachmentClientIDs(candidates, [first]), ['client-two'])
+  const precise = Object.assign(new Error('attachment receipt expired'), { status: 404 })
+  assert.equal(isAssistantAttachmentReceiptUnavailableError(precise), true)
+  assert.equal(isAssistantAttachmentReceiptUnavailableError(Object.assign(new Error('project is unavailable'), { status: 404 })), false)
+  assert.equal(isAssistantAttachmentReceiptUnavailableError(new TypeError('network lost')), false)
+})
+
 test('keeps upload protocol and durable-accept clearing explicit in the portal seams', async () => {
   const [api, composer, app] = await Promise.all([
     readFile(new URL('./api.ts', import.meta.url), 'utf8'),
@@ -62,11 +98,18 @@ test('keeps upload protocol and durable-accept clearing explicit in the portal s
   assert.match(api, /method: 'POST'/)
   assert.match(api, /'DELETE'/)
   assert.match(api, /listAssistantAttachments/)
+  assert.match(api, /clientAttachmentID/)
   assert.match(composer, /ASSISTANT_LARGE_PASTE_BYTES/)
   assert.match(composer, /getAsFile\(\)/)
   assert.match(composer, /Retry attachment upload/)
+  assert.match(composer, /bestEffortDeleteAttachment/)
+  assert.match(composer, /isProjectAPINotFoundError/)
+  assert.match(composer, /controller\.signal, clientID/)
   assert.match(composer, /update:attachmentsPending/)
   assert.match(app, /startPostAccepted = true[\s\S]*clearSelectedTurnAttachments\(\)/)
+  assert.match(app, /bestEffortDeletePreProjectAttachment/)
+  assert.match(app, /recoverPreProjectAttachmentReceipts/)
+  assert.match(app, /clearPreProjectAttachments\(true\)/)
 })
 
 test('history renders image previews through the scoped API while text stays compact', async () => {

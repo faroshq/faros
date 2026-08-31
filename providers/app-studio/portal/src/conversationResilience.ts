@@ -149,6 +149,8 @@ export interface PendingFirstProjectSubmission {
   clientRequestID: string
   projectName: string
   modelID: string
+  /** The server-owned thread to replay when the first start response is lost. */
+  threadID?: string
 }
 
 /**
@@ -169,6 +171,26 @@ export function newFirstProjectSubmission(content: string, clientRequestID: stri
 
 export function firstProjectSubmissionWithProject(submission: PendingFirstProjectSubmission, projectName: string): PendingFirstProjectSubmission {
   return { ...submission, projectName }
+}
+
+export function firstProjectSubmissionWithThread(submission: PendingFirstProjectSubmission, threadID: string): PendingFirstProjectSubmission {
+  return { ...submission, threadID }
+}
+
+export function firstProjectSubmissionWithClientRequestID(submission: PendingFirstProjectSubmission, clientRequestID: string): PendingFirstProjectSubmission {
+  return { ...submission, clientRequestID }
+}
+
+/**
+ * A received 5xx means the startup request reached the server but was
+ * rejected before this client observed durable acceptance. Rotate only that
+ * explicit failure boundary; transport failures remain ambiguous and must
+ * replay with the original idempotency identity.
+ */
+export function shouldRotateFirstProjectRequestID(error: unknown, startPostAccepted: boolean): boolean {
+  if (startPostAccepted || !error || typeof error !== 'object') return false
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' && status >= 500 && status < 600
 }
 
 export function firstProjectStartPlan(submission: PendingFirstProjectSubmission) {
