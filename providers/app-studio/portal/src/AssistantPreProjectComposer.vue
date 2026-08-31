@@ -58,18 +58,23 @@ defineExpose({ focus, setSelectionRange })
 
 function toggleAttachmentMenu() {
   if (props.disabled) return
-  attachmentMenuOpen.value = !attachmentMenuOpen.value
+  if (attachmentMenuOpen.value) {
+    closeAttachmentMenu()
+    return
+  }
+  attachmentMenuOpen.value = true
 }
 
 function closeAttachmentMenu() {
-  if (!attachmentMenuOpen.value) return
   attachmentMenuOpen.value = false
   emit('close-menu')
 }
 
 function openAttachmentPicker() {
   if (props.disabled) return
-  attachmentMenuOpen.value = false
+  // Closing through the shared path also dismisses a nested Import menu owned
+  // by the landing surface. This keeps Files and Import mutually exclusive.
+  closeAttachmentMenu()
   const input = attachmentInputRef.value
   if (!input) return
   input.value = ''

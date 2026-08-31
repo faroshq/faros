@@ -655,6 +655,9 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 			// it before binding so a crash cannot leave an immutable attachment
 			// pointing only at a generic run that the conversation cannot recover.
 			if err := s.bindProjectAssistantContentPartAttachmentsForRun(r.Context(), id, project, request.ContentParts, bindingID); err != nil {
+				if terminalErr := s.terminalizeProjectAssistantTurnStartFailure(r.Context(), scope, canonicalTurn, err); terminalErr != nil {
+					return errors.Join(err, terminalErr)
+				}
 				return err
 			}
 			if generateThreadTitle {
@@ -663,6 +666,9 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 			if err := s.projectAssistantSupervisor().Start(r.Context(), scope, created, assistant, func(ctx context.Context, accumulator *projectAssistantSnapshotAccumulator) {
 				s.runProjectAssistantWorker(ctx, accumulator, r, id, c, project, created, start)
 			}); err != nil {
+				if terminalErr := s.terminalizeProjectAssistantTurnStartFailure(r.Context(), scope, canonicalTurn, err); terminalErr != nil {
+					return errors.Join(err, terminalErr)
+				}
 				return err
 			}
 			s.startAssistantThreadMirror(scope, thread.ID, canonicalTurn, created)
@@ -822,6 +828,43 @@ func (s *Server) repairProjectAssistantThreadTurn(ctx context.Context, scope sto
 		return s.store.GetAssistantTurn(ctx, scope, thread.ID, created.ID)
 	}
 	return created, nil
+}
+
+// terminalizeProjectAssistantTurnStartFailure closes the canonical turn when
+// the provider-specific startup boundary fails after CreateAssistantTurn has
+// committed it. Generic run compensation cannot do this because the thread
+// projection has its own durable row and event stream. Keeping both terminal
+// transitions in the failure path makes retries and deletion observe the same
+// failed turn rather than a permanently active one.
+func (s *Server) terminalizeProjectAssistantTurnStartFailure(ctx context.Context, scope store.Scope, turn store.AssistantTurn, startErr error) error {
+	if s == nil || s.store == nil || turn.ID == "" {
+		return nil
+	}
+	switch turn.Status {
+	case store.AssistantTurnStatusCompleted, store.AssistantTurnStatusInterrupted, store.AssistantTurnStatusFailed:
+		return nil
+	}
+	if startErr == nil {
+		startErr = errors.New("assistant turn startup failed")
+	}
+	turn.Status = store.AssistantTurnStatusFailed
+	turn.Error = projectAssistantRunErrorJSON(startErr, "internal_server_error")
+	turn.UpdatedAt = time.Now().UTC()
+	payload, err := json.Marshal(map[string]any{"turn": turn})
+	if err != nil {
+		return fmt.Errorf("encode failed assistant turn: %w", err)
+	}
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	if err := s.saveAssistantTurnWithEvent(persistCtx, scope, turn, store.AssistantThreadEvent{
+		ThreadID: turn.ThreadID,
+		TurnID:   turn.ID,
+		Type:     assistantThreadEventTurnFailed,
+		Payload:  payload,
+	}); err != nil {
+		return fmt.Errorf("terminalize assistant turn after startup failure: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) activeProjectAssistantThreadTurn(w http.ResponseWriter, r *http.Request) {
@@ -1111,13 +1154,19 @@ func (s *Server) reconcileProjectAssistantThreadTurn(ctx context.Context, scope 
 	release := s.acquireAssistantThreadProjectionLock(scope, turn.ThreadID, turn.ID)
 	defer release()
 
-	if err := s.reconcileOrphanedProjectAssistantRun(ctx, scope, turn.ID); err != nil {
+	if err := s.reconcileOrphanedProjectAssistantRunForProjection(ctx, scope, turn.ID); err != nil {
 		return err
 	}
 	run, err := s.store.GetAssistantRun(ctx, scope, turn.ID)
 	if err != nil || !assistantRunTerminal(run.Status) {
 		return err
 	}
+	// Canonical terminalization is part of the recovery boundary. Do not let a
+	// canceled HTTP request strand the turn after the generic run has already
+	// been closed.
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	ctx = persistCtx
 	current, err := s.store.GetAssistantTurn(ctx, scope, turn.ThreadID, turn.ID)
 	if err != nil || current.Status != store.AssistantTurnStatusInProgress {
 		return err

@@ -1393,11 +1393,42 @@ func (s *PostgresStore) CreateAttachment(ctx context.Context, scope Scope, attac
 }
 
 func lockPostgresAttachmentScope(ctx context.Context, tx *sql.Tx, scope Scope) error {
-	key := postgresAttachmentWorkspaceLockKey(scope)
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, key); err != nil {
+	// Keep the workspace lock first and the project lock second. The workspace
+	// key is unchanged from the first workspace-quota rollout, so replicas from
+	// that rollout still serialize with current replicas. The project key is a
+	// NUL-safe replacement for the pre-workspace key; that key was sent as a
+	// PostgreSQL text parameter and lib/pq/Postgres reject it before hashing.
+	// There is therefore no usable old project lock to acquire. Holding the two
+	// current lock domains in this order prevents current replicas from
+	// deadlocking while checking aggregate and project-local quotas.
+	workspaceKey := postgresAttachmentWorkspaceLockKey(scope)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, workspaceKey); err != nil {
 		return fmt.Errorf("lock workspace attachment scope: %w", err)
 	}
+	projectKey := postgresAttachmentProjectLockKey(scope)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, projectKey); err != nil {
+		return fmt.Errorf("lock project attachment scope: %w", err)
+	}
 	return nil
+}
+
+// postgresAttachmentProjectLockKey returns a deterministic signed bigint for
+// the current project-local quota lock. The historical implementation joined
+// the scope with NUL bytes and passed the result as PostgreSQL text; that is
+// rejected by lib/pq/Postgres, so successful old uploads never entered a
+// project lock that current code can share. Length-prefixing also keeps
+// malformed identifiers unambiguous without putting user-controlled text in
+// the SQL parameter.
+func postgresAttachmentProjectLockKey(scope Scope) int64 {
+	hash := sha256.New()
+	for _, part := range []string{"app-studio-attachment-project", scope.OrgUUID, scope.WorkspaceUUID, scope.ProjectName, scope.ProjectUID} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(part))
+	}
+	digest := hash.Sum(nil)
+	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
 
 // postgresAttachmentWorkspaceLockKey returns a deterministic signed bigint
@@ -1414,6 +1445,17 @@ func postgresAttachmentWorkspaceLockKey(scope Scope) int64 {
 	}
 	digest := hash.Sum(nil)
 	return int64(binary.BigEndian.Uint64(digest[:8]))
+}
+
+// lockPostgresAssistantThread serializes operations that use the advisory
+// thread lock. Callers that also need the attachment scope must acquire that
+// scope first (workspace, then project, then thread) so retention and explicit
+// thread deletion cannot wait on one another in opposite orders.
+func lockPostgresAssistantThread(ctx context.Context, tx *sql.Tx, scope Scope, threadID string) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, assistantThreadLockKey(scope, threadID)); err != nil {
+		return fmt.Errorf("lock assistant thread: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetAttachment(ctx context.Context, scope Scope, id string) (Attachment, error) {
@@ -1730,6 +1772,83 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 		return 0, fmt.Errorf("begin delete stale assistant data: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// A thread projection is one canonical transcript. Materialize the stale
+	// candidate set before taking any row locks, then lock and re-check every
+	// candidate in deterministic scope order. The scope locks must be acquired
+	// before the generic message/run deletes below: otherwise a concurrent
+	// DeleteAssistantThread could hold the scope lock while waiting on a row
+	// lock already taken by this transaction, and this transaction could then
+	// wait on that scope lock.
+	rows, err := tx.QueryContext(ctx, `SELECT thread.org_uuid, thread.workspace_uuid, thread.project_name, thread.project_uid, thread.thread_id
+		FROM app_studio_assistant_threads AS thread
+		WHERE thread.updated_at < $1
+		  AND thread.status <> 'active'
+		  AND NOT EXISTS (
+			SELECT 1 FROM app_studio_assistant_turns AS active_turn
+			WHERE active_turn.org_uuid = thread.org_uuid
+			  AND active_turn.workspace_uuid = thread.workspace_uuid
+			  AND active_turn.project_name = thread.project_name
+			  AND active_turn.project_uid = thread.project_uid
+			  AND active_turn.thread_id = thread.thread_id
+			  AND active_turn.status = 'in_progress'
+		  )
+		ORDER BY thread.org_uuid, thread.workspace_uuid, thread.project_name, thread.project_uid, thread.thread_id`, before.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("select stale assistant thread candidates: %w", err)
+	}
+	type assistantThreadRetentionCandidate struct {
+		scope    Scope
+		threadID string
+	}
+	candidates := make([]assistantThreadRetentionCandidate, 0)
+	for rows.Next() {
+		var candidate assistantThreadRetentionCandidate
+		if err := rows.Scan(&candidate.scope.OrgUUID, &candidate.scope.WorkspaceUUID, &candidate.scope.ProjectName, &candidate.scope.ProjectUID, &candidate.threadID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan stale assistant thread candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("iterate stale assistant thread candidates: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close stale assistant thread candidates: %w", err)
+	}
+	lockedCandidates := make([]assistantThreadRetentionCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if err := lockPostgresAttachmentScope(ctx, tx, candidate.scope); err != nil {
+			return 0, fmt.Errorf("lock stale assistant thread attachment scope: %w", err)
+		}
+		if err := lockPostgresAssistantThread(ctx, tx, candidate.scope, candidate.threadID); err != nil {
+			return 0, fmt.Errorf("lock stale assistant thread: %w", err)
+		}
+		var lockedThreadID string
+		err := tx.QueryRowContext(ctx, `SELECT thread.thread_id
+			FROM app_studio_assistant_threads AS thread
+			WHERE thread.org_uuid=$1 AND thread.workspace_uuid=$2 AND thread.project_name=$3 AND thread.project_uid=$4
+			  AND thread.thread_id=$5 AND thread.updated_at < $6 AND thread.status <> 'active'
+			  AND NOT EXISTS (
+				SELECT 1 FROM app_studio_assistant_turns AS active_turn
+				WHERE active_turn.org_uuid=thread.org_uuid
+				  AND active_turn.workspace_uuid=thread.workspace_uuid
+				  AND active_turn.project_name=thread.project_name
+				  AND active_turn.project_uid=thread.project_uid
+				  AND active_turn.thread_id=thread.thread_id
+				  AND active_turn.status='in_progress'
+			  )
+			FOR UPDATE`, candidate.scope.OrgUUID, candidate.scope.WorkspaceUUID, candidate.scope.ProjectName,
+			candidate.scope.ProjectUID, candidate.threadID, before.UTC()).Scan(&lockedThreadID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("re-check stale assistant thread candidate: %w", err)
+		}
+		candidate.threadID = lockedThreadID
+		lockedCandidates = append(lockedCandidates, candidate)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM app_studio_messages AS message
 		WHERE message.created_at < $1
 		  AND NOT EXISTS (
@@ -1771,53 +1890,20 @@ func (s *PostgresStore) DeleteMessagesOlderThan(ctx context.Context, before time
 	if err != nil {
 		return 0, fmt.Errorf("count deleted assistant runs: %w", err)
 	}
-	// A thread projection is one canonical transcript.  Remove old idle or
-	// archived projections only when no in-progress turn remains; active turns
-	// must survive retention so a refresh can still resume them.  The FK
-	// cascade removes the associated turns and thread events atomically.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_attachments AS attachment
-		WHERE EXISTS (
-			SELECT 1
-			FROM app_studio_assistant_turns AS turn
-			JOIN app_studio_assistant_threads AS thread
-			  ON thread.org_uuid=turn.org_uuid
-			 AND thread.workspace_uuid=turn.workspace_uuid
-			 AND thread.project_name=turn.project_name
-			 AND thread.project_uid=turn.project_uid
-			 AND thread.thread_id=turn.thread_id
-			WHERE turn.org_uuid=attachment.org_uuid
-			  AND turn.workspace_uuid=attachment.workspace_uuid
-			  AND turn.project_name=attachment.project_name
-			  AND turn.project_uid=attachment.project_uid
-			  AND turn.turn_id=attachment.binding_id
-			  AND thread.updated_at < $1
-			  AND thread.status <> 'active'
-			  AND NOT EXISTS (
-				SELECT 1
-				FROM app_studio_assistant_turns AS active_turn
-				WHERE active_turn.org_uuid=thread.org_uuid
-				  AND active_turn.workspace_uuid=thread.workspace_uuid
-				  AND active_turn.project_name=thread.project_name
-				  AND active_turn.project_uid=thread.project_uid
-				  AND active_turn.thread_id=thread.thread_id
-				  AND active_turn.status='in_progress'
-			  )
-		)`, before.UTC()); err != nil {
-		return 0, fmt.Errorf("delete stale assistant thread attachments: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_threads AS thread
-		WHERE thread.updated_at < $1
-		  AND thread.status <> 'active'
-		  AND NOT EXISTS (
-			SELECT 1 FROM app_studio_assistant_turns AS active_turn
-			WHERE active_turn.org_uuid = thread.org_uuid
-			  AND active_turn.workspace_uuid = thread.workspace_uuid
-			  AND active_turn.project_name = thread.project_name
-			  AND active_turn.project_uid = thread.project_uid
-			  AND active_turn.thread_id = thread.thread_id
-			  AND active_turn.status = 'in_progress'
-		  )`, before.UTC()); err != nil {
-		return 0, fmt.Errorf("delete stale assistant threads: %w", err)
+	for _, candidate := range lockedCandidates {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_attachments AS attachment
+			USING app_studio_assistant_turns AS turn
+			WHERE attachment.org_uuid=$1 AND attachment.workspace_uuid=$2 AND attachment.project_name=$3 AND attachment.project_uid=$4
+			  AND turn.org_uuid=$1 AND turn.workspace_uuid=$2 AND turn.project_name=$3 AND turn.project_uid=$4
+			  AND turn.thread_id=$5 AND attachment.binding_id=turn.turn_id`, candidate.scope.OrgUUID, candidate.scope.WorkspaceUUID,
+			candidate.scope.ProjectName, candidate.scope.ProjectUID, candidate.threadID); err != nil {
+			return 0, fmt.Errorf("delete stale assistant thread attachments: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM app_studio_assistant_threads
+			WHERE org_uuid=$1 AND workspace_uuid=$2 AND project_name=$3 AND project_uid=$4 AND thread_id=$5`, candidate.scope.OrgUUID,
+			candidate.scope.WorkspaceUUID, candidate.scope.ProjectName, candidate.scope.ProjectUID, candidate.threadID); err != nil {
+			return 0, fmt.Errorf("delete stale assistant thread: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit delete stale assistant data: %w", err)

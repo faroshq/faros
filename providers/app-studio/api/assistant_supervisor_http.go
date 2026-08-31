@@ -288,7 +288,9 @@ func (s *Server) compensateProjectAssistantStartFailure(ctx context.Context, sco
 	run.UpdatedAt = time.Now().UTC()
 	message.UpdatedAt = run.UpdatedAt
 	message.Metadata = projectAssistantDurableMetadataForTransition(run, "Failed", false, false, nil, nil)
-	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	if err := s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return run, message, fmt.Errorf("compensate assistant start failure: %w", err)
 	}
 	return run, message, nil
@@ -1224,6 +1226,19 @@ func projectAssistantRunErrorInfo(err error) string {
 }
 
 func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope store.Scope, runID string) error {
+	return s.reconcileOrphanedProjectAssistantRunWithProjection(ctx, scope, runID, true)
+}
+
+// reconcileOrphanedProjectAssistantRunForProjection repairs the generic run
+// while reconcileProjectAssistantThreadTurn already owns the per-turn
+// projection lock. That caller finishes the canonical projection itself;
+// asking the generic repair to discover and reconcile the same turn would
+// recursively acquire the non-reentrant lock.
+func (s *Server) reconcileOrphanedProjectAssistantRunForProjection(ctx context.Context, scope store.Scope, runID string) error {
+	return s.reconcileOrphanedProjectAssistantRunWithProjection(ctx, scope, runID, false)
+}
+
+func (s *Server) reconcileOrphanedProjectAssistantRunWithProjection(ctx context.Context, scope store.Scope, runID string, reconcileCanonicalProjection bool) error {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return nil
@@ -1236,6 +1251,15 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 		return err
 	}
 	if assistantRunTerminal(run.Status) {
+		// The process may have exited after a prior recovery committed the
+		// generic terminal state but before its canonical thread projection was
+		// repaired. Terminal runs therefore still need the idempotent projection
+		// pass on callers that do not already hold the per-turn lock.
+		if reconcileCanonicalProjection {
+			persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+			defer cancel()
+			return s.reconcileOrphanedProjectAssistantCanonicalTurn(persistCtx, scope, run)
+		}
 		return nil
 	}
 	if run.Status != store.AssistantRunStatusRunning && run.Status != store.AssistantRunStatusStopping {
@@ -1274,19 +1298,64 @@ func (s *Server) reconcileOrphanedProjectAssistantRun(ctx context.Context, scope
 	run.AbortReason = store.AssistantRunAbortReasonInterrupted
 	run.UpdatedAt = time.Now().UTC()
 	run.Revision++
-	message, err := s.findProjectMessage(ctx, scope, run.ActiveMessageID)
+	// The transition is the recovery boundary: once the run is known to be an
+	// orphan, request cancellation must not leave either durable projection
+	// active. Keep the reads and writes in one detached, bounded context.
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	message, err := s.findProjectMessage(persistCtx, scope, run.ActiveMessageID)
 	if err != nil {
 		return err
 	}
 	message.UpdatedAt = run.UpdatedAt
 	message.Metadata = projectAssistantDurableMetadataFromExisting(run, "Interrupted", false, message.Metadata)
 	projectAssistantClearPendingInterruptMetadata(&message, run.ID)
-	if err := s.store.SaveAssistantRunSnapshot(ctx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
+	if err := s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return err
 	}
-	if err := appendProjectAssistantInterruptedBoundary(ctx, s.store, scope, run); err != nil {
+	if err := appendProjectAssistantInterruptedBoundary(persistCtx, s.store, scope, run); err != nil {
 		return err
 	}
 	s.projectAssistantSupervisor().log("orphan_interrupted", scope, run)
+	// A process can exit after the generic run commits but before the
+	// provider-specific canonical turn is mirrored. The generic run and
+	// canonical turn share the client request identity, but only the latter
+	// blocks future turns on the thread. Reconcile that projection now so a
+	// subsequent request cannot encounter a permanently active turn.
+	if reconcileCanonicalProjection {
+		if err := s.reconcileOrphanedProjectAssistantCanonicalTurn(persistCtx, scope, run); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) reconcileOrphanedProjectAssistantCanonicalTurn(ctx context.Context, scope store.Scope, run store.AssistantRun) error {
+	if s == nil || s.store == nil || strings.TrimSpace(run.ClientRequestID) == "" || strings.TrimSpace(run.UserMessageID) == "" {
+		return nil
+	}
+	user, err := s.findProjectMessage(ctx, scope, run.UserMessageID)
+	if err != nil {
+		if errors.Is(err, errProjectAssistantMessageNotFound) {
+			return nil
+		}
+		return fmt.Errorf("find orphaned assistant turn actor: %w", err)
+	}
+	if strings.TrimSpace(user.ActorID) == "" {
+		return nil
+	}
+	thread, turn, err := s.findProjectAssistantTurnAcrossThreads(ctx, scope, user.ActorID, run.ClientRequestID, "")
+	if errors.Is(err, store.ErrAssistantTurnNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find orphaned assistant canonical turn: %w", err)
+	}
+	if turn.ID != run.ID || turn.Status != store.AssistantTurnStatusInProgress {
+		return nil
+	}
+	if err := s.reconcileProjectAssistantThreadTurn(ctx, scope, turn); err != nil {
+		return fmt.Errorf("reconcile orphaned assistant canonical turn %q: %w", thread.ID, err)
+	}
 	return nil
 }

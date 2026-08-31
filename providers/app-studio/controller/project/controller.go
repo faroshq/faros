@@ -92,9 +92,10 @@ type Reconciler struct {
 	// Workspace is the shared on-disk project file store (nil disables
 	// commit convergence).
 	Workspace *workspace.FileStore
-	// Attachments owns the durable project attachment scope. The controller
-	// holds its finalizer even for Projects without provider bindings so direct
-	// KCP deletion cannot bypass blob cleanup.
+	// Attachments owns the durable project attachment scope. The controller adds
+	// its finalizer only after the Project's tenant scope and UID are available;
+	// API-created Projects carry the finalizer from creation time so an immediate
+	// direct KCP delete still has a cleanup owner.
 	Attachments store.AttachmentStore
 	// Busy reports whether an assistant turn currently owns the project's
 	// workspace — commits wait for idle.
@@ -172,11 +173,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if r.Attachments != nil && !controllerutil.ContainsFinalizer(&p, store.AttachmentStorageFinalizer) {
-		controllerutil.AddFinalizer(&p, store.AttachmentStorageFinalizer)
-		if err := c.Update(ctx, &p); err != nil {
-			return ctrl.Result{}, fmt.Errorf("adding attachment storage finalizer: %w", err)
+		// A Project created directly through KCP may not carry the API layer's
+		// org/workspace annotations. Do not add a finalizer that this controller
+		// cannot later use to identify the attachment storage scope.
+		if _, ok := attachmentScopeForProject(&p); ok {
+			controllerutil.AddFinalizer(&p, store.AttachmentStorageFinalizer)
+			if err := c.Update(ctx, &p); err != nil {
+				return ctrl.Result{}, fmt.Errorf("adding attachment storage finalizer: %w", err)
+			}
+			return ctrl.Result{Requeue: true}, nil
 		}
-		return ctrl.Result{Requeue: true}, nil
 	}
 
 	bound := providerBindings(&p)
@@ -583,12 +589,20 @@ func (r *Reconciler) finalize(ctx context.Context, c client.Client, p *aiv1alpha
 		}
 		scope, ok := attachmentScopeForProject(p)
 		if !ok {
-			return ctrl.Result{}, fmt.Errorf("attachment storage finalizer requires org/workspace annotations and Project UID")
+			// This can only be a legacy object (or a manually-created object
+			// carrying the old finalizer). There is no authenticated scope with
+			// which to delete bytes, so retaining the finalizer would make the CR
+			// undeletable forever. The API creation path now installs the
+			// finalizer only alongside the scope annotations, while unattached
+			// direct KCP Projects never receive it.
+			log.Printf("app-studio project %s: releasing attachment finalizer without cleanup because tenant scope is unavailable", p.Name)
+			controllerutil.RemoveFinalizer(p, store.AttachmentStorageFinalizer)
+		} else {
+			if err := r.Attachments.DeleteProjectAttachments(ctx, scope); err != nil {
+				return ctrl.Result{}, fmt.Errorf("deleting project attachments: %w", err)
+			}
+			controllerutil.RemoveFinalizer(p, store.AttachmentStorageFinalizer)
 		}
-		if err := r.Attachments.DeleteProjectAttachments(ctx, scope); err != nil {
-			return ctrl.Result{}, fmt.Errorf("deleting project attachments: %w", err)
-		}
-		controllerutil.RemoveFinalizer(p, store.AttachmentStorageFinalizer)
 	}
 	if instanceFinalizer {
 		if bound := providerBindings(p); len(bound) > 0 {

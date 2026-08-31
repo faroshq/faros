@@ -422,9 +422,11 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 		}
 	}
 	now := metav1.Now()
+	finalizers := s.projectFinalizersForCreate(id)
 	p := &aiv1alpha1.Project{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:       name,
+			Finalizers: finalizers,
 			// Bridge to the workspace/store keyspace: the Project reconciler
 			// only knows the cluster, but workspace scopes are keyed by the
 			// org/workspace UUIDs the hub derives from the tenant path.
@@ -507,6 +509,24 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 		}
 	}
 	return updated, nil
+}
+
+// projectFinalizersForCreate protects the short interval between a Project
+// create response and its first controller reconcile. API-created Projects
+// already know their tenant annotations, so installing the attachment
+// finalizer here ensures a direct delete cannot bypass blob cleanup. Projects
+// created through KCP do not get a finalizer until the controller has verified
+// the same scope.
+func (s *Server) projectFinalizersForCreate(id identity) []string {
+	if s == nil || strings.TrimSpace(id.orgUUID) == "" || strings.TrimSpace(id.workspaceUUID) == "" {
+		return nil
+	}
+	if s.attachments == nil {
+		if _, ok := s.store.(store.AttachmentStore); !ok {
+			return nil
+		}
+	}
+	return []string{store.AttachmentStorageFinalizer}
 }
 
 func resolveProjectCreateTemplate(ctx context.Context, c *asclient.Client, name string, inferred bool) (*projectTemplateInfo, error) {

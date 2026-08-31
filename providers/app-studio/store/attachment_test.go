@@ -316,6 +316,34 @@ func TestPostgresAttachmentWorkspaceLockKeyIsBinaryAndNulSafe(t *testing.T) {
 	}
 }
 
+func TestPostgresAttachmentLockKeysAreDeterministicAndNulSafe(t *testing.T) {
+	scope := attachmentTestScope()
+	withNUL := scope
+	withNUL.OrgUUID = "org\x00suffix"
+	withoutNUL := scope
+	withoutNUL.OrgUUID = "org"
+	withoutNUL.WorkspaceUUID = "suffixworkspace"
+	if postgresAttachmentProjectLockKey(withNUL) == postgresAttachmentProjectLockKey(withoutNUL) {
+		t.Fatal("project lock key aliases NUL-containing and adjacent fields")
+	}
+	if postgresAttachmentProjectLockKey(scope) != postgresAttachmentProjectLockKey(scope) {
+		t.Fatal("project lock key is not deterministic")
+	}
+	otherProject := scope
+	otherProject.ProjectName = "other"
+	if postgresAttachmentProjectLockKey(scope) == postgresAttachmentProjectLockKey(otherProject) {
+		t.Fatal("project lock key did not distinguish projects")
+	}
+	if postgresAttachmentWorkspaceLockKey(scope) != postgresAttachmentWorkspaceLockKey(otherProject) {
+		t.Fatal("workspace lock key changed across projects in one workspace")
+	}
+	otherWorkspace := scope
+	otherWorkspace.WorkspaceUUID = "other-workspace"
+	if postgresAttachmentWorkspaceLockKey(scope) == postgresAttachmentWorkspaceLockKey(otherWorkspace) {
+		t.Fatal("workspace lock key did not distinguish workspaces")
+	}
+}
+
 func TestParseAttachmentQuotaBytes(t *testing.T) {
 	for _, test := range []struct {
 		raw  string

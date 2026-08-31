@@ -26,14 +26,19 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/bindings"
+	asclient "github.com/faroshq/provider-app-studio/client"
 	"github.com/faroshq/provider-app-studio/store"
 )
 
@@ -41,6 +46,13 @@ import (
 // bytes remain bounded by AttachmentMaxBytes. The MaxBytesReader is still
 // required because a multipart parser's memory limit is not a body limit.
 const attachmentMultipartOverhead = 256 << 10
+
+const projectAttachmentAdmissionMaxAttempts = 3
+
+var (
+	errProjectAttachmentScopeConflict    = errors.New("project attachment scope conflicts with authenticated project")
+	errProjectAttachmentScopeConvergence = errors.New("project attachment scope could not be persisted")
+)
 
 type attachmentReceiptResponse struct {
 	ID          string     `json:"id"`
@@ -218,7 +230,7 @@ func (s *Server) listProjectAssistantAttachments(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http.Request) {
-	_, id, project, ok := s.requireProjectWithClient(w, r)
+	c, id, project, ok := s.requireProjectWithClient(w, r)
 	if !ok {
 		return
 	}
@@ -232,6 +244,11 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 	}
 	attachmentStore, ok := s.projectAttachmentStore(w)
 	if !ok {
+		return
+	}
+	project, err := s.ensureProjectAttachmentAdmission(r.Context(), c, id, project)
+	if err != nil {
+		s.writeProjectAttachmentAdmissionError(w, err)
 		return
 	}
 
@@ -318,6 +335,130 @@ func (s *Server) createProjectAssistantAttachment(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, attachmentReceipt(created))
+}
+
+// ensureProjectAttachmentAdmission makes the Project metadata that protects
+// attachment cleanup authoritative before an upload can create storage. API
+// project creation already supplies these fields, but Projects can also be
+// created directly through KCP. In that case this boundary adopts the object
+// to the authenticated tenant only when its existing annotations are empty or
+// agree with the caller; a conflicting annotation is never overwritten.
+//
+// Update is retried only after a fresh read. This preserves concurrent spec or
+// status changes and makes a conflict safe: if another writer installed the
+// same identity/finalizer, the upload proceeds; if it installed a different
+// identity, the upload is rejected. The returned object is always the
+// re-read, persisted Project rather than the caller's stale copy.
+func (s *Server) ensureProjectAttachmentAdmission(ctx context.Context, c *asclient.Client, id identity, project *aiv1alpha1.Project) (*aiv1alpha1.Project, error) {
+	if c == nil || project == nil {
+		return nil, fmt.Errorf("%w: project client is unavailable", errProjectAttachmentScopeConvergence)
+	}
+	org := strings.TrimSpace(id.orgUUID)
+	workspace := strings.TrimSpace(id.workspaceUUID)
+	name := strings.TrimSpace(project.Name)
+	if org == "" || workspace == "" || name == "" || strings.TrimSpace(string(project.UID)) == "" {
+		return nil, newValidationError("project attachment scope requires an authenticated organization, workspace, project name, and Project UID")
+	}
+
+	for attempt := 0; attempt < projectAttachmentAdmissionMaxAttempts; attempt++ {
+		refreshed, err := c.Projects().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("%w: re-read Project %q: %v", errProjectAttachmentScopeConvergence, name, err)
+		}
+		current := refreshed
+		if err := validateProjectAttachmentAdmissionIdentity(current, org, workspace, name); err != nil {
+			return nil, err
+		}
+		if projectAttachmentAdmissionReady(current, org, workspace) {
+			return current, nil
+		}
+
+		next := current.DeepCopy()
+		annotations := next.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+			next.SetAnnotations(annotations)
+		}
+		changed := false
+		if annotations[bindings.OrgUUIDAnnotation] != org {
+			annotations[bindings.OrgUUIDAnnotation] = org
+			changed = true
+		}
+		if annotations[bindings.WorkspaceUUIDAnnotation] != workspace {
+			annotations[bindings.WorkspaceUUIDAnnotation] = workspace
+			changed = true
+		}
+		if !slices.Contains(next.Finalizers, store.AttachmentStorageFinalizer) {
+			next.Finalizers = append(next.Finalizers, store.AttachmentStorageFinalizer)
+			changed = true
+		}
+		if !changed {
+			return current, nil
+		}
+		if _, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{}); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return nil, fmt.Errorf("%w: update Project %q: %v", errProjectAttachmentScopeConvergence, name, err)
+		}
+
+		// Do not trust an Update response as proof that the cleanup guard is
+		// durable. A concurrent writer/controller may have changed the object
+		// between the update and this request's next storage operation.
+		persisted, err := c.Projects().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return nil, fmt.Errorf("%w: verify Project %q after update: %v", errProjectAttachmentScopeConvergence, name, err)
+		}
+		current = persisted
+		if err := validateProjectAttachmentAdmissionIdentity(current, org, workspace, name); err != nil {
+			return nil, err
+		}
+		if projectAttachmentAdmissionReady(current, org, workspace) {
+			return current, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: Project %q update retry budget exhausted", errProjectAttachmentScopeConflict, name)
+}
+
+func validateProjectAttachmentAdmissionIdentity(project *aiv1alpha1.Project, org, workspace, name string) error {
+	if project == nil || strings.TrimSpace(project.Name) != name || strings.TrimSpace(string(project.UID)) == "" {
+		return fmt.Errorf("%w: Project identity is incomplete", errProjectAttachmentScopeConvergence)
+	}
+	if !project.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("%w: Project %q is being deleted", errProjectAttachmentScopeConflict, name)
+	}
+	annotations := project.GetAnnotations()
+	if annotated := strings.TrimSpace(annotations[bindings.OrgUUIDAnnotation]); annotated != "" && annotated != org {
+		return fmt.Errorf("%w: organization annotation does not match the authenticated tenant", errProjectAttachmentScopeConflict)
+	}
+	if annotated := strings.TrimSpace(annotations[bindings.WorkspaceUUIDAnnotation]); annotated != "" && annotated != workspace {
+		return fmt.Errorf("%w: workspace annotation does not match the authenticated tenant", errProjectAttachmentScopeConflict)
+	}
+	return nil
+}
+
+func projectAttachmentAdmissionReady(project *aiv1alpha1.Project, org, workspace string) bool {
+	if project == nil || strings.TrimSpace(string(project.UID)) == "" || !slices.Contains(project.Finalizers, store.AttachmentStorageFinalizer) {
+		return false
+	}
+	annotations := project.GetAnnotations()
+	return strings.TrimSpace(annotations[bindings.OrgUUIDAnnotation]) == org &&
+		strings.TrimSpace(annotations[bindings.WorkspaceUUIDAnnotation]) == workspace
+}
+
+func (s *Server) writeProjectAttachmentAdmissionError(w http.ResponseWriter, err error) {
+	var validationErr *ValidationError
+	switch {
+	case errors.Is(err, errProjectAttachmentScopeConflict), apierrors.IsConflict(err):
+		writeStatus(w, http.StatusConflict, "Conflict", "project attachment scope changed; refresh the project and retry")
+	case errors.As(err, &validationErr):
+		writeProjectError(w, err)
+	default:
+		writeStatus(w, http.StatusInternalServerError, "InternalError", "prepare project attachment scope: "+err.Error())
+	}
 }
 
 func parseClientAttachmentID(r *http.Request) (string, error) {

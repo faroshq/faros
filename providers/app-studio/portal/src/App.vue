@@ -157,6 +157,7 @@ import {
 import {
   assistantAttachmentPart,
   assistantAttachmentErrorMessage,
+  assistantAttachmentReceiptsMatch,
   isAssistantAttachmentReceiptUnavailableError,
   projectAssistantAttachmentReceipt,
   staleAssistantAttachmentClientIDs,
@@ -745,7 +746,23 @@ const landingImportOpen = ref(false)
 const landingImportPopoverRef = ref<HTMLElement | null>(null)
 const landingImportDialogRef = ref<HTMLElement | null>(null)
 const landingImportTriggerRef = ref<HTMLButtonElement | null>(null)
-const assistantComposerRef = ref<{ focus: () => void; openPalette: () => void; closePalette: (restoreFocus?: boolean) => void } | null>(null)
+interface AssistantAttachmentRecoveryCounts {
+  recovered: number
+  removed: number
+  unresolved: number
+}
+
+interface AssistantAttachmentRecoveryResult extends AssistantAttachmentRecoveryCounts {
+  candidateCount: number
+  stale: boolean
+}
+
+const assistantComposerRef = ref<{
+  focus: () => void
+  openPalette: () => void
+  closePalette: (restoreFocus?: boolean) => void
+  recoverUnavailableAttachments?: (receiptIDs: readonly string[]) => Promise<AssistantAttachmentRecoveryCounts>
+} | null>(null)
 const threadRailRef = ref<{
   open?: () => void
   openAndFocus?: () => void
@@ -1094,12 +1111,14 @@ function clearPendingFirstProjectSubmission() {
   pendingFirstProjectSubmission = null
 }
 
-function updatePreProjectAttachment(clientID: string, patch: Partial<AssistantStagedAttachment>) {
+function updatePreProjectAttachment(clientID: string, patch: Partial<AssistantStagedAttachment>, isCurrent?: () => boolean): boolean {
+  if (isCurrent && !isCurrent()) return false
   const current = preProjectAttachments.value.find((attachment) => attachment.clientID === clientID)
-  if (!current) return
+  if (!current) return false
   preProjectAttachments.value = preProjectAttachments.value.map((attachment) =>
     attachment.clientID === clientID ? { ...attachment, ...patch } : attachment,
   )
+  return true
 }
 
 function attachmentCleanupIDs(attachment: Pick<AssistantStagedAttachment, 'clientID' | 'receipt'>): string[] {
@@ -1143,7 +1162,8 @@ function stagePreProjectAttachment(attachment: AssistantStagedAttachment) {
   preProjectAttachments.value = [...preProjectAttachments.value, attachment]
 }
 
-async function uploadPreProjectAttachment(clientID: string, projectName: string): Promise<boolean> {
+async function uploadPreProjectAttachment(clientID: string, projectName: string, isCurrent?: () => boolean): Promise<boolean> {
+  if (isCurrent && !isCurrent()) return false
   const attachment = preProjectAttachments.value.find((candidate) => candidate.clientID === clientID)
   if (!attachment) return false
   if (attachment.receipt && attachment.projectName === projectName && attachment.status === 'ready') return true
@@ -1169,6 +1189,10 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
   try {
     const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, projectName, attachment.file, controller.signal, attachment.clientID))
     if (!receipt) throw new Error('The attachment upload returned an invalid receipt.')
+    if (isCurrent && !isCurrent()) {
+      void bestEffortDeletePreProjectAttachment({ ...attachment, receipt }, projectName)
+      return false
+    }
     if (!preProjectAttachments.value.some((candidate) => candidate.clientID === clientID)) {
       void bestEffortDeletePreProjectAttachment({ ...attachment, receipt }, projectName)
       return false
@@ -1193,7 +1217,7 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
           error: undefined,
           retryable: false,
           retryAction: undefined,
-        })
+        }, isCurrent)
       }
       return false
     }
@@ -1201,7 +1225,7 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
     // lost. Use both the server receipt (when available) and stable client ID,
     // but keep the File candidate visible for a retry.
     void bestEffortDeletePreProjectAttachment(cleanupAttachment, projectName)
-    if (!present) return false
+    if (!present || (isCurrent && !isCurrent())) return false
     const detail = uploadError instanceof Error ? uploadError.message : 'Attachment upload failed.'
     updatePreProjectAttachment(clientID, {
       projectName,
@@ -1209,14 +1233,15 @@ async function uploadPreProjectAttachment(clientID: string, projectName: string)
       error: detail,
       retryable: true,
       retryAction: 'upload',
-    })
+    }, isCurrent)
     return false
   } finally {
     if (preProjectAttachmentControllers.get(clientID) === controller) preProjectAttachmentControllers.delete(clientID)
   }
 }
 
-async function recoverPreProjectAttachmentReceipts(projectName: string, force = false): Promise<void> {
+async function recoverPreProjectAttachmentReceipts(projectName: string, force = false, isCurrent?: () => boolean): Promise<void> {
+  if (isCurrent && !isCurrent()) return
   const ready = preProjectAttachments.value.filter((candidate) =>
     candidate.projectName === projectName && candidate.status === 'ready' && candidate.receipt,
   )
@@ -1231,13 +1256,16 @@ async function recoverPreProjectAttachmentReceipts(projectName: string, force = 
     if (!force) return
     listed = []
   }
+  if (isCurrent && !isCurrent()) return
   const staleIDs = force
     ? ready.map((candidate) => candidate.clientID)
     : staleAssistantAttachmentClientIDs(ready, listed)
   for (const clientID of staleIDs) {
+    if (isCurrent && !isCurrent()) return
     const candidate = preProjectAttachments.value.find((attachment) => attachment.clientID === clientID)
     if (!candidate) continue
     await bestEffortDeletePreProjectAttachment(candidate, projectName)
+    if (isCurrent && !isCurrent()) return
     updatePreProjectAttachment(clientID, {
       receipt: undefined,
       projectName,
@@ -1245,13 +1273,15 @@ async function recoverPreProjectAttachmentReceipts(projectName: string, force = 
       error: undefined,
       retryable: false,
       retryAction: undefined,
-    })
+    }, isCurrent)
   }
 }
 
-async function ensurePreProjectAttachmentsUploaded(projectName: string): Promise<boolean> {
+async function ensurePreProjectAttachmentsUploaded(projectName: string, isCurrent?: () => boolean): Promise<boolean> {
+  if (isCurrent && !isCurrent()) return false
   preProjectAttachmentProjectName = projectName
-  await recoverPreProjectAttachmentReceipts(projectName)
+  await recoverPreProjectAttachmentReceipts(projectName, false, isCurrent)
+  if (isCurrent && !isCurrent()) return false
   const candidates = [...preProjectAttachments.value]
   let allReady = true
   for (const candidate of candidates) {
@@ -1264,7 +1294,8 @@ async function ensurePreProjectAttachmentsUploaded(projectName: string): Promise
       allReady = false
       continue
     }
-    if (!(await uploadPreProjectAttachment(candidate.clientID, projectName))) allReady = false
+    if (!(await uploadPreProjectAttachment(candidate.clientID, projectName, isCurrent))) allReady = false
+    if (isCurrent && !isCurrent()) return false
   }
   return allReady && preProjectAttachments.value.every((candidate) =>
     candidate.projectName === projectName && candidate.status === 'ready' && Boolean(candidate.receipt),
@@ -1409,7 +1440,7 @@ function invalidateProjectContextState() {
   reviewPanelHold.value = null
   clearSelectedTurnAttachments()
   clearPreProjectAttachments()
-  landingImportOpen.value = false
+  closeLandingImportPopover()
   projectOpenLoading.value = hasToken && Boolean(selectedNameFromPath.value)
   threadHistoryLoading.value = hasToken && Boolean(selectedNameFromPath.value)
   loading.value = hasToken
@@ -2641,7 +2672,7 @@ watch(
     }
     projectDeletionError.value = null
     projectDeletionRetry.value = null
-    landingImportOpen.value = false
+    closeLandingImportPopover()
     invalidateLLMModelMutationState()
     // A route change can leave the previous project's stream mounted until
     // the replacement project has hydrated. Detach that stream immediately,
@@ -4309,7 +4340,7 @@ async function applyLandingStarterPrompt(starter: LandingStarterPrompt) {
 async function openNewProjectComposer() {
   prompt.value = ''
   error.value = null
-  landingImportOpen.value = false
+  closeLandingImportPopover()
   wizardOpen.value = false
   props.navigate(CREATE_PROJECT_ROUTE)
   await nextTick()
@@ -4598,6 +4629,7 @@ async function startPreProjectAssistantTurn(
   projectName: string,
   submission: ReturnType<typeof newFirstProjectSubmission>,
   threadID: string,
+  isCurrent?: () => boolean,
 ): Promise<Awaited<ReturnType<typeof api.startAssistantTurn>>> {
   const startPlan = firstProjectStartPlan(submission)
   const start = () => {
@@ -4614,8 +4646,10 @@ async function startPreProjectAssistantTurn(
     return await start()
   } catch (error) {
     if (!isAssistantAttachmentReceiptUnavailableError(error)) throw error
-    await recoverPreProjectAttachmentReceipts(projectName, true)
-    if (!await ensurePreProjectAttachmentsUploaded(projectName)) throw error
+    await recoverPreProjectAttachmentReceipts(projectName, true, isCurrent)
+    if (isCurrent && !isCurrent()) throw error
+    if (!await ensurePreProjectAttachmentsUploaded(projectName, isCurrent)) throw error
+    if (isCurrent && !isCurrent()) throw error
     return start()
   }
 }
@@ -4712,7 +4746,7 @@ async function createProjectAndStartConversation(
       activeProjectContextFingerprint = appContextFingerprint(props.ctx)
     }
 
-    if (!(await ensurePreProjectAttachmentsUploaded(projectName))) {
+    if (!(await ensurePreProjectAttachmentsUploaded(projectName, current))) {
       if (!current()) return
       prompt.value = content
       // Keep the failed candidates visible on the shared pre-project surface;
@@ -4725,18 +4759,18 @@ async function createProjectAndStartConversation(
     // the next attempt can address the same server thread without creating a
     // second one; the backend accepts an explicit thread ID on creation.
     let thread = submission.threadID
-      ? assistantThreads.value.find((candidate) => candidate.id === submission.threadID) ?? {
-          id: submission.threadID,
-          status: 'idle' as const,
-          createdAt: now,
-          updatedAt: now,
-        }
+      ? assistantThreads.value.find((candidate) => candidate.id === submission.threadID)
       : undefined
     if (!thread) {
-      const requestedThreadID = `thread-${crypto.randomUUID()}`
+      // A retained ID is only a request identity until the server returns the
+      // row. Reissue the idempotent create on retry instead of fabricating a
+      // local thread that the subsequent start request cannot find.
+      const requestedThreadID = submission.threadID || `thread-${crypto.randomUUID()}`
       submission = firstProjectSubmissionWithThread(submission, requestedThreadID)
       pendingFirstProjectSubmission = submission
-      thread = await api.createAssistantThread(props.ctx, projectName, undefined, requestedThreadID)
+      const createdThread = await api.createAssistantThread(props.ctx, projectName, undefined, requestedThreadID)
+      if (!current()) return
+      thread = createdThread
     }
     // The explicit ID is a request identity, not a promise that the server
     // will keep it. Persist the response's thread immediately so a later
@@ -4751,7 +4785,7 @@ async function createProjectAndStartConversation(
     activeAssistantThreadID.value = thread.id
     persistAssistantThreadFocus(assistantThreadFocusScope(projectName), thread.id)
     startPostAttempted = true
-    const canonical = await startPreProjectAssistantTurn(projectName, submission, thread.id)
+    const canonical = await startPreProjectAssistantTurn(projectName, submission, thread.id, current)
     // A resolved start response is the durable acceptance boundary. Any
     // projection/history failure after this point must replay this same
     // client request rather than manufacture a new turn.
@@ -5167,6 +5201,102 @@ function replaceAssistantComposerText(value: string) {
   prompt.value = value
   assistantComposerParts.value = [{ type: 'text', text: value }]
   persistCurrentAssistantAnnotationDraft()
+}
+
+/**
+ * A precise receipt failure means the browser's current structured payload is
+ * no longer sendable. The rich composer owns original File objects when the
+ * user attached them in this session, so App can refresh those receipts and
+ * clear receipt-only candidates while leaving the authored prompt intact.
+ * This is a recovery boundary, not an automatic replay: changing content
+ * parts after a rejected POST must never create a second accepted turn.
+ */
+async function recoverUnavailableAssistantAttachmentReceipts(
+  projectName: string,
+  parts: readonly ProjectAssistantContentPart[],
+  isCurrent?: () => boolean,
+): Promise<AssistantAttachmentRecoveryResult> {
+  const attachmentParts = parts.filter((part): part is Extract<ProjectAssistantContentPart, { type: 'attachment' }> => part.type === 'attachment')
+  const empty = (stale = false): AssistantAttachmentRecoveryResult => ({
+    recovered: 0,
+    removed: 0,
+    unresolved: 0,
+    candidateCount: 0,
+    stale,
+  })
+  if (!attachmentParts.length) return empty()
+  if (isCurrent && !isCurrent()) return empty(true)
+
+  let listed: Awaited<ReturnType<typeof api.listAssistantAttachments>> = []
+  try {
+    listed = await api.listAssistantAttachments(props.ctx, projectName)
+  } catch {
+    // The failed start is already precise. If listing is unavailable, treat
+    // every receipt in this rejected payload as a recovery candidate; the
+    // composer reuses stable client IDs, so a valid draft remains idempotent.
+  }
+  if (isCurrent && !isCurrent()) return { ...empty(), stale: true }
+
+  const staleParts = attachmentParts.filter((part) => !listed.some((receipt) => assistantAttachmentReceiptsMatch(part.attachment, receipt)))
+  if (!staleParts.length) return empty()
+  if (isCurrent && !isCurrent()) return { ...empty(), candidateCount: staleParts.length, stale: true }
+
+  const staleIDs = new Set(staleParts.map((part) => part.attachment.id))
+  const recover = assistantComposerRef.value?.recoverUnavailableAttachments
+  if (recover) {
+    let result: AssistantAttachmentRecoveryCounts
+    try {
+      result = await recover([...staleIDs])
+    } catch {
+      // Keep the rejected prompt and candidate state visible. The composer
+      // owns its retry controls and will expose any upload failure there.
+      result = { recovered: 0, removed: 0, unresolved: staleParts.length }
+    }
+    if (isCurrent && !isCurrent()) return { ...empty(), candidateCount: staleParts.length, stale: true }
+    // A host may briefly render a composer that cannot reconcile a hydrated
+    // receipt-only chip. Count any unaccounted receipt as unresolved so the
+    // caller never silently retries the rejected turn with stale parts.
+    const recovered = Math.max(0, result.recovered)
+    const removed = Math.max(0, result.removed)
+    const unresolved = Math.max(0, result.unresolved, staleParts.length - recovered - removed)
+    return { recovered, removed, unresolved, candidateCount: staleParts.length, stale: false }
+  } else {
+    // Keep a defensive fallback for a host rendering an older composer bundle.
+    // It clears only receipts proven stale; no turn replay occurs here.
+    const recoveredParts = parts.filter((part) => part.type !== 'attachment' || !staleIDs.has(part.attachment.id))
+    assistantComposerParts.value = [...recoveredParts]
+    assistantComposerAttachmentsPending.value = false
+    persistCurrentAssistantAnnotationDraft(recoveredParts)
+    return { recovered: 0, removed: staleParts.length, unresolved: 0, candidateCount: staleParts.length, stale: false }
+  }
+}
+
+async function recoverUnavailableAssistantAttachmentSend(
+  projectName: string,
+  content: string,
+  parts: readonly ProjectAssistantContentPart[],
+  isCurrent: () => boolean,
+): Promise<AssistantAttachmentRecoveryResult> {
+  const recovery = await recoverUnavailableAssistantAttachmentReceipts(projectName, parts, isCurrent)
+  if (recovery.stale || !isCurrent()) return recovery.stale ? recovery : { ...recovery, stale: true }
+  if (recovery.candidateCount === 0) return recovery
+  pendingMessageSubmission = null
+  prompt.value = content
+  if (recovery.recovered > 0 && recovery.removed === 0 && recovery.unresolved === 0) {
+    error.value = recovery.recovered === 1
+      ? 'The attached file was refreshed. Review it and send again.'
+      : 'The attached files were refreshed. Review them and send again.'
+  } else if (recovery.recovered > 0) {
+    error.value = 'Some attached files were refreshed; reattach unavailable files and send again.'
+  } else if (recovery.unresolved > 0 && recovery.removed === 0) {
+    error.value = 'Some attached files could not be refreshed. Reattach them and send again.'
+  } else {
+    error.value = recovery.removed === 1
+      ? 'The attached file is no longer available. Reattach it and send again.'
+      : 'Some attached files are no longer available. Reattach them and send again.'
+  }
+  messageStreaming.value = false
+  return recovery
 }
 
 watch(() => selected.value?.name ?? '', (current, previous) => {
@@ -6904,6 +7034,12 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
       return true
     }
     if (e instanceof ProjectAPIRequestError && e.status === 409) {
+      if (isAssistantAttachmentReceiptUnavailableError(e) && turnContentParts.some((part) => part.type === 'attachment')) {
+        // A receipt rejection is a pre-acceptance failure, not an active-run
+        // conflict. Reconcile it before attempting normal conflict recovery.
+        const attachmentRecovery = await recoverUnavailableAssistantAttachmentSend(projectName, content, turnContentParts, firstSendIsCurrent)
+        if (attachmentRecovery.stale || attachmentRecovery.candidateCount > 0) return false
+      }
       let recoveredSameRequest = false
       try {
         const recovered = await recoverAssistantConversation(projectName)
@@ -6934,6 +7070,13 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
         error.value = detail ? `Could not recover the active assistant run: ${detail}` : 'Could not recover the active assistant run. Your prompt is preserved.'
       }
       return recoveredSameRequest
+    }
+    if (isAssistantAttachmentReceiptUnavailableError(e) && turnContentParts.some((part) => part.type === 'attachment')) {
+      // The start POST was rejected before acceptance. Reconcile stale
+      // receipts into the composer while preserving the authored prompt; do
+      // not replay this request with a changed payload or risk two turns.
+      const attachmentRecovery = await recoverUnavailableAssistantAttachmentSend(projectName, content, turnContentParts, firstSendIsCurrent)
+      if (attachmentRecovery.stale || attachmentRecovery.candidateCount > 0) return false
     }
     error.value = e instanceof Error ? e.message : String(e)
     prompt.value = content

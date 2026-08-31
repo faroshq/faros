@@ -275,7 +275,7 @@ func (s *PostgresStore) DeleteAssistantThread(ctx context.Context, scope Scope, 
 	if err := lockPostgresAttachmentScope(ctx, tx, scope); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, assistantThreadLockKey(scope, threadID)); err != nil {
+	if err := lockPostgresAssistantThread(ctx, tx, scope, threadID); err != nil {
 		return fmt.Errorf("lock assistant thread deletion: %w", err)
 	}
 	var owner string

@@ -135,6 +135,53 @@ func TestFinalizeProjectAttachmentStorageWithoutInstanceBinding(t *testing.T) {
 	}
 }
 
+func TestFinalizeProjectAttachmentStorageReleasesUnscopedLegacyFinalizer(t *testing.T) {
+	ctx := context.Background()
+	now := metav1.Now()
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{
+		Name:              "metadata-incomplete",
+		UID:               "project-uid",
+		Finalizers:        []string{store.AttachmentStorageFinalizer},
+		DeletionTimestamp: &now,
+	}}
+	scheme := runtime.NewScheme()
+	if err := aiv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(project).Build()
+	if _, err := (&Reconciler{Attachments: store.NewMemoryStore()}).finalize(ctx, fakeClient, project, "cluster-a"); err != nil {
+		t.Fatalf("finalize metadata-incomplete project: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(project, store.AttachmentStorageFinalizer) {
+		t.Fatal("unscoped legacy attachment finalizer was retained")
+	}
+	stored := &aiv1alpha1.Project{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Name: project.Name}, stored); err != nil {
+		if !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+		return
+	}
+	if controllerutil.ContainsFinalizer(stored, store.AttachmentStorageFinalizer) {
+		t.Fatal("unscoped legacy attachment finalizer persisted in the API")
+	}
+}
+
+func TestAttachmentScopeForProjectRequiresTenantMetadata(t *testing.T) {
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "uid"}}
+	if _, ok := attachmentScopeForProject(project); ok {
+		t.Fatal("attachment scope resolved without tenant annotations")
+	}
+	project.Annotations = map[string]string{
+		bindings.OrgUUIDAnnotation:       "org",
+		bindings.WorkspaceUUIDAnnotation: "workspace",
+	}
+	scope, ok := attachmentScopeForProject(project)
+	if !ok || scope.OrgUUID != "org" || scope.WorkspaceUUID != "workspace" || scope.ProjectName != project.Name || scope.ProjectUID != string(project.UID) {
+		t.Fatalf("attachment scope = %#v, ok=%v", scope, ok)
+	}
+}
+
 func TestReconcileDevelopmentPreviewPolicy(t *testing.T) {
 	projectWith := func(mode aiv1alpha1.ProjectSharingMode, values string, observedURL string) *aiv1alpha1.Project {
 		p := &aiv1alpha1.Project{

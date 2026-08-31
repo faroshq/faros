@@ -569,9 +569,13 @@ function appendAttachmentError(file: File, message: string) {
   emitAttachmentPending()
 }
 
-async function uploadAttachment(file: File, existingClientID?: string) {
-  if (props.disabled || props.activeRun) return
-  if (!props.projectName.trim()) {
+async function uploadAttachment(file: File, existingClientID?: string, allowWhileInactive = false) {
+  // Capture the project before any await. A route switch can clear the chips
+  // and update props while the upload is in flight; cleanup must still target
+  // the project that accepted the original upload request.
+  const projectName = props.projectName
+  if ((props.disabled || props.activeRun) && !allowWhileInactive) return
+  if (!projectName.trim()) {
     appendAttachmentError(file, 'Select a project before adding an attachment.')
     return
   }
@@ -606,11 +610,15 @@ async function uploadAttachment(file: File, existingClientID?: string) {
   if (!existingChip) attachmentChips.value = [...attachmentChips.value, chip]
   emitAttachmentPending()
   try {
-    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, props.projectName, file, controller.signal, clientID))
+    const receipt = projectAssistantAttachmentReceipt(await api.uploadAssistantAttachment(props.ctx, projectName, file, controller.signal, clientID))
     if (!receipt) throw new Error('The attachment upload returned an invalid receipt.')
+    if (props.projectName !== projectName) {
+      void bestEffortDeleteAttachment({ ...chip, receipt }, projectName)
+      return
+    }
     const current = attachmentChips.value.find((candidate) => candidate.clientID === clientID)
     if (!current) {
-      void bestEffortDeleteAttachment({ ...chip, receipt }, props.projectName)
+      void bestEffortDeleteAttachment({ ...chip, receipt }, projectName)
       return
     }
     current.receipt = receipt
@@ -623,8 +631,8 @@ async function uploadAttachment(file: File, existingClientID?: string) {
   } catch (error) {
     const current = attachmentChips.value.find((candidate) => candidate.clientID === clientID)
     if (isAttachmentAbortError(error)) {
-      void bestEffortDeleteAttachment(chip, props.projectName)
-      if (current) {
+      void bestEffortDeleteAttachment(chip, projectName)
+      if (current && props.projectName === projectName) {
         current.status = 'staged'
         current.controller = undefined
         current.error = undefined
@@ -635,14 +643,62 @@ async function uploadAttachment(file: File, existingClientID?: string) {
     }
     // Preserve the File candidate after an ambiguous response. The server may
     // have created a draft even when the browser received an error.
-    void bestEffortDeleteAttachment(chip, props.projectName)
-    if (!current) return
+    void bestEffortDeleteAttachment(chip, projectName)
+    if (!current || props.projectName !== projectName) return
     current.status = 'error'
     current.controller = undefined
     current.error = error instanceof Error ? error.message : 'Attachment upload failed.'
     current.retryAction = 'upload'
     emitAttachmentPending()
   }
+}
+
+interface UnavailableAttachmentRecovery {
+  recovered: number
+  removed: number
+  unresolved: number
+}
+
+/**
+ * Replace precise server-rejected receipts with fresh uploads from the
+ * browser-owned File candidates. Receipt-only chips cannot be reconstructed,
+ * so they are removed and the parent leaves the authored prompt ready for an
+ * explicit reattach. This method intentionally does not submit a turn.
+ */
+async function recoverUnavailableAttachments(receiptIDs: readonly string[]): Promise<UnavailableAttachmentRecovery> {
+  const requestedIDs = new Set(receiptIDs.map((id) => id.trim()).filter(Boolean))
+  if (!requestedIDs.size) return { recovered: 0, removed: 0, unresolved: 0 }
+  const projectName = props.projectName
+  let recovered = 0
+  let removed = 0
+  let unresolved = 0
+
+  for (const chip of [...attachmentChips.value]) {
+    const receiptID = chip.receipt?.id.trim() || ''
+    if (!receiptID || !requestedIDs.has(receiptID)) continue
+    const previousReceiptID = receiptID
+    const replacementFile = chip.file
+    localParts.value = localParts.value.filter((part) => part.type !== 'attachment' || part.attachment.id !== previousReceiptID)
+    if (!replacementFile) {
+      attachmentChips.value = attachmentChips.value.filter((candidate) => candidate.clientID !== chip.clientID)
+      removed += 1
+      emitState()
+      continue
+    }
+
+    chip.receipt = undefined
+    chip.status = 'staged'
+    chip.error = undefined
+    chip.retryAction = undefined
+    chip.controller = undefined
+    emitState()
+    await uploadAttachment(replacementFile, chip.clientID, true)
+    if (props.projectName !== projectName) return { recovered, removed, unresolved: unresolved + 1 }
+    const replacement = attachmentChips.value.find((candidate) => candidate.clientID === chip.clientID)
+    if (replacement?.status === 'ready' && replacement.receipt) recovered += 1
+    else unresolved += 1
+  }
+  return { recovered, removed, unresolved }
 }
 
 function handleAttachmentInput(event: Event) {
@@ -938,7 +994,7 @@ watch(() => props.projectName, (current, previous) => {
 watch(() => [props.disabled, props.activeRun], ([disabled, active]) => {
   if (disabled || active) {
     closePalette(false)
-    attachmentMenuOpen.value = false
+    closeAttachmentMenu()
   }
 })
 
@@ -955,7 +1011,12 @@ onBeforeUnmount(() => {
   }
 })
 
-defineExpose({ focus: () => focusEditor(false), openPalette, closePalette })
+defineExpose({
+  focus: () => focusEditor(false),
+  openPalette,
+  closePalette,
+  recoverUnavailableAttachments,
+})
 </script>
 
 <template>

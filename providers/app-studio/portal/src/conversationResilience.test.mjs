@@ -143,6 +143,25 @@ test('first-send thread creation cannot mutate state after an App unmount or req
   assert.match(sendMessage.slice(firstThreadStart, firstThreadEnd), /await api\.createAssistantThread\(props\.ctx, projectName\)[\s\S]*if \(!firstSendIsCurrent\(\)\) return false[\s\S]*persistAssistantThreadFocus[\s\S]*writeAssistantAnnotationDraft/)
 })
 
+test('first-project retries reissue an unconfirmed retained thread ID and fence its response', async () => {
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const startPath = appSource.slice(appSource.indexOf('async function createProjectAndStartConversation('))
+  assert.match(startPath, /const requestedThreadID = submission\.threadID \|\| `thread-\$\{crypto\.randomUUID\(\)\}`/)
+  assert.match(startPath, /const createdThread = await api\.createAssistantThread\(props\.ctx, projectName, undefined, requestedThreadID\)[\s\S]*if \(!current\(\)\) return[\s\S]*thread = createdThread/)
+  assert.doesNotMatch(startPath, /status: 'idle' as const/)
+})
+
+test('attachment recovery is fenced after every asynchronous stale-receipt step', async () => {
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const upload = appSource.slice(appSource.indexOf('async function uploadPreProjectAttachment'), appSource.indexOf('async function recoverPreProjectAttachmentReceipts'))
+  const recovery = appSource.slice(appSource.indexOf('async function recoverPreProjectAttachmentReceipts'), appSource.indexOf('async function ensurePreProjectAttachmentsUploaded'))
+  assert.match(upload, /if \(isCurrent && !isCurrent\(\)\) \{[\s\S]*bestEffortDeletePreProjectAttachment/)
+  assert.match(upload, /if \(!present \|\| \(isCurrent && !isCurrent\(\)\)\) return false/)
+  assert.match(recovery, /await bestEffortDeletePreProjectAttachment[\s\S]*if \(isCurrent && !isCurrent\(\)\) return/)
+  assert.match(appSource, /ensurePreProjectAttachmentsUploaded\(projectName, current\)/)
+  assert.match(appSource, /startPreProjectAssistantTurn\(projectName, submission, thread\.id, current\)/)
+})
+
 test('regular send adopts the canonical thread returned by the start response', async () => {
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   const sendMessage = appSource.slice(appSource.indexOf('async function sendMessage'), appSource.indexOf('function cancelMessageStream'))
@@ -157,6 +176,20 @@ test('regular send adopts the canonical thread returned by the start response', 
   assert.match(acceptedStart, /persistAssistantThreadFocus\(assistantThreadFocusScope\(projectName\), canonicalThreadID\)/)
   assert.match(acceptedStart, /listAssistantThreadItems\(props\.ctx, projectName, canonicalThreadID\)/)
   assert.match(acceptedStart, /clearStoredAssistantAnnotationDraft\(projectName, requestedThreadID\)/)
+})
+
+test('regular receipt failures recover through the composer without replaying a changed turn', async () => {
+  const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const sendMessage = appSource.slice(appSource.indexOf('async function sendMessage'), appSource.indexOf('function cancelMessageStream'))
+  assert.match(appSource, /recoverUnavailableAttachments/)
+  assert.match(sendMessage, /recoverUnavailableAssistantAttachmentSend\(projectName, content, turnContentParts, firstSendIsCurrent\)/)
+  assert.match(sendMessage, /if \(attachmentRecovery\.stale \|\| attachmentRecovery\.candidateCount > 0\) return false/)
+  const recoveryStart = appSource.indexOf('async function recoverUnavailableAssistantAttachmentSend')
+  const recoveryEnd = appSource.indexOf('\n\nwatch(', recoveryStart)
+  assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart)
+  assert.doesNotMatch(appSource.slice(recoveryStart, recoveryEnd), /startAssistantTurn|startAssistantReview/)
+  assert.match(appSource.slice(recoveryStart, recoveryEnd), /attached file was refreshed[\s\S]*send again/)
+  assert.match(appSource.slice(recoveryStart, recoveryEnd), /Reattach it and send again/)
 })
 
 test('App keeps central loading surfaces honest while project state hydrates', async () => {
