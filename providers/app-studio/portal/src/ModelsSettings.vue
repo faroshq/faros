@@ -167,9 +167,9 @@ const emit = defineEmits<{
         </button>
       </div>
 
-      <form v-if="editorOpen || creationRoute" class="k-create-surface" aria-label="Model configuration form" :aria-busy="saving" novalidate @submit.prevent="emit('save')">
+      <form v-if="editorOpen || creationRoute" class="k-create-surface" :class="{ 'k-create-surface--wide': creationRoute }" aria-label="Model configuration form" :aria-busy="saving" novalidate @submit.prevent="emit('save')">
         <div class="k-create-body">
-          <div v-if="!creationRoute" class="flex items-start gap-3">
+          <div v-if="!creationRoute" class="flex flex-wrap items-start gap-3">
             <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface text-text-muted"><KeyRound class="h-4 w-4" :stroke-width="1.75" /></div>
             <div class="min-w-0">
               <h4 class="text-[13px] font-semibold text-text-primary">{{ editingModelID ? 'Edit model' : 'New model' }}</h4>

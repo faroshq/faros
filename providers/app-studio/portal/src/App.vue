@@ -7551,7 +7551,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
   <div v-else-if="!isBuilderVisible" class="min-h-0 bg-surface text-text-primary">
     <div class="flex min-h-full w-full flex-col gap-4">
       <Tabs
-        v-if="!isCreateModelRoute && !llmEditorOpen"
+        v-if="!isCreateModelRoute"
+        v-show="!llmEditorOpen"
         :tabs="appStudioSectionTabs"
         :active="isModelsRoute || isCreateModelRoute ? 'models' : 'projects'"
         aria-label="App Studio sections"
