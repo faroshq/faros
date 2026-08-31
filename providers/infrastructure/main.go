@@ -37,6 +37,8 @@ import (
 
 	"k8s.io/client-go/rest"
 
+	"github.com/faroshq/provider-sdk/vwhealth"
+
 	"github.com/faroshq/provider-infrastructure/install"
 	"github.com/faroshq/provider-infrastructure/mcpserver"
 	"github.com/faroshq/provider-infrastructure/server"
@@ -159,10 +161,8 @@ func serveWithConfig(ctx context.Context, kcpConfig *rest.Config) {
 	// Report virtual-workspace reachability as readiness. Started before the
 	// server so /readyz answers from a real probe rather than a default as soon
 	// as it is reachable.
-	vwState := &vwReadiness{}
-	if kcpConfig != nil {
-		go watchVirtualWorkspaceReachability(ctx, kcpConfig, install.APIExportName, vwState, 60*time.Second)
-	}
+	vwState := &vwhealth.Readiness{}
+	go vwhealth.Watch(ctx, kcpConfig, install.APIExportName, vwState, vwhealth.DefaultInterval)
 
 	srv := server.New(server.Deps{
 		MCP:              mcpHandler,
