@@ -88,6 +88,48 @@ func TestProjectCreateReadinessReportsConnectionValidation(t *testing.T) {
 	}
 }
 
+func TestProjectCreateReadinessReportsTerminalConnectionFailure(t *testing.T) {
+	client := newCodeRepositoryTestClient(codeConnectionObjectWithValidationCondition(
+		"github",
+		metav1.ConditionFalse,
+		codeConnectionReasonValidationFailed,
+		"credential rejected by GitHub",
+		true,
+	))
+
+	readiness, err := projectCreateReadiness(context.Background(), client)
+	if err != nil {
+		t.Fatalf("projectCreateReadiness returned error: %v", err)
+	}
+	if readiness.GitConnection.Status != projectCreateGitStatusFailed {
+		t.Fatalf("GitConnection.Status = %q, want %q", readiness.GitConnection.Status, projectCreateGitStatusFailed)
+	}
+	if readiness.GitConnection.ConnectionRef != "github" {
+		t.Fatalf("GitConnection.ConnectionRef = %q, want github", readiness.GitConnection.ConnectionRef)
+	}
+	if readiness.GitConnection.Message != "credential rejected by GitHub" {
+		t.Fatalf("GitConnection.Message = %q, want provider validation detail", readiness.GitConnection.Message)
+	}
+}
+
+func TestProjectCreateReadinessKeepsTransientConnectionPending(t *testing.T) {
+	client := newCodeRepositoryTestClient(codeConnectionObjectWithValidationCondition(
+		"github",
+		metav1.ConditionFalse,
+		codeConnectionReasonCredentialUnavailable,
+		"credential Secret is not visible yet",
+		true,
+	))
+
+	readiness, err := projectCreateReadiness(context.Background(), client)
+	if err != nil {
+		t.Fatalf("projectCreateReadiness returned error: %v", err)
+	}
+	if readiness.GitConnection.Status != projectCreateGitStatusValidating {
+		t.Fatalf("GitConnection.Status = %q, want %q", readiness.GitConnection.Status, projectCreateGitStatusValidating)
+	}
+}
+
 func newCodeRepositoryTestClient(objects ...runtime.Object) *asclient.Client {
 	return asclient.NewFromDynamic(fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),
@@ -99,11 +141,22 @@ func newCodeRepositoryTestClient(objects ...runtime.Object) *asclient.Client {
 }
 
 func codeConnectionObjectWithValidated(name string, status metav1.ConditionStatus) *unstructured.Unstructured {
+	return codeConnectionObjectWithValidationCondition(name, status, "", "", false)
+}
+
+func codeConnectionObjectWithValidationCondition(name string, status metav1.ConditionStatus, reason, message string, reconciled bool) *unstructured.Unstructured {
+	condition := map[string]any{"type": codeConditionValidated, "status": string(status)}
+	if reason != "" {
+		condition["reason"] = reason
+	}
+	if message != "" {
+		condition["message"] = message
+	}
 	u := &unstructured.Unstructured{
 		Object: map[string]any{
 			"status": map[string]any{
 				"conditions": []any{
-					map[string]any{"type": codeConditionValidated, "status": string(status)},
+					condition,
 				},
 			},
 		},
@@ -111,5 +164,9 @@ func codeConnectionObjectWithValidated(name string, status metav1.ConditionStatu
 	u.SetAPIVersion(codeSchemeGroupVersion.String())
 	u.SetKind("Connection")
 	u.SetName(name)
+	u.SetGeneration(1)
+	if reconciled {
+		_ = unstructured.SetNestedField(u.Object, int64(1), "status", "observedGeneration")
+	}
 	return u
 }

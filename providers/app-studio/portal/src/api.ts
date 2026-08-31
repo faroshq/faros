@@ -110,6 +110,7 @@ interface ProjectAPIRequestOptions {
 
 const ASSISTANT_THREAD_PAGE_SIZE = 500
 const MAX_ASSISTANT_THREAD_PAGES = 100
+const PREVIEW_CONSOLE_TIMEOUT_MESSAGE = 'preview console request timed out'
 
 async function request<T>(ctx: FarosContext | null, method: string, path: string, body?: unknown, options: ProjectAPIRequestOptions = {}): Promise<T> {
   const headers = tenantHeaders({ token: ctx?.token, json: body !== undefined })
@@ -1093,7 +1094,7 @@ export const api = {
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/preview-console/sessions`,
       { generation, protocolVersion: 1, portalInstanceID },
-      { timeoutMS: 8_000 },
+      { timeoutMS: 8_000, timeoutMessage: PREVIEW_CONSOLE_TIMEOUT_MESSAGE },
     )
   },
 
@@ -1110,7 +1111,7 @@ export const api = {
       'POST',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/preview-console/sessions/${encodeURIComponent(sessionID)}/events`,
       { generation, protocolVersion: 1, droppedCount, events },
-      { timeoutMS: 5_000 },
+      { timeoutMS: 5_000, timeoutMessage: PREVIEW_CONSOLE_TIMEOUT_MESSAGE },
     )
   },
 
@@ -1124,7 +1125,7 @@ export const api = {
       'DELETE',
       `${baseURL(ctx)}/${encodeURIComponent(name)}/preview-console/sessions/${encodeURIComponent(sessionID)}`,
       undefined,
-      { timeoutMS: 3_000 },
+      { timeoutMS: 3_000, timeoutMessage: PREVIEW_CONSOLE_TIMEOUT_MESSAGE },
     )
   },
 }

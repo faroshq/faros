@@ -25,6 +25,8 @@ const render = (props = {}) => renderToString(createSSRApp(FirstTimeSetup, { ...
 
 test('keeps first-time setup separate from the project prompt', async () => {
   const html = await render()
+  assert.match(html, /aria-label="App Studio workspace setup"/)
+  assert.doesNotMatch(html, /aria-labelledby="app-studio-setup-title"/)
   assert.match(html, /Set up App Studio/)
   assert.match(html, /Git keeps every project durable/)
   assert.match(html, /Connect GitHub/)
@@ -36,6 +38,22 @@ test('advances from Git to model setup using real readiness', async () => {
   assert.match(html, /GitHub connected/)
   assert.match(html, /Connect an AI model/)
   assert.match(html, /tests the provider connection before saving/)
+})
+
+test('surfaces terminal Git validation failures with a recovery action', async () => {
+  const html = await render({
+    readiness: {
+      gitConnection: {
+        ready: false,
+        status: 'failed',
+        connectionRef: 'github-workspace',
+        message: 'The git host rejected the credential.',
+      },
+    },
+  })
+  assert.match(html, /The git host rejected the credential\./)
+  assert.match(html, /Fix Git connection/)
+  assert.match(html, /Check failed/)
 })
 
 test('completion hands off to normal project creation', async () => {

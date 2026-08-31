@@ -23,6 +23,7 @@ const gitState = computed<SetupState>(() => {
   if (props.loading) return 'checking'
   if (props.gitError) return 'error'
   if (props.readiness?.gitConnection.ready) return 'ready'
+  if (props.readiness?.gitConnection.status === 'failed') return 'error'
   if (props.readiness?.gitConnection.status === 'validating') return 'pending'
   return 'missing'
 })
@@ -32,11 +33,14 @@ const modelState = computed<SetupState>(() => {
   return props.llmConfigured ? 'ready' : 'missing'
 })
 const activeStep = computed<'git' | 'model'>(() => gitState.value === 'ready' ? 'model' : 'git')
-const gitAction = computed(() => props.readiness?.gitConnection.status === 'provider-missing'
-  ? { href: props.codeCatalogUrl, label: 'Enable Code provider' }
-  : props.readiness?.gitConnection.status === 'validating'
-    ? { href: props.codeConnectionsUrl, label: 'View Git connection' }
-    : { href: props.codeConnectionsUrl, label: 'Connect GitHub' })
+const gitAction = computed(() => {
+  switch (props.readiness?.gitConnection.status) {
+    case 'provider-missing': return { href: props.codeCatalogUrl, label: 'Enable Code provider' }
+    case 'failed': return { href: props.codeConnectionsUrl, label: 'Fix Git connection' }
+    case 'validating': return { href: props.codeConnectionsUrl, label: 'View Git connection' }
+    default: return { href: props.codeConnectionsUrl, label: 'Connect GitHub' }
+  }
+})
 const retryVisible = computed(() => gitState.value === 'error' || gitState.value === 'pending' || modelState.value === 'error')
 
 function stateLabel(state: SetupState): string {
@@ -49,7 +53,7 @@ function stateLabel(state: SetupState): string {
 </script>
 
 <template>
-  <section class="mx-auto grid w-full max-w-[900px] overflow-hidden rounded-lg border border-border-subtle bg-surface shadow-sm md:grid-cols-[220px_minmax(0,1fr)]" aria-labelledby="app-studio-setup-title">
+  <section class="mx-auto grid w-full max-w-[900px] overflow-hidden rounded-lg border border-border-subtle bg-surface shadow-sm md:grid-cols-[220px_minmax(0,1fr)]" aria-label="App Studio workspace setup">
     <aside class="border-b border-border-subtle bg-surface-raised px-5 py-5 md:min-h-[500px] md:border-b-0 md:border-r">
       <h2 class="text-[18px] font-semibold leading-6 text-text-primary">Workspace setup</h2>
       <p class="mt-1 text-[12px] leading-5 text-text-secondary">Connect the two services App Studio needs before you build.</p>
@@ -97,7 +101,7 @@ function stateLabel(state: SetupState): string {
           <div class="flex gap-3 py-4"><GitBranch class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" /><div><h3 class="text-[13px] font-medium text-text-primary">Git keeps every project durable</h3><p class="mt-1 text-[12px] leading-5 text-text-secondary">App Studio creates a repository and saves each change there.</p></div></div>
           <div class="flex gap-3 py-4"><Cpu class="mt-0.5 h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" /><div><h3 class="text-[13px] font-medium text-text-primary">An AI model builds with you</h3><p class="mt-1 text-[12px] leading-5 text-text-secondary">It plans the project, writes code, and responds to your feedback.</p></div></div>
         </div>
-        <p v-if="gitError" class="mt-5 rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ gitError }}</p>
+        <p v-if="gitError || gitState === 'error'" class="mt-5 rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] leading-5 text-danger" role="alert">{{ gitError || readiness?.gitConnection.message || 'The Git connection could not be validated. Review it and try again.' }}</p>
         <p v-else-if="gitState === 'pending'" class="mt-5 rounded-md border border-warning/30 bg-warning-subtle px-3 py-2 text-[12px] leading-5 text-warning" role="status">{{ readiness?.gitConnection.message || 'Your Git connection is still validating.' }}</p>
         <div class="mt-6 flex flex-wrap items-center gap-3">
           <a :href="gitAction.href" target="_blank" rel="noopener noreferrer" class="k-btn k-btn--primary no-underline">{{ gitAction.label }} <ExternalLink class="h-3.5 w-3.5" :stroke-width="1.75" /></a>

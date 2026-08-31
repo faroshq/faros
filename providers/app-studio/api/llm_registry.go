@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -544,10 +545,26 @@ func (s *Server) testProjectLLMConnection(w http.ResponseWriter, r *http.Request
 		Model:    request.Model,
 		APIKey:   request.APIKey,
 	}); err != nil {
-		writeProjectError(w, err)
+		writeProjectLLMConnectionTestError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func writeProjectLLMConnectionTestError(w http.ResponseWriter, err error) {
+	var connectionErr *projectLLMConnectionTestError
+	if !errors.As(err, &connectionErr) {
+		writeProjectError(w, err)
+		return
+	}
+	switch connectionErr.Kind {
+	case projectLLMConnectionTestRejected:
+		writeStatus(w, http.StatusUnprocessableEntity, "InvalidConnection", connectionErr.Error())
+	case projectLLMConnectionTestTimeout:
+		writeStatus(w, http.StatusGatewayTimeout, "GatewayTimeout", "Model connection test timed out before the provider responded.")
+	default:
+		writeStatus(w, http.StatusBadGateway, "BadGateway", connectionErr.Error())
+	}
 }
 
 func (s *Server) patchProjectLLMModel(w http.ResponseWriter, r *http.Request) {

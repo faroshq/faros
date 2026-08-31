@@ -97,6 +97,11 @@ const (
 	projectCreateGitStatusProviderMissing   = "provider-missing"
 	projectCreateGitStatusConnectionMissing = "connection-missing"
 	projectCreateGitStatusValidating        = "validating"
+	projectCreateGitStatusFailed            = "failed"
+
+	codeConnectionReasonCredentialUnavailable = "CredentialUnavailable"
+	codeConnectionReasonProviderNotFound      = "ProviderNotFound"
+	codeConnectionReasonValidationFailed      = "ValidationFailed"
 )
 
 type codeResourceGetter func(ctx context.Context, gvr schema.GroupVersionResource, name string) (*unstructured.Unstructured, error)
@@ -243,6 +248,36 @@ func inspectCodeConnectionReadiness(ctx context.Context, c *asclient.Client) (Pr
 	}
 	if len(list.Items) == 0 {
 		return ProjectCreateGitConnectionReadiness{Status: projectCreateGitStatusConnectionMissing, Message: "You need to connect to a Git account before you can continue"}, nil
+	}
+	var firstFailure *ProjectCreateGitConnectionReadiness
+	hasPending := false
+	for i := range list.Items {
+		status, reason, message, found := unstructuredCondition(&list.Items[i], codeConditionValidated)
+		observedGeneration, observed, _ := unstructured.NestedInt64(list.Items[i].Object, "status", "observedGeneration")
+		if !found || status != string(metav1.ConditionFalse) || !observed || observedGeneration < list.Items[i].GetGeneration() {
+			hasPending = true
+			continue
+		}
+		switch reason {
+		case codeConnectionReasonProviderNotFound, codeConnectionReasonValidationFailed:
+			if firstFailure == nil {
+				if strings.TrimSpace(message) == "" {
+					message = "The Git connection could not be validated. Review its credential and try again."
+				}
+				firstFailure = &ProjectCreateGitConnectionReadiness{
+					Status:        projectCreateGitStatusFailed,
+					ConnectionRef: list.Items[i].GetName(),
+					Message:       message,
+				}
+			}
+		case codeConnectionReasonCredentialUnavailable:
+			hasPending = true
+		default:
+			hasPending = true
+		}
+	}
+	if firstFailure != nil && !hasPending {
+		return *firstFailure, nil
 	}
 	return ProjectCreateGitConnectionReadiness{Status: projectCreateGitStatusValidating, Message: "Your Git connection is still validating"}, nil
 }
