@@ -18,12 +18,27 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func browserMCPTestEventStreamResponse(request *http.Request) *http.Response {
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/event-stream")
+	if sessionID := request.Header.Get("Mcp-Session-Id"); sessionID != "" {
+		recorder.Header().Set("Mcp-Session-Id", sessionID)
+	}
+	return recorder.Result()
+}
 
 // A representative Playwright MCP browser_snapshot result: the "Page URL" /
 // "Page Title" preamble plus a fenced YAML accessibility tree.
@@ -122,6 +137,237 @@ func TestBrowserMCPParseConsole(t *testing.T) {
 	}
 }
 
+func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	seen := map[string]string{}
+	var trace []projectAssistantBrowserTraceEvent
+	restoreTrace := setProjectAssistantBrowserTraceHook(func(event projectAssistantBrowserTraceEvent) {
+		trace = append(trace, event)
+	})
+	defer restoreTrace()
+	server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+		return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				seen[http.MethodGet] = request.Header.Get("MCP-Protocol-Version")
+				return browserMCPTestEventStreamResponse(request), nil
+			}
+			if request.Method == http.MethodDelete {
+				seen[http.MethodDelete] = request.Header.Get("MCP-Protocol-Version")
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(http.StatusNoContent)
+				return recorder.Result(), nil
+			}
+			var envelope struct {
+				Method string `json:"method"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+				return nil, err
+			}
+			seen[envelope.Method] = request.Header.Get("MCP-Protocol-Version")
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			switch envelope.Method {
+			case "initialize":
+				recorder.Header().Set("Mcp-Session-Id", "protocol-test-session")
+				_ = json.NewEncoder(recorder).Encode(map[string]any{
+					"jsonrpc": "2.0", "id": 1, "result": map[string]any{},
+				})
+			case "notifications/initialized":
+				recorder.WriteHeader(http.StatusAccepted)
+			case "tools/list":
+				_ = json.NewEncoder(recorder).Encode(map[string]any{
+					"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": []any{}},
+				})
+			default:
+				return nil, errors.New("unexpected MCP method " + envelope.Method)
+			}
+			return recorder.Result(), nil
+		})}
+	}
+	session, err := server.newBrowserMCPSession(context.Background(), identity{clusterID: "cluster-a"}, dataPlaneRef{Resource: "instances", Name: "browser"})
+	if err != nil {
+		t.Fatalf("new browser MCP session: %v", err)
+	}
+	if _, err := session.rpc(context.Background(), "tools/list", map[string]any{}); err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	session.close()
+	if got := seen["initialize"]; got != "" {
+		t.Fatalf("initialize protocol header = %q, want absent before session negotiation", got)
+	}
+	for _, method := range []string{"notifications/initialized", "tools/list", http.MethodGet, http.MethodDelete} {
+		if got, want := seen[method], browserMCPProtocolVersion; got != want {
+			t.Fatalf("%s protocol header = %q, want %q", method, got, want)
+		}
+	}
+	var created, listed, closed bool
+	for _, event := range trace {
+		if strings.Contains(event.SessionHash, "protocol-test-session") || strings.Contains(event.RefHash, "https://") {
+			t.Fatalf("browser trace leaked raw session or URL: %#v", event)
+		}
+		switch {
+		case event.Event == "session_create" && event.Role == projectAssistantBrowserSessionRoleUnspecified:
+			created = true
+		case event.Event == "rpc_response" && event.Method == "tools/list" && event.Status == http.StatusOK && event.SessionHeaderBeforeHash != "" && event.SessionHeaderAfterHash != "":
+			listed = true
+		case event.Event == "session_close_response" && event.Status == http.StatusNoContent && event.Reason == "unspecified":
+			closed = true
+		}
+	}
+	if !created || !listed || !closed {
+		t.Fatalf("browser trace missing create/list/close lifecycle: %#v", trace)
+	}
+}
+
+type testBrowserEventStreamBody struct {
+	payload []byte
+	closed  chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	sent    bool
+}
+
+func (body *testBrowserEventStreamBody) Read(p []byte) (int, error) {
+	body.mu.Lock()
+	if !body.sent {
+		body.sent = true
+		n := copy(p, body.payload)
+		body.mu.Unlock()
+		return n, nil
+	}
+	body.mu.Unlock()
+	<-body.closed
+	return 0, io.EOF
+}
+
+func (body *testBrowserEventStreamBody) Close() error {
+	body.once.Do(func() { close(body.closed) })
+	return nil
+}
+
+func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	streamBody := &testBrowserEventStreamBody{
+		payload: []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"ping\",\"params\":{}}\n\n"),
+		closed:  make(chan struct{}),
+	}
+	var eventsMu sync.Mutex
+	var events []string
+	appendEvent := func(event string) {
+		eventsMu.Lock()
+		events = append(events, event)
+		eventsMu.Unlock()
+	}
+	pingResponse := make(chan struct{}, 1)
+	server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+		return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.Method {
+			case http.MethodGet:
+				appendEvent("GET")
+				if got := request.Header.Get("Accept"); got != "text/event-stream" {
+					return nil, fmt.Errorf("GET Accept = %q", got)
+				}
+				if got := request.Header.Get("Mcp-Session-Id"); got != "stream-session" {
+					return nil, fmt.Errorf("GET session = %q", got)
+				}
+				if got := request.Header.Get("MCP-Protocol-Version"); got != browserMCPProtocolVersion {
+					return nil, fmt.Errorf("GET protocol = %q", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       streamBody,
+				}, nil
+			case http.MethodDelete:
+				select {
+				case <-streamBody.closed:
+					appendEvent("DELETE-after-stream-close")
+				default:
+					appendEvent("DELETE-before-stream-close")
+				}
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(http.StatusNoContent)
+				return recorder.Result(), nil
+			}
+
+			var envelope struct {
+				Method string          `json:"method"`
+				ID     json.RawMessage `json:"id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+				return nil, err
+			}
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			switch envelope.Method {
+			case "initialize":
+				recorder.Header().Set("Mcp-Session-Id", "stream-session")
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+			case "notifications/initialized":
+				recorder.WriteHeader(http.StatusAccepted)
+			case "tools/list":
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": []any{}}})
+			case "":
+				if string(envelope.ID) != "99" {
+					return nil, fmt.Errorf("ping response id = %s", envelope.ID)
+				}
+				pingResponse <- struct{}{}
+				recorder.WriteHeader(http.StatusAccepted)
+			default:
+				return nil, fmt.Errorf("unexpected MCP method %q", envelope.Method)
+			}
+			return recorder.Result(), nil
+		})}
+	}
+	session, err := server.newBrowserMCPSession(context.Background(), identity{clusterID: "cluster-a"}, dataPlaneRef{Resource: "instances", Name: "browser"})
+	if err != nil {
+		t.Fatalf("new browser MCP session: %v", err)
+	}
+	select {
+	case <-pingResponse:
+	case <-time.After(time.Second):
+		t.Fatal("event stream ping was not answered")
+	}
+	select {
+	case <-streamBody.closed:
+		t.Fatal("event stream closed before session close")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := session.rpc(context.Background(), "tools/list", map[string]any{}); err != nil {
+		t.Fatalf("tools/list with live event stream: %v", err)
+	}
+	session.close()
+	select {
+	case <-streamBody.closed:
+	case <-time.After(time.Second):
+		t.Fatal("event stream did not close with session")
+	}
+	eventsMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventsMu.Unlock()
+	getCount := 0
+	for _, event := range gotEvents {
+		if event == "GET" {
+			getCount++
+		}
+	}
+	if getCount != 1 {
+		t.Fatalf("event stream GET count = %d, want one; events=%v", getCount, gotEvents)
+	}
+	deleteBefore, deleteAfter := 0, 0
+	for _, event := range gotEvents {
+		switch event {
+		case "DELETE-before-stream-close":
+			deleteBefore++
+		case "DELETE-after-stream-close":
+			deleteAfter++
+		}
+	}
+	if deleteBefore != 1 || deleteAfter != 0 {
+		t.Fatalf("session close ordering = before:%d after:%d; events=%v", deleteBefore, deleteAfter, gotEvents)
+	}
+}
+
 func TestBrowserMCPNavigationSummarySkipsHeadingsAndKeepsError(t *testing.T) {
 	text := "### Result\n### Error\nError: page.goto: net::ERR_CONNECTION_REFUSED at https://preview.example/" + strings.Repeat(" details", 80)
 	got := browserMCPNavigationSummary(text, "fallback")
@@ -142,24 +388,71 @@ func TestBrowserMCPNavigationSummaryFallsBackWhenResponseHasNoDetail(t *testing.
 	}
 }
 
-func TestPrivatePreviewHubOriginAcceptsOnlyMatchingPlatformRedirect(t *testing.T) {
+func TestPrivatePreviewHubOriginAcceptsConfiguredPublicHubRedirect(t *testing.T) {
+	const publicHubURL = "https://console.example.test"
 	var preview *httptest.Server
 	preview = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := url.Values{
 			"cluster":      {"workspace-1"},
 			"redirect_uri": {preview.URL + privateAppCallbackPath},
 		}
-		http.Redirect(w, r, "https://console.example.test"+privateAppAuthorizePath+"?"+query.Encode(), http.StatusFound)
+		http.Redirect(w, r, publicHubURL+privateAppAuthorizePath+"?"+query.Encode(), http.StatusFound)
 	}))
 	defer preview.Close()
 
-	server := &Server{previewInsecureSkipTLSVerify: true}
+	server := &Server{
+		hubBase:                      "https://internal-hub.example.test",
+		hubPublicURL:                 publicHubURL,
+		previewInsecureSkipTLSVerify: true,
+	}
 	origin, err := server.privatePreviewHubOrigin(context.Background(), identity{clusterID: "workspace-1"}, preview.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := origin.String(), "https://console.example.test"; got != want {
+	if got, want := origin.String(), publicHubURL; got != want {
 		t.Fatalf("hub origin = %q, want %q", got, want)
+	}
+}
+
+func TestPrivatePreviewHubOriginRejectsUntrustedHubRedirect(t *testing.T) {
+	var preview *httptest.Server
+	preview = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := url.Values{
+			"cluster":      {"workspace-1"},
+			"redirect_uri": {preview.URL + privateAppCallbackPath},
+		}
+		http.Redirect(w, r, "https://attacker.example.test"+privateAppAuthorizePath+"?"+query.Encode(), http.StatusFound)
+	}))
+	defer preview.Close()
+
+	server := &Server{
+		hubBase:                      "https://internal-hub.example.test",
+		hubPublicURL:                 "https://trusted-hub.example.test",
+		previewInsecureSkipTLSVerify: true,
+	}
+	_, err := server.privatePreviewHubOrigin(context.Background(), identity{clusterID: "workspace-1"}, preview.URL)
+	if err == nil || !strings.Contains(err.Error(), "configured public hub origin") {
+		t.Fatalf("untrusted redirect error = %v, want configured-public-origin rejection", err)
+	}
+}
+
+func TestPrivatePreviewConfiguredHubOriginRequiresAbsoluteHTTPSOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "missing", url: ""},
+		{name: "http", url: "http://hub.example.test"},
+		{name: "path", url: "https://hub.example.test/private"},
+		{name: "query", url: "https://hub.example.test?tenant=one"},
+		{name: "fragment", url: "https://hub.example.test#private"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (&Server{hubPublicURL: tc.url}).privatePreviewConfiguredHubOrigin()
+			if err == nil || !strings.Contains(err.Error(), "FAROS_HUB_PUBLIC_URL") {
+				t.Fatalf("configured origin %q error = %v, want missing/invalid public URL", tc.url, err)
+			}
+		})
 	}
 }
 
@@ -173,7 +466,7 @@ func TestBrowserSessionHandoffURLMintsWithCallerBearer(t *testing.T) {
 	}))
 	defer hub.Close()
 	origin, _ := url.Parse("https://console.example.test")
-	server := &Server{hubBase: hub.URL}
+	server := &Server{hubBase: hub.URL, hubPublicURL: origin.String()}
 	handoff, err := server.browserSessionHandoffURL(context.Background(), identity{token: "caller-token"}, origin)
 	if err != nil {
 		t.Fatal(err)

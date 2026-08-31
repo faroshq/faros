@@ -56,6 +56,11 @@ type Server struct {
 	attachmentDraftRetention time.Duration
 	workspaces               *workspace.FileStore
 	hubBase                  string
+	// hubPublicURL is the browser-reachable hub origin used by private preview
+	// authorization redirects and one-use browser-session handoffs. It is
+	// deliberately separate from hubBase, which may be an internal
+	// cluster-local address used for MCP/data-plane traffic.
+	hubPublicURL string
 	// actionsExternalURL is the externally reachable hub origin used by
 	// development workloads for the Provider Actions exchange and SDK base
 	// URL. It is deliberately separate from hubBase, which may be an internal
@@ -84,10 +89,14 @@ type Server struct {
 	// catalog requests. Production uses a redirect-denying bounded client.
 	llmDiscoveryHTTPClient *http.Client
 	assistantRunManager    *projectAssistantRunManager
-	assistantSupervisor    *projectAssistantSupervisor
-	runSandboxManager      *projectAssistantSandboxManager
-	runSandboxConfig       CodingSandboxConfig
-	runSandboxConfigured   bool
+	// browserSessions owns the stateful native Playwright MCP session for each
+	// tenant/workspace/project/run owner tuple. It is intentionally process-local
+	// because the browser instance itself is single-replica and stateful.
+	browserSessions      *projectAssistantBrowserSessionManager
+	assistantSupervisor  *projectAssistantSupervisor
+	runSandboxManager    *projectAssistantSandboxManager
+	runSandboxConfig     CodingSandboxConfig
+	runSandboxConfigured bool
 	// codingSandboxResolver resolves a caller's organization-scoped BYO
 	// provider binding. Nil is fail-closed. Platform force mode never calls it.
 	codingSandboxResolver  func(context.Context, identity, workspace.Scope) (CodingSandboxEligibility, error)
@@ -174,6 +183,7 @@ func NewWithWorkspaceContext(parent context.Context, gql *tenant.GraphQLClient, 
 		attachmentDraftRetention: store.DefaultAttachmentDraftRetention,
 		workspaces:               workspaces,
 		hubBase:                  hubBase,
+		hubPublicURL:             strings.TrimSpace(os.Getenv("FAROS_HUB_PUBLIC_URL")),
 		actionsExternalURL:       strings.TrimSpace(os.Getenv("FAROS_ACTIONS_EXTERNAL_URL")),
 		actionsCABundle:          actionsCABundle,
 		actionsCABundleErr:       actionsCABundleErr,
@@ -188,6 +198,7 @@ func NewWithWorkspaceContext(parent context.Context, gql *tenant.GraphQLClient, 
 	s.publishingHTTPClient = newPublishingHTTPClient()
 	s.assistantEngine = NewEinoAssistantEngine(s)
 	s.assistantRunManager = newProjectAssistantRunManager()
+	s.browserSessions = newProjectAssistantBrowserSessionManager()
 	s.assistantSupervisor = newProjectAssistantSupervisor(parent, msgStore)
 	s.assistantSupervisor.server = s
 	s.runSandboxManager = newProjectAssistantSandboxManager()
@@ -213,6 +224,9 @@ func (s *Server) ConfigureCodingSandbox(config CodingSandboxConfig) {
 func (s *Server) Shutdown(ctx context.Context) {
 	if s.projectThumbnailCancel != nil {
 		s.projectThumbnailCancel()
+	}
+	if s.browserSessions != nil {
+		s.browserSessions.closeAll()
 	}
 	s.projectAssistantSupervisor().Shutdown(ctx)
 }

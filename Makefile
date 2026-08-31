@@ -1420,6 +1420,10 @@ KROMC_PROVIDER_MANIFEST ?= providers/infrastructure/provider.yaml
 # self-registration via ConfigMap.
 APP_STUDIO_PORT ?= 8085
 APP_STUDIO_HUB_URL ?= https://localhost:9443
+# Browser-reachable hub origin for private preview authorization. Normal local
+# development uses the same localhost origin; deployments with an internal hub
+# route should override this independently.
+APP_STUDIO_HUB_PUBLIC_URL ?= $(APP_STUDIO_HUB_URL)
 APP_STUDIO_TOKEN ?= $(STATIC_AUTH_TOKEN)
 # Optional external HTTPS hub origin for generated development runtimes. Keep
 # unset unless the operator has configured a pod-reachable, certificate-valid
@@ -1632,6 +1636,7 @@ run-provider-app-studio: build-app-studio-provider app-studio-db-up app-studio-p
 	@# being absent until init writes it.
 	set -a; [ -f providers/app-studio/.env ] && . ./providers/app-studio/.env || true; set +a; \
 	FAROS_ACTIONS_EXTERNAL_URL="$${FAROS_ACTIONS_EXTERNAL_URL:-$(FAROS_ACTIONS_EXTERNAL_URL)}"; \
+	FAROS_HUB_PUBLIC_URL="$${FAROS_HUB_PUBLIC_URL:-$(APP_STUDIO_HUB_PUBLIC_URL)}"; \
 	APP_STUDIO_DATABASE_URL="$${APP_STUDIO_DATABASE_URL:-$(APP_STUDIO_DATABASE_URL)}"; \
 	APP_STUDIO_IN_MEMORY_MESSAGE_STORE="$${APP_STUDIO_IN_MEMORY_MESSAGE_STORE:-$(APP_STUDIO_IN_MEMORY_MESSAGE_STORE)}"; \
 	APP_STUDIO_PREVIEW_CONSOLE_SIGNING_KEY="$$(cat "$(APP_STUDIO_PREVIEW_CONSOLE_DEV_PRIVATE_KEY)")"; \
@@ -1641,6 +1646,7 @@ run-provider-app-studio: build-app-studio-provider app-studio-db-up app-studio-p
 		APP_STUDIO_DATABASE_URL= \
 		PORT=$(APP_STUDIO_PORT) \
 		FAROS_HUB_URL=$(APP_STUDIO_HUB_URL) \
+		FAROS_HUB_PUBLIC_URL="$${FAROS_HUB_PUBLIC_URL}" \
 		FAROS_HUB_TOKEN=$(APP_STUDIO_TOKEN) \
 		FAROS_ACTIONS_EXTERNAL_URL="$${FAROS_ACTIONS_EXTERNAL_URL}" \
 		FAROS_HUB_INSECURE=true \
@@ -1656,6 +1662,7 @@ run-provider-app-studio: build-app-studio-provider app-studio-db-up app-studio-p
 		echo "  store: $${APP_STUDIO_DATABASE_URL:-$(APP_STUDIO_DEV_DATABASE_URL)}"; \
 		PORT=$(APP_STUDIO_PORT) \
 		FAROS_HUB_URL=$(APP_STUDIO_HUB_URL) \
+		FAROS_HUB_PUBLIC_URL="$${FAROS_HUB_PUBLIC_URL}" \
 		FAROS_HUB_TOKEN=$(APP_STUDIO_TOKEN) \
 		FAROS_ACTIONS_EXTERNAL_URL="$${FAROS_ACTIONS_EXTERNAL_URL}" \
 		FAROS_HUB_INSECURE=true \
@@ -2359,6 +2366,7 @@ help-dev: ## Show development environment options
 	@echo "  QUICKSTART_HUB_URL - Hub URL the provider heartbeats to (default: https://localhost:9443)"
 	@echo "  APP_STUDIO_PORT    - Port the App Studio provider listens on (default: 8085)"
 	@echo "  APP_STUDIO_HUB_URL - Hub URL the provider heartbeats to (default: https://localhost:9443)"
+	@echo "  APP_STUDIO_HUB_PUBLIC_URL - Browser-reachable hub origin for private previews (default: APP_STUDIO_HUB_URL)"
 	@echo "  APP_STUDIO_DEV_DATABASE_URL - Local App Studio Postgres DSN (default: postgres://appstudio:appstudio@localhost:55432/appstudio?sslmode=disable)"
 	@echo "  APP_STUDIO_IN_MEMORY_MESSAGE_STORE=true - Force non-durable App Studio message store"
 	@echo ""

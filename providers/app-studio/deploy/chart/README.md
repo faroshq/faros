@@ -82,6 +82,7 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 | `workspace.persistence.storageClassName` | `""` |  |
 | `hub` |  |  |
 | `hub.url` | `"http://faros-hub.faros.svc.cluster.local:8080"` |  |
+| `hub.publicURL` | `""` | Browser-reachable HTTPS hub origin for private preview authorization redirects and one-use browser-session handoffs. It may differ from `hub.url`, which is the internal provider-to-hub route; private browser inspection fails closed when this is unset or invalid. |
 | `hub.actionsExternalURL` | `""` | Public hub origin used by action-enabled development runtimes. Keep this separate from hub.url: the latter is an internal provider-to-hub address. Production action-enabled projects require an absolute HTTPS origin. |
 | `hub.actionsCABundleConfigMap` |  | Optional public CA bundle for that origin. The referenced ConfigMap is mounted at a dedicated path so it augments (never masks) image/system trust. Leave empty when the origin chains to the system CA. |
 | `hub.actionsCABundleConfigMap.name` | `""` |  |

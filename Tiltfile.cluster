@@ -1532,6 +1532,7 @@ provider_pod(
     chart_extra=[
         'replicaCount=%s' % replica_count,
         'store.databaseURL=%s' % providers_db_url('appstudio'),
+        'hub.publicURL=%s' % hub_external_url,
         'hub.actionsExternalURL=https://faros-hub.%s.svc:9443' % hub_namespace,
         'hub.actionsCABundleConfigMap.name=app-studio-actions-ca',
         'hub.actionsCABundleConfigMap.key=ca-bundle.pem',

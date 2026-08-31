@@ -112,6 +112,7 @@ Environment variables consumed by the binary:
 |---|---|
 | `PORT` | Listen port (default `8081`) |
 | `FAROS_HUB_URL` | Hub base URL for tenant GraphQL, caller-scoped catalog lookup, and Provider Actions forwarding |
+| `FAROS_HUB_PUBLIC_URL` | Browser-reachable HTTPS hub origin for private preview authorization redirects and one-use browser-session handoffs; may differ from the internal `FAROS_HUB_URL`, and private browser inspection fails closed when unset or invalid |
 | `FAROS_HUB_TOKEN` | Bearer token for the heartbeat |
 | `FAROS_PROVIDER_NAME` | CatalogEntry name (default `app-studio`) |
 | `FAROS_PROVIDER_KUBECONFIG` | Provider kubeconfig (kcp front-proxy host + TLS only) |
@@ -155,14 +156,23 @@ make app-studio-db-up
 make run-provider-app-studio
 ```
 
-Preview inspection (`inspect_development_preview`) drives the workspace's shared
-headless browser — the infrastructure provider's Playwright MCP `browser`
-template, provisioned once per workspace by the Studio reconciler — over the
-infrastructure data plane. There is no app-studio browser worker to run; the
-tool is exposed to the model only when that shared browser is Ready. The model
-can supply only a path within the server-resolved current preview plus bounded
-semantic assertions. It cannot select an origin, click, type, or execute
-arbitrary JavaScript.
+Preview browser access drives the workspace's shared headless browser — the
+Infrastructure provider's Playwright MCP `browser` template, provisioned once
+per workspace by the Studio reconciler — over the Infrastructure data plane.
+There is no App Studio browser worker to run. When the shared Browser is Ready,
+App Studio discovers the upstream MCP catalog, filters it through an explicit
+allowlist, and exposes the approved native `browser_*` tools and their input
+schemas directly to the model. Arbitrary-code tools such as
+`browser_evaluate`/`browser_run_code` and the old aggregate inspection or
+interaction wrappers are not model-facing capabilities.
+
+The shared browser uses MCP initialize/initialized, a persistent GET event
+stream, POST tool calls, and DELETE session close. App Studio owns the session
+owner tuple, preview-origin and private-preview handoff checks, the
+source-synchronization fence, and post-call snapshot/tab safety. Native tool
+receipts are the browser evidence; a lost mutating call is returned as unknown
+and is never replayed, while a safe read can be reconstructed once only when no
+interaction is pending.
 
 The database container is named `faros-app-studio-postgres`, listens on
 `127.0.0.1:55432`, and stores data under `.kcp/app-studio-postgres/`. Both

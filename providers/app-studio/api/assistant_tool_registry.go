@@ -58,7 +58,13 @@ func (r projectAssistantToolRegistry) Get(name string) (projectAssistantTool, bo
 }
 
 func (r projectAssistantToolRegistry) Has(name string) bool {
-	_, ok := r.Spec(name)
+	if tool, ok := r.Get(name); ok {
+		return !projectAssistantLegacyPreviewTool(tool)
+	}
+	// Workflow tools are synthesized from their shared specs rather than stored
+	// as concrete registry entries. Preserve that allowlist surface while still
+	// excluding retired preview wrappers above.
+	_, ok := projectAssistantWorkflowToolSpec(name)
 	return ok
 }
 
@@ -79,12 +85,18 @@ func (r projectAssistantToolRegistry) ChatTool(name string) (chatTool, bool) {
 }
 
 func (r projectAssistantToolRegistry) ChatTools(includeCommitBridge bool) []chatTool {
-	return projectAssistantChatToolsForSpecs(projectAssistantAllToolSpecs(r.Tools(includeCommitBridge)))
+	// Keep this compatibility view for callers that still decode the historical
+	// preview event stream. The model-facing catalog uses Tools, which excludes
+	// the retired aggregate preview wrappers below.
+	return projectAssistantChatToolsForSpecs(projectAssistantAllToolSpecs(r.registeredTools(includeCommitBridge)))
 }
 
 func (r projectAssistantToolRegistry) Tools(includeCommitBridge bool) []projectAssistantTool {
 	out := make([]projectAssistantTool, 0, len(r.tools))
 	for _, tool := range r.tools {
+		if projectAssistantLegacyPreviewTool(tool) {
+			continue
+		}
 		spec := tool.Spec()
 		if spec.Risk == projectAssistantToolRiskCommit && !includeCommitBridge {
 			continue
@@ -92,6 +104,32 @@ func (r projectAssistantToolRegistry) Tools(includeCommitBridge bool) []projectA
 		out = append(out, tool)
 	}
 	return out
+}
+
+func (r projectAssistantToolRegistry) registeredTools(includeCommitBridge bool) []projectAssistantTool {
+	out := make([]projectAssistantTool, 0, len(r.tools))
+	for _, tool := range r.tools {
+		if tool == nil {
+			continue
+		}
+		if tool.Spec().Risk == projectAssistantToolRiskCommit && !includeCommitBridge {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
+func projectAssistantLegacyPreviewTool(tool projectAssistantTool) bool {
+	if tool == nil {
+		return false
+	}
+	switch projectToolBaseName(tool.Spec().Name) {
+	case projectToolInspectDevelopmentPreview, projectToolInteractDevelopmentPreview:
+		return true
+	default:
+		return false
+	}
 }
 
 func projectAssistantAllToolSpecs(tools []projectAssistantTool) []projectAssistantToolSpec {
