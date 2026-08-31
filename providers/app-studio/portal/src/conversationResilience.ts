@@ -129,6 +129,7 @@ export function assistantRunExpectedServerContent(
     if (part.type === 'text') return part.text
     if (part.type === 'skill') return `[@skill:${part.skillID.trim()}]`
     if (part.type === 'annotation') return assistantAnnotationModelText(part.annotation)
+    if (part.type === 'attachment') return `[@attachment:${part.attachment.id.trim()}]`
     const canonicalIndex = originalToCanonical.get(part.resourceIndex)
     const resource = canonicalIndex === undefined ? undefined : resources[canonicalIndex]
     if (!resource) return ''

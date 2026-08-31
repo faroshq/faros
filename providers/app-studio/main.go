@@ -192,6 +192,14 @@ func runServe() {
 		os.Getenv("APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY") == "true" ||
 			hubInsecure,
 	)
+	attachmentRetention := parseRetention(os.Getenv("APP_STUDIO_ATTACHMENT_DRAFT_RETENTION"))
+	if attachmentRetention <= 0 {
+		attachmentRetention = store.DefaultAttachmentDraftRetention
+	}
+	apiServer.ConfigureAttachmentDraftRetention(attachmentRetention)
+	if attachmentStore, ok := msgStore.(store.AttachmentStore); ok {
+		go runAttachmentRetention(ctx, attachmentStore, attachmentRetention)
+	}
 	apiServer.ConfigureCodingSandbox(sandboxConfig)
 	apiServer.SetPreviewInsecureSkipTLSVerify(os.Getenv("APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY") == "true")
 	// Preview inspection drives the workspace's shared browser (the Studio's
@@ -455,6 +463,25 @@ func runRetention(ctx context.Context, msgStore store.Store, retention time.Dura
 			cutoff := time.Now().Add(-retention)
 			if _, err := msgStore.DeleteMessagesOlderThan(ctx, cutoff); err != nil {
 				log.Printf("App Studio retention cleanup failed (cutoff %s): %v", cutoff, err)
+			}
+		}
+	}
+}
+
+func runAttachmentRetention(ctx context.Context, attachmentStore store.AttachmentStore, retention time.Duration) {
+	interval := retention / 4
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := attachmentStore.DeleteExpiredAttachments(ctx, time.Now().UTC()); err != nil {
+				log.Printf("App Studio attachment retention cleanup failed: %v", err)
 			}
 		}
 	}

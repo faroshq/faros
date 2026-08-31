@@ -807,6 +807,17 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		}
 		cancelCleanup()
 	}
+	// Attachment storage is an optional capability layered beside the message
+	// store. The normal production wiring uses one store and the call above is
+	// atomic with message cleanup; keep this explicit fallback for tests or
+	// deployments that provide a separate attachment backend.
+	if s.attachments != nil && !s.attachmentsInStore {
+		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
+		if err := s.attachments.DeleteProjectAttachments(cleanupCtx, messageScope); err != nil {
+			klog.FromContext(r.Context()).Error(err, "delete project attachments", "project", name)
+		}
+		cancelCleanup()
+	}
 	if thumbnailStore, ok := s.projectThumbnailStore(); ok {
 		cleanupCtx, cancelCleanup := detachedProjectPersistenceContext(r.Context())
 		if err := thumbnailStore.DeleteProjectThumbnail(cleanupCtx, messageScope); err != nil {

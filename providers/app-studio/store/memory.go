@@ -47,11 +47,14 @@ type MemoryStore struct {
 	approvalModes     map[Scope]map[string]AssistantApprovalPreference
 	bootstrapPermits  map[Scope]projectBootstrapPermit
 	projectThumbnails map[Scope]ProjectThumbnail
+	attachments       map[Scope]map[string]Attachment
 }
 
 type projectBootstrapPermit struct {
 	actor, promptDigest, clientRequestID string
 }
+
+var _ AttachmentStore = (*MemoryStore)(nil)
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
@@ -66,6 +69,7 @@ func NewMemoryStore() *MemoryStore {
 		approvalModes:         map[Scope]map[string]AssistantApprovalPreference{},
 		bootstrapPermits:      map[Scope]projectBootstrapPermit{},
 		projectThumbnails:     map[Scope]ProjectThumbnail{},
+		attachments:           map[Scope]map[string]Attachment{},
 	}
 }
 
@@ -584,7 +588,155 @@ func (s *MemoryStore) DeleteProjectMessages(_ context.Context, scope Scope) erro
 	delete(s.bootstrapPermits, scope)
 	delete(s.approvalModes, scope)
 	delete(s.projectThumbnails, scope)
+	delete(s.attachments, scope)
 	return nil
+}
+
+func (s *MemoryStore) CreateAttachment(_ context.Context, scope Scope, attachment Attachment) (Attachment, error) {
+	prepared, err := prepareAttachment(scope, attachment)
+	if err != nil {
+		return Attachment{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attachments == nil {
+		s.attachments = map[Scope]map[string]Attachment{}
+	}
+	if s.attachments[scope] == nil {
+		s.attachments[scope] = map[string]Attachment{}
+	}
+	if _, exists := s.attachments[scope][prepared.ID]; exists {
+		return Attachment{}, ErrAttachmentConflict
+	}
+	s.attachments[scope][prepared.ID] = cloneAttachment(prepared)
+	return cloneAttachment(prepared), nil
+}
+
+func (s *MemoryStore) GetAttachment(_ context.Context, scope Scope, id string) (Attachment, error) {
+	if err := scope.validate(); err != nil {
+		return Attachment{}, err
+	}
+	id = strings.TrimSpace(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attachment, ok := s.attachments[scope][id]
+	if !ok {
+		return Attachment{}, ErrAttachmentNotFound
+	}
+	if attachmentExpired(attachment, time.Now()) {
+		delete(s.attachments[scope], id)
+		return Attachment{}, ErrAttachmentNotFound
+	}
+	return cloneAttachment(attachment), nil
+}
+
+func (s *MemoryStore) ListAttachments(_ context.Context, scope Scope) ([]Attachment, error) {
+	if err := scope.validate(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attachments := s.attachments[scope]
+	if len(attachments) == 0 {
+		return []Attachment{}, nil
+	}
+	now := time.Now()
+	result := make([]Attachment, 0, len(attachments))
+	for id, attachment := range attachments {
+		if attachmentExpired(attachment, now) {
+			delete(attachments, id)
+			continue
+		}
+		result = append(result, cloneAttachment(attachment))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].ID > result[j].ID
+		}
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	if len(attachments) == 0 {
+		delete(s.attachments, scope)
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) BindAttachment(_ context.Context, scope Scope, receipt AttachmentReceipt, actor string) (Attachment, error) {
+	if err := scope.validate(); err != nil {
+		return Attachment{}, err
+	}
+	actor = strings.TrimSpace(actor)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attachment, ok := s.attachments[scope][strings.TrimSpace(receipt.ID)]
+	if !ok {
+		return Attachment{}, ErrAttachmentNotFound
+	}
+	if attachmentExpired(attachment, time.Now()) {
+		delete(s.attachments[scope], attachment.ID)
+		return Attachment{}, ErrAttachmentNotFound
+	}
+	if err := validateAttachmentReceipt(attachment, receipt, actor); err != nil {
+		return Attachment{}, err
+	}
+	if attachment.Draft {
+		attachment.Draft = false
+		attachment.ExpiresAt = nil
+		s.attachments[scope][attachment.ID] = cloneAttachment(attachment)
+	}
+	return cloneAttachment(attachment), nil
+}
+
+func (s *MemoryStore) DeleteAttachment(_ context.Context, scope Scope, id, actor string) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	id, actor = strings.TrimSpace(id), strings.TrimSpace(actor)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	attachment, ok := s.attachments[scope][id]
+	if !ok {
+		return ErrAttachmentNotFound
+	}
+	if attachment.ActorID != actor {
+		return ErrAttachmentForbidden
+	}
+	if !attachment.Draft {
+		return ErrAttachmentImmutable
+	}
+	delete(s.attachments[scope], id)
+	if len(s.attachments[scope]) == 0 {
+		delete(s.attachments, scope)
+	}
+	return nil
+}
+
+func (s *MemoryStore) DeleteProjectAttachments(_ context.Context, scope Scope) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.attachments, scope)
+	return nil
+}
+
+func (s *MemoryStore) DeleteExpiredAttachments(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var deleted int64
+	for scope, attachments := range s.attachments {
+		for id, attachment := range attachments {
+			if attachmentExpired(attachment, before) {
+				delete(attachments, id)
+				deleted++
+			}
+		}
+		if len(attachments) == 0 {
+			delete(s.attachments, scope)
+		}
+	}
+	return deleted, nil
 }
 
 func (s *MemoryStore) DeleteMessagesOlderThan(_ context.Context, before time.Time) (int64, error) {

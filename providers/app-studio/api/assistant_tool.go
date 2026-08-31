@@ -24,6 +24,7 @@ import (
 	"net/http"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
+	"github.com/faroshq/provider-app-studio/store"
 	"github.com/faroshq/provider-app-studio/workspace"
 )
 
@@ -85,7 +86,7 @@ func projectAssistantToolBundleForSpec(spec projectAssistantToolSpec) projectAss
 	case projectToolGetRuntimeStatus, projectToolGetPreviewURL, projectToolInspectDevelopmentPreview, projectToolGetPreviewConsoleLogs,
 		projectToolGetRuntimeLogs, projectToolVerifyDevelopmentRuntime, projectToolRestartRuntime, projectToolSetRuntimeEnv, projectToolExecCommand, projectToolPromoteProject, projectToolRebuildProject:
 		return projectAssistantToolBundleRuntime
-	case projectToolLS, projectToolReadFile, projectToolGlob, projectToolGrep:
+	case projectToolLS, projectToolReadFile, projectToolReadAttachment, projectToolGlob, projectToolGrep:
 		return projectAssistantToolBundleWorkspaceRead
 	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
 		return projectAssistantToolBundleEdit
@@ -129,6 +130,8 @@ type projectAssistantToolCallRequest struct {
 	AssistantRunID       string
 	InitialBuild         bool
 	RunState             *projectEinoAssistantRunState
+	AttachmentReader     projectAssistantAttachmentReader
+	AttachmentScope      store.Scope
 	Arguments            map[string]any
 }
 

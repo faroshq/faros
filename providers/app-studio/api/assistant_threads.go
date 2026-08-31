@@ -551,6 +551,10 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 			writeProjectError(w, registryErr)
 			return
 		}
+		if projectAssistantContentPartsContainImageAttachment(request.ContentParts) && !projectAssistantCapabilitiesForModel(selected.Settings).VisionToolResults {
+			writeProjectError(w, newValidationError("the selected model does not support image attachments"))
+			return
+		}
 		request.ModelID = selected.ID
 		request.modelRevisionID = selected.RevisionID
 	}
@@ -582,6 +586,10 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 		}
 	}
 	if err != nil {
+		s.writeAssistantThreadError(w, err)
+		return
+	}
+	if err := s.bindProjectAssistantContentPartAttachments(r.Context(), id, project, request.ContentParts); err != nil {
 		s.writeAssistantThreadError(w, err)
 		return
 	}

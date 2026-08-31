@@ -83,6 +83,7 @@ func projectEinoAssistantToolsForDiscovery(
 	catalogPolicy := projectAssistantToolCatalogPolicy(req)
 	localTools := projectAssistantToolsForCollaborationMode(projectAssistantToolsForTurnPolicy(registry.Tools(discovery.IncludeCommitBridge), catalogPolicy), req.CollaborationMode)
 	localTools = projectEinoAssistantFilterPreviewInspection(localTools, discovery.IncludePreviewInspection)
+	localTools = projectAssistantFilterAttachmentTools(localTools, req.AttachmentReader != nil && len(projectAssistantAttachmentReceipts(projectAssistantRunContentParts(req, runState))) > 0)
 	mcpTools := projectAssistantToolsForCollaborationMode(projectAssistantToolsForTurnPolicy(discovery.MCPTools, catalogPolicy), req.CollaborationMode)
 	out := make([]einotool.BaseTool, 0, len(localTools)+len(mcpTools)+2)
 	if runState != nil && runState.CodexPOCEnabled() && projectEinoAssistantDynamicToolCatalogDigest(discovery) != "" {
@@ -136,6 +137,7 @@ func projectEinoAssistantDiscoverTools(ctx context.Context, server *Server, req 
 	policy := normalizeProjectAssistantTurnPolicy(req.TurnPolicy, req.TurnProfile)
 	includePreviewInspection := server.projectAssistantPreviewInspectionAvailable(ctx, req.Identity)
 	localTools := projectEinoAssistantFilterPreviewInspection(registry.Tools(false), includePreviewInspection)
+	localTools = projectAssistantFilterAttachmentTools(localTools, req.AttachmentReader != nil && len(projectAssistantAttachmentReceipts(req.ContentParts)) > 0)
 	chatTools := projectAssistantChatToolsForSpecs(projectAssistantToolSpecsForTurnPolicy(projectAssistantAllToolSpecs(localTools), policy))
 	if len(chatTools) == 0 {
 		return projectEinoAssistantToolDiscovery{}
@@ -552,6 +554,8 @@ func (t projectEinoAssistantTool) invokeAllowedToolWithPlan(
 		AssistantRunID:       projectAssistantRunID(t.req),
 		InitialBuild:         projectAssistantInitialBuildActive(t.req, t.runState),
 		RunState:             t.runState,
+		AttachmentReader:     t.req.AttachmentReader,
+		AttachmentScope:      t.req.MessageScope,
 		Arguments:            args,
 	}
 	var result string

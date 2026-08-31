@@ -135,12 +135,23 @@ export interface ProjectAssistantAnnotationPin {
   anchor?: ProjectAssistantAnnotationAnchor
 }
 
+/** Immutable server receipt referenced by an assistant attachment content part. */
+export interface ProjectAssistantAttachmentReceipt {
+  id: string
+  filename: string
+  contentType: string
+  sizeBytes: number
+  sha256: string
+  createdAt: string
+}
+
 /** Canonical rich-composer content parts persisted on user thread items. */
 export type ProjectAssistantContentPart =
   | { type: 'text'; text: string }
   | { type: 'skill'; skillID: string }
   | { type: 'resource'; resourceIndex: number }
   | { type: 'annotation'; annotation: ProjectAssistantAnnotation }
+  | { type: 'attachment'; attachment: ProjectAssistantAttachmentReceipt }
 
 export interface ProjectAssistantSkillResource {
   path: string

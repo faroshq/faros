@@ -57,6 +57,76 @@ test('rich composer source keeps editor input plain and chip deletion atomic', a
   assert.doesNotMatch(source, /[\u2726\u25c7]/u)
 })
 
+test('rich composer exposes one combined Files picker while retaining command entry', async () => {
+  const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
+  assert.match(source, /Paperclip/)
+  assert.match(source, /aria-label="Add"/)
+  assert.match(source, /@click="openAttachmentPicker"[\s\S]*Paperclip[\s\S]*Files/)
+  assert.match(source, /:accept="ASSISTANT_ATTACHMENT_ACCEPT"/)
+  assert.match(source, /:accept="ASSISTANT_ATTACHMENT_ACCEPT"[\s\S]*multiple/)
+  assert.match(source, /@click="openPalette"/)
+  assert.doesNotMatch(source, /Screenshot|Text file/)
+})
+
+test('rich composer renders image uploads through the lifecycle-safe thumbnail preview', async () => {
+  const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
+  const preview = await readFile(new URL('./AssistantAttachmentPreview.vue', import.meta.url), 'utf8')
+  assert.match(source, /AssistantAttachmentPreview/)
+  assert.match(source, /chip\.file && assistantAttachmentIsImage\(chip\.file\)/)
+  assert.match(source, /@retry="retryAttachment\(chip\)"/)
+  assert.match(source, /@remove="removeAttachment\(chip\)"/)
+  assert.match(preview, /URL\.createObjectURL\(file\)/)
+  assert.match(preview, /URL\.revokeObjectURL\(previewURL\.value\)/)
+  assert.match(preview, /watch\(\(\) => props\.file, syncPreview, \{ immediate: true \}\)/)
+  assert.match(preview, /onBeforeUnmount\(revokePreview\)/)
+  assert.match(preview, /absolute right-1 top-1[\s\S]*aria-label="Remove attachment"/)
+})
+
+test('Add flyouts dismiss on outside pointer/focus while preserving in-composer interactions', async () => {
+  const [rich, preProject, dismiss] = await Promise.all([
+    readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./AssistantPreProjectComposer.vue', import.meta.url), 'utf8'),
+    readFile(new URL('./useDismissibleAddMenu.ts', import.meta.url), 'utf8'),
+  ])
+  assert.match(dismiss, /function isInside\(target: EventTarget \| null\)/)
+  assert.match(dismiss, /container\.contains\(target\)/)
+  assert.match(dismiss, /if \(!open\.value \|\| isInside\(event\.target\)\) return/)
+  assert.match(dismiss, /function handleFocusIn\(event: FocusEvent\)/)
+  assert.match(dismiss, /function handleKeydown\(event: KeyboardEvent\)/)
+  assert.match(dismiss, /event\.key !== 'Escape'/)
+  assert.match(dismiss, /document\.addEventListener\('pointerdown', handlePointerDown, true\)/)
+  assert.match(dismiss, /document\.addEventListener\('focusin', handleFocusIn, true\)/)
+  assert.match(dismiss, /document\.removeEventListener\('pointerdown', handlePointerDown, true\)/)
+  assert.match(dismiss, /document\.removeEventListener\('focusin', handleFocusIn, true\)/)
+  assert.match(dismiss, /onBeforeUnmount\(\(\) => \{[\s\S]*removeEventListener\('keydown', handleKeydown, true\)/)
+  for (const source of [rich, preProject]) {
+    assert.match(source, /ref="rootRef"/)
+    assert.match(source, /ref="addMenuRootRef" class="contents"/)
+    assert.match(source, /useDismissibleAddMenu\(\{[\s\S]*open: attachmentMenuOpen,[\s\S]*root: addMenuRootRef,[\s\S]*onClose: closeAttachmentMenu/)
+    assert.match(source, /role="menu"[\s\S]*aria-label="Add"/)
+    assert.match(source, /@click="openAttachmentPicker"/)
+  }
+  assert.match(rich, /ref="rootRef" class="relative min-h-\[72px\]"[\s\S]*ref="addMenuRootRef" class="contents"/)
+  assert.match(preProject, /ref="rootRef"[\s\S]*@paste\.self="handlePaste"[\s\S]*ref="addMenuRootRef" class="contents"/)
+  assert.match(preProject, /<slot name="menu" \/>/)
+  assert.match(rich, /@click="openPalette"/)
+})
+
+test('rich attachment removal retries deletion without re-uploading the file', async () => {
+  const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
+  const retryStart = source.indexOf('function retryAttachment(')
+  const retryEnd = source.indexOf('\n}\n\nasync function removeAttachment', retryStart)
+  assert.ok(retryStart >= 0 && retryEnd > retryStart, 'retry and removal handlers must remain explicit')
+  const retryBody = source.slice(retryStart, retryEnd)
+  assert.match(source, /retryAction\?: 'upload' \| 'delete'/)
+  assert.match(source, /chip\.retryAction = 'delete'/)
+  assert.match(source, /chip\.retryAction === 'delete' \? 'Removal failed' : 'Upload failed'/)
+  assert.match(retryBody, /if \(chip\.retryAction === 'delete'\) \{[\s\S]*void removeAttachment\(chip\)[\s\S]*return/)
+  assert.ok(retryBody.indexOf('void removeAttachment(chip)') < retryBody.indexOf('void uploadAttachment(chip.file)'), 'delete retry must not enqueue an upload')
+  assert.match(source, /:retry-action="chip\.retryAction"/)
+  assert.match(source, /attachmentStatusLabel\(chip\)/)
+})
+
 test('rich composer presents a hoverable annotation preview with an in-pill clear control', async () => {
   const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
   const appSource = await readFile(new URL('./App.vue', import.meta.url), 'utf8')

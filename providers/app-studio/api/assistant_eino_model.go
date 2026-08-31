@@ -379,6 +379,12 @@ func projectEinoMessagesToChat(messages []*schema.Message) []chatMessage {
 		if msg == nil {
 			continue
 		}
+		// Attachment bytes are rehydrated from the durable receipt immediately
+		// before each provider call. Do not turn the synthetic multimodal user
+		// message into an empty durable conversation item or checkpoint entry.
+		if projectEinoAssistantAttachmentMessage(msg) {
+			continue
+		}
 		out = append(out, chatMessage{
 			Role:       string(msg.Role),
 			Content:    msg.Content,

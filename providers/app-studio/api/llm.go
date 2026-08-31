@@ -462,6 +462,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		WorkspaceScope:           projectWorkspaceScope(id, p),
 		Workspace:                s.workspaces,
 		MessageScope:             messageScope,
+		AttachmentReader:         s.projectAssistantAttachmentReader(),
 		LLM:                      settings,
 		History:                  recent,
 		Conversation:             conversation,
@@ -931,6 +932,8 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 			"offset": args["offset"],
 			"limit":  args["limit"],
 		}, []string{"path", "offset", "limit"})
+	case projectToolReadAttachment:
+		return summarizeProjectCanonicalToolKeyValues(args, []string{"attachmentID", "offset", "limit"})
 	case projectToolGlob:
 		return summarizeProjectCanonicalToolKeyValues(args, []string{"path", "pattern"})
 	case projectToolGrep:

@@ -10,6 +10,7 @@ import type {
   ProjectAssistantRunStatus,
   ProjectAssistantApprovalMode,
   ProjectAssistantApprovalPreference,
+  ProjectAssistantAttachmentReceipt,
   ProjectAssistantContextResource,
   ProjectAssistantContentPart,
   ProjectAssistantSkill,
@@ -45,6 +46,7 @@ import type {
 import type { ProjectCreateReadiness } from './createReadiness'
 import type { PreviewConsoleEvent, PreviewConsoleSession } from './previewConsole'
 import { readTenant, serviceBase, tenantHeaders } from './portalkit/tenant'
+import { projectAssistantAttachmentReceipt } from './assistantAttachments'
 
 interface TenantSelection {
   orgUUID: string | null
@@ -167,6 +169,65 @@ async function requestBlob(ctx: FarosContext | null, path: string): Promise<Blob
     throw new ProjectAPIRequestError(res.statusText || 'project thumbnail is unavailable', res.status)
   }
   return res.blob()
+}
+
+async function requestAssistantAttachmentUpload(
+  ctx: FarosContext | null,
+  path: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<ProjectAssistantAttachmentReceipt> {
+  const form = new FormData()
+  form.append('file', file, file.name || 'attachment')
+  const headers = tenantHeaders({ token: ctx?.token })
+  // The server promotes this provisional receipt atomically when the turn is
+  // accepted; abandoned drafts are bounded by the provider retention policy.
+  headers['X-Faros-Attachment-Draft'] = 'true'
+  const res = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers,
+    body: form,
+    signal,
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    const fallback = text || res.statusText
+    let detail = fallback
+    let reason = ''
+    try {
+      const parsed = JSON.parse(text) as { message?: string; reason?: string }
+      if (parsed.message) detail = parsed.message
+      if (parsed.reason) reason = parsed.reason
+    } catch {
+      // keep raw text
+    }
+    if (isProjectAPIInitializingResponse(res.status, reason, detail)) throw new ProjectAPIInitializingError(detail)
+    throw new ProjectAPIRequestError(detail, res.status)
+  }
+  let value: unknown
+  try {
+    value = text ? JSON.parse(text) : null
+  } catch {
+    throw new ProjectAPIRequestError('attachment upload returned invalid JSON', 502)
+  }
+  const receipt = projectAssistantAttachmentReceipt(
+    value && typeof value === 'object' && !Array.isArray(value) && 'attachment' in value
+      ? (value as { attachment?: unknown }).attachment
+      : value,
+  )
+  if (!receipt) throw new ProjectAPIRequestError('attachment upload returned an invalid receipt', 502)
+  return receipt
+}
+
+function assistantAttachmentReceipts(value: unknown): ProjectAssistantAttachmentReceipt[] {
+  const candidates = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object'
+    ? ((value as { attachments?: unknown; items?: unknown }).attachments ?? (value as { items?: unknown }).items)
+    : []
+  if (!Array.isArray(candidates)) return []
+  return candidates.map(projectAssistantAttachmentReceipt).filter((receipt): receipt is ProjectAssistantAttachmentReceipt => receipt !== null)
 }
 
 function isProjectAPIInitializingResponse(status: number, reason: string, message: string): boolean {
@@ -1024,6 +1085,24 @@ export const api = {
   async listAssistantThreadItems(ctx: FarosContext | null, name: string, threadID: string): Promise<ProjectAssistantThreadItem[]> {
     const body = await request<{ items: ProjectAssistantThreadItem[] }>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/threads/${encodeURIComponent(threadID)}/items`)
     return body.items ?? []
+  },
+
+  /** List durable project-scoped receipts; content parts carry only these references. */
+  async listAssistantAttachments(ctx: FarosContext | null, name: string): Promise<ProjectAssistantAttachmentReceipt[]> {
+    const body = await request<unknown>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments`)
+    return assistantAttachmentReceipts(body)
+  },
+
+  async getAssistantAttachment(ctx: FarosContext | null, name: string, attachmentID: string): Promise<Blob> {
+    return requestBlob(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments/${encodeURIComponent(attachmentID)}`)
+  },
+
+  async uploadAssistantAttachment(ctx: FarosContext | null, name: string, file: File, signal?: AbortSignal): Promise<ProjectAssistantAttachmentReceipt> {
+    return requestAssistantAttachmentUpload(ctx, `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments`, file, signal)
+  },
+
+  async deleteAssistantAttachment(ctx: FarosContext | null, name: string, attachmentID: string): Promise<void> {
+    await request<null>(ctx, 'DELETE', `${baseURL(ctx)}/${encodeURIComponent(name)}/assistant/attachments/${encodeURIComponent(attachmentID)}`)
   },
 
   async startAssistantTurn(ctx: FarosContext | null, name: string, threadID: string, body: { content: string; clientUserMessageID: string; modelID?: string; collaborationMode: ProjectAssistantRunMode; skills?: string[]; contextResources?: ProjectAssistantContextResource[]; contentParts?: ProjectAssistantContentPart[] }): Promise<{ thread: ProjectAssistantThread; turn: ProjectAssistantTurn }> {

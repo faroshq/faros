@@ -952,6 +952,7 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 		WorkspaceScope:           projectWorkspaceScope(id, p),
 		Workspace:                s.workspaces,
 		MessageScope:             messageScope,
+		AttachmentReader:         s.projectAssistantAttachmentReader(),
 		LLM:                      settings,
 		MCPBaseURL:               s.hubBase,
 		MCPInsecureSkipTLSVerify: s.mcpInsecureSkipTLSVerify,

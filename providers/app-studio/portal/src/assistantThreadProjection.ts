@@ -84,7 +84,8 @@ export function assistantContentPartsFromThreadItem(item: ProjectAssistantThread
     part.type === 'text' ||
     (part.type === 'skill' && (!skillIDs.size || skillIDs.has(part.skillID))) ||
     (part.type === 'resource' && part.resourceIndex < resources.length) ||
-    (part.type === 'annotation' && Boolean(part.annotation.comment && part.annotation.documentID)),
+    (part.type === 'annotation' && Boolean(part.annotation.comment && part.annotation.documentID)) ||
+    (part.type === 'attachment' && Boolean(part.attachment.id && part.attachment.filename)),
   )
 }
 
