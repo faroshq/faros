@@ -372,6 +372,8 @@ local_resource(
         'providers/app-studio/apis',
         'providers/app-studio/scaffold',
         'providers/app-studio/client',
+        'providers/app-studio/builtin-skills',
+        'providers/app-studio/skills',
         'providers/app-studio/store',
         'providers/app-studio/tenant',
         'providers/app-studio/workspace',
