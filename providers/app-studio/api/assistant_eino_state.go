@@ -2568,12 +2568,10 @@ func (s *projectEinoAssistantRunState) recordPreviewEvidenceLocked(message chatM
 
 func (s *projectEinoAssistantRunState) recordNativeBrowserEvidenceLocked(toolName, content string) {
 	var receipt struct {
-		Status  string `json:"status"`
-		Phase   string `json:"phase"`
-		IsError bool   `json:"isError"`
-		Error   *struct {
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
+		Status  string          `json:"status"`
+		Phase   string          `json:"phase"`
+		IsError bool            `json:"isError"`
+		Error   json.RawMessage `json:"error,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &receipt); err != nil {
 		return
@@ -2582,7 +2580,8 @@ func (s *projectEinoAssistantRunState) recordNativeBrowserEvidenceLocked(toolNam
 	if status == "" {
 		status = strings.ToLower(strings.TrimSpace(receipt.Phase))
 	}
-	failed := receipt.IsError || receipt.Error != nil
+	rawError := strings.TrimSpace(string(receipt.Error))
+	failed := receipt.IsError || rawError != "" && rawError != "null"
 	if !failed {
 		switch status {
 		case "failed", "error", "canceled", "cancelled", "timed_out", "partial_failure":
@@ -2602,9 +2601,14 @@ func (s *projectEinoAssistantRunState) recordNativeBrowserEvidenceLocked(toolNam
 	}
 	// An unverifiable observation is deliberately non-evidence. In
 	// particular, do not let a receipt carrying incidental text or a page URL
-	// overwrite an earlier certified receipt, and keep an unresolved
-	// interaction pending so an authoritative snapshot can still settle it.
+	// overwrite an earlier certified receipt. The native browser currently
+	// uses this status when the MCP session was lost while an interaction was
+	// pending; the next snapshot belongs to a newly initialized session and
+	// therefore cannot settle that old interaction. Require a new interaction
+	// in the replacement session instead of carrying the pending flag across
+	// the session boundary.
 	if status == "unverifiable" {
+		s.nativeBrowserInteractionPending = false
 		return
 	}
 	if !failed && toolName == browserMCPToolSnapshot &&

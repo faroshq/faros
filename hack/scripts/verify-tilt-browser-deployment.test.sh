@@ -31,9 +31,13 @@ def require(condition: bool, message: str) -> None:
 
 
 digests = re.findall(
-    r"mcr\.microsoft\.com/playwright/mcp@sha256:([0-9a-f]+)", browser
+    r"(?m)^\s*image:\s*mcr\.microsoft\.com/playwright/mcp@sha256:([0-9a-f]+)\s*$",
+    browser,
 )
-require(len(digests) == 1, "browser template must contain one Playwright MCP digest")
+require(
+    len(digests) == 1,
+    "browser template deployment must contain exactly one digest-pinned Playwright MCP image field",
+)
 require(
     re.fullmatch(r"[0-9a-f]{64}", digests[0]) is not None,
     f"Playwright MCP digest must be exactly 64 lowercase hex characters: {digests[0]!r}",

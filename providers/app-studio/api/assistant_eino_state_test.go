@@ -242,3 +242,23 @@ func TestProjectAssistantRunStateUnverifiableBrowserObservationIsNotEvidence(t *
 		t.Fatalf("unverifiable observation erased prior evidence: got %#v, want %#v", got, prior)
 	}
 }
+
+func TestProjectAssistantRunStateUnverifiableSessionLossClearsPendingInteraction(t *testing.T) {
+	state := newProjectEinoAssistantRunState()
+	state.RecordSourceMutation()
+	state.RecordToolMessage(chatMessage{Role: "tool", Name: "browser_click", Content: `{"isError":false,"content":[{"type":"text","text":"clicked"}]}`})
+	if !state.NativeBrowserInteractionPending() {
+		t.Fatal("successful interaction did not become pending")
+	}
+
+	state.RecordToolMessage(chatMessage{
+		Role: "tool", Name: browserMCPToolSnapshot,
+		Content: `{"status":"unverifiable","outcome":"unknown","requiresSnapshot":true,"error":"preview browser tools/call: status 404: Session not found"}`,
+	})
+	if state.NativeBrowserInteractionPending() {
+		t.Fatal("production-shaped unverifiable receipt retained the pending interaction")
+	}
+	if evidence := state.CompletionEvidence(); evidence.PreviewInteractionVerified || evidence.PreviewEvidenceOutcome == "interactions_verified" {
+		t.Fatalf("unverifiable receipt certified interaction evidence: %#v", evidence)
+	}
+}

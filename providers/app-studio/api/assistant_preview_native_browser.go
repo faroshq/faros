@@ -1070,8 +1070,8 @@ func (s *Server) callProjectAssistantNativeBrowserTool(ctx context.Context, req 
 			}
 			return "", callErr
 		}
-		if callErr == nil {
-			if originErr := validateProjectAssistantNativeBrowserReceiptOrigin(result, preview.PreviewURL); originErr != nil {
+		if callErr == nil && projectAssistantNativeBrowserReceiptReportsPageLocation(name) {
+			if originErr := validateProjectAssistantNativeBrowserPageOrigin(result, preview.PreviewURL); originErr != nil {
 				manager.remove(owner, entry, "receipt_origin_escape")
 				if risk != projectAssistantToolRiskRead {
 					return projectAssistantNativeBrowserOutcomeUnknown(originErr), nil
@@ -1108,8 +1108,8 @@ func (s *Server) callProjectAssistantNativeBrowserTool(ctx context.Context, req 
 		manager.remove(owner, entry, "retry_safety_observation_failed")
 		return "", callErr
 	}
-	if callErr == nil {
-		if originErr := validateProjectAssistantNativeBrowserReceiptOrigin(result, preview.PreviewURL); originErr != nil {
+	if callErr == nil && projectAssistantNativeBrowserReceiptReportsPageLocation(name) {
+		if originErr := validateProjectAssistantNativeBrowserPageOrigin(result, preview.PreviewURL); originErr != nil {
 			manager.remove(owner, entry, "retry_receipt_origin_escape")
 			return "", originErr
 		}
@@ -1169,7 +1169,7 @@ func (s *Server) callProjectAssistantNativeBrowserSession(
 		if projectAssistantNativeBrowserReceiptIsError(navigation) {
 			return "", projectAssistantNativeBrowserSafetyErrorAt("browser_navigate", errors.New("preview browser retry navigation returned a tool error"))
 		}
-		if err := validateProjectAssistantNativeBrowserReceiptOrigin(navigation, previewURL); err != nil {
+		if err := validateProjectAssistantNativeBrowserPageOrigin(navigation, previewURL); err != nil {
 			return "", projectAssistantNativeBrowserSafetyErrorAt("browser_navigate", err)
 		}
 		entry.previewReady = true
@@ -1372,17 +1372,34 @@ func validateProjectAssistantNativeBrowserArguments(name string, args map[string
 	return nil
 }
 
-func validateProjectAssistantNativeBrowserReceiptOrigin(receipt, baseURL string) error {
+// Only receipts that report the browser's current page location are checked
+// here. Diagnostic tools such as browser_network_requests and
+// browser_console_messages intentionally return application-controlled URLs;
+// those URLs do not establish the browser's navigation boundary. The
+// server-owned snapshot and tab observations below remain authoritative for
+// that boundary after every successful tool call.
+func projectAssistantNativeBrowserReceiptReportsPageLocation(name string) bool {
+	switch projectToolBaseName(name) {
+	case browserMCPToolNavigate, "browser_navigate_back", "browser_navigate_forward", browserMCPToolSnapshot:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateProjectAssistantNativeBrowserPageOrigin(receipt, baseURL string) error {
 	base, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return errors.New("development preview URL is invalid")
 	}
-	for _, raw := range projectAssistantNativeBrowserReportedURLs(receipt) {
-		if err := validateProjectAssistantNativeBrowserURL(raw, base); err != nil {
-			return err
-		}
+	pageURL := projectAssistantNativeBrowserSnapshotPageURL(receipt)
+	if pageURL == "" {
+		// Some navigation receipts only acknowledge the action. The mandatory
+		// server-owned browser_snapshot that follows the call still verifies the
+		// actual page location, so an absent page field is not itself an escape.
+		return nil
 	}
-	return nil
+	return validateProjectAssistantNativeBrowserURL(pageURL, base)
 }
 
 func validateProjectAssistantNativeBrowserURL(raw string, base *url.URL) error {
@@ -1403,7 +1420,7 @@ func validateProjectAssistantNativeBrowserSafetySnapshot(receipt, baseURL string
 	if pageURL := projectAssistantNativeBrowserSnapshotPageURL(receipt); pageURL == "" {
 		return errors.New("browser_snapshot did not report the current page URL")
 	}
-	return validateProjectAssistantNativeBrowserReceiptOrigin(receipt, baseURL)
+	return validateProjectAssistantNativeBrowserPageOrigin(receipt, baseURL)
 }
 
 func validateProjectAssistantNativeBrowserSafetyTabs(receipt, baseURL string) error {

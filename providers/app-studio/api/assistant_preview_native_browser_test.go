@@ -568,17 +568,37 @@ func TestProjectAssistantNativeBrowserNavigationStaysOnPreviewOrigin(t *testing.
 	}
 }
 
-func TestProjectAssistantNativeBrowserReceiptRejectsOriginEscape(t *testing.T) {
+func TestProjectAssistantNativeBrowserPageOriginIgnoresDiagnosticURLs(t *testing.T) {
+	onOriginWithExternalNetworkURL := `{"isError":false,"content":[{"type":"text","text":"- Page URL: https://demo.preview.example/tasks"}],"structuredContent":{"networkRequests":[{"url":"https://cdn.example/assets/app.js"}]}}`
+	if err := validateProjectAssistantNativeBrowserPageOrigin(onOriginWithExternalNetworkURL, "https://demo.preview.example/"); err != nil {
+		t.Fatalf("on-origin page with external diagnostic URL rejected: %v", err)
+	}
+	for _, name := range []string{"browser_network_requests", "browser_console_messages", "browser_click"} {
+		if projectAssistantNativeBrowserReceiptReportsPageLocation(name) {
+			t.Fatalf("diagnostic tool %q unexpectedly requires page-location validation", name)
+		}
+	}
+}
+
+func TestProjectAssistantNativeBrowserPageOriginRejectsNavigationEscape(t *testing.T) {
 	sameOrigin := `{"isError":false,"content":[{"type":"text","text":"- Page URL: https://demo.preview.example/tasks"}]}`
-	if err := validateProjectAssistantNativeBrowserReceiptOrigin(sameOrigin, "https://demo.preview.example/"); err != nil {
+	if err := validateProjectAssistantNativeBrowserPageOrigin(sameOrigin, "https://demo.preview.example/"); err != nil {
 		t.Fatalf("same-origin receipt rejected: %v", err)
 	}
 	escaped := `{"isError":false,"content":[{"type":"text","text":"- Page URL: https://attacker.example/"}]}`
-	if err := validateProjectAssistantNativeBrowserReceiptOrigin(escaped, "https://demo.preview.example/"); err == nil {
-		t.Fatal("cross-origin final URL was accepted")
+	if err := validateProjectAssistantNativeBrowserPageOrigin(escaped, "https://demo.preview.example/"); err == nil {
+		t.Fatal("cross-origin navigation receipt was accepted")
 	}
+	for _, name := range []string{browserMCPToolNavigate, "browser_navigate_back", "browser_navigate_forward", browserMCPToolSnapshot} {
+		if !projectAssistantNativeBrowserReceiptReportsPageLocation(name) {
+			t.Fatalf("page-location tool %q was not selected for origin validation", name)
+		}
+	}
+}
+
+func TestProjectAssistantNativeBrowserTabsRemainOriginValidated(t *testing.T) {
 	structured := `{"structuredContent":{"tabs":[{"url":"https://attacker.example/"}]}}`
-	if err := validateProjectAssistantNativeBrowserReceiptOrigin(structured, "https://demo.preview.example/"); err == nil {
+	if err := validateProjectAssistantNativeBrowserSafetyTabs(structured, "https://demo.preview.example/"); err == nil {
 		t.Fatal("cross-origin tab URL was accepted")
 	}
 }
@@ -1321,11 +1341,27 @@ func TestProjectAssistantNativeBrowserLostReadWithPendingInteractionIsUnverifiab
 	if outcome["status"] != "unverifiable" || outcome["outcome"] != "unknown" || outcome["replayed"] != false || outcome["requiresSnapshot"] != true {
 		t.Fatalf("pending read outcome = %#v", outcome)
 	}
+	state.RecordToolMessage(chatMessage{Role: "tool", Name: browserMCPToolSnapshot, ToolCallID: "lost-snapshot", Content: result})
 	if initializeCalls != 1 || toolCalls != 5 {
 		t.Fatalf("pending read calls = initialize %d, tools/call %d; want 1/5 without retry", initializeCalls, toolCalls)
 	}
-	if !state.NativeBrowserInteractionPending() {
-		t.Fatal("invalid follow-up snapshot cleared pending interaction")
+	if state.NativeBrowserInteractionPending() {
+		t.Fatal("unverifiable session-loss receipt retained pending interaction")
+	}
+
+	// The next snapshot initializes a replacement MCP session and auto-navigates
+	// it to the preview. That fresh document must not certify the click made in
+	// the lost session.
+	freshResult, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, browserMCPToolSnapshot, projectAssistantToolRiskRead)
+	if err != nil {
+		t.Fatalf("fresh snapshot returned transport error: %v", err)
+	}
+	state.RecordToolMessage(chatMessage{Role: "tool", Name: browserMCPToolSnapshot, ToolCallID: "fresh-snapshot", Content: freshResult})
+	if initializeCalls != 2 || toolCalls != 8 {
+		t.Fatalf("fresh replacement snapshot calls = initialize %d, tools/call %d; want 2/8", initializeCalls, toolCalls)
+	}
+	if evidence := state.CompletionEvidence(); evidence.PreviewInteractionVerified || evidence.PreviewEvidenceOutcome == "interactions_verified" {
+		t.Fatalf("fresh replacement-session snapshot verified lost interaction: %#v", evidence)
 	}
 }
 
