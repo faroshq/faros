@@ -903,10 +903,13 @@ func (s *Server) promoteProjectWithSelectionAndTarget(ctx context.Context, c *as
 
 	// Mint a ghcr image-pull credential (from the Code connection's token) as a
 	// tenant Secret so the infrastructure provider can bridge it into the
-	// runtime namespace — production images are private packages the runtime
-	// cluster cannot otherwise pull. Best-effort: a public image needs none, so
-	// a failure here must not block promotion.
-	_ = s.ensureProjectRegistryPullSecret(ctx, c, p)
+	// runtime namespace. The helper is a no-op when the Project has no usable
+	// registry credential; once a configured connection is present, an API or
+	// Secret failure must stop promotion rather than reporting success before a
+	// predictable ImagePullBackOff.
+	if err := s.ensureProjectRegistryPullSecret(ctx, c, p); err != nil {
+		return nil, projectPromoteResponse{}, fmt.Errorf("prepare production registry pull credential: %w", err)
+	}
 
 	updated, err := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
 	if err != nil {
