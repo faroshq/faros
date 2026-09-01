@@ -20,9 +20,11 @@ const props = withDefaults(defineProps<{
   projectName: string
   components?: ProjectComponent[]
   disabled?: boolean
+  embedded?: boolean
 }>(), {
   components: () => [],
   disabled: false,
+  embedded: false,
 })
 
 const emit = defineEmits<{
@@ -48,6 +50,7 @@ const logsService = ref('')
 const logsLoading = ref(false)
 const logsError = ref('')
 const logsText = ref('')
+const headingRef = ref<HTMLElement | null>(null)
 let requestSerial = 0
 let logsSerial = 0
 let refreshTimer: number | undefined
@@ -311,6 +314,12 @@ function configureListener(listener: ProjectDevelopmentListener) {
   openCreate(listener.port)
 }
 
+function focus() {
+  headingRef.value?.focus()
+}
+
+defineExpose({ focus })
+
 watch(
   () => [props.projectName, props.ctx?.token, props.ctx?.tenant, props.ctx?.subPath, props.disabled] as const,
   (next, previous) => {
@@ -329,14 +338,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="grid gap-3 rounded-md border border-border-subtle bg-surface-raised/70 p-3" aria-labelledby="development-services-heading">
+  <section
+    class="grid gap-3"
+    :class="embedded ? 'border-t border-border-subtle pt-4' : 'rounded-md border border-border-subtle bg-surface-raised/70 p-3'"
+    aria-labelledby="development-services-heading"
+  >
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-2">
         <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface-overlay">
           <Server class="h-3.5 w-3.5 text-accent" :stroke-width="1.75" aria-hidden="true" />
         </div>
         <div class="min-w-0">
-          <h3 id="development-services-heading" class="text-[13px] font-semibold text-text-primary">Development services</h3>
+          <h3 id="development-services-heading" ref="headingRef" tabindex="-1" class="text-[13px] font-semibold text-text-primary outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Preview services</h3>
           <p class="mt-0.5 text-[11px] leading-4 text-text-muted">Configure process routes in the universal sandbox. Listener discovery is observation-only and never opens a port automatically.</p>
         </div>
       </div>

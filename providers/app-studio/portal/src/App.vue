@@ -322,6 +322,7 @@ import type {
   ProjectPublishingMode,
   ProjectPublishingMember,
   ProviderItem,
+  ProjectDevelopmentService,
   ProjectDevelopmentServicesResponse,
   ProjectBuildConfiguration,
   ProjectComponent,
@@ -807,8 +808,16 @@ const developmentPreviewAccessBusy = ref(false)
 const developmentPreviewAccessError = ref<string | null>(null)
 const developmentPreviewOverrideURL = ref<string | null>(null)
 const developmentServicesAvailable = ref(false)
+const developmentServices = ref<ProjectDevelopmentService[]>([])
+const developmentServicesLoading = ref(false)
+const developmentServicesLoaded = ref(false)
+const developmentServicesError = ref<string | null>(null)
 const developmentPreviewService = ref('')
 const developmentPreviewServiceURL = ref('')
+const developmentServicesPanelRef = ref<{ focus: () => void } | null>(null)
+let developmentServicesSummarySerial = 0
+let developmentServicesSummaryTimer: number | undefined
+let developmentServicesSummaryInFlight = false
 const developmentPreviewAuthorizationKey = ref('')
 const developmentPreviewFrameKey = ref(0)
 const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
@@ -2510,7 +2519,10 @@ const developmentBinding = computed(() => {
 
 function handleDevelopmentServicesUpdated(response: ProjectDevelopmentServicesResponse) {
   const items = Array.isArray(response.items) ? response.items : []
+  developmentServices.value = items
   developmentServicesAvailable.value = items.length > 0
+  developmentServicesLoaded.value = true
+  developmentServicesError.value = null
   if (!items.length) {
     developmentPreviewService.value = ''
     developmentPreviewServiceURL.value = ''
@@ -2528,6 +2540,74 @@ function handleDevelopmentServicesError(_message: string) {
   // available if its binding is healthy, rather than replacing it with a
   // transient DevelopmentService catalog failure.
 }
+
+function resetDevelopmentServicesSummary() {
+  developmentServicesSummarySerial += 1
+  developmentServicesSummaryInFlight = false
+  developmentServices.value = []
+  developmentServicesAvailable.value = false
+  developmentServicesLoading.value = false
+  developmentServicesLoaded.value = false
+  developmentServicesError.value = null
+  developmentPreviewService.value = ''
+  developmentPreviewServiceURL.value = ''
+}
+
+async function loadDevelopmentServicesSummary(options: { background?: boolean } = {}) {
+  const projectName = selected.value?.name?.trim() || ''
+  if (!projectName) {
+    resetDevelopmentServicesSummary()
+    return
+  }
+  if (developmentServicesSummaryInFlight) return
+  const serial = ++developmentServicesSummarySerial
+  developmentServicesSummaryInFlight = true
+  if (!options.background || !developmentServicesLoaded.value) developmentServicesLoading.value = true
+  try {
+    const response = await api.listDevelopmentServices(props.ctx, projectName)
+    if (serial !== developmentServicesSummarySerial || selected.value?.name !== projectName) return
+    handleDevelopmentServicesUpdated(response)
+  } catch (cause) {
+    if (serial !== developmentServicesSummarySerial || selected.value?.name !== projectName) return
+    developmentServicesLoaded.value = true
+    developmentServicesError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    if (serial === developmentServicesSummarySerial) {
+      developmentServicesSummaryInFlight = false
+      developmentServicesLoading.value = false
+    }
+  }
+}
+
+function scheduleDevelopmentServicesSummaryRefresh() {
+  stopDevelopmentServicesSummaryRefresh()
+  if (!selected.value?.name) return
+  developmentServicesSummaryTimer = window.setInterval(() => {
+    if (!developmentServicesSummaryInFlight && !settingsInWorkbench.value) {
+      void loadDevelopmentServicesSummary({ background: true })
+    }
+  }, 5000)
+}
+
+function stopDevelopmentServicesSummaryRefresh() {
+  if (developmentServicesSummaryTimer !== undefined) window.clearInterval(developmentServicesSummaryTimer)
+  developmentServicesSummaryTimer = undefined
+}
+
+const developmentPreviewServiceTarget = computed(() => (
+  developmentServices.value.find(service => service.name === developmentPreviewService.value) ??
+  developmentServices.value[0] ??
+  null
+))
+
+const universalPreviewNeedsSetup = computed(() => (
+  !!selected.value &&
+  !selected.value.template &&
+  developmentServicesLoaded.value &&
+  !developmentServicesLoading.value &&
+  !developmentServicesAvailable.value &&
+  !developmentServicesError.value
+))
 
 const developmentPreviewRawURL = computed(() => {
   if (developmentServicesAvailable.value) return developmentPreviewServiceURL.value
@@ -2659,11 +2739,29 @@ const developmentPreviewAccessConfigurable = computed(() => (
   developmentPreviewAccessModes.value.includes('private') && developmentPreviewAccessModes.value.includes('public')
 ))
 const developmentPreviewUnavailableTitle = computed(() => (
-  developmentPreviewAuthorizing.value || developmentPreviewReadinessMessage.value
-    ? 'Preview is getting ready'
-    : 'Preview unavailable'
+  universalPreviewNeedsSetup.value
+    ? 'Set up your preview'
+    : developmentServicesLoading.value && !developmentServicesLoaded.value && !selected.value?.template
+      ? 'Checking preview configuration'
+      : developmentServicesError.value && !developmentServicesAvailable.value && !selected.value?.template
+        ? 'Preview status unavailable'
+        : developmentServicesAvailable.value
+          ? developmentPreviewServiceTarget.value?.error
+            ? 'Preview needs attention'
+            : `Starting ${developmentPreviewService.value || 'preview'}…`
+          : developmentPreviewAuthorizing.value || developmentPreviewReadinessMessage.value
+            ? 'Preview is getting ready'
+            : 'Preview unavailable'
 ))
 const developmentPreviewUnavailableMessage = computed(() => {
+  if (universalPreviewNeedsSetup.value) return 'Choose which process in the universal sandbox App Studio should display here.'
+  if (developmentServicesLoading.value && !developmentServicesLoaded.value && !selected.value?.template) return 'Reading the project’s preview services.'
+  if (developmentServicesError.value && !developmentServicesAvailable.value && !selected.value?.template) return developmentServicesError.value
+  if (developmentServicesAvailable.value) {
+    return developmentPreviewServiceTarget.value?.error ||
+      developmentPreviewServiceTarget.value?.process?.message ||
+      `Waiting for ${developmentPreviewService.value || 'the selected service'} to report a ready route.`
+  }
   if (developmentPreviewAuthorizing.value) return 'Checking the development runtime.'
   return developmentPreviewReadinessMessage.value || 'Development instance is not ready.'
 })
@@ -2755,6 +2853,8 @@ watch(
     // asynchronous project/catalog response can arrive. Otherwise a pending
     // default or old project's tabs could be written under the new scope.
     invalidateProjectContextState()
+    resetDevelopmentServicesSummary()
+    stopDevelopmentServicesSummaryRefresh()
     if (isCreateModelRoute.value) openLLMEditor()
     void load()
     void loadProviders()
@@ -2833,9 +2933,7 @@ watch(
     developmentPreviewAccessConverged.value = true
     developmentPreviewAccessBusy.value = false
     developmentPreviewAccessError.value = null
-    developmentServicesAvailable.value = false
-    developmentPreviewService.value = ''
-    developmentPreviewServiceURL.value = ''
+    resetDevelopmentServicesSummary()
     developmentPreviewAuthorizationError.value = null
     developmentPreviewReadinessMessage.value = null
     developmentPreviewOverrideURL.value = null
@@ -2845,6 +2943,21 @@ watch(
 		reloadDevelopmentPreviewFrame()
     reviewPanelHold.value = null
   },
+)
+
+watch(
+  () => [
+    selected.value?.name ?? '',
+    props.ctx?.token ?? '',
+    props.ctx?.tenant ?? '',
+    props.ctx?.subPath ?? '',
+  ] as const,
+  () => {
+    resetDevelopmentServicesSummary()
+    void loadDevelopmentServicesSummary()
+    scheduleDevelopmentServicesSummaryRefresh()
+  },
+  { immediate: true },
 )
 
 watch(
@@ -2981,6 +3094,8 @@ onBeforeUnmount(() => {
   clearInitializationRetry()
   clearDevelopmentPreviewAuthorizationRetry()
 	clearDevelopmentPreviewRecovery()
+  developmentServicesSummarySerial += 1
+  stopDevelopmentServicesSummaryRefresh()
   clearProjectThumbnailURLs()
   clearProjectDeletionPollTimer()
   projectDeletion.clear()
@@ -5030,6 +5145,16 @@ async function openSettings() {
     return
   }
   showSettings.value = true
+}
+
+async function openDevelopmentServicesSettings() {
+  if (!settingsProject.value) return
+  syncProjectSettingsForm()
+  openBuiltInWorkbenchTab('settings')
+  showSettings.value = true
+  await nextTick()
+  await nextTick()
+  developmentServicesPanelRef.value?.focus()
 }
 
 function openProjectsSection() {
@@ -9810,15 +9935,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             @sync="syncDevelopmentPreview"
             @open-browser="openDevelopmentPreviewInBrowser"
           />
-          <DevelopmentServicesPanel
-            v-if="selected && (!selected.template || developmentServicesAvailable)"
-            :ctx="props.ctx"
-            :project-name="selected.name"
-            :components="selected.components || []"
-            :disabled="messageStreaming"
-            @services-updated="handleDevelopmentServicesUpdated"
-            @error="handleDevelopmentServicesError"
-          />
           <div v-if="developmentSyncError || developmentPreviewAuthorizationError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive" aria-atomic="true">
             {{ developmentSyncError || developmentPreviewAuthorizationError }}
           </div>
@@ -9918,6 +10034,28 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </div>
               <div class="mt-3 text-[13px] font-semibold text-text-primary">{{ developmentPreviewUnavailableTitle }}</div>
               <div class="mt-1 text-[12px] leading-5 text-text-muted">{{ developmentPreviewUnavailableMessage }}</div>
+              <div v-if="universalPreviewNeedsSetup" class="mt-4 flex justify-center">
+                <button
+                  type="button"
+                  class="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent bg-accent px-3 text-[12px] font-semibold text-on-accent shadow-[0_0_16px_var(--color-accent-glow)] transition hover:bg-accent-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                  @click="openDevelopmentServicesSettings"
+                >
+                  <Settings2 class="h-3.5 w-3.5" :stroke-width="1.75" aria-hidden="true" />
+                  Configure preview
+                </button>
+              </div>
+              <div v-else-if="developmentServicesError && !developmentServicesAvailable && !selected?.template" class="mt-4 flex flex-wrap justify-center gap-2">
+                <button type="button" class="h-8 rounded-md border border-border-subtle bg-surface px-3 text-[12px] font-medium text-text-secondary transition hover:bg-surface-hover hover:text-text-primary" @click="loadDevelopmentServicesSummary()">Retry</button>
+                <button type="button" class="h-8 rounded-md px-3 text-[12px] font-medium text-accent transition hover:bg-accent-subtle" @click="openDevelopmentServicesSettings">Configure preview</button>
+              </div>
+              <button
+                v-else-if="developmentServicesAvailable"
+                type="button"
+                class="mt-3 rounded-md px-2 py-1 text-[12px] font-medium text-accent transition hover:bg-accent-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                @click="openDevelopmentServicesSettings"
+              >
+                Manage preview service
+              </button>
             </div>
           </div>
         </div>
@@ -10357,6 +10495,17 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 {{ developmentTemplateError || developmentTemplateStatus }}
               </div>
             </section>
+            <DevelopmentServicesPanel
+              v-if="selected && (!selected.template || developmentServicesAvailable)"
+              ref="developmentServicesPanelRef"
+              embedded
+              :ctx="props.ctx"
+              :project-name="selected.name"
+              :components="selected.components || []"
+              :disabled="messageStreaming"
+              @services-updated="handleDevelopmentServicesUpdated"
+              @error="handleDevelopmentServicesError"
+            />
             <section
               v-if="developmentPreviewAccessConfigurable"
               class="grid gap-3 border-t border-border-subtle pt-4"
