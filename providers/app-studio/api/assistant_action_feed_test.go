@@ -225,7 +225,7 @@ func TestProjectAssistantActionFeedApprovedNativeBrowserActionsAreBounded(t *tes
 			rawStatus: "succeeded",
 			kind:      projectAssistantActionFeedItemInspect,
 			status:    projectAssistantActionFeedStatusSucceeded,
-			title:     "Reviewed preview console",
+			title:     "Reviewed browser console",
 		},
 		{
 			name:      "click failed",
@@ -365,7 +365,7 @@ func TestProjectAssistantActionFeedApprovedNativeBrowserActionsSurviveMetadataRo
 	if feed[0].Kind != projectAssistantActionFeedItemInspect || feed[0].Status != projectAssistantActionFeedStatusRunning || feed[0].Title != "Inspecting preview" {
 		t.Fatalf("running snapshot = %#v", feed[0])
 	}
-	if feed[1].Kind != projectAssistantActionFeedItemInspect || feed[1].Status != projectAssistantActionFeedStatusSucceeded || feed[1].Title != "Reviewed preview console" {
+	if feed[1].Kind != projectAssistantActionFeedItemInspect || feed[1].Status != projectAssistantActionFeedStatusSucceeded || feed[1].Title != "Reviewed browser console" {
 		t.Fatalf("successful console = %#v", feed[1])
 	}
 	if feed[2].Kind != projectAssistantActionFeedItemRun || feed[2].Status != projectAssistantActionFeedStatusFailed || feed[2].Title != "Preview interaction failed" || feed[2].Diagnostic == nil {

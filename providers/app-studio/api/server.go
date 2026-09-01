@@ -135,9 +135,9 @@ type Server struct {
 	previewEdgeProbe            func(context.Context, string) error
 	edgeReadyURLs               edgeReadyURLsCache
 	previewEdgeProbeInflight    map[string]*previewEdgeProbeInflight
-	previewConsoleEnabled       bool
-	previewConsoleStore         *previewConsoleStore
-	previewConsoleSigner        *previewConsoleCapabilitySigner
+	previewBridgeEnabled        bool
+	previewBridgeStore          *previewBridgeStore
+	previewBridgeSigner         *previewBridgeCapabilitySigner
 	previewInspector            projectAssistantPreviewInspector
 	previewInspectionResolveURL func(context.Context, identity, *aiv1alpha1.Project) (string, error)
 	projectThumbnailContext     context.Context
@@ -289,7 +289,7 @@ func (s *Server) developmentSyncLock(id identity, project *aiv1alpha1.Project) *
 // Register mounts the project routes onto r. The hub backend proxy strips the
 // /services/providers/app-studio prefix, so paths are registered bare.
 func (s *Server) Register(r *mux.Router) {
-	r.HandleFunc("/metrics", s.previewConsoleMetrics).Methods(http.MethodGet)
+	r.HandleFunc("/metrics", projectAssistantMetricsHandler).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects", s.listProjects).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects", s.createProject).Methods(http.MethodPost)
 	r.HandleFunc("/api/projects/stream", s.createProjectStream).Methods(http.MethodPost)
@@ -376,9 +376,8 @@ func (s *Server) Register(r *mux.Router) {
 	r.HandleFunc("/api/projects/{project}/files", s.listProjectFiles).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/files/content", s.readProjectFile).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/authorize-development-preview", s.authorizeProjectDevelopmentPreview).Methods(http.MethodPost)
-	r.HandleFunc("/api/projects/{project}/preview-console/sessions", s.createProjectPreviewConsoleSession).Methods(http.MethodPost)
-	r.HandleFunc("/api/projects/{project}/preview-console/sessions/{session}/events", s.appendProjectPreviewConsoleEvents).Methods(http.MethodPost)
-	r.HandleFunc("/api/projects/{project}/preview-console/sessions/{session}", s.deleteProjectPreviewConsoleSession).Methods(http.MethodDelete)
+	r.HandleFunc("/api/projects/{project}/preview-bridge/sessions", s.createProjectPreviewBridgeSession).Methods(http.MethodPost)
+	r.HandleFunc("/api/projects/{project}/preview-bridge/sessions/{session}", s.deleteProjectPreviewBridgeSession).Methods(http.MethodDelete)
 	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.getProjectAssistantApprovalMode).Methods(http.MethodGet)
 	r.HandleFunc("/api/projects/{project}/assistant/approval-mode", s.patchProjectAssistantApprovalMode).Methods(http.MethodPatch)
 	r.HandleFunc("/api/projects/{project}/memory", s.getProjectMemory).Methods(http.MethodGet)

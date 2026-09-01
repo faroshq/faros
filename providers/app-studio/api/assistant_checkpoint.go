@@ -1683,8 +1683,8 @@ func projectAssistantBoundCheckpointMessages(src []chatMessage) []chatMessage {
 		start++
 	}
 	// A model-input snapshot can legitimately contain a standalone tool
-	// evidence message (for example, the scrubbed preview-console record used
-	// by the no-leakage boundary). Do not turn an all-tool snapshot into an
+	// evidence message (for example, a scrubbed transient tool record used by
+	// the no-leakage boundary). Do not turn an all-tool snapshot into an
 	// empty checkpoint merely because there is no assistant call to anchor it.
 	if start == len(src) {
 		start = len(src) - 1

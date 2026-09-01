@@ -757,7 +757,7 @@ func (s *projectEinoAssistantRunState) progressReminderPending() bool {
 func (s *projectEinoAssistantRunState) RegisterTransientToolResult(name, result string) string {
 	persistent := projectEinoAssistantPersistentToolResult(name, result)
 	baseName := projectToolBaseName(name)
-	if s == nil || (baseName != projectToolGetPreviewConsoleLogs && baseName != projectToolReadAttachment) {
+	if s == nil || baseName != projectToolReadAttachment {
 		return persistent
 	}
 
@@ -833,7 +833,7 @@ func (s *projectEinoAssistantRunState) ExpandTransientToolMessages(input []*sche
 			continue
 		}
 		switch projectToolBaseName(toolName) {
-		case projectToolGetPreviewConsoleLogs, projectToolReadAttachment:
+		case projectToolReadAttachment:
 			result, ok := s.transientToolResults[strings.TrimSpace(placeholder.TransientReference)]
 			if !ok {
 				expanded = append(expanded, message)
@@ -2395,8 +2395,7 @@ func (s *projectEinoAssistantRunState) RecordModelInput(messages []chatMessage) 
 			messages[index].Content = s.RegisterNativeBrowserReceipt(messages[index].Name, messages[index].Content)
 			continue
 		}
-		if projectToolBaseName(messages[index].Name) == projectToolGetPreviewConsoleLogs ||
-			projectToolBaseName(messages[index].Name) == projectToolReadAttachment {
+		if projectToolBaseName(messages[index].Name) == projectToolReadAttachment {
 			messages[index].Content = projectEinoAssistantPersistentToolResult(messages[index].Name, messages[index].Content)
 		}
 	}

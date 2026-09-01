@@ -889,7 +889,7 @@ func TestApplicationLocksStatefulDatabaseInputsAfterCreation(t *testing.T) {
 	}
 }
 
-func TestPreviewConsolePluginIsLimitedToBuiltInViteComponents(t *testing.T) {
+func TestPreviewBridgePluginIsLimitedToBuiltInViteComponents(t *testing.T) {
 	want := map[string]string{
 		"simple-webapp": "app",
 		"application":   "web",
@@ -926,22 +926,22 @@ func TestPreviewConsolePluginIsLimitedToBuiltInViteComponents(t *testing.T) {
 				t.Fatalf("%s/%s decode Vite shim: %v", tmpl.Name, componentName, err)
 			}
 			source := string(shim)
-			if !strings.Contains(source, "preview-console-plugin.mjs") {
+			if !strings.Contains(source, "preview-bridge-plugin.mjs") {
 				continue
 			}
 			key := tmpl.Name + "/" + componentName
 			if found[key] {
-				t.Errorf("duplicate preview console discovery for %s", key)
+				t.Errorf("duplicate preview bridge discovery for %s", key)
 			}
 			found[key] = true
-			count := strings.Count(source, "file:///faros/bin/preview-console-plugin.mjs")
+			count := strings.Count(source, "file:///faros/bin/preview-bridge-plugin.mjs")
 			references += count
 			if count != 1 {
-				t.Errorf("%s Vite shim has %d preview-console imports, want exactly 1", key, count)
+				t.Errorf("%s Vite shim has %d preview-bridge imports, want exactly 1", key, count)
 			}
 			for _, required := range []string{
-				"await import('file:///faros/bin/preview-console-plugin.mjs')",
-				"forced.plugins = [previewConsolePlugin()]",
+				"await import('file:///faros/bin/preview-bridge-plugin.mjs')",
+				"forced.plugins = [previewBridgePlugin()]",
 				"} catch (e) {",
 				"return mergeConfig(base, forced)",
 			} {
@@ -949,21 +949,21 @@ func TestPreviewConsolePluginIsLimitedToBuiltInViteComponents(t *testing.T) {
 					t.Errorf("%s/%s Vite shim lacks %q:\n%s", tmpl.Name, componentName, required, source)
 				}
 			}
-			if strings.Contains(source, "preview console bridge unavailable") {
+			if strings.Contains(source, "preview bridge unavailable") {
 				t.Errorf("%s/%s Vite shim logs while optional instrumentation is disabled", tmpl.Name, componentName)
 			}
 		}
 	}
 	if len(found) != len(want) {
-		t.Fatalf("preview console plugin components = %v, want exactly %v", found, want)
+		t.Fatalf("preview bridge plugin components = %v, want exactly %v", found, want)
 	}
 	if references != len(want) {
-		t.Errorf("preview console import references = %d, want exactly %d", references, len(want))
+		t.Errorf("preview bridge import references = %d, want exactly %d", references, len(want))
 	}
 	for templateName, componentName := range want {
 		key := templateName + "/" + componentName
 		if !found[key] {
-			t.Errorf("missing preview console plugin from %s", key)
+			t.Errorf("missing preview bridge plugin from %s", key)
 		}
 	}
 }

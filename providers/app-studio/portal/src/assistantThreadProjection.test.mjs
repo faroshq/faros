@@ -262,7 +262,7 @@ test('projects native browser actions across live updates and durable reload', a
   const consoleCompleted = {
     id: 'tool-assistant-browser-console', turnID: 'run-browser', type: 'dynamicToolCall', status: 'completed',
     assistantMessageID: 'assistant-browser', data: {
-      id: 'browser-console-1', kind: 'inspect', status: 'succeeded', title: 'Reviewed preview console',
+      id: 'browser-console-1', kind: 'inspect', status: 'succeeded', title: 'Reviewed browser console',
       severity: 'normal', sequence: 2,
     }, sequence: 3, createdAt: '2026-08-02T17:42:11Z',
   }

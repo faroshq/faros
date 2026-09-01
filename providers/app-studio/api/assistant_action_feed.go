@@ -127,9 +127,9 @@ var projectAssistantBrowserActionFeedPresentations = map[string]projectAssistant
 	},
 	browserMCPToolConsole: {
 		kind:      projectAssistantActionFeedItemInspect,
-		active:    "Reviewing preview console",
-		succeeded: "Reviewed preview console",
-		failed:    "Preview console review failed",
+		active:    "Reviewing browser console",
+		succeeded: "Reviewed browser console",
+		failed:    "Browser console review failed",
 	},
 	"browser_network_requests": {
 		kind:      projectAssistantActionFeedItemInspect,
@@ -440,12 +440,6 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 		if count, ok := projectAssistantSummaryCount(summary, "log line(s)"); ok {
 			item.Count = count
 			item.Outcome = projectAssistantCountOutcome(count, "log line", "log lines")
-		}
-	case projectToolGetPreviewConsoleLogs:
-		item.Title = projectAssistantActionLifecycleTitle(status, "Reviewing preview console", "Reviewed preview console", "Preview console review failed")
-		if count, ok := projectAssistantSummaryCount(summary, "browser console event(s)"); ok {
-			item.Count = count
-			item.Outcome = projectAssistantCountOutcome(count, "console event", "console events")
 		}
 	case projectToolRestartRuntime:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Restarting development runtime", "Restarted development runtime", "Runtime restart failed")

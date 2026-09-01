@@ -69,12 +69,12 @@ assistant:
     # a startup warning; it never selects the platform Infrastructure export.
     enabled: null
 
-# Browser-console sharing starts automatically while the embedded preview is
-# open. Until both signing fields are configured, App Studio stays available
-# but reports console instrumentation as unavailable.
+# Signed DOM annotation sharing starts automatically while the embedded preview
+# is open. Until both signing fields are configured, App Studio stays available
+# but reports the optional preview bridge as unavailable.
 # The private key signs short-lived iframe capabilities. Its matching current
 # and previous public JWKs are deployed independently with the preview bridge.
-previewConsole:
+previewBridge:
   enabled: true
   signingKeyID: ""
   signingKeySecretRef:

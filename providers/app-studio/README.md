@@ -131,9 +131,9 @@ Environment variables consumed by the binary:
 | `APP_STUDIO_ASSISTANT_MODEL_CONTEXT_TOKENS` | Active model context window used for token-pressure compaction (default `128000` when provider model metadata is unavailable). |
 | `APP_STUDIO_MCP_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verify on MCP calls (dev) |
 | `APP_STUDIO_PREVIEW_INSECURE_SKIP_TLS_VERIFY` | `true` → skip TLS verification only for preview readiness probes (local dev with a self-signed Gateway) |
-| `APP_STUDIO_PREVIEW_CONSOLE_ENABLED` | Automatically shares bounded browser-console evidence while the embedded preview is open; set `false` for a deployment-wide kill switch. |
-| `APP_STUDIO_PREVIEW_CONSOLE_SIGNING_KEY` | PEM-encoded P-256 private key used to sign short-lived ES256 iframe capabilities |
-| `APP_STUDIO_PREVIEW_CONSOLE_SIGNING_KEY_ID` | Stable key ID matching the public JWK independently deployed to the preview bridge |
+| `APP_STUDIO_PREVIEW_BRIDGE_ENABLED` | Enables the signed DOM annotation bridge for supported development previews; set `false` for a deployment-wide kill switch. |
+| `APP_STUDIO_PREVIEW_BRIDGE_SIGNING_KEY` | PEM-encoded P-256 private key used to sign short-lived ES256 iframe capabilities |
+| `APP_STUDIO_PREVIEW_BRIDGE_SIGNING_KEY_ID` | Stable key ID matching the public JWK independently deployed to the preview bridge |
 
 ## Health and readiness
 
@@ -179,9 +179,9 @@ The database container is named `faros-app-studio-postgres`, listens on
 Tiltfiles expose it as the `app-studio-db` resource, so hard-refreshing the UI
 or rebuilding the provider no longer drops prior conversation history.
 
-Both Tilt stacks also expose an `app-studio-preview-console-key` resource.
+Both Tilt stacks also expose an `app-studio-preview-bridge-key` resource.
 It atomically generates and reuses a P-256 key under
-`.kcp/app-studio-preview-console/`. The App Studio process receives the private
+`.kcp/app-studio-preview-bridge/`. The App Studio process receives the private
 key and derived key ID; Infrastructure receives only the matching public JWKS
 and propagates it into development-preview init containers. The directory is
 gitignored and uses mode `0700`; the private key uses mode `0600`. Delete that
@@ -286,8 +286,7 @@ tool calls, plans, steering, approval/input requests, and lifecycle transitions.
 Thread and turn rows are materialized projections; a turn's terminal projection
 and terminal event commit atomically. New turns reconstruct model context from
 the latest persisted compaction plus subsequent conversation evidence instead
-of dropping tool results. Reasoning, secrets, and transient preview-console
-payloads are not stored there.
+of dropping tool results. Reasoning and secrets are not stored there.
 
 Source mutations produce bounded server-generated diffs and structured
 operation/path metadata for the audit and action projections. The repository

@@ -1213,33 +1213,7 @@ func projectEinoAssistantPersistentToolResult(name, result string) string {
 		}
 		return string(persistent)
 	}
-	if baseName != projectToolGetPreviewConsoleLogs {
-		return result
-	}
-	var decoded struct {
-		Status        string `json:"status"`
-		NextSequence  uint64 `json:"nextSequence,omitempty"`
-		DroppedCount  int    `json:"droppedCount,omitempty"`
-		ReceivedCount int    `json:"receivedCount,omitempty"`
-		RedactedCount int    `json:"redactedCount,omitempty"`
-		Summary       string `json:"summary,omitempty"`
-	}
-	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
-		return `{"status":"unavailable","summary":"transient preview console result omitted from persistence"}`
-	}
-	persistent, err := json.Marshal(map[string]any{
-		"status":         strings.TrimSpace(decoded.Status),
-		"nextSequence":   decoded.NextSequence,
-		"droppedCount":   decoded.DroppedCount,
-		"receivedCount":  decoded.ReceivedCount,
-		"redactedCount":  decoded.RedactedCount,
-		"summary":        strings.TrimSpace(decoded.Summary),
-		"transientEvent": true,
-	})
-	if err != nil {
-		return `{"status":"unavailable","summary":"transient preview console result omitted from persistence"}`
-	}
-	return string(persistent)
+	return result
 }
 
 func projectAssistantMutationFromResult(name, result string) *projectAssistantMutation {

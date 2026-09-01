@@ -59,11 +59,11 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 | `assistant.runSandbox.mode` | `off` | Coding sandbox policy: off disables it, byo-only fails closed until a scoped BYO binding resolves, and force uses the platform provider only with explicit development mode. |
 | `assistant.runSandbox.developmentMode` | `false` | Explicit development-only authority required by force mode. |
 | `assistant.runSandbox.enabled` | `null` | Deprecated boolean. true maps to byo-only with a startup warning. |
-| `previewConsole` |  | Browser-console sharing starts automatically while the embedded preview is open. Until both signing fields are configured, App Studio stays available but reports console instrumentation as unavailable. The private key signs short-lived iframe capabilities. Its matching current and previous public… |
-| `previewConsole.enabled` | `true` |  |
-| `previewConsole.signingKeyID` | `""` |  |
-| `previewConsole.signingKeySecretRef.name` | `""` |  |
-| `previewConsole.signingKeySecretRef.key` | `private-key.pem` |  |
+| `previewBridge` |  | Signed DOM annotation sharing starts automatically while the embedded preview is open. Until both signing fields are configured, App Studio stays available but reports the optional preview bridge as unavailable. The private key signs short-lived iframe capabilities. Its matching current and previous public… |
+| `previewBridge.enabled` | `true` |  |
+| `previewBridge.signingKeyID` | `""` |  |
+| `previewBridge.signingKeySecretRef.name` | `""` |  |
+| `previewBridge.signingKeySecretRef.key` | `private-key.pem` |  |
 | `store` |  | App Studio no longer holds a kubeconfig to the runtime cluster. The development data plane (sync, logs, restart, preview readiness) is served by the infrastructure provider as subresources on the project's template instance, reached through the hub as the calling user. See docs/app-studio-runtime… |
 | `store.databaseURL` | `""` |  |
 | `store.databaseURLSecretRef.name` | `""` |  |

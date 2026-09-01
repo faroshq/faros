@@ -109,9 +109,9 @@ test('keeps annotation visible as a first-class preview action with an anchored 
 
 test('renders hover comments in a parent-owned, pointer-transparent preview overlay', async () => {
   const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
-  assert.match(app, /type PreviewConsoleAnnotationPinHover/)
+  assert.match(app, /type PreviewBridgeAnnotationPinHover/)
   assert.match(app, /onAnnotationPinHover: handleDevelopmentPreviewAnnotationPinHover/)
-  assert.match(app, /function handleDevelopmentPreviewAnnotationPinHover\(hover: PreviewConsoleAnnotationPinHover\)/)
+  assert.match(app, /function handleDevelopmentPreviewAnnotationPinHover\(hover: PreviewBridgeAnnotationPinHover\)/)
   assert.match(app, /hover\.pagePath !== pagePath/)
   assert.match(app, /candidate\.pagePath === pagePath/)
   const hoverHandler = app.slice(app.indexOf('function handleDevelopmentPreviewAnnotationPinHover'), app.indexOf('function toggleDevelopmentPreviewAnnotation'))

@@ -102,7 +102,7 @@ on the owner.
 - **Route split** (from the audit's flow map):
   - *Forwarded (workspace/run-touching)*: turn start, steer, interrupt,
     approvals/resume, hydrate-workspace, template switch, scaffold reseed,
-    dev-sync, file browser, promote gate, preview-console, preview
+    dev-sync, file browser, promote gate, preview-bridge, preview
     interaction (browser lock).
   - *Served anywhere (store/CR-backed)*: SSE event streams, thread/message
     listing, project listing, health, portal assets, MCP surfaces that only
@@ -141,7 +141,7 @@ work is inherently partitioned by project, not singleton.
 - The orphan-interrupt cross-kill (F1) and the non-mutual Busy gate (F5).
 - The chart's `replicaCount != 1` hard fail and the RWO PVC.
 - The empty-workspace dev-sync wipe (F3) — non-owners never touch workspaces.
-- Preview-console session breakage (F6) — console routes ride the pin.
+- Preview-bridge session breakage (F6) — bridge routes ride the pin.
 
 These mechanisms do **not** delete the shared-browser race: projects in one
 workspace can have different owners while still targeting the same Browser.
@@ -155,7 +155,7 @@ The chart's single-replica guard remains the safety boundary.
 | B | Internal listener + project claims + forwarding middleware; revision fence to durable side | Yes — forwarding is a no-op single-replica |
 | C | Claim-driven hydration, `emptyDir` default, reconciler owner-gating | Makes workspace/run state replica-aware, but does not unlock N replicas by itself |
 | D | Distributed or durable ownership for the workspace-wide Playwright Browser | Required before allowing `replicaCount > 1` |
-| E (optional) | WIP snapshot-to-git; preview-console to shared store if forwarding proves noisy | Hardening |
+| E (optional) | WIP snapshot-to-git; preview-bridge to shared store if forwarding proves noisy | Hardening |
 
 ## Open decisions
 

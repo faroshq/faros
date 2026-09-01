@@ -336,11 +336,11 @@ local_resource(
 
 # --- providers-app-studio ---
 local_resource(
-    'app-studio-preview-console-key',
-    cmd='make app-studio-preview-console-dev-key',
+    'app-studio-preview-bridge-key',
+    cmd='make app-studio-preview-bridge-dev-key',
     deps=[
         'Makefile',
-        'providers/app-studio/hack/preview-console-dev-keys.mjs',
+        'providers/app-studio/hack/preview-bridge-dev-keys.mjs',
     ],
     labels=['providers-app-studio'],
 )
@@ -385,7 +385,7 @@ local_resource(
         'providers/app-studio/.env',
     ],
     resource_deps=(
-        ['hub', 'app-studio-db', 'dev-agent-image', 'app-studio-preview-console-key']
+        ['hub', 'app-studio-db', 'dev-agent-image', 'app-studio-preview-bridge-key']
         + (['universal-dev-image'] if app_studio_sandbox_force else [])
     ),
     readiness_probe=probe(
@@ -769,7 +769,7 @@ infrastructure_resource_deps = [
     'preview-gateway-up',
     'app-studio-preview-dns',
     'app-studio-preview-port-forward',
-    'app-studio-preview-console-key',
+    'app-studio-preview-bridge-key',
 ]
 if app_studio_sandbox_force:
     infrastructure_sandbox_digest_script = ('''

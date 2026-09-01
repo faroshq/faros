@@ -43,7 +43,7 @@ test('keeps approved browser observations and interactions visible while hiding 
     severity: 'attention', sequence: 1,
   }
   const consoleReview = {
-    id: 'browser-console-1', kind: 'inspect', status: 'succeeded', title: 'Reviewed preview console',
+    id: 'browser-console-1', kind: 'inspect', status: 'succeeded', title: 'Reviewed browser console',
     severity: 'normal', sequence: 2,
   }
   const click = {
