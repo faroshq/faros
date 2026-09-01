@@ -203,6 +203,101 @@ func TestCreateProjectLivePathListsCatalogCallsPreflightOnceAndCreatesInstance(t
 	}
 }
 
+func TestCreateProjectExplicitNoTemplatePreservesReviewedNameWithoutPreflight(t *testing.T) {
+	dynamicClient := newProjectCreationTestDynamicClient(codeConnectionObjectWithValidated("github", metav1.ConditionTrue))
+	dynamicClient.PrependReactor("create", "projects", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		action.(k8stesting.CreateAction).GetObject().(metav1.Object).SetUID("project-uid-reviewed-empty")
+		return false, nil, nil
+	})
+	client := asclient.NewFromDynamic(dynamicClient)
+	calls := 0
+	server := &Server{
+		store: store.NewMemoryStore(),
+		projectCreatePreflight: func(_ context.Context, _ *asclient.Client, _ string, _ []projectDevelopmentTemplateView) (projectCreatePreflight, error) {
+			calls++
+			return projectCreatePreflight{
+				Naming:       projectNamingResult{DisplayName: "Generated Name", RepositoryName: "generated-name"},
+				TemplateName: "application",
+			}, nil
+		},
+	}
+	created, err := server.createProjectFromRequest(
+		context.Background(),
+		client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{
+			Prompt:        "Keep this project empty.",
+			DisplayName:   "Reviewed Empty Project",
+			ConnectionRef: "github",
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("createProjectFromRequest: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("preflight calls = %d, want none for reviewed explicit no-template creation", calls)
+	}
+	if created.Spec.DisplayName != "Reviewed Empty Project" || created.Spec.Repository.Name != "reviewed-empty-project" {
+		t.Fatalf("created naming = display %q repository %q, want reviewed values", created.Spec.DisplayName, created.Spec.Repository.Name)
+	}
+	if created.Spec.Template != nil || len(created.Spec.Environments) != 1 || len(created.Spec.Environments[0].Bindings) != 0 {
+		t.Fatalf("created template/environments = %+v %+v, want template-less unbound development environment", created.Spec.Template, created.Spec.Environments)
+	}
+}
+
+func TestCreateProjectTemplateInferencePreservesReviewedName(t *testing.T) {
+	dynamicClient := newProjectCreationTestDynamicClient(
+		codeConnectionObjectWithValidated("github", metav1.ConditionTrue),
+		applicationTemplateObject(),
+	)
+	dynamicClient.PrependReactor("create", "projects", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		action.(k8stesting.CreateAction).GetObject().(metav1.Object).SetUID("project-uid-reviewed-application")
+		return false, nil, nil
+	})
+	client := asclient.NewFromDynamic(dynamicClient)
+	calls := 0
+	server := &Server{
+		store: store.NewMemoryStore(),
+		projectCreatePreflight: func(_ context.Context, _ *asclient.Client, _ string, templates []projectDevelopmentTemplateView) (projectCreatePreflight, error) {
+			calls++
+			if len(templates) != 1 || templates[0].Name != "application" {
+				t.Fatalf("preflight templates = %+v, want application", templates)
+			}
+			return projectCreatePreflight{
+				Naming:       projectNamingResult{DisplayName: "Generated Name", RepositoryName: "generated-name"},
+				TemplateName: "application",
+			}, nil
+		},
+	}
+	created, err := server.createProjectFromRequest(
+		context.Background(),
+		client,
+		identity{user: "alice", orgUUID: "org-a", workspaceUUID: "ws-1", tenantPath: "root:org-a:ws-1"},
+		CreateProjectRequest{
+			Prompt:                   "Build an application.",
+			DisplayName:              "Reviewed Application",
+			ConnectionRef:            "github",
+			InferDevelopmentTemplate: true,
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("createProjectFromRequest: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("preflight calls = %d, want one template-inference call", calls)
+	}
+	if created.Spec.DisplayName != "Reviewed Application" || created.Spec.Repository.Name != "reviewed-application" {
+		t.Fatalf("created naming = display %q repository %q, want reviewed values", created.Spec.DisplayName, created.Spec.Repository.Name)
+	}
+	if created.Spec.Template == nil || created.Spec.Template.Name != "application" {
+		t.Fatalf("created template = %+v, want inferred application", created.Spec.Template)
+	}
+}
+
 func TestCreateProjectLivePathSurfacesCatalogListErrorBeforePreflight(t *testing.T) {
 	dynamicClient := fake.NewSimpleDynamicClientWithCustomListKinds(
 		runtime.NewScheme(),

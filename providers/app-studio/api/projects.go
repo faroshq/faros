@@ -361,13 +361,14 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 	if preflight != nil {
 		req.DisplayName = preflight.Naming.DisplayName
 		repoBase = preflight.Naming.RepositoryName
-	} else if req.Prompt != "" && !(req.DisplayName != "" && selectedTemplate != nil) {
-		// Skip inference when the caller already committed both a name and a
-		// template — the wizard's blueprint step (POST /api/projects/plan)
-		// already ran the preflight, so re-running it here would double the
-		// LLM round-trip (a visible stall on "Planning project") and clobber
-		// the name the user just confirmed. Only infer when something is
-		// genuinely missing.
+	} else if req.Prompt != "" && (req.DisplayName == "" || (selectedTemplate == nil && req.InferDevelopmentTemplate)) {
+		// The wizard's blueprint step (POST /api/projects/plan) already ran
+		// preflight. A reviewed display name plus disabled template inference
+		// is therefore complete, including the explicit no-template choice.
+		// Re-run preflight only when naming is missing or the caller explicitly
+		// authorized template inference. Even in the latter case, preserve a
+		// supplied name: preflight may fill the template, but must not clobber
+		// the value the user reviewed.
 		if err := emitProjectCreationStatus(onStatus, "Planning project"); err != nil {
 			return nil, err
 		}
@@ -391,8 +392,10 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 			return nil, err
 		}
 		preflight = &generated
-		req.DisplayName = generated.Naming.DisplayName
-		repoBase = generated.Naming.RepositoryName
+		if req.DisplayName == "" {
+			req.DisplayName = generated.Naming.DisplayName
+			repoBase = generated.Naming.RepositoryName
+		}
 	}
 	if req.DisplayName == "" {
 		return nil, newValidationError("displayName is required")
