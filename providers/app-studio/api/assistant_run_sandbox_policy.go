@@ -42,23 +42,29 @@ const (
 	projectAssistantRunSandboxTemplateEnv     = "APP_STUDIO_RUN_SANDBOX_TEMPLATE"
 	projectAssistantRunSandboxDefaultTemplate = "universal-coding-sandbox"
 	projectAssistantRunSandboxHardTTL         = 12 * time.Hour
-	// Cached project sandboxes are retained until their hard lifetime. The
-	// infrastructure Template and this coordinator use the same cap; an idle
-	// cache may be evicted for quota pressure, but never merely after 30m.
-	projectAssistantRunSandboxIdleTTL            = 12 * time.Hour
-	projectAssistantRunSandboxMaxActive          = 2
-	projectAssistantRunSandboxWorkspaceVerb      = "workspace"
-	projectAssistantRunSandboxResource           = "instances"
-	projectAssistantRunSandboxAPIVersion         = "infrastructure.faros.sh/v1alpha1"
-	projectAssistantRunSandboxKind               = "Instance"
-	projectAssistantRunSandboxEnvironment        = "assistant-run"
-	projectAssistantRunSandboxBinding            = "assistant-run"
-	projectAssistantRunSandboxNamePrefix         = "as-run-"
-	projectAssistantRunSandboxMaxChanges         = 128
-	projectAssistantRunSandboxMaxChangeBytes     = 8 << 20
-	projectAssistantRunSandboxLabel              = "faros.sh/app-studio-run-sandbox"
-	projectAssistantRunSandboxIdleExpiry         = "faros.sh/app-studio-run-sandbox-idle-expires-at"
-	projectAssistantRunSandboxHardExpiry         = "faros.sh/app-studio-run-sandbox-hard-expires-at"
+	// This is the maximum duration of one assistant-run claim lease. The
+	// project-scoped Instance itself is durable; Infrastructure owns its idle
+	// suspension policy and App Studio never treats that policy as an Instance
+	// deletion/expiry signal.
+	projectAssistantRunSandboxIdleTTL        = 12 * time.Hour
+	projectAssistantRunSandboxMaxActive      = 2
+	projectAssistantRunSandboxWorkspaceVerb  = "workspace"
+	projectAssistantRunSandboxResource       = "instances"
+	projectAssistantRunSandboxAPIVersion     = "infrastructure.faros.sh/v1alpha1"
+	projectAssistantRunSandboxKind           = "Instance"
+	projectAssistantRunSandboxEnvironment    = "assistant-run"
+	projectAssistantRunSandboxBinding        = "assistant-run"
+	projectAssistantRunSandboxNamePrefix     = "as-run-"
+	projectAssistantRunSandboxMaxChanges     = 128
+	projectAssistantRunSandboxMaxChangeBytes = 8 << 20
+	projectAssistantRunSandboxLabel          = "faros.sh/app-studio-run-sandbox"
+	projectAssistantRunSandboxIdleExpiry     = "faros.sh/app-studio-run-sandbox-idle-expires-at"
+	projectAssistantRunSandboxHardExpiry     = "faros.sh/app-studio-run-sandbox-hard-expires-at"
+	// Legacy duration annotations were written by the short-lived run-cache
+	// implementation. They are removed when an old Instance is claimed so an
+	// Infrastructure lifecycle reconciler cannot mistake them for policy.
+	projectAssistantRunSandboxLegacyIdleTTL      = "faros.sh/app-studio-run-sandbox-idle"
+	projectAssistantRunSandboxLegacyHardTTL      = "faros.sh/app-studio-run-sandbox-hard"
 	projectAssistantRunSandboxClaimOwner         = "faros.sh/app-studio-run-sandbox-claim-owner"
 	projectAssistantRunSandboxClaimExpiry        = "faros.sh/app-studio-run-sandbox-claim-expires-at"
 	projectAssistantRunSandboxCacheGeneration    = "faros.sh/app-studio-run-sandbox-cache-generation"

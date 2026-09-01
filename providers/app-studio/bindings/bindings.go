@@ -34,6 +34,18 @@ import (
 // ProjectLabel attributes an instance back to its Project.
 const ProjectLabel = "app-studio.faros.sh/project"
 
+const (
+	// RetainedLabel marks a provider resource detached from a Project by an
+	// explicit Retain lifecycle policy.
+	RetainedLabel = "app-studio.faros.sh/retained"
+	// RetainedProjectLabel preserves the former Project identity for operators
+	// after its owner reference has been removed.
+	RetainedProjectLabel = "app-studio.faros.sh/retained-project"
+	// RetainedEnvironmentLabel preserves the former environment identity for
+	// operators after retention detaches the resource.
+	RetainedEnvironmentLabel = "app-studio.faros.sh/retained-environment"
+)
+
 // TemplateLabel attributes an instance to its catalog Template, matching the
 // infrastructure provider's own convention so its portal/MCP listings group
 // instances correctly.
@@ -53,6 +65,46 @@ const (
 	// PreviewAccessPublic serves the application without platform sign-in.
 	PreviewAccessPublic = "public"
 )
+
+// TemplateName resolves the Template selected by one binding. Binding-level
+// selection is canonical; the Project-level Template is retained as a
+// compatibility fallback for Projects written before per-binding selection
+// existed.
+func TemplateName(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) string {
+	if binding.TemplateRef != nil {
+		// Presence is authoritative even when the value is malformed. This
+		// prevents a bad binding-level update from silently falling back to a
+		// different Project-level Template.
+		return strings.TrimSpace(binding.TemplateRef.Name)
+	}
+	if p != nil && p.Spec.Template != nil {
+		return strings.TrimSpace(p.Spec.Template.Name)
+	}
+	return ""
+}
+
+// BindingDeletionPolicy returns the explicit lifecycle policy for a binding,
+// defaulting to Delete to preserve the behavior of existing Projects. The
+// Infrastructure provider may use the binding policy as an input when it
+// applies provider-specific stateful defaults.
+func BindingDeletionPolicy(env aiv1alpha1.ProjectEnvironmentSpec, binding aiv1alpha1.ProjectProviderBindingSpec) aiv1alpha1.ProjectBindingDeletionPolicy {
+	if binding.Lifecycle != nil {
+		switch binding.Lifecycle.DeletionPolicy {
+		case aiv1alpha1.ProjectBindingDeletionPolicyRetain:
+			return aiv1alpha1.ProjectBindingDeletionPolicyRetain
+		case aiv1alpha1.ProjectBindingDeletionPolicyDelete:
+			return aiv1alpha1.ProjectBindingDeletionPolicyDelete
+		}
+	}
+	_ = env // The compatibility default is independent of environment mode.
+	return aiv1alpha1.ProjectBindingDeletionPolicyDelete
+}
+
+// ShouldDeleteBinding reports whether the Project controller should delete the
+// provider resource when its binding is torn down.
+func ShouldDeleteBinding(env aiv1alpha1.ProjectEnvironmentSpec, binding aiv1alpha1.ProjectProviderBindingSpec) bool {
+	return BindingDeletionPolicy(env, binding) != aiv1alpha1.ProjectBindingDeletionPolicyRetain
+}
 
 const (
 	ActionsExchangeURLField = "farosActionsExchangeURL"
@@ -496,10 +548,12 @@ func IsInvalidBinding(err error) bool {
 }
 
 // Desired builds the desired instance object for a binding: the flattened
-// Instance shape, with the Project's template name under spec.template and
-// the binding values under spec.values. Returns the GVR alongside so callers
-// can address the right resource. Errors are InvalidBindingError — the spec,
-// not the world, is wrong.
+// Instance shape, with the binding's effective Template name under
+// spec.template and the binding values under spec.values. Binding-level
+// templateRef wins; Project.spec.template is used only for legacy/simple-flow
+// bindings. Returns the GVR alongside so callers can address the right
+// resource. Errors are InvalidBindingError — the spec, not the world, is
+// wrong.
 func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) (*unstructured.Unstructured, schema.GroupVersionResource, error) {
 	gvr, err := GVR(binding.ResourceRef)
 	if err != nil {
@@ -513,12 +567,9 @@ func Desired(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpe
 	if name == "" {
 		return nil, schema.GroupVersionResource{}, &InvalidBindingError{Err: fmt.Errorf("provider binding %q has no resource name", binding.Name)}
 	}
-	templateName := ""
-	if p != nil && p.Spec.Template != nil {
-		templateName = strings.TrimSpace(p.Spec.Template.Name)
-	}
+	templateName := TemplateName(p, binding)
 	if templateName == "" {
-		return nil, schema.GroupVersionResource{}, &InvalidBindingError{Err: fmt.Errorf("provider binding %q: project names no template — spec.template is required on the instance", binding.Name)}
+		return nil, schema.GroupVersionResource{}, &InvalidBindingError{Err: fmt.Errorf("provider binding %q: no effective template — binding.templateRef or project.spec.template is required on the instance", binding.Name)}
 	}
 	vals := map[string]any{}
 	maps.Copy(vals, values)

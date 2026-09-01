@@ -20,10 +20,10 @@ You may obtain a copy of the License at
 // so this reconciler never reads Templates (they ride virtual storage with a
 // separate identity).
 //
-// Instances the spec no longer references are NOT swept here: their GVR is
-// unknowable once the spec forgot it (kinds are per-template and dynamic).
-// The template-switch handler deletes replaced instances while it still holds
-// the old spec, and the ownerReference covers Project deletion.
+// Removed provider resources are swept from the controller-maintained binding
+// inventory, which retains their dynamic GVR and lifecycle policy after spec
+// deletion. Derived Infrastructure Connections have a fixed GVK and are swept
+// by Project identity labels.
 package project
 
 import (
@@ -38,6 +38,7 @@ import (
 	"github.com/kcp-dev/sdk/apis/core"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -187,7 +188,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 
 	bound := providerBindings(&p)
 	hasRepository := p.Spec.Repository != nil && p.Spec.Repository.RepositoryRef != ""
-	if len(bound) == 0 && !hasRepository {
+	hasInventory := len(p.Status.BindingInventory) > 0
+	hasConnections := projectHasEnvironmentConnections(&p)
+	if len(bound) == 0 && !hasRepository && !hasInventory && !hasConnections {
 		// Nothing to lifecycle yet.
 		return ctrl.Result{}, nil
 	}
@@ -224,12 +227,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("tenant client: %w", err)
 	}
+	if err := cleanupRemovedBindings(ctx, tc, &p, bound); err != nil {
+		return ctrl.Result{}, fmt.Errorf("cleaning removed provider bindings: %w", err)
+	}
 
 	// Converge each bound instance, folding observed state per environment.
 	allReady := true
 	instancesNeedRetry := false
+	resolvedInstances := make(map[string]map[string]*unstructured.Unstructured, len(bound))
 	liveStatuses := make([]aiv1alpha1.ProjectEnvironmentStatus, 0, len(bound))
 	for _, env := range bound {
+		resolvedInstances[env.spec.Name] = map[string]*unstructured.Unstructured{}
 		bindingStatuses := make([]aiv1alpha1.ProjectProviderBindingStatus, 0, len(env.bindings))
 		for _, binding := range env.bindings {
 			effectiveBinding := binding
@@ -278,6 +286,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 				continue
 			}
 			st := bindings.StatusFromObject(binding, obj)
+			resolvedInstances[env.spec.Name][binding.Name] = obj
 			if st.Phase != "Ready" {
 				allReady = false
 			}
@@ -286,12 +295,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		liveStatuses = append(liveStatuses, bindings.FoldEnvironment(env.spec, bindingStatuses))
 	}
 
+	connectionStatuses, connectionsNeedRetry, err := reconcileProjectConnections(ctx, tc, &p, resolvedInstances)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling project connections: %w", err)
+	}
+	liveStatuses = mergeProjectConnectionStatuses(liveStatuses, p.Spec.Environments, p.Status.Environments, connectionStatuses)
+	if connectionsNeedRetry {
+		allReady = false
+	}
+
 	// Mirror, touching only the environments the reconciler owns (other
 	// status fields — Phase, UpdatedAt, artifact-env entries — belong to the
 	// API layer).
 	next := bindings.MergeEnvironmentStatuses(p.Status.Environments, liveStatuses)
-	if !environmentStatusesEqual(p.Status.Environments, next) {
+	nextInventory := bindingInventory(&p, bound)
+	if !environmentStatusesEqual(p.Status.Environments, next) || !bindingInventoryEqual(p.Status.BindingInventory, nextInventory) {
 		p.Status.Environments = next
+		p.Status.BindingInventory = nextInventory
 		if err := c.Status().Update(ctx, &p); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -574,9 +594,12 @@ func (r *Reconciler) ensureInstance(ctx context.Context, c client.Client, p *aiv
 	return nil, fmt.Errorf("instance convergence retry budget exhausted")
 }
 
-// finalize deletes bound instances, then releases the finalizer. The
-// infrastructure provider's template owns the runtime namespace and
-// garbage-collects every materialized workload when the instance goes away.
+// finalize deletes bound instances according to their lifecycle policy, then
+// releases the finalizer. Retained instances are detached from the Project
+// owner reference before this Project disappears, so Kubernetes garbage
+// collection cannot remove them after the fact. The infrastructure provider's
+// template owns the runtime namespace and garbage-collects every materialized
+// workload when a deleted instance goes away.
 func (r *Reconciler) finalize(ctx context.Context, c client.Client, p *aiv1alpha1.Project, clusterName string) (ctrl.Result, error) {
 	instanceFinalizer := controllerutil.ContainsFinalizer(p, finalizer)
 	attachmentFinalizer := controllerutil.ContainsFinalizer(p, store.AttachmentStorageFinalizer)
@@ -605,37 +628,32 @@ func (r *Reconciler) finalize(ctx context.Context, c client.Client, p *aiv1alpha
 		}
 	}
 	if instanceFinalizer {
-		if bound := providerBindings(p); len(bound) > 0 {
-			// Deletion goes through the tenant-path client like every other
-			// instance write. Blocking on the identity here is deliberate: the
-			// old claimed-VW path treated an unserved resource's 404 as "already
-			// gone" and released the finalizer over live instances.
-			token, err := r.ensureIdentity(ctx, c, p)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("project identity for teardown: %w", err)
+		bound := providerBindings(p)
+		// Teardown always obtains the tenant-path client, even when spec and
+		// binding inventory are empty: a derived Connection can still be waiting
+		// on its Infrastructure finalizer after its logical intent was removed.
+		token, err := r.ensureIdentity(ctx, c, p)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("project identity for teardown: %w", err)
+		}
+		if token == "" {
+			return ctrl.Result{RequeueAfter: requeueInterval}, nil
+		}
+		tc, err := r.tenantClient(clusterName, token, c)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("tenant client for teardown: %w", err)
+		}
+		if len(bound) > 0 || len(p.Status.BindingInventory) > 0 {
+			if err := teardownProviderBindings(ctx, tc, p, bound); err != nil {
+				return ctrl.Result{}, fmt.Errorf("tearing down provider bindings: %w", err)
 			}
-			if token == "" {
-				return ctrl.Result{RequeueAfter: requeueInterval}, nil
-			}
-			tc, err := r.tenantClient(clusterName, token, c)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("tenant client for teardown: %w", err)
-			}
-			for _, env := range bound {
-				for _, binding := range env.bindings {
-					want, _, err := bindings.Desired(p, binding)
-					if err != nil {
-						// Un-buildable desired state also means nothing was created.
-						continue
-					}
-					obj := &unstructured.Unstructured{}
-					obj.SetGroupVersionKind(want.GroupVersionKind())
-					obj.SetName(want.GetName())
-					if err := tc.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-						return ctrl.Result{}, fmt.Errorf("deleting instance for binding %q: %w", binding.Name, err)
-					}
-				}
-			}
+		}
+		connectionsPending, err := deleteProjectConnections(ctx, tc, p)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("tearing down project connections: %w", err)
+		}
+		if connectionsPending {
+			return ctrl.Result{RequeueAfter: requeueInterval}, nil
 		}
 	}
 	if instanceFinalizer {
@@ -645,6 +663,236 @@ func (r *Reconciler) finalize(ctx context.Context, c client.Client, p *aiv1alpha
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// cleanupRemovedBindings uses the controller-maintained status inventory to
+// lifecycle resources whose binding disappeared from spec. Dynamic provider
+// kinds cannot be rediscovered from the new spec, so the inventory retains the
+// complete GVR/name until cleanup has succeeded.
+func cleanupRemovedBindings(ctx context.Context, c client.Client, p *aiv1alpha1.Project, bound []boundEnv) error {
+	if p == nil || len(p.Status.BindingInventory) == 0 {
+		return nil
+	}
+	current := map[string]struct{}{}
+	for _, env := range bound {
+		for _, binding := range env.bindings {
+			if key := bindingIdentity(p, env.spec.Name, binding); key != "" {
+				current[key] = struct{}{}
+			}
+		}
+	}
+	for _, item := range p.Status.BindingInventory {
+		if key := inventoryIdentity(item); key != "" {
+			if _, stillBound := current[key]; stillBound {
+				continue
+			}
+		}
+		obj, err := objectForResourceRef(item.ResourceRef)
+		if err != nil {
+			return fmt.Errorf("binding %q in environment %q: %w", item.Binding, item.Environment, err)
+		}
+		if err := lifecycleProviderObject(ctx, c, obj, p, item.Environment, item.DeletionPolicy, item.Binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// teardownProviderBindings handles both currently-declared bindings and stale
+// inventory entries during Project deletion. The inventory pass is deduped so
+// a binding observed in both places is handled exactly once.
+func teardownProviderBindings(ctx context.Context, c client.Client, p *aiv1alpha1.Project, bound []boundEnv) error {
+	current := map[string]struct{}{}
+	for _, env := range bound {
+		for _, binding := range env.bindings {
+			key := bindingIdentity(p, env.spec.Name, binding)
+			if key != "" {
+				current[key] = struct{}{}
+			}
+			obj, err := objectForBinding(p, binding)
+			if err != nil {
+				// A malformed binding could not have been created by this
+				// controller, so there is no object identity to tear down.
+				continue
+			}
+			if err := lifecycleProviderObject(ctx, c, obj, p, env.spec.Name, bindings.BindingDeletionPolicy(env.spec, binding), binding.Name); err != nil {
+				return err
+			}
+		}
+	}
+	for _, item := range p.Status.BindingInventory {
+		if key := inventoryIdentity(item); key != "" {
+			if _, handled := current[key]; handled {
+				continue
+			}
+		}
+		obj, err := objectForResourceRef(item.ResourceRef)
+		if err != nil {
+			return fmt.Errorf("inventory binding %q in environment %q: %w", item.Binding, item.Environment, err)
+		}
+		if err := lifecycleProviderObject(ctx, c, obj, p, item.Environment, item.DeletionPolicy, item.Binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lifecycleProviderObject(ctx context.Context, c client.Client, obj *unstructured.Unstructured, p *aiv1alpha1.Project, environment string, policy aiv1alpha1.ProjectBindingDeletionPolicy, bindingName string) error {
+	if policy == aiv1alpha1.ProjectBindingDeletionPolicyRetain {
+		if err := retainInstance(ctx, c, obj, p, environment); err != nil {
+			return fmt.Errorf("retaining instance for binding %q: %w", bindingName, err)
+		}
+		return nil
+	}
+	if err := c.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting instance for binding %q: %w", bindingName, err)
+	}
+	return nil
+}
+
+func objectForBinding(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) (*unstructured.Unstructured, error) {
+	ref := normalizedResourceRef(p, binding)
+	return objectForResourceRef(ref)
+}
+
+func objectForResourceRef(ref *aiv1alpha1.ProjectProviderResourceReference) (*unstructured.Unstructured, error) {
+	if ref == nil {
+		return nil, fmt.Errorf("resourceRef is required")
+	}
+	if _, err := bindings.GVR(ref); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(ref.Name)
+	if name == "" {
+		return nil, fmt.Errorf("resourceRef.name is required for lifecycle cleanup")
+	}
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion(strings.TrimSpace(ref.APIVersion))
+	obj.SetKind(strings.TrimSpace(ref.Kind))
+	obj.SetName(name)
+	return obj, nil
+}
+
+func normalizedResourceRef(p *aiv1alpha1.Project, binding aiv1alpha1.ProjectProviderBindingSpec) *aiv1alpha1.ProjectProviderResourceReference {
+	if binding.ResourceRef == nil {
+		return nil
+	}
+	ref := *binding.ResourceRef
+	if strings.TrimSpace(ref.Name) == "" {
+		values, err := bindings.Values(binding)
+		if err != nil {
+			return nil
+		}
+		ref.Name = bindings.ResourceName(p, binding, values)
+	}
+	return &ref
+}
+
+func bindingIdentity(p *aiv1alpha1.Project, environment string, binding aiv1alpha1.ProjectProviderBindingSpec) string {
+	ref := normalizedResourceRef(p, binding)
+	return resourceIdentity(environment, binding.Provider, binding.Name, ref)
+}
+
+func inventoryIdentity(item aiv1alpha1.ProjectBindingInventoryStatus) string {
+	return resourceIdentity(item.Environment, item.Provider, item.Binding, item.ResourceRef)
+}
+
+func resourceIdentity(environment, provider, binding string, ref *aiv1alpha1.ProjectProviderResourceReference) string {
+	if ref == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(environment),
+		strings.TrimSpace(provider),
+		strings.TrimSpace(binding),
+		strings.TrimSpace(ref.APIVersion),
+		strings.TrimSpace(ref.Kind),
+		strings.TrimSpace(ref.Resource),
+		strings.TrimSpace(ref.Name),
+	}, "\x00")
+}
+
+func bindingInventory(p *aiv1alpha1.Project, bound []boundEnv) []aiv1alpha1.ProjectBindingInventoryStatus {
+	var out []aiv1alpha1.ProjectBindingInventoryStatus
+	for _, env := range bound {
+		for _, binding := range env.bindings {
+			ref := normalizedResourceRef(p, binding)
+			if ref == nil || strings.TrimSpace(ref.Name) == "" {
+				continue
+			}
+			refCopy := *ref
+			out = append(out, aiv1alpha1.ProjectBindingInventoryStatus{
+				Environment:    env.spec.Name,
+				Binding:        binding.Name,
+				Provider:       binding.Provider,
+				ResourceRef:    &refCopy,
+				DeletionPolicy: bindings.BindingDeletionPolicy(env.spec, binding),
+			})
+		}
+	}
+	return out
+}
+
+func bindingInventoryEqual(a, b []aiv1alpha1.ProjectBindingInventoryStatus) bool {
+	return equality.Semantic.DeepEqual(a, b)
+}
+
+// retainInstance removes only this Project's owner reference and records the
+// former identity as labels. The provider resource remains under its own
+// finalizers and provider ownership after the Project is deleted.
+func retainInstance(ctx context.Context, c client.Client, key *unstructured.Unstructured, p *aiv1alpha1.Project, environment string) error {
+	if c == nil || key == nil || p == nil {
+		return fmt.Errorf("retention requires client, instance key, and project")
+	}
+	current := &unstructured.Unstructured{}
+	current.SetGroupVersionKind(key.GroupVersionKind())
+	if err := c.Get(ctx, types.NamespacedName{Name: key.GetName()}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	changed := false
+	owner := bindings.OwnerRef(p)
+	if owner != nil {
+		refs := current.GetOwnerReferences()
+		kept := make([]metav1.OwnerReference, 0, len(refs))
+		for _, ref := range refs {
+			if ref.APIVersion == owner.APIVersion && ref.Kind == owner.Kind && ref.Name == owner.Name && ref.UID == owner.UID {
+				changed = true
+				continue
+			}
+			kept = append(kept, ref)
+		}
+		if changed {
+			current.SetOwnerReferences(kept)
+		}
+	}
+
+	labels := current.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	for key, value := range map[string]string{
+		bindings.RetainedLabel:            "true",
+		bindings.RetainedProjectLabel:     p.Name,
+		bindings.RetainedEnvironmentLabel: environment,
+	} {
+		if labels[key] != value {
+			labels[key] = value
+			changed = true
+		}
+	}
+	if _, ok := labels[bindings.ProjectLabel]; ok {
+		delete(labels, bindings.ProjectLabel)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	current.SetLabels(labels)
+	return c.Update(ctx, current)
 }
 
 func attachmentScopeForProject(p *aiv1alpha1.Project) (store.Scope, bool) {

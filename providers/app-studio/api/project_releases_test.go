@@ -228,7 +228,7 @@ func TestPromoteProjectSelectedHistoricalCommitRejectsPartialArtifacts(t *testin
 	if err != nil {
 		t.Fatalf("get project: %v", err)
 	}
-	_, _, err = (&Server{}).promoteProjectWithSelection(context.Background(), client, identity{}, persisted, nil, nil, commitSHA, true, "sha256:stale")
+	_, _, err = (&Server{}).promoteProjectWithSelectionAndTarget(context.Background(), client, identity{}, persisted, nil, nil, commitSHA, true, "application", nil, "sha256:stale")
 	if err == nil || !strings.Contains(err.Error(), "not ready to promote") {
 		t.Fatalf("partial historical promotion error = %v, want not-ready validation", err)
 	}
@@ -277,7 +277,7 @@ func TestProjectReleaseHandlersReturnAndPromoteExactEvidence(t *testing.T) {
 		t.Fatalf("GET releases = %#v, want exact release evidence", releases.Items)
 	}
 
-	body, err := json.Marshal(projectPromoteRequest{CommitSHA: &commitSHA, ReleaseID: &releases.Items[0].ReleaseID})
+	body, err := json.Marshal(projectPromoteRequest{CommitSHA: &commitSHA, ReleaseID: &releases.Items[0].ReleaseID, TemplateName: "application"})
 	if err != nil {
 		t.Fatalf("marshal promote request: %v", err)
 	}

@@ -11,6 +11,10 @@ spec:
   # Consumed pod-to-pod on the runtime cluster. No HTTP surface.
   exposure: internal
   backend: kro
+  lifecycle:
+    # Keep the cache runtime by default so an Instance recreation does not
+    # unexpectedly erase connection state; callers may explicitly delete it.
+    defaultDeletionPolicy: Retain
   sampleValues:
     name: cache
     size: small
@@ -90,6 +94,12 @@ spec:
         default: "7"
     required:
       - name
+  connections:
+    provides:
+      - name: default
+        type: redis
+        secretRefPath: status.connectionSecretRef
+        keys: [host, port, password, uri]
   # backendConfig is interpreted by the kro backend. Every resource sets
   # namespace: default — the control-plane/data-plane split materializes
   # these on the runtime cluster and remaps that to a per-tenant namespace

@@ -402,6 +402,8 @@ export interface Project {
     commits?: ProjectRepositoryCommit[]
     commitsError?: string
   }
+  components?: ProjectComponent[]
+  build?: ProjectBuildConfiguration
   memory?: ProjectMemory
   sharing?: {
     preview?: { mode?: 'private' | 'public' }
@@ -423,7 +425,206 @@ export interface ProjectEnvironment {
   name: string
   mode?: string
   phase?: string
+  preview?: {
+    primaryServiceRef?: string
+  }
   bindings?: ProjectProviderBinding[]
+	connections?: ProjectDependencyConnection[]
+}
+
+export type ProjectComponentKind = 'Service' | 'Worker'
+export type ProjectComponentProtocol = 'HTTP' | 'HTTPS' | 'TCP'
+
+export interface ProjectComponentBuild {
+  contextPath: string
+  dockerfilePath: string
+}
+
+export interface ProjectComponentPort {
+  name: string
+  protocol: ProjectComponentProtocol
+  containerPort: number
+}
+
+export interface ProjectComponent {
+  name: string
+  kind: ProjectComponentKind
+  sourcePath: string
+  build?: ProjectComponentBuild
+  ports?: ProjectComponentPort[]
+}
+
+export interface ProjectBuildConfiguration {
+  workflowPath?: string
+}
+
+export interface ProjectComponentMapping {
+  componentRef: string
+  targetComponent: string
+}
+
+export interface ProductionTemplateComponent {
+  name: string
+  imageInput: string
+}
+
+export interface ProductionTemplate {
+  name: string
+  displayName?: string
+  description?: string
+  category?: string
+  components: ProductionTemplateComponent[]
+}
+
+export interface ProjectDevelopmentServiceCommand {
+  argv?: string[]
+  workingDirectory?: string
+}
+
+export interface ProjectDevelopmentServiceEndpoint {
+  protocol?: string
+  port?: number
+  healthPath?: string
+}
+
+export interface ProjectDevelopmentServiceExposure {
+  visibility?: 'private' | 'public'
+}
+
+export interface ProjectDevelopmentServiceProcess {
+  running: boolean
+  portListening: boolean
+  reachable: boolean
+  phase?: string
+  restartCount?: number
+  lastExitCode?: number
+  message?: string
+}
+
+export interface ProjectDevelopmentServiceCondition {
+  type: string
+  status: string
+  reason?: string
+  message?: string
+  observedGeneration?: number
+}
+
+export interface ProjectDevelopmentService {
+  name: string
+  componentRef?: string
+  enabled: boolean
+  command?: ProjectDevelopmentServiceCommand
+  endpoint?: ProjectDevelopmentServiceEndpoint
+  exposure?: ProjectDevelopmentServiceExposure
+  restartPolicy?: 'Always' | 'OnFailure' | 'Never' | string
+  connectionRefs?: string[]
+  host?: string
+  url?: string
+  phase?: string
+  ready: boolean
+  process?: ProjectDevelopmentServiceProcess
+  conditions?: ProjectDevelopmentServiceCondition[]
+  observedAt?: string
+  error?: string
+}
+
+export interface ProjectDevelopmentListener {
+  port: number
+  protocol?: string
+  address?: string
+  process?: string
+}
+
+export interface ProjectDevelopmentServicesResponse {
+  items: ProjectDevelopmentService[]
+  primaryServiceRef?: string
+  listeners?: ProjectDevelopmentListener[]
+}
+
+export interface ProjectDevelopmentServiceMutation {
+  componentRef?: string
+  enabled?: boolean
+  command?: ProjectDevelopmentServiceCommand
+  endpoint?: ProjectDevelopmentServiceEndpoint
+  exposure?: ProjectDevelopmentServiceExposure
+  restartPolicy?: 'Always' | 'OnFailure' | 'Never' | string
+	confirmPublic?: boolean
+}
+
+export type ProjectConnectionReferenceKind = 'binding' | 'developmentService'
+
+export interface ProjectConnectionEndpointReference {
+	kind: ProjectConnectionReferenceKind
+	name: string
+}
+
+export interface ProjectConnectionMapping {
+	sourceKey: string
+	targetKey: string
+}
+
+export interface ProjectDependencyConnection {
+	name: string
+	sourceRef: ProjectConnectionEndpointReference
+	targetRef: ProjectConnectionEndpointReference
+	sourceInterface: string
+	targetInterface: string
+	mappings?: ProjectConnectionMapping[]
+}
+
+export interface ProjectDependencyInterface {
+	name: string
+	type: string
+	keys?: string[]
+	mappings?: ProjectConnectionMapping[]
+}
+
+export interface ProjectDependencyTemplate {
+	name: string
+	displayName?: string
+	description?: string
+	category?: string
+	schema?: JSONSchema
+	sampleValues?: Record<string, unknown>
+	defaultDeletionPolicy?: 'Delete' | 'Retain' | string
+	provides: ProjectDependencyInterface[]
+}
+
+export interface ProjectDependencyCatalog {
+	templates: ProjectDependencyTemplate[]
+	targetInterfaces: ProjectDependencyInterface[]
+}
+
+export interface ProjectDependencyStatus {
+	name: string
+	phase?: 'Pending' | 'Ready' | 'Failed' | string
+	reason?: string
+	message?: string
+	revision?: string
+}
+
+export interface ProjectDependency {
+	name: string
+	environment: string
+	template: string
+	values?: Record<string, unknown>
+	sourceRef: ProjectConnectionEndpointReference
+	targetRef: ProjectConnectionEndpointReference
+	sourceInterface: string
+	targetInterface: string
+	mappings?: ProjectConnectionMapping[]
+	deletionPolicy: 'Retain' | 'Delete' | string
+	status?: ProjectDependencyStatus
+}
+
+export interface ProjectDependencyMutation {
+	environment?: string
+	template: string
+	values: Record<string, unknown>
+	sourceInterface: string
+	targetRef: ProjectConnectionEndpointReference
+	targetInterface: string
+	mappings?: ProjectConnectionMapping[]
 }
 
 export interface ProjectProviderBinding {
@@ -712,6 +913,8 @@ export interface ProjectBuildCheck {
 export interface ProjectPromotionReadiness {
   template?: string
   instance?: string
+  targetComponents?: ProductionTemplateComponent[]
+  componentMappings?: ProjectComponentMapping[]
   productionSchema?: JSONSchema
   productionValues?: Record<string, unknown>
   immutableProductionInputs?: string[]

@@ -102,19 +102,21 @@ type ProjectView struct {
 	// Deleting is derived from metadata.deletionTimestamp, not from the
 	// controller's eventually-updated status phase. This keeps terminating
 	// projects visibly locked while their finalizers complete.
-	Deleting       bool                          `json:"deleting"`
-	DisplayName    string                        `json:"displayName"`
-	Description    string                        `json:"description,omitempty"`
-	Phase          string                        `json:"phase,omitempty"`
-	Template       string                        `json:"template,omitempty"`
-	Repository     *ProjectRepositoryView        `json:"repository,omitempty"`
-	Memory         aiv1alpha1.ProjectMemory      `json:"memory,omitempty"`
-	Sharing        aiv1alpha1.ProjectSharingSpec `json:"sharing,omitempty"`
-	Environments   []ProjectEnvironmentView      `json:"environments,omitempty"`
-	CreatedAt      time.Time                     `json:"createdAt"`
-	UpdatedAt      *time.Time                    `json:"updatedAt,omitempty"`
-	SourceRevision uint64                        `json:"sourceRevision,omitempty"`
-	Thumbnail      *ProjectThumbnailView         `json:"thumbnail,omitempty"`
+	Deleting       bool                              `json:"deleting"`
+	DisplayName    string                            `json:"displayName"`
+	Description    string                            `json:"description,omitempty"`
+	Phase          string                            `json:"phase,omitempty"`
+	Template       string                            `json:"template,omitempty"`
+	Repository     *ProjectRepositoryView            `json:"repository,omitempty"`
+	Components     []aiv1alpha1.ProjectComponentSpec `json:"components,omitempty"`
+	Build          *aiv1alpha1.ProjectBuildSpec      `json:"build,omitempty"`
+	Memory         aiv1alpha1.ProjectMemory          `json:"memory,omitempty"`
+	Sharing        aiv1alpha1.ProjectSharingSpec     `json:"sharing,omitempty"`
+	Environments   []ProjectEnvironmentView          `json:"environments,omitempty"`
+	CreatedAt      time.Time                         `json:"createdAt"`
+	UpdatedAt      *time.Time                        `json:"updatedAt,omitempty"`
+	SourceRevision uint64                            `json:"sourceRevision,omitempty"`
+	Thumbnail      *ProjectThumbnailView             `json:"thumbnail,omitempty"`
 }
 
 type ProjectEnvironmentView struct {
@@ -1702,6 +1704,8 @@ func projectView(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project,
 		Description:  p.Spec.Description,
 		Phase:        p.Status.Phase,
 		Repository:   projectRepositoryView(ctx, c, p),
+		Components:   append([]aiv1alpha1.ProjectComponentSpec(nil), p.Spec.Components...),
+		Build:        p.Spec.Build.DeepCopy(),
 		Memory:       p.Spec.Memory,
 		Sharing:      effectiveProjectSharingSpec(p.Spec.Sharing),
 		Environments: projectEnvironmentViews(p),

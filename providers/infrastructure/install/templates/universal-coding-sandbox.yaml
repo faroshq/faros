@@ -13,6 +13,9 @@ spec:
   # data plane, which authorizes them against the ordinary flattened Instance.
   exposure: internal
   backend: kro
+  lifecycle:
+    supportsSuspension: true
+    defaultDeletionPolicy: Delete
   sampleValues:
     name: coding-sandbox
   agent:
@@ -51,6 +54,7 @@ spec:
       - "components.workspace.workspace — bounded workspace list/read/mutate/diff/checkpoint endpoint."
       - "components.workspace.sync — authoritative source seed endpoint; preserves the existing /sync contract."
       - "components.workspace.exec — bounded argv execution; preserves the existing /exec contract."
+      - "components.workspace.listeners — bounded, observation-only TCP listener discovery; control-plane ports are excluded and no listener is exposed automatically."
       - "status.runtimeNamespace and status.controlSecretRef — platform-computed data-plane routing state."
   instanceCRD:
     group: infrastructure.faros.sh
@@ -85,6 +89,18 @@ spec:
         devImage: "${faros.devImage.universal}"
         workingDir: /workspace
         startCommand: "sleep infinity"
+  connections:
+    consumes:
+      - name: postgresql
+        type: postgresql
+        mappings:
+          - sourceKey: uri
+            targetKey: DATABASE_URL
+      - name: redis
+        type: redis
+        mappings:
+          - sourceKey: uri
+            targetKey: REDIS_URL
   dataPlane:
     runtimeNamespacePath: status.runtimeNamespace
     tokenSecretPath: status.controlSecretRef
@@ -123,6 +139,11 @@ spec:
             port: control
             upstreamPath: /status
             methods: ["GET"]
+          listeners:
+            servicePath: status.components.workspace.controlServiceRef
+            port: control
+            upstreamPath: /listeners
+            methods: ["GET"]
         exec:
           maxTimeoutSeconds: 120
           maxOutputBytes: 262144
@@ -155,6 +176,7 @@ spec:
                   app: ${schema.spec.name}
                 annotations:
                   faros.sh/network-access: default-deny-egress
+                  faros.sh/connections-revision: ${schema.spec.farosConnectionsRevision}
               spec:
                 automountServiceAccountToken: false
                 securityContext:
@@ -188,6 +210,15 @@ spec:
                       readOnlyRootFilesystem: false
                       capabilities:
                         drop: ["ALL"]
+                    volumeMounts:
+                      - name: faros-connections
+                        mountPath: /var/run/faros/connections
+                        readOnly: true
+                volumes:
+                  - name: faros-connections
+                    secret:
+                      secretName: ${schema.spec.farosConnectionsSecretName}
+                      optional: true
       # This policy is the runtime boundary, not an annotation: when the
       # development pod exists, Egress is denied unless another policy allows
       # it. The phase-gated setup/runtime policies below are selected by a

@@ -30,6 +30,9 @@ import type {
   ProjectProviderResourceReference,
   ProjectCheckpoints,
   ProjectPromotionReadiness,
+  ProjectBuildConfiguration,
+  ProjectComponentMapping,
+  ProductionTemplate,
   ProjectRelease,
   ProjectReleasesResponse,
   ProjectPreviewAccess,
@@ -42,6 +45,14 @@ import type {
   ProjectPlan,
   ProjectFileList,
   ProjectFileContent,
+  ProjectComponent,
+  ProjectDevelopmentListener,
+  ProjectDevelopmentService,
+  ProjectDevelopmentServiceMutation,
+  ProjectDevelopmentServicesResponse,
+	ProjectDependency,
+	ProjectDependencyCatalog,
+	ProjectDependencyMutation,
 } from './types'
 import type { ProjectCreateReadiness } from './createReadiness'
 import type { PreviewConsoleEvent, PreviewConsoleSession } from './previewConsole'
@@ -160,6 +171,54 @@ async function request<T>(ctx: FarosContext | null, method: string, path: string
     throw new ProjectAPIRequestError(detail, res.status)
   }
   return (text ? JSON.parse(text) : null) as T
+}
+
+// Development logs are intentionally plain text rather than JSON. Keep the
+// same tenant, timeout, and structured-error behavior as request() so a
+// diagnostics panel can show a useful API failure without trying to parse a
+// log payload as JSON.
+async function requestText(ctx: FarosContext | null, path: string, options: ProjectAPIRequestOptions = {}): Promise<string> {
+  const headers = tenantHeaders({ token: ctx?.token })
+  const controller = options.timeoutMS ? new AbortController() : null
+  let timedOut = false
+  const timeout = controller ? window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, options.timeoutMS) : undefined
+  let res: Response
+  let text: string
+  try {
+    res = await fetch(path, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers,
+      signal: controller?.signal,
+      cache: 'no-cache',
+    })
+    text = await res.text()
+  } catch (error) {
+    if (timedOut) throw new ProjectAPIRequestError(options.timeoutMessage || 'request timed out', 408)
+    throw error
+  } finally {
+    if (timeout !== undefined) window.clearTimeout(timeout)
+  }
+  if (!res.ok) {
+    const fallback = text || res.statusText
+    let detail = fallback
+    let reason = ''
+    try {
+      const parsed = JSON.parse(text) as { message?: string; reason?: string }
+      if (parsed.message) detail = parsed.message
+      if (parsed.reason) reason = parsed.reason
+    } catch {
+      // Keep the raw text for a non-JSON proxy/data-plane error.
+    }
+    if (isProjectAPIInitializingResponse(res.status, reason, detail)) {
+      throw new ProjectAPIInitializingError(detail)
+    }
+    throw new ProjectAPIRequestError(detail, res.status)
+  }
+  return text
 }
 
 async function requestBlob(ctx: FarosContext | null, path: string, signal?: AbortSignal): Promise<Blob> {
@@ -595,6 +654,141 @@ export const api = {
     )
   },
 
+  async listProjectComponents(ctx: FarosContext | null, name: string): Promise<ProjectComponent[]> {
+    const body = await request<{ items?: ProjectComponent[] }>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/components`,
+    )
+    return body.items ?? []
+  },
+
+  async upsertProjectComponent(
+    ctx: FarosContext | null,
+    name: string,
+    component: string,
+    body: Omit<ProjectComponent, 'name'>,
+  ): Promise<{ component: ProjectComponent; components: ProjectComponent[] }> {
+    const response = await request<{ component: ProjectComponent; project?: { items?: ProjectComponent[] } }>(
+      ctx,
+      'PUT',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/components/${encodeURIComponent(component)}`,
+      body,
+    )
+    return { component: response.component, components: response.project?.items ?? [] }
+  },
+
+  async deleteProjectComponent(ctx: FarosContext | null, name: string, component: string): Promise<void> {
+    await request<null>(
+      ctx,
+      'DELETE',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/components/${encodeURIComponent(component)}`,
+    )
+  },
+
+	async getProjectDependencyCatalog(ctx: FarosContext | null, name: string): Promise<ProjectDependencyCatalog> {
+		return request<ProjectDependencyCatalog>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/dependencies/catalog`)
+	},
+
+	async listProjectDependencies(ctx: FarosContext | null, name: string): Promise<ProjectDependency[]> {
+		const body = await request<{ items?: ProjectDependency[] }>(ctx, 'GET', `${baseURL(ctx)}/${encodeURIComponent(name)}/dependencies`)
+		return body.items ?? []
+	},
+
+	async upsertProjectDependency(ctx: FarosContext | null, name: string, dependency: string, body: ProjectDependencyMutation): Promise<{ dependency: ProjectDependency; items: ProjectDependency[] }> {
+		return request<{ dependency: ProjectDependency; items: ProjectDependency[] }>(ctx, 'PUT', `${baseURL(ctx)}/${encodeURIComponent(name)}/dependencies/${encodeURIComponent(dependency)}`, body)
+	},
+
+	async deleteProjectDependency(ctx: FarosContext | null, name: string, dependency: string, environment = 'development'): Promise<void> {
+		await request<null>(ctx, 'DELETE', `${baseURL(ctx)}/${encodeURIComponent(name)}/dependencies/${encodeURIComponent(dependency)}?environment=${encodeURIComponent(environment)}`)
+	},
+
+  async getProjectBuildConfiguration(ctx: FarosContext | null, name: string): Promise<ProjectBuildConfiguration> {
+    return request<ProjectBuildConfiguration>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/build`,
+    )
+  },
+
+  async setProjectBuildConfiguration(
+    ctx: FarosContext | null,
+    name: string,
+    workflowPath: string | null,
+  ): Promise<ProjectBuildConfiguration> {
+    return request<ProjectBuildConfiguration>(
+      ctx,
+      'PUT',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/build`,
+      workflowPath === null ? { clear: true } : { workflowPath },
+    )
+  },
+
+  async listDevelopmentServices(ctx: FarosContext | null, name: string): Promise<ProjectDevelopmentServicesResponse> {
+    return request<ProjectDevelopmentServicesResponse>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services`,
+    )
+  },
+
+  async getDevelopmentServiceLogs(ctx: FarosContext | null, name: string, service: string): Promise<string> {
+    return requestText(
+      ctx,
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services/${encodeURIComponent(service)}/logs`,
+      { timeoutMS: 10000, timeoutMessage: 'development logs request timed out' },
+    )
+  },
+
+  async upsertDevelopmentService(
+    ctx: FarosContext | null,
+    name: string,
+    service: string,
+    body: ProjectDevelopmentServiceMutation,
+  ): Promise<{ service: ProjectDevelopmentService }> {
+    return request<{ service: ProjectDevelopmentService }>(
+      ctx,
+      'PUT',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services/${encodeURIComponent(service)}`,
+      body,
+    )
+  },
+
+  async deleteDevelopmentService(ctx: FarosContext | null, name: string, service: string): Promise<void> {
+    await request<null>(
+      ctx,
+      'DELETE',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services/${encodeURIComponent(service)}`,
+    )
+  },
+
+  async restartDevelopmentService(ctx: FarosContext | null, name: string, service: string): Promise<{ service: ProjectDevelopmentService }> {
+    return request<{ service: ProjectDevelopmentService }>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services/${encodeURIComponent(service)}/restart`,
+      {},
+    )
+  },
+
+  async setPrimaryDevelopmentService(ctx: FarosContext | null, name: string, service: string): Promise<{ primaryServiceRef: string }> {
+    return request<{ primaryServiceRef: string }>(
+      ctx,
+      'POST',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-services/primary`,
+      { service },
+    )
+  },
+
+  async listDetectedDevelopmentListeners(ctx: FarosContext | null, name: string): Promise<ProjectDevelopmentListener[]> {
+    const body = await request<{ listeners?: ProjectDevelopmentListener[] }>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/development-listeners`,
+    )
+    return body.listeners ?? []
+  },
+
   async restoreWorkspace(ctx: FarosContext | null, name: string, commitSHA: string, expectedSourceRevision: number): Promise<ProjectRestoreResult> {
     return request<ProjectRestoreResult>(
       ctx,
@@ -604,11 +798,21 @@ export const api = {
     )
   },
 
-  async getPromotion(ctx: FarosContext | null, name: string): Promise<ProjectPromotionReadiness> {
+  async listProductionTemplates(ctx: FarosContext | null): Promise<ProductionTemplate[]> {
+    const body = await request<{ templates?: ProductionTemplate[] }>(
+      ctx,
+      'GET',
+      `${baseURL(ctx)}/production-templates`,
+    )
+    return body.templates ?? []
+  },
+
+  async getPromotion(ctx: FarosContext | null, name: string, templateName = ''): Promise<ProjectPromotionReadiness> {
+    const query = templateName.trim() ? `?templateName=${encodeURIComponent(templateName.trim())}` : ''
     return request<ProjectPromotionReadiness>(
       ctx,
       'GET',
-      `${baseURL(ctx)}/${encodeURIComponent(name)}/promotion`,
+      `${baseURL(ctx)}/${encodeURIComponent(name)}/promotion${query}`,
     )
   },
 
@@ -635,11 +839,20 @@ export const api = {
     values?: Record<string, unknown>,
     commitSHA?: string,
     releaseID?: string,
+    target?: { templateName: string; componentMappings: ProjectComponentMapping[] },
   ): Promise<ProjectPromoteResult> {
-    const body: { values?: Record<string, unknown>; commitSHA?: string; releaseID?: string } = {}
+    const body: {
+      values?: Record<string, unknown>
+      commitSHA?: string
+      releaseID?: string
+      templateName?: string
+      componentMappings?: ProjectComponentMapping[]
+    } = {}
     if (values) body.values = values
     if (commitSHA?.trim()) body.commitSHA = commitSHA.trim()
     if (releaseID?.trim()) body.releaseID = releaseID.trim()
+    if (target?.templateName.trim()) body.templateName = target.templateName.trim()
+    if (target?.componentMappings.length) body.componentMappings = target.componentMappings
     return request<ProjectPromoteResult>(
       ctx,
       'POST',
@@ -1027,8 +1240,9 @@ export const api = {
     return request<unknown>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/sync-development`)
   },
 
-  async authorizeDevelopmentPreview(ctx: FarosContext | null, name: string): Promise<unknown> {
-    return request<unknown>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/authorize-development-preview`)
+  async authorizeDevelopmentPreview(ctx: FarosContext | null, name: string, service = ''): Promise<unknown> {
+    const query = service.trim() ? `?service=${encodeURIComponent(service.trim())}` : ''
+    return request<unknown>(ctx, 'POST', `${baseURL(ctx)}/${encodeURIComponent(name)}/authorize-development-preview${query}`)
   },
 
   async listAssistantThreads(ctx: FarosContext | null, name: string, includeArchived = false): Promise<ProjectAssistantThread[]> {

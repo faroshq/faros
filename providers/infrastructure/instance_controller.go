@@ -45,7 +45,7 @@ func startInstanceController(ctx context.Context, providerConfig *rest.Config) {
 		return
 	}
 
-	runtimeClient, runtimeSrc, err := runtimeDynamicClient()
+	runtimeClient, runtimeSrc, runtimeConfig, err := runtimeDynamicClient()
 	if err != nil {
 		log.Printf("instance controller: disabled (no kro runtime cluster: %v)", err)
 		return
@@ -68,6 +68,7 @@ func startInstanceController(ctx context.Context, providerConfig *rest.Config) {
 				APIExportName:        install.APIExportName,
 				BaseDomain:           baseDomain,
 				Runtime:              runtimeClient,
+				RuntimeConfig:        runtimeConfig,
 				CodingSandboxEnabled: codingSandboxEnabled(),
 			})
 			if err != nil {
@@ -91,23 +92,23 @@ func startInstanceController(ctx context.Context, providerConfig *rest.Config) {
 // Errors when neither is available (dev/REST-only), so the controller stays
 // disabled rather than pointing at the wrong cluster. Returns the source for
 // logging.
-func runtimeDynamicClient() (dynamic.Interface, string, error) {
+func runtimeDynamicClient() (dynamic.Interface, string, *rest.Config, error) {
 	var cfg *rest.Config
 	var src string
 	if p := os.Getenv("KRO_KUBECONFIG"); p != "" {
 		c, err := clientcmd.BuildConfigFromFlags("", p)
 		if err != nil {
-			return nil, "", fmt.Errorf("loading KRO_KUBECONFIG: %w", err)
+			return nil, "", nil, fmt.Errorf("loading KRO_KUBECONFIG: %w", err)
 		}
 		cfg, src = c, "KRO_KUBECONFIG="+p
 	} else if c, err := rest.InClusterConfig(); err == nil {
 		cfg, src = c, "in-cluster"
 	} else {
-		return nil, "", fmt.Errorf("KRO_KUBECONFIG unset and not running in a pod")
+		return nil, "", nil, fmt.Errorf("KRO_KUBECONFIG unset and not running in a pod")
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("runtime dynamic client: %w", err)
+		return nil, "", nil, fmt.Errorf("runtime dynamic client: %w", err)
 	}
-	return dyn, src, nil
+	return dyn, src, cfg, nil
 }

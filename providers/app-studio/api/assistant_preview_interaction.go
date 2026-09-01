@@ -89,7 +89,7 @@ func (s *Server) interactProjectDevelopmentPreviewResult(ctx context.Context, re
 			}
 		}
 	}
-	preview, err := s.resolveProjectPreviewInspectionTarget(ctx, req.Identity, req.Project)
+	preview, err := s.resolveProjectPreviewInspectionTargetForService(ctx, req.Identity, req.Project, projectToolString(req.Arguments["service"]))
 	if err != nil {
 		return projectAssistantPreviewInteractionResult{}, err
 	}

@@ -78,6 +78,22 @@ type ProjectSpec struct {
 	// +optional
 	Template *ProjectTemplateSpec `json:"template,omitempty"`
 
+	// Components are the stable source and build units that make up this
+	// Project. A component can be mapped to a different provider Template in
+	// each environment without changing its source identity.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=map
+	// +listMapKey=name
+	Components []ProjectComponentSpec `json:"components,omitempty"`
+
+	// Build identifies the repository-owned CI workflow for a Project whose
+	// development environment is not backed by an infrastructure Template.
+	// Template-backed Projects continue to resolve this contract from their
+	// selected Template's development.build block.
+	// +optional
+	Build *ProjectBuildSpec `json:"build,omitempty"`
+
 	// Memory stores durable context the AI should consider for this
 	// project. It is edited explicitly through the API in the MVP.
 	// +optional
@@ -141,6 +157,111 @@ type ProjectTemplateSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+}
+
+// ProjectBuildSpec identifies the repository-owned workflow App Studio
+// observes and dispatches to produce immutable component images. App Studio
+// never creates or edits this workflow.
+type ProjectBuildSpec struct {
+	// WorkflowPath is the repository-relative GitHub Actions workflow file.
+	// It must be directly under .github/workflows so Code can dispatch the
+	// corresponding workflow by filename without allowing path traversal.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^\.github/workflows/[^/]+\.ya?ml$`
+	// +kubebuilder:validation:MaxLength=256
+	WorkflowPath string `json:"workflowPath"`
+}
+
+// ProjectComponentKind identifies the runtime role of a Project component.
+type ProjectComponentKind string
+
+const (
+	// ProjectComponentKindService is a long-running networked component.
+	ProjectComponentKindService ProjectComponentKind = "Service"
+	// ProjectComponentKindWorker is a long-running component without a public
+	// network endpoint.
+	ProjectComponentKindWorker ProjectComponentKind = "Worker"
+)
+
+// ProjectComponentProtocol identifies the network protocol a production
+// component port speaks. HTTP and HTTPS are routable through the platform;
+// TCP is retained for provider-specific internal services.
+type ProjectComponentProtocol string
+
+const (
+	ProjectComponentProtocolHTTP  ProjectComponentProtocol = "HTTP"
+	ProjectComponentProtocolHTTPS ProjectComponentProtocol = "HTTPS"
+	ProjectComponentProtocolTCP   ProjectComponentProtocol = "TCP"
+)
+
+// ProjectComponentSpec is the Project-owned logical identity of one source
+// and build unit. Providers consume this contract through environment binding
+// mappings; they do not own the source paths.
+type ProjectComponentSpec struct {
+	// Name is a stable component identifier such as web, api, or worker.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Kind determines whether this component is expected to serve traffic.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=Service;Worker
+	Kind ProjectComponentKind `json:"kind"`
+
+	// SourcePath is the component's directory relative to the repository root.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	SourcePath string `json:"sourcePath"`
+
+	// Build describes the source context used to produce an immutable image.
+	// +optional
+	Build *ProjectComponentBuildSpec `json:"build,omitempty"`
+
+	// Ports describes the production network contract for this component.
+	// Development listener ports are configured independently by the
+	// DevelopmentService resource.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=name
+	Ports []ProjectComponentPortSpec `json:"ports,omitempty"`
+}
+
+// ProjectComponentBuildSpec identifies a Docker-compatible build context.
+type ProjectComponentBuildSpec struct {
+	// ContextPath is relative to the repository root.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	ContextPath string `json:"contextPath"`
+
+	// DockerfilePath is relative to the repository root.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	DockerfilePath string `json:"dockerfilePath"`
+}
+
+// ProjectComponentPortSpec declares a named production port.
+type ProjectComponentPortSpec struct {
+	// Name is the stable port name used by Template component mappings and
+	// application routes.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// Protocol is the protocol spoken by the port.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=HTTP;HTTPS;TCP
+	Protocol ProjectComponentProtocol `json:"protocol"`
+
+	// ContainerPort is the port exposed by the component workload.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	ContainerPort int32 `json:"containerPort"`
 }
 
 // ProjectRepositoryBinding identifies the Code provider Repository created for
@@ -280,9 +401,139 @@ type ProjectEnvironmentSpec struct {
 	// +optional
 	Promotion ProjectPromotion `json:"promotion,omitempty"`
 
+	// Preview selects the primary DevelopmentService URL shown by App Studio
+	// for this environment. Other services remain addressable individually.
+	// +optional
+	Preview *ProjectEnvironmentPreviewSpec `json:"preview,omitempty"`
+
 	// Bindings connect this environment to provider capabilities.
 	// +optional
 	Bindings []ProjectProviderBindingSpec `json:"bindings,omitempty"`
+
+	// Connections bind provider-resource outputs to a consuming binding or
+	// DevelopmentService in this environment. They are logical, secret-free
+	// intent: the Project controller resolves exact object identities and owns
+	// the derived Infrastructure Connection resources.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=name
+	Connections []ProjectEnvironmentConnectionSpec `json:"connections,omitempty"`
+}
+
+// ProjectEnvironmentPreviewSpec selects the environment's primary preview.
+type ProjectEnvironmentPreviewSpec struct {
+	// PrimaryServiceRef is the name of a DevelopmentService in this Project
+	// environment.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	PrimaryServiceRef string `json:"primaryServiceRef,omitempty"`
+}
+
+// ProjectConnectionReferenceKind identifies a logical endpoint within a
+// Project environment. Source references are always bindings; targets may be
+// bindings or logical DevelopmentServices.
+type ProjectConnectionReferenceKind string
+
+const (
+	ProjectConnectionReferenceBinding            ProjectConnectionReferenceKind = "binding"
+	ProjectConnectionReferenceDevelopmentService ProjectConnectionReferenceKind = "developmentService"
+)
+
+// ProjectConnectionEndpointReference names a logical Project-owned endpoint.
+// Physical object names and UIDs are deliberately controller-owned.
+type ProjectConnectionEndpointReference struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=binding;developmentService
+	Kind ProjectConnectionReferenceKind `json:"kind"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+}
+
+// ProjectConnectionMappingSpec narrows one provider-declared connection
+// mapping. Empty mappings select the target interface's provider-owned
+// defaults.
+type ProjectConnectionMappingSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
+	SourceKey string `json:"sourceKey"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	TargetKey string `json:"targetKey"`
+}
+
+// ProjectEnvironmentConnectionSpec is generic environment-scoped dependency
+// wiring. It contains no credentials or provider runtime identity.
+type ProjectEnvironmentConnectionSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	SourceRef ProjectConnectionEndpointReference `json:"sourceRef"`
+
+	// +kubebuilder:validation:Required
+	TargetRef ProjectConnectionEndpointReference `json:"targetRef"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	SourceInterface string `json:"sourceInterface"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	TargetInterface string `json:"targetInterface"`
+
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=targetKey
+	Mappings []ProjectConnectionMappingSpec `json:"mappings,omitempty"`
+}
+
+// ProjectBindingDeletionPolicy controls what happens to a provider resource
+// when its Project binding is deleted.
+type ProjectBindingDeletionPolicy string
+
+const (
+	// ProjectBindingDeletionPolicyDelete removes the provider resource with its
+	// Project binding. This is the compatibility default.
+	ProjectBindingDeletionPolicyDelete ProjectBindingDeletionPolicy = "Delete"
+	// ProjectBindingDeletionPolicyRetain detaches the provider resource so it
+	// survives Project or environment deletion.
+	ProjectBindingDeletionPolicyRetain ProjectBindingDeletionPolicy = "Retain"
+)
+
+// ProjectBindingLifecycleSpec contains lifecycle policy for one provider
+// resource binding.
+type ProjectBindingLifecycleSpec struct {
+	// DeletionPolicy defaults to Delete when omitted. Stateful providers can be
+	// retained explicitly by setting Retain.
+	// +optional
+	// +kubebuilder:validation:Enum=Delete;Retain
+	DeletionPolicy ProjectBindingDeletionPolicy `json:"deletionPolicy,omitempty"`
+}
+
+// ProjectComponentMappingSpec maps a Project component to a named component
+// in the selected provider Template.
+type ProjectComponentMappingSpec struct {
+	// ComponentRef names the Project component.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	ComponentRef string `json:"componentRef"`
+
+	// TargetComponent names the component in the selected Template.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	TargetComponent string `json:"targetComponent"`
 }
 
 type ProjectProviderBindingSpec struct {
@@ -300,6 +551,12 @@ type ProjectProviderBindingSpec struct {
 	// +kubebuilder:validation:Enum=providerResource;providerReference
 	Kind ProjectBindingKind `json:"kind"`
 
+	// TemplateRef selects the provider Template for this binding. It is the
+	// canonical source for managed provider resources. Project.spec.template
+	// remains a legacy/simple-flow fallback for bindings that omit this field.
+	// +optional
+	TemplateRef *ProjectTemplateSpec `json:"templateRef,omitempty"`
+
 	// +optional
 	ResourceRef *ProjectProviderResourceReference `json:"resourceRef,omitempty"`
 
@@ -314,6 +571,19 @@ type ProjectProviderBindingSpec struct {
 	// forwards a call.
 	// +optional
 	AllowedActions []ProjectProviderActionSpec `json:"allowedActions,omitempty"`
+
+	// ComponentMappings map Project-owned source components to components in
+	// the selected Template. They are primarily used by artifact/production
+	// bindings and are ignored by provider references.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=map
+	// +listMapKey=targetComponent
+	ComponentMappings []ProjectComponentMappingSpec `json:"componentMappings,omitempty"`
+
+	// Lifecycle controls deletion behavior for the bound provider resource.
+	// +optional
+	Lifecycle *ProjectBindingLifecycleSpec `json:"lifecycle,omitempty"`
 }
 
 type ProjectProviderResourceReference struct {
@@ -375,13 +645,33 @@ type ProjectStatus struct {
 	// Environments reports provider-observed environment state.
 	// +optional
 	Environments []ProjectEnvironmentStatus `json:"environments,omitempty"`
+
+	// BindingInventory records the last provider-resource identities owned by
+	// this Project. The controller uses it to clean up a binding removed from
+	// spec, when the removed binding's dynamic resource kind is no longer
+	// available in the current Project spec.
+	// +optional
+	// +kubebuilder:validation:MaxItems=128
+	BindingInventory []ProjectBindingInventoryStatus `json:"bindingInventory,omitempty"`
 }
 
 type ProjectEnvironmentStatus struct {
-	Name     string                         `json:"name,omitempty"`
-	Mode     ProjectEnvironmentMode         `json:"mode,omitempty"`
-	Phase    string                         `json:"phase,omitempty"`
-	Bindings []ProjectProviderBindingStatus `json:"bindings,omitempty"`
+	Name        string                               `json:"name,omitempty"`
+	Mode        ProjectEnvironmentMode               `json:"mode,omitempty"`
+	Phase       string                               `json:"phase,omitempty"`
+	Bindings    []ProjectProviderBindingStatus       `json:"bindings,omitempty"`
+	Connections []ProjectEnvironmentConnectionStatus `json:"connections,omitempty"`
+}
+
+// ProjectEnvironmentConnectionStatus mirrors only secret-free Infrastructure
+// Connection state. Secret references, paths, and values never cross into the
+// Project API.
+type ProjectEnvironmentConnectionStatus struct {
+	Name     string `json:"name,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Revision string `json:"revision,omitempty"`
 }
 
 type ProjectProviderBindingStatus struct {
@@ -391,6 +681,28 @@ type ProjectProviderBindingStatus struct {
 	URL        string            `json:"url,omitempty"`
 	PreviewURL string            `json:"previewURL,omitempty"`
 	Outputs    map[string]string `json:"outputs,omitempty"`
+}
+
+// ProjectBindingInventoryStatus preserves enough information to lifecycle a
+// provider resource after its binding has been removed from spec. It is
+// controller-maintained status, not user-authored desired state.
+type ProjectBindingInventoryStatus struct {
+	// Environment identifies the environment that previously contained the
+	// binding.
+	Environment string `json:"environment,omitempty"`
+
+	// Binding identifies the removed binding.
+	Binding string `json:"binding,omitempty"`
+
+	// Provider identifies the provider that owns the resource.
+	Provider string `json:"provider,omitempty"`
+
+	// ResourceRef is the complete dynamic resource identity required to address
+	// the provider resource after the binding is removed.
+	ResourceRef *ProjectProviderResourceReference `json:"resourceRef,omitempty"`
+
+	// DeletionPolicy is the policy captured when the binding was last observed.
+	DeletionPolicy ProjectBindingDeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // +kubebuilder:object:root=true

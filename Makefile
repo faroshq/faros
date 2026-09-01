@@ -266,6 +266,8 @@ codegen-infrastructure-provider: $(CONTROLLER_GEN) ## Codegen for the infrastruc
 	find providers/infrastructure/install/crds -maxdepth 1 -type f -name '*.yaml' -delete
 	cp providers/infrastructure/config/crds/infrastructure.faros.sh_templates.yaml \
 	   providers/infrastructure/config/crds/infrastructure.faros.sh_instances.yaml \
+	   providers/infrastructure/config/crds/infrastructure.faros.sh_developmentservices.yaml \
+	   providers/infrastructure/config/crds/infrastructure.faros.sh_connections.yaml \
 	   providers/infrastructure/install/crds/
 	./hack/ensure-boilerplate.sh
 

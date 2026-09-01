@@ -148,6 +148,16 @@ func applyDevOverlay(tmpl *infrav1alpha1.Template, simpleSpec map[string]any, re
 	}
 	simpleSpec[infrav1alpha1.FarosNetworkPhaseField] = fmt.Sprintf("string | enum=%q default=%q",
 		infrav1alpha1.FarosNetworkPhaseSetup+","+infrav1alpha1.FarosNetworkPhaseRuntime, infrav1alpha1.FarosNetworkPhaseSetup)
+	if tmpl.Spec.Lifecycle.SupportsSuspension {
+		if _, exists := simpleSpec[infrav1alpha1.FarosSuspendedField]; exists {
+			return nil, nil, fmt.Errorf("template %q: schema declares reserved field %q", tmpl.Name, infrav1alpha1.FarosSuspendedField)
+		}
+		// Keep the dev graph and its workspace/control objects stable while
+		// scaling only the compute workload to zero. KRO evaluates this
+		// expression from the controller-stamped lifecycle value on every
+		// runtime Instance update.
+		simpleSpec[infrav1alpha1.FarosSuspendedField] = "boolean | default=false"
+	}
 
 	agentImage := tokens[devAgentImageToken]
 	if agentImage == "" {
@@ -207,6 +217,7 @@ func applyDevOverlay(tmpl *infrav1alpha1.Template, simpleSpec map[string]any, re
 			agentImage,
 			previewConsoleVerificationJWKS,
 			providerActions,
+			tmpl.Spec.Lifecycle.SupportsSuspension,
 			byID,
 		)
 		if err != nil {
@@ -267,7 +278,7 @@ func findComponentWorkload(byID map[string]map[string]any, name string) (string,
 // synthesizeComponent builds the dev-mode resources for one component: the
 // workspace PVC, the dev variant of the workload, and the control Service.
 // Returns the resources plus the namespace expression the workload deploys to.
-func synthesizeComponent(templateName, name string, comp infrav1alpha1.TemplateDevelopmentComponent, workloadID string, workload map[string]any, devImage, agentImage, previewConsoleVerificationJWKS string, providerActions bool, byID map[string]map[string]any) ([]any, string, error) {
+func synthesizeComponent(templateName, name string, comp infrav1alpha1.TemplateDevelopmentComponent, workloadID string, workload map[string]any, devImage, agentImage, previewConsoleVerificationJWKS string, providerActions, supportsSuspension bool, byID map[string]map[string]any) ([]any, string, error) {
 	prodTemplate, _ := workload["template"].(map[string]any)
 	namespace, _, _ := nestedString(prodTemplate, "metadata", "namespace")
 	if namespace == "" {
@@ -300,6 +311,7 @@ func synthesizeComponent(templateName, name string, comp infrav1alpha1.TemplateD
 		agentImage,
 		previewConsoleVerificationJWKS,
 		providerActions,
+		supportsSuspension,
 		workingDir,
 		pvcName,
 		"${schema.spec.name}-dev-"+name+"-platform-state",
@@ -404,7 +416,7 @@ func synthesizeComponent(templateName, name string, comp infrav1alpha1.TemplateD
 // are built from scratch with their own mounts and minimal environments.
 // mountedWorkspace reports whether the overlay added the workspace mount (and
 // so needs the per-component workspace PVC).
-func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopmentComponent, prodTemplate map[string]any, devImage, agentImage, previewConsoleVerificationJWKS string, providerActions bool, workingDir, pvcName, statePVCName, caBundleResourceID string) (dev, selector map[string]any, mountedWorkspace bool, err error) {
+func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopmentComponent, prodTemplate map[string]any, devImage, agentImage, previewConsoleVerificationJWKS string, providerActions, supportsSuspension bool, workingDir, pvcName, statePVCName, caBundleResourceID string) (dev, selector map[string]any, mountedWorkspace bool, err error) {
 	tmplCopy, err := deepCopyMap(prodTemplate)
 	if err != nil {
 		return nil, nil, false, err
@@ -415,8 +427,14 @@ func synthesizeDevDeployment(name string, comp infrav1alpha1.TemplateDevelopment
 		return nil, nil, false, fmt.Errorf("workload has no spec")
 	}
 	// One dev pod, one workspace PVC; Recreate avoids the RWO rolling-update
-	// deadlock (the new pod can't mount until the old one releases).
-	spec["replicas"] = int64(1)
+	// deadlock (the new pod can't mount until the old one releases). Suspension
+	// scales this workload to zero without deleting the graph, PVC, or control
+	// plane resources, so the project can resume with the same workspace.
+	if supportsSuspension {
+		spec["replicas"] = "${schema.spec." + infrav1alpha1.FarosSuspendedField + " ? 0 : 1}"
+	} else {
+		spec["replicas"] = int64(1)
+	}
 	spec["strategy"] = map[string]any{"type": "Recreate"}
 
 	selectorLabels, _, _ := nestedMap(spec, "selector", "matchLabels")

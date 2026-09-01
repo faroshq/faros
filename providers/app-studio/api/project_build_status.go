@@ -123,16 +123,27 @@ func (s *Server) rebuildProject(ctx context.Context, id identity, p *aiv1alpha1.
 
 func (s *Server) projectBuildWorkflowCandidates(ctx context.Context, id identity, p *aiv1alpha1.Project) ([]string, error) {
 	declared := ""
-	if p != nil && p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) != "" {
+	templateName := projectDevelopmentTemplateName(p)
+	if templateName != "" {
 		c, err := s.clientFor(id)
 		if err != nil {
 			return nil, err
 		}
-		info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
+		info, err := fetchProjectTemplate(ctx, c, templateName)
 		if err != nil {
 			return nil, err
 		}
 		declared = info.BuildWorkflowPath
+	} else if p != nil && (len(p.Spec.Components) > 0 || p.Spec.Build != nil) {
+		// A template-less Project is not allowed to silently select the
+		// historical compatibility workflow. Its repository-owned build contract
+		// must identify the exact workflow that publishes the Project's stable
+		// component images.
+		workflowPath, err := projectBuildWorkflowPath(p)
+		if err != nil {
+			return nil, err
+		}
+		declared = workflowPath
 	}
 
 	if declared != "" {
@@ -154,6 +165,26 @@ func (s *Server) projectBuildWorkflowCandidates(ctx context.Context, id identity
 		candidates = append(candidates, candidate)
 	}
 	return candidates, nil
+}
+
+// projectBuildWorkflowPath validates and returns a template-less Project's
+// repository-owned workflow pointer. The API schema rejects malformed values,
+// but this runtime guard is still required for objects produced by older
+// servers, dynamic clients, or tests that bypass API admission.
+func projectBuildWorkflowPath(p *aiv1alpha1.Project) (string, error) {
+	if p == nil || p.Spec.Build == nil || strings.TrimSpace(p.Spec.Build.WorkflowPath) == "" {
+		return "", newValidationError("template-less projects require spec.build.workflowPath")
+	}
+	workflowPath := strings.TrimSpace(p.Spec.Build.WorkflowPath)
+	const workflowPrefix = ".github/workflows/"
+	if path.IsAbs(workflowPath) || strings.Contains(workflowPath, `\`) || path.Clean(workflowPath) != workflowPath || !strings.HasPrefix(workflowPath, workflowPrefix) {
+		return "", newValidationError("spec.build.workflowPath must name a repository-relative workflow directly under .github/workflows/")
+	}
+	filename := strings.TrimPrefix(workflowPath, workflowPrefix)
+	if filename == "" || strings.Contains(filename, "/") || strings.ContainsAny(filename, "\x00\r\n") || (path.Ext(filename) != ".yml" && path.Ext(filename) != ".yaml") {
+		return "", newValidationError("spec.build.workflowPath must name a .yml or .yaml file directly under .github/workflows/")
+	}
+	return workflowPath, nil
 }
 
 // callProjectBuildWorkflow tries workflow candidates in order. A declared
@@ -241,7 +272,7 @@ func projectComponentImagesFromPackages(items []unstructured.Unstructured, repoR
 
 	out := make(map[string]componentImageRef, len(components))
 	for _, comp := range components {
-		pkg := findPackageForComponentInRepository(items, comp.Name, repoRef)
+		pkg := findPackageForProjectBuildComponent(items, comp, repoRef)
 		if pkg == nil {
 			continue
 		}
@@ -258,6 +289,19 @@ func projectComponentImagesFromPackages(items []unstructured.Unstructured, repoR
 		}
 	}
 	return out
+}
+
+func findPackageForProjectBuildComponent(items []unstructured.Unstructured, component projectBuildComponent, repositoryRef string) *unstructured.Unstructured {
+	for _, name := range []string{component.Name, component.TemplateComponent} {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if pkg := findPackageForComponentInRepository(items, name, repositoryRef); pkg != nil {
+			return pkg
+		}
+	}
+	return nil
 }
 
 // Package versions are registry observations, not user-supplied image refs.
@@ -442,12 +486,14 @@ func packageVersionTags(raw any) []string {
 
 // projectBuildCheckComponent is one launchable component's build state.
 type projectBuildCheckComponent struct {
-	Name       string `json:"name"`
-	ImageInput string `json:"imageInput"`
-	Built      bool   `json:"built"`
-	Image      string `json:"image,omitempty"`
-	Digest     string `json:"digest,omitempty"`
-	Tag        string `json:"tag,omitempty"`
+	Name           string `json:"name"`
+	ImageInput     string `json:"imageInput"`
+	ContextPath    string `json:"contextPath,omitempty"`
+	DockerfilePath string `json:"dockerfilePath,omitempty"`
+	Built          bool   `json:"built"`
+	Image          string `json:"image,omitempty"`
+	Digest         string `json:"digest,omitempty"`
+	Tag            string `json:"tag,omitempty"`
 }
 
 // projectBuildRunObservation is explanatory evidence from the Code provider.
@@ -490,7 +536,7 @@ const (
 type projectBuildCheckResult struct {
 	// Status is one of: built (every launchable component has a published
 	// image), incomplete (some do), none (none published yet), or unsupported
-	// (template-less project).
+	// (missing Project build contract or no launchable components).
 	Status string `json:"status"`
 	// CommitSHA is the exact reviewed repository commit whose sha-<commit>
 	// package tags were used for the component image plan.
@@ -611,21 +657,42 @@ func (s *Server) checkProjectBuild(ctx context.Context, c *asclient.Client, id i
 			return projectBuildCheckResult{}, err
 		}
 	}
-	if p == nil || p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) == "" {
+	templateName := projectDevelopmentTemplateName(p)
+	if p == nil || templateName == "" {
+		// Universal-sandbox Projects intentionally have no development Template.
+		// Their stable Project components are the build contract instead of a
+		// reason to fall back to the legacy singular spec.template field.
+		if p != nil && len(p.Spec.Components) > 0 {
+			if _, workflowErr := projectBuildWorkflowPath(p); workflowErr != nil {
+				return projectBuildCheckResult{Status: "unsupported", Note: workflowErr.Error()}, nil
+			}
+			components := projectBuildComponentsForProject(p, projectTemplateInfo{})
+			if len(components) == 0 {
+				return projectBuildCheckResult{
+					Status: "unsupported",
+					Note:   "the project's components do not declare a usable source/build context",
+				}, nil
+			}
+			commitSHA, err := currentProjectRepositoryCommitSHA(ctx, c, projectLinkedRepositoryRef(p))
+			if err != nil {
+				return projectBuildCheckResult{}, err
+			}
+			return s.checkProjectBuildForCommit(ctx, c, p, components, commitSHA)
+		}
 		return projectBuildCheckResult{
 			Status: "unsupported",
-			Note:   "this project is not backed by a template with launchable build components; select a template (e.g. application or simple-webapp) before building for launch",
+			Note:   "this project has no development Template or stable components with a usable source/build context",
 		}, nil
 	}
-	info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
+	info, err := fetchProjectTemplate(ctx, c, templateName)
 	if err != nil {
 		return projectBuildCheckResult{}, err
 	}
-	components := projectBuildComponents(info)
+	components := projectBuildComponentsForProject(p, info)
 	if len(components) == 0 {
 		return projectBuildCheckResult{
 			Status: "unsupported",
-			Note:   "the project's template declares no launchable build components",
+			Note:   "the project's Template or stable Project components declare no launchable build components",
 		}, nil
 	}
 
@@ -650,7 +717,12 @@ func (s *Server) checkProjectBuildForCommit(ctx context.Context, c *asclient.Cli
 	result := projectBuildCheckResult{CommitSHA: commitSHA, Components: make([]projectBuildCheckComponent, 0, len(components))}
 	builtCount := 0
 	for _, comp := range components {
-		row := projectBuildCheckComponent{Name: comp.Name, ImageInput: comp.ImageInput}
+		row := projectBuildCheckComponent{
+			Name:           comp.Name,
+			ImageInput:     comp.ImageInput,
+			ContextPath:    projectBuildComponentContextPath(comp),
+			DockerfilePath: comp.DockerfilePath,
+		}
 		if img, ok := images[comp.Name]; ok && img.Image != "" {
 			row.Built = true
 			row.Image = img.Image
@@ -687,21 +759,35 @@ func (s *Server) checkProjectBuildForCommit(ctx context.Context, c *asclient.Cli
 // after revalidating RepositoryCommit ownership, ensuring GET release evidence
 // or client image values can never become promotion authority.
 func (s *Server) checkProjectBuildAtCommit(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, commitSHA string) (projectBuildCheckResult, error) {
-	if p == nil || p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) == "" {
+	templateName := projectDevelopmentTemplateName(p)
+	if p == nil || templateName == "" {
+		if p != nil && len(p.Spec.Components) > 0 {
+			if _, workflowErr := projectBuildWorkflowPath(p); workflowErr != nil {
+				return projectBuildCheckResult{Status: "unsupported", Note: workflowErr.Error()}, nil
+			}
+			components := projectBuildComponentsForProject(p, projectTemplateInfo{})
+			if len(components) == 0 {
+				return projectBuildCheckResult{
+					Status: "unsupported",
+					Note:   "the project's components do not declare a usable source/build context",
+				}, nil
+			}
+			return s.checkProjectBuildForCommit(ctx, c, p, components, commitSHA)
+		}
 		return projectBuildCheckResult{
 			Status: "unsupported",
-			Note:   "this project is not backed by a template with launchable build components; select a template (e.g. application or simple-webapp) before building for launch",
+			Note:   "this project has no development Template or stable components with a usable source/build context",
 		}, nil
 	}
-	info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
+	info, err := fetchProjectTemplate(ctx, c, templateName)
 	if err != nil {
 		return projectBuildCheckResult{}, err
 	}
-	components := projectBuildComponents(info)
+	components := projectBuildComponentsForProject(p, info)
 	if len(components) == 0 {
 		return projectBuildCheckResult{
 			Status: "unsupported",
-			Note:   "the project's template declares no launchable build components",
+			Note:   "the project's Template or stable Project components declare no launchable build components",
 		}, nil
 	}
 	return s.checkProjectBuildForCommit(ctx, c, p, components, commitSHA)

@@ -106,12 +106,16 @@ func (s *Server) projectReleases(ctx context.Context, c *asclient.Client, p *aiv
 	commits = releaseCommits
 
 	var components []projectBuildComponent
-	if p != nil && p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) != "" {
-		info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
+	if templateName := projectDevelopmentTemplateName(p); templateName != "" {
+		info, err := fetchProjectTemplate(ctx, c, templateName)
 		if err != nil {
 			return projectReleasesResponse{}, err
 		}
-		components = projectBuildComponents(info)
+		components = projectBuildComponentsForProject(p, info)
+	} else if p != nil && len(p.Spec.Components) > 0 {
+		// Universal-sandbox Projects do not have a development Template. Their
+		// stable Project components still identify the artifact packages.
+		components = projectBuildComponentsForProject(p, projectTemplateInfo{})
 	}
 
 	var packages []unstructured.Unstructured
@@ -137,7 +141,7 @@ func (s *Server) projectReleases(ctx context.Context, c *asclient.Client, p *aiv
 			if view.Deployable {
 				view.ReleaseID = projectReleaseID(repositoryRef, view.CommitSHA, view.Components)
 			}
-			view.Live = view.Deployable && projectReleaseMatchesProduction(p, view.Components)
+			view.Live = view.Deployable && projectReleaseMatchesProductionForClient(ctx, c, p, view.Components)
 		}
 		response.Items = append(response.Items, view)
 	}
@@ -294,7 +298,12 @@ func projectReleaseComponents(components []projectBuildComponent, images map[str
 	evidence := make([]projectBuildCheckComponent, 0, len(components))
 	missing := make([]string, 0, len(components))
 	for _, component := range components {
-		row := projectBuildCheckComponent{Name: component.Name, ImageInput: component.ImageInput}
+		row := projectBuildCheckComponent{
+			Name:           component.Name,
+			ImageInput:     component.ImageInput,
+			ContextPath:    projectBuildComponentContextPath(component),
+			DockerfilePath: component.DockerfilePath,
+		}
 		if image, ok := images[component.Name]; ok && image.Image != "" {
 			row.Built = true
 			row.Image = image.Image
@@ -328,4 +337,44 @@ func projectReleaseMatchesProduction(p *aiv1alpha1.Project, components []project
 		}
 	}
 	return true
+}
+
+func projectReleaseMatchesProductionForClient(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, components []projectBuildCheckComponent) bool {
+	if p == nil || c == nil {
+		return projectReleaseMatchesProduction(p, components)
+	}
+	templateName := projectDevelopmentTemplateName(p)
+	if binding := findProjectProductionBinding(p); binding != nil && binding.TemplateRef != nil {
+		templateName = strings.TrimSpace(binding.TemplateRef.Name)
+	}
+	if templateName == "" {
+		return false
+	}
+	info, err := fetchProjectTemplate(ctx, c, templateName)
+	if err != nil {
+		return false
+	}
+	return projectReleaseMatchesProductionForTemplate(p, info, components)
+}
+
+func projectReleaseMatchesProductionForTemplate(p *aiv1alpha1.Project, info projectTemplateInfo, components []projectBuildCheckComponent) bool {
+	binding := findProjectProductionBinding(p)
+	if binding == nil || len(components) == 0 {
+		return false
+	}
+	values := projectBindingValues(binding)
+	if values == nil {
+		return false
+	}
+	_, images, err := projectProductionComponentMappings(p, info, components, nil)
+	if err != nil {
+		return false
+	}
+	for imageInput, image := range images {
+		current, ok := values[imageInput].(string)
+		if !ok || strings.TrimSpace(current) != strings.TrimSpace(image) {
+			return false
+		}
+	}
+	return len(images) > 0
 }

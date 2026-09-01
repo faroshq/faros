@@ -57,6 +57,12 @@ func ValidateUniversalCodingSandboxTemplate(tmpl *Template) error {
 	if tmpl.Spec.ExposureClass() != ExposureInternal {
 		return fmt.Errorf("universal coding sandbox exposure must be %q", ExposureInternal)
 	}
+	if !tmpl.Spec.Lifecycle.SupportsSuspension {
+		return fmt.Errorf("universal coding sandbox must support lifecycle suspension")
+	}
+	if tmpl.Spec.Lifecycle.DefaultDeletionPolicy != DeletionPolicyDelete {
+		return fmt.Errorf("universal coding sandbox deletion policy must be %q", DeletionPolicyDelete)
+	}
 	if tmpl.Spec.Backend != "kro" {
 		return fmt.Errorf("universal coding sandbox backend must be kro")
 	}
@@ -72,7 +78,31 @@ func ValidateUniversalCodingSandboxTemplate(tmpl *Template) error {
 	if err := validateUniversalDataPlane(tmpl.Spec.DataPlane); err != nil {
 		return err
 	}
+	if err := validateUniversalConnections(tmpl.Spec.Connections); err != nil {
+		return err
+	}
 	return validateUniversalBackend(tmpl.Spec.BackendConfig)
+}
+
+func validateUniversalConnections(connections *TemplateConnections) error {
+	if connections == nil || len(connections.Provides) != 0 || len(connections.Consumes) != 2 {
+		return fmt.Errorf("universal coding sandbox must consume exactly postgresql and redis connection interfaces")
+	}
+	want := map[string]TemplateConnectionMapping{
+		"postgresql": {SourceKey: "uri", TargetKey: "DATABASE_URL"},
+		"redis":      {SourceKey: "uri", TargetKey: "REDIS_URL"},
+	}
+	for _, consumed := range connections.Consumes {
+		mapping, ok := want[consumed.Name]
+		if !ok || consumed.Type != consumed.Name || len(consumed.Mappings) != 1 || consumed.Mappings[0] != mapping {
+			return fmt.Errorf("universal coding sandbox connection interface %q is unsafe", consumed.Name)
+		}
+		delete(want, consumed.Name)
+	}
+	if len(want) != 0 {
+		return fmt.Errorf("universal coding sandbox is missing required connection interfaces")
+	}
+	return nil
 }
 
 func validateUniversalSchema(tmpl *Template) error {
@@ -194,8 +224,8 @@ func validateUniversalDataPlane(dataPlane *TemplateDataPlane) error {
 		return fmt.Errorf("universal coding sandbox data plane must declare only the workspace component")
 	}
 	workspace, ok := dataPlane.Components["workspace"]
-	if !ok || len(workspace.Endpoints) != 5 {
-		return fmt.Errorf("universal coding sandbox workspace data plane must declare exactly five bounded endpoints")
+	if !ok || len(workspace.Endpoints) != 6 {
+		return fmt.Errorf("universal coding sandbox workspace data plane must declare exactly six bounded endpoints")
 	}
 	expected := map[string]TemplateDataPlaneEndpoint{
 		"workspace": {ServicePath: universalControlService, Port: "control", UpstreamPath: "/workspace", Methods: []string{"GET", "POST"}},
@@ -203,6 +233,7 @@ func validateUniversalDataPlane(dataPlane *TemplateDataPlane) error {
 		"restart":   {ServicePath: universalControlService, Port: "control", UpstreamPath: "/restart", Methods: []string{"POST"}},
 		"log":       {ServicePath: universalControlService, Port: "control", UpstreamPath: "/logs", Methods: []string{"GET"}, Stream: true},
 		"process":   {ServicePath: universalControlService, Port: "control", UpstreamPath: "/status", Methods: []string{"GET"}},
+		"listeners": {ServicePath: universalControlService, Port: "control", UpstreamPath: "/listeners", Methods: []string{"GET"}},
 	}
 	for name, want := range expected {
 		if got, ok := workspace.Endpoints[name]; !ok || !reflect.DeepEqual(got, want) {
@@ -308,7 +339,10 @@ func validateUniversalWorkload(resource map[string]any) error {
 		return fmt.Errorf("universal coding sandbox workload: %w", err)
 	}
 	podMetadata, err := objectField(podTemplate, "metadata")
-	if err != nil || !stringMapEqual(podMetadata["labels"], map[string]string{"app": "${schema.spec.name}"}) || !stringMapEqual(podMetadata["annotations"], map[string]string{"faros.sh/network-access": "default-deny-egress"}) {
+	if err != nil || !stringMapEqual(podMetadata["labels"], map[string]string{"app": "${schema.spec.name}"}) || !stringMapEqual(podMetadata["annotations"], map[string]string{
+		"faros.sh/network-access":       "default-deny-egress",
+		"faros.sh/connections-revision": "${schema.spec.farosConnectionsRevision}",
+	}) {
 		return fmt.Errorf("universal coding sandbox workload pod labels are unsafe")
 	}
 	podSpec, err := objectField(podTemplate, "spec")
@@ -316,7 +350,6 @@ func validateUniversalWorkload(resource map[string]any) error {
 		return fmt.Errorf("universal coding sandbox workload: %w", err)
 	}
 	for _, field := range []string{
-		"volumes",
 		"initContainers",
 		"ephemeralContainers",
 		"imagePullSecrets",
@@ -353,6 +386,9 @@ func validateUniversalWorkload(resource map[string]any) error {
 	if err := validateUniversalResources(container["resources"]); err != nil {
 		return err
 	}
+	if err := validateUniversalConnectionMount(podSpec, container); err != nil {
+		return err
+	}
 	containerSecurity, err := objectField(container, "securityContext")
 	if err != nil || containerSecurity["runAsNonRoot"] != true || !numberEqual(containerSecurity["runAsUser"], 1000) || !numberEqual(containerSecurity["runAsGroup"], 1000) || containerSecurity["allowPrivilegeEscalation"] != false || containerSecurity["readOnlyRootFilesystem"] != false {
 		return fmt.Errorf("universal coding sandbox container security context is unsafe")
@@ -360,6 +396,30 @@ func validateUniversalWorkload(resource map[string]any) error {
 	capabilities, err := objectField(containerSecurity, "capabilities")
 	if err != nil || !equalStringSlice(capabilities["drop"], []string{"ALL"}) || capabilities["add"] != nil {
 		return fmt.Errorf("universal coding sandbox container must drop all capabilities")
+	}
+	return nil
+}
+
+func validateUniversalConnectionMount(podSpec, container map[string]any) error {
+	volumes, ok := podSpec["volumes"].([]any)
+	if !ok || len(volumes) != 1 {
+		return fmt.Errorf("universal coding sandbox must declare exactly one aggregate connection volume")
+	}
+	volume, ok := volumes[0].(map[string]any)
+	if !ok || volume["name"] != "faros-connections" {
+		return fmt.Errorf("universal coding sandbox aggregate connection volume is malformed")
+	}
+	secret, err := objectField(volume, "secret")
+	if err != nil || secret["secretName"] != "${schema.spec.farosConnectionsSecretName}" || secret["optional"] != true || len(secret) != 2 {
+		return fmt.Errorf("universal coding sandbox aggregate connection Secret must be platform selected and optional")
+	}
+	mounts, ok := container["volumeMounts"].([]any)
+	if !ok || len(mounts) != 1 {
+		return fmt.Errorf("universal coding sandbox must mount exactly one aggregate connection volume")
+	}
+	mount, ok := mounts[0].(map[string]any)
+	if !ok || mount["name"] != "faros-connections" || mount["mountPath"] != "/var/run/faros/connections" || mount["readOnly"] != true || len(mount) != 3 {
+		return fmt.Errorf("universal coding sandbox aggregate connection mount is unsafe")
 	}
 	return nil
 }

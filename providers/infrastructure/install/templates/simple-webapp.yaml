@@ -11,6 +11,8 @@ spec:
   # Every instance is published; App Studio's preview depends on it.
   exposure: public
   backend: kro
+  lifecycle:
+    defaultDeletionPolicy: Delete
   # One-click provision defaults for the portal form. nginx serves its welcome
   # page on port 80, so "Provision → see it working" needs zero external setup.
   sampleValues:
@@ -226,6 +228,19 @@ spec:
             upstreamPath: /status
             methods: ["GET"]
 
+  connections:
+    consumes:
+      - name: postgresql
+        type: postgresql
+        mappings:
+          - sourceKey: uri
+            targetKey: DATABASE_URL
+      - name: redis
+        type: redis
+        mappings:
+          - sourceKey: uri
+            targetKey: REDIS_URL
+
   # ── backendConfig: the kro resource graph ─────────────────────────────
   # Every resource sets namespace: default — the control-plane/data-plane split
   # materializes these on the runtime cluster and remaps that to the per-tenant
@@ -262,6 +277,7 @@ spec:
               metadata:
                 annotations:
                   faros.sh/redeploy-revision: ${schema.spec.farosRedeployRevision}
+                  faros.sh/connections-revision: ${schema.spec.farosConnectionsRevision}
                 labels:
                   app: ${schema.spec.name}
               spec:
@@ -280,6 +296,9 @@ spec:
                     envFrom:
                       - configMapRef:
                           name: ${appEnv.metadata.name}
+                      - secretRef:
+                          name: ${schema.spec.farosConnectionsSecretName}
+                          optional: true
                     ports:
                       - containerPort: ${schema.spec.port}
       - id: appService

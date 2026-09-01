@@ -16,6 +16,10 @@ spec:
   # No HTTP surface at all, so no dataPlane either.
   exposure: internal
   backend: kro
+  lifecycle:
+    # Database state is retained by default so deleting the control-plane
+    # Instance does not silently discard tenant data.
+    defaultDeletionPolicy: Retain
   sampleValues:
     name: todo-db
     version: "16"
@@ -73,6 +77,12 @@ spec:
     version: v1alpha1
     resource: postgresdatabases
     kind: PostgresDatabase
+  connections:
+    provides:
+      - name: default
+        type: postgresql
+        secretRefPath: status.connectionSecretRef
+        keys: [host, port, user, dbname, password, uri]
   schema:
     type: object
     properties:

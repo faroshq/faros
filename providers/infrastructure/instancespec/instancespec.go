@@ -64,7 +64,61 @@ func EffectiveSchema(tmpl *infrav1alpha1.Template) (*apiextensionsv1.JSONSchemaP
 	if err := injectFarosNetworkPhase(&spec, tmpl.Spec.Development != nil); err != nil {
 		return nil, err
 	}
+	if err := injectFarosSuspended(&spec, tmpl.Spec.Development != nil && tmpl.Spec.Lifecycle.SupportsSuspension); err != nil {
+		return nil, err
+	}
+	if err := injectFarosConnections(&spec); err != nil {
+		return nil, err
+	}
 	return &spec, nil
+}
+
+// injectFarosConnections adds provider-owned aggregate Secret metadata to
+// every runtime contract. The Instance controller computes both fields; users
+// and template authors cannot select an arbitrary Secret or rollout revision.
+func injectFarosConnections(spec *apiextensionsv1.JSONSchemaProps) error {
+	for _, name := range []string{
+		infrav1alpha1.FarosConnectionsSecretNameField,
+		infrav1alpha1.FarosConnectionsRevisionField,
+	} {
+		if _, exists := spec.Properties[name]; exists {
+			return fmt.Errorf("spec.schema declares reserved property %q; the platform injects connection metadata", name)
+		}
+	}
+	if spec.Properties == nil {
+		spec.Properties = map[string]apiextensionsv1.JSONSchemaProps{}
+	}
+	spec.Properties[infrav1alpha1.FarosConnectionsSecretNameField] = apiextensionsv1.JSONSchemaProps{
+		Type: "string", Description: "Platform-managed aggregate connection Secret name.",
+		Default: &apiextensionsv1.JSON{Raw: []byte(`""`)},
+	}
+	spec.Properties[infrav1alpha1.FarosConnectionsRevisionField] = apiextensionsv1.JSONSchemaProps{
+		Type: "string", Description: "Non-secret revision of the aggregate connection material.",
+		Default: &apiextensionsv1.JSON{Raw: []byte(`""`)},
+	}
+	return nil
+}
+
+// injectFarosSuspended adds the provider-owned suspension input to
+// development contracts. It is stamped from Instance.spec.lifecycle rather
+// than accepted from the template-shaped values payload, so callers cannot
+// smuggle a second lifecycle writer into a backend graph.
+func injectFarosSuspended(spec *apiextensionsv1.JSONSchemaProps, enabled bool) error {
+	if _, exists := spec.Properties[infrav1alpha1.FarosSuspendedField]; exists {
+		return fmt.Errorf("spec.schema declares reserved property %q; the platform injects suspension", infrav1alpha1.FarosSuspendedField)
+	}
+	if !enabled {
+		return nil
+	}
+	if spec.Properties == nil {
+		spec.Properties = map[string]apiextensionsv1.JSONSchemaProps{}
+	}
+	spec.Properties[infrav1alpha1.FarosSuspendedField] = apiextensionsv1.JSONSchemaProps{
+		Type:        "boolean",
+		Description: "Platform-reserved lifecycle suspension. The provider scales development compute to zero while preserving the workspace.",
+		Default:     &apiextensionsv1.JSON{Raw: []byte(`false`)},
+	}
+	return nil
 }
 
 // injectFarosNetworkPhase adds the platform-owned setup/runtime phase to

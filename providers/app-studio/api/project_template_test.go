@@ -74,7 +74,11 @@ func applicationTemplateObject() *unstructured.Unstructured {
 }
 
 func TestProjectTemplateInfoFromUnstructured(t *testing.T) {
-	info, err := projectTemplateInfoFromUnstructured(applicationTemplateObject())
+	obj := applicationTemplateObject()
+	if err := unstructured.SetNestedField(obj.Object, "Retain", "spec", "lifecycle", "defaultDeletionPolicy"); err != nil {
+		t.Fatalf("set lifecycle test field: %v", err)
+	}
+	info, err := projectTemplateInfoFromUnstructured(obj)
 	if err != nil {
 		t.Fatalf("projectTemplateInfoFromUnstructured: %v", err)
 	}
@@ -94,12 +98,15 @@ func TestProjectTemplateInfoFromUnstructured(t *testing.T) {
 	if info.BuildWorkflowPath != ".github/workflows/build.yaml" {
 		t.Errorf("BuildWorkflowPath = %q", info.BuildWorkflowPath)
 	}
+	if info.DefaultDeletionPolicy != "Retain" {
+		t.Errorf("DefaultDeletionPolicy = %q, want Retain", info.DefaultDeletionPolicy)
+	}
 	if got, want := info.WorkspacePaths(), map[string]string{"frontend": "web", "backend": "api"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("WorkspacePaths = %v, want %v", got, want)
 	}
 
 	// A template without a development block yields no components.
-	obj := applicationTemplateObject()
+	obj = applicationTemplateObject()
 	unstructured.RemoveNestedField(obj.Object, "spec", "development")
 	info, err = projectTemplateInfoFromUnstructured(obj)
 	if err != nil {
@@ -200,6 +207,9 @@ func TestProjectTemplateDevBinding(t *testing.T) {
 	}
 	if binding.Name != projectDevelopmentBindingName || binding.Provider != projectDevelopmentProviderAppStudio {
 		t.Errorf("binding identity = %s/%s", binding.Name, binding.Provider)
+	}
+	if binding.TemplateRef == nil || binding.TemplateRef.Name != "application" {
+		t.Fatalf("binding.templateRef = %+v, want application", binding.TemplateRef)
 	}
 	if binding.ResourceRef.Kind != "Instance" || binding.ResourceRef.Resource != "instances" || binding.ResourceRef.Name != "shop-dev" {
 		t.Errorf("resourceRef = %+v", binding.ResourceRef)
@@ -487,6 +497,45 @@ func TestApplyProjectDevelopmentTemplateBuildsInitialBindingIdempotently(t *test
 	}
 	if got := len(p.Spec.Environments[0].Bindings); got != 2 {
 		t.Fatalf("development bindings after second apply = %d, want idempotent 2", got)
+	}
+}
+
+func TestApplyProjectDevelopmentTemplateInitializesStableComponentsOnlyWhenAbsent(t *testing.T) {
+	info, err := projectTemplateInfoFromUnstructured(applicationTemplateObject())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "shop"}}
+	if err := applyProjectDevelopmentTemplateWithContext(project, info, projectTemplateBindingContext{}); err != nil {
+		t.Fatalf("initial template apply: %v", err)
+	}
+	if got := len(project.Spec.Components); got != 2 {
+		t.Fatalf("initialized Project components = %d, want 2", got)
+	}
+	if project.Spec.Components[0].Name != "backend" || project.Spec.Components[0].SourcePath != "api" || project.Spec.Components[0].Kind != aiv1alpha1.ProjectComponentKindService {
+		t.Fatalf("first initialized component = %+v, want backend/api/Service", project.Spec.Components[0])
+	}
+	if project.Spec.Components[1].Name != "frontend" || project.Spec.Components[1].SourcePath != "web" || project.Spec.Components[1].Kind != aiv1alpha1.ProjectComponentKindService {
+		t.Fatalf("second initialized component = %+v, want frontend/web/Service", project.Spec.Components[1])
+	}
+
+	// A later Template contract must not rewrite the stable source identity.
+	project.Spec.Components[0].SourcePath = "services/api"
+	changed := applicationTemplateObject()
+	changed.SetName("different")
+	_ = unstructured.SetNestedField(changed.Object, "renamed", "spec", "development", "components", "backend", "workspacePath")
+	changedInfo, err := projectTemplateInfoFromUnstructured(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProjectDevelopmentTemplateWithContext(project, changedInfo, projectTemplateBindingContext{}); err != nil {
+		t.Fatalf("second template apply: %v", err)
+	}
+	if project.Spec.Components[0].SourcePath != "services/api" {
+		t.Fatalf("existing Project component was rewritten to %q", project.Spec.Components[0].SourcePath)
+	}
+	if project.Spec.Components[0].Name != "backend" {
+		t.Fatalf("existing Project component name changed to %q", project.Spec.Components[0].Name)
 	}
 }
 

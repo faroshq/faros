@@ -399,6 +399,99 @@ func TestEnsureInstanceDeepMergesComputedFieldsAndRetriesConflict(t *testing.T) 
 	}
 }
 
+func TestCleanupRemovedBindingsDeletesFromStatusInventory(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"}, Status: aiv1alpha1.ProjectStatus{
+		BindingInventory: []aiv1alpha1.ProjectBindingInventoryStatus{{
+			Environment: "development",
+			Binding:     "old",
+			Provider:    "infrastructure",
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+				Name: "demo-old", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
+			},
+			DeletionPolicy: aiv1alpha1.ProjectBindingDeletionPolicyDelete,
+		}},
+	}}
+	old := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Instance",
+		"metadata":   map[string]any{"name": "demo-old"},
+	}}
+	c := fake.NewClientBuilder().WithObjects(old).Build()
+	current := binding("new")
+	current.ResourceRef.Name = "demo-new"
+	bound := []boundEnv{{spec: aiv1alpha1.ProjectEnvironmentSpec{Name: "development"}, bindings: []aiv1alpha1.ProjectProviderBindingSpec{current}}}
+
+	if err := cleanupRemovedBindings(context.Background(), c, p, bound); err != nil {
+		t.Fatalf("cleanupRemovedBindings: %v", err)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetAPIVersion("infrastructure.faros.sh/v1alpha1")
+	got.SetKind("Instance")
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "demo-old"}, got); !apierrors.IsNotFound(err) {
+		t.Fatalf("removed instance lookup error = %v, want NotFound", err)
+	}
+}
+
+func TestCleanupRemovedBindingsDetachesRetainedInventory(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: "project-uid"}, Status: aiv1alpha1.ProjectStatus{
+		BindingInventory: []aiv1alpha1.ProjectBindingInventoryStatus{{
+			Environment: "production",
+			Binding:     "database",
+			Provider:    "infrastructure",
+			ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
+				Name: "demo-db", APIVersion: "infrastructure.faros.sh/v1alpha1", Kind: "Instance", Resource: "instances",
+			},
+			DeletionPolicy: aiv1alpha1.ProjectBindingDeletionPolicyRetain,
+		}},
+	}}
+	owner := bindings.OwnerRef(p)
+	database := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Instance",
+		"metadata": map[string]any{
+			"name":            "demo-db",
+			"ownerReferences": []any{map[string]any{"apiVersion": owner.APIVersion, "kind": owner.Kind, "name": owner.Name, "uid": string(owner.UID), "controller": true}},
+			"labels":          map[string]any{bindings.ProjectLabel: "demo"},
+		},
+	}}
+	c := fake.NewClientBuilder().WithObjects(database).Build()
+
+	if err := cleanupRemovedBindings(context.Background(), c, p, nil); err != nil {
+		t.Fatalf("cleanupRemovedBindings: %v", err)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetAPIVersion("infrastructure.faros.sh/v1alpha1")
+	got.SetKind("Instance")
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "demo-db"}, got); err != nil {
+		t.Fatalf("get retained instance: %v", err)
+	}
+	if refs := got.GetOwnerReferences(); len(refs) != 0 {
+		t.Fatalf("ownerReferences = %+v, want detached", refs)
+	}
+	labels := got.GetLabels()
+	if labels[bindings.RetainedLabel] != "true" || labels[bindings.RetainedProjectLabel] != "demo" || labels[bindings.RetainedEnvironmentLabel] != "production" {
+		t.Fatalf("retained labels = %#v", labels)
+	}
+	if _, found := labels[bindings.ProjectLabel]; found {
+		t.Fatalf("stale project label survived retention: %#v", labels)
+	}
+}
+
+func TestBindingInventoryCapturesResolvedNamesAndPolicies(t *testing.T) {
+	p := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}
+	b := binding("database")
+	b.ResourceRef.Name = ""
+	b.Values = runtime.RawExtension{Raw: []byte(`{"name":"demo-db"}`)}
+	b.Lifecycle = &aiv1alpha1.ProjectBindingLifecycleSpec{DeletionPolicy: aiv1alpha1.ProjectBindingDeletionPolicyRetain}
+	got := bindingInventory(p, []boundEnv{{spec: aiv1alpha1.ProjectEnvironmentSpec{Name: "production"}, bindings: []aiv1alpha1.ProjectProviderBindingSpec{b}}})
+	if len(got) != 1 || got[0].ResourceRef == nil || got[0].ResourceRef.Name != "demo-db" {
+		t.Fatalf("inventory = %+v, want resolved demo-db", got)
+	}
+	if got[0].DeletionPolicy != aiv1alpha1.ProjectBindingDeletionPolicyRetain {
+		t.Fatalf("inventory deletion policy = %q, want Retain", got[0].DeletionPolicy)
+	}
+}
+
 // Keep the conflict test independent of provider-specific API discovery.
 func schemaGroupResourceForTest() schema.GroupResource {
 	return schema.GroupResource{Group: "infrastructure.faros.sh", Resource: "applications"}

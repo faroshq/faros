@@ -122,6 +122,16 @@ func buildRGD(tmpl *infrav1alpha1.Template, tokens map[string]string) (*unstruct
 	if err != nil {
 		return nil, fmt.Errorf("template %q: %w", tmpl.Name, err)
 	}
+	// Every runtime graph accepts provider-stamped aggregate connection
+	// metadata. Templates may reference these fields in optional Secret mounts,
+	// envFrom, and pod-template annotations, but may never declare or choose
+	// them themselves.
+	for _, field := range []string{infrav1alpha1.FarosConnectionsSecretNameField, infrav1alpha1.FarosConnectionsRevisionField} {
+		if _, exists := simpleSpec[field]; exists {
+			return nil, fmt.Errorf("template %q: schema declares reserved field %q", tmpl.Name, field)
+		}
+		simpleSpec[field] = `string | default=""`
+	}
 
 	resources, status, err := backendConfig(tmpl, tokens)
 	if err != nil {

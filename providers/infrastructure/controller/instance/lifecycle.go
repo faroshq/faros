@@ -17,13 +17,47 @@ limitations under the License.
 package instance
 
 import (
+	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
+
+// instanceSuspended reads the provider-owned lifecycle bit from the
+// tenant-facing Instance. Missing means running, preserving the additive
+// contract for Instances created before lifecycle suspension was introduced.
+func instanceSuspended(inst *unstructured.Unstructured) bool {
+	if inst == nil {
+		return false
+	}
+	suspended, _, _ := unstructured.NestedBool(inst.Object, "spec", "lifecycle", "suspended")
+	return suspended
+}
+
+// markInstanceSuspended persists a one-way suspension transition. The
+// controller intentionally does not auto-resume after an idle/hard lifetime
+// deadline: a user or App Studio must explicitly clear the lifecycle bit,
+// which makes compute spend and resume behavior visible and auditable.
+func markInstanceSuspended(ctx context.Context, tenantClient client.Client, inst *unstructured.Unstructured) (bool, error) {
+	if instanceSuspended(inst) {
+		return false, nil
+	}
+	if err := unstructured.SetNestedField(inst.Object, true, "spec", "lifecycle", "suspended"); err != nil {
+		return false, err
+	}
+	if err := tenantClient.Update(ctx, inst); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
 
 // lifecycleDue is deliberately pure so short-lived test templates can prove
 // expiry without sleeping or a controller-runtime harness. A missing activity

@@ -117,6 +117,10 @@ type Config struct {
 	// Runtime is a dynamic client for the kro runtime cluster, where the
 	// per-template CRs, their namespaces, and the bridged Secrets live.
 	Runtime dynamic.Interface
+	// RuntimeConfig is the REST config for Runtime. DevelopmentService uses
+	// this only to proxy its authenticated control request through the
+	// sandbox's runtime Service; object reconciliation remains dynamic.
+	RuntimeConfig *rest.Config
 	// CredentialsNamespace is the namespace in the tenant workspace the
 	// cloud-credentials Secret lives in (default "default").
 	CredentialsNamespace string
@@ -176,6 +180,7 @@ func New(cfg Config) (*Controller, error) {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(apiskcpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(apiskcpv1alpha2.AddToScheme(scheme))
+	utilruntime.Must(infrav1alpha1.AddToScheme(scheme))
 
 	provider, err := apiexport.New(cfg.ProviderConfig, cfg.APIExportName, apiexport.Options{Scheme: scheme})
 	if err != nil {
@@ -200,6 +205,18 @@ func New(cfg Config) (*Controller, error) {
 		For(obj).
 		Complete(&reconciler{c: c}); err != nil {
 		return nil, fmt.Errorf("registering instance reconciler: %w", err)
+	}
+	if err := mcbuilder.ControllerManagedBy(mgr).
+		Named("infra-development-service").
+		For(&infrav1alpha1.DevelopmentService{}).
+		Complete(&developmentServiceReconciler{c: c}); err != nil {
+		return nil, fmt.Errorf("registering development service reconciler: %w", err)
+	}
+	if err := mcbuilder.ControllerManagedBy(mgr).
+		Named("infra-connection").
+		For(&infrav1alpha1.Connection{}).
+		Complete(&connectionReconciler{c: c}); err != nil {
+		return nil, fmt.Errorf("registering connection reconciler: %w", err)
 	}
 
 	c.mgr = mgr
@@ -268,12 +285,27 @@ func (r *reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 		return c.failValidation(ctx, tenantClient, inst, infrav1alpha1.ReasonCodingSandboxDisabled,
 			"the universal coding sandbox is disabled by provider configuration")
 	}
+	if instanceSuspended(inst) && !tmpl.Spec.Lifecycle.SupportsSuspension {
+		return c.failValidation(ctx, tenantClient, inst, infrav1alpha1.ReasonSuspensionUnsupported,
+			fmt.Sprintf("template %q does not support lifecycle suspension", templateName))
+	}
 	if reason, due := lifecycleDue(time.Now(), inst.GetCreationTimestamp(), tmpl.Spec.Development, nil); due {
-		if err := tenantClient.Delete(ctx, inst); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("delete expired sandbox: %w", err)
+		if tmpl.Spec.Lifecycle.SupportsSuspension {
+			changed, err := markInstanceSuspended(ctx, tenantClient, inst)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("suspend expired sandbox: %w", err)
+			}
+			if changed {
+				log.Info("sandbox lifecycle limit reached; suspending", "reason", reason)
+				return ctrl.Result{}, nil
+			}
+		} else {
+			if err := tenantClient.Delete(ctx, inst); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("delete expired sandbox: %w", err)
+			}
+			log.Info("sandbox lifecycle limit reached", "reason", reason)
+			return ctrl.Result{}, nil
 		}
-		log.Info("sandbox lifecycle limit reached", "reason", reason)
-		return ctrl.Result{}, nil
 	}
 
 	values, _, _ := unstructured.NestedMap(inst.Object, "spec", "values")
@@ -314,17 +346,37 @@ func (r *reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	currentRuntime, _ := c.currentRuntime(ctx, tenant, tmpl, inst)
 	if tmpl.Spec.Development != nil {
 		stampedValues[infrav1alpha1.FarosNetworkPhaseField] = desiredNetworkPhase(currentRuntime)
+		if tmpl.Spec.Lifecycle.SupportsSuspension {
+			stampedValues[infrav1alpha1.FarosSuspendedField] = instanceSuspended(inst)
+		}
 	}
+	connectionName, connectionRevision, err := c.connectionRuntimeMetadata(ctx, tenant, inst)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolving connection runtime metadata: %w", err)
+	}
+	stampedValues[infrav1alpha1.FarosConnectionsSecretNameField] = connectionName
+	stampedValues[infrav1alpha1.FarosConnectionsRevisionField] = connectionRevision
 	runtimeObj, err := c.syncRuntime(ctx, tenant, tmpl, inst, stampedValues)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing runtime instance: %w", err)
 	}
 	if reason, due := lifecycleDue(time.Now(), inst.GetCreationTimestamp(), tmpl.Spec.Development, runtimeObj); due {
-		if err := tenantClient.Delete(ctx, inst); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("delete idle sandbox: %w", err)
+		if tmpl.Spec.Lifecycle.SupportsSuspension {
+			changed, err := markInstanceSuspended(ctx, tenantClient, inst)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("suspend idle sandbox: %w", err)
+			}
+			if changed {
+				log.Info("sandbox lifecycle limit reached; suspending", "reason", reason)
+				return ctrl.Result{}, nil
+			}
+		} else {
+			if err := tenantClient.Delete(ctx, inst); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("delete idle sandbox: %w", err)
+			}
+			log.Info("sandbox lifecycle limit reached", "reason", reason)
+			return ctrl.Result{}, nil
 		}
-		log.Info("sandbox lifecycle limit reached", "reason", reason)
-		return ctrl.Result{}, nil
 	}
 
 	ready, err := c.mirrorStatus(ctx, tenantClient, inst, tmpl, runtimeObj, validCondition(metav1.ConditionTrue, infrav1alpha1.ReasonReady, ""), oidcCond)

@@ -590,7 +590,7 @@ func TestProjectBuildAndPromotionRequireExactReviewedCommitImages(t *testing.T) 
 				t.Fatalf("build status = %q, want %q (check=%+v)", check.Status, tc.wantBuild, check)
 			}
 
-			_, _, promoteErr := (&Server{}).promoteProject(context.Background(), client, identity{}, persisted, nil, nil)
+			_, _, promoteErr := (&Server{}).promoteProjectWithSelectionAndTarget(context.Background(), client, identity{}, persisted, nil, nil, "", false, "application", nil)
 			if tc.wantPromotErr {
 				if promoteErr == nil || !strings.Contains(promoteErr.Error(), "not ready to promote") {
 					t.Fatalf("promoteProject error = %v, want not-ready validation error", promoteErr)
@@ -638,6 +638,144 @@ func TestUpsertProjectProductionBindingAddsThenReplaces(t *testing.T) {
 	dev := findEnv(t, p, projectDevelopmentEnvironmentName)
 	if len(dev.Bindings) != 1 || dev.Bindings[0].Name != projectDevelopmentBindingName {
 		t.Fatalf("dev environment disturbed: %+v", dev)
+	}
+}
+
+func TestProjectProductionComponentMappingsAllowDivergentTargetTemplate(t *testing.T) {
+	p := &aiv1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Name: "shop"},
+		Spec: aiv1alpha1.ProjectSpec{Components: []aiv1alpha1.ProjectComponentSpec{
+			{Name: "web", Kind: aiv1alpha1.ProjectComponentKindService, SourcePath: "src/web"},
+			{Name: "jobs", Kind: aiv1alpha1.ProjectComponentKindWorker, SourcePath: "src/jobs"},
+		}},
+	}
+	info := projectTemplateInfo{
+		Name:                  "production-stack",
+		DefaultDeletionPolicy: "Retain",
+		Components: map[string]projectTemplateComponent{
+			"public-http":   {WorkspacePath: "container/http", ImageInput: "httpImage"},
+			"async-runtime": {WorkspacePath: "container/worker", ImageInput: "workerImage"},
+		},
+		ProductionSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"httpImage":   map[string]any{"type": "string"},
+			"workerImage": map[string]any{"type": "string"},
+		}},
+	}
+	build := []projectBuildCheckComponent{
+		{Name: "web", ImageInput: "webImage", Built: true, Image: "registry.example/shop/web@sha256:111"},
+		{Name: "jobs", ImageInput: "jobsImage", Built: true, Image: "registry.example/shop/jobs@sha256:222"},
+	}
+	requested := []aiv1alpha1.ProjectComponentMappingSpec{
+		{ComponentRef: "jobs", TargetComponent: "async-runtime"},
+		{ComponentRef: "web", TargetComponent: "public-http"},
+	}
+
+	mappings, images, err := projectProductionComponentMappings(p, info, build, requested)
+	if err != nil {
+		t.Fatalf("projectProductionComponentMappings: %v", err)
+	}
+	wantMappings := []aiv1alpha1.ProjectComponentMappingSpec{
+		{ComponentRef: "jobs", TargetComponent: "async-runtime"},
+		{ComponentRef: "web", TargetComponent: "public-http"},
+	}
+	if !reflect.DeepEqual(mappings, wantMappings) {
+		t.Fatalf("mappings = %+v, want %+v", mappings, wantMappings)
+	}
+	wantImages := map[string]string{
+		"httpImage":   "registry.example/shop/web@sha256:111",
+		"workerImage": "registry.example/shop/jobs@sha256:222",
+	}
+	if !reflect.DeepEqual(images, wantImages) {
+		t.Fatalf("images = %#v, want %#v", images, wantImages)
+	}
+
+	binding, err := projectTemplateProdBindingWithMappings(p, info, images, nil, mappings)
+	if err != nil {
+		t.Fatalf("projectTemplateProdBindingWithMappings: %v", err)
+	}
+	if binding.TemplateRef == nil || binding.TemplateRef.Name != "production-stack" {
+		t.Fatalf("binding.templateRef = %+v, want production-stack", binding.TemplateRef)
+	}
+	if binding.Lifecycle == nil || binding.Lifecycle.DeletionPolicy != aiv1alpha1.ProjectBindingDeletionPolicyRetain {
+		t.Fatalf("binding.lifecycle = %+v, want Retain", binding.Lifecycle)
+	}
+	if !reflect.DeepEqual(binding.ComponentMappings, wantMappings) {
+		t.Fatalf("binding.componentMappings = %+v, want %+v", binding.ComponentMappings, wantMappings)
+	}
+	values, err := aiv1alpha1BindingValues(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["httpImage"] != wantImages["httpImage"] || values["workerImage"] != wantImages["workerImage"] {
+		t.Fatalf("binding image values = %#v, want immutable target digests", values)
+	}
+}
+
+func TestProjectProductionComponentMappingsDefaultLifecycleIsDelete(t *testing.T) {
+	p := projectForPromote("shop")
+	info := projectTemplateInfo{
+		Name: "application",
+		Components: map[string]projectTemplateComponent{
+			"web": {WorkspacePath: ".", ImageInput: "image"},
+		},
+		ProductionSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"image": map[string]any{"type": "string"},
+		}},
+	}
+	binding, err := projectTemplateProdBindingWithMappings(p, info, map[string]string{"image": "registry.example/shop@sha256:111"}, nil, nil)
+	if err != nil {
+		t.Fatalf("projectTemplateProdBindingWithMappings: %v", err)
+	}
+	if binding.Lifecycle == nil || binding.Lifecycle.DeletionPolicy != aiv1alpha1.ProjectBindingDeletionPolicyDelete {
+		t.Fatalf("binding.lifecycle = %+v, want explicit Delete", binding.Lifecycle)
+	}
+}
+
+func TestProjectProductionComponentMappingsRejectsSharedImageInput(t *testing.T) {
+	p := projectForPromote("shop")
+	info := projectTemplateInfo{
+		Name: "production-stack",
+		Components: map[string]projectTemplateComponent{
+			"web":    {WorkspacePath: "web", ImageInput: "image"},
+			"worker": {WorkspacePath: "worker", ImageInput: "image"},
+		},
+	}
+	_, _, err := projectProductionComponentMappings(p, info, []projectBuildCheckComponent{
+		{Name: "web", Built: true, Image: "web@sha256:111"},
+		{Name: "worker", Built: true, Image: "worker@sha256:222"},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "share image input") {
+		t.Fatalf("shared image input error = %v, want fail-closed validation", err)
+	}
+}
+
+func TestProjectProductionTemplateNamePrefersExplicitTargetAndBinding(t *testing.T) {
+	p := projectForPromote("shop")
+	p.Spec.Environments = []aiv1alpha1.ProjectEnvironmentSpec{
+		{Name: projectDevelopmentEnvironmentName, Bindings: []aiv1alpha1.ProjectProviderBindingSpec{
+			{Name: projectDevelopmentBindingName, Kind: aiv1alpha1.ProjectBindingKindProviderResource, TemplateRef: &aiv1alpha1.ProjectTemplateSpec{Name: "development"}},
+		}},
+		{Name: projectProductionEnvironmentName, Bindings: []aiv1alpha1.ProjectProviderBindingSpec{
+			{Name: projectProductionBindingName, Kind: aiv1alpha1.ProjectBindingKindProviderResource, TemplateRef: &aiv1alpha1.ProjectTemplateSpec{Name: "existing-production"}},
+		}},
+	}
+	if got, err := projectProductionTemplateName(p, "requested-production"); err != nil || got != "requested-production" {
+		t.Fatalf("explicit target = %q, err %v; want requested-production", got, err)
+	}
+	if got, err := projectProductionTemplateName(p, ""); err != nil || got != "existing-production" {
+		t.Fatalf("existing target = %q, err %v; want existing-production", got, err)
+	}
+
+	p.Spec.Environments = p.Spec.Environments[:1]
+	if got, err := projectProductionTemplateName(p, ""); err == nil || got != "" || !strings.Contains(err.Error(), "production template is required") {
+		t.Fatalf("development-only target = %q, err %v; want explicit-template validation", got, err)
+	}
+
+	noTemplate := &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "universal"}, Spec: aiv1alpha1.ProjectSpec{
+		Components: []aiv1alpha1.ProjectComponentSpec{{Name: "web", SourcePath: "."}},
+	}}
+	if _, err := projectProductionTemplateName(noTemplate, ""); err == nil || !strings.Contains(err.Error(), "production template is required") {
+		t.Fatalf("universal target error = %v, want explicit-template validation", err)
 	}
 }
 

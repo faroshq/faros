@@ -44,6 +44,23 @@ type fakeInstanceGetter struct {
 	gotToken     string
 	gotResource  string
 	gotName      string
+	calls        []string
+}
+
+type fakeResourceGetter struct {
+	objects map[string]*unstructured.Unstructured
+
+	gotWorkspace string
+	gotToken     string
+	gotResource  string
+	gotName      string
+	calls        []string
+}
+
+func (f *fakeResourceGetter) Get(_ context.Context, ws, token, resource, name string) (*unstructured.Unstructured, error) {
+	f.gotWorkspace, f.gotToken, f.gotResource, f.gotName = ws, token, resource, name
+	f.calls = append(f.calls, resource+"/"+name)
+	return f.objects[resource+"/"+name], nil
 }
 
 func (f *fakeInstanceGetter) Get(_ context.Context, ws, token, resource, name string) (*unstructured.Unstructured, error) {
@@ -147,6 +164,101 @@ func TestHandlerProxiesControlVerb(t *testing.T) {
 	}
 	if rt.gotTokenName != testNamespace+"-control" || rt.gotTokenNamespace != testNamespace {
 		t.Errorf("control token read from %s/%s, want %s/%s-control", rt.gotTokenNamespace, rt.gotTokenName, testNamespace, testNamespace)
+	}
+}
+
+func TestHandlerProxiesDevelopmentServiceLogsOnlyAfterCallerAuthorization(t *testing.T) {
+	var gotPath, gotQuery, gotControlToken, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		gotControlToken = r.Header.Get(controlTokenHeader)
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, "service log\n")
+	}))
+	defer upstream.Close()
+
+	service := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "DevelopmentService",
+		"metadata":   map[string]any{"name": "frontend", "generation": int64(1)},
+		"spec": map[string]any{
+			"projectRef": map[string]any{"name": "project", "uid": "project-uid"},
+			"sandboxRef": map[string]any{"name": "coding-sandbox", "uid": "sandbox-uid"},
+		},
+	}}
+	sandbox := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Instance",
+		"metadata":   map[string]any{"name": "coding-sandbox", "uid": "sandbox-uid"},
+		"status": map[string]any{
+			"runtimeNamespace": "tenant-default",
+			"controlSecretRef": map[string]any{"name": "control-secret", "namespace": "tenant-default"},
+			"components": map[string]any{"workspace": map[string]any{"controlServiceRef": map[string]any{
+				"name": "coding-sandbox-control", "namespace": "tenant-default",
+			}}},
+		},
+	}}
+	getter := &fakeResourceGetter{objects: map[string]*unstructured.Unstructured{
+		infrav1alpha1.DevelopmentServicesResource + "/frontend": service,
+		infrav1alpha1.InstancesResource + "/coding-sandbox":     sandbox,
+	}}
+	rt := &fakeRuntime{host: upstream.URL, token: "sandbox-control-token"}
+	req := httptest.NewRequest(http.MethodGet, PathPrefix+"clusters/"+testWorkspace+"/developmentservices/frontend/logs", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	rec := httptest.NewRecorder()
+	NewHandler(getter, nil, rt).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "service log\n" {
+		t.Fatalf("body = %q, want service log", rec.Body.String())
+	}
+	wantPath := "/api/v1/namespaces/tenant-default/services/coding-sandbox-control:control/proxy/service/logs"
+	if gotPath != wantPath || gotQuery != "name=frontend" {
+		t.Fatalf("upstream = %s?%s, want %s?name=frontend", gotPath, gotQuery, wantPath)
+	}
+	if gotControlToken != "sandbox-control-token" {
+		t.Errorf("control token = %q, want sandbox token", gotControlToken)
+	}
+	if gotAuth != "" {
+		t.Errorf("caller Authorization leaked to runtime: %q", gotAuth)
+	}
+	if len(getter.calls) != 2 || getter.calls[0] != infrav1alpha1.DevelopmentServicesResource+"/frontend" || getter.calls[1] != infrav1alpha1.InstancesResource+"/coding-sandbox" {
+		t.Fatalf("authorization lookups = %#v, want developmentservices/frontend then instances/coding-sandbox", getter.calls)
+	}
+}
+
+func TestHandlerRejectsDevelopmentServiceLogsWithoutReferenceUIDs(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		projectRef map[string]any
+		sandboxRef map[string]any
+	}{
+		{name: "project UID", projectRef: map[string]any{"name": "project"}, sandboxRef: map[string]any{"name": "coding-sandbox", "uid": "sandbox-uid"}},
+		{name: "sandbox UID", projectRef: map[string]any{"name": "project", "uid": "project-uid"}, sandboxRef: map[string]any{"name": "coding-sandbox"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "infrastructure.faros.sh/v1alpha1",
+				"kind":       "DevelopmentService",
+				"metadata":   map[string]any{"name": "frontend"},
+				"spec": map[string]any{
+					"projectRef": test.projectRef,
+					"sandboxRef": test.sandboxRef,
+				},
+			}}
+			getter := &fakeResourceGetter{objects: map[string]*unstructured.Unstructured{
+				infrav1alpha1.DevelopmentServicesResource + "/frontend": service,
+			}}
+			req := httptest.NewRequest(http.MethodGet, PathPrefix+"clusters/"+testWorkspace+"/developmentservices/frontend/logs", nil)
+			req.Header.Set("Authorization", "Bearer caller-token")
+			rec := httptest.NewRecorder()
+			NewHandler(getter, nil, &fakeRuntime{host: "http://unused"}).ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

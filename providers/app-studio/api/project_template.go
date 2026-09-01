@@ -103,6 +103,12 @@ type projectTemplateInfo struct {
 	// BuildWorkflowPath is the repository-owned CI workflow declared by
 	// spec.development.build. Empty means the Template declares no CI.
 	BuildWorkflowPath string
+
+	// DefaultDeletionPolicy is the provider-owned lifecycle default for an
+	// Instance of this Template. App Studio copies the explicit value into a
+	// production binding so promotion remains deterministic even when the
+	// provider's catalog changes later.
+	DefaultDeletionPolicy string
 }
 
 // projectTemplateComponent is one development component's contract: where its
@@ -180,6 +186,8 @@ func projectTemplateInfoFromUnstructured(obj *unstructured.Unstructured) (projec
 		info.ProductionSchema = productionSchema
 		info.PreviewAccessModes = bindings.TemplatePreviewAccessModes(productionSchema)
 	}
+	defaultDeletionPolicy, _, _ := unstructured.NestedString(obj.Object, "spec", "lifecycle", "defaultDeletionPolicy")
+	info.DefaultDeletionPolicy = strings.TrimSpace(defaultDeletionPolicy)
 	for _, path := range strings.Split(obj.GetAnnotations()[projectTemplateImmutableInputsAnnotation], ",") {
 		if path = strings.TrimSpace(path); path != "" {
 			info.ImmutableProductionInputs = append(info.ImmutableProductionInputs, path)
@@ -273,16 +281,29 @@ func projectTemplateToolchain(devImage string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(devImage, projectTemplateDevImageTokenPrefix), "}")
 }
 
-// projectBuildComponent is one launchable component of a template-backed
-// project: the App Studio build derives one OCI image from Context (the
-// component's workspace subdirectory) and, on launch, sets ImageInput to that
-// image. Only components whose template declares an imageInput are buildable.
+// projectBuildComponent is one launchable Project component: the App Studio
+// build derives one OCI image from ContextPath (the component's repository
+// subdirectory) and, on launch, sets ImageInput to that image. Template-backed
+// projects get ImageInput from the Template contract; template-less projects
+// derive a deterministic field from the stable Project component name.
 type projectBuildComponent struct {
 	// Name is the template development component key (e.g. "frontend").
 	Name string
-	// Context is the build context: the component's workspacePath relative to
-	// the repository root ("." for a whole-repo, single-component template).
+	// TemplateComponent is the development Template component that supplies
+	// the build contract. It is usually equal to Name for legacy projects, but
+	// remains available when a stable Project component is mapped to a
+	// differently named Template component.
+	TemplateComponent string
+	// Context is the historical internal spelling for the build context. Keep
+	// it populated for callers that predate Project.spec.components.
 	Context string
+	// ContextPath is the Project-owned build context relative to the repository
+	// root ("." for a whole-repo, single-component project).
+	ContextPath string
+	// DockerfilePath is the Project-owned Dockerfile relative to the repository
+	// root. Template-backed legacy projects may leave it empty because their
+	// Template contract predates Project build metadata.
+	DockerfilePath string
 	// ImageInput is the production schema field the built image feeds on
 	// launch (e.g. "frontendImage", or "image" for a single-component app).
 	ImageInput string
@@ -299,13 +320,248 @@ func projectBuildComponents(info projectTemplateInfo) []projectBuildComponent {
 			continue
 		}
 		out = append(out, projectBuildComponent{
-			Name:       name,
-			Context:    comp.WorkspacePath,
-			ImageInput: comp.ImageInput,
+			Name:              name,
+			TemplateComponent: name,
+			Context:           comp.WorkspacePath,
+			ContextPath:       comp.WorkspacePath,
+			ImageInput:        comp.ImageInput,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// projectBuildComponentsForProject resolves the build contract against the
+// Project's stable source components. Projects created before spec.components
+// existed intentionally fall back to projectBuildComponents(info), preserving
+// the historical package names and workspace paths. New Projects use their
+// source path/build context and map to the development Template component by
+// explicit binding mapping, stable name, or (for migration) unique workspace
+// path.
+func projectBuildComponentsForProject(p *aiv1alpha1.Project, info projectTemplateInfo) []projectBuildComponent {
+	if p == nil || len(p.Spec.Components) == 0 {
+		return projectBuildComponents(info)
+	}
+	// A universal sandbox has no development Template at all. Its Project
+	// components are still a complete build contract, so resolve them directly
+	// instead of requiring (or falling back to) Project.spec.template.
+	if len(info.Components) == 0 {
+		projectComponents := append([]aiv1alpha1.ProjectComponentSpec(nil), p.Spec.Components...)
+		sort.Slice(projectComponents, func(i, j int) bool { return projectComponents[i].Name < projectComponents[j].Name })
+		out := make([]projectBuildComponent, 0, len(projectComponents))
+		for _, projectComponent := range projectComponents {
+			name := strings.TrimSpace(projectComponent.Name)
+			if name == "" {
+				continue
+			}
+			context := strings.TrimSpace(projectComponent.SourcePath)
+			if projectComponent.Build != nil && strings.TrimSpace(projectComponent.Build.ContextPath) != "" {
+				context = strings.TrimSpace(projectComponent.Build.ContextPath)
+			}
+			if context == "" {
+				return nil
+			}
+			out = append(out, projectBuildComponent{
+				Name:              name,
+				TemplateComponent: name,
+				Context:           context,
+				ContextPath:       context,
+				DockerfilePath:    projectComponentDockerfilePath(projectComponent),
+				ImageInput:        projectComponentImageInput(name),
+			})
+		}
+		return out
+	}
+
+	devBinding := projectEnvironmentBinding(p, projectDevelopmentEnvironmentName, projectDevelopmentBindingName)
+	mappingByProject := make(map[string]string)
+	if devBinding != nil {
+		for _, mapping := range devBinding.ComponentMappings {
+			projectName := strings.TrimSpace(mapping.ComponentRef)
+			targetName := strings.TrimSpace(mapping.TargetComponent)
+			if projectName != "" && targetName != "" {
+				mappingByProject[projectName] = targetName
+			}
+		}
+	}
+
+	projectComponents := append([]aiv1alpha1.ProjectComponentSpec(nil), p.Spec.Components...)
+	sort.Slice(projectComponents, func(i, j int) bool { return projectComponents[i].Name < projectComponents[j].Name })
+	usedTemplateComponents := make(map[string]struct{}, len(projectComponents))
+	out := make([]projectBuildComponent, 0, len(projectComponents))
+	for _, projectComponent := range projectComponents {
+		projectName := strings.TrimSpace(projectComponent.Name)
+		if projectName == "" {
+			continue
+		}
+		templateName := strings.TrimSpace(mappingByProject[projectName])
+		if templateName == "" {
+			if _, found := info.Components[projectName]; found {
+				templateName = projectName
+			} else {
+				templateName = projectTemplateComponentForSourcePath(info, projectComponent.SourcePath, usedTemplateComponents)
+			}
+		}
+		contract, found := info.Components[templateName]
+		if !found {
+			// A Project component may be a worker or may simply not be part of
+			// this development Template. It is not a launchable build target.
+			continue
+		}
+		imageInput := strings.TrimSpace(contract.ImageInput)
+		if imageInput == "" {
+			// New Projects retain the source component even when a legacy
+			// development contract omitted imageInput (the worker Template is
+			// the current example). Infer the single production image field for
+			// this new stable component; old Projects still use the compatibility
+			// path above and therefore preserve the historical skip behavior.
+			imageInput = projectTemplateImageInputForComponent(info, templateName)
+		}
+		if imageInput == "" {
+			continue
+		}
+		if _, used := usedTemplateComponents[templateName]; used {
+			continue
+		}
+		usedTemplateComponents[templateName] = struct{}{}
+		context := strings.TrimSpace(projectComponent.SourcePath)
+		if projectComponent.Build != nil && strings.TrimSpace(projectComponent.Build.ContextPath) != "" {
+			context = strings.TrimSpace(projectComponent.Build.ContextPath)
+		}
+		if context == "" {
+			context = contract.WorkspacePath
+		}
+		out = append(out, projectBuildComponent{
+			Name:              projectName,
+			TemplateComponent: templateName,
+			Context:           context,
+			ContextPath:       context,
+			DockerfilePath:    projectComponentDockerfilePath(projectComponent),
+			ImageInput:        imageInput,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func projectComponentDockerfilePath(component aiv1alpha1.ProjectComponentSpec) string {
+	if component.Build == nil {
+		return ""
+	}
+	return strings.TrimSpace(component.Build.DockerfilePath)
+}
+
+func projectBuildComponentContextPath(component projectBuildComponent) string {
+	if strings.TrimSpace(component.ContextPath) != "" {
+		return strings.TrimSpace(component.ContextPath)
+	}
+	return strings.TrimSpace(component.Context)
+}
+
+func projectComponentImageInput(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return name + "Image"
+}
+
+// projectTemplateImageInputForComponent infers the conventional single-image
+// production input only when the Template has one development component. This
+// is intentionally narrow: multi-component Templates must declare each
+// component's imageInput explicitly to avoid silently wiring the wrong image.
+func projectTemplateImageInputForComponent(info projectTemplateInfo, componentName string) string {
+	if contract, ok := info.Components[componentName]; ok && strings.TrimSpace(contract.ImageInput) != "" {
+		return strings.TrimSpace(contract.ImageInput)
+	}
+	if len(info.Components) > 1 {
+		return ""
+	}
+	if len(info.Components) == 0 {
+		properties, _ := info.ProductionSchema["properties"].(map[string]any)
+		inputs := make([]string, 0)
+		for name, raw := range properties {
+			if !strings.EqualFold(name, "image") && !strings.HasSuffix(strings.ToLower(name), "image") {
+				continue
+			}
+			field, _ := raw.(map[string]any)
+			description, _ := field["description"].(string)
+			if strings.HasPrefix(strings.TrimSpace(description), "Computed by the platform") {
+				continue
+			}
+			inputs = append(inputs, name)
+		}
+		if len(inputs) == 1 {
+			return inputs[0]
+		}
+		return ""
+	}
+	properties, _ := info.ProductionSchema["properties"].(map[string]any)
+	if _, ok := properties["image"]; ok {
+		return "image"
+	}
+	return ""
+}
+
+func projectTemplateComponentForSourcePath(info projectTemplateInfo, sourcePath string, used map[string]struct{}) string {
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath == "" {
+		return ""
+	}
+	match := ""
+	for name, contract := range info.Components {
+		if _, alreadyUsed := used[name]; alreadyUsed || strings.TrimSpace(contract.WorkspacePath) != sourcePath {
+			continue
+		}
+		if match != "" {
+			// Ambiguous source paths are not safe to map by inference.
+			return ""
+		}
+		match = name
+	}
+	return match
+}
+
+// projectComponentsFromTemplate materializes the stable Project component
+// identity from a Template's development contract. The Template contract does
+// not carry a numeric production port, nor does it promise a Dockerfile, so
+// this initializer intentionally only copies facts that are authoritative:
+// component name, workspace/source path, and whether the component serves
+// traffic. Build-specific details remain optional Project-owned fields.
+func projectComponentsFromTemplate(info projectTemplateInfo) []aiv1alpha1.ProjectComponentSpec {
+	if len(info.Components) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(info.Components))
+	for name := range info.Components {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	components := make([]aiv1alpha1.ProjectComponentSpec, 0, len(names))
+	for _, name := range names {
+		contract := info.Components[name]
+		kind := aiv1alpha1.ProjectComponentKindWorker
+		if strings.TrimSpace(contract.Port) != "" {
+			kind = aiv1alpha1.ProjectComponentKindService
+		}
+		components = append(components, aiv1alpha1.ProjectComponentSpec{
+			Name:       name,
+			Kind:       kind,
+			SourcePath: contract.WorkspacePath,
+		})
+	}
+	return components
+}
+
+// ensureProjectComponentsFromTemplate establishes Project-owned source
+// components once. Re-selecting or changing a Template must not rewrite an
+// existing component list: the list is the stable identity that allows a
+// development Template and a production Template to diverge safely.
+func ensureProjectComponentsFromTemplate(p *aiv1alpha1.Project, info projectTemplateInfo) {
+	if p == nil || len(p.Spec.Components) != 0 {
+		return
+	}
+	p.Spec.Components = projectComponentsFromTemplate(info)
 }
 
 // projectTemplateInstanceNameMaxBase bounds the project-name part of the
@@ -404,6 +660,9 @@ func projectTemplateDevBindingWithContext(p *aiv1alpha1.Project, info projectTem
 		Name:     projectDevelopmentBindingName,
 		Provider: projectDevelopmentProviderAppStudio,
 		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		TemplateRef: &aiv1alpha1.ProjectTemplateSpec{
+			Name: info.Name,
+		},
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
 			Name:       name,
 			APIVersion: info.APIVersion,
@@ -443,6 +702,11 @@ func applyProjectDevelopmentTemplateWithContext(p *aiv1alpha1.Project, info proj
 		return err
 	}
 
+	// Project components are the durable application identity. Initialize them
+	// from the selected development Template only for a project that has not
+	// declared any yet; a later Template selection must never silently rename or
+	// remove source components.
+	ensureProjectComponentsFromTemplate(p, info)
 	p.Spec.Template = &aiv1alpha1.ProjectTemplateSpec{Name: info.Name}
 	replaced := false
 	for i := range p.Spec.Environments {
@@ -469,6 +733,53 @@ func applyProjectDevelopmentTemplateWithContext(p *aiv1alpha1.Project, info proj
 		})
 	}
 	return nil
+}
+
+// projectEnvironmentBinding returns the first owning binding with the given
+// name. Provider references are deliberately ignored: they are observations,
+// not App Studio's desired development or production resource.
+func projectEnvironmentBinding(p *aiv1alpha1.Project, environment, bindingName string) *aiv1alpha1.ProjectProviderBindingSpec {
+	if p == nil {
+		return nil
+	}
+	for envIndex := range p.Spec.Environments {
+		env := &p.Spec.Environments[envIndex]
+		if strings.TrimSpace(env.Name) != strings.TrimSpace(environment) {
+			continue
+		}
+		for bindingIndex := range env.Bindings {
+			binding := &env.Bindings[bindingIndex]
+			if strings.TrimSpace(binding.Name) == strings.TrimSpace(bindingName) && binding.Kind != aiv1alpha1.ProjectBindingKindProviderReference {
+				return binding
+			}
+		}
+	}
+	return nil
+}
+
+// projectDevelopmentTemplateName resolves the development Template from the
+// owning binding first and uses Project.spec.template only for legacy
+// Projects. This is the canonical read path for build and release logic.
+func projectDevelopmentTemplateName(p *aiv1alpha1.Project) string {
+	binding := projectEnvironmentBinding(p, projectDevelopmentEnvironmentName, projectDevelopmentBindingName)
+	if binding != nil && binding.TemplateRef != nil {
+		return strings.TrimSpace(binding.TemplateRef.Name)
+	}
+	if p != nil && p.Spec.Template != nil {
+		return strings.TrimSpace(p.Spec.Template.Name)
+	}
+	return ""
+}
+
+func projectDevelopmentBindingIsCanonical(p *aiv1alpha1.Project, templateName string) bool {
+	if p == nil || strings.TrimSpace(templateName) == "" {
+		return false
+	}
+	binding := projectEnvironmentBinding(p, projectDevelopmentEnvironmentName, projectDevelopmentBindingName)
+	if binding == nil || binding.TemplateRef == nil {
+		return false
+	}
+	return strings.TrimSpace(binding.TemplateRef.Name) == strings.TrimSpace(templateName)
 }
 
 func validateActionsExternalURL(raw string) (string, error) {
@@ -541,10 +852,11 @@ func (s *Server) ActionsRuntimeConfig() bindings.ActionsRuntimeConfig {
 // git re-hydrate that lands with the Code provider checkout):
 //
 //  1. Read the Template from the tenant catalog; require a development block.
-//  2. Delete the previous development binding's instance (kro GC tears the
-//     old graph down — workspace files live in App Studio's store and are
-//     re-synced after the switch).
-//  3. Rewrite spec.template + the development binding; update the Project.
+//  2. Delete the previous development binding's instance when the selected
+//     Template actually changes (kro GC tears the old graph down — workspace
+//     files live in App Studio's store and are re-synced after the switch).
+//  3. Rewrite spec.template, stable components (only on first selection), and
+//     the development binding; update the Project.
 //  4. Reconcile the new binding (creates the instance in development mode).
 func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, templateName string) (*aiv1alpha1.Project, projectTemplateInfo, error) {
 	info, err := fetchProjectTemplate(ctx, c, templateName)
@@ -557,12 +869,29 @@ func (s *Server) selectProjectTemplate(ctx context.Context, c *asclient.Client, 
 	if err := validateProjectDevelopmentTemplate(info); err != nil {
 		return nil, projectTemplateInfo{}, err
 	}
-	if p.Spec.Template != nil && strings.TrimSpace(p.Spec.Template.Name) == info.Name {
+	currentTemplate := projectDevelopmentTemplateName(p)
+	if currentTemplate == info.Name {
+		// Re-selecting the same Template is normally a read. The one exception is
+		// a pre-migration Project: materialize its stable components and the
+		// binding-level TemplateRef exactly once, then persist that normalization.
+		if !projectDevelopmentBindingIsCanonical(p, info.Name) || len(p.Spec.Components) == 0 || p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) != info.Name {
+			next := p.DeepCopy()
+			if err := s.applyProjectDevelopmentTemplateWithIdentity(next, info, id); err != nil {
+				return nil, projectTemplateInfo{}, err
+			}
+			updated, updateErr := c.Projects().Update(ctx, next, metav1.UpdateOptions{})
+			if updateErr != nil {
+				return nil, projectTemplateInfo{}, updateErr
+			}
+			if _, seedErr := s.seedProjectScaffold(ctx, id, updated, info); seedErr != nil {
+				klog.V(1).Infof("scaffold seed on re-select for %s: %v", updated.Name, seedErr)
+			}
+			return projectWithLiveBindingStatus(ctx, c, updated, id), info, nil
+		}
 		// Already selected — the reconciler owns convergence; return fresh
-		// observed state (idempotent re-select). Still attempt the scaffold
-		// seed: it is a no-op once the workspace has content, but recovers a
-		// project whose template was bound before the seed step existed (or
-		// whose earlier seed failed).
+		// observed state (idempotent re-select). Still attempt the scaffold seed:
+		// it is a no-op once the workspace has content, but recovers a project
+		// whose earlier seed failed.
 		if _, err := s.seedProjectScaffold(ctx, id, p, info); err != nil {
 			klog.V(1).Infof("scaffold seed on re-select for %s: %v", p.Name, err)
 		}

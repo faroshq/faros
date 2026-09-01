@@ -53,6 +53,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&TemplateList{},
 		&Instance{},
 		&InstanceList{},
+		&DevelopmentService{},
+		&DevelopmentServiceList{},
+		&Connection{},
+		&ConnectionList{},
 		&InfrastructureProvider{},
 		&InfrastructureProviderList{},
 	)

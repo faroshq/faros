@@ -41,8 +41,14 @@ const (
 	dataPlaneVerbProxy     = "proxy"
 	dataPlaneVerbEnv       = "env"
 	dataPlaneVerbProcess   = "process"
+	dataPlaneVerbListeners = "listeners"
 	dataPlaneVerbExec      = "exec"
 	dataPlaneVerbWorkspace = "workspace"
+	// DevelopmentService logs are served by Infrastructure as a provider-owned
+	// subresource. Unlike the instance component "log" action, this address
+	// carries the physical DevelopmentService name and never exposes the
+	// sandbox control token to App Studio.
+	dataPlaneVerbDevelopmentServiceLogs = "logs"
 
 	dataPlaneCallTimeout = 30 * time.Second
 )

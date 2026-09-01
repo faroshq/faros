@@ -204,7 +204,7 @@ func (s *Server) ensureProjectAssistantRunSandbox(
 			CheckpointDigest:    remoteDigest,
 			CacheGeneration:     runID,
 			CreatedAt:           now, LastActivityAt: now,
-			IdleExpiresAt: minProjectAssistantRunSandboxExpiry(now.Add(projectAssistantRunSandboxIdleTTL), hardExpiry), HardExpiresAt: hardExpiry,
+			IdleExpiresAt: now.Add(projectAssistantRunSandboxIdleTTL), HardExpiresAt: time.Time{},
 		},
 	}
 	if runState != nil {
@@ -245,12 +245,6 @@ func (s *Server) attachProjectAssistantRunSandbox(
 	}
 	if metadata.OrgUUID != req.WorkspaceScope.OrgUUID || metadata.WorkspaceUUID != req.WorkspaceScope.WorkspaceUUID || metadata.ProjectUID != req.WorkspaceScope.ProjectUID {
 		return nil, nil, fmt.Errorf("%w: checkpoint tenant or project identity does not match", errProjectAssistantRunSandboxConflict)
-	}
-	if metadata.HardExpiresAt.IsZero() || time.Now().UTC().After(metadata.HardExpiresAt) {
-		return nil, nil, fmt.Errorf("%w: sandbox hard lifetime has expired", errProjectAssistantRunSandboxConflict)
-	}
-	if !metadata.IdleExpiresAt.IsZero() && time.Now().UTC().After(metadata.IdleExpiresAt) {
-		return nil, nil, fmt.Errorf("%w: sandbox idle lifetime has expired", errProjectAssistantRunSandboxConflict)
 	}
 	if strings.TrimSpace(metadata.RemoteCheckpointID) == "" {
 		return nil, nil, fmt.Errorf("%w: checkpoint does not contain a durable remote workspace baseline", errProjectAssistantRunSandboxConflict)
@@ -322,8 +316,8 @@ func (s *Server) attachProjectAssistantRunSandbox(
 		project: req.Project.DeepCopy(), scope: req.WorkspaceScope, target: target,
 		instance: projectAssistantSandboxInstance{APIVersion: target.APIVersion, Kind: target.Kind, Resource: target.Resource, Name: target.ResourceName}, runState: runState, metadata: metadata,
 	}
-	sandbox.metadata.HardExpiresAt = hardExpiry
-	sandbox.metadata.IdleExpiresAt = minProjectAssistantRunSandboxExpiry(time.Now().UTC().Add(projectAssistantRunSandboxIdleTTL), hardExpiry)
+	sandbox.metadata.HardExpiresAt = time.Time{}
+	sandbox.metadata.IdleExpiresAt = time.Now().UTC().Add(projectAssistantRunSandboxIdleTTL)
 	sandbox.metadata.LastActivityAt = time.Now().UTC()
 	if runState != nil {
 		runState.SetSandbox(sandbox)
@@ -628,21 +622,10 @@ func retryProjectAssistantRunSandboxSeed(ctx context.Context, timeout, poll time
 }
 
 func (b *projectAssistantRunSandbox) close(ctx context.Context) error {
-	if b == nil {
-		return nil
-	}
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return nil
-	}
-	b.closed = true
-	b.metadata.Status = "closed"
-	b.mu.Unlock()
-	if b.runState != nil {
-		b.runState.SetSandboxMetadata(b.metadataSnapshot())
-	}
-	return b.deleteInstance(ctx)
+	// A Project owns the universal Instance. Closing an assistant turn releases
+	// its claim and leaves the Instance warm; Infrastructure may suspend it
+	// later when the idle deadline passes. Only Project deletion removes it.
+	return b.retain(ctx)
 }
 
 func (b *projectAssistantRunSandbox) deleteInstance(ctx context.Context) error {
@@ -759,9 +742,8 @@ func (s *Server) cleanupInterruptedProjectAssistantRunSandbox(ctx context.Contex
 	// Stop may be initiated by a browser request that disconnects immediately
 	// after the durable run is marked interrupted. Remote cleanup is therefore
 	// independent of that request while remaining bounded like other data-plane
-	// operations. The same context covers GET, DELETE, and deletion polling;
-	// detaching only the final wait would leave a claimed Instance behind when
-	// the request context is canceled during the initial lookup or delete.
+	// operations. The Instance remains project-owned; this transition only
+	// releases the run claim and asks Infrastructure to suspend compute.
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dataPlaneCallTimeout)
 	defer cancel()
 	resource := client.Resource(runSandboxInstancesResource, "")
@@ -780,11 +762,25 @@ func (s *Server) cleanupInterruptedProjectAssistantRunSandbox(ctx context.Contex
 		strings.TrimSpace(annotations[projectAssistantRunSandboxCacheGeneration]) != generation {
 		return fmt.Errorf("%w: interrupted sandbox instance %q is not owned by run %q", errProjectAssistantRunSandboxConflict, name, run.ID)
 	}
-	if err := resource.Delete(cleanupCtx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete interrupted sandbox instance %q: %w", name, err)
+	copy := make(map[string]string, len(annotations)+4)
+	for key, value := range annotations {
+		copy[key] = value
 	}
-	if err := waitForProjectAssistantRunSandboxInstanceDeleted(cleanupCtx, client, name); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("wait for interrupted sandbox instance %q deletion: %w", name, err)
+	delete(copy, projectAssistantRunSandboxClaimOwner)
+	delete(copy, projectAssistantRunSandboxClaimExpiry)
+	delete(copy, projectAssistantRunSandboxHardExpiry)
+	delete(copy, projectAssistantRunSandboxLegacyIdleTTL)
+	delete(copy, projectAssistantRunSandboxLegacyHardTTL)
+	now := time.Now().UTC()
+	copy[projectAssistantRunSandboxCacheState] = projectAssistantRunSandboxCacheStateCached
+	copy[projectAssistantRunSandboxLastActivity] = now.Format(time.RFC3339Nano)
+	copy[projectAssistantRunSandboxIdleExpiry] = now.Add(projectAssistantRunSandboxIdleTTL).Format(time.RFC3339Nano)
+	instance.SetAnnotations(copy)
+	if err := unstructured.SetNestedField(instance.Object, true, "spec", "lifecycle", "suspended"); err != nil {
+		return fmt.Errorf("suspend interrupted sandbox instance %q: %w", name, err)
+	}
+	if _, err := resource.Update(cleanupCtx, instance, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("suspend interrupted sandbox instance %q: %w", name, err)
 	}
 	return nil
 }
@@ -805,7 +801,8 @@ func (b *projectAssistantRunSandbox) retain(ctx context.Context) error {
 	b.closed = true
 	b.metadata.Status = projectAssistantRunSandboxCacheStateCached
 	b.metadata.LastActivityAt = now
-	b.metadata.IdleExpiresAt = minProjectAssistantRunSandboxExpiry(now.Add(projectAssistantRunSandboxIdleTTL), b.metadata.HardExpiresAt)
+	b.metadata.HardExpiresAt = time.Time{}
+	b.metadata.IdleExpiresAt = now.Add(projectAssistantRunSandboxIdleTTL)
 	b.mu.Unlock()
 	if b.runState != nil {
 		b.runState.SetSandboxMetadata(b.metadataSnapshot())
@@ -833,6 +830,9 @@ func (b *projectAssistantRunSandbox) retain(ctx context.Context) error {
 	}
 	delete(copy, projectAssistantRunSandboxClaimOwner)
 	delete(copy, projectAssistantRunSandboxClaimExpiry)
+	delete(copy, projectAssistantRunSandboxHardExpiry)
+	delete(copy, projectAssistantRunSandboxLegacyIdleTTL)
+	delete(copy, projectAssistantRunSandboxLegacyHardTTL)
 	copy[projectAssistantRunSandboxCacheState] = projectAssistantRunSandboxCacheStateCached
 	copy[projectAssistantRunSandboxCacheGeneration] = metadata.CacheGeneration
 	copy[projectAssistantRunSandboxLastActivity] = metadata.LastActivityAt.Format(time.RFC3339Nano)
@@ -870,15 +870,6 @@ func finishProjectAssistantRunSandbox(ctx context.Context, sandbox *projectAssis
 	var closeErr error
 	if cacheSafe {
 		closeErr = sandbox.retain(closeCtx)
-		if closeErr != nil {
-			// A failed retention update must not leave an untracked live worker.
-			// deleteInstance re-checks ownership before deleting, so a concurrent
-			// claimant cannot be torn down by this fallback.
-			deleteErr := sandbox.deleteInstance(closeCtx)
-			if deleteErr != nil {
-				closeErr = errors.Join(closeErr, deleteErr)
-			}
-		}
 	} else {
 		closeErr = sandbox.close(closeCtx)
 	}

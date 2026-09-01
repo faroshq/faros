@@ -671,6 +671,113 @@ func TestResolveProjectComponentImagesKeepsPackagesBoundToProjectRepository(t *t
 	}
 }
 
+func TestUniversalProjectComponentsUseExistingPackageDigestEvidence(t *testing.T) {
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Components: []aiv1alpha1.ProjectComponentSpec{
+			{
+				Name: "api", Kind: aiv1alpha1.ProjectComponentKindService, SourcePath: "api",
+				Build: &aiv1alpha1.ProjectComponentBuildSpec{ContextPath: "api", DockerfilePath: "api/Dockerfile"},
+			},
+			{Name: "web", Kind: aiv1alpha1.ProjectComponentKindService, SourcePath: "web"},
+		},
+	}}
+	components := projectBuildComponentsForProject(project, projectTemplateInfo{})
+	if len(components) != 2 || components[0].Name != "api" || components[0].ImageInput != "apiImage" || components[0].DockerfilePath != "api/Dockerfile" || components[1].Name != "web" || components[1].ImageInput != "webImage" {
+		t.Fatalf("universal build components = %+v, want api/apiImage and web/webImage with build metadata", components)
+	}
+	commitSHA := strings.Repeat("a", 40)
+	items := []unstructured.Unstructured{
+		*projectBuildPackageForTest(
+			"repo-a",
+			"api",
+			"ghcr.io/acme/shop/api",
+			map[string]any{"digest": "sha256:api-wrong", "tags": []any{"sha-other"}},
+			map[string]any{"digest": "sha256:api", "tags": []any{"latest", "sha-" + commitSHA}},
+		),
+		*projectBuildPackageForTest(
+			"repo-a",
+			"web",
+			"ghcr.io/acme/shop/web",
+			map[string]any{"digest": "sha256:web", "tags": []any{"sha-" + commitSHA}},
+		),
+	}
+	images := projectComponentImagesFromPackages(items, "repo-a", components, commitSHA)
+	if got := images["api"].Image; got != "ghcr.io/acme/shop/api@sha256:api" {
+		t.Fatalf("universal package evidence = %q, want immutable api digest", got)
+	}
+	if got := images["web"].Image; got != "ghcr.io/acme/shop/web@sha256:web" {
+		t.Fatalf("universal package evidence = %q, want immutable web digest", got)
+	}
+	check, err := (&Server{}).checkProjectBuildForCommit(context.Background(), nil, project, components, commitSHA)
+	if err != nil {
+		t.Fatalf("checkProjectBuildForCommit: %v", err)
+	}
+	if len(check.Components) != 2 || check.Components[0].ContextPath != "api" || check.Components[0].DockerfilePath != "api/Dockerfile" || check.Components[1].ContextPath != "web" {
+		t.Fatalf("build diagnostics = %+v, want stable context and Dockerfile paths", check.Components)
+	}
+}
+
+func TestTemplateLessProjectBuildWorkflowUsesProjectBuildContract(t *testing.T) {
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Components: []aiv1alpha1.ProjectComponentSpec{{Name: "web", SourcePath: "web"}},
+		Build:      &aiv1alpha1.ProjectBuildSpec{WorkflowPath: ".github/workflows/universal-build.yaml"},
+	}}
+	got, err := (&Server{}).projectBuildWorkflowCandidates(context.Background(), identity{}, project)
+	if err != nil {
+		t.Fatalf("projectBuildWorkflowCandidates: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"universal-build.yaml"}) {
+		t.Fatalf("workflow candidates = %#v, want exact Project workflow basename", got)
+	}
+}
+
+func TestTemplateLessProjectBuildWorkflowRequiresValidProjectBuildContract(t *testing.T) {
+	paths := []string{
+		"",
+		".github/workflows/",
+		".github/workflows/nested/build.yaml",
+		".github/workflows/build.txt",
+		".github/workflows/../build.yaml",
+		"/repo/.github/workflows/build.yaml",
+	}
+	for _, workflowPath := range paths {
+		t.Run(workflowPath, func(t *testing.T) {
+			project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+				Components: []aiv1alpha1.ProjectComponentSpec{{Name: "web", SourcePath: "web"}},
+			}}
+			if workflowPath != "" {
+				project.Spec.Build = &aiv1alpha1.ProjectBuildSpec{WorkflowPath: workflowPath}
+			}
+			if _, err := (&Server{}).projectBuildWorkflowCandidates(context.Background(), identity{}, project); err == nil || !strings.Contains(err.Error(), "spec.build.workflowPath") {
+				t.Fatalf("workflow %q error = %v, want project build contract validation", workflowPath, err)
+			}
+		})
+	}
+}
+
+func TestTemplateLessProjectBuildStatusRequiresProjectBuildContract(t *testing.T) {
+	project := &aiv1alpha1.Project{Spec: aiv1alpha1.ProjectSpec{
+		Components: []aiv1alpha1.ProjectComponentSpec{{Name: "web", SourcePath: "web"}},
+	}}
+	check, err := (&Server{}).checkProjectBuildAtCommit(context.Background(), nil, project, strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatalf("checkProjectBuildAtCommit: %v", err)
+	}
+	if check.Status != "unsupported" || !strings.Contains(check.Note, "spec.build.workflowPath") {
+		t.Fatalf("build check = %+v, want unsupported missing workflow contract", check)
+	}
+}
+
+func TestLegacyTemplateLessProjectWithoutComponentsKeepsCompatibilityWorkflow(t *testing.T) {
+	got, err := (&Server{}).projectBuildWorkflowCandidates(context.Background(), identity{}, &aiv1alpha1.Project{})
+	if err != nil {
+		t.Fatalf("projectBuildWorkflowCandidates: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{projectBuildWorkflowFileName, projectLegacyBuildWorkflowFileName}) {
+		t.Fatalf("workflow candidates = %#v, want legacy compatibility candidates", got)
+	}
+}
+
 func TestCurrentProjectRepositoryCommitSHASelectsNewestSuccessfulScopedCommit(t *testing.T) {
 	base := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	old := repositoryCommitForBuildTest("old", "repo-a", "repo-a", "Succeeded", "commit-old", base.Add(-5*time.Hour))

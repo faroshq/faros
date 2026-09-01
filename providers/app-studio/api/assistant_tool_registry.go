@@ -603,6 +603,209 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 			},
 		},
 	)
+	tools = append(tools,
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolListDevelopmentServices,
+				Description:  "List the Project's explicitly configured universal-sandbox DevelopmentService resources with command, endpoint, visibility, restart policy, connection references, observed route/process state, and the persisted primary preview selector. This is read-only; it never exposes a listener or changes a route.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantListProjectDevelopmentServices(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolUpsertDevelopmentService,
+				Description: "Create or update one Project-local DevelopmentService in the universal sandbox. The command is argv-only and the endpoint/visibility/restart policy are validated server-side. The Infrastructure object is bound to the Project-scoped universal Instance; public visibility requires confirmPublic=true and this runtime mutation must be confirmed by the user. Detected listeners are suggestions only and are never auto-exposed.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"service":{"type":"string","minLength":1,"maxLength":63,"description":"Project-local logical service name."},"componentRef":{"type":"string","maxLength":253},"enabled":{"type":"boolean"},"command":{"type":"object","additionalProperties":false,"properties":{"argv":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":256}},"workingDirectory":{"type":"string","maxLength":512}}},"endpoint":{"type":"object","additionalProperties":false,"properties":{"protocol":{"type":"string","enum":["HTTP","http"]},"port":{"type":"integer","minimum":1,"maximum":65535},"healthPath":{"type":"string","maxLength":512}}},"exposure":{"type":"object","additionalProperties":false,"properties":{"visibility":{"type":"string","enum":["private","public"]}}},"restartPolicy":{"type":"string","enum":["Always","OnFailure","Never"]},"confirmPublic":{"type":"boolean","description":"Required when visibility is public."}},"required":["service","command","endpoint"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantUpsertProjectDevelopmentService(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolDeleteDevelopmentService,
+				Description: "Delete one explicitly configured Project-local DevelopmentService. This removes only the service intent; it does not delete the Project-scoped universal sandbox. Confirm this runtime mutation with the user.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"service":{"type":"string","minLength":1,"maxLength":63}},"required":["service"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantDeleteProjectDevelopmentService(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolRestartDevelopmentService,
+				Description: "Request a restart of one configured DevelopmentService process by changing its server-owned restart marker. Use after verification shows a stuck or crash-looping process; this does not alter command, route, or visibility settings. Confirm this runtime mutation with the user.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"service":{"type":"string","minLength":1,"maxLength":63}},"required":["service"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantRestartProjectDevelopmentService(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolSetPrimaryPreviewService,
+				Description: "Persist the Project development environment's primary preview service selector. This changes only which configured service App Studio uses when no service is named; it never auto-exposes a port. Confirm this runtime mutation with the user.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"service":{"type":"string","maxLength":63,"description":"Project-local service name; omit or pass an empty string to clear the explicit selector."}},"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantSetProjectDevelopmentPrimaryService(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolListDetectedListeners,
+				Description:  "Read bounded listener observations from the universal sandbox listeners endpoint to suggest candidate DevelopmentService configurations. Suggestions are read-only and are never auto-exposed, persisted, or selected as primary.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantListProjectDevelopmentListeners(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolGetProjectBuildConfiguration,
+				Description:  "Read the Project's repository-owned build workflow configuration. An empty workflowPath means no workflow is configured; template-less Projects with buildable components must configure one before App Studio can observe or dispatch builds.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantGetProjectBuildConfiguration(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolSetProjectBuildWorkflow,
+				Description: "Set or clear the exact repository-owned GitHub Actions workflow App Studio observes and dispatches for this Project. workflowPath must name a .yml or .yaml file directly under .github/workflows/. Pass clear=true without workflowPath to remove the configuration. This changes Project.spec.build only; it never creates or edits repository files.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"workflowPath":{"type":"string","maxLength":256,"description":"Repository-relative path such as .github/workflows/build.yaml."},"clear":{"type":"boolean","description":"Remove Project.spec.build; workflowPath must be omitted."}},"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskWrite,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantSetProjectBuildWorkflow(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolUpsertProjectComponent,
+				Description: "Declare or update one stable Project component before configuring development services or preparing production. Components own logical identity, source/build paths, and production port contracts; listener discovery never creates them implicitly. The component is persisted in Project.spec.components and path validation keeps every path inside the repository workspace.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"component":{"type":"string","minLength":1,"maxLength":63,"description":"Stable Project-local component name, for example web or api."},"kind":{"type":"string","enum":["Service","Worker"]},"sourcePath":{"type":"string","minLength":1,"maxLength":1024,"description":"Repository-relative component source directory."},"build":{"type":"object","additionalProperties":false,"properties":{"contextPath":{"type":"string","minLength":1,"maxLength":1024},"dockerfilePath":{"type":"string","minLength":1,"maxLength":1024}},"required":["contextPath","dockerfilePath"]},"ports":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string","minLength":1,"maxLength":63},"protocol":{"type":"string","enum":["HTTP","HTTPS","TCP"]},"containerPort":{"type":"integer","minimum":1,"maximum":65535}},"required":["name","protocol","containerPort"]}}},"required":["component","sourcePath"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskWrite,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantUpsertProjectComponent(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolDeleteProjectComponent,
+				Description: "Remove one stable Project component declaration. This does not delete source files or the universal sandbox, but any DevelopmentService componentRef pointing at it must be removed or changed first.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"component":{"type":"string","minLength":1,"maxLength":63}},"required":["component"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskWrite,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantDeleteProjectComponent(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolListDependencyTemplates,
+				Description:  "List safe Infrastructure dependency Templates that declare typed provided interfaces, plus the current development runtime's compatible consumed interfaces. Results contain public schema/sample metadata and key names only; they never contain Secret references or values.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantListProjectDependencyTemplates(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:         projectToolListProjectDependencies,
+				Description:  "List this Project's durable dependency bindings and typed connections with secret-free Pending, Ready, or Failed status. Runtime Secret names, paths, and values are never returned.",
+				Parameters:   json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+				Risk:         projectAssistantToolRiskRead,
+				ParallelSafe: true,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantListProjectDependencies(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolUpsertProjectDependency,
+				Description: "Provision or update one durable Infrastructure dependency and connect its typed interface to a Project target. The source Instance is explicitly Retain, while the derived credential delivery Connection is always removed with the intent. This runtime mutation requires user confirmation and never accepts credential values.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"dependency":{"type":"string","minLength":1,"maxLength":63},"environment":{"type":"string","minLength":1,"maxLength":63,"default":"development"},"template":{"type":"string","minLength":1,"maxLength":253},"values":{"type":"object","description":"Public provider schema values only. Never pass passwords, tokens, or Secret data."},"sourceInterface":{"type":"string","minLength":1},"targetRef":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["developmentService","binding"]},"name":{"type":"string","minLength":1,"maxLength":63}},"required":["kind","name"]},"targetInterface":{"type":"string","minLength":1},"mappings":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"properties":{"sourceKey":{"type":"string","minLength":1},"targetKey":{"type":"string","minLength":1}},"required":["sourceKey","targetKey"]}}},"required":["dependency","template","values","sourceInterface","targetRef","targetInterface"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantUpsertProjectDependency(ctx, req)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
+				Name:        projectToolDeleteProjectDependency,
+				Description: "Remove one Project dependency connection and detach its retained Infrastructure Instance. Credentials are withdrawn, but the stateful source Instance and its data are not deleted. This runtime mutation requires user confirmation.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"dependency":{"type":"string","minLength":1,"maxLength":63},"environment":{"type":"string","minLength":1,"maxLength":63,"default":"development"}},"required":["dependency"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskRuntime,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				if server == nil {
+					return "", errors.New("server is not configured")
+				}
+				return server.assistantDeleteProjectDependency(ctx, req)
+			},
+		},
+	)
 	if _, _, enabled := server.previewConsoleDependencies(); enabled {
 		tools = append(tools, projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{

@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260814-102b8331.projects.ai.faros.sh
+  name: v260901-9ac5b75d.projects.ai.faros.sh
 spec:
   group: ai.faros.sh
   names:
@@ -50,6 +50,105 @@ spec:
         spec:
           description: ProjectSpec defines user-authored Project state.
           properties:
+            components:
+              description: |-
+                Components are the stable source and build units that make up this
+                Project. A component can be mapped to a different provider Template in
+                each environment without changing its source identity.
+              items:
+                description: |-
+                  ProjectComponentSpec is the Project-owned logical identity of one source
+                  and build unit. Providers consume this contract through environment binding
+                  mappings; they do not own the source paths.
+                properties:
+                  build:
+                    description: Build describes the source context used to produce
+                      an immutable image.
+                    properties:
+                      contextPath:
+                        description: ContextPath is relative to the repository root.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      dockerfilePath:
+                        description: DockerfilePath is relative to the repository
+                          root.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                    required:
+                    - contextPath
+                    - dockerfilePath
+                    type: object
+                  kind:
+                    description: Kind determines whether this component is expected
+                      to serve traffic.
+                    enum:
+                    - Service
+                    - Worker
+                    type: string
+                  name:
+                    description: Name is a stable component identifier such as web,
+                      api, or worker.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  ports:
+                    description: |-
+                      Ports describes the production network contract for this component.
+                      Development listener ports are configured independently by the
+                      DevelopmentService resource.
+                    items:
+                      description: ProjectComponentPortSpec declares a named production
+                        port.
+                      properties:
+                        containerPort:
+                          description: ContainerPort is the port exposed by the component
+                            workload.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        name:
+                          description: |-
+                            Name is the stable port name used by Template component mappings and
+                            application routes.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        protocol:
+                          description: Protocol is the protocol spoken by the port.
+                          enum:
+                          - HTTP
+                          - HTTPS
+                          - TCP
+                          type: string
+                      required:
+                      - containerPort
+                      - name
+                      - protocol
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  sourcePath:
+                    description: SourcePath is the component's directory relative
+                      to the repository root.
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                - sourcePath
+                type: object
+              maxItems: 64
+              type: array
+              x-kubernetes-list-map-keys:
+              - name
+              x-kubernetes-list-type: map
             description:
               description: Description is a short project summary.
               maxLength: 2048
@@ -144,11 +243,54 @@ spec:
                             - version
                             type: object
                           type: array
+                        componentMappings:
+                          description: |-
+                            ComponentMappings map Project-owned source components to components in
+                            the selected Template. They are primarily used by artifact/production
+                            bindings and are ignored by provider references.
+                          items:
+                            description: |-
+                              ProjectComponentMappingSpec maps a Project component to a named component
+                              in the selected provider Template.
+                            properties:
+                              componentRef:
+                                description: ComponentRef names the Project component.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                              targetComponent:
+                                description: TargetComponent names the component in
+                                  the selected Template.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - componentRef
+                            - targetComponent
+                            type: object
+                          maxItems: 64
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - targetComponent
+                          x-kubernetes-list-type: map
                         kind:
                           enum:
                           - providerResource
                           - providerReference
                           type: string
+                        lifecycle:
+                          description: Lifecycle controls deletion behavior for the
+                            bound provider resource.
+                          properties:
+                            deletionPolicy:
+                              description: |-
+                                DeletionPolicy defaults to Delete when omitted. Stateful providers can be
+                                retained explicitly by setting Retain.
+                              enum:
+                              - Delete
+                              - Retain
+                              type: string
+                          type: object
                         name:
                           maxLength: 63
                           minLength: 1
@@ -167,6 +309,21 @@ spec:
                               type: string
                             resource:
                               type: string
+                          type: object
+                        templateRef:
+                          description: |-
+                            TemplateRef selects the provider Template for this binding. It is the
+                            canonical source for managed provider resources. Project.spec.template
+                            remains a legacy/simple-flow fallback for bindings that omit this field.
+                          properties:
+                            name:
+                              description: Name is the Template's catalog name (e.g.
+                                "application").
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
                           type: object
                         values:
                           description: |-
@@ -191,6 +348,18 @@ spec:
                     maxLength: 63
                     minLength: 1
                     type: string
+                  preview:
+                    description: |-
+                      Preview selects the primary DevelopmentService URL shown by App Studio
+                      for this environment. Other services remain addressable individually.
+                    properties:
+                      primaryServiceRef:
+                        description: |-
+                          PrimaryServiceRef is the name of a DevelopmentService in this Project
+                          environment.
+                        maxLength: 63
+                        type: string
+                    type: object
                   promotion:
                     description: Promotion controls how changes move into this environment.
                     type: string
@@ -303,6 +472,50 @@ spec:
         status:
           description: ProjectStatus defines the observed Project state.
           properties:
+            bindingInventory:
+              description: |-
+                BindingInventory records the last provider-resource identities owned by
+                this Project. The controller uses it to clean up a binding removed from
+                spec, when the removed binding's dynamic resource kind is no longer
+                available in the current Project spec.
+              items:
+                description: |-
+                  ProjectBindingInventoryStatus preserves enough information to lifecycle a
+                  provider resource after its binding has been removed from spec. It is
+                  controller-maintained status, not user-authored desired state.
+                properties:
+                  binding:
+                    description: Binding identifies the removed binding.
+                    type: string
+                  deletionPolicy:
+                    description: DeletionPolicy is the policy captured when the binding
+                      was last observed.
+                    type: string
+                  environment:
+                    description: |-
+                      Environment identifies the environment that previously contained the
+                      binding.
+                    type: string
+                  provider:
+                    description: Provider identifies the provider that owns the resource.
+                    type: string
+                  resourceRef:
+                    description: |-
+                      ResourceRef is the complete dynamic resource identity required to address
+                      the provider resource after the binding is removed.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      resource:
+                        type: string
+                    type: object
+                type: object
+              maxItems: 128
+              type: array
             environments:
               description: Environments reports provider-observed environment state.
               items:

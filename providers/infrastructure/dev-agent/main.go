@@ -26,6 +26,7 @@ You may obtain a copy of the License at
 //	POST /env      set non-secret env for the dev process; optional restart.
 //	GET  /logs     current dev-process attempt output (text/plain).
 //	GET  /status   current child-process and declared-port readiness (JSON).
+//	GET  /listeners bounded read-only TCP listener observations (JSON).
 //
 // Every endpoint except /healthz and /readyz requires X-Sandbox-Control-Token (constant-
 // time compared against FAROS_DEV_CONTROL_TOKEN, read once then cleared).
@@ -401,13 +402,14 @@ func runHealthcheck(address string) error {
 func runRuntimeSupervisor(ctx context.Context, cfg *agentConfig) error {
 	logs := newRingLog(500)
 	supervisor := newSupervisor(ctx, cfg, logs)
+	services := newServiceManager(ctx, cfg.WorkDir)
 	if cfg.StartCommand != "" {
 		if err := supervisor.start(ctx); err != nil {
 			log.Printf("initial process start failed: %v", err)
 		}
 	}
-	srv := &http.Server{Addr: defaultRuntimeAddr, Handler: newRuntimeSupervisorServer(supervisor, logs, nil), ReadHeaderTimeout: 10 * time.Second}
-	return serveUntilDone(ctx, srv, func() { _ = supervisor.stop() })
+	srv := &http.Server{Addr: defaultRuntimeAddr, Handler: newRuntimeSupervisorServer(supervisor, logs, nil, services), ReadHeaderTimeout: 10 * time.Second}
+	return serveUntilDone(ctx, srv, func() { services.StopAll(); _ = supervisor.stop() })
 }
 
 func runStatelessExecutor(ctx context.Context, cfg *agentConfig) error {
@@ -837,7 +839,7 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	logs := newRingLog(500)
 	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}, checkpoints: map[string]workspaceCheckpoint{}}
 	s.supervisor = newSupervisor(ctx, cfg, logs)
-	s.runtime = &localRuntime{supervisor: s.supervisor, logs: logs}
+	s.runtime = &localRuntime{supervisor: s.supervisor, logs: logs, services: newServiceManager(ctx, cfg.WorkDir)}
 	s.initMux()
 	return s
 }
@@ -857,6 +859,9 @@ func (s *agentServer) initMux() {
 	mux.HandleFunc("/env", s.handleEnv)
 	mux.HandleFunc("/logs", s.handleLogs)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/listeners", s.handleListeners)
+	mux.HandleFunc("/service", s.handleService)
+	mux.HandleFunc("/service/logs", s.handleServiceLogs)
 	mux.HandleFunc("/workspace/", s.handleWorkspace)
 	s.mux = mux
 }
@@ -1503,17 +1508,18 @@ func (s *agentServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 type processStatusResponse struct {
-	AttemptID               uint64 `json:"attemptID"`
-	AttemptStartedUnixMilli int64  `json:"attemptStartedUnixMilli,omitempty"`
-	Configured              bool   `json:"configured"`
-	Running                 bool   `json:"running"`
-	Port                    string `json:"port,omitempty"`
-	PortReachable           bool   `json:"portReachable,omitempty"`
-	ActionsEnabled          bool   `json:"actionsEnabled"`
-	ActionsReady            bool   `json:"actionsReady"`
-	ActionsTokenExpiresAt   int64  `json:"actionsTokenExpiresAtUnixMilli,omitempty"`
-	SourceRevision          uint64 `json:"sourceRevision,omitempty"`
-	SourceDigest            string `json:"sourceDigest,omitempty"`
+	AttemptID               uint64                `json:"attemptID"`
+	AttemptStartedUnixMilli int64                 `json:"attemptStartedUnixMilli,omitempty"`
+	Configured              bool                  `json:"configured"`
+	Running                 bool                  `json:"running"`
+	Port                    string                `json:"port,omitempty"`
+	PortReachable           bool                  `json:"portReachable,omitempty"`
+	DiscoveredListeners     []listenerObservation `json:"discoveredListeners,omitempty"`
+	ActionsEnabled          bool                  `json:"actionsEnabled"`
+	ActionsReady            bool                  `json:"actionsReady"`
+	ActionsTokenExpiresAt   int64                 `json:"actionsTokenExpiresAtUnixMilli,omitempty"`
+	SourceRevision          uint64                `json:"sourceRevision,omitempty"`
+	SourceDigest            string                `json:"sourceDigest,omitempty"`
 }
 
 type runtimeOperations interface {
@@ -1528,6 +1534,7 @@ type runtimeOperations interface {
 type localRuntime struct {
 	supervisor *supervisor
 	logs       *ringLog
+	services   *serviceManager
 }
 
 func (r *localRuntime) Restart(ctx context.Context) error { return r.supervisor.restart(ctx) }
@@ -1629,7 +1636,7 @@ func (c *httpRuntimeClient) Status(ctx context.Context) (processStatusResponse, 
 	return status, err
 }
 
-func newRuntimeSupervisorServer(supervisor *supervisor, logs *ringLog, exit func(int)) http.Handler {
+func newRuntimeSupervisorServer(supervisor *supervisor, logs *ringLog, exit func(int), services ...*serviceManager) http.Handler {
 	if exit == nil {
 		exit = os.Exit
 	}
@@ -1727,6 +1734,12 @@ func newRuntimeSupervisorServer(supervisor *supervisor, logs *ringLog, exit func
 		}
 		writeJSON(w, http.StatusOK, supervisor.status())
 	})
+	var serviceRuntime *serviceManager
+	if len(services) > 0 {
+		serviceRuntime = services[0]
+	}
+	registerServiceRuntimeEndpoints(mux, serviceRuntime)
+	registerListenerRuntimeEndpoint(mux)
 	return mux
 }
 
@@ -1993,6 +2006,7 @@ func (s *supervisor) status() processStatusResponse {
 			_ = conn.Close()
 		}
 	}
+	status.DiscoveredListeners, _ = discoverTCPListeners()
 	return status
 }
 

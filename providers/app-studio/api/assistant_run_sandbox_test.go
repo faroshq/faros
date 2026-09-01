@@ -323,7 +323,7 @@ func TestProjectAssistantSandboxManagerPrunesExpiredLeasesBeforeQuota(t *testing
 	}
 }
 
-func TestProjectAssistantSupervisorStopDeletesSuspendedSandboxAndAllowsFreshRun(t *testing.T) {
+func TestProjectAssistantSupervisorStopSuspendsSandboxAndAllowsFreshRun(t *testing.T) {
 	messages := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, messages, nil, "", false)
 	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "ws", ProjectName: "shop", ProjectUID: "project-uid"}
@@ -372,8 +372,15 @@ func TestProjectAssistantSupervisorStopDeletesSuspendedSandboxAndAllowsFreshRun(
 	if err != nil || !ok || stopped.Status != store.AssistantRunStatusInterrupted {
 		t.Fatalf("StopWithIdentity = run=%#v stopped=%t err=%v", stopped, ok, err)
 	}
-	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("stopped sandbox lookup = %v, want NotFound", err)
+	stoppedInstance, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("stopped sandbox lookup: %v", err)
+	}
+	if !projectAssistantRunSandboxInstanceSuspended(stoppedInstance) {
+		t.Fatal("stopped sandbox is not suspended")
+	}
+	if owner := stoppedInstance.GetAnnotations()[projectAssistantRunSandboxClaimOwner]; owner != "" {
+		t.Fatalf("stopped sandbox claim owner = %q, want released", owner)
 	}
 	nextRelease, err := server.projectAssistantSandboxManager().acquire(projectAssistantRunSandboxTenantKey(id, workspace.Scope(scope)), name, "run-next")
 	if err != nil {
@@ -581,7 +588,7 @@ func TestProjectAssistantRunSandboxSafeTerminalRetainsProjectCache(t *testing.T)
 	}
 }
 
-func TestProjectAssistantRunSandboxUnsafeTerminalDeletesCache(t *testing.T) {
+func TestProjectAssistantRunSandboxUnsafeTerminalRetainsProjectInstance(t *testing.T) {
 	now := time.Now().UTC()
 	instance := newRunSandboxTestInstance("cache", projectAssistantRunSandboxCacheStateCached, now)
 	client := newRunSandboxTestClient(instance)
@@ -607,12 +614,19 @@ func TestProjectAssistantRunSandboxUnsafeTerminalDeletesCache(t *testing.T) {
 	if got := finishProjectAssistantRunSandbox(context.Background(), sandbox, release, checkpointErr, false); !errors.Is(got, checkpointErr) {
 		t.Fatalf("finish error = %v, want checkpoint failure", got)
 	}
-	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("unsafe terminal cache lookup = %v, want NotFound", err)
+	retained, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "cache", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("unsafe terminal cache lookup: %v", err)
+	}
+	if owner := retained.GetAnnotations()[projectAssistantRunSandboxClaimOwner]; owner != "" {
+		t.Fatalf("unsafe terminal claim owner = %q, want released", owner)
+	}
+	if state := retained.GetAnnotations()[projectAssistantRunSandboxCacheState]; state != projectAssistantRunSandboxCacheStateCached {
+		t.Fatalf("unsafe terminal cache state = %q, want cached", state)
 	}
 }
 
-func TestProjectAssistantRunSandboxSetupFailureDeletesClaimedCache(t *testing.T) {
+func TestProjectAssistantRunSandboxSetupFailureRetainsProjectInstance(t *testing.T) {
 	now := time.Now().UTC()
 	instance := newRunSandboxTestInstance("cache", projectAssistantRunSandboxCacheStateActive, now)
 	annotations := instance.GetAnnotations()
@@ -635,8 +649,15 @@ func TestProjectAssistantRunSandboxSetupFailureDeletesClaimedCache(t *testing.T)
 	guard := newProjectAssistantRunSandboxSetupGuard(sandbox, func() { releases++ })
 	guard.cleanupSetup()
 
-	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "cache", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("setup-failure cache lookup = %v, want NotFound", err)
+	retained, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "cache", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("setup-failure cache lookup: %v", err)
+	}
+	if owner := retained.GetAnnotations()[projectAssistantRunSandboxClaimOwner]; owner != "" {
+		t.Fatalf("setup-failure claim owner = %q, want released", owner)
+	}
+	if state := retained.GetAnnotations()[projectAssistantRunSandboxCacheState]; state != projectAssistantRunSandboxCacheStateCached {
+		t.Fatalf("setup-failure cache state = %q, want cached", state)
 	}
 	if releases != 1 || !sandbox.closed {
 		t.Fatalf("setup cleanup releases=%d closed=%v, want one release and closed sandbox", releases, sandbox.closed)
@@ -845,7 +866,7 @@ func TestProjectAssistantRunSandboxColdMultiMutationWarmFollowUpKeepsRemoteRevis
 	}
 }
 
-func TestProjectAssistantRunSandboxQuotaEvictsOldestUnclaimedCache(t *testing.T) {
+func TestProjectAssistantRunSandboxQuotaSuspendsOldestUnclaimedCache(t *testing.T) {
 	now := time.Now().UTC()
 	oldest := newRunSandboxTestInstance("oldest", projectAssistantRunSandboxCacheStateCached, now.Add(-time.Hour))
 	newer := newRunSandboxTestInstance("newer", projectAssistantRunSandboxCacheStateCached, now.Add(-time.Minute))
@@ -854,15 +875,19 @@ func TestProjectAssistantRunSandboxQuotaEvictsOldestUnclaimedCache(t *testing.T)
 	if err := server.enforceProjectAssistantRunSandboxQuota(context.Background(), client, "incoming"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "oldest", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("oldest cache lookup = %v, want eviction", err)
+	oldestInstance, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "oldest", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("oldest cache lookup: %v", err)
+	}
+	if !projectAssistantRunSandboxInstanceSuspended(oldestInstance) {
+		t.Fatal("oldest cache was not suspended under quota pressure")
 	}
 	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "newer", metav1.GetOptions{}); err != nil {
 		t.Fatalf("newer cache was evicted: %v", err)
 	}
 }
 
-func TestProjectAssistantRunSandboxQuotaDoesNotEvictLocallyClaimedCache(t *testing.T) {
+func TestProjectAssistantRunSandboxQuotaSuspendsUnclaimedNotLocallyClaimedCache(t *testing.T) {
 	now := time.Now().UTC()
 	claimed := newRunSandboxTestInstance("claimed", projectAssistantRunSandboxCacheStateCached, now.Add(-time.Hour))
 	unclaimed := newRunSandboxTestInstance("unclaimed", projectAssistantRunSandboxCacheStateCached, now.Add(-time.Minute))
@@ -879,8 +904,12 @@ func TestProjectAssistantRunSandboxQuotaDoesNotEvictLocallyClaimedCache(t *testi
 	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "claimed", metav1.GetOptions{}); err != nil {
 		t.Fatalf("locally claimed cache was evicted: %v", err)
 	}
-	if _, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "unclaimed", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("unclaimed cache lookup = %v, want eviction", err)
+	unclaimedInstance, err := client.Resource(runSandboxInstancesResource, "").Get(context.Background(), "unclaimed", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("unclaimed cache lookup: %v", err)
+	}
+	if !projectAssistantRunSandboxInstanceSuspended(unclaimedInstance) {
+		t.Fatal("unclaimed cache was not suspended under quota pressure")
 	}
 }
 
@@ -988,7 +1017,7 @@ func TestProjectAssistantRunSandboxInstanceReadinessRequiresCurrentRuntimeState(
 	}
 }
 
-func TestProjectAssistantRunSandboxQuotaIgnoresSameExpiredAndDeletingInstances(t *testing.T) {
+func TestProjectAssistantRunSandboxQuotaCountsDurableInstancesAndIgnoresSuspendedDeletingInstances(t *testing.T) {
 	now := time.Now().UTC()
 	newInstance := func(name string) unstructured.Unstructured {
 		return unstructured.Unstructured{Object: map[string]any{
@@ -1007,12 +1036,14 @@ func TestProjectAssistantRunSandboxQuotaIgnoresSameExpiredAndDeletingInstances(t
 	deleting.SetDeletionTimestamp(&metav1.Time{Time: now})
 	terminal := newInstance("terminal")
 	_ = unstructured.SetNestedField(terminal.Object, "Expired", "status", "phase")
-	list := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{activeOne, activeTwo, sameRun, expired, deleting, terminal}}
-	if got := countProjectAssistantRunSandboxInstances(list, "current-run", now); got != 2 {
-		t.Fatalf("active quota count = %d, want 2", got)
+	suspended := newInstance("suspended")
+	_ = unstructured.SetNestedField(suspended.Object, true, "spec", "lifecycle", "suspended")
+	list := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{activeOne, activeTwo, sameRun, expired, deleting, terminal, suspended}}
+	if got := countProjectAssistantRunSandboxInstances(list, "current-run", now); got != 3 {
+		t.Fatalf("active quota count = %d, want 3 durable unsuspended instances", got)
 	}
-	if got := countProjectAssistantRunSandboxInstances(list, "run-one", now); got != 2 {
-		t.Fatalf("same-name quota count = %d, want 2", got)
+	if got := countProjectAssistantRunSandboxInstances(list, "run-one", now); got != 3 {
+		t.Fatalf("same-name quota count = %d, want 3 durable unsuspended instances", got)
 	}
 }
 

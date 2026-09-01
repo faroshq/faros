@@ -239,7 +239,104 @@ type TemplateSpec struct {
 	// See docs/app-studio-template-sandboxes.md for the end-to-end design.
 	// +optional
 	Development *TemplateDevelopment `json:"development,omitempty"`
+
+	// Lifecycle declares backend lifecycle capabilities and safe defaults for
+	// Instances of this Template. It is provider-owned metadata rather than
+	// template-shaped user input.
+	// +optional
+	Lifecycle TemplateLifecycle `json:"lifecycle,omitempty"`
+
+	// Connections declares the typed runtime interfaces this Template provides
+	// and consumes. Secret values never appear here: providers point at a
+	// Secret reference in Instance status and allowlist individual keys;
+	// consumers declare the exact source-key to environment-name mappings they
+	// accept. Connection objects bind these contracts without weakening them.
+	// +optional
+	Connections *TemplateConnections `json:"connections,omitempty"`
 }
+
+// TemplateConnections is the provider-owned connection contract for a
+// Template. Interface names are local handles while Type is the compatibility
+// identity shared by producers and consumers (for example postgresql).
+type TemplateConnections struct {
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Provides []TemplateProvidedConnection `json:"provides,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Consumes []TemplateConsumedConnection `json:"consumes,omitempty"`
+}
+
+type TemplateProvidedConnection struct {
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	Name string `json:"name"`
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9.-]*$`
+	Type string `json:"type"`
+	// SecretRefPath is a dot-separated path below Instance status whose value
+	// is an object containing name and namespace. Only status paths are allowed.
+	// +required
+	// +kubebuilder:validation:Pattern=`^status(\.[A-Za-z][A-Za-z0-9]*)+$`
+	SecretRefPath string `json:"secretRefPath"`
+	// Keys is the complete allowlist of Secret data keys this interface may
+	// export. The Connection controller rejects every unlisted key.
+	// +required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	Keys []string `json:"keys"`
+}
+
+type TemplateConsumedConnection struct {
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	Name string `json:"name"`
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9.-]*$`
+	Type string `json:"type"`
+	// Mappings allowlists the exact producer key and target environment name
+	// pairs accepted by this consumer. A Connection may select a subset.
+	// +required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	Mappings []TemplateConnectionMapping `json:"mappings"`
+}
+
+type TemplateConnectionMapping struct {
+	// +required
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
+	SourceKey string `json:"sourceKey"`
+	// TargetKey is an environment variable name in the consuming workload.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	TargetKey string `json:"targetKey"`
+}
+
+// TemplateLifecycle declares lifecycle behavior shared by all Instances of a
+// Template.
+type TemplateLifecycle struct {
+	// SupportsSuspension means Instance.spec.lifecycle.suspended can scale the
+	// Template's compute to zero while preserving its durable state.
+	// +optional
+	SupportsSuspension bool `json:"supportsSuspension,omitempty"`
+
+	// DefaultDeletionPolicy is the policy used when a caller does not provide a
+	// more specific deletion decision. Stateful Templates should declare
+	// retain; stateless workloads normally use delete.
+	// +optional
+	// +kubebuilder:default=Delete
+	// +kubebuilder:validation:Enum=Delete;Retain
+	DefaultDeletionPolicy DeletionPolicy `json:"defaultDeletionPolicy,omitempty"`
+}
+
+// DeletionPolicy determines whether provider-owned backend state is removed
+// when the owning Instance is deleted.
+type DeletionPolicy string
+
+const (
+	DeletionPolicyDelete DeletionPolicy = "Delete"
+	DeletionPolicyRetain DeletionPolicy = "Retain"
+)
 
 // Platform-reserved instance spec field the Template controller injects into
 // every per-template CRD. Tenants set it to development only when the
@@ -284,13 +381,24 @@ const (
 	// Instance controller holds a new sandbox in setup until its runtime graph
 	// is Ready, then switches it to runtime. Templates use it only to select
 	// an explicit setup egress policy; tenants cannot choose the phase.
-	FarosNetworkPhaseField   = "farosNetworkPhase"
+	FarosNetworkPhaseField = "farosNetworkPhase"
 	// FarosNetworkPhaseStatusField is the controller-owned status mirror of
 	// FarosNetworkPhaseField. Tenant spec values are never authoritative for
 	// execution readiness.
 	FarosNetworkPhaseStatusField = "farosNetworkPhase"
-	FarosNetworkPhaseSetup   = "setup"
-	FarosNetworkPhaseRuntime = "runtime"
+	// FarosSuspendedField is a platform-reserved development value. The
+	// Instance controller stamps it from spec.lifecycle.suspended; template
+	// authors cannot claim or directly control it. Development overlays use it
+	// to scale the sandbox workload to zero while retaining its workspace and
+	// control objects.
+	FarosSuspendedField = "farosSuspended"
+	// FarosConnectionsSecretNameField and FarosConnectionsRevisionField are
+	// provider-stamped runtime inputs. Templates consume them mechanically to
+	// mount the aggregate connection Secret and roll workloads on rotation.
+	FarosConnectionsSecretNameField = "farosConnectionsSecretName"
+	FarosConnectionsRevisionField   = "farosConnectionsRevision"
+	FarosNetworkPhaseSetup          = "setup"
+	FarosNetworkPhaseRuntime        = "runtime"
 	// FarosLastActivityAnnotation is written to a runtime Instance by the
 	// provider data plane after caller authorization. It is deliberately not
 	// stored in tenant-visible Instance status.

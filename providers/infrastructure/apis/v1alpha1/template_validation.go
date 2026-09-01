@@ -50,6 +50,9 @@ func ValidateImmutableImageRef(image string) error {
 // duplicates), and data-plane component naming. Returns nil when the spec
 // declares no development block AND no data-plane components.
 func (s *TemplateSpec) ValidateDevelopment() error {
+	if err := s.validateConnections(); err != nil {
+		return err
+	}
 	if s.DataPlane != nil {
 		if len(s.DataPlane.Endpoints) == 0 && len(s.DataPlane.Components) == 0 {
 			return fmt.Errorf("spec.dataPlane declares neither endpoints nor components")
@@ -138,6 +141,60 @@ func (s *TemplateSpec) ValidateDevelopment() error {
 		}
 	}
 
+	return nil
+}
+
+var connectionKeyRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var connectionEnvRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func (s *TemplateSpec) validateConnections() error {
+	if s.Connections == nil {
+		return nil
+	}
+	providedNames := map[string]bool{}
+	for i, provided := range s.Connections.Provides {
+		if !componentNameRE.MatchString(provided.Name) || provided.Type == "" {
+			return fmt.Errorf("spec.connections.provides[%d] has an invalid name or type", i)
+		}
+		if providedNames[provided.Name] {
+			return fmt.Errorf("spec.connections.provides name %q is duplicated", provided.Name)
+		}
+		providedNames[provided.Name] = true
+		if !strings.HasPrefix(provided.SecretRefPath, "status.") {
+			return fmt.Errorf("spec.connections.provides[%d].secretRefPath must be below status", i)
+		}
+		seen := map[string]bool{}
+		for _, key := range provided.Keys {
+			if !connectionKeyRE.MatchString(key) || seen[key] {
+				return fmt.Errorf("spec.connections.provides[%d] has invalid or duplicate key %q", i, key)
+			}
+			seen[key] = true
+		}
+		if len(seen) == 0 {
+			return fmt.Errorf("spec.connections.provides[%d].keys is required", i)
+		}
+	}
+	consumedNames := map[string]bool{}
+	for i, consumed := range s.Connections.Consumes {
+		if !componentNameRE.MatchString(consumed.Name) || consumed.Type == "" {
+			return fmt.Errorf("spec.connections.consumes[%d] has an invalid name or type", i)
+		}
+		if consumedNames[consumed.Name] {
+			return fmt.Errorf("spec.connections.consumes name %q is duplicated", consumed.Name)
+		}
+		consumedNames[consumed.Name] = true
+		seen := map[string]bool{}
+		for _, mapping := range consumed.Mappings {
+			pair := mapping.SourceKey + "\x00" + mapping.TargetKey
+			if !connectionKeyRE.MatchString(mapping.SourceKey) || !connectionEnvRE.MatchString(mapping.TargetKey) || seen[pair] {
+				return fmt.Errorf("spec.connections.consumes[%d] has invalid or duplicate mapping %q to %q", i, mapping.SourceKey, mapping.TargetKey)
+			}
+			seen[pair] = true
+		}
+		if len(seen) == 0 {
+			return fmt.Errorf("spec.connections.consumes[%d].mappings is required", i)
+		}
+	}
 	return nil
 }
 

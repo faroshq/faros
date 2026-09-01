@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -183,6 +184,12 @@ type projectPromoteRequest struct {
 	Values    map[string]any `json:"values,omitempty"`
 	CommitSHA *string        `json:"commitSHA,omitempty"`
 	ReleaseID *string        `json:"releaseID,omitempty"`
+	// TemplateName (the preferred wire spelling) selects the production
+	// Template independently from the development Template. Template is
+	// accepted as a concise alias for callers that use the KRM field name.
+	TemplateName      string                                   `json:"templateName,omitempty"`
+	Template          string                                   `json:"template,omitempty"`
+	ComponentMappings []aiv1alpha1.ProjectComponentMappingSpec `json:"componentMappings,omitempty"`
 }
 
 type projectPromoteResponse struct {
@@ -203,14 +210,21 @@ func newProjectRedeployRevision() string {
 	return uuid.NewString()
 }
 
-// projectTemplateProdBinding builds the production binding: an instance of the
-// template kind named "<project>-prod", provisioned with farosMode: production,
-// the user's production input values, and each imageInput set to the built
-// digest. Platform-owned fields (name, farosMode, image inputs, and the
-// rollout revision) always win over anything in values. The optional revision
-// argument exists so promoteProject can mint once and return the exact value
-// written to the binding; callers that omit it get a fresh revision too.
+// projectTemplateProdBinding is the compatibility wrapper for callers that
+// already have image inputs in the target Template's schema. New promotion
+// callers use projectTemplateProdBindingWithMappings so a production Template
+// can diverge from the development Template without changing artifact
+// identity.
 func projectTemplateProdBinding(p *aiv1alpha1.Project, info projectTemplateInfo, images map[string]string, values map[string]any, rolloutRevisions ...string) (aiv1alpha1.ProjectProviderBindingSpec, error) {
+	return projectTemplateProdBindingWithMappings(p, info, images, values, nil, rolloutRevisions...)
+}
+
+// projectTemplateProdBindingWithMappings builds the production binding: an
+// Instance named "<project>-prod", provisioned with farosMode: production,
+// the user's production input values, and each target imageInput set to an
+// immutable digest. Platform-owned fields (name, farosMode, image inputs, and
+// the rollout revision) always win over anything in values.
+func projectTemplateProdBindingWithMappings(p *aiv1alpha1.Project, info projectTemplateInfo, images map[string]string, values map[string]any, componentMappings []aiv1alpha1.ProjectComponentMappingSpec, rolloutRevisions ...string) (aiv1alpha1.ProjectProviderBindingSpec, error) {
 	name := projectTemplateProdInstanceName(p)
 	if name == "" {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, fmt.Errorf("project has no name")
@@ -249,14 +263,209 @@ func projectTemplateProdBinding(p *aiv1alpha1.Project, info projectTemplateInfo,
 		Name:     projectProductionBindingName,
 		Provider: projectDevelopmentProviderAppStudio,
 		Kind:     aiv1alpha1.ProjectBindingKindProviderResource,
+		TemplateRef: &aiv1alpha1.ProjectTemplateSpec{
+			Name: info.Name,
+		},
 		ResourceRef: &aiv1alpha1.ProjectProviderResourceReference{
 			Name:       name,
 			APIVersion: info.APIVersion,
 			Kind:       info.Kind,
 			Resource:   info.Resource,
 		},
-		Values: runtime.RawExtension{Raw: raw},
+		Values:            runtime.RawExtension{Raw: raw},
+		ComponentMappings: normalizedProjectComponentMappings(componentMappings),
+		Lifecycle: &aiv1alpha1.ProjectBindingLifecycleSpec{
+			DeletionPolicy: projectTemplateDeletionPolicy(info),
+		},
 	}, nil
+}
+
+func projectTemplateDeletionPolicy(info projectTemplateInfo) aiv1alpha1.ProjectBindingDeletionPolicy {
+	if strings.EqualFold(strings.TrimSpace(info.DefaultDeletionPolicy), "Retain") {
+		return aiv1alpha1.ProjectBindingDeletionPolicyRetain
+	}
+	return aiv1alpha1.ProjectBindingDeletionPolicyDelete
+}
+
+func normalizedProjectComponentMappings(mappings []aiv1alpha1.ProjectComponentMappingSpec) []aiv1alpha1.ProjectComponentMappingSpec {
+	if len(mappings) == 0 {
+		return nil
+	}
+	out := append([]aiv1alpha1.ProjectComponentMappingSpec(nil), mappings...)
+	for i := range out {
+		out[i].ComponentRef = strings.TrimSpace(out[i].ComponentRef)
+		out[i].TargetComponent = strings.TrimSpace(out[i].TargetComponent)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TargetComponent != out[j].TargetComponent {
+			return out[i].TargetComponent < out[j].TargetComponent
+		}
+		return out[i].ComponentRef < out[j].ComponentRef
+	})
+	return out
+}
+
+// projectTemplateImageInputs returns the launchable production components and
+// their image-input fields. Most Templates declare imageInput on each
+// development component. A single-component legacy Template such as worker
+// may omit it, so the conventional top-level "image" field is inferred only in
+// that unambiguous case.
+func projectTemplateImageInputs(info projectTemplateInfo) map[string]string {
+	out := make(map[string]string)
+	for name := range info.Components {
+		if imageInput := projectTemplateImageInputForComponent(info, name); imageInput != "" {
+			out[name] = imageInput
+		}
+	}
+	return out
+}
+
+func projectTemplateSchemaImageInputs(info projectTemplateInfo) []string {
+	properties, _ := info.ProductionSchema["properties"].(map[string]any)
+	inputs := make([]string, 0)
+	for name, raw := range properties {
+		if !strings.EqualFold(name, "image") && !strings.HasSuffix(strings.ToLower(name), "image") {
+			continue
+		}
+		field, _ := raw.(map[string]any)
+		description, _ := field["description"].(string)
+		if strings.HasPrefix(strings.TrimSpace(description), "Computed by the platform") {
+			continue
+		}
+		inputs = append(inputs, name)
+	}
+	sort.Strings(inputs)
+	return inputs
+}
+
+// projectProductionComponentMappings resolves stable Project components to the
+// selected production Template. Explicit mappings are required whenever names
+// or source paths are not enough to identify a target. Existing production
+// binding mappings are reused on re-promote; otherwise name/path inference is
+// deliberately narrow and fails closed when ambiguous.
+func projectProductionComponentMappings(p *aiv1alpha1.Project, info projectTemplateInfo, build []projectBuildCheckComponent, requested []aiv1alpha1.ProjectComponentMappingSpec) ([]aiv1alpha1.ProjectComponentMappingSpec, map[string]string, error) {
+	requested = normalizedProjectComponentMappings(requested)
+	targetInputs := projectTemplateImageInputs(info)
+	if len(targetInputs) == 0 && len(requested) > 0 {
+		for _, mapping := range requested {
+			if input := projectTemplateImageInputForComponent(info, mapping.TargetComponent); input != "" {
+				targetInputs[mapping.TargetComponent] = input
+			}
+		}
+	}
+	if len(targetInputs) == 0 && len(info.Components) == 0 && len(requested) == 0 && len(build) == 1 {
+		// A production-only single-image Template has no component metadata. Its
+		// stable source component is the only safe target identity available.
+		if inputs := projectTemplateSchemaImageInputs(info); len(inputs) == 1 {
+			targetInputs[build[0].Name] = inputs[0]
+		}
+	}
+	if len(targetInputs) == 0 {
+		return nil, nil, newValidationError(fmt.Sprintf("production Template %q declares no launchable image inputs", info.Name))
+	}
+	seenInputs := make(map[string]string, len(targetInputs))
+	for targetName, imageInput := range targetInputs {
+		imageInput = strings.TrimSpace(imageInput)
+		if imageInput == "" {
+			return nil, nil, newValidationError(fmt.Sprintf("production Template component %q has an empty image input", targetName))
+		}
+		if priorTarget, found := seenInputs[imageInput]; found {
+			return nil, nil, newValidationError(fmt.Sprintf("production Template components %q and %q share image input %q", priorTarget, targetName, imageInput))
+		}
+		seenInputs[imageInput] = targetName
+	}
+
+	// A re-promotion with no mapping payload keeps the binding's established
+	// mapping when it is still targeting this Template.
+	if len(requested) == 0 {
+		if existing := findProjectProductionBinding(p); existing != nil && existing.TemplateRef != nil && strings.TrimSpace(existing.TemplateRef.Name) == strings.TrimSpace(info.Name) {
+			requested = normalizedProjectComponentMappings(existing.ComponentMappings)
+		}
+	}
+
+	buildByName := make(map[string]projectBuildCheckComponent, len(build))
+	for _, component := range build {
+		buildByName[strings.TrimSpace(component.Name)] = component
+	}
+	projectByName := make(map[string]aiv1alpha1.ProjectComponentSpec)
+	if p != nil {
+		for _, component := range p.Spec.Components {
+			projectByName[strings.TrimSpace(component.Name)] = component
+		}
+	}
+
+	resolved := make(map[string]string, len(targetInputs))
+	if len(requested) > 0 {
+		seenProjects := map[string]struct{}{}
+		seenTargets := map[string]struct{}{}
+		for _, mapping := range requested {
+			projectName := strings.TrimSpace(mapping.ComponentRef)
+			targetName := strings.TrimSpace(mapping.TargetComponent)
+			if projectName == "" || targetName == "" {
+				return nil, nil, newValidationError("component mappings require componentRef and targetComponent")
+			}
+			if _, duplicate := seenProjects[projectName]; duplicate {
+				return nil, nil, newValidationError(fmt.Sprintf("project component %q is mapped more than once", projectName))
+			}
+			if _, duplicate := seenTargets[targetName]; duplicate {
+				return nil, nil, newValidationError(fmt.Sprintf("production Template component %q is mapped more than once", targetName))
+			}
+			if _, found := targetInputs[targetName]; !found {
+				return nil, nil, newValidationError(fmt.Sprintf("production Template component %q has no usable image input", targetName))
+			}
+			if len(projectByName) > 0 {
+				if _, found := projectByName[projectName]; !found {
+					return nil, nil, newValidationError(fmt.Sprintf("component mapping references unknown Project component %q", projectName))
+				}
+			}
+			if _, found := buildByName[projectName]; !found {
+				return nil, nil, newValidationError(fmt.Sprintf("component mapping references Project component %q without build evidence", projectName))
+			}
+			seenProjects[projectName] = struct{}{}
+			seenTargets[targetName] = struct{}{}
+			resolved[targetName] = projectName
+		}
+	} else {
+		for targetName := range targetInputs {
+			sourceName := ""
+			if _, found := buildByName[targetName]; found {
+				sourceName = targetName
+			} else if component, found := info.Components[targetName]; found && len(projectByName) > 0 {
+				for projectName, projectComponent := range projectByName {
+					if strings.TrimSpace(projectComponent.SourcePath) == strings.TrimSpace(component.WorkspacePath) {
+						if sourceName != "" {
+							return nil, nil, newValidationError(fmt.Sprintf("production Template component %q matches multiple Project source paths", targetName))
+						}
+						sourceName = projectName
+					}
+				}
+			}
+			if sourceName == "" && len(targetInputs) == 1 && len(buildByName) == 1 {
+				for projectName := range buildByName {
+					sourceName = projectName
+				}
+			}
+			if sourceName == "" {
+				return nil, nil, newValidationError(fmt.Sprintf("production Template component %q needs an explicit component mapping", targetName))
+			}
+			resolved[targetName] = sourceName
+		}
+	}
+
+	if len(resolved) != len(targetInputs) {
+		return nil, nil, newValidationError("every launchable production Template component must be mapped to a built Project component")
+	}
+	mappings := make([]aiv1alpha1.ProjectComponentMappingSpec, 0, len(resolved))
+	images := make(map[string]string, len(resolved))
+	for targetName, projectName := range resolved {
+		row, found := buildByName[projectName]
+		if !found || !row.Built || strings.TrimSpace(row.Image) == "" {
+			return nil, nil, newValidationError(fmt.Sprintf("Project component %q has no immutable image evidence", projectName))
+		}
+		mappings = append(mappings, aiv1alpha1.ProjectComponentMappingSpec{ComponentRef: projectName, TargetComponent: targetName})
+		images[targetInputs[targetName]] = strings.TrimSpace(row.Image)
+	}
+	return normalizedProjectComponentMappings(mappings), images, nil
 }
 
 func projectTemplateSupportsAccess(info projectTemplateInfo) bool {
@@ -596,12 +805,12 @@ func projectRequestedRedeployRevision(binding *aiv1alpha1.ProjectProviderBinding
 	return strings.TrimSpace(revision)
 }
 
-// promoteProject stands up (or re-deploys) the project's production
-// environment from the current build evidence. It refuses unless every
-// launchable component has a built image (check_project_build == "built"), so
-// production never references an image that was not built.
+// promoteProject re-deploys an existing production target from the current
+// build evidence. First-time promotion must use the target-aware path with an
+// explicit Template; this compatibility wrapper may only reuse a production
+// binding already persisted on the Project.
 func (s *Server) promoteProject(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, httpReq *http.Request, values map[string]any) (*aiv1alpha1.Project, projectPromoteResponse, error) {
-	return s.promoteProjectWithSelection(ctx, c, id, p, httpReq, values, "", false)
+	return s.promoteProjectWithSelectionAndTarget(ctx, c, id, p, httpReq, values, "", false, "", nil)
 }
 
 // promoteProjectWithSelection is the common promotion path for latest and
@@ -609,6 +818,14 @@ func (s *Server) promoteProject(ctx context.Context, c *asclient.Client, id iden
 // and bypasses the development dirty-workspace guard: its package digests are
 // immutable evidence independent of the current sandbox contents.
 func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, httpReq *http.Request, values map[string]any, selectedCommitSHA string, commitSelected bool, selectedReleaseIDs ...string) (*aiv1alpha1.Project, projectPromoteResponse, error) {
+	return s.promoteProjectWithSelectionAndTarget(ctx, c, id, p, httpReq, values, selectedCommitSHA, commitSelected, "", nil, selectedReleaseIDs...)
+}
+
+// promoteProjectWithSelectionAndTarget is the target-aware promotion path.
+// The target Template is independent from the development Template. An empty
+// target may reuse an existing production binding, but it never infers the
+// development Template.
+func (s *Server) promoteProjectWithSelectionAndTarget(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project, httpReq *http.Request, values map[string]any, selectedCommitSHA string, commitSelected bool, targetTemplate string, componentMappings []aiv1alpha1.ProjectComponentMappingSpec, selectedReleaseIDs ...string) (*aiv1alpha1.Project, projectPromoteResponse, error) {
 	releaseIDEvidenceProvided := len(selectedReleaseIDs) > 0
 	selectedReleaseID := ""
 	if releaseIDEvidenceProvided {
@@ -620,8 +837,12 @@ func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Cl
 	if releaseIDEvidenceProvided && !commitSelected {
 		return nil, projectPromoteResponse{}, newValidationError("releaseID requires commitSHA")
 	}
-	if p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) == "" {
-		return nil, projectPromoteResponse{}, newValidationError("project has no template to promote; select a template and build first")
+	if p == nil {
+		return nil, projectPromoteResponse{}, newValidationError("project is required")
+	}
+	targetTemplate, err := projectProductionTemplateName(p, targetTemplate)
+	if err != nil {
+		return nil, projectPromoteResponse{}, err
 	}
 
 	// The digest tether (vibe promote semantics): refuse to ship while the
@@ -636,10 +857,7 @@ func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Cl
 		}
 	}
 
-	var (
-		check projectBuildCheckResult
-		err   error
-	)
+	var check projectBuildCheckResult
 	if commitSelected {
 		selectedCommitSHA = strings.TrimSpace(selectedCommitSHA)
 		if _, err = projectRepositoryCommitForSHA(ctx, c, projectLinkedRepositoryRef(p), selectedCommitSHA); err != nil {
@@ -656,16 +874,14 @@ func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Cl
 		return nil, projectPromoteResponse{}, newValidationError("project is not ready to promote: " + check.Note)
 	}
 
-	info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
+	info, err := fetchProjectTemplate(ctx, c, targetTemplate)
 	if err != nil {
 		return nil, projectPromoteResponse{}, err
 	}
 
-	images := make(map[string]string, len(check.Components))
-	for _, comp := range check.Components {
-		if comp.ImageInput != "" && comp.Image != "" {
-			images[comp.ImageInput] = comp.Image
-		}
+	mappings, images, err := projectProductionComponentMappings(p, info, check.Components, componentMappings)
+	if err != nil {
+		return nil, projectPromoteResponse{}, err
 	}
 	if len(images) == 0 {
 		return nil, projectPromoteResponse{}, newValidationError("no built component images recorded for this project")
@@ -677,7 +893,7 @@ func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Cl
 
 	rolloutRevision := newProjectRedeployRevision()
 	promotionValues := projectPromotionValues(p, values)
-	binding, err := projectTemplateProdBinding(p, info, images, promotionValues, rolloutRevision)
+	binding, err := projectTemplateProdBindingWithMappings(p, info, images, promotionValues, mappings, rolloutRevision)
 	if err != nil {
 		return nil, projectPromoteResponse{}, err
 	}
@@ -711,6 +927,23 @@ func (s *Server) promoteProjectWithSelection(ctx context.Context, c *asclient.Cl
 		Components:      check.Components,
 		Project:         raw,
 	}, nil
+}
+
+func projectProductionTemplateName(p *aiv1alpha1.Project, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return requested, nil
+	}
+	if binding := findProjectProductionBinding(p); binding != nil {
+		if binding.TemplateRef != nil {
+			name := strings.TrimSpace(binding.TemplateRef.Name)
+			if name == "" {
+				return "", newValidationError("production binding has an empty templateRef")
+			}
+			return name, nil
+		}
+	}
+	return "", newValidationError("production template is required; select a target Template before promoting")
 }
 
 // projectPromotionValues starts from the current production binding and
@@ -819,7 +1052,15 @@ func (s *Server) promoteProjectHandler(w http.ResponseWriter, r *http.Request) {
 	if req.ReleaseID != nil {
 		releaseIDs = []string{*req.ReleaseID}
 	}
-	_, resp, err := s.promoteProjectWithSelection(r.Context(), c, id, p, r, req.Values, commitSHA, commitSelected, releaseIDs...)
+	targetTemplate := strings.TrimSpace(req.TemplateName)
+	if alias := strings.TrimSpace(req.Template); alias != "" {
+		if targetTemplate != "" && targetTemplate != alias {
+			writeStatus(w, http.StatusBadRequest, "BadRequest", "templateName and template must identify the same production Template")
+			return
+		}
+		targetTemplate = alias
+	}
+	_, resp, err := s.promoteProjectWithSelectionAndTarget(r.Context(), c, id, p, r, req.Values, commitSHA, commitSelected, targetTemplate, req.ComponentMappings, releaseIDs...)
 	if err != nil {
 		writeProjectPromoteError(w, err)
 		return
@@ -831,15 +1072,17 @@ func (s *Server) promoteProjectHandler(w http.ResponseWriter, r *http.Request) {
 // button and seeds its form: whether the build is green, the component image
 // plan, and the production instance name.
 type projectPromotionReadinessResponse struct {
-	Template                  string                  `json:"template,omitempty"`
-	Instance                  string                  `json:"instance,omitempty"`
-	ProductionSchema          map[string]any          `json:"productionSchema,omitempty"`
-	ImmutableProductionInputs []string                `json:"immutableProductionInputs,omitempty"`
-	ProductionValues          map[string]any          `json:"productionValues,omitempty"`
-	RequestedRolloutRevision  string                  `json:"requestedRolloutRevision,omitempty"`
-	ObservedRolloutRevision   string                  `json:"observedRolloutRevision,omitempty"`
-	Promotable                bool                    `json:"promotable"`
-	Build                     projectBuildCheckResult `json:"build"`
+	Template                  string                                   `json:"template,omitempty"`
+	Instance                  string                                   `json:"instance,omitempty"`
+	TargetComponents          []projectProductionTemplateComponentView `json:"targetComponents,omitempty"`
+	ComponentMappings         []aiv1alpha1.ProjectComponentMappingSpec `json:"componentMappings,omitempty"`
+	ProductionSchema          map[string]any                           `json:"productionSchema,omitempty"`
+	ImmutableProductionInputs []string                                 `json:"immutableProductionInputs,omitempty"`
+	ProductionValues          map[string]any                           `json:"productionValues,omitempty"`
+	RequestedRolloutRevision  string                                   `json:"requestedRolloutRevision,omitempty"`
+	ObservedRolloutRevision   string                                   `json:"observedRolloutRevision,omitempty"`
+	Promotable                bool                                     `json:"promotable"`
+	Build                     projectBuildCheckResult                  `json:"build"`
 	// Production reports the live production environment when the project has
 	// been promoted at least once: its phase and, once serving, its URL. Nil
 	// when the project has never been promoted.
@@ -849,6 +1092,9 @@ type projectPromotionReadinessResponse struct {
 // findProjectProductionBinding returns the project's production binding spec,
 // or nil when it has never been promoted.
 func findProjectProductionBinding(p *aiv1alpha1.Project) *aiv1alpha1.ProjectProviderBindingSpec {
+	if p == nil {
+		return nil
+	}
 	for i := range p.Spec.Environments {
 		env := &p.Spec.Environments[i]
 		if strings.TrimSpace(env.Name) != projectProductionEnvironmentName {
@@ -861,6 +1107,19 @@ func findProjectProductionBinding(p *aiv1alpha1.Project) *aiv1alpha1.ProjectProv
 		}
 	}
 	return nil
+}
+
+func projectPromotionTemplateName(p *aiv1alpha1.Project, requested string) string {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		return requested
+	}
+	if production := findProjectProductionBinding(p); production != nil && production.TemplateRef != nil {
+		return strings.TrimSpace(production.TemplateRef.Name)
+	}
+	// Development runtime selection is intentionally not a production target.
+	// Universal Projects have no development Template at all, and ordinary
+	// Template-backed Projects must still make the production choice explicit.
+	return ""
 }
 
 // getProjectPromotion is GET /api/projects/{project}/promotion — the portal
@@ -877,14 +1136,12 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 		writeProjectPromoteError(w, err)
 		return
 	}
-	template := ""
-	if p.Spec.Template != nil {
-		template = strings.TrimSpace(p.Spec.Template.Name)
-	}
+	template := projectPromotionTemplateName(p, r.URL.Query().Get("templateName"))
+	productionBinding := findProjectProductionBinding(p)
 	resp := projectPromotionReadinessResponse{
 		Template:   template,
 		Instance:   projectTemplateProdInstanceName(p),
-		Promotable: check.Status == "built",
+		Promotable: template != "" && check.Status == "built",
 		Build:      check,
 	}
 	if template != "" {
@@ -893,6 +1150,7 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 			writeProjectPromoteError(w, templateErr)
 			return
 		}
+		resp.TargetComponents = projectProductionTemplateComponents(info)
 		resp.ProductionSchema = info.ProductionSchema
 		resp.ImmutableProductionInputs = projectProductionImmutableInputPaths(info)
 	}
@@ -902,8 +1160,12 @@ func (s *Server) getProjectPromotion(w http.ResponseWriter, r *http.Request) {
 	// Artifact-mode (production) environments are not reported by the live
 	// (development) environment status surface, so read the production
 	// binding's status directly for its phase and serving URL.
-	if prod := findProjectProductionBinding(p); prod != nil {
-		resp.ProductionValues = projectBindingValues(prod)
+	if prod := productionBinding; prod != nil {
+		selectedExistingTarget := prod.TemplateRef != nil && strings.TrimSpace(prod.TemplateRef.Name) == template
+		if selectedExistingTarget {
+			resp.ProductionValues = projectBindingValues(prod)
+			resp.ComponentMappings = normalizedProjectComponentMappings(prod.ComponentMappings)
+		}
 		resp.RequestedRolloutRevision = projectRequestedRedeployRevision(prod)
 		st := projectProviderBindingStatus(r.Context(), c, p, *prod, id)
 		resp.Production = &st

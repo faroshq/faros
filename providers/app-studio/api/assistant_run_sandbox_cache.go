@@ -352,10 +352,21 @@ func projectAssistantRunSandboxInstanceCached(instance *unstructured.Unstructure
 	if instance == nil || instance.GetDeletionTimestamp() != nil || projectAssistantRunSandboxInstanceExpired(instance, now) {
 		return false
 	}
+	if projectAssistantRunSandboxInstanceSuspended(instance) {
+		return false
+	}
 	if projectAssistantRunSandboxInstanceClaimed(instance, now) {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(instance.GetAnnotations()[projectAssistantRunSandboxCacheState]), projectAssistantRunSandboxCacheStateCached)
+}
+
+func projectAssistantRunSandboxInstanceSuspended(instance *unstructured.Unstructured) bool {
+	if instance == nil {
+		return false
+	}
+	suspended, found, _ := unstructured.NestedBool(instance.Object, "spec", "lifecycle", "suspended")
+	return found && suspended
 }
 
 // claimProjectAssistantRunSandboxInstance persists the active run identity for
@@ -390,9 +401,9 @@ func (s *Server) claimProjectAssistantRunSandboxInstance(ctx context.Context, c 
 			}
 			annotations = copy
 		}
-		if strings.EqualFold(strings.TrimSpace(annotations[projectAssistantRunSandboxCacheState]), projectAssistantRunSandboxCacheStateEvicting) {
-			return time.Time{}, fmt.Errorf("%w: run sandbox instance %q is being evicted", errProjectAssistantRunSandboxConflict, name)
-		}
+		// A stale eviction marker is recoverable for this deterministic
+		// project-scoped Instance. Claiming below replaces it with the active
+		// state; a live deletion still fails through the normal resource lookup.
 		owner := strings.TrimSpace(annotations[projectAssistantRunSandboxClaimOwner])
 		claimExpiry, claimExpiryOK := projectAssistantRunSandboxAnnotationTime(instance, projectAssistantRunSandboxClaimExpiry)
 		if owner != "" && owner != runID && (!claimExpiryOK || now.Before(claimExpiry)) {
@@ -404,26 +415,22 @@ func (s *Server) claimProjectAssistantRunSandboxInstance(ctx context.Context, c 
 				return time.Time{}, fmt.Errorf("%w: run sandbox instance %q is claimed by another run", errProjectAssistantRunSandboxConflict, name)
 			}
 		}
-		hardExpiry, hardExpiryOK := projectAssistantRunSandboxAnnotationTime(instance, projectAssistantRunSandboxHardExpiry)
-		if !hardExpiryOK {
-			hardExpiry = now.Add(projectAssistantRunSandboxHardTTL)
-		}
-		if !now.Before(hardExpiry) {
-			return time.Time{}, fmt.Errorf("%w: sandbox hard lifetime has expired", errProjectAssistantRunSandboxConflict)
-		}
+		// The Instance is project-scoped and durable. Hard/idle annotations from
+		// the earlier run-cache implementation must never make a project sandbox
+		// permanently unusable; Infrastructure owns suspension, and a new claim
+		// refreshes only the run lease and the next idle deadline.
+		newClaimExpiry := now.Add(projectAssistantRunSandboxHardTTL)
 		idleExpiry := now.Add(projectAssistantRunSandboxIdleTTL)
-		if idleExpiry.After(hardExpiry) {
-			idleExpiry = hardExpiry
-		}
 		annotations[projectAssistantRunSandboxClaimOwner] = runID
-		annotations[projectAssistantRunSandboxClaimExpiry] = hardExpiry.Format(time.RFC3339Nano)
+		annotations[projectAssistantRunSandboxClaimExpiry] = newClaimExpiry.Format(time.RFC3339Nano)
 		annotations[projectAssistantRunSandboxCacheGeneration] = runID
 		annotations[projectAssistantRunSandboxCacheState] = projectAssistantRunSandboxCacheStateActive
 		annotations[projectAssistantRunSandboxLastActivity] = now.Format(time.RFC3339Nano)
 		annotations[projectAssistantRunSandboxIdleExpiry] = idleExpiry.Format(time.RFC3339Nano)
-		if !hardExpiryOK {
-			annotations[projectAssistantRunSandboxHardExpiry] = hardExpiry.Format(time.RFC3339Nano)
-		}
+		delete(annotations, projectAssistantRunSandboxHardExpiry)
+		delete(annotations, projectAssistantRunSandboxLegacyIdleTTL)
+		delete(annotations, projectAssistantRunSandboxLegacyHardTTL)
+		_ = unstructured.SetNestedField(instance.Object, false, "spec", "lifecycle", "suspended")
 		instance.SetAnnotations(annotations)
 		updated, err := resource.Update(ctx, instance, metav1.UpdateOptions{})
 		if err != nil {
@@ -435,7 +442,7 @@ func (s *Server) claimProjectAssistantRunSandboxInstance(ctx context.Context, c 
 		if strings.TrimSpace(updated.GetAnnotations()[projectAssistantRunSandboxClaimOwner]) != runID {
 			return time.Time{}, fmt.Errorf("%w: run sandbox instance %q did not retain the requested claim", errProjectAssistantRunSandboxConflict, name)
 		}
-		return hardExpiry, nil
+		return newClaimExpiry, nil
 	}
 	return time.Time{}, fmt.Errorf("%w: run sandbox instance %q claim raced with another writer", errProjectAssistantRunSandboxConflict, name)
 }
@@ -512,10 +519,6 @@ func (s *Server) ensureProjectAssistantRunSandboxInstance(ctx context.Context, c
 			"labels": labels,
 			"annotations": map[string]any{
 				projectAssistantRunSandboxLabel:        "true",
-				"faros.sh/app-studio-run-sandbox-idle": projectAssistantRunSandboxIdleTTL.String(),
-				"faros.sh/app-studio-run-sandbox-hard": projectAssistantRunSandboxHardTTL.String(),
-				projectAssistantRunSandboxIdleExpiry:   now.Add(projectAssistantRunSandboxIdleTTL).Format(time.RFC3339Nano),
-				projectAssistantRunSandboxHardExpiry:   now.Add(projectAssistantRunSandboxHardTTL).Format(time.RFC3339Nano),
 				projectAssistantRunSandboxCacheState:   projectAssistantRunSandboxCacheStateNew,
 				projectAssistantRunSandboxLastActivity: now.Format(time.RFC3339Nano),
 			},
@@ -662,8 +665,11 @@ func (s *Server) evictProjectAssistantRunSandboxCache(ctx context.Context, c *as
 	for key, value := range annotations {
 		copy[key] = value
 	}
-	copy[projectAssistantRunSandboxCacheState] = projectAssistantRunSandboxCacheStateEvicting
+	copy[projectAssistantRunSandboxCacheState] = projectAssistantRunSandboxCacheStateCached
 	instance.SetAnnotations(copy)
+	if err := unstructured.SetNestedField(instance.Object, true, "spec", "lifecycle", "suspended"); err != nil {
+		return false, fmt.Errorf("suspend cached run sandbox %q: %w", name, err)
+	}
 	_, err = resource.Update(ctx, instance, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) {
 		return false, nil
@@ -674,9 +680,8 @@ func (s *Server) evictProjectAssistantRunSandboxCache(ctx context.Context, c *as
 	if s.projectAssistantSandboxManager().claimed(name) {
 		return false, nil
 	}
-	if err := resource.Delete(ctx, strings.TrimSpace(name), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("delete cached run sandbox %q: %w", name, err)
-	}
+	// Project deletion is the only destructive lifecycle path. Quota pressure
+	// removes active compute by suspension while retaining the Instance/PVC.
 	return true, nil
 }
 
@@ -687,7 +692,7 @@ func countProjectAssistantRunSandboxInstances(list *unstructured.UnstructuredLis
 	active := 0
 	for i := range list.Items {
 		instance := &list.Items[i]
-		if instance.GetName() == strings.TrimSpace(currentName) || instance.GetDeletionTimestamp() != nil || projectAssistantRunSandboxInstanceExpired(instance, now) {
+		if instance.GetName() == strings.TrimSpace(currentName) || instance.GetDeletionTimestamp() != nil || projectAssistantRunSandboxInstanceExpired(instance, now) || projectAssistantRunSandboxInstanceSuspended(instance) {
 			continue
 		}
 		active++
@@ -696,18 +701,13 @@ func countProjectAssistantRunSandboxInstances(list *unstructured.UnstructuredLis
 }
 
 func projectAssistantRunSandboxInstanceExpired(instance *unstructured.Unstructured, now time.Time) bool {
+	_ = now
 	if instance == nil {
 		return true
 	}
-	annotations := instance.GetAnnotations()
-	for _, key := range []string{projectAssistantRunSandboxIdleExpiry, projectAssistantRunSandboxHardExpiry} {
-		if raw := strings.TrimSpace(annotations[key]); raw != "" {
-			expiresAt, err := time.Parse(time.RFC3339Nano, raw)
-			if err == nil && !now.Before(expiresAt) {
-				return true
-			}
-		}
-	}
+	// Instance lifetime is project-owned. Idle deadlines are consumed by the
+	// Infrastructure lifecycle reconciler as a suspension signal; they are not
+	// deletion/expiry signals for App Studio and must not trigger recreation.
 	status, _, _ := unstructured.NestedString(instance.Object, "status", "status")
 	if strings.EqualFold(strings.TrimSpace(status), "expired") {
 		return true

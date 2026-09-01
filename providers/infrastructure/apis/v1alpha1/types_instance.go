@@ -96,6 +96,25 @@ type InstanceSpec struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:XPreserveUnknownFields
 	Values *runtime.RawExtension `json:"values,omitempty"`
+
+	// Lifecycle carries provider-owned runtime controls that are independent of
+	// a template's user-facing values. A suspended Instance keeps its control
+	// object and persistent state while the backend may scale its workload to
+	// zero. Templates must explicitly opt into suspension through
+	// Template.spec.lifecycle.supportsSuspension.
+	// +optional
+	Lifecycle InstanceLifecycle `json:"lifecycle,omitempty"`
+}
+
+// InstanceLifecycle is the provider-owned lifecycle contract for one
+// provisioned Instance. It intentionally contains only controls that can be
+// safely applied to every backend; template-specific knobs stay in Values.
+type InstanceLifecycle struct {
+	// Suspended asks the backend to stop compute while preserving durable state
+	// and the Instance identity. The instance controller rejects this request
+	// for Templates that do not declare lifecycle suspension support.
+	// +optional
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // InstanceStatus is the observed state: a platform-guaranteed baseline plus
@@ -178,6 +197,9 @@ const (
 	// ReasonInvalidValues marks spec.values that failed Template schema
 	// validation.
 	ReasonInvalidValues = "InvalidValues"
+	// ReasonSuspensionUnsupported marks a lifecycle request that a Template
+	// did not explicitly opt into.
+	ReasonSuspensionUnsupported = "SuspensionUnsupported"
 	// ReasonTemplateNotFound marks an Instance whose spec.template names no
 	// catalog Template.
 	ReasonTemplateNotFound = "TemplateNotFound"

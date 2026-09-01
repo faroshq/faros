@@ -151,18 +151,32 @@ type projectSandboxPreviewURLResponse struct {
 	Message        string `json:"message,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 	ObservedAccess string `json:"observedAccess,omitempty"`
+	ServiceName    string `json:"serviceName,omitempty"`
+	ServicePhase   string `json:"servicePhase,omitempty"`
+	ProcessRunning bool   `json:"processRunning,omitempty"`
+	PortListening  bool   `json:"portListening,omitempty"`
+	Reachable      bool   `json:"reachable,omitempty"`
 }
 
 // projectDevelopmentTarget resolves the Project's development data-plane
 // target: the template instance, with the Template's component map read live
-// from the tenant catalog. A project without a bound template has no
-// development environment.
-func (s *Server) projectDevelopmentTarget(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, _ identity) (projectDevelopmentSyncTargetInfo, error) {
+// from the tenant catalog. Universal projects have no Project.spec.template;
+// their deterministic project-scoped Instance is still addressed through the
+// universal template's development component contract.
+func (s *Server) projectDevelopmentTarget(ctx context.Context, c *asclient.Client, p *aiv1alpha1.Project, id identity) (projectDevelopmentSyncTargetInfo, error) {
 	if p == nil {
 		return projectDevelopmentSyncTargetInfo{}, fmt.Errorf("project is nil")
 	}
 	if p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) == "" {
-		return projectDevelopmentSyncTargetInfo{}, newValidationError("project has no development template yet — select one first")
+		info, err := fetchProjectTemplate(ctx, c, projectAssistantRunSandboxDefaultTemplate)
+		if err != nil {
+			return projectDevelopmentSyncTargetInfo{}, fmt.Errorf("read universal sandbox template %q: %w", projectAssistantRunSandboxDefaultTemplate, err)
+		}
+		if len(info.Components) == 0 {
+			return projectDevelopmentSyncTargetInfo{}, fmt.Errorf("universal sandbox template %q has no development components", info.Name)
+		}
+		name := projectAssistantRunSandboxName(projectWorkspaceScope(id, p), p, "")
+		return projectAssistantSandboxTargetFromTemplate(info, name), nil
 	}
 	info, err := fetchProjectTemplate(ctx, c, p.Spec.Template.Name)
 	if err != nil {
@@ -228,7 +242,7 @@ func (s *Server) authorizeProjectDevelopmentPreview(w http.ResponseWriter, r *ht
 		writeStatus(w, http.StatusBadRequest, "BadRequest", err.Error())
 		return
 	}
-	preview, err := s.authorizeProjectDevelopmentPreviewTarget(r.Context(), c, id, p, target)
+	preview, err := s.authorizeProjectDevelopmentPreviewTargetForService(r.Context(), c, id, p, target, strings.TrimSpace(r.URL.Query().Get("service")))
 	if err != nil {
 		writeStatus(w, http.StatusBadGateway, "BadGateway", err.Error())
 		return
@@ -573,7 +587,26 @@ func countRoutedProjectSyncFiles(routed map[string][]projectSandboxSyncFile) int
 // development environment: the template instance's own public URL — the dev
 // overlay keeps the production route wiring, so the dev instance is served
 // where a production one would be. See docs/app-studio-template-sandboxes.md §1.
-func (s *Server) authorizeProjectDevelopmentPreviewTarget(ctx context.Context, c *asclient.Client, _ identity, _ *aiv1alpha1.Project, target projectDevelopmentSyncTargetInfo) (projectSandboxPreviewURLResponse, error) {
+func (s *Server) authorizeProjectDevelopmentPreviewTarget(ctx context.Context, c *asclient.Client, _ identity, p *aiv1alpha1.Project, target projectDevelopmentSyncTargetInfo) (projectSandboxPreviewURLResponse, error) {
+	return s.authorizeProjectDevelopmentPreviewTargetForService(ctx, c, identity{}, p, target, "")
+}
+
+func (s *Server) authorizeProjectDevelopmentPreviewTargetForService(ctx context.Context, c *asclient.Client, _ identity, p *aiv1alpha1.Project, target projectDevelopmentSyncTargetInfo, service string) (projectSandboxPreviewURLResponse, error) {
+	// A universal sandbox has no template-owned public route. When a project
+	// declares DevelopmentService resources, their observed URL/conditions are
+	// the preview contract. An empty or unavailable DevelopmentService catalog
+	// falls through to the existing Template route for legacy projects.
+	if p.Spec.Template == nil || strings.TrimSpace(p.Spec.Template.Name) == "" {
+		if preview, found, err := s.projectDevelopmentServicePreview(ctx, c, p, target, service); found || err != nil {
+			return preview, err
+		}
+		return projectSandboxPreviewURLResponse{
+			Ready:       false,
+			ServiceName: strings.TrimSpace(service),
+			Reason:      "development_service_not_configured",
+			Message:     "Configure a DevelopmentService before opening the universal sandbox preview.",
+		}, nil
+	}
 	return s.templateDevelopmentPreview(ctx, c, target)
 }
 

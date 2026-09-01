@@ -17,9 +17,13 @@ limitations under the License.
 package install
 
 import (
+	"io/fs"
+	"strings"
+
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 // schemaWithPointers builds a CRD whose OpenAPIV3Schema populates the
@@ -82,4 +86,77 @@ func TestSchemaPrefixSensitiveToContent(t *testing.T) {
 	if schemaPrefix(base) == schemaPrefix(changed) {
 		t.Fatal("schemaPrefix must change when schema content changes")
 	}
+}
+
+// TestEmbeddedPlatformCRDsIncludeDevelopmentService protects the install
+// boundary, not just controller-gen output. PlatformSchemaInAPIExport walks
+// crdsFS, so a CRD that exists only in config/crds is invisible to a fresh
+// provider init and tenants cannot create that resource after APIBind.
+func TestEmbeddedPlatformCRDsIncludeDevelopmentService(t *testing.T) {
+	entries, err := fs.ReadDir(crdsFS, "crds")
+	if err != nil {
+		t.Fatalf("read embedded CRDs: %v", err)
+	}
+
+	var found bool
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "" {
+			continue
+		}
+		raw, err := fs.ReadFile(crdsFS, "crds/"+entry.Name())
+		if err != nil {
+			t.Fatalf("read embedded CRD %s: %v", entry.Name(), err)
+		}
+		var crd apiextensionsv1.CustomResourceDefinition
+		if err := utilyaml.Unmarshal(raw, &crd); err != nil {
+			t.Fatalf("decode embedded CRD %s: %v", entry.Name(), err)
+		}
+		if crd.Spec.Group != "infrastructure.faros.sh" || crd.Spec.Names.Plural != "developmentservices" {
+			continue
+		}
+		found = true
+		if crd.Name != "developmentservices.infrastructure.faros.sh" {
+			t.Fatalf("DevelopmentService CRD name = %q", crd.Name)
+		}
+		if crd.Spec.Names.Kind != "DevelopmentService" || crd.Spec.Scope != apiextensionsv1.ClusterScoped {
+			t.Fatalf("DevelopmentService CRD identity = kind=%q scope=%q", crd.Spec.Names.Kind, crd.Spec.Scope)
+		}
+		if len(crd.Spec.Versions) != 1 || crd.Spec.Versions[0].Name != "v1alpha1" {
+			t.Fatalf("DevelopmentService CRD versions = %#v", crd.Spec.Versions)
+		}
+		if crd.Spec.Versions[0].Schema == nil || crd.Spec.Versions[0].Schema.OpenAPIV3Schema == nil {
+			t.Fatal("DevelopmentService CRD has no OpenAPI schema")
+		}
+	}
+	if !found {
+		t.Fatal("embedded platform CRDs do not include developmentservices")
+	}
+}
+
+func TestEmbeddedPlatformCRDsIncludeConnection(t *testing.T) {
+	entries, err := fs.ReadDir(crdsFS, "crds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		raw, err := fs.ReadFile(crdsFS, "crds/"+entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var crd apiextensionsv1.CustomResourceDefinition
+		if err := utilyaml.Unmarshal(raw, &crd); err != nil {
+			t.Fatal(err)
+		}
+		if crd.Spec.Names.Plural == "connections" {
+			if crd.Name != "connections.infrastructure.faros.sh" || crd.Spec.Names.Kind != "Connection" || crd.Spec.Scope != apiextensionsv1.ClusterScoped {
+				t.Fatalf("Connection CRD identity = name=%q kind=%q scope=%q", crd.Name, crd.Spec.Names.Kind, crd.Spec.Scope)
+			}
+			spec := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
+			if len(spec.XValidations) == 0 || !strings.Contains(spec.XValidations[0].Rule, "oldSelf") {
+				t.Fatalf("Connection spec does not carry immutable validation: %#v", spec.XValidations)
+			}
+			return
+		}
+	}
+	t.Fatal("embedded platform CRDs do not include connections")
 }

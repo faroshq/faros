@@ -63,6 +63,7 @@ type projectAssistantRuntimeWorkflowInput struct {
 	Project         *aiv1alpha1.Project
 	Repository      *ProjectRepositoryView
 	SessionSnapshot *projectEinoAssistantSessionSnapshot
+	PreviewService  string
 	// RuntimeResolved is set by the status/preview tool input builders once
 	// they have queried the live development runtime.
 	// RuntimeHasBinding is false when the project has no development
@@ -78,7 +79,9 @@ type projectAssistantWorkflowToolInput struct {
 	MaxFiles     int   `json:"maxFiles,omitempty" jsonschema_description:"Maximum workspace file paths to include when includeFiles is true."`
 }
 
-type projectAssistantRuntimeStatusToolInput struct{}
+type projectAssistantRuntimeStatusToolInput struct {
+	Service string `json:"service,omitempty" jsonschema_description:"Optional named DevelopmentService to inspect. Omit to resolve the environment's primary preview service."`
+}
 
 type projectAssistantTemplateInspectionToolInput struct{}
 
@@ -348,8 +351,8 @@ func projectAssistantWorkflowToolSpecs() []projectAssistantToolSpec {
 		},
 		{
 			Name:         projectToolGetPreviewURL,
-			Description:  "Return the live development preview URL for this project when its public edge is reachable, or the reason it is not available yet.",
-			Parameters:   json.RawMessage(`{"type":"object","properties":{}}`),
+			Description:  "Return the live development preview URL for this project when its public edge is reachable, or the reason it is not available yet. For universal-sandbox projects, pass service to resolve a specific configured DevelopmentService; omit it for the environment's primary preview service.",
+			Parameters:   json.RawMessage(`{"type":"object","properties":{"service":{"type":"string","maxLength":63,"description":"Optional DevelopmentService name. Omit to use the configured primary preview service."}},"additionalProperties":false}`),
 			Risk:         projectAssistantToolRiskRead,
 			ParallelSafe: true,
 		},
@@ -1190,11 +1193,17 @@ func normalizeProjectAssistantRuntimeWorkflowInput(ctx context.Context, input pr
 }
 
 func projectAssistantRuntimeWorkflowInputFromStatusTool(runCtx projectAssistantWorkflowRunContext) func(context.Context, *projectAssistantRuntimeStatusToolInput) (projectAssistantRuntimeWorkflowInput, error) {
-	return func(ctx context.Context, _ *projectAssistantRuntimeStatusToolInput) (projectAssistantRuntimeWorkflowInput, error) {
+	return func(ctx context.Context, args *projectAssistantRuntimeStatusToolInput) (projectAssistantRuntimeWorkflowInput, error) {
 		currentRunCtx := runCtx.current()
 		input := projectAssistantRuntimeWorkflowInput{
 			Project:    currentRunCtx.Project,
 			Repository: currentRunCtx.Repository,
+			PreviewService: strings.TrimSpace(func() string {
+				if args == nil {
+					return ""
+				}
+				return args.Service
+			}()),
 		}
 		if currentRunCtx.RunState != nil {
 			input.SessionSnapshot = currentRunCtx.RunState.SessionSnapshot()
@@ -1205,7 +1214,7 @@ func projectAssistantRuntimeWorkflowInputFromStatusTool(runCtx projectAssistantW
 		// a project client) leaves the input unresolved and the format functions
 		// fall back to the previous not_configured behaviour.
 		if currentRunCtx.Server != nil && currentRunCtx.Client != nil {
-			preview, hasBinding := currentRunCtx.Server.resolveProjectSandboxRuntime(ctx, currentRunCtx.Client, currentRunCtx.Identity, currentRunCtx.Project)
+			preview, hasBinding := currentRunCtx.Server.resolveProjectSandboxRuntimeForService(ctx, currentRunCtx.Client, currentRunCtx.Identity, currentRunCtx.Project, input.PreviewService)
 			input.RuntimeResolved = true
 			input.RuntimeHasBinding = hasBinding
 			input.RuntimePreview = preview

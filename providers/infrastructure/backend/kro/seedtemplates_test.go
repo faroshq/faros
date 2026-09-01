@@ -69,6 +69,32 @@ func TestSeedTemplatesBuildRGD(t *testing.T) {
 	}
 }
 
+func TestConnectionRuntimeContractsSurviveRGDBuild(t *testing.T) {
+	tests := map[string][]string{
+		"universal-coding-sandbox.yaml": {"farosConnectionsSecretName", "farosConnectionsRevision", "/var/run/faros/connections", "readOnly"},
+		"simple-webapp.yaml":            {"farosConnectionsSecretName", "farosConnectionsRevision", "secretRef", "optional"},
+		"worker.yaml":                   {"farosConnectionsSecretName", "farosConnectionsRevision", "secretRef", "optional"},
+	}
+	for file, expected := range tests {
+		t.Run(file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "install", "templates", file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rgd, err := buildRGD(decodeTemplate(t, raw), testTokens())
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded := mustJSON(t, rgd.Object)
+			for _, want := range expected {
+				if !strings.Contains(encoded, want) {
+					t.Fatalf("built RGD does not contain %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestUniversalCodingSandboxPreservesLegacyExposureHostnameInRGDSchema(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "install", "templates", "universal-coding-sandbox.yaml"))
 	if err != nil {

@@ -137,6 +137,8 @@ import AssistantMessageQueue from './AssistantMessageQueue.vue'
 import AssistantMessageAnnotations from './AssistantMessageAnnotations.vue'
 import AssistantMessageAttachments from './AssistantMessageAttachments.vue'
 import DevelopmentPreviewToolbar from './DevelopmentPreviewToolbar.vue'
+import DevelopmentServicesPanel from './DevelopmentServicesPanel.vue'
+import ProjectCompositionPanel from './ProjectCompositionPanel.vue'
 import {
   ASSISTANT_MESSAGE_QUEUE_MAX_ITEMS,
   assistantMessageQueueStorageKey,
@@ -214,9 +216,11 @@ import ReleasePipeline from './ReleasePipeline.vue'
 import ProjectHistory from './ProjectHistory.vue'
 import ModelsSettings from './ModelsSettings.vue'
 import ProductionForm from './ProductionForm.vue'
+import ProductionTargetForm from './ProductionTargetForm.vue'
 import ProductionSettingsLoadingShell from './ProductionSettingsLoadingShell.vue'
 import { productionFormValuesFromSchema, type ProductionFormValues } from './productionForm'
 import { productionConfigurationSummary, shortReleaseSHA } from './productionPane'
+import { productionTargetMappingsComplete, updateProductionTargetMapping } from './productionTarget'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import {
   activateWorkbenchTab,
@@ -316,6 +320,11 @@ import type {
   ProjectPublishingMode,
   ProjectPublishingMember,
   ProviderItem,
+  ProjectDevelopmentServicesResponse,
+  ProjectBuildConfiguration,
+  ProjectComponent,
+  ProjectComponentMapping,
+  ProductionTemplate,
 } from './types'
 
 const props = defineProps<{
@@ -795,6 +804,9 @@ const developmentPreviewAccessConverged = ref(true)
 const developmentPreviewAccessBusy = ref(false)
 const developmentPreviewAccessError = ref<string | null>(null)
 const developmentPreviewOverrideURL = ref<string | null>(null)
+const developmentServicesAvailable = ref(false)
+const developmentPreviewService = ref('')
+const developmentPreviewServiceURL = ref('')
 const developmentPreviewAuthorizationKey = ref('')
 const developmentPreviewFrameKey = ref(0)
 const developmentPreviewFrameRef = ref<HTMLIFrameElement | null>(null)
@@ -861,6 +873,12 @@ const promotionFeedback = ref<PromotionFeedback | null>(null)
 const promotionValues = ref<ProductionFormValues>({})
 const promotionValuesDirty = ref(false)
 const productionFormValid = ref(true)
+const productionTemplates = ref<ProductionTemplate[]>([])
+const productionTemplatesLoading = ref(false)
+const productionTemplatesError = ref<string | null>(null)
+const selectedProductionTemplate = ref('')
+const productionComponentMappings = ref<ProjectComponentMapping[]>([])
+let productionTemplateLoadSerial = 0
 const releases = ref<ProjectRelease[]>([])
 type ReleaseLoadState = 'idle' | 'loading' | 'ready' | 'error'
 const releaseLoadState = ref<ReleaseLoadState>('idle')
@@ -2488,12 +2506,34 @@ const developmentBinding = computed(() => {
   )
 })
 
+function handleDevelopmentServicesUpdated(response: ProjectDevelopmentServicesResponse) {
+  const items = Array.isArray(response.items) ? response.items : []
+  developmentServicesAvailable.value = items.length > 0
+  if (!items.length) {
+    developmentPreviewService.value = ''
+    developmentPreviewServiceURL.value = ''
+    return
+  }
+  const fallback = items.find(service => service.ready && !!service.url) ?? items[0]
+  const name = response.primaryServiceRef?.trim() || fallback?.name || ''
+  const target = items.find(service => service.name === name) ?? fallback
+  developmentPreviewService.value = target?.name || ''
+  developmentPreviewServiceURL.value = target?.url || ''
+}
+
+function handleDevelopmentServicesError(_message: string) {
+  // The panel owns the service error state. Keep the legacy template preview
+  // available if its binding is healthy, rather than replacing it with a
+  // transient DevelopmentService catalog failure.
+}
+
 const developmentPreviewRawURL = computed(() => {
+  if (developmentServicesAvailable.value) return developmentPreviewServiceURL.value
   return projectBindingPreviewURL(developmentBinding.value)
 })
 
 const developmentPreviewNeedsAuthorization = computed(() => {
-  return !!developmentBinding.value && developmentBinding.value.provider === 'app-studio'
+  return developmentServicesAvailable.value || (!!developmentBinding.value && developmentBinding.value.provider === 'app-studio')
 })
 
 const developmentPreviewURL = computed(() => {
@@ -2513,7 +2553,7 @@ const developmentPreviewPhase = computed(() => {
 })
 
 const developmentPreviewCanOpenInBrowser = computed(() => {
-  return !!developmentBinding.value &&
+  return developmentPreviewNeedsAuthorization.value &&
     !developmentPreviewAuthorizing.value &&
     !!developmentPreviewOverrideURL.value &&
     !developmentPreviewAuthorizationError.value
@@ -2742,6 +2782,10 @@ watch(
     promotionValues.value = {}
     promotionValuesDirty.value = false
     productionFormValid.value = true
+    selectedProductionTemplate.value = ''
+    productionComponentMappings.value = []
+    productionTemplatesError.value = null
+    productionTemplateLoadSerial += 1
     clearPromotionPoll()
     releaseLoadSerial += 1
     releases.value = []
@@ -2787,6 +2831,9 @@ watch(
     developmentPreviewAccessConverged.value = true
     developmentPreviewAccessBusy.value = false
     developmentPreviewAccessError.value = null
+    developmentServicesAvailable.value = false
+    developmentPreviewService.value = ''
+    developmentPreviewServiceURL.value = ''
     developmentPreviewAuthorizationError.value = null
     developmentPreviewReadinessMessage.value = null
     developmentPreviewOverrideURL.value = null
@@ -2830,6 +2877,8 @@ watch(
     selected.value?.name,
     developmentBinding.value?.provider,
     developmentPreviewRawURL.value,
+    developmentServicesAvailable.value,
+    developmentPreviewService.value,
     props.ctx?.token,
     props.ctx?.tenant,
     props.ctx?.subPath,
@@ -3424,10 +3473,21 @@ const currentProductionRelease = computed(() => releases.value.find((release) =>
 const productionReleaseSHA = computed(() => shortReleaseSHA(latestDeployableRelease.value?.commitSHA || releasePipeline.value.commitSHA))
 const productionDeployReviewSHA = computed(() => shortReleaseSHA(productionDeployReviewRelease.value?.commitSHA))
 const productionSettingsSummary = computed(() => productionConfigurationSummary(promotionValues.value))
+const productionTargetComponents = computed(() => promotion.value?.targetComponents ?? [])
+const productionMappingsComplete = computed(() => {
+  if (!selectedProductionTemplate.value || !productionTargetComponents.value.length) return false
+  return productionTargetMappingsComplete(
+    productionTargetComponents.value,
+    selected.value?.components ?? [],
+    productionComponentMappings.value,
+  )
+})
 function canPromoteRelease(release: ProjectRelease | null): boolean {
   return Boolean(
     releaseHasPromotionEvidence(release) &&
     promotion.value &&
+    promotion.value.promotable &&
+    productionMappingsComplete.value &&
     !promotionError.value &&
     !promotionBusy.value &&
     (productionBinding.value || productionFormValid.value),
@@ -3468,6 +3528,9 @@ const currentBuildActionDisabledReason = computed(() => {
       ? 'Loading production status before enabling deployment.'
       : 'Production status is unavailable. Refresh to retry.'
   }
+  if (!selectedProductionTemplate.value) return 'Select a production infrastructure Template before deploying.'
+  if (!productionMappingsComplete.value) return 'Map every production target to a distinct built Project component.'
+  if (!promotion.value.promotable) return promotion.value.build.note || 'The selected production target is not ready to deploy.'
   if (!productionBinding.value && !productionFormValid.value) return 'Fix the highlighted production settings before deploying.'
   return ''
 })
@@ -3477,12 +3540,16 @@ const canRedeployCurrentProduction = computed(() => Boolean(
   promotion.value &&
   !promotionError.value &&
   !promotionBusy.value &&
+  promotion.value.promotable &&
+  productionMappingsComplete.value &&
   productionFormValid.value,
 ))
 const productionSettingsActionDisabledReason = computed(() => {
   if (!productionBinding.value) return 'Deploy to production before saving deployment configuration.'
   if (promotionError.value) return 'Production status is unavailable. Check again before redeploying.'
   if (!currentProductionRelease.value) return 'The current production release is unavailable. Refresh Publishing to retry.'
+  if (!selectedProductionTemplate.value) return 'Select the production infrastructure Template.'
+  if (!productionMappingsComplete.value) return 'Map every production target to a distinct built Project component.'
   if (!productionFormValid.value) return 'Fix the highlighted deployment configuration before redeploying.'
   return ''
 })
@@ -3545,6 +3612,52 @@ function syncProductionForm(readiness: ProjectPromotionReadiness) {
 function updateProductionForm(values: ProductionFormValues) {
   promotionValues.value = values
   promotionValuesDirty.value = true
+}
+
+function applyProjectCompositionUpdate(payload: { components: ProjectComponent[]; build: ProjectBuildConfiguration }) {
+  const project = selected.value
+  if (!project) return
+  const updated = { ...project, components: payload.components, build: payload.build }
+  selected.value = updated
+  const index = projects.value.findIndex((candidate) => candidate.name === updated.name)
+  if (index >= 0) {
+    projects.value[index] = updated
+    projects.value = [...projects.value]
+  }
+}
+
+async function loadProductionTemplates() {
+  const serial = ++productionTemplateLoadSerial
+  productionTemplatesLoading.value = true
+  productionTemplatesError.value = null
+  try {
+    const templates = await api.listProductionTemplates(props.ctx)
+    if (serial !== productionTemplateLoadSerial) return
+    productionTemplates.value = templates
+  } catch (err) {
+    if (serial !== productionTemplateLoadSerial) return
+    productionTemplatesError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    if (serial === productionTemplateLoadSerial) productionTemplatesLoading.value = false
+  }
+}
+
+function updateProductionMapping(payload: { targetComponent: string; componentRef: string }) {
+  const targetComponent = payload.targetComponent.trim()
+  const componentRef = payload.componentRef.trim()
+  productionComponentMappings.value = updateProductionTargetMapping(productionComponentMappings.value, targetComponent, componentRef)
+}
+
+async function changeProductionTemplate(templateName: string) {
+  const normalized = templateName.trim()
+  if (!normalized || normalized === selectedProductionTemplate.value) return
+  selectedProductionTemplate.value = normalized
+  productionComponentMappings.value = []
+  promotionValues.value = {}
+  promotionValuesDirty.value = false
+  productionFormValid.value = true
+  promotion.value = null
+  await loadPromotionStatus(false)
 }
 
 async function pollPromotionAndReleases() {
@@ -3636,9 +3749,14 @@ async function loadPromotionStatus(scheduleNext: boolean) {
     promotionError.value = null
   }
   try {
-    const readiness = await api.getPromotion(props.ctx, name)
+    const requestedTemplate = selectedProductionTemplate.value
+    const readiness = await api.getPromotion(props.ctx, name, requestedTemplate)
     if (requestSerial !== promotionLoadSerial || selected.value?.name !== name) return
+    if (!requestedTemplate && readiness.template) selectedProductionTemplate.value = readiness.template
     promotion.value = readiness
+    if (readiness.componentMappings?.length && productionComponentMappings.value.length === 0) {
+      productionComponentMappings.value = readiness.componentMappings.map((mapping) => ({ ...mapping }))
+    }
     syncProductionForm(readiness)
     const observation = promotionObservation(readiness)
     if (pollAtStart && promotionPollState === pollAtStart) {
@@ -4007,7 +4125,10 @@ async function promoteToProd(applyProductionValues = false, requestedRelease: Pr
     : undefined
   promotionBusy.value = true
   try {
-    const result = await api.promoteProject(props.ctx, name, values, commitSHA, releaseID)
+    const result = await api.promoteProject(props.ctx, name, values, commitSHA, releaseID, {
+      templateName: selectedProductionTemplate.value,
+      componentMappings: productionComponentMappings.value,
+    })
     if (selected.value?.name !== name) return
     if (promotion.value && result.rolloutRevision) {
       promotion.value = {
@@ -4045,6 +4166,7 @@ watch(
     const surfaceOrProjectChanged = surfaceActive && (!previousSurfaceActive || projectName !== previousProjectName)
     if (surfaceOrProjectChanged) {
       resetReleaseTransitionTracking()
+      void loadProductionTemplates()
       void loadPromotion()
       void loadReleases()
       void loadPublishing()
@@ -5941,7 +6063,7 @@ async function refreshDevelopmentPreviewFrame(status: string, options: { refresh
 
 async function openDevelopmentPreviewInBrowser() {
   const projectName = selected.value?.name
-  if (!projectName || !developmentBinding.value) return
+  if (!projectName || !developmentPreviewNeedsAuthorization.value) return
   if (!developmentPreviewNeedsAuthorization.value) return
   await authorizeDevelopmentPreview({ force: true })
   if (
@@ -6007,7 +6129,7 @@ async function authorizeDevelopmentPreview(options: { force?: boolean; preserveE
 	resetDevelopmentPreviewDocumentState()
     return
   }
-  const key = developmentPreviewKey(projectName, rawURL)
+  const key = developmentPreviewKey(projectName, rawURL, developmentPreviewService.value)
 	if (!options.force && !options.preserveExistingPreview && developmentPreviewOverrideURL.value && developmentPreviewAuthorizationKey.value === key) return
 
   await developmentPreviewRefreshController.authorize(
@@ -6023,7 +6145,7 @@ async function authorizeDevelopmentPreviewRequest(projectName: string, key: stri
   developmentPreviewAuthorizing.value = true
   developmentPreviewAuthorizationError.value = null
   try {
-    const result = await api.authorizeDevelopmentPreview(props.ctx, projectName)
+    const result = await api.authorizeDevelopmentPreview(props.ctx, projectName, developmentPreviewService.value)
     if (serial !== developmentPreviewAuthorizationSerial || selected.value?.name !== projectName) return
     const authorization = projectDevelopmentPreviewAuthorization(result)
     developmentPreviewAccessModesFromAuthorization.value = authorization.previewAccessModes
@@ -6055,7 +6177,7 @@ async function authorizeDevelopmentPreviewRequest(projectName: string, key: stri
 }
 
 function applyDevelopmentPreviewAuthorization(projectName: string, authorization: ProjectDevelopmentPreviewAuthorization) {
-  const key = developmentPreviewKey(projectName, developmentPreviewRawURL.value)
+  const key = developmentPreviewKey(projectName, developmentPreviewRawURL.value, developmentPreviewService.value)
   developmentPreviewOverrideURL.value = authorization.previewURL
   developmentPreviewAuthorizationKey.value = key
   developmentPreviewReadinessMessage.value = null
@@ -6074,8 +6196,8 @@ function scheduleDevelopmentPreviewAuthorizationRetry(projectName: string, key: 
   }, DEVELOPMENT_PREVIEW_AUTH_RETRY_MS)
 }
 
-function developmentPreviewKey(projectName: string, rawURL: string): string {
-  return [projectName, rawURL, props.ctx?.tenant ?? '', props.ctx?.subPath ?? '', props.ctx?.token ? 'token' : ''].join('\u001f')
+function developmentPreviewKey(projectName: string, rawURL: string, service = ''): string {
+  return [projectName, service, rawURL, props.ctx?.tenant ?? '', props.ctx?.subPath ?? '', props.ctx?.token ? 'token' : ''].join('\u001f')
 }
 
 function projectDevelopmentPreviewURL(result: unknown): string {
@@ -9679,12 +9801,21 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             :annotation-available="developmentPreviewCanAnnotate"
             :annotation-disabled="messageStreaming || !developmentPreviewCanAnnotate"
             :sync-busy="developmentSyncBusy"
-            :sync-disabled="!selected || !developmentBinding || messageStreaming || developmentSyncBusy"
-            :open-disabled="!selected || !developmentBinding || !developmentPreviewCanOpenInBrowser"
+            :sync-disabled="!selected || (!developmentBinding && !developmentServicesAvailable) || messageStreaming || developmentSyncBusy"
+            :open-disabled="!selected || !developmentPreviewNeedsAuthorization || !developmentPreviewCanOpenInBrowser"
             :open-label="developmentPreviewOpenButtonLabel"
             @annotate="toggleDevelopmentPreviewAnnotation"
             @sync="syncDevelopmentPreview"
             @open-browser="openDevelopmentPreviewInBrowser"
+          />
+          <DevelopmentServicesPanel
+            v-if="selected && (!selected.template || developmentServicesAvailable)"
+            :ctx="props.ctx"
+            :project-name="selected.name"
+            :components="selected.components || []"
+            :disabled="messageStreaming"
+            @services-updated="handleDevelopmentServicesUpdated"
+            @error="handleDevelopmentServicesError"
           />
           <div v-if="developmentSyncError || developmentPreviewAuthorizationError" class="rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive" aria-atomic="true">
             {{ developmentSyncError || developmentPreviewAuthorizationError }}
@@ -10157,6 +10288,12 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </button>
             </div>
           </form>
+          <ProjectCompositionPanel
+            v-if="settingsProject"
+            :ctx="props.ctx"
+            :project="settingsProject"
+            @updated="applyProjectCompositionUpdate"
+          />
           <section
             class="grid gap-4 rounded-lg border border-border-subtle bg-surface-overlay/40 p-3"
             aria-label="Development settings"
@@ -10447,7 +10584,21 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 <ChevronRight class="mt-0.5 h-4 w-4 shrink-0 text-text-muted transition-transform" :class="productionSettingsOpen ? 'rotate-90' : ''" :stroke-width="1.75" aria-hidden="true" />
               </button>
               <div id="production-settings-body" v-show="productionSettingsOpen" class="grid gap-3 border-t border-border-subtle p-3">
-                <p class="text-[12px] leading-5 text-text-secondary">Template-owned runtime settings only. Names, rollout revisions, component images, and access policy are managed separately.</p>
+                <ProductionTargetForm
+                  :templates="productionTemplates"
+                  :selected-template="selectedProductionTemplate"
+                  :project-components="selected?.components ?? []"
+                  :build-components="promotion?.build.components ?? []"
+                  :target-components="productionTargetComponents"
+                  :component-mappings="productionComponentMappings"
+                  :loading="productionTemplatesLoading || (promotionLoading && !promotion)"
+                  :busy="promotionBusy"
+                  :error="productionTemplatesError"
+                  @update:template="changeProductionTemplate"
+                  @update:mapping="updateProductionMapping"
+                  @retry="loadProductionTemplates"
+                />
+                <p class="border-t border-border-subtle pt-3 text-[12px] leading-5 text-text-secondary">Template-owned runtime settings only. Names, rollout revisions, component images, and access policy are managed separately.</p>
                 <div v-if="currentProductionRelease" class="flex flex-wrap items-center gap-x-2 gap-y-1 border-y border-border-subtle py-2 text-[11px] text-text-secondary" aria-label="Current production release">
                   <span class="font-semibold uppercase tracking-wide">Current production release</span>
                   <code class="font-mono text-text-primary">{{ shortReleaseSHA(currentProductionRelease.commitSHA) }}</code>

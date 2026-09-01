@@ -259,7 +259,7 @@ func (s *Server) inspectProjectDevelopmentPreviewResult(ctx context.Context, req
 			}
 		}
 	}
-	preview, err := s.resolveProjectPreviewInspectionTarget(ctx, req.Identity, req.Project)
+	preview, err := s.resolveProjectPreviewInspectionTargetForService(ctx, req.Identity, req.Project, projectToolString(req.Arguments["service"]))
 	if err != nil {
 		return projectAssistantPreviewInspectionResult{}, err
 	}
@@ -336,6 +336,10 @@ func (s *Server) resolveProjectPreviewInspectionURL(ctx context.Context, id iden
 }
 
 func (s *Server) resolveProjectPreviewInspectionTarget(ctx context.Context, id identity, project *aiv1alpha1.Project) (projectSandboxPreviewURLResponse, error) {
+	return s.resolveProjectPreviewInspectionTargetForService(ctx, id, project, "")
+}
+
+func (s *Server) resolveProjectPreviewInspectionTargetForService(ctx context.Context, id identity, project *aiv1alpha1.Project, service string) (projectSandboxPreviewURLResponse, error) {
 	if s.previewInspectionResolveURL != nil {
 		previewURL, err := s.previewInspectionResolveURL(ctx, id, project)
 		return projectSandboxPreviewURLResponse{Ready: err == nil, PreviewURL: previewURL}, err
@@ -344,7 +348,7 @@ func (s *Server) resolveProjectPreviewInspectionTarget(ctx context.Context, id i
 	if err != nil {
 		return projectSandboxPreviewURLResponse{}, err
 	}
-	preview, bound := s.resolveProjectSandboxRuntime(ctx, client, id, project)
+	preview, bound := s.resolveProjectSandboxRuntimeForService(ctx, client, id, project, service)
 	if !bound {
 		return projectSandboxPreviewURLResponse{}, errors.New("development preview is not configured")
 	}

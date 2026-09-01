@@ -16,6 +16,10 @@ spec:
   # URL; spec.access (public|private) chooses who can reach it.
   exposure: public
   backend: kro
+  lifecycle:
+    # The aggregate owns PostgreSQL data, so its default follows the stateful
+    # database tier rather than the stateless web/API Deployments.
+    defaultDeletionPolicy: Retain
   # Example payload the portal pre-fills the provision form with, so the 3-tier
   # demo is effectively one click. The frontend/backend images are the example
   # apps under examples/application/apps/, built + pushed to :latest by

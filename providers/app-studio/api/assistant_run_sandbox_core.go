@@ -78,19 +78,8 @@ func (b *projectAssistantRunSandbox) touch() error {
 		return errProjectAssistantRunSandboxClosed
 	}
 	now := time.Now().UTC()
-	if !b.metadata.HardExpiresAt.IsZero() && now.After(b.metadata.HardExpiresAt) {
-		b.metadata.Status = "expired"
-		return fmt.Errorf("%w: sandbox hard lifetime has expired", errProjectAssistantRunSandboxConflict)
-	}
-	if !b.metadata.IdleExpiresAt.IsZero() && now.After(b.metadata.IdleExpiresAt) {
-		b.metadata.Status = "expired"
-		return fmt.Errorf("%w: sandbox idle lifetime has expired", errProjectAssistantRunSandboxConflict)
-	}
 	b.metadata.LastActivityAt = now
 	b.metadata.IdleExpiresAt = now.Add(projectAssistantRunSandboxIdleTTL)
-	if !b.metadata.HardExpiresAt.IsZero() && b.metadata.IdleExpiresAt.After(b.metadata.HardExpiresAt) {
-		b.metadata.IdleExpiresAt = b.metadata.HardExpiresAt
-	}
 	return nil
 }
 
@@ -128,9 +117,6 @@ func (b *projectAssistantRunSandbox) request(ctx context.Context, req projectAss
 	}
 	b.metadata.LastActivityAt = time.Now().UTC()
 	b.metadata.IdleExpiresAt = b.metadata.LastActivityAt.Add(projectAssistantRunSandboxIdleTTL)
-	if !b.metadata.HardExpiresAt.IsZero() && b.metadata.IdleExpiresAt.After(b.metadata.HardExpiresAt) {
-		b.metadata.IdleExpiresAt = b.metadata.HardExpiresAt
-	}
 	b.mu.Unlock()
 	if b.runState != nil {
 		b.runState.SetSandboxMetadata(b.metadataSnapshot())

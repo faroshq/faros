@@ -11,6 +11,8 @@ spec:
   # A schedule, not a server. Nothing to reach.
   exposure: internal
   backend: kro
+  lifecycle:
+    defaultDeletionPolicy: Delete
   # One-click provision defaults for the portal form. busybox's default
   # entrypoint exits 0 immediately, so the sample schedule visibly produces
   # completed Jobs with zero external setup.

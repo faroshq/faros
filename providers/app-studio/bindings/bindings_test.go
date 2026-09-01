@@ -79,6 +79,58 @@ func TestDesiredIsSelfContained(t *testing.T) {
 	}
 }
 
+func TestDesiredUsesBindingTemplateBeforeLegacyProjectTemplate(t *testing.T) {
+	p := testProject()
+	b := testBinding()
+	b.TemplateRef = &aiv1alpha1.ProjectTemplateSpec{Name: "worker"}
+
+	want, _, err := Desired(p, b)
+	if err != nil {
+		t.Fatalf("Desired: %v", err)
+	}
+	if got, _, _ := unstructured.NestedString(want.Object, "spec", "template"); got != "worker" {
+		t.Fatalf("spec.template = %q, want worker", got)
+	}
+	if got := want.GetLabels()[TemplateLabel]; got != "worker" {
+		t.Fatalf("template label = %q, want worker", got)
+	}
+}
+
+func TestDesiredUsesBindingTemplateWithoutLegacyProjectTemplate(t *testing.T) {
+	p := testProject()
+	p.Spec.Template = nil
+	b := testBinding()
+	b.TemplateRef = &aiv1alpha1.ProjectTemplateSpec{Name: "database"}
+
+	want, _, err := Desired(p, b)
+	if err != nil {
+		t.Fatalf("Desired: %v", err)
+	}
+	if got, _, _ := unstructured.NestedString(want.Object, "spec", "template"); got != "database" {
+		t.Fatalf("spec.template = %q, want database", got)
+	}
+}
+
+func TestDesiredRejectsMissingEffectiveTemplate(t *testing.T) {
+	p := testProject()
+	p.Spec.Template = nil
+	if _, _, err := Desired(p, testBinding()); !IsInvalidBinding(err) {
+		t.Fatalf("Desired error = %v, want InvalidBindingError", err)
+	}
+}
+
+func TestBindingDeletionPolicyDefaultsToDeleteAndHonorsRetain(t *testing.T) {
+	env := aiv1alpha1.ProjectEnvironmentSpec{Name: "production", Mode: aiv1alpha1.ProjectEnvironmentModeArtifact}
+	b := testBinding()
+	if got := BindingDeletionPolicy(env, b); got != aiv1alpha1.ProjectBindingDeletionPolicyDelete {
+		t.Fatalf("default deletion policy = %q, want Delete", got)
+	}
+	b.Lifecycle = &aiv1alpha1.ProjectBindingLifecycleSpec{DeletionPolicy: aiv1alpha1.ProjectBindingDeletionPolicyRetain}
+	if got := BindingDeletionPolicy(env, b); got != aiv1alpha1.ProjectBindingDeletionPolicyRetain || ShouldDeleteBinding(env, b) {
+		t.Fatalf("explicit retain policy = %q, ShouldDeleteBinding=%t", got, ShouldDeleteBinding(env, b))
+	}
+}
+
 func TestDesiredNameFallbacks(t *testing.T) {
 	p := testProject()
 

@@ -12,6 +12,8 @@ spec:
   # Setting expose.enabled publishes it behind oauth2-proxy — never ungated.
   exposure: optional
   backend: kro
+  lifecycle:
+    defaultDeletionPolicy: Delete
   sampleValues:
     name: search
     size: small

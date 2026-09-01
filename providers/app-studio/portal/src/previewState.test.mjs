@@ -33,7 +33,7 @@ test('reports synced files without claiming preview refresh when route binding i
   )
 })
 
-test('development preview uses the selected Template binding', () => {
+test('development preview prefers the selected universal service and falls back to the Template binding', () => {
   assert.equal(
     appSource.includes("PREVIEW_ROUTE_BINDING_NAME = 'preview-route'"),
     false,
@@ -41,11 +41,11 @@ test('development preview uses the selected Template binding', () => {
   )
   assert.match(
     appSource,
-    /const developmentPreviewRawURL = computed\(\(\) => \{\s*return projectBindingPreviewURL\(developmentBinding\.value\)\s*\}\)/,
+    /const developmentPreviewRawURL = computed\(\(\) => \{\s*if \(developmentServicesAvailable\.value\) return developmentPreviewServiceURL\.value\s*return projectBindingPreviewURL\(developmentBinding\.value\)\s*\}\)/,
   )
   assert.match(
     appSource,
-    /const developmentPreviewNeedsAuthorization = computed\(\(\) => \{\s*return !!developmentBinding\.value && developmentBinding\.value\.provider === 'app-studio'\s*\}\)/,
+    /const developmentPreviewNeedsAuthorization = computed\(\(\) => \{\s*return developmentServicesAvailable\.value \|\| \(!!developmentBinding\.value && developmentBinding\.value\.provider === 'app-studio'\)\s*\}\)/,
   )
 })
 

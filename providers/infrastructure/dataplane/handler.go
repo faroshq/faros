@@ -120,7 +120,7 @@ type request struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h == nil || h.instances == nil || h.contracts == nil || h.runtime == nil {
+	if h == nil || h.instances == nil || h.runtime == nil {
 		http.Error(w, "data plane unavailable on this provider", http.StatusServiceUnavailable)
 		return
 	}
@@ -134,6 +134,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req, ok := parsePath(r.URL.Path)
 	if !ok {
 		http.Error(w, "bad data-plane path; want /dataplane/clusters/<ws>/<resource>/<name>/<verb>", http.StatusBadRequest)
+		return
+	}
+
+	// DevelopmentService logs are a provider-owned subresource. The caller is
+	// authorized by a tenant-scoped GET on the DevelopmentService itself, then
+	// the handler resolves its sandbox reference and uses the runtime credential
+	// held by Infrastructure to proxy only that service's bounded logs.
+	if req.resource == infrav1alpha1.DevelopmentServicesResource {
+		if req.component != "" || req.verb != "logs" || req.callerPath != "" {
+			http.Error(w, "developmentservices exposes only the logs subresource", http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "development service logs require GET", http.StatusMethodNotAllowed)
+			return
+		}
+		service, err := h.instances.Get(r.Context(), req.workspace, id.token, req.resource, req.name)
+		if err != nil {
+			writeKubeError(w, err)
+			return
+		}
+		h.serveDevelopmentServiceLogs(w, r, id, req, service)
+		return
+	}
+
+	if h.contracts == nil {
+		http.Error(w, "data plane contract unavailable on this provider", http.StatusServiceUnavailable)
 		return
 	}
 

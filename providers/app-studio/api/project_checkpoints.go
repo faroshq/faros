@@ -76,10 +76,7 @@ type projectCheckpointsResponse struct {
 // portal already reads (repository view, build check, production binding) so
 // the chips, the promotion form, and the assistant never disagree.
 func (s *Server) projectCheckpoints(ctx context.Context, c *asclient.Client, id identity, p *aiv1alpha1.Project) projectCheckpointsResponse {
-	templateName := ""
-	if p.Spec.Template != nil {
-		templateName = strings.TrimSpace(p.Spec.Template.Name)
-	}
+	templateName := projectDevelopmentTemplateName(p)
 	repo := projectRepositoryView(ctx, c, p)
 
 	template := s.checkpointTemplate(templateName)
@@ -92,7 +89,11 @@ func (s *Server) projectCheckpoints(ctx context.Context, c *asclient.Client, id 
 	if err != nil {
 		build = projectBuildCheckResult{Status: "unavailable", Note: err.Error()}
 	}
-	production := s.checkpointProduction(ctx, c, id, p, templateName, build)
+	productionTemplate := templateName
+	if binding := findProjectProductionBinding(p); binding != nil && binding.TemplateRef != nil {
+		productionTemplate = strings.TrimSpace(binding.TemplateRef.Name)
+	}
+	production := s.checkpointProduction(ctx, c, id, p, productionTemplate, build)
 
 	return projectCheckpointsResponse{Items: []projectCheckpoint{template, git, ci, production}}
 }

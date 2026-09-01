@@ -11,6 +11,8 @@ spec:
   # A background consumer. Reachable only through its dataPlane verbs.
   exposure: internal
   backend: kro
+  lifecycle:
+    defaultDeletionPolicy: Delete
   # One-click provision defaults for the portal form. nginx is a stand-in
   # long-running process that always starts; a real worker replaces it.
   sampleValues:
@@ -148,6 +150,19 @@ spec:
             upstreamPath: /status
             methods: ["GET"]
 
+  connections:
+    consumes:
+      - name: postgresql
+        type: postgresql
+        mappings:
+          - sourceKey: uri
+            targetKey: DATABASE_URL
+      - name: redis
+        type: redis
+        mappings:
+          - sourceKey: uri
+            targetKey: REDIS_URL
+
   # ── backendConfig: the kro resource graph ─────────────────────────────
   # namespace: default is remapped to the per-tenant namespace on the runtime
   # cluster — same convention as every seed template. The graph id follows
@@ -178,6 +193,8 @@ spec:
                 app: ${schema.spec.name}
             template:
               metadata:
+                annotations:
+                  faros.sh/connections-revision: ${schema.spec.farosConnectionsRevision}
                 labels:
                   app: ${schema.spec.name}
               spec:
@@ -187,5 +204,8 @@ spec:
                     envFrom:
                       - configMapRef:
                           name: ${workerEnv.metadata.name}
+                      - secretRef:
+                          name: ${schema.spec.farosConnectionsSecretName}
+                          optional: true
     status:
       ready: ${workerDeployment.status.readyReplicas}

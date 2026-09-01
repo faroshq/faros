@@ -142,6 +142,84 @@ spec:
                   "Other" bucket.
                 maxLength: 64
                 type: string
+              connections:
+                description: |-
+                  Connections declares the typed runtime interfaces this Template provides
+                  and consumes. Secret values never appear here: providers point at a
+                  Secret reference in Instance status and allowlist individual keys;
+                  consumers declare the exact source-key to environment-name mappings they
+                  accept. Connection objects bind these contracts without weakening them.
+                properties:
+                  consumes:
+                    items:
+                      properties:
+                        mappings:
+                          description: |-
+                            Mappings allowlists the exact producer key and target environment name
+                            pairs accepted by this consumer. A Connection may select a subset.
+                          items:
+                            properties:
+                              sourceKey:
+                                pattern: ^[A-Za-z0-9._-]+$
+                                type: string
+                              targetKey:
+                                description: TargetKey is an environment variable
+                                  name in the consuming workload.
+                                pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                type: string
+                            required:
+                            - sourceKey
+                            - targetKey
+                            type: object
+                          maxItems: 32
+                          minItems: 1
+                          type: array
+                        name:
+                          pattern: ^[a-z][a-z0-9-]*$
+                          type: string
+                        type:
+                          pattern: ^[a-z][a-z0-9.-]*$
+                          type: string
+                      required:
+                      - mappings
+                      - name
+                      - type
+                      type: object
+                    maxItems: 16
+                    type: array
+                  provides:
+                    items:
+                      properties:
+                        keys:
+                          description: |-
+                            Keys is the complete allowlist of Secret data keys this interface may
+                            export. The Connection controller rejects every unlisted key.
+                          items:
+                            type: string
+                          maxItems: 32
+                          minItems: 1
+                          type: array
+                        name:
+                          pattern: ^[a-z][a-z0-9-]*$
+                          type: string
+                        secretRefPath:
+                          description: |-
+                            SecretRefPath is a dot-separated path below Instance status whose value
+                            is an object containing name and namespace. Only status paths are allowed.
+                          pattern: ^status(\.[A-Za-z][A-Za-z0-9]*)+$
+                          type: string
+                        type:
+                          pattern: ^[a-z][a-z0-9.-]*$
+                          type: string
+                      required:
+                      - keys
+                      - name
+                      - secretRefPath
+                      - type
+                      type: object
+                    maxItems: 16
+                    type: array
+                type: object
               dataPlane:
                 description: |-
                   DataPlane optionally declares the live data-plane verbs this template's
@@ -626,6 +704,28 @@ spec:
                 - kind
                 - resource
                 - version
+                type: object
+              lifecycle:
+                description: |-
+                  Lifecycle declares backend lifecycle capabilities and safe defaults for
+                  Instances of this Template. It is provider-owned metadata rather than
+                  template-shaped user input.
+                properties:
+                  defaultDeletionPolicy:
+                    default: Delete
+                    description: |-
+                      DefaultDeletionPolicy is the policy used when a caller does not provide a
+                      more specific deletion decision. Stateful Templates should declare
+                      retain; stateless workloads normally use delete.
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  supportsSuspension:
+                    description: |-
+                      SupportsSuspension means Instance.spec.lifecycle.suspended can scale the
+                      Template's compute to zero while preserving its durable state.
+                    type: boolean
                 type: object
               sampleValues:
                 description: |-

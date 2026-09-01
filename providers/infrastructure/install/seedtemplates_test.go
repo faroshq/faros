@@ -82,6 +82,56 @@ func TestSeedTemplatesDecodeAndValidate(t *testing.T) {
 	}
 }
 
+func TestConnectionSeedContractsAndRuntimeInjection(t *testing.T) {
+	tests := []struct {
+		file, provide, consume string
+		backendContains        []string
+	}{
+		{file: "database.yaml", provide: "postgresql"},
+		{file: "redis-cache.yaml", provide: "redis"},
+		{file: "universal-coding-sandbox.yaml", consume: "postgresql", backendContains: []string{"farosConnectionsSecretName", "/var/run/faros/connections", "readOnly", "farosConnectionsRevision"}},
+		{file: "simple-webapp.yaml", consume: "postgresql", backendContains: []string{"secretRef", "farosConnectionsSecretName", "optional", "farosConnectionsRevision"}},
+		{file: "worker.yaml", consume: "redis", backendContains: []string{"secretRef", "farosConnectionsSecretName", "optional", "farosConnectionsRevision"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.file, func(t *testing.T) {
+			raw, err := fs.ReadFile(seedTemplatesFS, "templates/"+tc.file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tmpl infrav1alpha1.Template
+			if err := utilyaml.UnmarshalStrict(raw, &tmpl); err != nil {
+				t.Fatal(err)
+			}
+			if tmpl.Spec.Connections == nil {
+				t.Fatal("spec.connections is nil")
+			}
+			if tc.provide != "" {
+				if len(tmpl.Spec.Connections.Provides) != 1 || tmpl.Spec.Connections.Provides[0].Type != tc.provide || tmpl.Spec.Connections.Provides[0].SecretRefPath != "status.connectionSecretRef" {
+					t.Fatalf("provides = %#v", tmpl.Spec.Connections.Provides)
+				}
+			}
+			if tc.consume != "" {
+				found := false
+				for _, item := range tmpl.Spec.Connections.Consumes {
+					if item.Type == tc.consume {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("consumes = %#v, missing %q", tmpl.Spec.Connections.Consumes, tc.consume)
+				}
+			}
+			backend := string(tmpl.Spec.BackendConfig.Raw)
+			for _, want := range tc.backendContains {
+				if !strings.Contains(backend, want) {
+					t.Fatalf("backendConfig does not contain %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestBrowserTemplatePinsVerifiedPlaywrightImage(t *testing.T) {
 	raw, err := fs.ReadFile(seedTemplatesFS, "templates/browser.yaml")
 	if err != nil {

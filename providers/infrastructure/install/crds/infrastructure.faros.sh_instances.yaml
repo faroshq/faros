@@ -76,6 +76,21 @@ spec:
           spec:
             description: InstanceSpec is the desired state.
             properties:
+              lifecycle:
+                description: |-
+                  Lifecycle carries provider-owned runtime controls that are independent of
+                  a template's user-facing values. A suspended Instance keeps its control
+                  object and persistent state while the backend may scale its workload to
+                  zero. Templates must explicitly opt into suspension through
+                  Template.spec.lifecycle.supportsSuspension.
+                properties:
+                  suspended:
+                    description: |-
+                      Suspended asks the backend to stop compute while preserving durable state
+                      and the Instance identity. The instance controller rejects this request
+                      for Templates that do not declare lifecycle suspension support.
+                    type: boolean
+                type: object
               template:
                 description: |-
                   Template names the catalog Template this instance is provisioned from

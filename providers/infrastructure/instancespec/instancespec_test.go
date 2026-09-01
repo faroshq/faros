@@ -109,7 +109,7 @@ func TestFarosModeEnumIncludesDevelopment(t *testing.T) {
 }
 
 func TestReservedPropertiesRejected(t *testing.T) {
-	for _, reserved := range []string{infrav1alpha1.FarosModeField, infrav1alpha1.FarosActionsInstanceField} {
+	for _, reserved := range []string{infrav1alpha1.FarosModeField, infrav1alpha1.FarosActionsInstanceField, infrav1alpha1.FarosConnectionsSecretNameField, infrav1alpha1.FarosConnectionsRevisionField} {
 		schema := map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -122,6 +122,21 @@ func TestReservedPropertiesRejected(t *testing.T) {
 		}
 		if _, err := EffectiveSchema(withDevelopment(testTemplate(t, schema))); err == nil {
 			t.Errorf("EffectiveSchema accepted a development template claiming reserved %q", reserved)
+		}
+	}
+}
+
+func TestConnectionMetadataInjectedForEveryTemplate(t *testing.T) {
+	for _, tmpl := range []*infrav1alpha1.Template{testTemplate(t, simpleSchema()), withDevelopment(testTemplate(t, simpleSchema()))} {
+		spec, err := EffectiveSchema(tmpl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{infrav1alpha1.FarosConnectionsSecretNameField, infrav1alpha1.FarosConnectionsRevisionField} {
+			property, ok := spec.Properties[field]
+			if !ok || property.Type != "string" || property.Default == nil || string(property.Default.Raw) != `""` {
+				t.Fatalf("connection field %q = %#v", field, property)
+			}
 		}
 	}
 }
