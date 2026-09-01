@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +397,160 @@ func TestProjectAssistantNativeBrowserCallReusesSessionPerRun(t *testing.T) {
 	}
 	if got := len(server.browserSessions.sessions); got != 1 {
 		t.Fatalf("browser sessions after other owner = %d, want one active owner", got)
+	}
+}
+
+func TestProjectAssistantNativeBrowserFirstNonNavigationStartsAtPreview(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	server.browserSessions = newProjectAssistantBrowserSessionManager()
+	defer server.browserSessions.closeAll()
+	var toolCalls []string
+	configurePreviewInteractionBrowserTestServer(t, server, func(method, tool string) {
+		if method == "tools/call" {
+			toolCalls = append(toolCalls, tool)
+		}
+	})
+	server.previewInspectionResolveURL = func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
+		return "https://demo.preview.example/", nil
+	}
+	request := projectAssistantToolCallRequest{
+		Identity:       identity{tenantPath: "root:faros:tenants:org-a:ws-a", clusterID: "cluster-a", user: "alice"},
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("project-uid")}},
+		AssistantRunID: "run-first-preview",
+	}
+	if _, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, browserMCPToolSnapshot, projectAssistantToolRiskRead); err != nil {
+		t.Fatalf("first snapshot: %v", err)
+	}
+	if got, want := strings.Join(toolCalls, ","), "browser_navigate,browser_snapshot,browser_tabs"; got != want {
+		t.Fatalf("first non-navigation tool calls = %q, want %q", got, want)
+	}
+}
+
+func TestProjectAssistantNativeBrowserPrivateHandoffThenFirstNonNavigationStartsAtPreview(t *testing.T) {
+	var hub *httptest.Server
+	var preview *httptest.Server
+	hub = httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatalf("private handoff unexpectedly reached the real hub server")
+	}))
+	defer hub.Close()
+	preview = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := url.Values{
+			"cluster":      {"cluster-a"},
+			"redirect_uri": {preview.URL + privateAppCallbackPath},
+		}
+		http.Redirect(w, r, hub.URL+privateAppAuthorizePath+"?"+query.Encode(), http.StatusFound)
+	}))
+	defer preview.Close()
+
+	server := &Server{
+		hubBase:                      hub.URL,
+		hubPublicURL:                 hub.URL,
+		previewInsecureSkipTLSVerify: true,
+	}
+	manager := newProjectAssistantBrowserSessionManager()
+	server.browserSessions = manager
+	defer manager.closeAll()
+	previewURL := strings.TrimRight(preview.URL, "/") + "/"
+	var toolCalls []string
+	var initializeCalls int
+	server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+		return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				return browserMCPTestEventStreamResponse(request), nil
+			}
+			if request.Method == http.MethodDelete {
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(http.StatusNoContent)
+				return recorder.Result(), nil
+			}
+			if request.Method == http.MethodPost && request.URL.Path == browserSessionHandoffPath {
+				recorder := httptest.NewRecorder()
+				recorder.Header().Set("Content-Type", "application/json")
+				_, _ = recorder.WriteString(`{"path":"/auth/session/handoff?code=one-use"}`)
+				return recorder.Result(), nil
+			}
+			var envelope struct {
+				Method string `json:"method"`
+				Params struct {
+					Name      string         `json:"name"`
+					Arguments map[string]any `json:"arguments"`
+				} `json:"params"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+				return nil, err
+			}
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			switch envelope.Method {
+			case "initialize":
+				initializeCalls++
+				recorder.Header().Set("Mcp-Session-Id", "private-session")
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
+			case "notifications/initialized":
+				recorder.WriteHeader(http.StatusAccepted)
+			case "tools/call":
+				toolCalls = append(toolCalls, envelope.Params.Name)
+				content := "- Page URL: " + previewURL + "\n- Page Snapshot:\n- generic [ref=e1]:"
+				switch envelope.Params.Name {
+				case browserMCPToolNavigate:
+					if strings.HasPrefix(projectToolString(envelope.Params.Arguments["url"]), hub.URL) {
+						content = "handoff complete"
+					}
+				case "browser_tabs":
+					content = "- 0: " + previewURL
+				}
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": len(toolCalls), "result": map[string]any{"isError": false, "content": []map[string]string{{"type": "text", "text": content}}}})
+			default:
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+			}
+			return recorder.Result(), nil
+		})}
+	}
+	request := projectAssistantToolCallRequest{
+		Identity:       identity{tenantPath: "root:faros:tenants:org-a:ws-a", clusterID: "cluster-a", user: "alice"},
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("project-uid")}},
+		AssistantRunID: "run-private-first-preview",
+	}
+	ref := dataPlaneRef{Resource: "instances", Name: "browser"}
+	entry := manager.entry(server.nativeBrowserOwner(request), ref)
+	if _, err := server.callProjectAssistantNativeBrowserSession(context.Background(), request, entry, ref, browserMCPToolSnapshot, map[string]any{}, true, previewURL, false); err != nil {
+		t.Fatalf("private first snapshot: %v", err)
+	}
+	if initializeCalls != 1 {
+		t.Fatalf("private first snapshot initialize calls = %d, want one", initializeCalls)
+	}
+	if got, want := strings.Join(toolCalls, ","), "browser_navigate,browser_navigate,browser_snapshot,browser_tabs"; got != want {
+		t.Fatalf("private first non-navigation tool calls = %q, want %q", got, want)
+	}
+}
+
+func TestProjectAssistantNativeBrowserFirstNavigationIsNotDuplicated(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	server.browserSessions = newProjectAssistantBrowserSessionManager()
+	defer server.browserSessions.closeAll()
+	var toolCalls []string
+	configurePreviewInteractionBrowserTestServer(t, server, func(method, tool string) {
+		if method == "tools/call" {
+			toolCalls = append(toolCalls, tool)
+		}
+	})
+	server.previewInspectionResolveURL = func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
+		return "https://demo.preview.example/", nil
+	}
+	request := projectAssistantToolCallRequest{
+		Identity:       identity{tenantPath: "root:faros:tenants:org-a:ws-a", clusterID: "cluster-a", user: "alice"},
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("project-uid")}},
+		AssistantRunID: "run-first-navigation",
+		Arguments:      map[string]any{"url": "/tasks"},
+	}
+	if _, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, browserMCPToolNavigate, projectAssistantToolRiskRead); err != nil {
+		t.Fatalf("first navigation: %v", err)
+	}
+	if _, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, browserMCPToolSnapshot, projectAssistantToolRiskRead); err != nil {
+		t.Fatalf("snapshot after first navigation: %v", err)
+	}
+	if got, want := strings.Join(toolCalls, ","), "browser_navigate,browser_snapshot,browser_tabs,browser_snapshot,browser_tabs"; got != want {
+		t.Fatalf("first navigation tool calls = %q, want %q", got, want)
 	}
 }
 
@@ -989,6 +1144,99 @@ func TestProjectAssistantNativeBrowserReadRetriesLostSessionOnce(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantNativeBrowserReadRetriesAfterUnexpectedEventStreamEOF(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	manager := newProjectAssistantBrowserSessionManager()
+	server.browserSessions = manager
+	defer manager.closeAll()
+	configurePreviewInteractionBrowserTestServer(t, server, nil)
+	server.previewInspectionResolveURL = func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
+		return "https://demo.preview.example/", nil
+	}
+	firstStream := &testBrowserEventStreamErrorBody{started: make(chan struct{})}
+	var initializeCalls, toolCalls, deleteCalls int
+	server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+		return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				if initializeCalls == 1 {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body:       firstStream,
+					}, nil
+				}
+				return browserMCPTestEventStreamResponse(request), nil
+			}
+			if request.Method == http.MethodDelete {
+				deleteCalls++
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(http.StatusNoContent)
+				return recorder.Result(), nil
+			}
+			var envelope struct {
+				Method string `json:"method"`
+				Params struct {
+					Name string `json:"name"`
+				} `json:"params"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+				return nil, err
+			}
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			switch envelope.Method {
+			case "initialize":
+				initializeCalls++
+				recorder.Header().Set("Mcp-Session-Id", fmt.Sprintf("eof-session-%d", initializeCalls))
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
+			case "notifications/initialized":
+				recorder.WriteHeader(http.StatusAccepted)
+			case "tools/call":
+				toolCalls++
+				content := "- 0: https://demo.preview.example/"
+				switch envelope.Params.Name {
+				case browserMCPToolNavigate, browserMCPToolSnapshot:
+					content = "- Page URL: https://demo.preview.example/\n- Page Snapshot:\n- generic [ref=e1]:"
+				}
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": toolCalls, "result": map[string]any{"isError": false, "content": []map[string]string{{"type": "text", "text": content}}}})
+			default:
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+			}
+			return recorder.Result(), nil
+		})}
+	}
+	first, err := server.newBrowserMCPSession(context.Background(), identity{clusterID: "cluster-a"}, dataPlaneRef{Resource: "instances", Name: "browser"})
+	if err != nil {
+		t.Fatalf("new initial browser MCP session: %v", err)
+	}
+	<-firstStream.started
+	deadline := time.Now().Add(time.Second)
+	for first.eventStreamFailure() == nil && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if first.eventStreamFailure() == nil {
+		t.Fatal("unexpected event-stream EOF did not invalidate initial session")
+	}
+	request := projectAssistantToolCallRequest{
+		Identity:       identity{tenantPath: "root:faros:tenants:org-a:ws-a", clusterID: "cluster-a", user: "alice"},
+		Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("project-uid")}},
+		AssistantRunID: "run-eof-read",
+	}
+	ref := dataPlaneRef{Resource: "instances", Name: "browser"}
+	entry := manager.entry(server.nativeBrowserOwner(request), ref)
+	entry.session = first
+	result, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, browserMCPToolSnapshot, projectAssistantToolRiskRead)
+	if err != nil || result == "" {
+		t.Fatalf("EOF-invalidated read retry result = %q, err = %v", result, err)
+	}
+	if initializeCalls != 2 || toolCalls != 3 {
+		t.Fatalf("EOF read retry calls = initialize %d, tools/call %d; want 2/3 (fresh preview navigation, snapshot, safety tabs)", initializeCalls, toolCalls)
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("EOF-invalidated session DELETE calls before cleanup = %d, want one", deleteCalls)
+	}
+}
+
 func TestProjectAssistantNativeBrowserLostReadWithPendingInteractionIsUnverifiable(t *testing.T) {
 	server := &Server{hubBase: "https://hub.example"}
 	server.browserSessions = newProjectAssistantBrowserSessionManager()
@@ -1027,7 +1275,7 @@ func TestProjectAssistantNativeBrowserLostReadWithPendingInteractionIsUnverifiab
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
 				toolCalls++
-				if toolCalls == 4 {
+				if toolCalls == 5 {
 					recorder.WriteHeader(http.StatusNotFound)
 					_, _ = recorder.WriteString("Session not found")
 					return recorder.Result(), nil
@@ -1073,8 +1321,8 @@ func TestProjectAssistantNativeBrowserLostReadWithPendingInteractionIsUnverifiab
 	if outcome["status"] != "unverifiable" || outcome["outcome"] != "unknown" || outcome["replayed"] != false || outcome["requiresSnapshot"] != true {
 		t.Fatalf("pending read outcome = %#v", outcome)
 	}
-	if initializeCalls != 1 || toolCalls != 4 {
-		t.Fatalf("pending read calls = initialize %d, tools/call %d; want 1/4 without retry", initializeCalls, toolCalls)
+	if initializeCalls != 1 || toolCalls != 5 {
+		t.Fatalf("pending read calls = initialize %d, tools/call %d; want 1/5 without retry", initializeCalls, toolCalls)
 	}
 	if !state.NativeBrowserInteractionPending() {
 		t.Fatal("invalid follow-up snapshot cleared pending interaction")
@@ -1101,6 +1349,9 @@ func TestProjectAssistantNativeBrowserMutationDoesNotReplayLostSession(t *testin
 			}
 			var envelope struct {
 				Method string `json:"method"`
+				Params struct {
+					Name string `json:"name"`
+				} `json:"params"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
 				return nil, err
@@ -1115,6 +1366,10 @@ func TestProjectAssistantNativeBrowserMutationDoesNotReplayLostSession(t *testin
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
 				toolCalls++
+				if envelope.Params.Name == browserMCPToolNavigate {
+					_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"isError": false, "content": []map[string]string{{"type": "text", "text": "- Page URL: https://demo.preview.example/"}}}})
+					return recorder.Result(), nil
+				}
 				recorder.WriteHeader(http.StatusGone)
 				_, _ = recorder.WriteString("session expired")
 			default:
@@ -1139,7 +1394,7 @@ func TestProjectAssistantNativeBrowserMutationDoesNotReplayLostSession(t *testin
 	if outcome["status"] != "outcome_unknown" || outcome["outcome"] != "unknown" || outcome["replayed"] != false {
 		t.Fatalf("mutating browser session loss outcome = %#v", outcome)
 	}
-	if toolCalls != 1 {
-		t.Fatalf("mutating calls = %d, want one non-replayed call", toolCalls)
+	if toolCalls != 2 {
+		t.Fatalf("mutating calls = %d, want preview navigation plus one non-replayed call", toolCalls)
 	}
 }

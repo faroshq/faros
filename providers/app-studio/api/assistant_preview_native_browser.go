@@ -517,15 +517,17 @@ func (o browserSessionOwner) key() string {
 }
 
 type projectAssistantBrowserSessionEntry struct {
-	mu          sync.Mutex
-	owner       browserSessionOwner
-	ref         dataPlaneRef
-	scopeKey    string
-	session     *browserMCPSession
-	privateBase string
-	lastUsed    time.Time
-	inFlight    int
-	idleTimer   *time.Timer
+	mu           sync.Mutex
+	owner        browserSessionOwner
+	ref          dataPlaneRef
+	scopeKey     string
+	session      *browserMCPSession
+	privateBase  string
+	previewURL   string
+	previewReady bool
+	lastUsed     time.Time
+	inFlight     int
+	idleTimer    *time.Timer
 }
 
 const projectAssistantBrowserSessionIdleTimeout = 5 * time.Minute
@@ -675,6 +677,16 @@ func projectAssistantBrowserEntryTrace(entry *projectAssistantBrowserSessionEntr
 	return sessionRole(entry.session), sessionTraceHash(entry.session)
 }
 
+func projectAssistantBrowserEntrySessionFailed(entry *projectAssistantBrowserSessionEntry) bool {
+	if entry == nil {
+		return false
+	}
+	entry.mu.Lock()
+	session := entry.session
+	entry.mu.Unlock()
+	return session != nil && session.eventStreamFailure() != nil
+}
+
 func (m *projectAssistantBrowserSessionManager) expire(entry *projectAssistantBrowserSessionEntry) {
 	if m == nil || entry == nil {
 		return
@@ -746,6 +758,12 @@ func (m *projectAssistantBrowserSessionManager) entry(owner browserSessionOwner,
 	// A caller may retain its owner key while the ready Browser instance is
 	// replaced. Drop the old entry before selecting the new active ref.
 	entry := m.sessions[key]
+	if entry != nil && projectAssistantBrowserEntrySessionFailed(entry) {
+		m.detachLocked(key, entry)
+		stale = append(stale, entry)
+		entryReason = "session_loss"
+		entry = nil
+	}
 	if entry != nil && entry.ref != ref {
 		m.detachLocked(key, entry)
 		stale = append(stale, entry)
@@ -835,12 +853,21 @@ func (m *projectAssistantBrowserSessionManager) hasActiveRef(id identity, ref da
 		return false
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.activeByRef == nil {
+		m.mu.Unlock()
 		return false
 	}
-	_, ok := m.activeByRef[projectAssistantBrowserSessionScopeKey(id, ref)]
-	return ok
+	scopeKey := projectAssistantBrowserSessionScopeKey(id, ref)
+	key, ok := m.activeByRef[scopeKey]
+	entry := m.sessions[key]
+	if !ok || entry == nil || !projectAssistantBrowserEntrySessionFailed(entry) {
+		m.mu.Unlock()
+		return ok && entry != nil
+	}
+	m.detachLocked(key, entry)
+	m.mu.Unlock()
+	closeProjectAssistantBrowserSessionEntry(entry, "session_loss", "projectAssistantBrowserSessionManager.hasActiveRef")
+	return false
 }
 
 func (m *projectAssistantBrowserSessionManager) begin(entry *projectAssistantBrowserSessionEntry) bool {
@@ -1113,6 +1140,8 @@ func (s *Server) callProjectAssistantNativeBrowserSession(
 			return "", err
 		}
 		entry.privateBase = ""
+		entry.previewURL = ""
+		entry.previewReady = false
 	}
 	if private && entry.privateBase == "" {
 		if err := s.preparePrivatePreviewBrowserSession(ctx, entry.session, req.Identity, previewURL); err != nil {
@@ -1120,7 +1149,19 @@ func (s *Server) callProjectAssistantNativeBrowserSession(
 		}
 		entry.privateBase = previewURL
 	}
-	if restorePreview && !strings.EqualFold(projectToolBaseName(name), browserMCPToolNavigate) {
+	if entry.previewURL != previewURL {
+		entry.previewURL = previewURL
+		entry.previewReady = false
+	}
+	if restorePreview {
+		entry.previewReady = false
+	}
+	isNavigation := strings.EqualFold(projectToolBaseName(name), browserMCPToolNavigate)
+	// A newly initialized browser may still be on the previous shared page (or
+	// on the private handoff route). Establish the preview before any model
+	// tool that observes or mutates page state. An explicit browser_navigate is
+	// already that model-owned establishment and must not be duplicated.
+	if !isNavigation && !entry.previewReady {
 		navigation, err := entry.session.callToolReceipt(ctx, browserMCPToolNavigate, map[string]any{"url": previewURL})
 		if err != nil {
 			return "", err
@@ -1131,10 +1172,14 @@ func (s *Server) callProjectAssistantNativeBrowserSession(
 		if err := validateProjectAssistantNativeBrowserReceiptOrigin(navigation, previewURL); err != nil {
 			return "", projectAssistantNativeBrowserSafetyErrorAt("browser_navigate", err)
 		}
+		entry.previewReady = true
 	}
 	result, err := entry.session.callToolReceipt(ctx, name, args)
 	if err != nil || strings.EqualFold(projectToolBaseName(name), "browser_close") {
 		return result, err
+	}
+	if isNavigation && !projectAssistantNativeBrowserReceiptIsError(result) {
+		entry.previewReady = true
 	}
 	if err := s.observeProjectAssistantNativeBrowserSafety(ctx, entry.session, name, result, previewURL); err != nil {
 		return "", err

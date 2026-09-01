@@ -360,7 +360,10 @@ local_resource(
 local_resource(
     'app-studio',
     cmd='make build-app-studio-provider',
-    serve_cmd='APP_STUDIO_RUN_SANDBOX_MODE=${APP_STUDIO_RUN_SANDBOX_MODE:-force} APP_STUDIO_DEVELOPMENT_MODE=true APP_STUDIO_REPLICA_COUNT=1 make run-provider-app-studio',
+    serve_cmd=('APP_STUDIO_HUB_PUBLIC_URL=%s ' +
+               'APP_STUDIO_RUN_SANDBOX_MODE=${APP_STUDIO_RUN_SANDBOX_MODE:-force} ' +
+               'APP_STUDIO_DEVELOPMENT_MODE=true APP_STUDIO_REPLICA_COUNT=1 ' +
+               'make run-provider-app-studio') % preview_hub_public_url,
     deps=[
         'providers/app-studio/main.go',
         'providers/app-studio/heartbeat.go',

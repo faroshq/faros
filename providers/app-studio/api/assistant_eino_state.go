@@ -2589,6 +2589,24 @@ func (s *projectEinoAssistantRunState) recordNativeBrowserEvidenceLocked(toolNam
 			failed = true
 		}
 	}
+	// An outcome-unknown mutation is not evidence that the interaction was
+	// accepted, and it must not leave a pending interaction for a later
+	// snapshot to certify. Preserve any evidence already certified for this
+	// revision; this receipt only tells us that the current action cannot be
+	// safely classified.
+	if status == "outcome_unknown" {
+		if projectAssistantNativeBrowserInteraction(toolName) {
+			s.nativeBrowserInteractionPending = false
+		}
+		return
+	}
+	// An unverifiable observation is deliberately non-evidence. In
+	// particular, do not let a receipt carrying incidental text or a page URL
+	// overwrite an earlier certified receipt, and keep an unresolved
+	// interaction pending so an authoritative snapshot can still settle it.
+	if status == "unverifiable" {
+		return
+	}
 	if !failed && toolName == browserMCPToolSnapshot &&
 		(!projectAssistantNativeBrowserSnapshotHasSubstantiveContent(content) || projectAssistantNativeBrowserSnapshotPageURL(content) == "") {
 		// A syntactically valid receipt is not evidence by itself. Keep any

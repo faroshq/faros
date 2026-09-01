@@ -451,23 +451,34 @@ k8s_resource(
 # Envoy gateway ClusterIP that *.kcp.localhost resolves to (see kcp's
 # gateway.yaml addresses + the hostAliases in its shard/front-proxy manifests).
 gateway_ip = '10.96.2.2'
+hub_service_name = 'faros-hub'
 
 # Keep host-side sslip.io loopback behavior while making the same app hosts
 # reachable from in-cluster development runtimes. This is a cluster-only
 # CoreDNS template; production clusters and per-project pod hostAliases are
 # untouched.
-app_studio_preview_dns_apply = 'hack/scripts/configure-tilt-preview-dns.sh %s %s %s' % (
-    k8s_context(), app_base_domain, gateway_ip)
-local_resource(
-    'app-studio-preview-dns',
-    # Apply in the update command so dependants do not become Ready until the
-    # CoreDNS block exists. This is intentionally one-shot: Tilt starts a new
-    # update before stopping the old serve process, so an exit cleanup races
-    # and can erase the freshly applied block.
-    cmd=app_studio_preview_dns_apply,
-    deps=['Tiltfile.cluster', 'hack/scripts/configure-tilt-preview-dns.sh'],
-    labels=['providers-app-studio'],
-)
+app_studio_preview_dns_apply = '''
+set -eu
+CTX=%s
+HUB_NAMESPACE=%s
+HUB_SERVICE=%s
+hub_ip=''
+for _ in $(seq 1 60); do
+  hub_ip="$(kubectl --context "$CTX" -n "$HUB_NAMESPACE" get svc "$HUB_SERVICE" \
+    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+  if [ -n "$hub_ip" ] && [ "$hub_ip" != 'None' ]; then
+    break
+  fi
+  sleep 1
+done
+if [ -z "$hub_ip" ] || [ "$hub_ip" = 'None' ]; then
+  echo 'faros hub Service did not expose a ClusterIP' >&2
+  exit 1
+fi
+hack/scripts/configure-tilt-preview-dns.sh "%s" "%s" "%s" "%s" "$hub_ip"
+'''.strip() % (
+    k8s_context(), hub_namespace, hub_service_name,
+    k8s_context(), app_base_domain, gateway_ip, hub_browser_host)
 
 hub_host_aliases = [
     # Make *.kcp.localhost resolve to the Envoy gateway from the hub pod,
@@ -912,6 +923,20 @@ k8s_resource(
     port_forwards=['9443:9443'],
     resource_deps=['hub-compile', 'hub-kcp-secrets', 'hub-rbac', 'hub-tls', 'dex'],
     labels=['hub'],
+)
+
+local_resource(
+    'app-studio-preview-dns',
+    # Apply in the update command so dependants do not become Ready until the
+    # CoreDNS block exists. This is intentionally one-shot: Tilt starts a new
+    # update before stopping the old serve process, so an exit cleanup races
+    # and can erase the freshly applied block. The exact hub hostname must
+    # point at the in-cluster Service because Browser pods cannot reach the
+    # host-side sslip.io loopback address.
+    cmd=app_studio_preview_dns_apply,
+    deps=['Tiltfile.cluster', 'hack/scripts/configure-tilt-preview-dns.sh'],
+    resource_deps=['faros-hub'],
+    labels=['providers-app-studio'],
 )
 
 # ---------------------------------------------------------------------------

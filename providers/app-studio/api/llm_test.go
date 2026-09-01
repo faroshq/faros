@@ -141,6 +141,18 @@ func TestProjectToolCallTerminalStatusPreservesCanceledSpellings(t *testing.T) {
 	}
 }
 
+func TestProjectToolCallStatusTreatsUnverifiableReceiptsAsFailed(t *testing.T) {
+	for _, status := range []string{"outcome_unknown", "unverifiable"} {
+		result := `{"status":"` + status + `","outcome":"unknown"}`
+		if got := projectToolCallResultStatus(browserMCPToolSnapshot, result); got != "failed" {
+			t.Fatalf("result status for %q = %q, want failed", status, got)
+		}
+		if got := projectToolCallTerminalStatus(browserMCPToolSnapshot, result, true); got != "failed" {
+			t.Fatalf("terminal status for %q = %q, want failed", status, got)
+		}
+	}
+}
+
 func TestProjectLLMSettingsUseCodexStreamRecoveryDefaults(t *testing.T) {
 	settings := defaultProjectLLMSettings()
 	if settings.MaxRetries != 5 {

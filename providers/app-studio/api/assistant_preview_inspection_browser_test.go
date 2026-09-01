@@ -32,12 +32,16 @@ import (
 )
 
 func browserMCPTestEventStreamResponse(request *http.Request) *http.Response {
-	recorder := httptest.NewRecorder()
-	recorder.Header().Set("Content-Type", "text/event-stream")
+	header := make(http.Header)
+	header.Set("Content-Type", "text/event-stream")
 	if sessionID := request.Header.Get("Mcp-Session-Id"); sessionID != "" {
-		recorder.Header().Set("Mcp-Session-Id", sessionID)
+		header.Set("Mcp-Session-Id", sessionID)
 	}
-	return recorder.Result()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     header,
+		Body:       &testBrowserEventStreamBody{closed: make(chan struct{})},
+	}
 }
 
 // A representative Playwright MCP browser_snapshot result: the "Page URL" /
@@ -140,8 +144,11 @@ func TestBrowserMCPParseConsole(t *testing.T) {
 func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
 	server := &Server{hubBase: "https://hub.example"}
 	seen := map[string]string{}
+	var traceMu sync.Mutex
 	var trace []projectAssistantBrowserTraceEvent
 	restoreTrace := setProjectAssistantBrowserTraceHook(func(event projectAssistantBrowserTraceEvent) {
+		traceMu.Lock()
+		defer traceMu.Unlock()
 		trace = append(trace, event)
 	})
 	defer restoreTrace()
@@ -200,8 +207,11 @@ func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
 			t.Fatalf("%s protocol header = %q, want %q", method, got, want)
 		}
 	}
+	traceMu.Lock()
+	traceSnapshot := append([]projectAssistantBrowserTraceEvent(nil), trace...)
+	traceMu.Unlock()
 	var created, listed, closed bool
-	for _, event := range trace {
+	for _, event := range traceSnapshot {
 		if strings.Contains(event.SessionHash, "protocol-test-session") || strings.Contains(event.RefHash, "https://") {
 			t.Fatalf("browser trace leaked raw session or URL: %#v", event)
 		}
@@ -261,7 +271,7 @@ type testBrowserEventStreamBody struct {
 
 func (body *testBrowserEventStreamBody) Read(p []byte) (int, error) {
 	body.mu.Lock()
-	if !body.sent {
+	if !body.sent && len(body.payload) > 0 {
 		body.sent = true
 		n := copy(p, body.payload)
 		body.mu.Unlock()
@@ -275,6 +285,83 @@ func (body *testBrowserEventStreamBody) Read(p []byte) (int, error) {
 func (body *testBrowserEventStreamBody) Close() error {
 	body.once.Do(func() { close(body.closed) })
 	return nil
+}
+
+type testBrowserEventStreamErrorBody struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (body *testBrowserEventStreamErrorBody) Read([]byte) (int, error) {
+	body.once.Do(func() { close(body.started) })
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (body *testBrowserEventStreamErrorBody) Close() error { return nil }
+
+func TestBrowserMCPSessionInvalidatesUnexpectedEventStreamReadFailure(t *testing.T) {
+	server := &Server{hubBase: "https://hub.example"}
+	streamBody := &testBrowserEventStreamErrorBody{started: make(chan struct{})}
+	deleteCalls := 0
+	server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+		return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.Method == http.MethodGet {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       streamBody,
+				}, nil
+			}
+			if request.Method == http.MethodDelete {
+				deleteCalls++
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(http.StatusNoContent)
+				return recorder.Result(), nil
+			}
+			var envelope struct {
+				Method string `json:"method"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+				return nil, err
+			}
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			switch envelope.Method {
+			case "initialize":
+				recorder.Header().Set("Mcp-Session-Id", "stream-error-session")
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
+			case "notifications/initialized":
+				recorder.WriteHeader(http.StatusAccepted)
+			default:
+				return nil, fmt.Errorf("unexpected MCP method %q after stream failure", envelope.Method)
+			}
+			return recorder.Result(), nil
+		})}
+	}
+	session, err := server.newBrowserMCPSession(context.Background(), identity{clusterID: "cluster-a"}, dataPlaneRef{Resource: "instances", Name: "browser"})
+	if err != nil {
+		t.Fatalf("new browser MCP session: %v", err)
+	}
+	<-streamBody.started
+	var streamErr error
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		streamErr = session.eventStreamFailure()
+		if streamErr != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if streamErr == nil {
+		t.Fatal("event-stream read failure did not invalidate the session")
+	}
+	if _, err := session.rpc(context.Background(), "tools/list", map[string]any{}); err == nil || !browserMCPErrorLooksLikeSessionLoss(err.Error()) {
+		t.Fatalf("RPC after event-stream failure = %v, want session-loss error", err)
+	}
+	session.close()
+	if deleteCalls != 1 {
+		t.Fatalf("DELETE calls = %d, want one", deleteCalls)
+	}
 }
 
 func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T) {

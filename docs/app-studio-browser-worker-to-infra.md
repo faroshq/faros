@@ -4,8 +4,9 @@
 
 App Studio now uses the Infrastructure provider's shared `Browser` instance,
 which runs the upstream Playwright MCP server. The browser image is pinned by
-digest:
-`mcr.microsoft.com/playwright/mcp@sha256:18c0a9c934004fe9580cc79f1e8e6cde7c667348b215335e8a23fd3e509804`.
+the verified architecture-neutral OCI image index digest recorded from the
+Playwright MCP registry reference:
+`mcr.microsoft.com/playwright/mcp@sha256:18c0a9c934004fe9580cc79f1e8e6e6cde7c667348b215335e8a23fd3e509804`.
 The instance is provisioned once per workspace by the Studio reconciler and
 reached through the Infrastructure data-plane proxy.
 

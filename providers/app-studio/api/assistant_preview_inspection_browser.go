@@ -310,6 +310,7 @@ type browserMCPSession struct {
 	streamCancel context.CancelFunc
 	streamBody   io.ReadCloser
 	streamDone   chan struct{}
+	streamErr    error
 
 	closeMu sync.Mutex
 	closed  bool
@@ -476,11 +477,53 @@ func (session *browserMCPSession) isClosed() bool {
 	return session.closed
 }
 
+// eventStreamFailure reports an unexpected end of the long-lived GET stream.
+// The MCP session may still accept POSTs after the GET has gone away, but it
+// can no longer answer the server heartbeat. Treating that session as live
+// would eventually turn the next model call into a stale browser operation.
+func (session *browserMCPSession) eventStreamFailure() error {
+	if session == nil {
+		return errors.New("preview browser session is not configured")
+	}
+	session.streamMu.Lock()
+	defer session.streamMu.Unlock()
+	return session.streamErr
+}
+
+func (session *browserMCPSession) markEventStreamFailure(readErr error) {
+	if session == nil {
+		return
+	}
+	if readErr == nil {
+		readErr = io.EOF
+	}
+	if session.isClosed() {
+		return
+	}
+	session.streamMu.Lock()
+	if session.streamErr == nil {
+		session.streamErr = fmt.Errorf("preview browser session event stream terminated: %w", readErr)
+	}
+	session.streamMu.Unlock()
+}
+
 // rpc posts one JSON-RPC request to the browser's data-plane proxy root and
 // returns the raw result. It captures (and thereafter echoes) the session id.
 func (session *browserMCPSession) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if session == nil {
 		return nil, errors.New("preview browser session is not configured")
+	}
+	if streamErr := session.eventStreamFailure(); streamErr != nil {
+		projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
+			Event:       "rpc_error",
+			Role:        session.role,
+			SessionHash: session.traceSessionHash(),
+			RefHash:     projectAssistantBrowserTraceRef(session.ref),
+			Method:      method,
+			Reason:      "event_stream_terminated",
+			CallSite:    "browserMCPSession.rpc",
+		})
+		return nil, streamErr
 	}
 	headerBefore := session.currentSessionID()
 	projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
@@ -811,17 +854,20 @@ func (session *browserMCPSession) drainEventStream(ctx context.Context, body io.
 			}
 		}
 		if err != nil {
-			if err != io.EOF {
-				projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
-					Event:       "event_stream_error",
-					Role:        session.role,
-					SessionHash: session.traceSessionHash(),
-					RefHash:     projectAssistantBrowserTraceRef(session.ref),
-					Method:      http.MethodGet,
-					Reason:      "read_error",
-					CallSite:    "browserMCPSession.drainEventStream",
-				})
+			session.markEventStreamFailure(err)
+			reason := "read_error"
+			if err == io.EOF {
+				reason = "unexpected_eof"
 			}
+			projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
+				Event:       "event_stream_error",
+				Role:        session.role,
+				SessionHash: session.traceSessionHash(),
+				RefHash:     projectAssistantBrowserTraceRef(session.ref),
+				Method:      http.MethodGet,
+				Reason:      reason,
+				CallSite:    "browserMCPSession.drainEventStream",
+			})
 			flush()
 			return
 		}
